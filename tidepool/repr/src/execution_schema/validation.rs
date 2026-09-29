@@ -4310,6 +4310,18 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn rejects_stale_execution_abi_even_if_caller_requests_it() {
+        let mut program = valid_program();
+        program.envelope.execution_abi_version = EXECUTION_ABI_VERSION - 1;
+        let mut stale_requirements = requirements();
+        stale_requirements.execution_abi_version = EXECUTION_ABI_VERSION - 1;
+        assert!(matches!(
+            validate_program(&program, &stale_requirements, DecodeLimits::default()),
+            Err(ParseError::UnsupportedTarget(_))
+        ));
+    }
+
     fn assert_invalid_signature(program: WireProgram) {
         assert!(matches!(
             validate_program(&program, &requirements(), DecodeLimits::default()),

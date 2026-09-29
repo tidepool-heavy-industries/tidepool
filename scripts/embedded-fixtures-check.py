@@ -3,14 +3,14 @@
 
 The corpus checker covers generated corpus outputs, while these artifacts are
 checked in because Rust tests include them directly. Keep this inventory tied
-to their real producers so a schema change cannot leave an old embedded byte
-blob behind unnoticed.
+to their real producers and admit every artifact through the production
+prepared-artifact decoder.
 """
 
 from __future__ import annotations
 
 import json
-import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -46,13 +46,12 @@ def main() -> int:
             raise SystemExit(f"embedded fixture is registered twice: {path}")
         paths.append(path)
 
-    source = ROOT / manifest["schema"]["version_source"]
-    version_match = re.search(r"SCHEMA_VERSION\s*:\s*u64\s*=\s*(\d+)", source.read_text())
-    if version_match is None:
-        raise SystemExit(f"could not find SCHEMA_VERSION in {source}")
-    expected_version = int(version_match.group(1))
-    expected_magic = manifest["schema"]["magic"].encode("ascii")
-    if expected_magic != b"TPSTG":
+    schema = manifest.get("schema")
+    if not isinstance(schema, dict) or not isinstance(schema.get("version_source"), str):
+        raise SystemExit("embedded fixture inventory has no schema owner")
+    if not (ROOT / schema["version_source"]).is_file():
+        raise SystemExit(f"embedded fixture schema owner is missing: {schema['version_source']}")
+    if schema.get("magic") != "TPSTG":
         raise SystemExit("embedded fixture checker only supports the TPSTG envelope")
 
     registered = set(paths)
@@ -73,15 +72,30 @@ def main() -> int:
 
     for path_name in paths:
         path = ROOT / path_name
-        data = path.read_bytes()
-        if len(data) < 8 or data[0] != 0x91 or data[1:6] != b"eTPST" or data[6:7] != b"G":
-            raise SystemExit(f"{path_name}: invalid TPSTG prepared envelope")
-        if data[7] != expected_version:
-            raise SystemExit(
-                f"{path_name}: schema {data[7]} does not match current schema {expected_version}"
-            )
+        if not path.is_file():
+            raise SystemExit(f"registered embedded fixture is missing: {path_name}")
 
-    print(f"embedded fixtures: {len(paths)} registered artifacts, schema {expected_version}")
+    # The repr decoder owns the complete wire contract, including the
+    # execution ABI. Keep Python responsible for inventory and producer
+    # metadata; do not mirror CBOR field offsets here.
+    result = subprocess.run(
+        [
+            "cargo",
+            "run",
+            "--quiet",
+            "-p",
+            "tidepool-toolchain",
+            "--bin",
+            "embedded-artifact-check",
+            "--",
+            *paths,
+        ],
+        cwd=ROOT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SystemExit(result.returncode)
+
     return 0
 
 
