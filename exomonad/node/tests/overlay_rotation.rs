@@ -156,6 +156,31 @@ fn view_helper_distinguishes_setup_failure_from_payload_exit_and_signal() {
     assert_eq!(recovered.stdout, b"alive");
 }
 
+#[test]
+fn view_helper_acquisition_retains_its_view_and_rejects_expired_descriptors() {
+    use std::ffi::OsStr;
+
+    let storage = tempfile::tempdir().unwrap();
+    let (_worker, namespace) = setup(storage.path());
+    let entry = namespace.entry().unwrap();
+    let acquired = entry.acquire().unwrap();
+    drop(namespace);
+    assert!(
+        entry.acquire().is_err(),
+        "expired descriptor references must fail closed"
+    );
+    let output = exomonad_node::view_command::output_in_view(
+        &acquired,
+        &storage.path().join("project/target"),
+        OsStr::new("/bin/sh"),
+        &["-c".into(), "cat value".into()],
+        &[],
+    )
+    .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"inherited\n");
+}
+
 /// Manual paired measurement. Build `exomonad-view-helper` first, then run
 /// this ignored test once without tracing for latency and once under `strace`
 /// for clone/exec evidence. `VIEW_SPAWN_BENCH_RSS_MIB` adds touched host RSS.
