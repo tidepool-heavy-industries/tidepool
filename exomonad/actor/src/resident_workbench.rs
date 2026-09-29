@@ -3452,17 +3452,8 @@ where
             // path (`validate_declaration_candidate`), never the shared
             // session root.
             let (checked, outcome, staged) = match folded {
-                // The whole-cell check already produced this item's compiled
-                // artifact (`check_cell_off_checkout`'s fold): no further
-                // GHC round trip for this attempt. Still validate its
-                // module against THIS reservation's generation — the fold
-                // compiled against the pre-check snapshot's generation,
-                // which only still matches when nothing else wrote to this
-                // scope between the check and `reserve_cell_generations`
-                // above; a mismatch here means the two disagree despite
-                // `is_current_for` passing (should not happen, but is
-                // cheap to guard) and this attempt falls back to an
-                // ordinary compile rather than installing a wrong binder.
+                // A single bind was compiled using the snapshot's reserved
+                // identity. Verify the artifact agrees before installing it.
                 Some(folded)
                     if fold_result_matches_generation(&folded, c_view.next_value_generation()) =>
                 {
@@ -8746,16 +8737,9 @@ enum CompiledBlock {
 struct CellSplitSnapshot {
     view: crate::ActorCompileView,
     candidate_module: tidepool_repr::SessionModule,
-    /// Captured under this SAME checkout, for the single-item fold
-    /// (`check_cell_off_checkout`'s [`tidepool_runtime::session::CellFoldTurn`]):
-    /// on the prepared route, the fold's speculative compile needs exactly
-    /// the retained-imports snapshot an ordinary item compile would take
-    /// under `reserve_cell_generations`'s later, fresher checkout. Reusing
-    /// this earlier one is safe only because the fold's result is later
-    /// installed through the SAME `is_current_for` staleness check
-    /// every other off-checkout compile in this split already goes through;
-    /// a stale value here just makes the fold's compile itself fail or the
-    /// later re-checkout discard its result, never a wrong install.
+    /// Retained imports for the speculative single-item compile. `view` owns
+    /// a reserved value generation before the snapshot leaves its checkout.
+    /// Source freshness is checked again before installation.
     retained: Vec<(SymbolIdentity, u64)>,
 }
 
@@ -8811,6 +8795,10 @@ where
     .into();
     source.preamble = actor_preamble(&source.preamble, context).into();
     let view = actor_compile_view(session, context, &source, type_modules)?;
+    // The fold can write a Val interface during the whole-cell check. Claim
+    // its identity before releasing checkout: rejecting a stale result later
+    // cannot undo a compiler overwriting another actor's interface.
+    session.reserve_value_generations_through(view.next_value_generation());
     let retained = session.prepared_retained();
     Ok((
         source,
@@ -9101,11 +9089,27 @@ where
     if let Some(changed) = split_staleness(session, &fresh_view, &snapshot.view, candidate) {
         return Ok(CellReservation::Stale(changed));
     }
-    if value_item_count > 0 {
-        let g0 = fresh_view.next_value_generation();
-        let through = g0.0.saturating_add((value_item_count - 1) as u64);
-        session.reserve_value_generations_through(tidepool_repr::Generation(through));
-    }
+    let reserved = snapshot.view.next_value_generation();
+    let compile_view = if value_item_count > 0
+        && (value_item_count == 1
+            || fresh_view.next_value_generation().0 == reserved.0.saturating_add(1))
+    {
+        // Reuse the fold reservation. An uncontended multi-item cell can
+        // extend it; otherwise its whole range must be reserved afresh.
+        if value_item_count > 1 {
+            session.reserve_value_generations_through(tidepool_repr::Generation(
+                reserved.0.saturating_add((value_item_count - 1) as u64),
+            ));
+        }
+        snapshot.view.clone()
+    } else {
+        if value_item_count > 1 {
+            let g0 = fresh_view.next_value_generation();
+            let through = g0.0.saturating_add((value_item_count - 1) as u64);
+            session.reserve_value_generations_through(tidepool_repr::Generation(through));
+        }
+        fresh_view.clone()
+    };
     let declaration = declaration_receipt
         .map(|receipt| {
             session
@@ -9127,7 +9131,7 @@ where
         .map(|binding| binding.name)
         .collect::<Vec<_>>();
     Ok(CellReservation::Ready(Box::new(CellReservationReady {
-        view: fresh_view,
+        view: compile_view,
         retained,
         visible_names,
         declaration,
@@ -13305,6 +13309,63 @@ mod request_tests {
         >::new());
         machines.insert_idle(session_id, Box::new(session));
         (machines, context_a, context_b, source, root)
+    }
+
+    #[test]
+    fn folded_cell_reserves_identity_before_another_actors_compile() {
+        let (mut session, context_a, source, _root) = host_mount_fixture();
+        let mut context_b = context_a.clone();
+        context_b.placement.lexical_scope = session.mint_isolated_scope();
+        let (source_a, snapshot_a) = snapshot_cell_split(
+            &mut session,
+            &context_a,
+            source.clone(),
+            &[],
+            None,
+            None,
+            None,
+        )
+        .expect("first snapshot");
+        let (source_b, snapshot_b) =
+            snapshot_cell_split(&mut session, &context_b, source, &[], None, None, None)
+                .expect("second snapshot");
+        let generation_a = snapshot_a.view.next_value_generation();
+        let generation_b = snapshot_b.view.next_value_generation();
+        assert_ne!(
+            generation_a, generation_b,
+            "off-checkout writes need exclusive identities"
+        );
+
+        // Both compiles finish before either actor returns for reservation.
+        // They must produce different interfaces even in this ordering.
+        for (snapshot, source, name, generation) in [
+            (&snapshot_a, &source_a, "firstActor", generation_a),
+            (&snapshot_b, &source_b, "secondActor", generation_b),
+        ] {
+            let (_, folded) = check_cell_off_checkout(
+                snapshot,
+                source,
+                &context_a.haskell_effects_alias,
+                &format!("{name} <- pure (1 :: Int)"),
+            )
+            .expect("whole-cell fold");
+            assert!(fold_result_matches_generation(
+                &folded.expect("fold compiled"),
+                generation
+            ));
+        }
+        for (context, source, snapshot, generation) in [
+            (&context_a, &source_a, &snapshot_a, generation_a),
+            (&context_b, &source_b, &snapshot_b, generation_b),
+        ] {
+            let reservation =
+                reserve_cell_generations(&mut session, context, source, &[], snapshot, 1, None)
+                    .expect("revalidate");
+            let CellReservation::Ready(ready) = reservation else {
+                panic!("unrelated actor must not stale imports");
+            };
+            assert_eq!(ready.view.next_value_generation(), generation);
+        }
     }
 
     /// A non-`Decl` cell in one actor must not go stale merely because a
