@@ -1106,6 +1106,69 @@ mod tests {
     }
 
     #[test]
+    fn staged_high_water_is_invisible_until_publish_and_survives_readback() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = fixture(dir.path());
+        let manifest_path = dir.path().join("recovery.json");
+        fs::write(&manifest_path, b"previous manifest").unwrap();
+
+        let staged = stage_high_water_v2(&manifest_path, &graph, Generation(3)).unwrap();
+        assert_eq!(staged.candidate_graph().high_water, Generation(3));
+        assert_eq!(fs::read(&manifest_path).unwrap(), b"previous manifest");
+        drop(staged);
+        assert_eq!(fs::read(&manifest_path).unwrap(), b"previous manifest");
+
+        match stage_high_water_v2(&manifest_path, &graph, Generation(3))
+            .unwrap()
+            .publish()
+        {
+            RecoveryPublishOutcome::Durable {
+                graph: published,
+                publication,
+            } => {
+                assert_eq!(publication.path(), manifest_path);
+                assert_eq!(published.high_water, Generation(3));
+                assert_eq!(published.public_root, graph.public_root);
+                assert_eq!(published.nodes, graph.nodes);
+            }
+            RecoveryPublishOutcome::BeforeRename { path, detail } => {
+                panic!(
+                    "unexpected pre-rename failure at {}: {detail}",
+                    path.display()
+                )
+            }
+            RecoveryPublishOutcome::PublishedDurabilityUnconfirmed { detail, .. } => {
+                panic!("unexpected durability uncertainty: {detail}")
+            }
+        }
+
+        let restored = read_v2(&manifest_path, dir.path()).unwrap().unwrap();
+        assert_eq!(restored.graph.high_water, Generation(3));
+        assert_eq!(restored.graph.public_root, graph.public_root);
+        assert!(restored.artifact_losses.is_empty());
+    }
+
+    #[test]
+    fn pre_rename_failure_keeps_target_unpublished() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = fixture(dir.path());
+        let manifest_path = dir.path().join("recovery.json");
+        let staged = stage_high_water_v2(&manifest_path, &graph, Generation(3)).unwrap();
+        fs::create_dir(&manifest_path).unwrap();
+
+        match staged.publish() {
+            RecoveryPublishOutcome::BeforeRename { path, .. } => {
+                assert_eq!(path, manifest_path);
+                assert!(manifest_path.is_dir());
+            }
+            RecoveryPublishOutcome::Durable { .. }
+            | RecoveryPublishOutcome::PublishedDurabilityUnconfirmed { .. } => {
+                panic!("a directory target must reject file publication before rename")
+            }
+        }
+    }
+
+    #[test]
     fn artifact_bytes_are_checked_against_the_manifest_digests() {
         let dir = tempfile::tempdir().unwrap();
         let mut graph = fixture(dir.path());
@@ -1138,6 +1201,47 @@ mod tests {
         assert!(
             matches!(projected.get(&identity("answer")), Some(RecoveryHead::Tombstone(t)) if t.winner == Generation(2))
         );
+    }
+
+    #[test]
+    fn restart_read_keeps_missing_winning_artifact_as_tombstone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut graph = fixture(dir.path());
+        graph.nodes[1].state = RecoveryNodeState::ExactArtifactClosure;
+        graph.nodes[1].artifact_refs = graph.nodes[0].artifact_refs.clone();
+        graph.seal().unwrap();
+        let manifest_path = dir.path().join("recovery.json");
+        match stage_v2(&manifest_path, dir.path(), &graph)
+            .unwrap()
+            .publish()
+        {
+            RecoveryPublishOutcome::Durable { .. } => {}
+            RecoveryPublishOutcome::BeforeRename { path, detail } => {
+                panic!(
+                    "unexpected pre-rename failure at {}: {detail}",
+                    path.display()
+                )
+            }
+            RecoveryPublishOutcome::PublishedDurabilityUnconfirmed { detail, .. } => {
+                panic!("unexpected durability uncertainty: {detail}")
+            }
+        }
+        let product = match &graph.artifacts[0] {
+            RecoveryArtifactClosure::Home(reference) => reference.product_path.clone(),
+            RecoveryArtifactClosure::Join(_) => unreachable!(),
+        };
+        fs::remove_file(dir.path().join(product)).unwrap();
+
+        let restored = read_v2(&manifest_path, dir.path()).unwrap().unwrap();
+        assert!(restored.artifact_losses.values().flatten().any(|loss| {
+            loss.component == RecoveryArtifactComponent::Product
+                && matches!(&loss.kind, RecoveryArtifactLossKind::Missing)
+        }));
+        let projected = restored.projection().unwrap();
+        assert!(matches!(
+            projected.get(&identity("answer")),
+            Some(RecoveryHead::Tombstone(t)) if t.winner == Generation(2)
+        ));
     }
 
     #[test]
