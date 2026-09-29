@@ -4,6 +4,14 @@
 unchanged. This document records current evidence and proposed integration gates,
 not a claim that the adapter exists or is accepted.
 
+## Current contract
+
+The [embedded integration contract](harness-integration.md) supersedes the
+implementation ordering and open ownership decisions below. This document retains
+wave19 evidence, not current run status. The 2026-09-28 batch is documentation
+only; engine/runtime work is held, Codex remains operational, and harness
+production convergence stays with its separate owner.
+
 ## Authority and source baseline
 
 Inanna authorized reconciliation now, then a narrow vertical slice and a small

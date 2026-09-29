@@ -52,6 +52,9 @@ unconsumed proposals are removed; Git retains their history.
 - [JIT memory lifetime](actor-model/jit-memory-lifetime.md): live-machine code
   reclamation remains an open follow-up referenced by the actor guide. No
   reclamation design is accepted.
+- [Embedded harness integration](harness-integration.md): accepted host/library
+  contracts, Codex compatibility, implementation parcels and acceptance gates.
+  Compiler/runtime implementation is held pending the engine investigation.
 - [Harness adoption](harness-adoption.md): how Exomonad moves from the forked
   Codex backend to the standalone model harness (`~/dev/exomonad-harness`):
   adapter, `spawnAgent`, hook placement, compaction, deletions, order.
