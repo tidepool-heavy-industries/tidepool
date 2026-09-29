@@ -950,7 +950,11 @@ impl ResidentToolEndpoint for ResidentToolPolicy {
                 ));
             }
             match capture {
-                Some(capture) => client.dispatch_with_checkpoint_capture(invocation, capture).await,
+                Some(capture) => {
+                    client
+                        .dispatch_with_checkpoint_capture(invocation, capture)
+                        .await
+                }
                 None => client.dispatch(invocation).await,
             }
         })
@@ -1032,12 +1036,12 @@ mod tests {
             Err(ResidentToolError::Unavailable(_))
         ));
         assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 0);
-        assert_eq!(
+        assert!(matches!(
             endpoint
                 .dispatch_with_checkpoint_boxed(invocation(), None)
                 .await,
             Ok(serde_json::Value::Null)
-        );
+        ));
         assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
