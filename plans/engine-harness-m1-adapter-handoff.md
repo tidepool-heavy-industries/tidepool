@@ -11,10 +11,10 @@ function input stays structured JSON. Unsupported snapshots fail before model
 transport, with no live-endpoint fallback.
 
 The harness companion is
-`0fa0caf410667e35ab34d11c231a71ba2b0d246d` on
+`c485edb9b697ffc671b22c9ef25a73fc84763d76` on
 `integration/actor-admission-companion`, based on the operation-identity
 candidate. Tidepool `Cargo.toml` and `Cargo.lock` name that exact commit at the
-public Git origin. It is not published there yet. The local adapter check used
+public Git origin. The local adapter check used
 an environment-only Git URL redirect to the clean companion worktree; this
 does not establish remote reproducibility. After review and publication,
 verify the remote commit and add its Git source hash to both `cargoLock`
@@ -60,3 +60,18 @@ not treat source and handler publication as one atomic reload.
   source hashes, bound actor-path composition from the owner registry, and
   complete M1 raw/structured/retained/cancellation/reload/reconnect/Codex
   integration gates remain for review. Concurrent execution remains disabled.
+
+## Cancellation and retirement repair checkpoint
+
+The companion adds a typed `CancellationAcknowledgment::Completed` result.
+The owning `JobScheduler` publishes it through its existing first-settlement
+lock, so an actor `Expired` reply can retain success even when the provider
+waiter has not resumed. One focused companion regression passed 1/1: a late
+provider result did not overwrite the owner-observed success. The adapter
+maps `Expired`'s typed workbench reply to that acknowledgment and takes the
+existing short actor admission lease while capturing a request snapshot.
+Its retirement race test passed 1/1 through the GHC-aware battery (549
+skipped): a published installation remained available internally, while a
+new request was rejected after admission closed. A direct Cargo attempt
+compiled the target but could not execute because `TIDEPOOL_EXTRACT` was
+unset; the battery supplied it and passed. Broader integration is unverified.
