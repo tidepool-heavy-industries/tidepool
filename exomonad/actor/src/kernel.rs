@@ -173,7 +173,8 @@ pub type KernelWorkbenchReply = Result<WorkbenchResponse, KernelInvocationFailur
 pub struct ActorWorkbenchInvocation {
     pub request: WorkbenchRequest,
     pub(crate) installed_tools: Option<crate::resident_workbench::InstalledToolLease>,
-    pub(crate) hosted_checkpoint_capture: Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
+    pub(crate) hosted_checkpoint_capture:
+        Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
 }
 
 impl ActorWorkbenchInvocation {

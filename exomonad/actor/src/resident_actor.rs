@@ -3777,18 +3777,21 @@ where
                         },
                         None => None,
                     };
-                    Ok(self.environment.fork_groups.capture_checkpoint_with_host_attachment(
-                        name,
-                        context.actor,
-                        self.descriptor.effective_role().clone(),
-                        self.descriptor.model().cloned(),
-                        self.descriptor.fork_effort(),
-                        before,
-                        context.placement.session,
-                        scope,
-                        boundary,
-                        attachment,
-                    ))
+                    Ok(self
+                        .environment
+                        .fork_groups
+                        .capture_checkpoint_with_host_attachment(
+                            name,
+                            context.actor,
+                            self.descriptor.effective_role().clone(),
+                            self.descriptor.model().cloned(),
+                            self.descriptor.fork_effort(),
+                            before,
+                            context.placement.session,
+                            scope,
+                            boundary,
+                            attachment,
+                        ))
                 }
                 .await;
                 let token = result.as_ref().ok().cloned();
@@ -8238,7 +8241,8 @@ where
             {
                 return Err(KernelInvocationFailure::Rejected {
                     actor: context.actor,
-                    detail: "hosted checkpoint capture requires an exact provider invocation".into(),
+                    detail: "hosted checkpoint capture requires an exact provider invocation"
+                        .into(),
                 });
             }
             let awaiting = match std::mem::replace(&mut self.standing, ResidentStanding::Boot) {
@@ -10363,8 +10367,8 @@ mod tests {
             boundary: Some(boundary),
             capture: None,
         }
-            .hosted_boundary()
-            .is_some());
+        .hosted_boundary()
+        .is_some());
     }
 
     #[tokio::test]
