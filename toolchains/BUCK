@@ -29,6 +29,7 @@ system_cxx_toolchain(
     linker = read_root_config("nix", "cxx"),
     archiver = read_root_config("nix", "ar"),
     compiler_type = "gcc",
+    link_flags = ["-fuse-ld=bfd", "-B" + read_root_config("nix", "ar").rsplit("/", 1)[0] + "/"],
     c_flags = ["-fno-omit-frame-pointer"],
     cxx_flags = ["-fno-omit-frame-pointer"],
     visibility = ["PUBLIC"],

@@ -139,8 +139,15 @@
           buck2Release =
             pkgs.runCommand "buck2-snapshot-20260926-200119"
               {
-                nativeBuildInputs = [ pkgs.zstd pkgs.autoPatchelfHook ];
-                buildInputs = [ pkgs.stdenv.cc.cc.lib pkgs.openssl pkgs.zlib ];
+                nativeBuildInputs = [
+                  pkgs.zstd
+                  pkgs.autoPatchelfHook
+                ];
+                buildInputs = [
+                  pkgs.stdenv.cc.cc.lib
+                  pkgs.openssl
+                  pkgs.zlib
+                ];
                 source = pkgs.fetchurl {
                   url = "https://github.com/thoughtpolice/buck2/releases/download/snapshot-20260926-200119/buck2-x86_64-unknown-linux-gnu.zst";
                   hash = "sha256-hCos2M7wxjrYKXaQdCouhaWvoK6XM5urBtKJTm2tkfQ=";
