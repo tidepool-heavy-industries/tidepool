@@ -4,8 +4,7 @@
 //! exposes an immutable tool surface and submits typed invocations to the
 //! owning local actor.
 
-use std::sync::Arc;
-use std::{future::Future, pin::Pin};
+use std::{any::Any, future::Future, pin::Pin, sync::Arc};
 
 use exomonad_tool::{HostedTool, ToolInvocation, ToolInvocationContext};
 use tidepool_runtime::session::{ResidentHole, WorkbenchExecutionId, WorkbenchRequest};
@@ -355,6 +354,46 @@ pub struct ResidentToolPolicy {
 pub type ResidentToolFuture =
     Pin<Box<dyn Future<Output = Result<serde_json::Value, ResidentToolError>> + Send + 'static>>;
 
+/// Opaque host-owned half of a resident context checkpoint. The actor keeps
+/// this share with its checkpoint lease; only the host that created the value
+/// can interpret it.
+#[derive(Clone)]
+pub struct HostedCheckpointAttachment(Arc<dyn Any + Send + Sync>);
+
+impl HostedCheckpointAttachment {
+    #[must_use]
+    pub fn new<T: Any + Send + Sync>(value: Arc<T>) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub fn downcast<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
+        Arc::downcast(Arc::clone(&self.0)).ok()
+    }
+}
+
+impl std::fmt::Debug for HostedCheckpointAttachment {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("HostedCheckpointAttachment(..)")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostedCheckpointCaptureError {
+    Unavailable,
+    CaptureFailed,
+}
+
+/// Trusted per-call host capability. Concrete hosts close over their exact
+/// invocation identity; that identity is never parsed back out of display IDs.
+pub trait HostedCheckpointCapture: Send + Sync {
+    fn capture(
+        &self,
+        name: &str,
+        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> Result<HostedCheckpointAttachment, HostedCheckpointCaptureError>;
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub enum ResidentToolOutput {
     #[default]
@@ -394,6 +433,23 @@ pub trait ResidentToolEndpoint: Send + Sync {
     }
     fn instructions(&self) -> Option<&str>;
     fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture;
+    /// Dispatch with an exact hosted checkpoint capability. Endpoints that do
+    /// not carry this authority fail closed; absence keeps the ordinary path.
+    fn dispatch_with_checkpoint_boxed(
+        &self,
+        invocation: ToolInvocation,
+        capture: Option<Arc<dyn HostedCheckpointCapture>>,
+    ) -> ResidentToolFuture {
+        if capture.is_some() {
+            Box::pin(async {
+                Err(ResidentToolError::Unavailable(
+                    "hosted checkpoint capture is unsupported by this endpoint".into(),
+                ))
+            })
+        } else {
+            self.dispatch_boxed(invocation)
+        }
+    }
     fn cancel_workbench_boxed(
         &self,
         _invocation: ToolInvocationContext,
@@ -603,6 +659,35 @@ impl ResidentToolClient {
             .map_err(ResidentToolError::Invocation)
     }
 
+    pub(crate) async fn dispatch_with_checkpoint_capture(
+        &self,
+        invocation: ToolInvocation,
+        capture: Arc<dyn HostedCheckpointCapture>,
+    ) -> Result<serde_json::Value, ResidentToolError> {
+        let _turn = self.dispatch_gate.lock().await;
+        let (response, receive) = oneshot::channel();
+        self.actor
+            .admit_mailbox(crate::KernelMessage::ToolWithHostedCheckpoint {
+                invocation,
+                capture,
+                reply: response.into(),
+            })
+            .map_err(|failure| {
+                ResidentToolError::Invocation(hosted_admission_failure(
+                    self.actor.identity(),
+                    failure,
+                ))
+            })?;
+        receive
+            .await
+            .map_err(|_| {
+                ResidentToolError::Unavailable(
+                    "the actor stopped before settling the invocation".into(),
+                )
+            })?
+            .map_err(ResidentToolError::Invocation)
+    }
+
     pub(crate) async fn reconcile_workbench(
         &self,
         boundary: tidepool_runtime::session::WorkbenchForkBoundary,
@@ -667,15 +752,31 @@ impl ResidentToolClient {
 
     pub(crate) async fn dispatch_workbench_issued(
         &self,
-        mut request: WorkbenchRequest,
+        request: WorkbenchRequest,
         invocation: Option<ToolInvocationContext>,
         installed_tools: Option<crate::InstalledToolLease>,
     ) -> Result<serde_json::Value, ResidentToolError> {
+        self.dispatch_workbench_issued_with_capture(request, invocation, installed_tools, None)
+            .await
+    }
+
+    pub(crate) async fn dispatch_workbench_issued_with_capture(
+        &self,
+        mut request: WorkbenchRequest,
+        invocation: Option<ToolInvocationContext>,
+        installed_tools: Option<crate::InstalledToolLease>,
+        hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
+    ) -> Result<serde_json::Value, ResidentToolError> {
         let Some(invocation) = invocation else {
+            if hosted_checkpoint_capture.is_some() {
+                return Err(ResidentToolError::Unavailable(
+                    "hosted checkpoint capture requires an exact provider invocation".into(),
+                ));
+            }
             let _turn = self.dispatch_gate.lock().await;
             let control = WorkbenchExecutionControl::untracked();
             return self
-                .dispatch_registered_workbench(request, control, None, installed_tools)
+                .dispatch_registered_workbench(request, control, None, installed_tools, None)
                 .await;
         };
         if let Some(context_call_id) = &invocation.context_call_id {
@@ -710,8 +811,14 @@ impl ResidentToolClient {
                 "workbench cell dispatched to its actor"
             );
         }
-        self.dispatch_registered_workbench(request, control, Some(&published), installed_tools)
-            .await
+        self.dispatch_registered_workbench(
+            request,
+            control,
+            Some(&published),
+            installed_tools,
+            hosted_checkpoint_capture,
+        )
+        .await
     }
 
     async fn dispatch_registered_workbench(
@@ -720,12 +827,17 @@ impl ResidentToolClient {
         control: Arc<WorkbenchExecutionControl>,
         publication: Option<&HostedCellPublication>,
         installed_tools: Option<crate::InstalledToolLease>,
+        hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
     ) -> Result<serde_json::Value, ResidentToolError> {
         let (response, receive) = oneshot::channel();
         if let Err(error) = self
             .actor
             .admit_mailbox(crate::KernelMessage::Workbench {
-                invocation: crate::ActorWorkbenchInvocation::issued(request, installed_tools),
+                invocation: crate::ActorWorkbenchInvocation::issued(
+                    request,
+                    installed_tools,
+                    hosted_checkpoint_capture,
+                ),
                 control: Some(Arc::clone(&control)),
                 reply: response.into(),
             })
@@ -820,6 +932,29 @@ impl ResidentToolEndpoint for ResidentToolPolicy {
             client.dispatch(invocation).await
         })
     }
+
+    fn dispatch_with_checkpoint_boxed(
+        &self,
+        invocation: ToolInvocation,
+        capture: Option<Arc<dyn HostedCheckpointCapture>>,
+    ) -> ResidentToolFuture {
+        let client = self.client.clone();
+        let tools = self.tools.clone();
+        Box::pin(async move {
+            if !tools
+                .iter()
+                .any(|tool| tool.name() == invocation.name && tool.accepts(&invocation.arguments))
+            {
+                return Err(ResidentToolError::InvalidInvocation(
+                    "unknown tool or invalid argument kind".into(),
+                ));
+            }
+            match capture {
+                Some(capture) => client.dispatch_with_checkpoint_capture(invocation, capture).await,
+                None => client.dispatch(invocation).await,
+            }
+        })
+    }
 }
 
 pub(crate) fn install_local_resident_tools(
@@ -843,6 +978,68 @@ pub(crate) fn install_local_resident_tools(
 mod tests {
     use super::*;
     use tidepool_runtime::session::{WorkbenchResponse, WorkbenchRunStatus};
+
+    struct LegacyEndpoint {
+        dispatches: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ResidentToolEndpoint for LegacyEndpoint {
+        fn tools(&self) -> &[HostedTool] {
+            &[]
+        }
+
+        fn instructions(&self) -> Option<&str> {
+            None
+        }
+
+        fn dispatch_boxed(&self, _invocation: ToolInvocation) -> ResidentToolFuture {
+            self.dispatches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(serde_json::Value::Null) })
+        }
+    }
+
+    struct TestCheckpointCapture;
+
+    impl HostedCheckpointCapture for TestCheckpointCapture {
+        fn capture(
+            &self,
+            _name: &str,
+            _boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+        ) -> Result<HostedCheckpointAttachment, HostedCheckpointCaptureError> {
+            Ok(HostedCheckpointAttachment::new(Arc::new(())))
+        }
+    }
+
+    #[tokio::test]
+    async fn endpoints_without_checkpoint_support_fail_closed_but_none_uses_legacy_dispatch() {
+        let dispatches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let endpoint = LegacyEndpoint {
+            dispatches: Arc::clone(&dispatches),
+        };
+        let invocation = || ToolInvocation {
+            context: None,
+            name: "legacy".into(),
+            arguments: exomonad_tool::ToolArguments::Structured(serde_json::Value::Null),
+        };
+        assert!(matches!(
+            endpoint
+                .dispatch_with_checkpoint_boxed(
+                    invocation(),
+                    Some(Arc::new(TestCheckpointCapture)),
+                )
+                .await,
+            Err(ResidentToolError::Unavailable(_))
+        ));
+        assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            endpoint
+                .dispatch_with_checkpoint_boxed(invocation(), None)
+                .await,
+            Ok(serde_json::Value::Null)
+        );
+        assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 
     fn call_key(call_id: &str) -> WorkbenchCallKey {
         ToolInvocationContext {

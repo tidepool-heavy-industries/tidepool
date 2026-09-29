@@ -173,6 +173,7 @@ pub type KernelWorkbenchReply = Result<WorkbenchResponse, KernelInvocationFailur
 pub struct ActorWorkbenchInvocation {
     pub request: WorkbenchRequest,
     pub(crate) installed_tools: Option<crate::resident_workbench::InstalledToolLease>,
+    pub(crate) hosted_checkpoint_capture: Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
 }
 
 impl ActorWorkbenchInvocation {
@@ -180,16 +181,19 @@ impl ActorWorkbenchInvocation {
         Self {
             request,
             installed_tools: None,
+            hosted_checkpoint_capture: None,
         }
     }
 
     pub(crate) fn issued(
         request: WorkbenchRequest,
         installed_tools: Option<crate::resident_workbench::InstalledToolLease>,
+        hosted_checkpoint_capture: Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
     ) -> Self {
         Self {
             request,
             installed_tools,
+            hosted_checkpoint_capture,
         }
     }
 }
@@ -237,6 +241,11 @@ pub enum KernelMessage {
     },
     Tool {
         invocation: exomonad_tool::ToolInvocation,
+        reply: RpcReplyPort<KernelInvocationReply>,
+    },
+    ToolWithHostedCheckpoint {
+        invocation: exomonad_tool::ToolInvocation,
+        capture: std::sync::Arc<dyn crate::HostedCheckpointCapture>,
         reply: RpcReplyPort<KernelInvocationReply>,
     },
     Workbench {
@@ -298,6 +307,7 @@ impl KernelMessage {
             Self::Cast { .. } => "Cast",
             Self::Call { .. } => "Call",
             Self::Tool { .. } => "Tool",
+            Self::ToolWithHostedCheckpoint { .. } => "ToolWithHostedCheckpoint",
             Self::Workbench { .. } => "Workbench",
             Self::WorkbenchCompleted { .. } => "WorkbenchCompleted",
             Self::ReconcileWorkbenchCancellation { .. } => "ReconcileWorkbenchCancellation",
@@ -346,6 +356,10 @@ impl std::fmt::Debug for KernelMessage {
                 .finish_non_exhaustive(),
             Self::Tool { invocation, .. } => formatter
                 .debug_struct("Tool")
+                .field("invocation", invocation)
+                .finish_non_exhaustive(),
+            Self::ToolWithHostedCheckpoint { invocation, .. } => formatter
+                .debug_struct("ToolWithHostedCheckpoint")
                 .field("invocation", invocation)
                 .finish_non_exhaustive(),
             Self::Workbench { invocation, .. } => formatter
