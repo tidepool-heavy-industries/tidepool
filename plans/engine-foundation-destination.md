@@ -40,6 +40,9 @@ Pushes are explicitly deferred by the user. The client candidate is preserved
 in a verified complete-history bundle with instructions and bounded companion
 evidence at `/srv/swarm/checkouts/foundation-transfer/README.md`. The new
 candidate commits are local, not advertised remote dependencies.
+The Tidepool incremental bundle in that directory requires the original main
+checkpoint above; its manifest records the final documentation commit and
+checksum. Bounded destination logs are retained in `tidepool-evidence/` there.
 
 ## Executed destination checks
 
@@ -54,12 +57,13 @@ no shared compiler or infrastructure daemon was restarted.
 | Seven embedded artifact producers | Regenerated through their registered Haskell/Rust producers; no byte patching | `embedded-fixtures-update-2.log` |
 | Production artifact decoder | 7/7 accepted at execution ABI 8, schema 14 | `embedded-artifact-gate-final.log` |
 | Historical ABI 7 artifact | Rejected with exit 1 and explicit expected ABI 8 diagnostic | `stale-abi-rejection-final.log` |
-| Repr/codegen libraries | 636 passed, 1 skipped | `joined-native-libs-final.log` |
+| Repr/codegen libraries after parcel repair | 638 passed, 1 skipped | `joined-native-libs-repaired.log` |
 | Repr schema contract | 7 passed, 49 skipped | `repr-schema-contract.log` |
 | Exact artifact linking | 1 passed, 91 skipped | `toolchain-artifact-link.log` |
 | Runtime prepared owner and detached capture | 17 passed, 210 skipped | `runtime-owner-tests.log` |
+| Full runtime session integration after parcel repair | 32 passed, 1 skipped | `joined-runtime-session-repaired.log` |
 | Actor admission/retirement | 2 passed, 367 skipped | `actor-admission-tests.log` |
-| Embedded adapter, frozen tools and real Event retirement | 4 passed, 547 skipped | `joined-facade-adapter.log` |
+| Embedded adapter, frozen tools and real Event retirement after parcel repair | 4 passed, 547 skipped | `joined-facade-adapter-repaired.log` |
 | Declaration join proof | 1 suite/case passed; six join/consumer scenarios | `declaration-join-proof.log` |
 | Module product roundtrip | 1 suite/case passed; skinny interface 2,336 bytes | `module-product-roundtrip.log` |
 | Retained compiler scope | 1 suite/case passed | `retained-scope.log` |
@@ -108,13 +112,32 @@ regressions and the final ABI diagnostic regression.
 
 Runtime session integration initially ran 32 tests: 31 passed, one failed,
 one skipped. The failed cross-session parcel regression revealed a carried
-static installation ownership problem. Repair and final verification are
-pending; `joined-runtime-session.log` retains the original failure.
+static installation ownership problem. The repair is integrated at
+`c25a654476b0cd584bb6cf62fddb2aa2245df556`. At that exact code revision the
+full native and runtime-session reruns passed 638/638 and 32/32 respectively,
+with one deliberately skipped test in each selection.
+`joined-runtime-session.log` retains the original failure.
+
+The repaired zero-byte parcel path admits the exact carried static regions
+before validating cross-installation imports. On failure it releases parcel
+handles and retires partial installations through the existing major collector,
+while temporarily preserving preexisting programs. Descriptor and region
+ownership outlives collection, including unrelated heap tops initialized during
+installation. Two new regressions reject the first or a later installation,
+assert restored residency and temporary-pin release, then collect and reuse the
+receiver. The cross-session test also destroys the sender before observing the
+imported value. Independent review rejected two unsafe intermediate cleanup
+approaches before clearing this final collection-based implementation. Copied
+heap parcel failure cleanup was not expanded by this static-parcel repair.
 
 The matched local host build succeeded with
 `bash scripts/dev-shell.sh bash exomonad/scripts/exomonad-build.sh`:
 frontend, Haskell worker, endpoint validation, `exomonad` and
-`exomonad-view-helper`. This uses the declared default build environment;
+`exomonad-view-helper`. It passed again after the parcel repair at `c25a65447`,
+as did the four facade regressions; logs are `matched-host-build-repaired.log`
+and `joined-facade-adapter-repaired.log`. Final changed-Rust formatting,
+flake formatting, Python syntax and `git diff --check` also passed.
+This uses the declared default build environment;
 it does not realize the private Codex package or launch a live session.
 The adapter still has unused production composition surface, reported by
 compiler warnings; a successful build is not full M1 owner composition.
