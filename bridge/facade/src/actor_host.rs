@@ -1256,15 +1256,6 @@ struct InteractiveDeployment {
     fork_parent_thread: Option<BackendThreadId>,
 }
 
-struct PendingEmbeddedLaunch {
-    embedded: embedded_service::EmbeddedActor,
-    settings: crate::exomonad::EmbeddedLaunchConfig,
-    local_actor: LocalActorRef,
-    model: String,
-    effort: harness::model::Effort,
-    instructions: String,
-}
-
 fn embedded_root_attachment_error(
     actor: ActorRef,
     is_root: bool,
@@ -3918,7 +3909,6 @@ async fn run_interactive_applications(
     let mut embedded_tasks: JoinSet<(ActorRef, LocalActorRef, Result<(), String>)> = JoinSet::new();
     let mut embedded_cancellations = HashMap::new();
     let mut embedded_live = BTreeSet::new();
-    let mut embedded_pending = HashMap::new();
     let mut embedded_conversations: HashMap<ActorRef, Arc<harness::embedding::Conversation>> =
         HashMap::new();
     let mut embedded_root: Option<Arc<harness::embedding::Conversation>> = None;
@@ -4209,13 +4199,14 @@ async fn run_interactive_applications(
                                 break Some(error);
                             }
                             let path = harness::model::AgentPath("/root".into());
+                            let initial_input = installation.initial_user_message.clone();
                             let embedded = match embedded_service::attach_actor(
                                 service,
                                 &launch_context.run_root,
                                 path.clone(),
                                 None,
                                 *installation,
-                                None,
+                                initial_input,
                             )
                             .await {
                                 Ok(embedded) => embedded,
@@ -4226,17 +4217,35 @@ async fn run_interactive_applications(
                             let root_conversation = Arc::clone(&embedded.conversation);
                             embedded_conversations.insert(actor, Arc::clone(&root_conversation));
                             embedded_cancellations.insert(actor, embedded.cancellation.clone());
-                            embedded_pending.insert(
-                                actor,
-                                PendingEmbeddedLaunch {
-                                    embedded,
-                                    settings,
-                                    local_actor,
+                            embedded_live.insert(actor);
+                            let runtime = Arc::clone(&service.runtime);
+                            embedded_tasks.spawn(async move {
+                                let result = embedded_service::drive_conversation(
+                                    embedded.driver,
+                                    runtime,
+                                    &settings,
                                     model,
                                     effort,
                                     instructions,
-                                },
-                            );
+                                    embedded.cancellation_rx,
+                                )
+                                .await;
+                                (actor, local_actor, result)
+                            });
+                            // The permanent root has an installed workbench but
+                            // no typed request activation. PolicyInstalled is its
+                            // actor-owned readiness boundary; SessionReady below
+                            // carries subsequent typed request input only.
+                            if is_root {
+                                embedded_root = Some(Arc::clone(&root_conversation));
+                                publish_embedded_root_snapshot(&service.control, &root_conversation);
+                                readiness
+                                    .send(ActorHostReadiness::EmbeddedReady {
+                                        root: root_identity,
+                                        address: service.address,
+                                    })
+                                    .ok();
+                            }
                             continue;
                         }
                         let fork_parent_thread = match (
@@ -4371,53 +4380,6 @@ async fn run_interactive_applications(
                             {
                                 break Some(format!("embedded activation for {actor:?} was not admitted: {error}"));
                             }
-                            if let Some(pending) = embedded_pending.remove(&actor) {
-                                let Some(service) = embedded_service.as_ref() else {
-                                    break Some("embedded backend lost its prepared service".into());
-                                };
-                                let PendingEmbeddedLaunch {
-                                    embedded,
-                                    settings,
-                                    local_actor,
-                                    model,
-                                    effort,
-                                    instructions,
-                                } = pending;
-                                let runtime = Arc::clone(&service.runtime);
-                                let address = service.address;
-                                let root_conversation = Arc::clone(&embedded.conversation);
-                                embedded_live.insert(actor);
-                                embedded_tasks.spawn(async move {
-                                    let result = embedded_service::drive_conversation(
-                                        embedded.driver,
-                                        runtime,
-                                        &settings,
-                                        model,
-                                        effort,
-                                        instructions,
-                                        embedded.cancellation_rx,
-                                    )
-                                    .await;
-                                    (actor, local_actor, result)
-                                });
-                                if actor == root_identity {
-                                    embedded_root = Some(root_conversation);
-                                    publish_embedded_root_snapshot(
-                                        &service.control,
-                                        conversation,
-                                    );
-                                    readiness
-                                        .send(ActorHostReadiness::EmbeddedReady {
-                                            root: root_identity,
-                                            address,
-                                        })
-                                        .ok();
-                                }
-                            } else if !embedded_live.contains(&actor) {
-                                break Some(format!(
-                                    "embedded actor {actor:?} received an activation without a pending launch"
-                                ));
-                            }
                             continue;
                         }
                         let Some(application) = deployments.iter_mut().find(|app| app.actor == actor) else {
@@ -4442,7 +4404,6 @@ async fn run_interactive_applications(
 
                     LocalResidentDeployment::Retired { actor, terminal } => {
                         worktree_authority.remove_grant(actor.into());
-                        embedded_pending.remove(&actor);
                         if let Some(cancel) = embedded_cancellations.remove(&actor) {
                             cancel.send_replace(true);
                         }
@@ -5055,7 +5016,6 @@ async fn run_interactive_applications(
         owner.native_retirement = native_retirement;
         owner.cancel();
     }
-    embedded_pending.clear();
     for cancellation in embedded_cancellations.values() {
         cancellation.send_replace(true);
     }
