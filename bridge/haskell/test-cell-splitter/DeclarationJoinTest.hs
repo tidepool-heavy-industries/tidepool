@@ -236,20 +236,21 @@ recoveredNextConsumer root = do
     env <- getSession
     _ <- liftIO (compileOne env summary 1 1 Nothing emptyHomeModInfoLinkable)
     liftIO $ writeFile (root </> "next-consumer-object.txt") (ml_obj_file (ms_location summary))
-    bad <- check "BadRetraction"
-    badEnv <- getSession
-    result <- liftIO $ try (compileOne badEnv bad 1 1 Nothing emptyHomeModInfoLinkable)
-      :: Ghc (Either SourceError HomeModInfo)
-    liftIO $ case result of
-      Left _ -> pure ()
-      Right _ -> fail "a retracted original export reappeared after next-turn recovery"
+    forM_ ["BadRetraction", "BadNextClass", "BadNextFamily"] $ \name -> do
+      bad <- check name
+      badEnv <- getSession
+      result <- liftIO $ try (compileOne badEnv bad 1 1 Nothing emptyHomeModInfoLinkable)
+        :: Ghc (Either SourceError HomeModInfo)
+      liftIO $ case result of
+        Left _ -> pure ()
+        Right _ -> fail (name ++ " acquired retracted exports or hidden instances after next-turn recovery")
   nextObject <- readFile (root </> "next-object.txt")
   consumerObject <- readFile (root </> "next-consumer-object.txt")
   let executable = root </> "next-consumer"
       objects = map (\name -> root </> name ++ ".o") ["Common", "Old", "Public"] ++ [nextObject, consumerObject]
   callProcess "ghc" (objects ++ ["-o", executable])
   output <- readProcess executable [] ""
-  unless (output == "(99,11,11,True)\n") (fail ("next-turn export identity changed: " ++ show output))
+  unless (output == "(99,11,11,True,True)\n") (fail ("next-turn export identity changed: " ++ show output))
   putStrLn "next-turn recovery: original constructors, replacement and retraction passed"
 
 configure :: FilePath -> Ghc ()
@@ -282,7 +283,7 @@ requireIface ifaces name = case [iface | iface <- ifaces, moduleName (mi_module 
 
 sourceFiles :: [String]
 sourceFiles = map (++ ".hs")
-  ["Common", "Old", "Public", "Conflict", "AssociatedConflict", "DataConflict", "InjectiveConflict", "Consumer", "BadClass", "BadFamily", "BadAssociated", "BadFD", "Next", "NextConsumer", "BadRetraction"]
+  ["Common", "Old", "Public", "Conflict", "AssociatedConflict", "DataConflict", "InjectiveConflict", "Consumer", "BadClass", "BadFamily", "BadAssociated", "BadFD", "Next", "NextConsumer", "BadRetraction", "BadNextClass", "BadNextFamily"]
 
 temporary :: IO FilePath
 temporary = do

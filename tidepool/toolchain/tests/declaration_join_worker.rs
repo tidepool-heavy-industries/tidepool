@@ -25,6 +25,8 @@ fn exact_join_round_trips_actual_worker_and_source_hidden_consumers() {
     fixture(root, "Next", include_str!("../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/exact-isolation/Next.hs"));
     fixture(root, "NextConsumer", include_str!("../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/exact-isolation/NextConsumer.hs"));
     fixture(root, "BadRetraction", include_str!("../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/exact-isolation/BadRetraction.hs"));
+    fixture(root, "BadNextClass", include_str!("../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/exact-isolation/BadNextClass.hs"));
+    fixture(root, "BadNextFamily", include_str!("../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/exact-isolation/BadNextFamily.hs"));
     let mut artifacts = Vec::new();
     for module in ["Common", "Old", "Public"] {
         let output = Command::new("ghc")
