@@ -157,3 +157,19 @@ reachable native demand with atomic SCC install, concurrent private execution
 and compiler-validated paired publication, independent capture lifecycle,
 worker-tree acceptance, full joined verification, matched package, and deferred
 delivery/live approval. Structural fixes must have production consumers.
+
+## Expanded-worker continuation
+
+Eight worker slots are now available. Root integration source stays fixed while
+`tidepool-matched-source-0929.service` realizes the matched shell. A separate
+`/srv/swarm/checkouts/tidepool-completion-staging`, branch
+`integration/completion-staging`, stages the reviewed capture/release trio as
+`b54d0674a`, `a82af8d3f`, `ab6921f94`, and the queued M1 test/readiness stack
+through `6758f1b5d`. These picks were conflict-free; joined verification remains
+pending. Do not count staging as a passed final integration. Root may fast-forward
+the integration checkout once the active build has settled.
+
+The unchanged `exomonad/node/src/process_scope.rs` launcher still uses host
+`pre_exec` to transfer its inherited descriptors and terminal foreground group.
+The thin retained-view command path has measured helper acceptance; that does
+not imply every process/terminal launch now avoids a host fork.
