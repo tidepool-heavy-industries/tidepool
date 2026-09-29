@@ -1002,6 +1002,88 @@ mod tests {
     }
 
     #[test]
+    fn target_and_reachable_source_group_share_one_atomic_install() {
+        let groups = [certified_caf_group()];
+        let binder = SourceBinder {
+            version: ModuleVersion([1; 32]),
+            binder: testing::identity("Fixture", "caf"),
+        };
+        let demand = GroupInventory::new(&groups)
+            .unwrap()
+            .seal([binder.clone()])
+            .unwrap();
+        let registry = ImageRegistry::new();
+        let images = demand.compile(&registry).unwrap();
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.expressions.nodes[0] =
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
+        wire.globals.push(GlobalDecl {
+            identity: binder.binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        });
+        let prepared = testing::prepare(wire).unwrap();
+        let target = registry
+            .get_or_compile_prepared(&prepared, || {
+                CompiledProgram::compile_prepared_definitions(&prepared).map(Arc::new)
+            })
+            .unwrap();
+        let lease = BatchLeaseRequest::for_demanded(0, &images[0], &binder).unwrap();
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        let installed = machine
+            .install_shared_batch_with_leases(
+                vec![
+                    BatchProgram {
+                        image: Arc::clone(images[0].image()),
+                        imports: vec![],
+                    },
+                    BatchProgram {
+                        image: target,
+                        imports: vec![BatchImport::Source {
+                            group: 0,
+                            binding: ValueId(0),
+                        }],
+                    },
+                ],
+                vec![lease],
+            )
+            .unwrap();
+        assert_eq!(installed.programs.len(), 2);
+        let [source_lease] = installed.leases.as_slice() else {
+            panic!("one requested source binder must be materialized");
+        };
+        assert_eq!(source_lease.instance().program(), installed.programs[0]);
+        assert_eq!(source_lease.binder(), &binder);
+        let target_result = machine
+            .run_entry_retained(
+                installed.programs[1],
+                prepared.entry(),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 0,
+                    collect_before_observation: false,
+                },
+                RealmId::ROOT,
+            )
+            .unwrap();
+        let [PreparedResult::Managed(returned)] = target_result.values.as_slice() else {
+            panic!("target must return its certified source CAF");
+        };
+        assert_eq!(
+            machine.handle_current_pointer(*returned),
+            machine.handle_current_pointer(source_lease.handle())
+        );
+        assert!(machine.release(*returned));
+        assert!(machine.release(source_lease.handle()));
+    }
+
+    #[test]
     fn bad_source_edge_keeps_existing_machine_unchanged() {
         let image = group("a", 2, "b");
         let mut machine = PreparedMachine::empty(PreparedMachineOptions {
