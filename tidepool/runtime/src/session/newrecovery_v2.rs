@@ -1021,7 +1021,11 @@ fn artifact_error_loss(
         }
         RecoveryArtifactError::CertifiedOwnersDigestMismatch(path) => {
             let (component, relative) = artifact_component(artifact, &path);
-            (component, relative, RecoveryArtifactLossKind::DigestMismatch)
+            (
+                component,
+                relative,
+                RecoveryArtifactLossKind::DigestMismatch,
+            )
         }
         RecoveryArtifactError::Io(error) => {
             let (interface, _) = artifact.paths();
@@ -1199,10 +1203,10 @@ mod tests {
         RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse(path).unwrap(), 1).unwrap()
     }
     use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion};
+    use tidepool_toolchain::certified_products::encode_home_certification;
     use tidepool_toolchain::recovery_artifacts::{
         materialize_recovery_closure, RecoveryArtifactInput,
     };
-    use tidepool_toolchain::certified_products::encode_home_certification;
 
     const IFACE_SHA: [u8; 32] = [
         0xc7, 0x96, 0xd3, 0x7c, 0x6d, 0x49, 0x1e, 0x8f, 0x0c, 0x6e, 0x9b, 0x83, 0xee, 0xd3, 0x4c,
@@ -1334,6 +1338,64 @@ mod tests {
         };
         graph.seal().unwrap();
         graph
+    }
+
+    #[test]
+    fn private_only_exact_nodes_survive_restart_without_lexical_visibility() {
+        use crate::session::{ModuleEnv, SessionId, SessionLib};
+        use tidepool_codegen::scope::ScopeId;
+
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("declarations.json");
+        let mut graph = fixture(root.path());
+        graph.public_surfaces[0].declaration_root = None;
+        graph.nodes.retain(|node| node.id == Generation(1));
+        graph.seal().unwrap();
+        assert!(matches!(
+            stage_v2(&manifest, root.path(), &graph).unwrap().publish(),
+            RecoveryPublishOutcome::Durable { .. }
+        ));
+
+        let mut reopened = SessionLib::open(
+            SessionId(41),
+            root.path().join("session"),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        reopened.attach_empty_recovery_graph_v2(&manifest).unwrap();
+        assert_eq!(reopened.generation(), Generation(2));
+        assert_eq!(reopened.scope_tip(ScopeId::ROOT), Generation(0));
+        assert!(reopened.current_module().is_none());
+        assert!(reopened.current_declarations().is_empty());
+        assert_eq!(
+            reopened.reserve_join_generation_durable().unwrap(),
+            Generation(3)
+        );
+        let retained = read_v2(&manifest, root.path()).unwrap().unwrap();
+        assert_eq!(retained.graph.nodes, graph.nodes);
+        assert_eq!(retained.graph.high_water, Generation(3));
+    }
+
+    #[test]
+    fn published_exact_root_still_requires_hydration_on_restart() {
+        use crate::session::{ModuleEnv, SessionId, SessionLib};
+
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("declarations.json");
+        let graph = fixture(root.path());
+        assert!(matches!(
+            stage_v2(&manifest, root.path(), &graph).unwrap().publish(),
+            RecoveryPublishOutcome::Durable { .. }
+        ));
+        let mut reopened = SessionLib::open(
+            SessionId(41),
+            root.path().join("session"),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        assert!(reopened.attach_empty_recovery_graph_v2(&manifest).is_err());
+        assert_eq!(reopened.generation(), Generation(0));
+        assert!(reopened.current_module().is_none());
     }
 
     #[test]
