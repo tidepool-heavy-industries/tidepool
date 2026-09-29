@@ -1822,9 +1822,9 @@ where
             .expect("public visibility epoch exhausted");
     }
 
-    /// Capture both halves of the actor's public lexical environment under
+    /// Capture the actor's declaration, binding and source-instance view under
     /// the caller's machine checkout. `epoch` is not a compiler generation;
-    /// exact declaration and binding identities remain the stale authority.
+    /// exact identities remain the stale authority.
     pub fn public_visibility_snapshot_in(
         &self,
         scope: ScopeId,
@@ -1841,6 +1841,13 @@ where
             .map(|(name, entry)| (name.0.clone(), entry.id))
             .collect();
         bindings.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut source_instances: Vec<_> = self
+            .state
+            .bindings()
+            .source_instance_keys_in(self.state.scope_tree(), scope)
+            .into_iter()
+            .collect();
+        source_instances.sort();
         Some(super::PublicVisibilitySnapshot {
             scope,
             epoch: self
@@ -1850,6 +1857,7 @@ where
                 .unwrap_or(0),
             declaration_tip: self.state.lib().scope_tip(scope),
             bindings,
+            source_instances,
         })
     }
 

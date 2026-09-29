@@ -144,6 +144,7 @@ pub enum ResidentSessionState {
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
+use tidepool_codegen::binding_table::SourceLeaseKey;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::{Generation, SessionId, SessionModule, SessionVarId};
 
@@ -324,6 +325,7 @@ pub struct PublicVisibilitySnapshot {
     pub epoch: u64,
     pub declaration_tip: Generation,
     pub bindings: Vec<(String, SessionVarId)>,
+    pub source_instances: Vec<SourceLeaseKey>,
 }
 
 /// A resident session's declaration library. Owns the ordered decl log, the

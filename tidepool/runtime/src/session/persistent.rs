@@ -280,6 +280,25 @@ impl PersistentSession {
         released
     }
 
+    fn release_source_instance_roots(
+        &mut self,
+        leases: Vec<tidepool_codegen::prepared_program::SourceInstanceLease>,
+    ) -> usize {
+        let mut released = 0;
+        for lease in leases {
+            if self
+                .machine
+                .as_mut()
+                .is_some_and(|engine| engine.release(lease.handle()))
+            {
+                released += 1;
+            } else {
+                panic!("retired source instance has no registered machine root");
+            }
+        }
+        released
+    }
+
     /// Drop one newly published value when no compiled turn can yet have
     /// captured it. This is deliberately narrower than name retraction:
     /// callers must supply the exact id, so an older captured generation is
@@ -1460,12 +1479,16 @@ impl PersistentSession {
             roots_released: 0,
         };
         let mut retired = Vec::new();
+        let mut source_instances = Vec::new();
         for dead in &doomed {
-            retired.extend(self.bindings.drain_scope(*dead));
+            let drained = self.bindings.drain_scope_with_sources(*dead);
+            retired.extend(drained.bindings);
+            source_instances.extend(drained.source_instances);
         }
         retired.extend(self.bindings.collect_observations());
         receipt.bindings_retired = retired.len();
-        receipt.roots_released = self.release_binding_roots(retired);
+        receipt.roots_released = self.release_binding_roots(retired)
+            + self.release_source_instance_roots(source_instances);
         debug_assert_eq!(
             roots_before - self.persistent_roots_count(),
             receipt.roots_released,
