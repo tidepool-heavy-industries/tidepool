@@ -30,9 +30,9 @@ pub use tidepool_codegen::machine::MachineDisposition;
 use tidepool_codegen::suspension::ContinuationId;
 pub use tidepool_codegen::suspension::{RealmId, ValueHandle};
 use tidepool_repr::execution_schema::{
-    link_program, CtorRow, DefinitionsView, Group, HeapRhs, ImportOwner, ImportedValue, JsonLayout,
-    LinkError, MachineImports, ParseError, PreparedProgram, RuntimeRep, Signature, SiteDelivery,
-    SiteRow, SymbolIdentity, TypeNode, TypeNodeId, ValueId,
+    link_program, CachedHomeOwner, CtorRow, DefinitionsView, Group, HeapRhs, ImportOwner,
+    ImportedValue, JsonLayout, LinkError, MachineImports, ParseError, PreparedProgram, RuntimeRep,
+    Signature, SiteDelivery, SiteRow, SymbolIdentity, TypeNode, TypeNodeId, ValueId,
 };
 use tidepool_repr::{DataConId, DataConTable, Literal, PrincipalId, SessionVarId};
 
@@ -77,6 +77,8 @@ pub enum PreparedRuntimeError {
         owner: tidepool_repr::execution_schema::CachedHomeOwner,
         ordinal: u32,
     },
+    #[error("certified source owner differs from the selected original group for {0:?}")]
+    InvalidCertifiedSourceOwner(SourceBinder),
     #[error("prepared execution failed: {0}")]
     Run(ExecutionError),
     #[error("session binding {0:?} is not a live prepared binding")]
@@ -229,6 +231,7 @@ impl PreparedRuntimeError {
             | Self::SourceScopeAdmission
             | Self::AmbiguousSourceInstance(_)
             | Self::AmbiguousSourceGroup { .. }
+            | Self::InvalidCertifiedSourceOwner(_)
             | Self::UnknownBinding(_)
             | Self::UnsettledEntry { .. }
             | Self::MachineNotInstalled
@@ -2560,6 +2563,7 @@ impl PreparedEngine {
         &mut self,
         target: CertifiedTargetImage,
         target_owners: &[ImportOwner],
+        source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
         demanded: Vec<DemandedImage<'_>>,
         inherited_needed: &[InheritedSourceDemand<'_>],
         inherited: &BTreeMap<SourceBinder, SourceInstanceLease>,
@@ -2673,6 +2677,39 @@ impl PreparedEngine {
         }
         if reachable.len() != demanded.len() || needed_late.len() != late_sources.len() {
             return Err(PreparedRuntimeError::UnreachableCertifiedGroup);
+        }
+
+        for owner in target_owners.iter().chain(
+            demanded
+                .iter()
+                .flat_map(|selected| selected.group().imports()),
+        ) {
+            let ImportOwner::Source { version, binder } = owner else {
+                continue;
+            };
+            let key = SourceBinder {
+                version: version.clone(),
+                binder: binder.clone(),
+            };
+            let expected = source_evidence
+                .get(&key)
+                .ok_or_else(|| PreparedRuntimeError::InvalidCertifiedSourceOwner(key.clone()))?;
+            let actual = if let Some(&(index, _)) = source.get(&key) {
+                let group = demanded[index].group();
+                (group.owner(), group.original_ordinal())
+            } else if let Some(lease) = inherited.get(&key) {
+                (lease.owner(), lease.original_ordinal())
+            } else if let Some(requested) = late_sources.get(&key) {
+                (
+                    requested.group().owner(),
+                    requested.group().original_ordinal(),
+                )
+            } else {
+                return Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(key));
+            };
+            if actual.0 != &expected.0 || actual.1 != expected.1 {
+                return Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(key));
+            }
         }
 
         let mut late_leases = BTreeMap::new();
@@ -4441,6 +4478,25 @@ mod tests {
         .unwrap()
     }
 
+    fn certified_source_evidence(
+        groups: &[tidepool_repr::execution_schema::CertifiedGroup],
+    ) -> BTreeMap<SourceBinder, (CachedHomeOwner, u32)> {
+        groups
+            .iter()
+            .flat_map(|group| {
+                group.binders().iter().map(move |binder| {
+                    (
+                        SourceBinder {
+                            version: group.owner().module_version.clone(),
+                            binder: binder.clone(),
+                        },
+                        (group.owner().clone(), group.original_ordinal()),
+                    )
+                })
+            })
+            .collect()
+    }
+
     #[test]
     fn certified_demand_installs_cyclic_groups_with_distinct_instances() {
         use tidepool_codegen::prepared_program::GroupInventory;
@@ -4499,6 +4555,7 @@ mod tests {
             certified_source_group("b", 7, "a"),
             certified_source_group("unused", 12, "unused"),
         ];
+        let source_evidence = certified_source_evidence(&groups);
         let root = SourceBinder {
             version: ModuleVersion([1; 32]),
             binder: testing::identity("Fixture", "a"),
@@ -4529,10 +4586,31 @@ mod tests {
         let (mut engine, bootstrap) =
             PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
         let before = engine.residency();
+        let mut wrong_source_evidence = source_evidence.clone();
+        wrong_source_evidence
+            .get_mut(&root)
+            .unwrap()
+            .0
+            .product_sha256 = [99; 32];
+        assert!(matches!(
+            engine.install_certified_turn(
+                CertifiedTargetImage::compile(target.prepared.clone(), &registry).unwrap(),
+                &[owner.clone()],
+                &wrong_source_evidence,
+                demand.compile(&registry).unwrap(),
+                &[],
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &BindingTable::new(),
+            ),
+            Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(_))
+        ));
+        assert_eq!(engine.residency(), before);
         assert!(matches!(
             engine.install_certified_turn(
                 CertifiedTargetImage::compile(target.prepared.clone(), &registry).unwrap(),
                 &[],
+                &source_evidence,
                 demand.compile(&registry).unwrap(),
                 &[],
                 &BTreeMap::new(),
@@ -4556,6 +4634,7 @@ mod tests {
             engine.install_certified_turn(
                 CertifiedTargetImage::compile(target.prepared.clone(), &registry).unwrap(),
                 &[owner.clone()],
+                &source_evidence,
                 with_unused.compile(&registry).unwrap(),
                 &[],
                 &BTreeMap::new(),
@@ -4569,6 +4648,7 @@ mod tests {
             .install_certified_turn(
                 target,
                 &[owner],
+                &source_evidence,
                 demand.compile(&registry).unwrap(),
                 &[],
                 &BTreeMap::new(),
@@ -4621,6 +4701,7 @@ mod tests {
                     version: root.version.clone(),
                     binder: root.binder.clone(),
                 }],
+                &source_evidence,
                 vec![],
                 &[],
                 &inherited,
@@ -4684,6 +4765,7 @@ mod tests {
                     version: root.version.clone(),
                     binder: root.binder.clone(),
                 }],
+                &source_evidence,
                 demand.compile(&registry).unwrap(),
                 &[],
                 &BTreeMap::new(),
@@ -4816,6 +4898,7 @@ mod tests {
             *body = 1;
         }
         group_wire.bindings = vec![Group::Recursive(vec![first, sibling])];
+        let projected = testing::projected_group(group_wire, 11).unwrap();
         let group = CertifiedGroup::admit(
             CachedHomeOwner {
                 unit: "fixture".into(),
@@ -4824,11 +4907,12 @@ mod tests {
                 skinny_iface_sha256: [2; 32],
                 product_sha256: [3; 32],
             },
-            testing::projected_group(group_wire, 11).unwrap(),
+            projected.clone(),
             vec![],
         )
         .unwrap();
         let groups = [group];
+        let source_evidence = certified_source_evidence(&groups);
         let inventory = GroupInventory::new(&groups).unwrap();
         let binder = |name| SourceBinder {
             version: ModuleVersion([1; 32]),
@@ -4859,6 +4943,7 @@ mod tests {
                     version: ModuleVersion([1; 32]),
                     binder: binder("a").binder,
                 }],
+                &source_evidence,
                 first_demand.compile(&registry).unwrap(),
                 &[],
                 &BTreeMap::new(),
@@ -4875,6 +4960,15 @@ mod tests {
         let anchor = first_leases.pop().unwrap();
         let existing = BTreeMap::from([(binder("a"), anchor.clone())]);
         let anchors = HashMap::from([((groups[0].owner().clone(), 11), anchor.clone())]);
+        let mut wrong_owner = groups[0].owner().clone();
+        wrong_owner.product_sha256 = [9; 32];
+        let wrong_groups = [CertifiedGroup::admit(wrong_owner, projected, vec![]).unwrap()];
+        assert!(matches!(
+            GroupInventory::new(&wrong_groups)
+                .unwrap()
+                .seal_with_inherited([binder("a")], &existing, &anchors),
+            Err(DemandError::InvalidInheritedInstance(_))
+        ));
         let already_rooted = inventory
             .seal_with_inherited([binder("a")], &existing, &anchors)
             .unwrap();
@@ -4907,6 +5001,7 @@ mod tests {
                 version: ModuleVersion([1; 32]),
                 binder: binder("b").binder,
             }],
+            &source_evidence,
             vec![],
             sibling_demand.inherited_demands(),
             &existing,
@@ -4931,6 +5026,7 @@ mod tests {
                     version: ModuleVersion([1; 32]),
                     binder: binder("b").binder,
                 }],
+                &source_evidence,
                 vec![],
                 sibling_demand.inherited_demands(),
                 &existing,

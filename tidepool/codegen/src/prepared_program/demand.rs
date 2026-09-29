@@ -230,14 +230,20 @@ impl<'a> GroupInventory<'a> {
         let mut reachable = BTreeSet::new();
         let mut inherited = BTreeMap::new();
         while let Some(binder) = pending.pop_front() {
-            if existing.contains_key(&binder) {
-                continue;
-            }
             let &index = self
                 .binders
                 .get(&binder)
                 .ok_or_else(|| DemandError::MissingSource(binder.clone()))?;
             let group = &self.groups[index];
+            if let Some(lease) = existing.get(&binder) {
+                if lease.binder() != &binder
+                    || lease.owner() != group.owner()
+                    || lease.original_ordinal() != group.original_ordinal()
+                {
+                    return Err(DemandError::InvalidInheritedInstance(binder));
+                }
+                continue;
+            }
             if let Some(anchor) = anchors.get(&(group.owner().clone(), group.original_ordinal())) {
                 if anchor.owner() != group.owner()
                     || anchor.original_ordinal() != group.original_ordinal()
