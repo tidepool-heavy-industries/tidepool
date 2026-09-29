@@ -8,8 +8,9 @@ use std::path::PathBuf;
 use ciborium::value::Value;
 use sha2::{Digest, Sha256};
 use tidepool_repr::execution_schema::{
-    parse_module_products, CachedHomeOwner, DecodeLimits, ModuleVersion, ProjectedGroup,
-    RawModuleProduct, ResultContract, RuntimeRep, Signature, SymbolIdentity,
+    parse_module_products, CachedHomeOwner, DecodeLimits, GlobalDecl, ModuleVersion,
+    PreparedProgram, ProjectedGroup, RawModuleProduct, ResultContract, RuntimeRep, Signature,
+    SymbolIdentity,
 };
 
 use crate::cache::{DependencyEvidence, ProductAvailability};
@@ -19,6 +20,8 @@ const RECEIPT_LIMIT: usize = 4 << 20;
 const MODULE_LIMIT: usize = 128;
 const GROUP_LIMIT: usize = 4096;
 const GLOBAL_LIMIT: usize = 65536;
+const PACKAGE_LIMIT: usize = 4096;
+const PACKAGE_INTERFACE_LIMIT: u64 = 32 << 20;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProductOrigin {
@@ -94,17 +97,34 @@ pub struct CertifiedModuleReceipt {
     pub groups: Vec<AcceptedGroup>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CertifiedReceipt {
+    pub modules: Vec<CertifiedModuleReceipt>,
+    pub targets: BTreeMap<String, Vec<AcceptedGlobal>>,
+    pub packages: BTreeMap<(String, String), PackageInterfaceWitness>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageInterfaceWitness {
+    pub selected_path: PathBuf,
+    pub sha256: [u8; 32],
+}
+
 /// A group whose retained globals still need the authoritative lexical
 /// `SessionVarId` and live handle. Runtime resolves those under checkout,
 /// then constructs `CertifiedGroup`; it never infers a retained ID from text.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingCertifiedGroup {
+    origin: ProductOrigin,
     owner: CachedHomeOwner,
     group: ProjectedGroup,
     imports: Vec<PendingImportOwner>,
 }
 
 impl PendingCertifiedGroup {
+    pub fn origin(&self) -> ProductOrigin {
+        self.origin
+    }
     pub fn owner(&self) -> &CachedHomeOwner {
         &self.owner
     }
@@ -289,24 +309,81 @@ fn owner(value: &Value) -> CertResult<ReceiptImportOwner> {
     }
 }
 
-/// Decode the worker's bounded `TPCERT` v1 CBOR tuple. The worker emits one
-/// row for every ready fresh or accepted cached module and one global row in
-/// each original group's declaration order.
-pub fn decode_receipt(bytes: &[u8]) -> CertResult<Vec<CertifiedModuleReceipt>> {
+fn accepted_global(value: &Value) -> CertResult<AcceptedGlobal> {
+    let row = sized(value, 5)?;
+    Ok(AcceptedGlobal {
+        identity: identity(&row[0])?,
+        rep: rep(&row[1])?,
+        entry_signature: signature(&row[2])?,
+        required_evaluated: boolean(&row[3])?,
+        owner: owner(&row[4])?,
+    })
+}
+
+fn validate_global_witness(
+    declaration: &GlobalDecl,
+    signatures: &[Signature],
+    selected: &AcceptedGlobal,
+) -> CertResult<ReceiptImportOwner> {
+    let actual_signature = declaration
+        .entry_signature
+        .and_then(|id| signatures.get(id.0 as usize))
+        .cloned();
+    if declaration.identity != selected.identity
+        || declaration.rep != selected.rep
+        || declaration.required_evaluated != selected.required_evaluated
+        || actual_signature != selected.entry_signature
+    {
+        return Err(CertificationError::Mismatch(
+            "global representation/signature",
+        ));
+    }
+    let aligned = match &selected.owner {
+        ReceiptImportOwner::Retained {
+            identity,
+            generation,
+        } => {
+            identity == &declaration.identity
+                && declaration.required_generation == Some(*generation)
+        }
+        ReceiptImportOwner::Source { binder, .. } => {
+            binder == &declaration.identity && declaration.required_generation.is_none()
+        }
+        ReceiptImportOwner::Package {
+            unit,
+            module,
+            binder,
+            ..
+        } => {
+            binder == &declaration.identity
+                && &binder.unit == unit
+                && &binder.module == module
+                && declaration.required_generation.is_none()
+        }
+    };
+    if !aligned {
+        return Err(CertificationError::Mismatch("global owner"));
+    }
+    Ok(selected.owner.clone())
+}
+
+/// Decode the worker's bounded `TPCERT` v2 CBOR tuple. Original module
+/// groups and each executable target retain their own ordered global rows.
+pub fn decode_receipt(bytes: &[u8]) -> CertResult<CertifiedReceipt> {
     if bytes.len() > RECEIPT_LIMIT {
         return Err(CertificationError::Receipt("receipt size"));
     }
     let value: Value =
         ciborium::de::from_reader(bytes).map_err(|_| CertificationError::Receipt("CBOR"))?;
-    let header = sized(&value, 3)?;
-    if string(&header[0])? != "TPCERT" || number(&header[1])? != 1 {
+    let header = sized(&value, 5)?;
+    if string(&header[0])? != "TPCERT" || number(&header[1])? != 2 {
         return Err(CertificationError::Receipt("receipt header"));
     }
     let modules = array(&header[2])?;
     if modules.len() > MODULE_LIMIT {
         return Err(CertificationError::Receipt("module count"));
     }
-    modules
+    let modules = modules
         .iter()
         .map(|module| {
             let row = sized(module, 9)?;
@@ -332,16 +409,7 @@ pub fn decode_receipt(bytes: &[u8]) -> CertResult<Vec<CertifiedModuleReceipt>> {
                             .map_err(|_| CertificationError::Receipt("group ordinal"))?,
                         globals: globals
                             .iter()
-                            .map(|global| {
-                                let row = sized(global, 5)?;
-                                Ok(AcceptedGlobal {
-                                    identity: identity(&row[0])?,
-                                    rep: rep(&row[1])?,
-                                    entry_signature: signature(&row[2])?,
-                                    required_evaluated: boolean(&row[3])?,
-                                    owner: owner(&row[4])?,
-                                })
-                            })
+                            .map(accepted_global)
                             .collect::<CertResult<_>>()?,
                     })
                 })
@@ -358,7 +426,66 @@ pub fn decode_receipt(bytes: &[u8]) -> CertResult<Vec<CertifiedModuleReceipt>> {
                 groups,
             })
         })
-        .collect()
+        .collect::<CertResult<Vec<_>>>()?;
+    let target_rows = array(&header[3])?;
+    if target_rows.len() > MODULE_LIMIT {
+        return Err(CertificationError::Receipt("target count"));
+    }
+    let mut targets = BTreeMap::new();
+    for target in target_rows {
+        let row = sized(target, 2)?;
+        let name = string(&row[0])?.to_owned();
+        if name.is_empty() {
+            return Err(CertificationError::Receipt("empty target name"));
+        }
+        let globals = array(&row[1])?;
+        if globals.len() > GLOBAL_LIMIT {
+            return Err(CertificationError::Receipt("target global count"));
+        }
+        if targets
+            .insert(
+                name,
+                globals
+                    .iter()
+                    .map(accepted_global)
+                    .collect::<CertResult<_>>()?,
+            )
+            .is_some()
+        {
+            return Err(CertificationError::Receipt("duplicate target"));
+        }
+    }
+    let package_rows = array(&header[4])?;
+    if package_rows.len() > PACKAGE_LIMIT {
+        return Err(CertificationError::Receipt("package count"));
+    }
+    let mut packages = BTreeMap::new();
+    for package in package_rows {
+        let row = sized(package, 4)?;
+        let unit = string(&row[0])?.to_owned();
+        let module = string(&row[1])?.to_owned();
+        let selected_path = PathBuf::from(string(&row[2])?);
+        if unit.is_empty() || module.is_empty() || !selected_path.is_absolute() {
+            return Err(CertificationError::Receipt("package witness identity/path"));
+        }
+        if packages
+            .insert(
+                (unit, module),
+                PackageInterfaceWitness {
+                    selected_path,
+                    sha256: digest(&row[3])?,
+                },
+            )
+            .is_some()
+        {
+            return Err(CertificationError::Receipt("duplicate package witness"));
+        }
+    }
+    Ok(CertifiedReceipt {
+        modules,
+        targets,
+        packages,
+    })
 }
 
 fn sha(bytes: &[u8]) -> [u8; 32] {
@@ -435,14 +562,111 @@ fn fresh_module_version(
     ))
 }
 
+type SourceGroupMap =
+    BTreeMap<(String, String, u32, SymbolIdentity), (CachedHomeOwner, ProductOrigin)>;
+
+fn resolve_receipt_owner(
+    import: ReceiptImportOwner,
+    sources: &SourceGroupMap,
+    packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+) -> CertResult<PendingImportOwner> {
+    match import {
+        ReceiptImportOwner::Source {
+            unit,
+            module,
+            module_version,
+            original_ordinal,
+            binder,
+        } => {
+            let (resolved, origin) = sources
+                .get(&(unit, module, original_ordinal, binder.clone()))
+                .ok_or(CertificationError::Mismatch("source binder/group closure"))?;
+            if *origin == ProductOrigin::Cached && module_version.is_none() {
+                return Err(CertificationError::Mismatch(
+                    "missing cached source version",
+                ));
+            }
+            if module_version
+                .as_ref()
+                .is_some_and(|version| version != &resolved.module_version)
+            {
+                return Err(CertificationError::Mismatch("source module version"));
+            }
+            Ok(PendingImportOwner::Source {
+                owner: resolved.clone(),
+                original_ordinal,
+                binder,
+            })
+        }
+        ReceiptImportOwner::Retained {
+            identity,
+            generation,
+        } => Ok(PendingImportOwner::Retained {
+            identity,
+            generation,
+        }),
+        ReceiptImportOwner::Package {
+            unit,
+            module,
+            binder,
+            interface_digest,
+        } => {
+            let witness = packages
+                .get(&(unit.clone(), module.clone()))
+                .ok_or(CertificationError::Mismatch("package interface witness"))?;
+            if witness.sha256 != interface_digest || !witness.selected_path.is_absolute() {
+                return Err(CertificationError::Mismatch("package interface witness"));
+            }
+            let metadata = std::fs::metadata(&witness.selected_path)
+                .map_err(|_| CertificationError::StaleEvidence)?;
+            if !metadata.is_file() || metadata.len() > PACKAGE_INTERFACE_LIMIT {
+                return Err(CertificationError::StaleEvidence);
+            }
+            let bytes = std::fs::read(&witness.selected_path)
+                .map_err(|_| CertificationError::StaleEvidence)?;
+            if sha(&bytes) != interface_digest {
+                return Err(CertificationError::StaleEvidence);
+            }
+            Ok(PendingImportOwner::Package {
+                unit,
+                module,
+                binder,
+                interface_digest,
+            })
+        }
+    }
+}
+
+fn certified_source_map(groups: &[PendingCertifiedGroup]) -> CertResult<SourceGroupMap> {
+    let mut sources = SourceGroupMap::new();
+    for group in groups {
+        for binder in group.group.binders() {
+            let key = (
+                group.owner.unit.clone(),
+                group.owner.module.clone(),
+                group.group.original_ordinal(),
+                binder.clone(),
+            );
+            if sources
+                .insert(key, (group.owner.clone(), group.origin))
+                .is_some()
+            {
+                return Err(CertificationError::Mismatch("duplicate source binder"));
+            }
+        }
+    }
+    Ok(sources)
+}
+
 /// Recheck original/fresh sidecars and dependency bytes against a worker
 /// receipt. A candidate is never admitted merely because its name or hash
 /// appears in the receipt: every original global and source edge is checked.
 pub(crate) fn certify_products(
     candidates: Option<&CandidateSet>,
-    receipt: &[CertifiedModuleReceipt],
+    receipt: &CertifiedReceipt,
     fresh_products: &[RawModuleProduct],
     fresh_product_bytes: &[u8],
+    fresh_evidence_bytes: &[u8],
     final_evidence: &DependencyEvidence,
     final_target_source: &str,
     endpoint_identity: &[u8],
@@ -461,7 +685,7 @@ pub(crate) fn certify_products(
     let mut seen_modules = BTreeSet::new();
     let mut fresh_modules = BTreeSet::new();
     let mut groups = Vec::new();
-    for accepted in receipt {
+    for accepted in &receipt.modules {
         let key = (accepted.unit.clone(), accepted.module.clone());
         if !seen_modules.insert(key.clone()) {
             return Err(CertificationError::Mismatch("duplicate receipt module"));
@@ -560,12 +784,15 @@ pub(crate) fn certify_products(
             skinny_iface_sha256: accepted.skinny_iface_sha256,
             product_sha256: accepted.product_sha256,
         };
+        let evidence_digest = match accepted.origin {
+            ProductOrigin::Fresh => sha(fresh_evidence_bytes),
+            ProductOrigin::Cached => sha(&serde_json::to_vec(evidence)
+                .map_err(|_| CertificationError::Mismatch("dependency witness encoding"))?),
+        };
         if source_sha != accepted.source_sha256
             || sha(bytes) != owner.product_sha256
             || sha(&product.interface) != owner.skinny_iface_sha256
-            || sha(&serde_json::to_vec(evidence)
-                .map_err(|_| CertificationError::Mismatch("dependency witness encoding"))?)
-                != accepted.dependency_witness_sha256
+            || evidence_digest != accepted.dependency_witness_sha256
         {
             return Err(CertificationError::Mismatch(
                 "product/iface/source/evidence digest",
@@ -584,42 +811,13 @@ pub(crate) fn certify_products(
             }
             let mut imports = Vec::with_capacity(witness.globals.len());
             for (declaration, selected) in group.globals().iter().zip(&witness.globals) {
-                let actual_signature = declaration
-                    .entry_signature
-                    .and_then(|id| group.definitions().signatures().get(id.0 as usize))
-                    .cloned();
-                if declaration.identity != selected.identity
-                    || declaration.rep != selected.rep
-                    || declaration.required_evaluated != selected.required_evaluated
-                    || actual_signature != selected.entry_signature
-                {
-                    return Err(CertificationError::Mismatch(
-                        "global representation/signature",
-                    ));
-                }
-                match &selected.owner {
-                    ReceiptImportOwner::Retained {
-                        identity,
-                        generation,
-                    } if identity == &declaration.identity
-                        && declaration.required_generation == Some(*generation) => {}
-                    ReceiptImportOwner::Source { binder, .. }
-                        if binder == &declaration.identity
-                            && declaration.required_generation.is_none() => {}
-                    ReceiptImportOwner::Package {
-                        unit,
-                        module,
-                        binder,
-                        ..
-                    } if binder == &declaration.identity
-                        && &binder.unit == unit
-                        && &binder.module == module
-                        && declaration.required_generation.is_none() => {}
-                    _ => return Err(CertificationError::Mismatch("global owner")),
-                }
-                imports.push(selected.owner.clone());
+                imports.push(validate_global_witness(
+                    declaration,
+                    group.definitions().signatures(),
+                    selected,
+                )?);
             }
-            groups.push((owner.clone(), group.clone(), imports));
+            groups.push((accepted.origin, owner.clone(), group.clone(), imports));
         }
     }
     for product in &parsed_fresh {
@@ -627,8 +825,8 @@ pub(crate) fn certify_products(
             return Err(CertificationError::Mismatch("unwitnessed fresh module"));
         }
     }
-    let mut source_groups = BTreeMap::new();
-    for (owner, group, _) in &groups {
+    let mut source_groups = SourceGroupMap::new();
+    for (origin, owner, group, _) in &groups {
         for binder in group.binders() {
             let key = (
                 owner.unit.clone(),
@@ -636,70 +834,23 @@ pub(crate) fn certify_products(
                 group.original_ordinal(),
                 binder.clone(),
             );
-            let origin = if fresh_modules.contains(&(owner.unit.clone(), owner.module.clone())) {
-                ProductOrigin::Fresh
-            } else {
-                ProductOrigin::Cached
-            };
-            if source_groups.insert(key, (owner.clone(), origin)).is_some() {
+            if source_groups
+                .insert(key, (owner.clone(), *origin))
+                .is_some()
+            {
                 return Err(CertificationError::Mismatch("duplicate source binder"));
             }
         }
     }
     groups
         .into_iter()
-        .map(|(owner, group, imports)| {
+        .map(|(origin, owner, group, imports)| {
             let imports = imports
                 .into_iter()
-                .map(|import| match import {
-                    ReceiptImportOwner::Source {
-                        unit,
-                        module,
-                        module_version,
-                        original_ordinal,
-                        binder,
-                    } => {
-                        let (resolved, origin) = source_groups
-                            .get(&(unit, module, original_ordinal, binder.clone()))
-                            .ok_or(CertificationError::Mismatch("source binder/group closure"))?;
-                        if *origin == ProductOrigin::Cached && module_version.is_none() {
-                            return Err(CertificationError::Mismatch(
-                                "missing cached source version",
-                            ));
-                        }
-                        if module_version
-                            .as_ref()
-                            .is_some_and(|version| version != &resolved.module_version)
-                        {
-                            return Err(CertificationError::Mismatch("source module version"));
-                        }
-                        Ok(PendingImportOwner::Source {
-                            owner: resolved.clone(),
-                            original_ordinal,
-                            binder,
-                        })
-                    }
-                    ReceiptImportOwner::Retained {
-                        identity,
-                        generation,
-                    } => Ok(PendingImportOwner::Retained {
-                        identity,
-                        generation,
-                    }),
-                    ReceiptImportOwner::Package {
-                        unit,
-                        module,
-                        binder,
-                        interface_digest,
-                    } => Ok(PendingImportOwner::Package {
-                        unit,
-                        module,
-                        binder,
-                        interface_digest,
-                    }),
-                })
+                .map(|import| resolve_receipt_owner(import, &source_groups, &receipt.packages))
                 .collect::<CertResult<_>>()?;
             Ok(PendingCertifiedGroup {
+                origin,
                 owner,
                 group,
                 imports,
@@ -708,10 +859,35 @@ pub(crate) fn certify_products(
         .collect()
 }
 
+/// Bind a target's declared globals to the same compiler transaction's
+/// source inventory. Retained identities remain unresolved until runtime
+/// checks their lexical scope and assigns authoritative session IDs.
+pub fn certify_target_owners(
+    prepared: &PreparedProgram,
+    accepted: &[AcceptedGlobal],
+    groups: &[PendingCertifiedGroup],
+    packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+) -> CertResult<Vec<PendingImportOwner>> {
+    if prepared.globals().len() != accepted.len() {
+        return Err(CertificationError::Mismatch("target global count"));
+    }
+    let sources = certified_source_map(groups)?;
+    prepared
+        .globals()
+        .iter()
+        .zip(accepted)
+        .map(|(declaration, selected)| {
+            let owner = validate_global_witness(declaration, prepared.signatures(), selected)?;
+            resolve_receipt_owner(owner, &sources, packages)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cache::{ModuleEvidence, SourceEvidence};
+    use tidepool_repr::execution_schema::testing;
 
     fn sidecar() -> Vec<u8> {
         let value = Value::Array(vec![
@@ -783,9 +959,14 @@ mod tests {
         let accepted = receipt(&bytes, &evidence, source);
         assert!(certify_products(
             None,
-            &[accepted.clone()],
+            &CertifiedReceipt {
+                modules: vec![accepted.clone()],
+                targets: BTreeMap::new(),
+                packages: BTreeMap::new()
+            },
             &parsed,
             &bytes,
+            &serde_json::to_vec(&evidence).unwrap(),
             &evidence,
             source,
             b"producer",
@@ -798,9 +979,14 @@ mod tests {
         assert!(matches!(
             certify_products(
                 None,
-                &[changed],
+                &CertifiedReceipt {
+                    modules: vec![changed],
+                    targets: BTreeMap::new(),
+                    packages: BTreeMap::new()
+                },
                 &parsed,
                 &bytes,
+                &serde_json::to_vec(&evidence).unwrap(),
                 &evidence,
                 source,
                 b"producer",
@@ -814,9 +1000,14 @@ mod tests {
         changed.dependency_witness_sha256 = [7; 32];
         assert!(certify_products(
             None,
-            &[changed],
+            &CertifiedReceipt {
+                modules: vec![changed],
+                targets: BTreeMap::new(),
+                packages: BTreeMap::new()
+            },
             &parsed,
             &bytes,
+            &serde_json::to_vec(&evidence).unwrap(),
             &evidence,
             source,
             b"producer",
@@ -833,7 +1024,7 @@ mod tests {
         let accepted = receipt(&bytes, &evidence, source);
         let value = Value::Array(vec![
             Value::Text("TPCERT".into()),
-            Value::Integer(1.into()),
+            Value::Integer(2.into()),
             Value::Array(vec![Value::Array(vec![
                 Value::Text("fresh".into()),
                 Value::Text("main".into()),
@@ -845,14 +1036,105 @@ mod tests {
                 Value::Text(hex(&accepted.dependency_witness_sha256)),
                 Value::Array(vec![]),
             ])]),
+            Value::Array(vec![Value::Array(vec![
+                Value::Text("target".into()),
+                Value::Array(vec![]),
+            ])]),
+            Value::Array(vec![Value::Array(vec![
+                Value::Text("base".into()),
+                Value::Text("Selected".into()),
+                Value::Text("/tmp/Selected.hi".into()),
+                Value::Text(hex(&[5; 32])),
+            ])]),
         ]);
         let mut encoded = Vec::new();
         ciborium::ser::into_writer(&value, &mut encoded).unwrap();
-        assert_eq!(decode_receipt(&encoded).unwrap(), vec![accepted]);
+        assert_eq!(
+            decode_receipt(&encoded).unwrap(),
+            CertifiedReceipt {
+                modules: vec![accepted],
+                targets: BTreeMap::from([("target".into(), vec![])]),
+                packages: BTreeMap::from([(
+                    ("base".into(), "Selected".into()),
+                    PackageInterfaceWitness {
+                        selected_path: PathBuf::from("/tmp/Selected.hi"),
+                        sha256: [5; 32],
+                    }
+                )]),
+            }
+        );
         encoded.resize(RECEIPT_LIMIT + 1, 0);
         assert!(matches!(
             decode_receipt(&encoded),
             Err(CertificationError::Receipt("receipt size"))
+        ));
+    }
+
+    #[test]
+    fn target_retained_owner_keeps_identity_and_generation_unresolved() {
+        let mut wire = testing::wire_program();
+        let identity = testing::identity("Val.G7", "retained");
+        wire.globals.push(GlobalDecl {
+            identity: identity.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: Some(7),
+        });
+        let prepared = testing::prepare(wire).unwrap();
+        let selected = AcceptedGlobal {
+            identity: identity.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            owner: ReceiptImportOwner::Retained {
+                identity: identity.clone(),
+                generation: 7,
+            },
+        };
+        assert_eq!(
+            certify_target_owners(&prepared, &[selected.clone()], &[], &BTreeMap::new()).unwrap(),
+            vec![PendingImportOwner::Retained {
+                identity,
+                generation: 7,
+            }]
+        );
+        let mut stale = selected;
+        stale.owner = ReceiptImportOwner::Retained {
+            identity: stale.identity.clone(),
+            generation: 8,
+        };
+        assert!(certify_target_owners(&prepared, &[stale], &[], &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn package_owner_requires_selected_interface_bytes_at_final_admission() {
+        let directory = tempfile::tempdir().unwrap();
+        let selected_path = directory.path().join("Selected.hi");
+        std::fs::write(&selected_path, b"selected interface").unwrap();
+        let interface_digest = sha(b"selected interface");
+        let binder = testing::identity("base:Selected", "member");
+        let import = ReceiptImportOwner::Package {
+            unit: "base".into(),
+            module: "Selected".into(),
+            binder: binder.clone(),
+            interface_digest,
+        };
+        let packages = BTreeMap::from([(
+            ("base".into(), "Selected".into()),
+            PackageInterfaceWitness {
+                selected_path: selected_path.clone(),
+                sha256: interface_digest,
+            },
+        )]);
+        assert!(matches!(
+            resolve_receipt_owner(import.clone(), &SourceGroupMap::new(), &packages),
+            Ok(PendingImportOwner::Package { .. })
+        ));
+        std::fs::write(&selected_path, b"changed interface").unwrap();
+        assert!(matches!(
+            resolve_receipt_owner(import, &SourceGroupMap::new(), &packages),
+            Err(CertificationError::StaleEvidence)
         ));
     }
 }
