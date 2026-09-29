@@ -336,3 +336,19 @@ owned artifact bytes and package/dependency witnesses before runtime can admit
 that authored node to the durable graph. Source-less Join certification must
 also attest consulted orphan/family package metadata; an empty witness cannot
 be assumed merely because the Join has no authored source.
+
+Native codegen unit coverage is now accepted at `b74ca34cc`: 514 tests passed,
+one remained intentionally ignored. The Buck-built harness is a build-only
+Rust binary with `--test`; a declared Python bootstrap runner executes each
+nonignored test in a fresh process, with at most eight cases in parallel.
+There is one Rust compile/link action and one aggregate Buck test result; this
+does not provide separate cached Buck test results per case. No Cargo build is
+nested inside Buck. The runner rejects empty/malformed discovery and requires
+an exact one-test success result. Twenty-two generator and runner tests passed.
+Evidence: `target/completion-evidence/buck/codegen-units-final-gate.log`.
+The prior 10 shared-process failures all pass under process isolation.
+
+Private-only recovery restart admission is checkpointed at `702c90264` with
+two focused tests passing. Exact private nodes/artifacts and burned high-water
+survive reopening without exposing private declarations; published roots still
+require hydration. This does not itself certify or publish new authored nodes.
