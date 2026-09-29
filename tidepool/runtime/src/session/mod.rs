@@ -23,6 +23,7 @@ pub mod inspection;
 pub mod kernel;
 pub mod persistent;
 pub mod prepared;
+mod publication;
 mod recovery;
 pub mod registry;
 pub mod render;
@@ -53,6 +54,7 @@ pub use prepared::{
     CancelHandle, PreparedEngine, PreparedFailureKind, PreparedRuntimeError, PreparedSettlement,
     RealmId, SiteTypeEvidence,
 };
+pub use publication::{PublicationCancellation, PublicationDecision, PublicationPhase};
 // Re-exported for callers that pass a value across two resident sessions'
 // machines ([`resident::ResidentSession::export_custody`]/`import_parcel`)
 // and any composition root that wires the sessions' shared image cache

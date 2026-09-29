@@ -1326,6 +1326,7 @@ pub(crate) struct ExecutionPrivateScope {
     pub public_scope: tidepool_codegen::scope::ScopeId,
     pub private_scope: tidepool_codegen::scope::ScopeId,
     pub admitted_public: tidepool_runtime::session::PublicVisibilitySnapshot,
+    pub decision: Arc<tidepool_runtime::session::PublicationDecision>,
 }
 
 impl<H, O> Clone for ResidentActorRunner<H, O> {
@@ -6364,9 +6365,10 @@ where
     pub(crate) async fn begin_private_execution(
         &self,
         context: crate::ActorSessionContext,
+        decision: Arc<tidepool_runtime::session::PublicationDecision>,
     ) -> Result<ExecutionPrivateScope, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, |session, context, _| {
+            .with_machine(context, move |session, context, _| {
                 let public_scope = context.placement.lexical_scope;
                 let admitted_public = session
                     .public_visibility_snapshot_in(public_scope)
@@ -6384,6 +6386,7 @@ where
                     public_scope,
                     private_scope,
                     admitted_public,
+                    decision,
                 })
             })
             .await
