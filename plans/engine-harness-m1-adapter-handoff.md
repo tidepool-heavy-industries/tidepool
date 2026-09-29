@@ -14,10 +14,10 @@ The harness companion is
 `c485edb9b697ffc671b22c9ef25a73fc84763d76` on
 `integration/actor-admission-companion`, based on the operation-identity
 candidate. Tidepool `Cargo.toml` and `Cargo.lock` name that exact commit at the
-public Git origin. The local adapter check used
-an environment-only Git URL redirect to the clean companion worktree; this
-does not establish remote reproducibility. After review and publication,
-verify the remote commit and add its Git source hash to both `cargoLock`
+public Git origin. Both companion and adapter candidates are pushed; the
+local adapter check used an environment-only Git URL redirect to the clean
+companion worktree and has not verified a remote dependency fetch. Add the
+exact Git source hash to both `cargoLock`
 users in `flake.nix` before a Nix distribution build.
 
 The facade's `EmbeddedHarnessRuntime` opens one Store and one configured
@@ -56,8 +56,8 @@ not treat source and handler publication as one atomic reload.
   its real resident actor bound to an offline embedded Engine parked, received
   one durable input and resumed. The exact nextest selection passed 1/1
   (548 skipped), with the per-run compiler daemon torn down.
-- The default Codex backend was not switched. Remote publication, Nix Git
-  source hashes, bound actor-path composition from the owner registry, and
+- The default Codex backend was not switched. Remote dependency resolution,
+  Nix Git source hashes, bound actor-path composition from the owner registry, and
   complete M1 raw/structured/retained/cancellation/reload/reconnect/Codex
   integration gates remain for review. Concurrent execution remains disabled.
 
