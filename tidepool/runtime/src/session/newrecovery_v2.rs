@@ -12,21 +12,90 @@ use tidepool_toolchain::recovery_artifacts::{
 };
 
 const VERSION: u32 = 2;
+const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v1";
 const MAX_MANIFEST_BYTES: usize = 64 << 20;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RecoveryGraph {
     pub version: u32,
+    pub public_schema: String,
     pub source_session: u64,
     pub lineage: u64,
     #[serde(with = "generation_serde")]
     pub high_water: Generation,
-    #[serde(with = "option_generation_serde")]
-    pub public_root: Option<Generation>,
+    /// Several inherited-context actors can publish distinct lexical views
+    /// from the same session's declaration/artifact DAG.
+    pub public_surfaces: Vec<RecoveryPublicSurface>,
     pub nodes: Vec<RecoveryNode>,
     pub artifacts: Vec<RecoveryArtifactClosure>,
     pub checksum: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryPublicOwner {
+    path: String,
+    incarnation: u64,
+}
+
+impl RecoveryPublicOwner {
+    pub fn new(path: &tidepool_repr::ActorPath, incarnation: u64) -> Option<Self> {
+        if incarnation == 0 {
+            return None;
+        }
+        Some(Self {
+            path: path.to_string(),
+            incarnation,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecoveryPublicSurface {
+    pub owner: RecoveryPublicOwner,
+    #[serde(with = "option_generation_serde")]
+    pub declaration_root: Option<Generation>,
+    pub epoch: u64,
+    /// Final visible binding winners. Their values are process-local, so
+    /// recovery projects these as tombstones without reviving an older name.
+    pub bindings: Vec<RecoveryPublicBinding>,
+    /// Exact machine-local source instances at this public tip. Recovery can
+    /// report their loss but cannot reconstruct their mutable CAF state.
+    pub source_instances: Vec<RecoveryPublicSourceInstance>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecoveryPublicBinding {
+    pub name: String,
+    pub owner: RecoveryBindingId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RecoveryLostPublicBinding {
+    pub name: String,
+    pub winner: RecoveryBindingId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecoverySourceIdentity {
+    pub unit: String,
+    pub module: String,
+    pub namespace: String,
+    pub occurrence: String,
+    pub record_parent: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecoveryPublicSourceInstance {
+    pub machine_incarnation: u64,
+    pub instance: u32,
+    pub module_version: [u8; 32],
+    pub binder: RecoverySourceIdentity,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -205,8 +274,9 @@ pub(crate) struct RecoveryV2Read {
 impl RecoveryV2Read {
     pub(crate) fn projection(
         &self,
+        owner: &RecoveryPublicOwner,
     ) -> Result<BTreeMap<RecoverySymbolIdentity, RecoveryHead>, RecoveryError> {
-        self.graph.projection(&self.artifact_losses)
+        self.graph.projection(owner, &self.artifact_losses)
     }
 }
 
@@ -315,7 +385,7 @@ fn stage_metadata_v2(
 }
 
 /// Reserve the next burned identity durably before exposing its generated
-/// module name to compilation. No node is added and public_root does not move.
+/// module name to compilation. No node or public surface moves.
 pub(crate) fn stage_high_water_v2(
     path: &Path,
     graph: &RecoveryGraph,
@@ -323,6 +393,55 @@ pub(crate) fn stage_high_water_v2(
 ) -> Result<StagedRecoveryManifest, RecoveryError> {
     let candidate = high_water_candidate(graph, next)?;
     stage_metadata_v2(path, &candidate)
+}
+
+/// Stage a binding/source-only public visibility change without allocating a
+/// synthetic declaration node. The caller supplies the already checked final
+/// winners; the manifest, rather than a process-local machine id, is the
+/// authority for whether that public change occurred. A per-owner epoch check
+/// here does not compare the whole manifest with the file at rename time. The
+/// owning commit path must revalidate the exact graph checksum after staging
+/// and serialize read, stage, and rename under one session checkout; otherwise
+/// two actors can publish copies that erase one another's independent surface.
+pub(crate) fn stage_public_visibility_v2(
+    path: &Path,
+    recovery_root: &Path,
+    graph: &RecoveryGraph,
+    owner: RecoveryPublicOwner,
+    expected_epoch: u64,
+    bindings: Vec<RecoveryPublicBinding>,
+    source_instances: Vec<RecoveryPublicSourceInstance>,
+) -> Result<StagedRecoveryManifest, RecoveryError> {
+    graph.validate()?;
+    let mut candidate = graph.clone();
+    let surface = match candidate
+        .public_surfaces
+        .iter_mut()
+        .find(|surface| surface.owner == owner)
+    {
+        Some(surface) => surface,
+        None if expected_epoch == 0 => {
+            candidate.public_surfaces.push(RecoveryPublicSurface {
+                owner,
+                declaration_root: None,
+                epoch: 0,
+                bindings: Vec::new(),
+                source_instances: Vec::new(),
+            });
+            candidate.public_surfaces.last_mut().unwrap()
+        }
+        None => return Err(error("paired public surface is missing")),
+    };
+    if surface.epoch != expected_epoch {
+        return Err(error("paired public visibility epoch changed"));
+    }
+    surface.epoch = expected_epoch
+        .checked_add(1)
+        .ok_or_else(|| error("public visibility epoch exhausted"))?;
+    surface.bindings = bindings;
+    surface.source_instances = source_instances;
+    candidate.seal()?;
+    stage_v2(path, recovery_root, &candidate)
 }
 
 fn high_water_candidate(
@@ -376,6 +495,25 @@ pub(crate) fn read_v2(
     match version {
         1 => Ok(None),
         2 => {
+            if value
+                .get("public_schema")
+                .and_then(serde_json::Value::as_str)
+                != Some(PAIRED_PUBLIC_SCHEMA)
+            {
+                return Err(at(
+                    path,
+                    "v2 recovery graph lacks the supported paired public visibility schema",
+                ));
+            }
+            if !value
+                .get("public_surfaces")
+                .is_some_and(serde_json::Value::is_array)
+            {
+                return Err(at(
+                    path,
+                    "v2 recovery graph lacks per-actor public surfaces",
+                ));
+            }
             let graph: RecoveryGraph = serde_json::from_value(value)
                 .map_err(|e| at(path, format!("invalid v2 recovery graph: {e}")))?;
             graph.validate().map_err(|e| at(path, e.detail))?;
@@ -410,10 +548,11 @@ impl RecoveryGraph {
     pub(crate) fn empty(source_session: u64, lineage: u64) -> Result<Self, RecoveryError> {
         let mut graph = Self {
             version: VERSION,
+            public_schema: PAIRED_PUBLIC_SCHEMA.into(),
             source_session,
             lineage,
             high_water: Generation(0),
-            public_root: None,
+            public_surfaces: Vec::new(),
             nodes: Vec::new(),
             artifacts: Vec::new(),
             checksum: String::new(),
@@ -425,8 +564,27 @@ impl RecoveryGraph {
     /// Fill the digest after the owner has assembled a complete graph.
     pub(crate) fn seal(&mut self) -> Result<(), RecoveryError> {
         self.version = VERSION;
+        self.public_schema = PAIRED_PUBLIC_SCHEMA.into();
         self.nodes.sort_by_key(|node| node.id);
         self.artifacts.sort_by_key(RecoveryArtifactClosure::key);
+        self.public_surfaces.sort_by(|a, b| a.owner.cmp(&b.owner));
+        for surface in &mut self.public_surfaces {
+            surface.bindings.sort_by(|a, b| a.name.cmp(&b.name));
+            surface.source_instances.sort_by(|a, b| {
+                (
+                    &a.machine_incarnation,
+                    &a.instance,
+                    &a.module_version,
+                    &a.binder,
+                )
+                    .cmp(&(
+                        &b.machine_incarnation,
+                        &b.instance,
+                        &b.module_version,
+                        &b.binder,
+                    ))
+            });
+        }
         for node in &mut self.nodes {
             node.implementation_refs.sort();
             node.implementation_refs.dedup();
@@ -447,15 +605,42 @@ impl RecoveryGraph {
         Ok(())
     }
 
+    /// Heap values are never recovered. Compute loss from the final winning
+    /// names, so an unavailable replacement cannot reveal an older binding.
+    pub(crate) fn public_binding_tombstones(
+        &self,
+        owner: &RecoveryPublicOwner,
+    ) -> Result<Vec<RecoveryLostPublicBinding>, RecoveryError> {
+        self.validate()?;
+        let surface = self
+            .public_surfaces
+            .iter()
+            .find(|surface| &surface.owner == owner);
+        Ok(surface
+            .into_iter()
+            .flat_map(|surface| &surface.bindings)
+            .map(|binding| RecoveryLostPublicBinding {
+                name: binding.name.clone(),
+                winner: binding.owner,
+            })
+            .collect())
+    }
+
     /// Return the visible heads at the exact public root. Lost winning nodes
     /// remain tombstones, suppressing older declarations with the same exact
     /// GHC identity instead of silently resurrecting them.
     pub(crate) fn projection(
         &self,
+        owner: &RecoveryPublicOwner,
         artifact_losses: &BTreeMap<String, Vec<RecoveryArtifactLoss>>,
     ) -> Result<BTreeMap<RecoverySymbolIdentity, RecoveryHead>, RecoveryError> {
         self.validate()?;
-        let Some(root) = self.public_root else {
+        let Some(root) = self
+            .public_surfaces
+            .iter()
+            .find(|surface| &surface.owner == owner)
+            .and_then(|surface| surface.declaration_root)
+        else {
             return Ok(BTreeMap::new());
         };
         let by_id: BTreeMap<_, _> = self.nodes.iter().map(|node| (node.id, node)).collect();
@@ -572,6 +757,51 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
             graph.version
         )));
     }
+    if graph.public_schema != PAIRED_PUBLIC_SCHEMA {
+        return Err(error("unsupported paired public visibility schema"));
+    }
+    let mut public_owners = BTreeSet::new();
+    for surface in &graph.public_surfaces {
+        if tidepool_repr::ActorPath::parse(&surface.owner.path).is_err()
+            || surface.owner.incarnation == 0
+            || !public_owners.insert(&surface.owner)
+        {
+            return Err(error("invalid or duplicate public actor owner"));
+        }
+        let mut binding_names = BTreeSet::new();
+        for binding in &surface.bindings {
+            if binding.name.is_empty()
+                || binding.name.contains('\n')
+                || binding.name.contains('\r')
+                || binding.owner.session == 0
+                || !binding_names.insert(&binding.name)
+            {
+                return Err(error("invalid or duplicate public binding winner"));
+            }
+        }
+        let mut source_instances = BTreeSet::new();
+        for source in &surface.source_instances {
+            if source.machine_incarnation == 0
+                || source.binder.unit.is_empty()
+                || source.binder.module.is_empty()
+                || source.binder.namespace.is_empty()
+                || source.binder.occurrence.is_empty()
+                || !source_instances.insert((
+                    source.machine_incarnation,
+                    source.instance,
+                    &source.module_version,
+                    &source.binder,
+                ))
+            {
+                return Err(error("invalid or duplicate public source instance"));
+            }
+        }
+        if surface.epoch == 0
+            && (!surface.bindings.is_empty() || !surface.source_instances.is_empty())
+        {
+            return Err(error("public winners require a visibility epoch"));
+        }
+    }
     if graph.lineage == 0 {
         return Err(error("recovery lineage must be nonzero"));
     }
@@ -671,20 +901,19 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
             )));
         }
     }
-    if graph
-        .public_root
-        .is_some_and(|root| !nodes.contains_key(&root))
-    {
-        return Err(error("recovery public root is missing"));
-    }
-    if graph
-        .public_root
-        .is_some_and(|root| root > graph.high_water)
-    {
-        return Err(error("recovery public root exceeds high-water"));
-    }
-    if graph.public_root.is_none() && !graph.nodes.is_empty() {
-        return Err(error("nonempty recovery graph has no public root"));
+    for surface in &graph.public_surfaces {
+        if surface
+            .declaration_root
+            .is_some_and(|root| !nodes.contains_key(&root))
+        {
+            return Err(error("recovery public root is missing"));
+        }
+        if surface
+            .declaration_root
+            .is_some_and(|root| root > graph.high_water)
+        {
+            return Err(error("recovery public root exceeds high-water"));
+        }
     }
 
     let mut artifacts = BTreeMap::new();
@@ -948,6 +1177,10 @@ mod generation_vec_serde {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn owner(path: &str) -> RecoveryPublicOwner {
+        RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse(path).unwrap(), 1).unwrap()
+    }
     use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion};
     use tidepool_toolchain::recovery_artifacts::{
         materialize_recovery_closure, RecoveryArtifactInput,
@@ -990,7 +1223,7 @@ mod tests {
         let product = source.path().join("Lib.product");
         fs::write(&iface, b"interface").unwrap();
         fs::write(&product, b"product").unwrap();
-        let owner = CachedHomeOwner {
+        let home_owner = CachedHomeOwner {
             unit: "main".into(),
             module: "Lib".into(),
             module_version: ModuleVersion([0x22; 32]),
@@ -1001,7 +1234,7 @@ mod tests {
             root,
             [0x11; 32],
             &[RecoveryArtifactInput {
-                owner: &owner,
+                owner: &home_owner,
                 interface_source: &iface,
                 product_source: &product,
             }],
@@ -1016,10 +1249,17 @@ mod tests {
         };
         let mut graph = RecoveryGraph {
             version: VERSION,
+            public_schema: PAIRED_PUBLIC_SCHEMA.into(),
             source_session: 41,
             lineage: 99,
             high_water: Generation(2),
-            public_root: Some(Generation(2)),
+            public_surfaces: vec![RecoveryPublicSurface {
+                owner: owner("root"),
+                declaration_root: Some(Generation(2)),
+                epoch: 0,
+                bindings: vec![],
+                source_instances: vec![],
+            }],
             nodes: vec![
                 RecoveryNode {
                     id: Generation(1),
@@ -1058,6 +1298,218 @@ mod tests {
     }
 
     #[test]
+    fn binding_only_publication_is_durable_and_restarts_as_a_winner_tombstone() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("declarations.json");
+        let original = RecoveryGraph::empty(41, 99).unwrap();
+        let root = owner("root");
+        let first = RecoveryPublicBinding {
+            name: "answer".into(),
+            owner: RecoveryBindingId {
+                session: 41,
+                variable: 1,
+            },
+        };
+        let staged = stage_public_visibility_v2(
+            &manifest,
+            dir.path(),
+            &original,
+            root.clone(),
+            0,
+            vec![first],
+            vec![],
+        )
+        .unwrap();
+        assert!(!manifest.exists(), "staging is not public authority");
+        let published = match staged.publish() {
+            RecoveryPublishOutcome::Durable { graph, .. } => graph,
+            _ => panic!("expected durable publication"),
+        };
+        assert_eq!(published.public_surfaces[0].declaration_root, None);
+        assert_eq!(published.high_water, Generation(0));
+        assert_eq!(published.public_surfaces[0].epoch, 1);
+        let next = RecoveryPublicBinding {
+            name: "answer".into(),
+            owner: RecoveryBindingId {
+                session: 41,
+                variable: 2,
+            },
+        };
+        let staged = stage_public_visibility_v2(
+            &manifest,
+            dir.path(),
+            &published,
+            root.clone(),
+            1,
+            vec![next],
+            vec![],
+        )
+        .unwrap();
+        let replacement = match staged.publish() {
+            RecoveryPublishOutcome::Durable { graph, .. } => graph,
+            _ => panic!("expected durable replacement"),
+        };
+        let restarted = read_v2(&manifest, dir.path()).unwrap().unwrap().graph;
+        assert_eq!(restarted, replacement);
+        assert_eq!(
+            restarted.public_binding_tombstones(&root).unwrap(),
+            vec![RecoveryLostPublicBinding {
+                name: "answer".into(),
+                winner: RecoveryBindingId {
+                    session: 41,
+                    variable: 2,
+                },
+            }]
+        );
+        assert!(stage_public_visibility_v2(
+            &manifest,
+            dir.path(),
+            &replacement,
+            root,
+            1,
+            vec![],
+            vec![],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn same_session_actor_surfaces_keep_independent_winners_and_epochs() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("declarations.json");
+        let parent = owner("root");
+        let child = owner("root/child");
+        let initial = RecoveryGraph::empty(41, 99).unwrap();
+        let binding = |variable| RecoveryPublicBinding {
+            name: "answer".into(),
+            owner: RecoveryBindingId {
+                session: 41,
+                variable,
+            },
+        };
+        let parent_graph = match stage_public_visibility_v2(
+            &manifest,
+            dir.path(),
+            &initial,
+            parent.clone(),
+            0,
+            vec![binding(1)],
+            vec![],
+        )
+        .unwrap()
+        .publish()
+        {
+            RecoveryPublishOutcome::Durable { graph, .. } => graph,
+            _ => panic!("parent publication must be durable"),
+        };
+        let both = match stage_public_visibility_v2(
+            &manifest,
+            dir.path(),
+            &parent_graph,
+            child.clone(),
+            0,
+            vec![binding(2)],
+            vec![],
+        )
+        .unwrap()
+        .publish()
+        {
+            RecoveryPublishOutcome::Durable { graph, .. } => graph,
+            _ => panic!("child publication must be durable"),
+        };
+        assert!(stage_public_visibility_v2(
+            &manifest,
+            dir.path(),
+            &both,
+            parent.clone(),
+            0,
+            vec![binding(3)],
+            vec![],
+        )
+        .is_err());
+        let restored = read_v2(&manifest, dir.path()).unwrap().unwrap().graph;
+        assert_eq!(restored.public_surfaces.len(), 2);
+        assert_eq!(
+            restored.public_binding_tombstones(&parent).unwrap()[0]
+                .winner
+                .variable,
+            1
+        );
+        assert_eq!(
+            restored.public_binding_tombstones(&child).unwrap()[0]
+                .winner
+                .variable,
+            2
+        );
+        assert_eq!(
+            restored
+                .public_surfaces
+                .iter()
+                .map(|surface| surface.epoch)
+                .collect::<Vec<_>>(),
+            vec![1, 1]
+        );
+    }
+
+    #[test]
+    fn sibling_actors_project_their_own_declaration_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut graph = fixture(dir.path());
+        graph.public_surfaces[0].declaration_root = Some(Generation(1));
+        graph.public_surfaces.push(RecoveryPublicSurface {
+            owner: owner("root/child"),
+            declaration_root: Some(Generation(2)),
+            epoch: 0,
+            bindings: vec![],
+            source_instances: vec![],
+        });
+        graph.seal().unwrap();
+        let parent = graph.projection(&owner("root"), &BTreeMap::new()).unwrap();
+        let child = graph
+            .projection(&owner("root/child"), &BTreeMap::new())
+            .unwrap();
+        assert!(matches!(
+            parent.get(&identity("answer")),
+            Some(RecoveryHead::Available {
+                winner: Generation(1),
+                ..
+            })
+        ));
+        assert!(matches!(
+            child.get(&identity("answer")),
+            Some(RecoveryHead::Tombstone(t)) if t.winner == Generation(2)
+        ));
+    }
+
+    #[test]
+    fn duplicate_or_invalid_actor_surfaces_are_refused() {
+        let mut graph = RecoveryGraph::empty(41, 99).unwrap();
+        let surface = RecoveryPublicSurface {
+            owner: owner("root"),
+            declaration_root: None,
+            epoch: 0,
+            bindings: vec![],
+            source_instances: vec![],
+        };
+        graph.public_surfaces = vec![surface.clone(), surface];
+        assert!(graph.seal().is_err());
+        graph.public_surfaces.pop();
+        graph.public_surfaces[0].owner.path = "Root".into();
+        assert!(graph.seal().is_err());
+    }
+
+    #[test]
+    fn legacy_v2_without_paired_public_schema_is_explicitly_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("declarations.json");
+        fs::write(&manifest, br#"{"version":2,"source_session":41}"#).unwrap();
+        let error = read_v2(&manifest, dir.path()).err().unwrap();
+        assert!(error
+            .detail
+            .contains("lacks the supported paired public visibility schema"));
+    }
+
+    #[test]
     fn checksum_covers_the_graph_and_projection_preserves_lost_winner_tombstones() {
         let dir = tempfile::tempdir().unwrap();
         let graph = fixture(dir.path());
@@ -1066,7 +1518,7 @@ mod tests {
         assert_eq!(decoded, graph);
         decoded.validate().unwrap();
         graph.validate_artifact_files(dir.path()).unwrap();
-        let projected = graph.projection(&BTreeMap::new()).unwrap();
+        let projected = graph.projection(&owner("root"), &BTreeMap::new()).unwrap();
         assert!(
             matches!(projected.get(&identity("answer")), Some(RecoveryHead::Tombstone(t)) if t.winner == Generation(2))
         );
@@ -1100,7 +1552,7 @@ mod tests {
         fs::remove_file(dir.path().join(product)).unwrap();
         let candidate = high_water_candidate(&graph, Generation(3)).unwrap();
         assert_eq!(candidate.high_water, Generation(3));
-        assert_eq!(candidate.public_root, graph.public_root);
+        assert_eq!(candidate.public_surfaces, graph.public_surfaces);
         assert_eq!(candidate.nodes, graph.nodes);
         assert!(high_water_candidate(&graph, Generation(4)).is_err());
     }
@@ -1128,7 +1580,7 @@ mod tests {
             } => {
                 assert_eq!(publication.path(), manifest_path);
                 assert_eq!(published.high_water, Generation(3));
-                assert_eq!(published.public_root, graph.public_root);
+                assert_eq!(published.public_surfaces, graph.public_surfaces);
                 assert_eq!(published.nodes, graph.nodes);
             }
             RecoveryPublishOutcome::BeforeRename { path, detail } => {
@@ -1144,7 +1596,7 @@ mod tests {
 
         let restored = read_v2(&manifest_path, dir.path()).unwrap().unwrap();
         assert_eq!(restored.graph.high_water, Generation(3));
-        assert_eq!(restored.graph.public_root, graph.public_root);
+        assert_eq!(restored.graph.public_surfaces, graph.public_surfaces);
         assert!(restored.artifact_losses.is_empty());
     }
 
@@ -1171,7 +1623,7 @@ mod tests {
     #[test]
     fn artifact_bytes_are_checked_against_the_manifest_digests() {
         let dir = tempfile::tempdir().unwrap();
-        let mut graph = fixture(dir.path());
+        let graph = fixture(dir.path());
         let product = match &graph.artifacts[0] {
             RecoveryArtifactClosure::Home(reference) => reference.product_path.clone(),
             RecoveryArtifactClosure::Join(_) => unreachable!(),
@@ -1197,7 +1649,7 @@ mod tests {
         };
         fs::remove_file(dir.path().join(product)).unwrap();
         let losses = graph.validate_artifact_files(dir.path()).unwrap();
-        let projected = graph.projection(&losses).unwrap();
+        let projected = graph.projection(&owner("root"), &losses).unwrap();
         assert!(
             matches!(projected.get(&identity("answer")), Some(RecoveryHead::Tombstone(t)) if t.winner == Generation(2))
         );
@@ -1237,7 +1689,7 @@ mod tests {
             loss.component == RecoveryArtifactComponent::Product
                 && matches!(&loss.kind, RecoveryArtifactLossKind::Missing)
         }));
-        let projected = restored.projection().unwrap();
+        let projected = restored.projection(&owner("root")).unwrap();
         assert!(matches!(
             projected.get(&identity("answer")),
             Some(RecoveryHead::Tombstone(t)) if t.winner == Generation(2)
@@ -1255,7 +1707,7 @@ mod tests {
         graph.nodes[1].retracts = vec![old.clone()];
         graph.seal().unwrap();
 
-        let projected = graph.projection(&BTreeMap::new()).unwrap();
+        let projected = graph.projection(&owner("root"), &BTreeMap::new()).unwrap();
         assert!(!projected.contains_key(&old));
         assert!(matches!(
             projected.get(&replacement),
