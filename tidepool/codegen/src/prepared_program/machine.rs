@@ -1763,6 +1763,41 @@ impl<'code> PreparedMachine<'code> {
         block.len()
     }
 
+    /// Retire failed parcel installations through the ordinary collector.
+    /// Their heap tops may have allocated nursery objects, so dropping code
+    /// and descriptors directly would leave those objects with dead headers.
+    /// Existing programs are pinned for this one collection to preserve the
+    /// receiving machine's pre-import residency, including its unpinned code.
+    pub(super) fn retire_failed_parcel_installs(
+        &mut self,
+        imported: &[ProgramId],
+    ) -> Result<(), ExecutionError> {
+        if imported.is_empty() {
+            return Ok(());
+        }
+        let temporary_pins: Vec<_> = self
+            .programs
+            .keys()
+            .copied()
+            .filter(|id| !imported.contains(id) && !self.pins.contains(id))
+            .collect();
+        self.pins.extend(temporary_pins.iter().copied());
+        let result = (|| {
+            let receipt = self.collect_major(self.quiesce()?)?;
+            if imported.iter().all(|id| receipt.programs.contains(id)) {
+                Ok(())
+            } else {
+                Err(ExecutionError::Invariant(
+                    "failed parcel installation remained live after retiring its roots",
+                ))
+            }
+        })();
+        for id in temporary_pins {
+            self.pins.remove(&id);
+        }
+        result
+    }
+
     /// Publish each verified import into the candidate's root block as a
     /// persistent root before collection or heap-top initialization. The
     /// install transaction deregisters and zeros the whole block if any
@@ -4440,6 +4475,83 @@ mod tests {
         assert!(right.release(arrived));
     }
 
+    fn rejected_static_parcel_restores_receiver(fail_after_first_install: bool) {
+        let options = PreparedMachineOptions {
+            nursery_bytes: RunOptions::default().nursery_bytes,
+        };
+        let (mut source, producer) =
+            PreparedMachine::new(managed_roundtrip_program(), options).expect("source installs A");
+        let source_function = source
+            .retain_top(producer, ValueId(1))
+            .expect("source static function");
+        let identity = testing::identity("ParcelRollback", "function");
+        let mut bindings = ImportBindings::new();
+        bindings.insert(identity.clone(), source_function);
+        let caller = install_linked(
+            &mut source,
+            &direct_import_caller_program_with_heap_top(identity, true),
+            bindings,
+        )
+        .expect("source installs C importing A");
+        let entry = source.retain_top(caller, ValueId(0)).expect("source entry");
+        let mut parcel = source.export_parcel(entry).expect("export static closure");
+        assert_eq!(parcel.bytes(), 0);
+        assert_eq!(parcel.images().len(), 2);
+        let identity = parcel.images()[0].imports[0].0.clone();
+        let failing_image = usize::from(fail_after_first_install);
+        parcel.images_mut()[failing_image]
+            .imports
+            .push((identity, usize::MAX));
+
+        let (mut receiver, base) = PreparedMachine::new(
+            CompiledProgram::compile(&base_program(7_959)).expect("base"),
+            options,
+        )
+        .expect("receiver base");
+        let before = receiver.residency();
+        assert!(matches!(
+            receiver.import_parcel(parcel, RealmId::ROOT),
+            Err(ExecutionError::Invariant(
+                "import_parcel: an image import names a root the parcel lacks"
+            ))
+        ));
+        assert_eq!(
+            receiver.residency(),
+            before,
+            "failed parcel leaves no roots, images, or descriptors"
+        );
+        assert!(!receiver.unpin(base), "rollback releases its temporary pin");
+        receiver
+            .pin(base)
+            .expect("keep baseline through collection");
+        let receipt = receiver
+            .collect_major(receiver.quiesce().expect("quiescent after rollback"))
+            .expect("post-failure collection sees no abandoned heap top");
+        assert!(receipt.programs.is_empty());
+        receiver
+            .run_entry(
+                base,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: RunOptions::default().observation_budget,
+                    collect_before_observation: false,
+                },
+                RealmId::ROOT,
+            )
+            .expect("receiver remains runnable after rollback");
+    }
+
+    #[test]
+    fn a_rejected_static_parcel_before_first_install_releases_its_dependencies() {
+        rejected_static_parcel_restores_receiver(false);
+    }
+
+    #[test]
+    fn a_rejected_static_parcel_after_first_install_rolls_back_all_dependencies() {
+        rejected_static_parcel_restores_receiver(true);
+    }
+
     fn p7_case_producer_identity() -> SymbolIdentity {
         testing::identity("P7Case", "producer")
     }
@@ -5897,6 +6009,13 @@ mod tests {
     fn direct_import_caller_program(
         identity: SymbolIdentity,
     ) -> tidepool_repr::execution_schema::LinkedProgram {
+        direct_import_caller_program_with_heap_top(identity, false)
+    }
+
+    fn direct_import_caller_program_with_heap_top(
+        identity: SymbolIdentity,
+        with_heap_top: bool,
+    ) -> tidepool_repr::execution_schema::LinkedProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![],
@@ -5914,6 +6033,37 @@ mod tests {
             signature: SignatureId(0),
             arguments: vec![],
         };
+        if with_heap_top {
+            wire.constructors.push(ConstructorDecl {
+                identity: testing::identity("ParcelRollback", "Unused"),
+                family: testing::identity("ParcelRollback", "Unused"),
+                host_id: tidepool_repr::DataConId(7_960),
+                result_rep: RuntimeRep::LiftedRef,
+                tag: 1,
+                family_size: 1,
+                field_reps: vec![RuntimeRep::LiftedRef],
+                strict_fields: vec![false],
+                layout: CheckedLayout {
+                    fields: vec![FieldLayout {
+                        rep: RuntimeRep::LiftedRef,
+                        offset: 0,
+                    }],
+                    alignment: 8,
+                    payload_size: 8,
+                    root_mask: vec![true],
+                },
+            });
+            wire.bindings.push(Group::NonRecursive(TopBinding {
+                identity: testing::identity("ParcelRollback", "unusedTop"),
+                binding: HeapBinding {
+                    id: ValueId(50),
+                    rhs: HeapRhs::Constructor {
+                        constructor: ConstructorId(0),
+                        fields: vec![Atom::Ref(ValueRef::Global(GlobalId(0)))],
+                    },
+                },
+            }));
+        }
         let prepared = testing::prepare(wire).expect("direct import caller fixture");
         let mut imports = MachineImports::default();
         imports.values.insert(

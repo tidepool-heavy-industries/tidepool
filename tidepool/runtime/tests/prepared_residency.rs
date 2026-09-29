@@ -385,9 +385,8 @@ fn custody_resume_classifies_rejected_frame_and_consumed_failure() {
 /// through [`ResidentSession::export_custody`]/[`ResidentSession::import_parcel`].
 /// Both sessions run identical turns, so a wired-in constructor like `Int`
 /// shares descriptor content across the two independently bootstrapped
-/// machines even where the registry itself misses on a given install (a
-/// heap-allocated value is always copied on export, never shared by
-/// address -- only a static top needs an actual image hit for that).
+/// machines. A heap-allocated value is copied on export; a static top retains
+/// its exact source installation instance in the parcel.
 #[test]
 fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
     use std::sync::Arc;
@@ -409,18 +408,16 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
     right.session.set_image_registry(Arc::clone(&registry));
 
     // A bound value's own top is a static CAF (every `bind()`-produced
-    // `Val.G<gen>` top is), so exporting it always takes the
-    // shared-by-address path (`Parcel::bytes() == 0`) -- valid only when
-    // the importer installed the SAME image, i.e. an actual registry hit.
-    // `left` and `right` run the identical turn sequence against the
-    // identical session id, so their `held` installs are the same content
-    // and `right`'s is the hit: it maps the same static region `left`'s
-    // export points into.
+    // `Val.G<gen>` top is), so export carries its exact static region by
+    // address (`Parcel::bytes() == 0`). The registry hit shares compiled
+    // code, while each install owns a distinct static region. Import must
+    // admit the source instance carried by the parcel even when the sibling
+    // already installed that same compiled code.
     left.bind("held <- pure (999999 :: Int)");
     right.bind("held <- pure (999999 :: Int)");
     assert!(
         registry.hits() > 0,
-        "left and right's identical `held` bind should share one compiled image"
+        "left and right's identical `held` bind should share compiled code"
     );
     let custody = left
         .session
@@ -446,12 +443,13 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
     let imported = right
         .session
         .import_parcel(parcel, tidepool_runtime::session::RealmId::ROOT)
-        .expect("the parcel imports against the sibling machine's matching descriptors");
+        .expect("the parcel installs its source instance in the sibling machine");
     assert_eq!(
         right.session.value_handle_count(),
-        right_handles_before + 1,
-        "import mints exactly one new handle"
+        right_handles_before + 2,
+        "import mints the value handle and one retained source-binding handle"
     );
+    drop(left);
 
     let after = right
         .session
@@ -460,12 +458,11 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
     assert_eq!(before, after, "the value round-trips byte-for-byte");
     assert_eq!(after, "999999");
 
-    // Exact release: discarding the imported custody drops the right
-    // machine's handle count back to where it started, and the left
-    // machine -- whose own copy was already consumed by the export -- is
-    // untouched by any of this.
+    // Releasing the imported custody leaves the source-binding handle rooted
+    // for the carried installation's import slot. The source machine's
+    // custody was already consumed by export.
     assert!(right.session.discard_custody(imported));
-    assert_eq!(right.session.value_handle_count(), right_handles_before);
+    assert_eq!(right.session.value_handle_count(), right_handles_before + 1);
 }
 
 /// Fixture mirror of `PreparedEngine::MAJOR_COLLECTION_INSTALL_INTERVAL`

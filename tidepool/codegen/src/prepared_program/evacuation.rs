@@ -22,7 +22,9 @@ use super::machine::{PreparedHandle, PreparedMachine, ProgramId};
 use super::run::runtime_error;
 use super::{CompiledProgram, ExecutionError, ImportBindings};
 use crate::suspension::RealmId;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 use tidepool_heap::descriptor_region::DescriptorArena;
 use tidepool_heap::execution_descriptor::{DescriptorTraceError, ObjectDescriptor};
@@ -30,6 +32,51 @@ use tidepool_heap::external_storage::ExternalStorageKind;
 use tidepool_heap::gc::evacuate::{export_reachable, MachineSpaces, NurseryView};
 use tidepool_repr::execution_schema::{RuntimeRep, SymbolIdentity};
 use tidepool_repr::DataConId;
+
+/// Admit static roots carried by a zero-byte parcel until their owning
+/// instances install. A failed import must not leave ownerless regions in the
+/// receiving machine's exact-address catalog.
+struct PendingStaticRegions {
+    catalog: Rc<RefCell<tidepool_heap::static_region::StaticRegionCatalog>>,
+    pending: Vec<Arc<tidepool_heap::static_region::StaticRegion>>,
+}
+
+impl PendingStaticRegions {
+    fn new(
+        catalog: Rc<RefCell<tidepool_heap::static_region::StaticRegionCatalog>>,
+        images: &[&ParcelImage],
+    ) -> Result<Self, ExecutionError> {
+        let mut admission = Self {
+            catalog,
+            pending: Vec::new(),
+        };
+        for image in images {
+            let region = &image.instance.statics;
+            if admission
+                .catalog
+                .borrow_mut()
+                .insert(Arc::clone(region))
+                .map_err(ExecutionError::Evacuation)?
+            {
+                admission.pending.push(Arc::clone(region));
+            }
+        }
+        Ok(admission)
+    }
+
+    fn committed(&mut self) {
+        self.pending.clear();
+    }
+}
+
+impl Drop for PendingStaticRegions {
+    fn drop(&mut self) {
+        let mut catalog = self.catalog.borrow_mut();
+        for region in &self.pending {
+            catalog.remove(region);
+        }
+    }
+}
 
 /// For each import slot of an image: the identity imported and the index
 /// (into the parcel's roots) of the copied value the importer binds it to.
@@ -77,6 +124,11 @@ impl Parcel {
 
     pub fn images(&self) -> &[ParcelImage] {
         &self.images
+    }
+
+    #[cfg(test)]
+    pub(super) fn images_mut(&mut self) -> &mut [ParcelImage] {
+        &mut self.images
     }
 }
 
@@ -364,6 +416,20 @@ impl PreparedMachine<'_> {
             .collect();
         drop(new_constructors);
 
+        // A static root needs no heap copy, but an imported instance can
+        // verify one of its imports before the instance owning that root is
+        // installed. Admit only the exact immutable regions named by this
+        // parcel for that interval; installation takes over their ownership.
+        let mut static_admission = if parcel.bytes() == 0 {
+            let catalog = self
+                .machine
+                .prepared_static_catalog()
+                .map_err(|cause| runtime_error(&self.machine, cause))?;
+            Some(PendingStaticRegions::new(catalog, &missing)?)
+        } else {
+            None
+        };
+
         // Payloads first: the copier expands them through this machine's
         // ledger, so the parcel must already point at ledger allocations.
         let mut payload_map = HashMap::new();
@@ -466,26 +532,19 @@ impl PreparedMachine<'_> {
         // (`Self::import_parcel`'s own doc comment — kept, not released,
         // once the blocks hold them too).
         let mut handles = Vec::with_capacity(relocated.len());
-        for &pointer in &relocated {
-            let slot = self
-                .old_space
-                .adopt_root(&self.machine, pointer as *mut u8)
-                .map_err(|cause| runtime_error(&self.machine, cause))?;
-            let raw = self
-                .handles
-                .insert_handle(slot, realm, RuntimeRep::LiftedRef);
-            handles.push(PreparedHandle::new(raw, RuntimeRep::LiftedRef));
-        }
+        let mut installed_ids = Vec::new();
         // The images install in manifest order, and an image's import values
         // may belong to a sibling that installs later: an install verifies
         // its imports through this machine's registry, so every missing
         // image's descriptors join the registry first. Shared `Arc`s; an
         // install's own extension of the registry skips what is present.
+        let mut provisional_headers = Vec::new();
         for entry in &missing {
             for (&header, metadata) in &entry.instance.descriptor_registry {
                 if self.descriptor_registry.contains_key(&header) {
                     continue;
                 }
+                provisional_headers.push(header);
                 self.descriptors.push(Arc::clone(&metadata.descriptor));
                 self.descriptor_registry.insert(header, metadata.clone());
                 if let super::DescriptorMeaning::Constructor(observation) = &metadata.meaning {
@@ -509,32 +568,76 @@ impl PreparedMachine<'_> {
         // resolves against the SAME live value the images below install
         // bound to. An index not named by any kept identity (a duplicate
         // root two images both import) is released with the rest below.
-        let mut imported: Vec<(SymbolIdentity, PreparedHandle)> = Vec::new();
-        let mut kept_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        let mut seen_identities: std::collections::BTreeSet<SymbolIdentity> =
-            std::collections::BTreeSet::new();
-        for (image, instance, imports) in missing {
-            let mut bindings = ImportBindings::new();
-            for (identity, index) in imports {
-                let handle = handles
-                    .get(index)
-                    .copied()
-                    .ok_or(ExecutionError::Invariant(
-                        "import_parcel: an image import names a root the parcel lacks",
-                    ))?;
-                bindings.insert(identity.clone(), handle);
-                if seen_identities.insert(identity.clone()) {
-                    imported.push((identity, handle));
-                    kept_indices.insert(index);
+        let result = (|| {
+            for &pointer in &relocated {
+                let slot = self
+                    .old_space
+                    .adopt_root(&self.machine, pointer as *mut u8)
+                    .map_err(|cause| runtime_error(&self.machine, cause))?;
+                let raw = self
+                    .handles
+                    .insert_handle(slot, realm, RuntimeRep::LiftedRef);
+                handles.push(PreparedHandle::new(raw, RuntimeRep::LiftedRef));
+            }
+            let mut imported: Vec<(SymbolIdentity, PreparedHandle)> = Vec::new();
+            let mut kept_indices: std::collections::HashSet<usize> =
+                std::collections::HashSet::new();
+            let mut seen_identities: std::collections::BTreeSet<SymbolIdentity> =
+                std::collections::BTreeSet::new();
+            for (image, instance, imports) in missing {
+                let mut bindings = ImportBindings::new();
+                for (identity, index) in imports {
+                    let handle = handles
+                        .get(index)
+                        .copied()
+                        .ok_or(ExecutionError::Invariant(
+                            "import_parcel: an image import names a root the parcel lacks",
+                        ))?;
+                    bindings.insert(identity.clone(), handle);
+                    if seen_identities.insert(identity.clone()) {
+                        imported.push((identity, handle));
+                        kept_indices.insert(index);
+                    }
+                }
+                installed_ids.push(self.install_instance(image, instance, bindings)?);
+            }
+            for (index, handle) in handles.iter().copied().enumerate().skip(1) {
+                if !kept_indices.contains(&index) {
+                    self.release(handle);
                 }
             }
-            self.install_instance(image, instance, bindings)?;
-        }
-        for (index, handle) in handles.iter().copied().enumerate().skip(1) {
-            if !kept_indices.contains(&index) {
-                self.release(handle);
+            Ok((handles[0], imported))
+        })();
+        match result {
+            Ok(imported) => {
+                if let Some(admission) = &mut static_admission {
+                    admission.committed();
+                }
+                Ok(imported)
+            }
+            Err(error) => {
+                if let Some(admission) = &mut static_admission {
+                    for handle in handles {
+                        self.release(handle);
+                    }
+                    if let Err(cleanup) = self.retire_failed_parcel_installs(&installed_ids) {
+                        // A failed collection still owns every installed
+                        // instance. Keep provisional regions admitted rather
+                        // than strand any retained heap object or root.
+                        admission.committed();
+                        return Err(cleanup);
+                    }
+                    self.machine
+                        .retire_prepared_constructors(&provisional_headers);
+                    self.descriptors.retain(|descriptor| {
+                        !provisional_headers.contains(&descriptor.initial_header_word())
+                    });
+                    for header in provisional_headers {
+                        self.descriptor_registry.remove(&header);
+                    }
+                }
+                Err(error)
             }
         }
-        Ok((handles[0], imported))
     }
 }
