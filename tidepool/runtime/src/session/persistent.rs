@@ -8,9 +8,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BindingTipId};
+use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BindingTipId, SourceLeaseKey};
 use tidepool_codegen::machine::{CancelHandle, MachineDisposition};
-use tidepool_codegen::prepared_program::ResidencyCounts;
+use tidepool_codegen::prepared_program::{ResidencyCounts, SourceInstanceLease};
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
 use tidepool_codegen::suspension::{ContinuationId, RealmId};
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
@@ -231,6 +231,19 @@ impl PersistentSession {
     /// The persistent binding table (mutate).
     pub fn bindings_mut(&mut self) -> &mut BindingTable {
         &mut self.bindings
+    }
+
+    /// Transfer the exact machine-created source roots from one native batch
+    /// into this lexical scope. Rejection returns every original token so the
+    /// installing checkout can release all roots and retire its unpublished
+    /// candidates without a partially visible source instance.
+    pub fn register_source_instances_in(
+        &mut self,
+        scope: ScopeId,
+        tokens: Vec<SourceInstanceLease>,
+    ) -> Result<Vec<SourceLeaseKey>, Vec<SourceInstanceLease>> {
+        self.bindings
+            .register_source_instances_in(&self.scopes, scope, tokens)
     }
 
     /// Keep eight automatic observations per scope. Explicit persistent code

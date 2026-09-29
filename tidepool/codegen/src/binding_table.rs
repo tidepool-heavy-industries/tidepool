@@ -518,6 +518,32 @@ impl BindingTable {
         Ok(key)
     }
 
+    /// Admit one native batch without leaving a partial lexical installation
+    /// if a scope retired or one exact group instance was already registered.
+    pub fn register_source_instances_in(
+        &mut self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+        tokens: Vec<SourceInstanceLease>,
+    ) -> Result<Vec<SourceLeaseKey>, Vec<SourceInstanceLease>> {
+        let mut seen = HashSet::new();
+        if !tree.is_live(scope)
+            || tokens.iter().any(|token| {
+                let key = SourceLeaseKey::of(token);
+                !seen.insert(key.clone()) || self.source_instances.contains_key(&key)
+            })
+        {
+            return Err(tokens);
+        }
+        Ok(tokens
+            .into_iter()
+            .map(|token| {
+                self.register_source_instance_in(tree, scope, token)
+                    .expect("source batch was prevalidated under one checkout")
+            })
+            .collect())
+    }
+
     /// Exact materialized source instances available to this lexical scope.
     /// Returned descriptors share machine handles; callers never release them.
     #[must_use]

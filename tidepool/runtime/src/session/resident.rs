@@ -1861,6 +1861,24 @@ where
         })
     }
 
+    /// Publish the exact roots acquired by one native installation into the
+    /// lexical source view. Registration is all-or-nothing; on rejection the
+    /// caller still owns every token and must roll back the unpublished batch.
+    pub fn register_source_instances_in(
+        &mut self,
+        scope: ScopeId,
+        tokens: Vec<tidepool_codegen::prepared_program::SourceInstanceLease>,
+    ) -> Result<
+        Vec<tidepool_codegen::binding_table::SourceLeaseKey>,
+        Vec<tidepool_codegen::prepared_program::SourceInstanceLease>,
+    > {
+        let keys = self.state.register_source_instances_in(scope, tokens)?;
+        if !keys.is_empty() {
+            self.advance_public_visibility(scope);
+        }
+        Ok(keys)
+    }
+
     /// Observe only the continuation events caused by this checkout's host
     /// operation. Restore the previous observer even if the operation panics;
     /// a later checkout must never inherit another caller's cleanup owner.
