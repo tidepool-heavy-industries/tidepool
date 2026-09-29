@@ -138,6 +138,11 @@ drafts and successful formatting are not verification.
 
 ## User review boundary
 
+The 2026-09-28 review is complete. Implementation of the remaining parcels is
+authorized under [engine-harness-integration.md](engine-harness-integration.md),
+including the concurrent resident follow-on. The earlier hold below records the
+boundary that led to that review; it no longer blocks the approved batch.
+
 Inanna requested an explicit yield before the next major design review.
 Finish and review the active fixes and their focused verification, including
 constructor identity, code lookup/coalescing, external execution, actor control,

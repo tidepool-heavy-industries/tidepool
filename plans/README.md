@@ -7,6 +7,10 @@ unconsumed proposals are removed; Git retains their history.
 
 ## Open design questions
 
+- [Engine and harness implementation](engine-harness-integration.md): approved
+  parallel foundation closure, compiler/native and Git/process redesign, shared
+  private notebook execution and embedded harness; stop at verified readiness.
+
 - [Engine foundation](engine-foundation.md): approved compiler context/artifact,
   native code lifetime and external execution redesign after the wave22
   investigation; implementation ledger and acceptance evidence.
