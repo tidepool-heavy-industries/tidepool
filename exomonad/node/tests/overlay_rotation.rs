@@ -83,6 +83,79 @@ fn spawn_worker(invocation: ProcessInvocation) -> (Worker, MountNamespace) {
     (worker, namespace)
 }
 
+/// Exercises the production helper with byte arguments and environment values.
+/// Build `exomonad-view-helper` beside this target before executing this test.
+#[test]
+fn view_helper_preserves_raw_arguments_environment_cwd_and_streams() {
+    use std::ffi::{OsStr, OsString};
+    use std::os::unix::ffi::OsStringExt;
+
+    let storage = tempfile::tempdir().unwrap();
+    let (_worker, namespace) = setup(storage.path());
+    let directory = storage.path().join("project/target");
+    let raw = OsString::from_vec(vec![b'a', 0xff, b' ', b'\n']);
+    let output = exomonad_node::view_command::output_in_view(
+        &namespace,
+        &directory,
+        OsStr::new("/bin/sh"),
+        &[
+            "-c".into(),
+            include_str!("fixtures/view_command_contract.sh").into(),
+            "view-contract".into(),
+            raw.clone(),
+        ],
+        &[
+            ("VIEW_CONTRACT_VALUE".into(), Some(raw)),
+            ("HOME".into(), None),
+        ],
+    )
+    .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let mut expected = directory.as_os_str().as_encoded_bytes().to_vec();
+    expected.push(0);
+    expected.extend_from_slice(b"a\xff \n\0a\xff \n\0unset\0eof\0");
+    assert_eq!(output.stdout, expected);
+    assert_eq!(output.stderr, b"separate stderr\n");
+}
+
+#[test]
+fn view_helper_distinguishes_setup_failure_from_payload_exit_and_signal() {
+    use std::ffi::OsStr;
+    use std::os::unix::process::ExitStatusExt;
+
+    let storage = tempfile::tempdir().unwrap();
+    let (_worker, namespace) = setup(storage.path());
+    let run = |directory: &Path, program: &str, args: &[std::ffi::OsString]| {
+        exomonad_node::view_command::output_in_view(
+            &namespace,
+            directory,
+            OsStr::new(program),
+            args,
+            &[],
+        )
+    };
+    assert!(run(Path::new("/"), "/missing-view-contract-program", &[]).is_err());
+    assert!(run(&storage.path().join("absent"), "/bin/sh", &[]).is_err());
+    let exited = run(Path::new("/"), "/bin/sh", &["-c".into(), "exit 127".into()]).unwrap();
+    assert_eq!(exited.status.code(), Some(127));
+    let signalled = run(
+        Path::new("/"),
+        "/bin/sh",
+        &["-c".into(), "kill -TERM $$".into()],
+    )
+    .unwrap();
+    assert_eq!(signalled.status.signal(), Some(libc::SIGTERM));
+    // Failed setup and a signalled payload must not poison the retained view.
+    let recovered = run(
+        Path::new("/"),
+        "/bin/sh",
+        &["-c".into(), "printf alive".into()],
+    )
+    .unwrap();
+    assert!(recovered.status.success());
+    assert_eq!(recovered.stdout, b"alive");
+}
+
 /// Manual paired measurement. Build `exomonad-view-helper` first, then run
 /// this ignored test once without tracing for latency and once under `strace`
 /// for clone/exec evidence. `VIEW_SPAWN_BENCH_RSS_MIB` adds touched host RSS.
