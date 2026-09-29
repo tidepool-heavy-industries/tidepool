@@ -26,6 +26,8 @@ arguments.add_argument("--package", action="append", required=True, help="Cargo 
 arguments.add_argument("--check", action="store_true", help="check generated BUCK files without rewriting them")
 options = arguments.parse_args()
 selected = set(options.package)
+if any(name.startswith("codex-") for name in selected):
+    raise SystemExit("Codex is outside the Buck migration")
 unknown = selected - set(local)
 if unknown:
     raise SystemExit(f"unknown Cargo workspace package(s): {', '.join(sorted(unknown))}")
@@ -90,6 +92,7 @@ def source_inputs(package, target):
     directory = ROOT / CURRENT_DIR
     source_root = pathlib.Path(target["src_path"]).resolve()
     sources = {directory / "Cargo.toml"}
+    labels = set()
     if source_root.is_relative_to(directory / "src"):
         sources.update((directory / "src").rglob("*.rs"))
     else:
@@ -119,14 +122,13 @@ def source_inputs(package, target):
                 external_labels[repo_relative] = "//bridge/atomic-write:directory_fault_fixture"
             if repo_relative not in external_labels:
                 raise SystemExit(f"no Buck file input target for {repo_relative} (from {source})")
-            sources.add(pathlib.Path("buck-label:" + external_labels[repo_relative]))
+            labels.add(external_labels[repo_relative])
     local_sources = sorted(
         source.relative_to(directory).as_posix()
         for source in sources
         if source.is_relative_to(directory)
     )
-    labels = sorted(str(source).removeprefix("buck-label:") for source in sources if str(source).startswith("buck-label:"))
-    return local_sources + labels
+    return local_sources + sorted(labels)
 
 
 def render_rule(rule, name, target, package, deps, named, extra=""):
@@ -273,46 +275,3 @@ cxx_library(
     else:
         output_path.write_text(output)
 
-# This one local crate lives in an independently pinned submodule. A root
-# target can consume its tracked sources without editing the submodule.
-if "codex-shoal-protocol" in options.package:
-    CURRENT_DIR = "."
-    codex = local["codex-shoal-protocol"]
-    codex_deps, codex_named = dependency_sets(codex)
-    codex_root = codex["targets"][0]
-    root_rule = [
-        "tidepool_rust_library(",
-        '    name = "codex_shoal_protocol",',
-        '    package_name = "codex-shoal-protocol",',
-        '    package_dir = "vendor/codex/codex-rs/shoal-protocol",',
-        '    version = "' + codex["version"] + '",',
-        '    crate_root = "' + pathlib.Path(codex_root["src_path"]).relative_to(ROOT).as_posix() + '",',
-        '    edition = "' + codex_root["edition"] + '",',
-        '    srcs = glob(["vendor/codex/codex-rs/shoal-protocol/src/**/*.rs"]),',
-    ]
-    if codex_deps:
-        root_rule.extend(["    deps = [", render_strings(codex_deps, 8), "    ],"])
-    if codex_named:
-        root_rule.append("    named_deps = {")
-        root_rule.extend("        " + json.dumps(key) + ": " + json.dumps(label) + "," for key, label in codex_named.items())
-        root_rule.append("    },")
-    root_rule.extend(['    visibility = ["PUBLIC"],', ")", ""])
-    root_output = header + "\n" + "\n".join(root_rule) + '''
-filegroup(
-    name = "facade_build_inputs",
-    srcs = glob([
-        "bridge/facade/build.rs",
-        "bridge/haskell/lib/**/*.hs",
-        "bridge/haskell/actors/**/*.hs",
-        "exomonad/examples/workspace/.exomonad/**",
-        "exomonad/examples/workspace/flake.nix",
-    ]),
-    visibility = ["PUBLIC"],
-)
-'''
-    if options.check:
-        if not (ROOT / "BUCK").is_file() or (ROOT / "BUCK").read_text() != root_output:
-            print("stale or missing Buck target graph: BUCK", file=sys.stderr)
-            sys.exit(1)
-    else:
-        (ROOT / "BUCK").write_text(root_output)
