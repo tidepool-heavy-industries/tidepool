@@ -83,6 +83,85 @@ fn spawn_worker(invocation: ProcessInvocation) -> (Worker, MountNamespace) {
     (worker, namespace)
 }
 
+/// Manual paired measurement. Build `exomonad-view-helper` first, then run
+/// this ignored test once without tracing for latency and once under `strace`
+/// for clone/exec evidence. `VIEW_SPAWN_BENCH_RSS_MIB` adds touched host RSS.
+#[test]
+#[ignore = "manual retained-view spawn measurement"]
+fn compare_host_fork_with_view_helper_spawn() {
+    use std::ffi::OsStr;
+    use std::time::Instant;
+
+    let storage = tempfile::tempdir().unwrap();
+    let (_worker, namespace) = setup(storage.path());
+    let rss_mib: usize = std::env::var("VIEW_SPAWN_BENCH_RSS_MIB")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let pairs: usize = std::env::var("VIEW_SPAWN_BENCH_PAIRS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(100);
+    assert!(pairs > 0);
+    let mut host_memory = vec![0_u8; rss_mib * 1024 * 1024];
+    for page in host_memory.chunks_mut(4096) {
+        page[0] = 1;
+    }
+    std::hint::black_box(&host_memory);
+
+    let run = |helper: bool| {
+        let started = Instant::now();
+        let output = if helper {
+            exomonad_node::view_command::output_in_view(
+                &namespace,
+                Path::new("/"),
+                OsStr::new("/bin/sh"),
+                &["-c".into(), ":".into()],
+                &[],
+            )
+            .unwrap()
+        } else {
+            namespace
+                .host_command(Path::new("/"), OsStr::new("/bin/sh"))
+                .unwrap()
+                .args(["-c", ":"])
+                .output()
+                .unwrap()
+        };
+        assert!(output.status.success(), "{output:?}");
+        started.elapsed().as_nanos()
+    };
+    let warmups = if pairs >= 20 { 20 } else { 0 };
+    for index in 0..warmups {
+        run(index % 2 == 0);
+        run(index % 2 != 0);
+    }
+    let mut legacy = Vec::with_capacity(pairs);
+    let mut helper = Vec::with_capacity(pairs);
+    for index in 0..pairs {
+        if index % 2 == 0 {
+            legacy.push(run(false));
+            helper.push(run(true));
+        } else {
+            helper.push(run(true));
+            legacy.push(run(false));
+        }
+    }
+    let summarize = |mut samples: Vec<u128>| {
+        samples.sort_unstable();
+        (
+            samples[(samples.len() - 1) / 2],
+            samples[(samples.len() - 1) * 95 / 100],
+        )
+    };
+    eprintln!(
+        "view spawn rss_mib={rss_mib} pairs={pairs} legacy_p50_p95_ns={:?} helper_p50_p95_ns={:?}",
+        summarize(legacy),
+        summarize(helper)
+    );
+    std::hint::black_box(host_memory);
+}
+
 #[tokio::test]
 #[ignore = "requires a fresh delegated systemd cgroup scope"]
 async fn command_oom_releases_writers_for_cow_publication() {

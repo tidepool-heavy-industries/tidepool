@@ -79,6 +79,9 @@ unconsumed proposals are removed; Git retains their history.
 
 ## Referenced evidence
 
+- [Retained-view launch measurement](foundation-view-spawn-measurement.md):
+  bounded small/large synthetic-host comparison and spawn syscall trace for
+  the thin namespace command helper.
 - [Observation-budget finding](jev-lab/observation-limit/FINDING.md): the
   regression invariant is covered by
   `bridge/facade/src/actor_host/observation_budget_tests.rs`.
