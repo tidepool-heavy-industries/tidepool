@@ -350,6 +350,7 @@ fn owner(
         custody: None,
         scoped_retention: None,
         hosted: Arc::new(Mutex::new(None)),
+        embedded_policy: None,
         launch: HostLaunchState::Published,
         pending_activations: Vec::new(),
         terminal: None,

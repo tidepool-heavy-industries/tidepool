@@ -111,6 +111,7 @@ impl HttpFixture {
                 custody: None,
                 scoped_retention: None,
                 hosted: Arc::new(Mutex::new(None)),
+                embedded_policy: None,
                 launch: HostLaunchState::Pending,
                 pending_activations: Vec::new(),
                 terminal: None,

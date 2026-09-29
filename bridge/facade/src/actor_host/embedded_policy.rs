@@ -29,10 +29,10 @@ impl EmbeddedPolicyInstallation {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "the bound harness host calls this at request issue"
-    )]
+    pub(super) fn actor(&self) -> ActorRef {
+        self.actor
+    }
+
     pub(super) fn request_snapshot(&self) -> Result<EmbeddedPolicySnapshot, ResidentToolError> {
         Ok(EmbeddedPolicySnapshot {
             actor: self.actor,
@@ -51,26 +51,14 @@ pub(super) struct EmbeddedPolicySnapshot {
 }
 
 impl EmbeddedPolicySnapshot {
-    #[allow(
-        dead_code,
-        reason = "the bound harness host consumes this after integration"
-    )]
     pub(super) fn actor(&self) -> ActorRef {
         self.actor
     }
 
-    #[allow(
-        dead_code,
-        reason = "the bound harness host consumes this after integration"
-    )]
     pub(super) fn tools(&self) -> &[Value] {
         &self.tools
     }
 
-    #[allow(
-        dead_code,
-        reason = "the bound harness host consumes these after integration"
-    )]
     pub(super) fn dispatch(
         &self,
         name: String,
@@ -82,6 +70,13 @@ impl EmbeddedPolicySnapshot {
             name,
             arguments,
         })
+    }
+
+    pub(super) async fn cancel(
+        &self,
+        context: ToolInvocationContext,
+    ) -> Result<exomonad_actor::WorkbenchCancellationOutcome, ResidentToolError> {
+        self.policy.cancel_workbench_boxed(context).await
     }
 }
 
