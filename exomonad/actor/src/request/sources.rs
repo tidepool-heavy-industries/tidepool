@@ -517,7 +517,14 @@ mod tests {
         let owner = actor(100);
         let target = actor(101);
         let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
-        let abandoned = registry.reserve(owner, target);
+        let operation = crate::request::RequestReservationOwner::Route(crate::WatchId(1));
+        let abandoned = registry.reserve_for_operation(
+            owner,
+            target,
+            "request".into(),
+            true,
+            Some(operation.clone()),
+        );
         let _sources = registry
             .attach_sources(
                 owner,
@@ -528,7 +535,10 @@ mod tests {
                 ],
             )
             .unwrap();
-        assert_eq!(registry.abort_unsubmitted(owner).0, vec![abandoned]);
+        assert_eq!(
+            registry.abort_unsubmitted(owner, &operation).0,
+            vec![abandoned]
+        );
         let progress = receive(&mut events).await;
         let settlement = receive(&mut events).await;
         assert_eq!((progress.slot, settlement.slot), (0, 1));

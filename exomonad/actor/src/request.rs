@@ -71,6 +71,15 @@ pub struct RequestId(pub u64);
 #[serde(transparent)]
 pub struct WatchId(pub u64);
 
+/// The operation that owns the two-step construction of a request payload.
+/// Actor identity authorizes the request; this identity limits rollback to
+/// reservations created by the settling workbench or route callback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RequestReservationOwner {
+    Workbench(tidepool_runtime::session::WorkbenchExecutionId),
+    Route(WatchId),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ActorEventSequence(pub u64);
@@ -294,6 +303,7 @@ struct RequestRecord {
     sources: Vec<sources::RequestSourceConnection>,
     updates: Vec<updates::UpdateRecord>,
     owner: ActorRef,
+    reservation_owner: Option<RequestReservationOwner>,
     target: ActorRef,
     label: String,
     target_state: TargetState,
@@ -1069,12 +1079,24 @@ impl RequestRegistry {
         self.reserve_labeled_with_reporting(owner, target, label, true)
     }
 
+    #[cfg(test)]
     pub(crate) fn reserve_labeled_with_reporting(
         &self,
         owner: ActorRef,
         target: ActorRef,
         label: String,
         notify_owner: bool,
+    ) -> RequestId {
+        self.reserve_for_operation(owner, target, label, notify_owner, None)
+    }
+
+    pub(crate) fn reserve_for_operation(
+        &self,
+        owner: ActorRef,
+        target: ActorRef,
+        label: String,
+        notify_owner: bool,
+        reservation_owner: Option<RequestReservationOwner>,
     ) -> RequestId {
         let mut state = self.state.lock();
         // `next_request` is a per-process u64 counter; wraparound needs
@@ -1093,6 +1115,7 @@ impl RequestRegistry {
                 sources: Vec::new(),
                 updates: Vec::new(),
                 owner,
+                reservation_owner,
                 target,
                 label,
                 target_state: TargetState::Reserved,
@@ -1140,6 +1163,7 @@ impl RequestRegistry {
                 sources: Vec::new(),
                 updates: Vec::new(),
                 owner,
+                reservation_owner: None,
                 target: owner,
                 label: format!("job {job}"),
                 target_state: TargetState::Presented,
@@ -1201,13 +1225,16 @@ impl RequestRegistry {
     pub(crate) fn abort_unsubmitted(
         &self,
         owner: ActorRef,
+        operation: &RequestReservationOwner,
     ) -> (Vec<RequestId>, Vec<WatchNotification>) {
         let mut state = self.state.lock();
         let mut aborted = state
             .requests
             .iter()
             .filter_map(|(request, record)| {
-                (record.owner == owner && record.target_state == TargetState::Reserved)
+                (record.owner == owner
+                    && record.reservation_owner.as_ref() == Some(operation)
+                    && record.target_state == TargetState::Reserved)
                     .then_some(*request)
             })
             .collect::<Vec<_>>();
@@ -3172,12 +3199,33 @@ mod tests {
         let owner = actor(1);
         let other_owner = actor(2);
         let target = actor(3);
-        let leaked = registry.reserve(owner, target);
-        let committed = registry.reserve(owner, target);
-        let unrelated = registry.reserve(other_owner, target);
+        let operation = RequestReservationOwner::Workbench(
+            tidepool_runtime::session::WorkbenchExecutionId::from_digest([1; 16]),
+        );
+        let reserve = |actor, operation: &RequestReservationOwner| {
+            registry.reserve_for_operation(
+                actor,
+                target,
+                "request".into(),
+                true,
+                Some(operation.clone()),
+            )
+        };
+        let leaked = reserve(owner, &operation);
+        let committed = reserve(owner, &operation);
+        let unrelated = reserve(other_owner, &operation);
+        let sibling_operation = RequestReservationOwner::Workbench(
+            tidepool_runtime::session::WorkbenchExecutionId::from_digest([2; 16]),
+        );
+        let sibling = reserve(owner, &sibling_operation);
+        let route_operation = RequestReservationOwner::Route(WatchId(1));
+        let route = reserve(owner, &route_operation);
         registry.mark_queued(owner, target, committed).unwrap();
 
-        assert_eq!(registry.abort_unsubmitted(owner).0, vec![leaked]);
+        assert_eq!(
+            registry.abort_unsubmitted(owner, &operation).0,
+            vec![leaked]
+        );
         assert_eq!(
             registry.observe_response(owner, leaked),
             Err(ReplyError::Stale)
@@ -3186,8 +3234,30 @@ mod tests {
             registry.observe_response(owner, committed),
             Ok(ResponseObservation::Pending(_))
         ));
-        assert_eq!(registry.abort_unsubmitted(other_owner).0, vec![unrelated]);
-        assert!(registry.abort_unsubmitted(owner).0.is_empty());
+        assert!(matches!(
+            registry.observe_response(owner, sibling),
+            Ok(ResponseObservation::Pending(_))
+        ));
+        assert!(matches!(
+            registry.observe_response(owner, route),
+            Ok(ResponseObservation::Pending(_))
+        ));
+        // The surviving operation can still commit its request after its
+        // sibling's rollback; cleanup is not merely hidden from observation.
+        registry.mark_queued(owner, target, sibling).unwrap();
+        assert!(registry
+            .abort_unsubmitted(owner, &sibling_operation)
+            .0
+            .is_empty());
+        assert_eq!(
+            registry.abort_unsubmitted(owner, &route_operation).0,
+            vec![route]
+        );
+        assert_eq!(
+            registry.abort_unsubmitted(other_owner, &operation).0,
+            vec![unrelated]
+        );
+        assert!(registry.abort_unsubmitted(owner, &operation).0.is_empty());
     }
 
     #[tokio::test]

@@ -35,7 +35,7 @@ use tokio::sync::mpsc;
 use tracing::Instrument;
 
 use crate::mailbox::{InstalledReceiver, ResidentOutbound};
-use crate::request::RequestRegistry;
+use crate::request::{RequestRegistry, RequestReservationOwner};
 use crate::resident_workbench::{
     ForkGroupBoundary, PreparedCell, ResidentActorBoundary, ResidentActorStartupStep,
     ResidentKernelBoundary, ResidentWorkbenchFragment, ResidentWorkbenchStep,
@@ -1020,6 +1020,7 @@ pub struct ResidentKernelBehavior<H, O> {
     active_route: Option<(crate::WatchId, Vec<crate::ForkGroupId>)>,
     fork_publication: ForkPublication,
     active_workbench_control: Option<Arc<crate::resident_tools::WorkbenchExecutionControl>>,
+    active_reservation_owner: Option<RequestReservationOwner>,
     settled_fork_boundaries: Vec<tidepool_runtime::session::WorkbenchForkBoundary>,
     pending_fork_publications: Vec<PendingForkPublication>,
     /// This actor's last summary-family status roster, for the `changed`
@@ -1197,6 +1198,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             active_route: None,
             fork_publication: ForkPublication::Resident,
             active_workbench_control: None,
+            active_reservation_owner: None,
             settled_fork_boundaries: Vec::new(),
             pending_fork_publications: Vec::new(),
             roster_snapshot: Mutex::new(None),
@@ -4270,11 +4272,12 @@ where
                         "invalid request label: {error}"
                     ))
                 })?;
-                let request = self.environment.requests.reserve_labeled_with_reporting(
+                let request = self.environment.requests.reserve_for_operation(
                     context.actor,
                     reservation.target,
                     reservation.label,
                     reservation.notify_owner,
+                    self.active_reservation_owner.clone(),
                 );
                 self.environment
                     .runner
@@ -8310,6 +8313,13 @@ where
                     .begin(execution, request.clone(), invocation);
             }
             self.active_workbench_control = control.clone();
+            let reservation_owner =
+                RequestReservationOwner::Workbench(execution.clone().unwrap_or_else(|| {
+                    WorkbenchExecutionId::from_digest(*uuid::Uuid::new_v4().as_bytes())
+                }));
+            let previous_reservation_owner = self
+                .active_reservation_owner
+                .replace(reservation_owner.clone());
             self.fork_publication = ForkPublication::Workbench(request.fork_boundary().cloned());
             // One INFO line per hosted tool call or cell, breaking down
             // where its wall time went (checkout wait/hold, compile, Jev,
@@ -8329,6 +8339,7 @@ where
             let result = call_scope
                 .run(self.execute_workbench(kernel, &context, request, installed_tools))
                 .await;
+            self.active_reservation_owner = previous_reservation_owner;
             let call_outcome = match &result {
                 Ok(
                     KernelStep::Continue(response)
@@ -8422,8 +8433,10 @@ where
                 }
             }
             if rejected {
-                let (aborted, notifications) =
-                    self.environment.requests.abort_unsubmitted(context.actor);
+                let (aborted, notifications) = self
+                    .environment
+                    .requests
+                    .abort_unsubmitted(context.actor, &reservation_owner);
                 self.publish_watch_notifications(notifications).await;
                 if !aborted.is_empty() {
                     tracing::debug!(actor = ?context.actor, requests = ?aborted, "aborted unpublished request reservations after rejected workbench input");
@@ -8489,6 +8502,10 @@ where
                 return Ok(KernelStep::Continue(()));
             };
             self.active_route = Some((watch, Vec::new()));
+            let reservation_owner = RequestReservationOwner::Route(watch);
+            let previous_reservation_owner = self
+                .active_reservation_owner
+                .replace(reservation_owner.clone());
             // This internal completion identity gates only selected-context children.
             // It never authorizes or describes a provider-context fork.
             let completion = tidepool_runtime::session::WorkbenchForkBoundary {
@@ -8604,7 +8621,11 @@ where
                     }
                 }
             }
-            let (_, notifications) = self.environment.requests.abort_unsubmitted(context.actor);
+            self.active_reservation_owner = previous_reservation_owner;
+            let (_, notifications) = self
+                .environment
+                .requests
+                .abort_unsubmitted(context.actor, &reservation_owner);
             self.publish_watch_notifications(notifications).await;
             self.active_route = None;
             self.fork_publication = ForkPublication::Resident;
