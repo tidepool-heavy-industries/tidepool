@@ -16,6 +16,7 @@ integration or release:
 | --- | --- | --- |
 | Tidepool | `foundation/integration` | `24516ebb5f29a7e9a5f3245c485b578f31f1658f` |
 | Tidepool | `foundation/module-product` | `fbcfb02027632e2a53199c0a6ef6843f5cc2a577` |
+| Tidepool | `foundation/transitive-binding-retention` | `41583b5eb89737a2dd966908adbfd29bf55452ec` |
 | Tidepool | `foundation/harness-m1-adapter` | `e4bb3ddc4b59f01acedcc28b9950377a2299f38a` |
 | Codex (`inanna-malick/codex`) | `foundation/client-settlement` | `c09c2b067774be4104fad878ee271a6a14f12690` |
 | Harness | `integration/actor-admission-companion` | `c485edb9b697ffc671b22c9ef25a73fc84763d76` |
@@ -25,6 +26,12 @@ documentation-only handoff commit; its code revision above is exact. Adapter
 Cargo files pin the harness companion above. The client pin is not yet updated
 in integration. Module-product and adapter are dependent branches, not disjoint
 patch stacks: inspect ancestry and apply only missing commits when joining.
+
+The transitive binding-retention repair was omitted from the original transfer
+and subsequently pushed and remote-verified by the source owner. Apply only
+`41583b5eb89737a2dd966908adbfd29bf55452ec`; equivalent
+`20a031feb964b8d1437b5a5f8c6537ff1d48550c` must not also be applied. Its three
+regressions must run against the joined engine.
 
 The final cancellation repair preserves an owner's completed reply through the
 harness scheduler's existing terminal arbitration. Request snapshots now use a

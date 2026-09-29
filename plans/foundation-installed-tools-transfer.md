@@ -5,6 +5,13 @@ Read-only review of `3ed5ff603` (actor short admission) and `591d3c04c`
 implemented from the request-owner adapter still being joined. No build or
 runtime test was run for this review.
 
+The observations below describe that historical revision. The joined embedded
+adapter now supplies production request-snapshot and Store-admission consumers;
+see `engine-harness-m1-adapter-handoff.md`. The canonical Codex HTTP endpoint
+limitation below still applies: the adapter does not establish model-request-time
+handler pinning for Codex. Admission leases must remain short; retirement still
+waits for them before computing its shutdown budget.
+
 ## Implemented lifetime boundaries
 
 - `MailboxAdmission::transaction` and `close` use the same mutex. Cooperative

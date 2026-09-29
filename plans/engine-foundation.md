@@ -161,18 +161,17 @@ to fork. Continue measuring at the owning boundaries after each change.
 
 ## Active integration notes
 
-The Codex settlement repair is in the isolated `foundation/client-settlement`
-worktree. Its first focused test compile exposed twelve stale test API calls,
-and the existing `host_input.rs` regression file was not registered. Those
-repairs now compile. The expanded focused run executed 13 tests: 11 passed,
-including both terminal-settlement regressions; two older newly enabled
-host-input tests failed on fixture drift and remain to repair. The pinned
-client and running services are unchanged.
+The final Codex settlement candidate is
+`c09c2b067774be4104fad878ee271a6a14f12690`. Its source-box focused run passed
+13/13 after repairing stale test APIs, registration and fixture drift. The
+destination candidate pins that commit; destination verification is recorded
+in `engine-foundation-transfer.md`. No running client or service was replaced.
 
-Three Sol Medium lanes are implementing installation environments, owned
-external effects, and responsive actor execution. Root owns cross-layer review,
-actor effect adaptation, client repair, and integration. Builds use one slot;
-drafts and successful formatting are not verification.
+The destination join includes the transferred foundation, module-product,
+adapter and transitive binding-retention candidates. Root owns integration;
+bounded agents own ABI validation, compiler publication proof and companion
+review. Parallel checks use separate mutable outputs and explicit memory
+limits. Drafts, target compilation and executed tests remain distinct evidence.
 
 ## User review boundary
 
