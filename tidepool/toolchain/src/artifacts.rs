@@ -235,6 +235,10 @@ pub struct CompiledArtifacts {
     /// transaction. These are raw products until graph evidence assigns
     /// exact module versions and every import owner.
     pub module_products: Vec<RawModuleProduct>,
+    /// Exact post-downsweep graph paired with these products when the worker
+    /// supplied complete, revalidated cache evidence. A later compiler
+    /// request still needs its own precompile graph check before reuse.
+    pub module_inventory: Option<Vec<cache::ModuleEvidence>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -351,12 +355,16 @@ pub fn compile_invocation(
                 });
                 if let Some(key) = &key {
                     let load_start = Instant::now();
-                    if let Some((meta_bytes, raw, product_bytes)) =
+                    if let Some((meta_bytes, raw, product_bytes, evidence)) =
                         load_memo(key, &name_refs, inv.targets, inv.source)
                     {
-                        if let Ok(artifacts) =
-                            assemble_with_products(&meta_bytes, &raw, &product_bytes, &mut on_stage)
-                        {
+                        if let Ok(artifacts) = assemble_with_products(
+                            &meta_bytes,
+                            &raw,
+                            &product_bytes,
+                            Some(&evidence),
+                            &mut on_stage,
+                        ) {
                             on_stage(
                                 timing::STAGE_CBOR_READ,
                                 load_start.elapsed(),
@@ -415,24 +423,26 @@ pub fn compile_invocation(
     // Store only what DESERIALIZED, so a malformed artifact set is never
     // memoized into a permanently-failing entry. Best-effort: an unwritable
     // memo costs a recompile, it never fails a compile.
-    let artifacts = assemble_with_products(&meta_bytes, &raw, &product_bytes, &mut on_stage)?;
-    if let Some(key) = &inv_key {
-        if let Some(evidence) = std::fs::read(temp_dir.path().join("dependencies.json"))
-            .ok()
-            .and_then(|bytes| {
-                cache::DependencyEvidence::from_worker(&bytes, &input_path, inv.source)
-            })
-        {
-            store_memo(
-                key,
-                &name_refs,
-                &meta_bytes,
-                &raw,
-                &product_bytes,
-                &evidence,
-                inv.source,
-            );
-        }
+    let evidence = std::fs::read(temp_dir.path().join("dependencies.json"))
+        .ok()
+        .and_then(|bytes| cache::DependencyEvidence::from_worker(&bytes, &input_path, inv.source));
+    let artifacts = assemble_with_products(
+        &meta_bytes,
+        &raw,
+        &product_bytes,
+        evidence.as_ref(),
+        &mut on_stage,
+    )?;
+    if let (Some(key), Some(evidence)) = (&inv_key, evidence.as_ref()) {
+        store_memo(
+            key,
+            &name_refs,
+            &meta_bytes,
+            &raw,
+            &product_bytes,
+            evidence,
+            inv.source,
+        );
     }
     Ok(artifacts)
 }
@@ -754,6 +764,7 @@ pub(crate) fn assemble(
         warnings,
         targets,
         module_products: Vec::new(),
+        module_inventory: None,
     })
 }
 
@@ -761,6 +772,7 @@ fn assemble_with_products(
     meta_bytes: &[u8],
     raw: &[RawTargetOutput],
     product_bytes: &[u8],
+    evidence: Option<&cache::DependencyEvidence>,
     on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
     let mut artifacts = assemble(meta_bytes, raw, on_stage)?;
@@ -769,6 +781,19 @@ fn assemble_with_products(
         &crate::prepared_artifact::production_requirements()?,
         DecodeLimits::default(),
     )?;
+    if let Some(evidence) = evidence {
+        for product in &artifacts.module_products {
+            if !evidence.modules.iter().any(|module| {
+                !module.boot && module.unit == product.unit && module.module == product.module
+            }) {
+                return Err(CompileError::ExtractFailed(format!(
+                    "module product {}:{} has no matching graph node",
+                    product.unit, product.module
+                )));
+            }
+        }
+        artifacts.module_inventory = Some(evidence.modules.clone());
+    }
     Ok(artifacts)
 }
 
@@ -845,8 +870,13 @@ fn load_memo(
     names: &[&str],
     targets: &[&str],
     source: &str,
-) -> Option<(Vec<u8>, Vec<RawTargetOutput>, Vec<u8>)> {
-    let loaded = cache::artifacts_load(key, names, source)?;
+) -> Option<(
+    Vec<u8>,
+    Vec<RawTargetOutput>,
+    Vec<u8>,
+    cache::DependencyEvidence,
+)> {
+    let (loaded, evidence) = cache::artifacts_load(key, names, source)?;
     let mut it = loaded.into_iter();
     // Every artifact is required. An extractor represents a target with no
     // typed suspension sites by writing an `[]` sidecar.
@@ -861,7 +891,7 @@ fn load_memo(
             prepared_bytes: Arc::new(prepared_bytes),
         });
     }
-    Some((meta_bytes, raw, it.next()??))
+    Some((meta_bytes, raw, it.next()??, evidence))
 }
 
 /// Store this invocation's full artifact set under `names`, in the order
@@ -1046,6 +1076,16 @@ mod module_product_tests {
             .module_products
             .iter()
             .any(|product| product.module == "ModuleProductA" && product.groups.len() >= 2));
+        let inventory = compiled
+            .module_inventory
+            .expect("safe worker graph must accompany its module products");
+        let consumer = inventory
+            .iter()
+            .find(|node| node.module == "ModuleProductB" && !node.boot)
+            .expect("consumer graph node");
+        assert!(consumer.imports.iter().any(|imported| {
+            imported.module == "ModuleProductA" && imported.selected.is_some()
+        }));
     }
 }
 

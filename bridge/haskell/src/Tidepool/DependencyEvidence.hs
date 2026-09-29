@@ -5,6 +5,8 @@ module Tidepool.DependencyEvidence
   ( DependencyEvidence(..)
   , DependencySource(..)
   , DependencyResolution(..)
+  , DependencyModule(..)
+  , DependencyImport(..)
   , sourceEvidence
   , sourceEvidenceWithFingerprint
   , revalidateDependencyEvidence
@@ -27,6 +29,24 @@ data DependencyEvidence = DependencyEvidence
   , dependencySources :: [DependencySource]
   , dependencyResolutions :: [DependencyResolution]
   , dependencyPackages :: [String]
+  , dependencyModules :: [DependencyModule]
+  }
+
+-- | The direct graph that produced the paired module products. This is
+-- post-downsweep evidence; it does not by itself authorize a future compile
+-- to reuse a module without running its own downsweep and interface checks.
+data DependencyModule = DependencyModule
+  { dependencyModuleUnit :: String
+  , dependencyModuleName :: String
+  , dependencyModuleBoot :: Bool
+  , dependencyModuleSource :: FilePath
+  , dependencyModuleImports :: [DependencyImport]
+  }
+
+data DependencyImport = DependencyImport
+  { dependencyImportName :: String
+  , dependencyImportBoot :: Bool
+  , dependencyImportSelected :: Maybe FilePath
   }
 
 data DependencySource = DependencySource
@@ -36,6 +56,7 @@ data DependencySource = DependencySource
 
 data DependencyResolution = DependencyResolution
   { dependencyResolutionModule :: String
+  , dependencyResolutionBoot :: Bool
   , dependencyResolutionSelected :: Maybe FilePath
   , dependencyResolutionCandidates :: [FilePath]
   }
@@ -66,12 +87,13 @@ revalidateDependencyEvidence evidence = and <$> forM (dependencySources evidence
 
 renderDependencyEvidence :: DependencyEvidence -> String
 renderDependencyEvidence evidence =
-  "{\"version\":1"
+  "{\"version\":2"
     ++ ",\"cache_safe\":" ++ bool (dependencyCacheSafe evidence)
     ++ ",\"selection_complete\":" ++ bool (dependencySelectionComplete evidence)
     ++ ",\"sources\":[" ++ comma (map source (dependencySources evidence)) ++ "]"
     ++ ",\"resolutions\":[" ++ comma (map resolution (dependencyResolutions evidence)) ++ "]"
-    ++ ",\"packages\":[" ++ comma (map jsonString (dependencyPackages evidence)) ++ "]}"
+    ++ ",\"packages\":[" ++ comma (map jsonString (dependencyPackages evidence)) ++ "]"
+    ++ ",\"modules\":[" ++ comma (map moduleNode (dependencyModules evidence)) ++ "]}"
   where
     bool True = "true"
     bool False = "false"
@@ -81,6 +103,17 @@ renderDependencyEvidence evidence =
         ++ ",\"sha256\":" ++ jsonString (dependencySourceSha256 item) ++ "}"
     resolution item =
       "{\"module\":" ++ jsonString (dependencyResolutionModule item)
+        ++ ",\"boot\":" ++ bool (dependencyResolutionBoot item)
         ++ ",\"selected\":" ++ maybe "null" jsonString (dependencyResolutionSelected item)
         ++ ",\"candidates\":["
         ++ comma (map jsonString (dependencyResolutionCandidates item)) ++ "]}"
+    moduleNode item =
+      "{\"unit\":" ++ jsonString (dependencyModuleUnit item)
+        ++ ",\"module\":" ++ jsonString (dependencyModuleName item)
+        ++ ",\"boot\":" ++ bool (dependencyModuleBoot item)
+        ++ ",\"source\":" ++ jsonString (dependencyModuleSource item)
+        ++ ",\"imports\":[" ++ comma (map importNode (dependencyModuleImports item)) ++ "]}"
+    importNode item =
+      "{\"module\":" ++ jsonString (dependencyImportName item)
+        ++ ",\"boot\":" ++ bool (dependencyImportBoot item)
+        ++ ",\"selected\":" ++ maybe "null" jsonString (dependencyImportSelected item) ++ "}"

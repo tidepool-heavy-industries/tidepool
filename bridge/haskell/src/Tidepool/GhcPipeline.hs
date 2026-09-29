@@ -39,6 +39,7 @@ import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
 import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..))
 import GHC.Unit.Home (homeUnitId)
+import GHC.Unit.Types (unitString)
 import GHC.Data.Graph.Directed (flattenSCCs)
 import GHC.Core.Opt.Pipeline (core2core)
 import GHC.Driver.Session
@@ -150,6 +151,7 @@ import Tidepool.RetainedUnfoldings
 import Tidepool.TurnSource (extractModuleName)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..)
+  , DependencyModule(..), DependencyImport(..)
   , sourceEvidenceWithFingerprint )
 
 -- | Selects the compiler representation produced at the internal GHC API
@@ -2208,8 +2210,29 @@ dependencyEvidenceFor (sources, sourcesComplete) graph moduleFacts = do
             _ -> candidates ++ [path]
     pure DependencyResolution
       { dependencyResolutionModule = moduleNameString imported
+      , dependencyResolutionBoot = isBoot
       , dependencyResolutionSelected = chosen
       , dependencyResolutionCandidates = nub throughSelected
+      }
+  moduleNodes <- forM graphSummaries $ \summary -> do
+    let name = ms_mod_name summary
+        isBoot = ms_hsc_src summary == HsBootFile
+        directImports = sort . Set.toList . Set.fromList $
+          [ (unLoc imported, False) | (_, imported) <- ms_textual_imps summary ] ++
+          [ (unLoc imported, True) | (_, imported) <- ms_srcimps summary ]
+    source <- case ml_hs_file (ms_location summary) of
+      Nothing -> pure ""
+      Just path -> normalise <$> makeAbsolute path
+    pure DependencyModule
+      { dependencyModuleUnit = unitString (moduleUnit (ms_mod summary))
+      , dependencyModuleName = moduleNameString name
+      , dependencyModuleBoot = isBoot
+      , dependencyModuleSource = source
+      , dependencyModuleImports =
+          [ DependencyImport (moduleNameString imported) boot
+              (Map.lookup (imported, boot) selected)
+          | (imported, boot) <- directImports
+          ]
       }
   let hasUntrackedExecution =
         any (hasUntrackedCompileTimeExecution . ms_hspp_opts) graphSummaries
@@ -2228,6 +2251,7 @@ dependencyEvidenceFor (sources, sourcesComplete) graph moduleFacts = do
     , dependencySources = sources
     , dependencyResolutions = absoluteCandidates
     , dependencyPackages = packages
+    , dependencyModules = moduleNodes
     }
 
 

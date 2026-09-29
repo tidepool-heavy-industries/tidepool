@@ -148,6 +148,25 @@ pub struct DependencyEvidence {
     pub sources: Vec<SourceEvidence>,
     pub resolutions: Vec<ResolutionEvidence>,
     pub packages: Vec<String>,
+    pub modules: Vec<ModuleEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModuleEvidence {
+    pub unit: String,
+    pub module: String,
+    pub boot: bool,
+    pub source: PathBuf,
+    pub imports: Vec<ModuleImportEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModuleImportEvidence {
+    pub module: String,
+    pub boot: bool,
+    pub selected: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +180,7 @@ pub struct SourceEvidence {
 #[serde(deny_unknown_fields)]
 pub struct ResolutionEvidence {
     pub module: String,
+    pub boot: bool,
     pub selected: Option<PathBuf>,
     pub candidates: Vec<PathBuf>,
 }
@@ -178,13 +198,33 @@ impl DependencyEvidence {
                 item.path = GENERATED_SOURCE.into();
             }
         }
+        for module in &mut evidence.modules {
+            if fs::canonicalize(&module.source).ok().as_ref() == Some(&input) {
+                module.source = GENERATED_SOURCE.into();
+            }
+            for imported in &mut module.imports {
+                if imported
+                    .selected
+                    .as_ref()
+                    .and_then(|path| fs::canonicalize(path).ok())
+                    .as_ref()
+                    == Some(&input)
+                {
+                    imported.selected = Some(GENERATED_SOURCE.into());
+                }
+            }
+        }
         evidence.valid(source).then_some(evidence)
     }
 
     /// Validate contents and negative witnesses. IO errors are misses, including
     /// inaccessible candidates: absence must be known, not guessed.
     pub fn valid(&self, source: &str) -> bool {
-        if self.version != 1 || !self.cache_safe || self.sources.is_empty() {
+        if self.version != 2
+            || !self.cache_safe
+            || self.sources.is_empty()
+            || self.modules.is_empty()
+        {
             return false;
         }
         let mut paths = std::collections::HashSet::new();
@@ -212,8 +252,37 @@ impl DependencyEvidence {
         if !target {
             return false;
         }
+        let mut modules = std::collections::HashSet::new();
+        for module in &self.modules {
+            if module.unit.is_empty()
+                || module.module.is_empty()
+                || !paths.contains(&module.source)
+                || !modules.insert((&module.unit, &module.module, module.boot))
+            {
+                return false;
+            }
+            let mut imports = std::collections::HashSet::new();
+            for imported in &module.imports {
+                if imported.module.is_empty()
+                    || !imports.insert((&imported.module, imported.boot))
+                    || imported
+                        .selected
+                        .as_ref()
+                        .is_some_and(|path| !paths.contains(path))
+                {
+                    return false;
+                }
+            }
+        }
+        let mut resolutions = std::collections::HashMap::new();
         for resolution in &self.resolutions {
             if resolution.module.is_empty() || resolution.candidates.is_empty() {
+                return false;
+            }
+            if resolutions
+                .insert((&resolution.module, resolution.boot), &resolution.selected)
+                .is_some()
+            {
                 return false;
             }
             if let Some(selected) = &resolution.selected {
@@ -231,6 +300,15 @@ impl DependencyEvidence {
                 match fs::metadata(candidate) {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     _ => return false,
+                }
+            }
+        }
+        for module in &self.modules {
+            for imported in &module.imports {
+                if resolutions.get(&(&imported.module, imported.boot)).copied()
+                    != Some(&imported.selected)
+                {
+                    return false;
                 }
             }
         }
@@ -329,12 +407,16 @@ pub(crate) fn artifacts_load(
     key: &InvocationKey,
     names: &[&str],
     source: &str,
-) -> Option<Vec<Option<Vec<u8>>>> {
+) -> Option<(Vec<Option<Vec<u8>>>, DependencyEvidence)> {
     let bytes = fs::read(crate::paths::compile_cache_dir().join(format!("{key}.bundle"))).ok()?;
     decode_bundle(&bytes, names, source)
 }
 
-fn decode_bundle(bytes: &[u8], names: &[&str], source: &str) -> Option<Vec<Option<Vec<u8>>>> {
+fn decode_bundle(
+    bytes: &[u8],
+    names: &[&str],
+    source: &str,
+) -> Option<(Vec<Option<Vec<u8>>>, DependencyEvidence)> {
     let mut remaining = bytes;
     let manifest = tidepool_extract_report::artifact_manifest::ArtifactManifest::decode(
         take_frame(&mut remaining)?,
@@ -344,6 +426,7 @@ fn decode_bundle(bytes: &[u8], names: &[&str], source: &str) -> Option<Vec<Optio
         return None;
     }
     let mut out = Vec::with_capacity(names.len());
+    let mut recorded_evidence = None;
     for (name, entry) in names
         .iter()
         .copied()
@@ -362,11 +445,12 @@ fn decode_bundle(bytes: &[u8], names: &[&str], source: &str) -> Option<Vec<Optio
             if !evidence.valid(source) {
                 return None;
             }
+            recorded_evidence = Some(evidence);
         } else {
             out.push(Some(value.to_vec()));
         }
     }
-    remaining.is_empty().then_some(out)
+    remaining.is_empty().then_some(out).zip(recorded_evidence)
 }
 
 pub(crate) fn artifacts_store(
@@ -419,7 +503,7 @@ mod tests {
         fs::create_dir_all(root.join("first")).unwrap();
         fs::write(&selected, "library = 1").unwrap();
         DependencyEvidence {
-            version: 1,
+            version: 2,
             cache_safe: true,
             selection_complete: true,
             sources: vec![
@@ -434,10 +518,22 @@ mod tests {
             ],
             resolutions: vec![ResolutionEvidence {
                 module: "Library".into(),
+                boot: false,
                 selected: Some(selected.clone()),
-                candidates: vec![root.join("first/Library.hs"), selected],
+                candidates: vec![root.join("first/Library.hs"), selected.clone()],
             }],
             packages: vec!["base".into()],
+            modules: vec![ModuleEvidence {
+                unit: "main".into(),
+                module: "Target".into(),
+                boot: false,
+                source: GENERATED_SOURCE.into(),
+                imports: vec![ModuleImportEvidence {
+                    module: "Library".into(),
+                    boot: false,
+                    selected: Some(selected),
+                }],
+            }],
         }
     }
 
@@ -539,12 +635,34 @@ mod tests {
         let candidate = root.path().join("first/Package.hs");
         evidence.resolutions.push(ResolutionEvidence {
             module: "Package".into(),
+            boot: false,
             selected: None,
             candidates: vec![candidate.clone()],
         });
         assert!(evidence.valid("target"));
         fs::write(candidate, "module Package where").unwrap();
         assert!(!evidence.valid("target"));
+    }
+
+    #[test]
+    fn module_graph_cannot_pair_an_import_with_unrecorded_source() {
+        let root = tempfile::tempdir().unwrap();
+        let good = evidence(root.path());
+        assert!(good.valid("target"));
+        let mut wrong_source = good.clone();
+        wrong_source.modules[0].source = root.path().join("unrecorded.hs");
+        assert!(!wrong_source.valid("target"));
+        let mut wrong_import = good.clone();
+        wrong_import.modules[0].imports[0].selected = Some(root.path().join("unrecorded.hs"));
+        assert!(!wrong_import.valid("target"));
+        wrong_import.modules[0].imports[0].selected = Some(GENERATED_SOURCE.into());
+        assert!(
+            !wrong_import.valid("target"),
+            "graph edge must match resolution witness"
+        );
+        let mut duplicate = good;
+        duplicate.modules.push(duplicate.modules[0].clone());
+        assert!(!duplicate.valid("target"));
     }
 
     #[test]
