@@ -312,7 +312,9 @@ fn initialize_atom(
             let address = plan
                 .bytes
                 .get(value)
-                .ok_or(CompileError::MissingRepresentation(plan.program.entry()))?
+                .ok_or(CompileError::MissingRepresentation(
+                    plan.diagnostic_binding(),
+                ))?
                 .as_ptr() as usize;
             write_pointer(words, field_offset, field_size, address)
         }
@@ -483,7 +485,7 @@ fn write_bytes(words: &mut [u64], offset: usize, bytes: &[u8]) -> Result<(), Com
 
 fn invalid_static_value(plan: &ProgramPlan<'_>) -> CompileError {
     CompileError::Unsupported(Unsupported::Expression {
-        binding: plan.program.entry(),
+        binding: plan.diagnostic_binding(),
         node: 0,
     })
 }

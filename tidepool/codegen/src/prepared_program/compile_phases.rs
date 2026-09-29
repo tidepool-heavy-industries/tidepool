@@ -160,7 +160,7 @@ pub(super) struct NativeMetrics {
 }
 
 impl NativeMetrics {
-    pub(super) fn new(program: &tidepool_repr::execution_schema::PreparedProgram) -> Self {
+    pub(super) fn new(program: &tidepool_repr::execution_schema::DefinitionsView<'_>) -> Self {
         let enabled = std::env::var("TIDEPOOL_CODEGEN_DETAIL").as_deref() == Ok("1");
         let mut owners = std::collections::BTreeMap::new();
         if enabled {

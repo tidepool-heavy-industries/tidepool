@@ -20,8 +20,8 @@ use std::sync::Arc;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_heap::static_region::{StaticImage, StaticImageError};
 use tidepool_repr::execution_schema::{
-    Architecture, Endianness, GlobalId, LinkedProgram, ResultContract, RuntimeRep, Signature,
-    TargetDescriptor, ValueId,
+    Architecture, CertifiedGroup, DefinitionsView, Endianness, GlobalId, LinkedProgram,
+    ResultContract, RuntimeRep, Signature, TargetDescriptor, ValueId,
 };
 use tidepool_repr::DataConId;
 
@@ -86,10 +86,10 @@ impl Drop for ActiveIntrinsicScope<'_> {
     }
 }
 pub use machine::{
-    ImportBindings, ManagedBuilder, ManagedField, ManagedNode, ParkRequest, PreparedCallOptions,
-    PreparedCompileSnapshot, PreparedHandle, PreparedInput, PreparedMachine,
-    PreparedMachineOptions, PreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
-    Quiescent, ResidencyCounts, RetirementReceipt,
+    BatchImport, BatchProgram, ImportBindings, ManagedBuilder, ManagedField, ManagedNode,
+    ParkRequest, PreparedCallOptions, PreparedCompileSnapshot, PreparedHandle, PreparedInput,
+    PreparedMachine, PreparedMachineOptions, PreparedOuter, PreparedResult, PreparedResultBatch,
+    ProgramId, Quiescent, ResidencyCounts, RetirementReceipt,
 };
 pub use run::{ExecutionError, ImportShapeFact, RunOptions, RunResult};
 #[cfg(test)]
@@ -99,6 +99,8 @@ mod byte_arrays;
 #[cfg(test)]
 mod bytes_tests;
 mod data_tag;
+mod demand;
+pub use demand::{DemandError, DemandedImage, GroupInventory, SealedDemand, SourceBinder};
 #[cfg(test)]
 mod double_to_int_tests;
 mod entry;
@@ -379,6 +381,10 @@ pub struct CompiledProgram {
     pub(crate) statics: StaticImage,
     /// Block-local slot of every top.
     pub(crate) top_slots: BTreeMap<ValueId, usize>,
+    /// Immutable source identity and runtime contract for each top. Batch
+    /// installation uses this to authenticate exact inter-group imports
+    /// before allocating any mutable installation state.
+    pub(crate) top_exports: BTreeMap<ValueId, TopExport>,
     /// Admitted imports' slots -- see [`plan::ImportSlot`]. Indexed by
     /// `GlobalId`, occupying the block range right after `top_slots`.
     pub(crate) import_slots: Vec<plan::ImportSlot>,
@@ -422,6 +428,13 @@ pub struct CompiledProgram {
     /// later `install_shared` of the same `Arc<CompiledProgram>` sees this
     /// already `true` and charges nothing.
     codegen_charged: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Clone)]
+pub(crate) struct TopExport {
+    pub identity: tidepool_repr::execution_schema::SymbolIdentity,
+    pub rep: RuntimeRep,
+    pub evaluated: bool,
 }
 
 // SAFETY: every field above is written only inside `compile_with`, which
@@ -482,6 +495,17 @@ impl CompiledProgram {
         )
     }
 
+    /// Compile one worker-certified, entry-free recursive group. Its source
+    /// owner and import provenance were sealed before native compilation;
+    /// machine-local import handles are supplied only when the image installs.
+    pub fn compile_certified_group(group: &CertifiedGroup) -> Result<Self, CompileError> {
+        Self::compile_definitions(
+            group.definitions(),
+            &mut DescriptorInterner::default(),
+            &Arc::new(static_bytes::PinnedBytes::empty()),
+        )
+    }
+
     /// [`Self::compile`] against `interner`: constructor identities already
     /// interned reuse their descriptor, so this program's `Case`, enter and
     /// observation recognise objects an earlier program built. Likewise
@@ -499,7 +523,15 @@ impl CompiledProgram {
         interner: &mut DescriptorInterner,
         existing_bytes: &std::sync::Arc<static_bytes::PinnedBytes>,
     ) -> Result<Self, CompileError> {
-        let target = &linked.prepared().envelope().target;
+        Self::compile_definitions(linked.prepared().definitions(), interner, existing_bytes)
+    }
+
+    fn compile_definitions(
+        definitions: DefinitionsView<'_>,
+        interner: &mut DescriptorInterner,
+        existing_bytes: &Arc<static_bytes::PinnedBytes>,
+    ) -> Result<Self, CompileError> {
+        let target = &definitions.envelope().target;
         let host_matches = cfg!(all(target_os = "linux", target_arch = "x86_64"))
             && target.architecture == Architecture::X86_64;
         if !host_matches
@@ -512,14 +544,14 @@ impl CompiledProgram {
         }
         let mut clock = compile_phases::PhaseClock::start();
         let mut phases = compile_phases::CompilePhases::default();
-        let mut native_metrics = compile_phases::NativeMetrics::new(linked.prepared());
-        admit_program(linked)?;
+        let mut native_metrics = compile_phases::NativeMetrics::new(&definitions);
+        admission::admit_definitions(&definitions)?;
         phases.admit = clock.lap();
         use crate::entry_abi::{EnvironmentMode, NativeAbiProfile};
         use cranelift_codegen::isa::CallConv;
         use cranelift_module::Linkage;
         use tidepool_repr::execution_schema::{HeapRhs, RuntimeRep};
-        let plan = plan::ProgramPlan::new(linked.prepared(), interner, existing_bytes)?;
+        let plan = plan::ProgramPlan::new(definitions, interner, existing_bytes)?;
         let profile = NativeAbiProfile::new(plan.program.envelope().target.clone(), 0)?;
         phases.plan = clock.lap();
         let statics = image::build_static_image(&plan)?;
@@ -921,7 +953,7 @@ impl CompiledProgram {
         // state machine, while its body call uses the private body ID.
         let mut functions = BTreeMap::new();
         let mut abis = BTreeMap::new();
-        let result_instances = plan::result_instances(plan.program);
+        let result_instances = plan::result_instances(&plan.program);
         for (&id, signature) in &signatures {
             let results = if signature.results.is_caller_result() {
                 result_instances.iter().cloned().collect::<Vec<_>>()
@@ -1250,6 +1282,27 @@ impl CompiledProgram {
             descriptor_slots: plan.descriptor_slots,
             statics,
             top_slots: plan.top_slots,
+            top_exports: plan
+                .program
+                .bindings()
+                .iter()
+                .flat_map(|group| match group {
+                    tidepool_repr::execution_schema::Group::NonRecursive(top) => {
+                        std::slice::from_ref(top)
+                    }
+                    tidepool_repr::execution_schema::Group::Recursive(tops) => tops.as_slice(),
+                })
+                .map(|top| {
+                    (
+                        top.binding.id,
+                        TopExport {
+                            identity: top.identity.clone(),
+                            rep: plan.value_reps[&top.binding.id],
+                            evaluated: !matches!(top.binding.rhs, HeapRhs::Thunk { .. }),
+                        },
+                    )
+                })
+                .collect(),
             import_slots: plan.import_slots,
             root_words: plan.root_words,
             interned_constructors: plan.interned_constructors,

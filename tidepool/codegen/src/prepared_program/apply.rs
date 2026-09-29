@@ -235,7 +235,7 @@ pub(super) fn declare_dispatchers(
     profile: &NativeAbiProfile,
     pipeline: &mut CodegenPipeline,
 ) -> Result<Dispatchers, super::CompileError> {
-    let result_instances = super::plan::result_instances(plan.program);
+    let result_instances = super::plan::result_instances(&plan.program);
     let mut workers = std::collections::BTreeSet::new();
     let mut metadata = std::collections::BTreeSet::new();
     for declaration in plan.program.operations() {
@@ -757,7 +757,7 @@ pub(super) fn emit_dispatchers(
     let blocks_before = pipeline.blocks_emitted();
     let mut exports = Vec::new();
     let mut owner_index = 0usize;
-    let result_instances = super::plan::result_instances(plan.program);
+    let result_instances = super::plan::result_instances(&plan.program);
     let enter_lifts = enter_serves_zero_argument_lift(profile)?;
     for (&id, function) in &plan.functions {
         let offers = owner_offers_at(function.signature, 0, &result_instances, enter_lifts)

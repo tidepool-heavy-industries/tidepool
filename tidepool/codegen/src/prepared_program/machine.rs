@@ -79,6 +79,9 @@ use tidepool_heap::static_region::StaticRegion;
 use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, SymbolIdentity, ValueId};
 use tidepool_repr::{DataConId, PrincipalId};
 
+mod batch;
+pub use batch::{BatchImport, BatchProgram};
+
 /// A compiled program and its custody. Deliberately !Send: code custody, its
 /// VM context, and every live heap root stay on the thread that enters
 /// generated code. A later resident owner may stow the whole machine under
@@ -681,7 +684,7 @@ impl Drop for TemporaryRoots<'_> {
 /// is deregistered here before the block can be freed.
 struct InstallTransaction<'a, 'code> {
     machine: &'a mut PreparedMachine<'code>,
-    block: (*mut u64, usize),
+    blocks: Vec<(*mut u64, usize)>,
     owners: Option<tidepool_heap::gc::raw::OwnersMark>,
     stack_maps: usize,
     committed: bool,
@@ -690,12 +693,14 @@ struct InstallTransaction<'a, 'code> {
 impl Drop for InstallTransaction<'_, '_> {
     fn drop(&mut self) {
         if !self.committed {
-            let (block, words) = self.block;
-            let roots: Vec<*mut *mut u8> = (0..words)
-                .map(|slot| {
-                    // SAFETY: the caller holds the candidate `CompiledProgram`
-                    // (and so its block) until this transaction has dropped.
-                    unsafe { block.add(slot) }.cast::<*mut u8>()
+            let roots: Vec<*mut *mut u8> = self
+                .blocks
+                .iter()
+                .flat_map(|&(block, words)| {
+                    (0..words).map(move |slot| {
+                        // SAFETY: candidate root blocks outlive this transaction.
+                        unsafe { block.add(slot) }.cast::<*mut u8>()
+                    })
                 })
                 .collect();
             self.machine.machine.deregister_persistent_roots(&roots);
@@ -978,7 +983,7 @@ impl<'code> PreparedMachine<'code> {
         let block = (roots.as_mut_ptr(), roots.len());
         let mut transaction = InstallTransaction {
             machine: self,
-            block,
+            blocks: vec![block],
             owners,
             stack_maps,
             committed: false,

@@ -1,8 +1,8 @@
 use super::Unsupported;
 use std::collections::BTreeMap;
 use tidepool_repr::execution_schema::{
-    ExprFrame, GlobalId, Group, HeapBinding, HeapRhs, LinkedProgram, OperationDecl,
-    PreparedProgram, ResultContract, RuntimeRep, Signature, ValueId,
+    DefinitionsView, ExprFrame, GlobalId, Group, HeapBinding, HeapRhs, LinkedProgram,
+    OperationDecl, PreparedProgram, ResultContract, RuntimeRep, Signature, ValueId,
 };
 
 /// Whether one validated operation declaration has an exact native lowering.
@@ -18,7 +18,7 @@ fn items<T>(group: &Group<T>) -> &[T] {
     }
 }
 
-fn expression_owners(program: &PreparedProgram) -> Vec<Option<ValueId>> {
+fn expression_owners(program: &DefinitionsView<'_>) -> Vec<Option<ValueId>> {
     let mut owners = vec![None; program.expressions().nodes.len()];
     let mut pending = Vec::new();
     for group in program.bindings() {
@@ -89,6 +89,10 @@ pub fn admit_program(linked: &LinkedProgram) -> Result<(), Unsupported> {
 /// were already proven by [`tidepool_repr::execution_schema::link_program`]
 /// before this program reached admission.
 pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
+    admit_definitions(&program.definitions())
+}
+
+pub(super) fn admit_definitions(program: &DefinitionsView<'_>) -> Result<(), Unsupported> {
     for (index, declaration) in program.globals().iter().enumerate() {
         if !matches!(
             declaration.rep,
@@ -166,7 +170,8 @@ pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
                             false
                         } else {
                             return Err(Unsupported::Operation {
-                                binding: owners[node].unwrap_or(program.entry()),
+                                binding: owners[node]
+                                    .unwrap_or_else(|| diagnostic_binding(program)),
                                 node,
                                 identity: declaration.identity.clone(),
                                 signature: signature.clone(),
@@ -209,12 +214,20 @@ pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
         };
         if rejected {
             return Err(Unsupported::Expression {
-                binding: owners[node].unwrap_or(program.entry()),
+                binding: owners[node].unwrap_or_else(|| diagnostic_binding(program)),
                 node,
             });
         }
     }
     Ok(())
+}
+
+fn diagnostic_binding(program: &DefinitionsView<'_>) -> ValueId {
+    let first = &program.bindings()[0];
+    match first {
+        Group::NonRecursive(top) => top.binding.id,
+        Group::Recursive(tops) => tops[0].binding.id,
+    }
 }
 
 #[cfg(test)]

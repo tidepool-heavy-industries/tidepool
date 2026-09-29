@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tidepool_heap::execution_descriptor::{EntryMetadata, ObjectDescriptor, ObjectKind};
 use tidepool_repr::execution_schema::{
-    AlternativePattern, Atom, CaseKind, ConstructorDecl, ExprFrame, Group, HeapBinding, HeapRhs,
-    PreparedProgram, ResultContract, RuntimeRep, ScalarLiteral, Signature, StorageLayout,
+    AlternativePattern, Atom, CaseKind, ConstructorDecl, DefinitionsView, ExprFrame, Group,
+    HeapBinding, HeapRhs, ResultContract, RuntimeRep, ScalarLiteral, Signature, StorageLayout,
     SymbolIdentity, ValueId, ValueRef,
 };
 
@@ -119,7 +119,7 @@ impl<'a> Callee<'a> {
 /// that map differently, so it is passed in). `None` for a non-reference
 /// atom (a literal, `Void`, `Rubbish`), which can never be applied.
 pub(super) fn callee<'a>(
-    program: &'a PreparedProgram,
+    program: &DefinitionsView<'a>,
     known: &dyn Fn(ValueId) -> Option<&'a Signature>,
     atom: &Atom,
 ) -> Option<Callee<'a>> {
@@ -141,7 +141,7 @@ pub(super) fn callee<'a>(
 
 /// Finite concrete results served by representation-polymorphic entries.
 /// Lifted results are always offered to independently compiled consumers.
-pub(super) fn result_instances(program: &PreparedProgram) -> BTreeSet<ResultContract> {
+pub(super) fn result_instances(program: &DefinitionsView<'_>) -> BTreeSet<ResultContract> {
     program
         .signatures()
         .iter()
@@ -154,7 +154,7 @@ pub(super) fn result_instances(program: &PreparedProgram) -> BTreeSet<ResultCont
 }
 
 pub(super) struct ProgramPlan<'a> {
-    pub program: &'a PreparedProgram,
+    pub program: DefinitionsView<'a>,
     pub value_reps: BTreeMap<ValueId, RuntimeRep>,
     pub functions: BTreeMap<ValueId, FunctionPlan<'a>>,
     pub thunks: BTreeMap<ValueId, ThunkPlan<'a>>,
@@ -199,7 +199,7 @@ impl<'a> ProgramPlan<'a> {
     /// Slots are block-local: every program owns its own root block, so no
     /// machine-wide base exists and two programs never share a slot range.
     pub fn new(
-        program: &'a PreparedProgram,
+        program: DefinitionsView<'a>,
         interner: &mut super::DescriptorInterner,
         existing_bytes: &Arc<PinnedBytes>,
     ) -> Result<Self, CompileError> {
@@ -219,7 +219,7 @@ impl<'a> ProgramPlan<'a> {
                 top_bindings.insert(top.binding.id, &top.binding);
                 let slot = top_slots.len();
                 top_slots.insert(top.binding.id, slot);
-                binding_rep(program, &top.binding, &mut values);
+                binding_rep(&program, &top.binding, &mut values);
                 collect_binding_literals(&top.binding, &mut bytes, existing_bytes);
             }
         }
@@ -279,7 +279,7 @@ impl<'a> ProgramPlan<'a> {
                 }
                 ExprFrame::Let { bindings, .. } => {
                     for binding in group_items(bindings) {
-                        binding_rep(program, binding, &mut values);
+                        binding_rep(&program, binding, &mut values);
                         collect_binding_literals(binding, &mut bytes, existing_bytes);
                     }
                 }
@@ -337,7 +337,7 @@ impl<'a> ProgramPlan<'a> {
                     let signature = signature(program, *signature_id);
                     let capture_reps = captures
                         .iter()
-                        .map(|capture| value_ref_rep(program, &values, capture))
+                        .map(|capture| value_ref_rep(&program, &values, capture))
                         .collect::<Result<Vec<_>, _>>()?;
                     let layout = StorageLayout::for_reps(target, &capture_reps)?;
                     let descriptor = Arc::new(ObjectDescriptor::new(
@@ -377,7 +377,7 @@ impl<'a> ProgramPlan<'a> {
                     }
                     let capture_reps = captures
                         .iter()
-                        .map(|capture| value_ref_rep(program, &values, capture))
+                        .map(|capture| value_ref_rep(&program, &values, capture))
                         .collect::<Result<Vec<_>, _>>()?;
                     let layout = StorageLayout::for_reps(target, &capture_reps)?;
                     let descriptor = Arc::new(ObjectDescriptor::new(
@@ -450,7 +450,7 @@ impl<'a> ProgramPlan<'a> {
                     .clone(),
                 HeapRhs::Function { captures, .. } | HeapRhs::Thunk { captures, .. } => captures
                     .iter()
-                    .map(|capture| value_ref_rep(program, &values, capture))
+                    .map(|capture| value_ref_rep(&program, &values, capture))
                     .collect::<Result<Vec<_>, _>>()?,
                 HeapRhs::Bytes(_) => Vec::new(),
             };
@@ -512,10 +512,18 @@ impl<'a> ProgramPlan<'a> {
 }
 
 impl<'a> ProgramPlan<'a> {
+    pub(super) fn diagnostic_binding(&self) -> ValueId {
+        *self
+            .top_bindings
+            .keys()
+            .next()
+            .expect("validated definitions have a top binding")
+    }
+
     /// [`callee`] against this plan's own function/thunk tables.
     pub(super) fn callee(&self, atom: &Atom) -> Option<Callee<'a>> {
         callee(
-            self.program,
+            &self.program,
             &|id| {
                 self.functions
                     .get(&id)
@@ -534,7 +542,7 @@ fn group_items<T>(group: &Group<T>) -> &[T] {
     }
 }
 
-fn all_bindings(program: &PreparedProgram) -> Vec<&HeapBinding> {
+fn all_bindings<'a>(program: DefinitionsView<'a>) -> Vec<&'a HeapBinding> {
     let mut bindings = Vec::new();
     for group in program.bindings() {
         bindings.extend(group_items(group).iter().map(|top| &top.binding));
@@ -550,15 +558,15 @@ fn all_bindings(program: &PreparedProgram) -> Vec<&HeapBinding> {
     bindings
 }
 
-fn signature(
-    program: &PreparedProgram,
+fn signature<'a>(
+    program: DefinitionsView<'a>,
     id: tidepool_repr::execution_schema::SignatureId,
-) -> &Signature {
+) -> &'a Signature {
     &program.signatures()[id.0 as usize]
 }
 
 fn binding_rep(
-    program: &PreparedProgram,
+    program: &DefinitionsView<'_>,
     binding: &HeapBinding,
     values: &mut BTreeMap<ValueId, RuntimeRep>,
 ) {
@@ -582,7 +590,7 @@ fn binding_rep(
 /// So this resolves through `program.globals()` (indexed by `GlobalId`,
 /// exactly as `import_slots` is later) rather than rejecting the reference.
 fn value_ref_rep(
-    program: &PreparedProgram,
+    program: &DefinitionsView<'_>,
     values: &BTreeMap<ValueId, RuntimeRep>,
     value: &ValueRef,
 ) -> Result<RuntimeRep, CompileError> {

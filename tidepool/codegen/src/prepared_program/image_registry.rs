@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 
-use tidepool_repr::execution_schema::{LinkedProgram, PreparedProgram};
+use tidepool_repr::execution_schema::{CertifiedGroup, LinkedProgram, PreparedProgram};
 
 use super::CompiledProgram;
 
@@ -41,8 +41,17 @@ pub struct ImageRegistry {
 
 #[derive(Default)]
 struct Entries {
-    images: HashMap<PreparedProgram, Entry>,
+    images: HashMap<ImageKey, Entry>,
     since_sweep: usize,
+}
+
+/// Distinct content domains share one weak registry and one flight protocol.
+/// A certified group key includes its exact home/version, original ordinal,
+/// neutral definitions and import owners; neither key includes live handles.
+#[derive(Clone, Eq, Hash, PartialEq)]
+enum ImageKey {
+    Program(PreparedProgram),
+    Group(CertifiedGroup),
 }
 
 enum Entry {
@@ -77,7 +86,7 @@ impl Flight {
 /// error or panic clears the candidate and wakes followers to retry.
 struct CompileLease<'a> {
     registry: &'a ImageRegistry,
-    key: PreparedProgram,
+    key: ImageKey,
     flight: Arc<Flight>,
     published: bool,
 }
@@ -153,14 +162,14 @@ impl ImageRegistry {
     /// An existing live image compiled for exactly `key`'s content and target.
     #[must_use]
     pub fn lookup(&self, key: &LinkedProgram) -> Option<Arc<CompiledProgram>> {
-        let key = key.prepared();
+        let key = ImageKey::Program(key.prepared().clone());
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        let found = match entries.images.get(key) {
+        let found = match entries.images.get(&key) {
             Some(Entry::Ready(image)) => image.upgrade(),
             _ => None,
         };
-        if matches!(entries.images.get(key), Some(Entry::Ready(_))) && found.is_none() {
-            entries.images.remove(key);
+        if matches!(entries.images.get(&key), Some(Entry::Ready(_))) && found.is_none() {
+            entries.images.remove(&key);
         }
         entries.tick();
         if found.is_some() {
@@ -176,7 +185,7 @@ impl ImageRegistry {
     /// point is for callers that cannot wait while holding machine checkout.
     #[must_use]
     pub fn insert(&self, key: LinkedProgram, image: Arc<CompiledProgram>) -> Arc<CompiledProgram> {
-        let key = key.prepared().clone();
+        let key = ImageKey::Program(key.prepared().clone());
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(existing) = match entries.images.get(&key) {
             Some(Entry::Ready(image)) => image.upgrade(),
@@ -205,17 +214,34 @@ impl ImageRegistry {
         key: &LinkedProgram,
         compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
     ) -> Result<Arc<CompiledProgram>, E> {
+        self.get_or_compile_key(ImageKey::Program(key.prepared().clone()), compile)
+    }
+
+    /// Share an exact worker-certified source group across concurrent native
+    /// demand. Failed or panicked compiles release their flight for retry.
+    pub fn get_or_compile_group<E>(
+        &self,
+        group: &CertifiedGroup,
+        compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
+    ) -> Result<Arc<CompiledProgram>, E> {
+        self.get_or_compile_key(ImageKey::Group(group.clone()), compile)
+    }
+
+    fn get_or_compile_key<E>(
+        &self,
+        key: ImageKey,
+        compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
+    ) -> Result<Arc<CompiledProgram>, E> {
         enum Admission {
             Ready(Arc<CompiledProgram>),
             Wait(Arc<Flight>),
             Compile(Arc<Flight>),
         }
-        let key = key.prepared();
         let mut compile = Some(compile);
         loop {
             let admission = {
                 let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-                let admission = match entries.images.get(key) {
+                let admission = match entries.images.get(&key) {
                     Some(Entry::Ready(image)) => image.upgrade().map(Admission::Ready),
                     Some(Entry::Compiling(flight)) => Some(Admission::Wait(Arc::clone(flight))),
                     None => None,
@@ -298,7 +324,7 @@ mod tests {
         loop {
             let admitted = {
                 let entries = registry.entries.lock().unwrap();
-                matches!(entries.images.get(key.prepared()), Some(Entry::Compiling(flight)) if Arc::strong_count(flight) >= 3)
+                matches!(entries.images.get(&ImageKey::Program(key.prepared().clone())), Some(Entry::Compiling(flight)) if Arc::strong_count(flight) >= 3)
             };
             if admitted {
                 return;
