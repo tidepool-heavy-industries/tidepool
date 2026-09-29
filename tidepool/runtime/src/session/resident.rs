@@ -215,7 +215,6 @@ impl HostCarrier {
             table: std::borrow::Cow::Borrowed(&self.table),
             sites: std::borrow::Cow::Borrowed(&[]),
             prepared: std::borrow::Cow::Borrowed(&self.prepared),
-            certification: std::borrow::Cow::Owned(Default::default()),
         }
     }
 
