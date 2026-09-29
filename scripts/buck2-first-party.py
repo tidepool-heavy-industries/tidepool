@@ -29,7 +29,7 @@ selected = set(options.package)
 unknown = selected - set(local)
 if unknown:
     raise SystemExit(f"unknown Cargo workspace package(s): {', '.join(sorted(unknown))}")
-SUPPORTED_PACKAGES = {"tidepool-atomic-write", "tidepool-repr"}
+SUPPORTED_PACKAGES = {"tidepool-atomic-write", "tidepool-repr", "tidepool-heap"}
 unsupported = selected - SUPPORTED_PACKAGES
 if unsupported:
     raise SystemExit(

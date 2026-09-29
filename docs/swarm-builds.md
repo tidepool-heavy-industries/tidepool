@@ -19,12 +19,16 @@ bash scripts/dev-shell.sh scripts/buck2-reindeer.sh
 Add `--check` to either command to verify generated inputs without retaining
 regenerated output.
 
-The initial native slice is `tidepool-atomic-write` and `tidepool-repr`:
+The accepted native slice is `tidepool-atomic-write`, `tidepool-repr`, and
+`tidepool-heap`:
 
 - `//bridge/atomic-write:tidepool_atomic_write_unit_tests`
 - `//bridge/atomic-write:strict_directory`
 - `//tidepool/repr:tidepool_repr_unit_tests`
 - `//tidepool/repr:repr`
+- `//tidepool/heap:tidepool_heap_unit_tests`
+- `//tidepool/heap:gc_unit`
+- `//tidepool/heap:raw_scan_validation`
 
 These are native Rust rules with crate/test sources and compile-time fixtures
 mapped to repository-relative paths through `rust_filegroup`. Fixture owners

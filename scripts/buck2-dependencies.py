@@ -12,7 +12,7 @@ parser.add_argument("--output-dir", type=Path, required=True)
 DEST = parser.parse_args().output_dir.resolve()
 DEST.mkdir(parents=True, exist_ok=True)
 # Expand only after native targets and feature/platform handling are accepted.
-ROOTS = {"tidepool-atomic-write", "tidepool-repr"}
+ROOTS = {"tidepool-atomic-write", "tidepool-repr", "tidepool-heap"}
 metadata = json.loads(subprocess.check_output([
     "cargo", "metadata", "--locked", "--filter-platform", "x86_64-unknown-linux-gnu",
     "--format-version", "1",

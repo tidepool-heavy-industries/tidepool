@@ -185,3 +185,13 @@ with a 104 GiB aggregate maximum. Root Git and user-systemd probes passed after
 the app-server permission repair; worker patch preparation did not require
 restarting daemons. Remaining engine, runtime, harness and Haskell migration
 gates above remain open.
+
+The subsequent native heap cohort passed 77 unit, 3 GC integration, and 20 raw
+scanner integration tests (100 total), retained in
+`target/completion-evidence/buck/heap-gate-r2.log`. The first run exposed a test
+race masked by Nextest process isolation: concurrent libtest cases changed one
+process-global scanner override. Its test guard now holds a mutex and clears
+the override before releasing it, including expected panic unwinding. Production
+scanner semantics and parallelism of unrelated tests are unchanged. Heap adds no
+new third-party dependency closure or external runtime fixture. These checks do
+not establish Haskell, codegen, harness, or remote-cache migration acceptance.
