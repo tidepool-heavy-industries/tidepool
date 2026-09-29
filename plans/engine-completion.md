@@ -162,3 +162,41 @@ acceptance and a default-backend cutover remain separate.
 ## Implementation record
 
 - Baseline scaffold: contracts recorded; implementation and gates pending.
+
+## Implementation checkpoint, 2026-09-29
+
+Integration revision before this record: `8e705d8d0`.
+
+- `9bcbd7ef4`: request reservation rollback uses the creating workbench or route
+  identity. Two focused actor regressions executed and passed; actor library
+  consumers compiled. Evidence:
+  `/srv/swarm/checkouts/tidepool-completion-runtime/target/completion-evidence/request-reservations.log`.
+  The transitional active operation field remains sequential; moving it into
+  execution state and exact continuation cleanup are still required for M2.
+- `c5bfb9e8b` and `0bcf1a97c`: per-run backend selection and durable exclusive
+  publication through the atomic-write owner. The atomic publication race,
+  competing backend initialization, immutable resume selection and host failure
+  diagnostic tests all executed and passed (four tests across focused commands).
+  The facade binary compiled. This is bootstrap infrastructure, not production
+  embedded Engine acceptance. Evidence is under
+  `/srv/swarm/checkouts/tidepool-completion-harness/target/completion-evidence/`.
+- `8e705d8d0`: one Git admission implementation replaces clone-wide exclusion;
+  compatible reads and unrelated backings may proceed concurrently. Commands
+  and transactions both revalidate identities after acquiring admission.
+  Independent review found and verified repair of the post-wait identity gap.
+  Fifteen admission tests and twelve other library tests executed and passed.
+  Commands used the pinned dev shell and `cargo nextest run -p exomonad-worktree
+  --lib`, with filters `test(git::admission_tests::)` and its negation.
+  Exit status was zero for both. Logs:
+  `/srv/swarm/checkouts/tidepool-completion-git/target/completion-evidence/git-admission-revalidated.log`
+  and `git-other-unit.log`. Launcher and joined integration gates remain open.
+
+After this checkpoint the session sandbox changed: existing sibling worktrees
+and original Git metadata became read-only. The originals and all evidence are
+retained. Independent source checkouts were created in `/tmp/tidepool-engine-*`
+from exact recorded revisions; WIP transfers preserve only source diffs, not
+build caches or credentials. The declared dev-shell probe in scratch failed
+with `cannot connect to socket at '/nix/var/nix/daemon-socket/socket': Operation
+not permitted`. New source changes require verification once the declared
+build environment is available. Existing passing evidence does not cover them.
+Push hold and live G5 approval gate remain unchanged.
