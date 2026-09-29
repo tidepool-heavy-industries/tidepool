@@ -12,8 +12,8 @@ use std::sync::Arc;
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BindingTipId, SourceLeaseKey};
 use tidepool_codegen::machine::{CancelHandle, MachineDisposition};
 use tidepool_codegen::prepared_program::{
-    DemandedImage, InheritedSourceDemand, PreparedHandle, ProgramId, ResidencyCounts,
-    SourceBinder, SourceInstanceLease,
+    DemandedImage, ImageRegistry, InheritedSourceDemand, PendingGroupInventory, PreparedHandle,
+    ProgramId, ResidencyCounts, SourceBinder, SourceGroupOutline, SourceInstanceLease,
 };
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
 use tidepool_codegen::suspension::{ContinuationId, RealmId};
@@ -21,12 +21,16 @@ use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::{DataCon, DataConTable, Generation, SessionModule, SessionVarId, VarId};
 
 use tidepool_codegen::binding_table::BoundValue;
-use tidepool_repr::execution_schema::{CachedHomeOwner, ImportOwner, PreparedProgram, SymbolIdentity};
+use tidepool_repr::execution_schema::{
+    CachedHomeOwner, CertifiedGroup, GlobalDecl, ImportOwner, PreparedProgram, SymbolIdentity,
+};
+use tidepool_toolchain::certified_products::PendingImportOwner;
 
 use super::binding_table::{BindRecord, BindingIndex};
 use super::prepared::{
     CertifiedTargetImage, InstallSnapshot, PreparedEngine, PreparedRuntimeError,
 };
+use super::turn::TurnCertification;
 use super::{
     DeclarationCandidateRender, ExactExportError, ExactExportSurface, SessionCompileView,
     SessionError, SessionLib, SourceImports,
@@ -41,6 +45,16 @@ use super::{
 /// import specs its render pulls in, and the live-value environment (var id,
 /// module name) a later adopt must still match.
 type DeclarationStagingContext = (SourceImports, Vec<String>, Vec<(SessionVarId, String)>);
+
+/// Exact compiler owners after retained names have been resolved through one
+/// live lexical scope. Native installation rechecks the handles under the
+/// final checkout; this record carries no permission to publish a binding.
+pub(crate) struct ResolvedCertifiedTurn {
+    pub groups: Vec<CertifiedGroup>,
+    pub target_owners: Vec<ImportOwner>,
+    pub source_evidence: BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
+    pub inherited_needed: Vec<InheritedSourceDemand>,
+}
 
 fn value_import_specs(entries: impl IntoIterator<Item = (String, SessionModule)>) -> Vec<String> {
     let mut grouped = Vec::<(SessionModule, Vec<String>)>::new();
@@ -252,6 +266,182 @@ impl PersistentSession {
             .register_source_instances_in(&self.scopes, scope, tokens)
     }
 
+    /// Resolve the worker's retained imports against the exact inherited
+    /// lexical view, before native compilation. The worker never supplies a
+    /// `SessionVarId`; spelling or the globally newest binding cannot choose
+    /// a mutable value owned by another scope.
+    pub(crate) fn resolve_certification_in(
+        &self,
+        scope: ScopeId,
+        prepared: &PreparedProgram,
+        certification: &TurnCertification,
+    ) -> Result<ResolvedCertifiedTurn, PreparedRuntimeError> {
+        if !self.scopes.is_live(scope) {
+            return Err(PreparedRuntimeError::SourceScopeAdmission);
+        }
+        let mut source_evidence = BTreeMap::new();
+        let mut resolve = |globals: &[GlobalDecl], pending: &[PendingImportOwner]| {
+            if globals.len() != pending.len() {
+                return Err(PreparedRuntimeError::CertifiedTargetOwners);
+            }
+            globals
+                .iter()
+                .zip(pending)
+                .map(|(global, owner)| {
+                    if let PendingImportOwner::Source {
+                        owner,
+                        original_ordinal,
+                        binder,
+                    } = owner
+                    {
+                        if binder != &global.identity {
+                            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                        }
+                        let source = SourceBinder {
+                            version: owner.module_version.clone(),
+                            binder: binder.clone(),
+                        };
+                        let exact = (owner.clone(), *original_ordinal);
+                        if source_evidence
+                            .insert(source.clone(), exact.clone())
+                            .is_some_and(|prior| prior != exact)
+                        {
+                            return Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(source));
+                        }
+                        return Ok(ImportOwner::Source {
+                            version: owner.module_version.clone(),
+                            binder: binder.clone(),
+                        });
+                    }
+                    if let PendingImportOwner::Retained {
+                        identity,
+                        generation,
+                    } = owner
+                    {
+                        if identity != &global.identity
+                            || global.required_generation != Some(*generation)
+                        {
+                            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                        }
+                        let entry = self
+                            .bindings
+                            .resolve_exact_prepared_in(&self.scopes, scope, identity, *generation)
+                            .ok_or_else(|| PreparedRuntimeError::MissingRetainedCertifiedOwner {
+                                identity: identity.clone(),
+                                generation: *generation,
+                            })?;
+                        return Ok(ImportOwner::Retained {
+                            id: entry.id,
+                            generation: *generation,
+                        });
+                    }
+                    let PendingImportOwner::Package {
+                        unit,
+                        module,
+                        binder,
+                        interface_digest,
+                    } = owner
+                    else {
+                        unreachable!("all pending owner variants handled")
+                    };
+                    if binder != &global.identity {
+                        return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                    }
+                    Ok(ImportOwner::Package {
+                        unit: unit.clone(),
+                        module: module.clone(),
+                        binder: binder.clone(),
+                        interface_digest: *interface_digest,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        };
+        let target_owners = resolve(prepared.globals(), &certification.target_owners)?;
+        let outlines = certification
+            .groups
+            .iter()
+            .map(|pending| {
+                if pending.group().globals().len() != pending.imports().len() {
+                    return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                }
+                let source_imports = pending
+                    .group()
+                    .globals()
+                    .iter()
+                    .zip(pending.imports())
+                    .filter_map(|(global, owner)| match owner {
+                        PendingImportOwner::Source { owner, binder, .. } => {
+                            Some(if binder == &global.identity {
+                                Ok(SourceBinder {
+                                    version: owner.module_version.clone(),
+                                    binder: binder.clone(),
+                                })
+                            } else {
+                                Err(PreparedRuntimeError::CertifiedTargetOwners)
+                            })
+                        }
+                        PendingImportOwner::Retained { .. }
+                        | PendingImportOwner::Package { .. } => None,
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(SourceGroupOutline::from_projected(
+                    pending.owner().clone(),
+                    pending.group(),
+                    source_imports,
+                )?)
+            })
+            .collect::<Result<Vec<_>, PreparedRuntimeError>>()?;
+        let mut inherited = BTreeMap::<SourceBinder, SourceInstanceLease>::new();
+        let mut anchors = HashMap::<(CachedHomeOwner, u32), SourceInstanceLease>::new();
+        for lease in self.bindings.source_instances_in(&self.scopes, scope) {
+            let group = (lease.owner().clone(), lease.original_ordinal());
+            if anchors
+                .insert(group.clone(), lease.clone())
+                .is_some_and(|previous| previous.instance() != lease.instance())
+            {
+                return Err(PreparedRuntimeError::AmbiguousSourceGroup {
+                    owner: group.0,
+                    ordinal: group.1,
+                });
+            }
+            let binder = lease.binder().clone();
+            if inherited
+                .insert(binder.clone(), lease.clone())
+                .is_some_and(|previous| {
+                    previous.instance() != lease.instance() || previous.handle() != lease.handle()
+                })
+            {
+                return Err(PreparedRuntimeError::AmbiguousSourceInstance(binder));
+            }
+        }
+        let roots = target_owners.iter().filter_map(|owner| match owner {
+            ImportOwner::Source { version, binder } => Some(SourceBinder {
+                version: version.clone(),
+                binder: binder.clone(),
+            }),
+            ImportOwner::Retained { .. } | ImportOwner::Package { .. } => None,
+        });
+        let selected = PendingGroupInventory::new(outlines)?
+            .seal_with_inherited(roots, &inherited, &anchors)?;
+        let (indices, inherited_needed) = selected.into_parts();
+        let mut groups = Vec::with_capacity(indices.len());
+        for index in indices {
+            let pending = &certification.groups[index];
+            let imports = resolve(pending.group().globals(), pending.imports())?;
+            groups.push(CertifiedGroup::admit(
+                pending.owner().clone(),
+                pending.group().clone(),
+                imports,
+            )?);
+        }
+        Ok(ResolvedCertifiedTurn {
+            groups,
+            target_owners,
+            source_evidence,
+            inherited_needed,
+        })
+    }
+
     /// Install a certified target against this exact lexical view and place
     /// every newly materialized source root under its scope before returning
     /// the executable target. The machine batch is unpublished until the
@@ -262,10 +452,9 @@ impl PersistentSession {
         target: CertifiedTargetImage,
         target_owners: &[ImportOwner],
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-        demanded: Vec<DemandedImage<'_>>,
-        inherited_needed: &[InheritedSourceDemand<'_>],
-        package_external: &HashMap<ImportOwner, PreparedHandle>,
-    ) -> Result<(ProgramId, bool), PreparedRuntimeError> {
+        demanded: Vec<DemandedImage>,
+        inherited_needed: &[InheritedSourceDemand],
+    ) -> Result<(ProgramId, Vec<SourceLeaseKey>), PreparedRuntimeError> {
         if !self.scopes.is_live(scope) {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
         }
@@ -292,11 +481,7 @@ impl PersistentSession {
                 return Err(PreparedRuntimeError::AmbiguousSourceInstance(binder));
             }
         }
-        let mut exact_external = package_external
-            .iter()
-            .filter(|(owner, _)| matches!(owner, ImportOwner::Package { .. }))
-            .map(|(owner, handle)| (owner.clone(), *handle))
-            .collect::<HashMap<_, _>>();
+        let mut exact_external = HashMap::new();
         for (globals, owners) in std::iter::once((target.globals(), target_owners)).chain(
             demanded.iter().map(|selected| {
                 (
@@ -320,10 +505,18 @@ impl PersistentSession {
                 exact_external.insert(owner.clone(), entry.value.handle);
             }
         }
-        let engine = self
-            .machine
+        let mut bootstrap = if self.machine.is_none() {
+            Some(PreparedEngine::empty_certified(
+                self.nursery_size,
+                self.image_registry.clone(),
+            )?)
+        } else {
+            None
+        };
+        let engine = bootstrap
             .as_mut()
-            .ok_or(PreparedRuntimeError::MachineNotInstalled)?;
+            .or(self.machine.as_mut())
+            .expect("certified machine exists or was constructed");
         let mut staged = engine.install_certified_turn(
             target,
             target_owners,
@@ -337,22 +530,39 @@ impl PersistentSession {
         let tokens = std::mem::take(&mut staged.leases);
         match self.register_source_instances_in(scope, tokens) {
             Ok(keys) => {
-                let engine = self
-                    .machine
+                let engine = bootstrap
                     .as_mut()
+                    .or(self.machine.as_mut())
                     .expect("certified machine remains installed");
                 let target = engine.commit_certified_turn(staged);
-                Ok((target, !keys.is_empty()))
+                if let Some(engine) = bootstrap {
+                    self.machine = Some(engine);
+                }
+                Ok((target, keys))
             }
             Err(tokens) => {
-                let engine = self
-                    .machine
+                let engine = bootstrap
                     .as_mut()
+                    .or(self.machine.as_mut())
                     .expect("certified machine remains installed");
                 engine.abort_certified_turn(staged, tokens)?;
                 Err(PreparedRuntimeError::SourceScopeAdmission)
             }
         }
+    }
+
+    /// Release only the source roots first introduced by a failed turn.
+    /// Captured tips retain independent shares until their final owner drains.
+    pub(crate) fn retire_failed_turn_source_instances(
+        &mut self,
+        scope: ScopeId,
+        keys: &[SourceLeaseKey],
+    ) -> bool {
+        let Some(released) = self.bindings.retire_source_instances_in(scope, keys) else {
+            return false;
+        };
+        self.release_source_instance_roots(released);
+        true
     }
 
     /// Keep eight automatic observations per scope. Explicit persistent code
@@ -494,6 +704,17 @@ impl PersistentSession {
             engine.set_image_registry(Arc::clone(&registry));
         }
         self.image_registry = Some(registry);
+    }
+
+    /// One shared immutable-code cache for this session's certified turns,
+    /// including the first turn before its machine exists.
+    pub(crate) fn certified_image_registry(&mut self) -> Arc<ImageRegistry> {
+        if let Some(registry) = &self.image_registry {
+            return Arc::clone(registry);
+        }
+        let registry = Arc::new(ImageRegistry::new());
+        self.set_image_registry(Arc::clone(&registry));
+        registry
     }
 
     /// The prepared engine, once the first prepared turn has installed it.

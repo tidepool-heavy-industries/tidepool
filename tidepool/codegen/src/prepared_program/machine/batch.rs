@@ -1,8 +1,8 @@
 //! Atomic installation of mutually importing native group images.
 
-use super::super::{DemandedImage, SourceBinder, SourceInstanceLease};
+use super::super::{DemandedImage, InheritedSourceDemand, SourceBinder, SourceInstanceLease};
 use super::*;
-use tidepool_repr::execution_schema::{CachedHomeOwner, CertifiedGroup, Signature};
+use tidepool_repr::execution_schema::{CachedHomeOwner, Signature};
 
 /// One import slot's already admitted owner. `Source` selects a top in this
 /// sealed batch; it never accepts a spelling-only match.
@@ -40,7 +40,7 @@ impl BatchLeaseRequest {
     /// custody before any machine mutation.
     pub fn for_demanded(
         group: usize,
-        demanded: &DemandedImage<'_>,
+        demanded: &DemandedImage,
         binder: &SourceBinder,
     ) -> Result<Self, ExecutionError> {
         let source = demanded.group();
@@ -93,39 +93,25 @@ impl PreparedMachine<'_> {
     /// shared; this creates one new scoped handle without reinstalling code.
     pub fn retain_certified_source_top(
         &mut self,
-        anchor: &SourceInstanceLease,
-        group: &CertifiedGroup,
-        binder: &SourceBinder,
+        requested: &InheritedSourceDemand,
     ) -> Result<SourceInstanceLease, ExecutionError> {
+        let anchor = requested.anchor();
+        let binder = requested.binder();
         let mismatch = || ExecutionError::BatchSourceContract(Box::new(binder.binder.clone()));
-        if anchor.owner() != group.owner()
-            || anchor.original_ordinal() != group.original_ordinal()
-            || binder.version != group.owner().module_version
-            || !group.binders().contains(&binder.binder)
-            || !group.binders().contains(&anchor.binder().binder)
+        if anchor.owner() != requested.owner()
+            || anchor.original_ordinal() != requested.original_ordinal()
+            || binder.version != requested.owner().module_version
         {
             return Err(mismatch());
         }
-        let value = group
-            .definitions()
-            .bindings()
-            .iter()
-            .flat_map(|item| match item {
-                tidepool_repr::execution_schema::Group::NonRecursive(top) => {
-                    std::slice::from_ref(top)
-                }
-                tidepool_repr::execution_schema::Group::Recursive(tops) => tops.as_slice(),
-            })
-            .find(|top| top.identity == binder.binder)
-            .map(|top| top.binding.id)
-            .ok_or_else(|| mismatch())?;
+        let value = requested.value();
         let installed = self
             .programs
             .get(&anchor.instance().program())
             .ok_or(ExecutionError::UnknownProgram(anchor.instance().program()))?;
         let image = installed.program.get();
         if image.certified_source.as_ref()
-            != Some(&(group.owner().clone(), group.original_ordinal()))
+            != Some(&(requested.owner().clone(), requested.original_ordinal()))
             || image
                 .top_exports
                 .get(&anchor.value())
@@ -140,8 +126,8 @@ impl PreparedMachine<'_> {
         let handle = self.retain_top(anchor.instance().program(), value)?;
         Ok(SourceInstanceLease::new(
             anchor.instance(),
-            group.owner().clone(),
-            group.original_ordinal(),
+            requested.owner().clone(),
+            requested.original_ordinal(),
             binder.clone(),
             value,
             handle,

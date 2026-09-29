@@ -1322,6 +1322,12 @@ pub struct ResidentActorRunner<H, O> {
     access: ResidentMachineAccess<H, O>,
 }
 
+pub(crate) struct ExecutionPrivateScope {
+    pub public_scope: tidepool_codegen::scope::ScopeId,
+    pub private_scope: tidepool_codegen::scope::ScopeId,
+    pub admitted_public: tidepool_runtime::session::PublicVisibilitySnapshot,
+}
+
 impl<H, O> Clone for ResidentActorRunner<H, O> {
     fn clone(&self) -> Self {
         Self {
@@ -5478,6 +5484,7 @@ fn cloned_turn_code(turn: &CompiledTurn) -> TurnCode<'static> {
         table: std::borrow::Cow::Owned(turn.table.clone()),
         sites: std::borrow::Cow::Owned(turn.asks.clone()),
         prepared: std::borrow::Cow::Owned(turn.prepared.clone()),
+        certification: std::borrow::Cow::Owned(turn.certification.clone()),
     }
 }
 
@@ -5633,9 +5640,7 @@ where
             .await
             .map_err(ResidentActorWorkbenchError::Join)?;
         let compiled_program = compiled_program.map_err(|error| {
-            ResidentActorWorkbenchError::Resident(ResidentError::Prepared(
-                PreparedRuntimeError::Compile(error),
-            ))
+            ResidentActorWorkbenchError::Resident(ResidentError::Prepared(error))
         })?;
 
         let finish_bound = bound.clone();
@@ -6356,6 +6361,54 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    /// Admit one cell's independent lexical write domain and its exact public
+    /// baseline in the same machine checkout. Every resumed item keeps this
+    /// private scope; publication later compares the captured public view.
+    pub(crate) async fn begin_private_execution(
+        &self,
+        context: crate::ActorSessionContext,
+    ) -> Result<ExecutionPrivateScope, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, |session, context, _| {
+                let public_scope = context.placement.lexical_scope;
+                let admitted_public = session
+                    .public_visibility_snapshot_in(public_scope)
+                    .ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "workbench public lexical scope is unavailable".into(),
+                        )
+                    })?;
+                let private_scope = session.mint_detached_scope(public_scope).ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "workbench public lexical scope was retired".into(),
+                    )
+                })?;
+                Ok(ExecutionPrivateScope {
+                    public_scope,
+                    private_scope,
+                    admitted_public,
+                })
+            })
+            .await
+    }
+
+    /// Drain an execution's exact private lexical owner after failure,
+    /// cancellation, or a completed publication. Detached scope retirement
+    /// releases its binding and source-instance shares even if the actor that
+    /// started the execution can no longer run a normal finalizer.
+    pub(crate) async fn retire_private_execution(
+        &self,
+        context: crate::ActorSessionContext,
+        private_scope: tidepool_codegen::scope::ScopeId,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                session.retire_scope(private_scope);
+                Ok(())
+            })
+            .await
+    }
+
     pub(crate) async fn public_visibility_snapshot(
         &self,
         context: crate::ActorSessionContext,

@@ -215,6 +215,7 @@ impl HostCarrier {
             table: std::borrow::Cow::Borrowed(&self.table),
             sites: std::borrow::Cow::Borrowed(&[]),
             prepared: std::borrow::Cow::Borrowed(&self.prepared),
+            certification: std::borrow::Cow::Owned(None),
         }
     }
 
@@ -932,7 +933,7 @@ impl PendingPreparedMode {
 /// [`Self::compile_off_checkout`] then
 /// [`ResidentSession::revalidate_and_run_prepared`].
 pub struct PendingPreparedInstall {
-    snapshot: super::prepared::InstallSnapshot,
+    snapshot: PendingPreparedSource,
     mode: PendingPreparedMode,
     argument: Option<PreparedHandle>,
     provenance: Arc<ProgramProvenance>,
@@ -941,17 +942,62 @@ pub struct PendingPreparedInstall {
     park: ParkPolicy,
 }
 
+enum PendingPreparedSource {
+    Legacy(super::prepared::InstallSnapshot),
+    Certified {
+        prepared: PreparedProgram,
+        resolved: super::persistent::ResolvedCertifiedTurn,
+        registry: Arc<ImageRegistry>,
+        admitted_public: super::PublicVisibilitySnapshot,
+    },
+}
+
+/// Native code compiled for one pending install without holding the session
+/// checkout. Its exact source owner rows stay paired with the pending scope
+/// snapshot until final revalidation.
+pub struct CompiledPreparedInstall {
+    kind: CompiledPreparedKind,
+}
+
+enum CompiledPreparedKind {
+    Legacy(Arc<tidepool_codegen::prepared_program::CompiledProgram>),
+    Certified {
+        target: super::prepared::CertifiedTargetImage,
+        demanded: Vec<DemandedImage>,
+    },
+}
+
 impl PendingPreparedInstall {
     /// Step (b): compile this pending install's linked program off any
     /// checkout. No machine access; safe to run on a blocking thread while
     /// other turns hold the checkout this snapshot was taken under.
     pub fn compile_off_checkout(
         &mut self,
-    ) -> Result<
-        std::sync::Arc<tidepool_codegen::prepared_program::CompiledProgram>,
-        tidepool_codegen::prepared_program::CompileError,
-    > {
-        super::prepared::PreparedEngine::compile_off_checkout(&mut self.snapshot)
+    ) -> Result<CompiledPreparedInstall, PreparedRuntimeError> {
+        let kind = match &mut self.snapshot {
+            PendingPreparedSource::Legacy(snapshot) => CompiledPreparedKind::Legacy(
+                super::prepared::PreparedEngine::compile_off_checkout(snapshot)
+                    .map_err(PreparedRuntimeError::Compile)?,
+            ),
+            PendingPreparedSource::Certified {
+                prepared,
+                resolved,
+                registry,
+                ..
+            } => {
+                let target =
+                    super::prepared::CertifiedTargetImage::compile(prepared.clone(), registry)
+                        .map_err(PreparedRuntimeError::Compile)?;
+                let demanded = resolved
+                    .groups
+                    .iter()
+                    .cloned()
+                    .map(|group| DemandedImage::compile(group, registry))
+                    .collect::<Result<Vec<_>, _>>()?;
+                CompiledPreparedKind::Certified { target, demanded }
+            }
+        };
+        Ok(CompiledPreparedInstall { kind })
     }
 }
 
@@ -1892,23 +1938,41 @@ where
         target: super::prepared::CertifiedTargetImage,
         target_owners: &[ImportOwner],
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-        demanded: Vec<DemandedImage<'_>>,
-        inherited_needed: &[InheritedSourceDemand<'_>],
-        package_external: &HashMap<ImportOwner, PreparedHandle>,
-    ) -> Result<ProgramId, PreparedRuntimeError> {
-        let (program, source_visible) = self.state.install_certified_turn_in(
+        demanded: Vec<DemandedImage>,
+        inherited_needed: &[InheritedSourceDemand],
+    ) -> Result<
+        (
+            ProgramId,
+            Vec<tidepool_codegen::binding_table::SourceLeaseKey>,
+        ),
+        PreparedRuntimeError,
+    > {
+        let (program, source_keys) = self.state.install_certified_turn_in(
             scope,
             target,
             target_owners,
             source_evidence,
             demanded,
             inherited_needed,
-            package_external,
         )?;
-        if source_visible {
+        if !source_keys.is_empty() {
             self.advance_public_visibility(scope);
         }
-        Ok(program)
+        Ok((program, source_keys))
+    }
+
+    fn retire_failed_turn_source_instances(
+        &mut self,
+        scope: ScopeId,
+        keys: &[tidepool_codegen::binding_table::SourceLeaseKey],
+    ) {
+        if !keys.is_empty() {
+            assert!(
+                self.state.retire_failed_turn_source_instances(scope, keys),
+                "failed turn retains its exact newly registered source roots"
+            );
+            self.advance_public_visibility(scope);
+        }
     }
 
     /// Observe only the continuation events caused by this checkout's host
@@ -3733,7 +3797,7 @@ where
         mode: PreparedTurnMode<'_>,
         argument: Option<PreparedHandle>,
     ) -> Result<ResidentOutcome, ResidentError> {
-        let prepared = code.prepared;
+        let prepared = code.prepared.into_owned();
         let provenance = self.provenance_for(&code.sites)?;
         self.state
             .merge_table(&code.table)
@@ -3744,8 +3808,32 @@ where
             // Claim the value-module identity before the turn runs.
             self.state.set_val_gen(*generation);
         }
+        let lexical_scope = self.run_context.lexical_scope;
         let install_prepared_started = std::time::Instant::now();
-        let program = self.state.install_prepared(prepared.into_owned())?;
+        let (program, source_keys) = if let Some(certification) = code.certification.as_ref() {
+            let resolved =
+                self.state
+                    .resolve_certification_in(lexical_scope, &prepared, certification)?;
+            let registry = self.state.certified_image_registry();
+            let target = super::prepared::CertifiedTargetImage::compile(prepared, &registry)
+                .map_err(PreparedRuntimeError::Compile)?;
+            let demanded = resolved
+                .groups
+                .into_iter()
+                .map(|group| DemandedImage::compile(group, &registry))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(PreparedRuntimeError::from)?;
+            self.install_certified_turn_in(
+                lexical_scope,
+                target,
+                &resolved.target_owners,
+                &resolved.source_evidence,
+                demanded,
+                &resolved.inherited_needed,
+            )?
+        } else {
+            (self.state.install_prepared(prepared)?, Vec::new())
+        };
         timing::record_stage(
             timing::NO_NODE,
             timing::NO_ROUND,
@@ -3754,7 +3842,6 @@ where
             0,
         );
         let realm = self.run_context.resource_scope;
-        let lexical_scope = self.run_context.lexical_scope;
         let plan = settle_plan_of(&mode);
         let park = ParkPolicy {
             principal: self.run_context.principal,
@@ -3782,7 +3869,18 @@ where
         if let Some(engine) = self.state.prepared_mut() {
             engine.unpin(program);
         }
-        self.complete_prepared(ran??, mode, program, lexical_scope, provenance, None)
+        let run = match ran {
+            Ok(Ok(run)) => run,
+            Ok(Err(error)) => {
+                self.retire_failed_turn_source_instances(lexical_scope, &source_keys);
+                return Err(error.into());
+            }
+            Err(error) => {
+                self.retire_failed_turn_source_instances(lexical_scope, &source_keys);
+                return Err(error);
+            }
+        };
+        self.complete_prepared(run, mode, program, lexical_scope, provenance, None)
     }
 
     /// Whether this session already has a resident machine to snapshot an
@@ -3817,7 +3915,7 @@ where
         mode: PendingPreparedMode,
         argument: Option<PreparedHandle>,
     ) -> Result<PendingPreparedInstall, ResidentError> {
-        let prepared = code.prepared;
+        let prepared = code.prepared.into_owned();
         let provenance = self.provenance_for(&code.sites)?;
         self.state
             .merge_table(&code.table)
@@ -3830,12 +3928,28 @@ where
         // this typed refusal (rather than a panic) is the fallback if that
         // contract is not honored, since `PreparedRuntimeError` already has
         // a variant for exactly this precondition.
-        let snapshot = self
-            .state
-            .snapshot_install_prepared(prepared.into_owned())?
-            .ok_or(PreparedRuntimeError::MachineNotInstalled)?;
-        let realm = self.run_context.resource_scope;
         let lexical_scope = self.run_context.lexical_scope;
+        let snapshot = if let Some(certification) = code.certification.as_ref() {
+            let admitted_public = self
+                .public_visibility_snapshot_in(lexical_scope)
+                .ok_or(PreparedRuntimeError::SourceScopeAdmission)?;
+            let resolved =
+                self.state
+                    .resolve_certification_in(lexical_scope, &prepared, certification)?;
+            PendingPreparedSource::Certified {
+                prepared,
+                resolved,
+                registry: self.state.certified_image_registry(),
+                admitted_public,
+            }
+        } else {
+            PendingPreparedSource::Legacy(
+                self.state
+                    .snapshot_install_prepared(prepared)?
+                    .ok_or(PreparedRuntimeError::MachineNotInstalled)?,
+            )
+        };
+        let realm = self.run_context.resource_scope;
         let park = ParkPolicy {
             principal: self.run_context.principal,
             effect_policy: self.state.effect_policy(),
@@ -3863,7 +3977,7 @@ where
     pub fn revalidate_and_run_prepared(
         &mut self,
         pending: PendingPreparedInstall,
-        compiled: std::sync::Arc<tidepool_codegen::prepared_program::CompiledProgram>,
+        compiled: CompiledPreparedInstall,
     ) -> Result<Option<ResidentOutcome>, ResidentError> {
         let PendingPreparedInstall {
             snapshot,
@@ -3875,12 +3989,43 @@ where
             park,
         } = pending;
         let install_started = std::time::Instant::now();
-        let program = match self
-            .state
-            .revalidate_and_install_prepared(snapshot, compiled)?
-        {
-            Some(program) => program,
-            None => return Ok(None),
+        let (program, source_keys) = match (snapshot, compiled.kind) {
+            (PendingPreparedSource::Legacy(snapshot), CompiledPreparedKind::Legacy(compiled)) => {
+                match self
+                    .state
+                    .revalidate_and_install_prepared(snapshot, compiled)?
+                {
+                    Some(program) => (program, Vec::new()),
+                    None => return Ok(None),
+                }
+            }
+            (
+                PendingPreparedSource::Certified {
+                    resolved,
+                    admitted_public,
+                    ..
+                },
+                CompiledPreparedKind::Certified { target, demanded },
+            ) => {
+                if self.public_visibility_snapshot_in(lexical_scope).as_ref()
+                    != Some(&admitted_public)
+                {
+                    return Ok(None);
+                }
+                self.install_certified_turn_in(
+                    lexical_scope,
+                    target,
+                    &resolved.target_owners,
+                    &resolved.source_evidence,
+                    demanded,
+                    &resolved.inherited_needed,
+                )?
+            }
+            _ => {
+                return Err(ResidentError::Prepared(
+                    PreparedRuntimeError::CertifiedTargetOwners,
+                ));
+            }
         };
         timing::record_stage(
             timing::NO_NODE,
@@ -3907,8 +4052,19 @@ where
         if let Some(engine) = self.state.prepared_mut() {
             engine.unpin(program);
         }
+        let run = match ran {
+            Ok(Ok(run)) => run,
+            Ok(Err(error)) => {
+                self.retire_failed_turn_source_instances(lexical_scope, &source_keys);
+                return Err(error.into());
+            }
+            Err(error) => {
+                self.retire_failed_turn_source_instances(lexical_scope, &source_keys);
+                return Err(error);
+            }
+        };
         Ok(Some(self.complete_prepared(
-            ran??,
+            run,
             mode.as_mode(),
             program,
             lexical_scope,
