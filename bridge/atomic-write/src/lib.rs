@@ -1,14 +1,17 @@
 //! Same-directory atomic publication, with replacement and exclusive creation.
 //!
 //! [`write_durable`] syncs the file and containing directory and reports every
-//! failure. An error after rename can leave the new contents visible: callers
-//! must treat the result as uncertain, not proof that publication did not occur.
+//! failure; its legacy error type cannot distinguish a post-rename sync error.
+//! Use [`stage_durable`] when publication is a commit point: its staged handle
+//! separates preparation from rename, and [`PublishError`] distinguishes an
+//! unpublished failure from a visible publication whose durability is unconfirmed.
 //! [`write_best_effort`] preserves atomic replacement without requiring storage sync.
 //! Neither writer creates its parent directory. Owners creating persistent storage
 //! use [`create_dir_all_durable`] before publishing entries beneath new directories.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use tempfile::NamedTempFile;
 
 /// An atomic-write failure naming the path touched by the failing operation.
 /// Directory creation/open/sync failures name that directory. A failed sync
@@ -37,29 +40,128 @@ impl From<WriteError> for std::io::Error {
     }
 }
 
-/// Atomically replace a file, syncing its contents and then its parent directory.
-/// Parent-directory open and sync failures are reported, including after rename
-/// has made the new contents visible. An error does not roll back publication.
-/// The parent must already exist; use [`create_dir_all_durable`] when creating it.
-pub fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), WriteError> {
+/// A write whose bytes are complete and synced but whose target has not yet
+/// been replaced. The temporary file is in the target's directory so publish
+/// remains an atomic same-filesystem rename.
+pub struct StagedDurableWrite {
+    target: PathBuf,
+    temp: NamedTempFile,
+}
+
+/// A known-visible publication whose parent-directory durability can be
+/// confirmed again without repeating its rename.
+#[derive(Clone, Debug)]
+pub struct PublishedWrite {
+    target: PathBuf,
+}
+
+impl PublishedWrite {
+    /// Retry durability confirmation for this publication. Callers must
+    /// serialize writes to the same target until confirmation succeeds.
+    pub fn confirm_durability(&self) -> Result<(), WriteError> {
+        sync_parent_directory(&self.target)
+    }
+
+    /// The path made visible by this publication.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.target
+    }
+}
+
+/// Failure while publishing a staged durable write. `PublishedDurabilityUnconfirmed`
+/// means rename succeeded and the new file is visible; retry only the supplied
+/// receipt's directory sync, never the publication itself.
+#[derive(Debug)]
+pub enum PublishError {
+    BeforeRename(WriteError),
+    PublishedDurabilityUnconfirmed {
+        publication: PublishedWrite,
+        source: WriteError,
+    },
+}
+
+impl std::fmt::Display for PublishError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BeforeRename(error) => write!(f, "publication did not occur: {error}"),
+            Self::PublishedDurabilityUnconfirmed { source, .. } => {
+                write!(
+                    f,
+                    "publication is visible but durability is unconfirmed: {source}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for PublishError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::BeforeRename(error) => Some(error),
+            Self::PublishedDurabilityUnconfirmed { source, .. } => Some(source),
+        }
+    }
+}
+
+/// Prepare a durable write without making the target visible. The file is
+/// written and fsynced in a unique temporary file beside `path`; dropping the
+/// returned value before [`StagedDurableWrite::publish`] removes that temp.
+pub fn stage_durable(path: &Path, bytes: &[u8]) -> Result<StagedDurableWrite, WriteError> {
     let dir = parent_dir(path);
-    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|source| WriteError {
+    let mut temp = NamedTempFile::new_in(dir).map_err(|source| WriteError {
         path: dir.to_path_buf(),
         source,
     })?;
-    tmp.write_all(bytes).map_err(|source| WriteError {
+    temp.write_all(bytes).map_err(|source| WriteError {
         path: path.to_path_buf(),
         source,
     })?;
-    tmp.as_file().sync_all().map_err(|source| WriteError {
+    temp.as_file().sync_all().map_err(|source| WriteError {
         path: path.to_path_buf(),
         source,
     })?;
-    tmp.persist(path).map_err(|e| WriteError {
-        path: path.to_path_buf(),
-        source: e.error,
-    })?;
-    sync_parent_directory(path)
+    Ok(StagedDurableWrite {
+        target: path.to_path_buf(),
+        temp,
+    })
+}
+
+impl StagedDurableWrite {
+    /// Atomically replace the target and confirm the parent directory. A
+    /// post-rename sync error carries a receipt for retrying only that sync.
+    pub fn publish(self) -> Result<PublishedWrite, PublishError> {
+        let Self { target, temp } = self;
+        temp.persist(&target).map_err(|error| {
+            PublishError::BeforeRename(WriteError {
+                path: target.clone(),
+                source: error.error,
+            })
+        })?;
+        let publication = PublishedWrite { target };
+        publication.confirm_durability().map_err(|source| {
+            PublishError::PublishedDurabilityUnconfirmed {
+                publication: publication.clone(),
+                source,
+            }
+        })?;
+        Ok(publication)
+    }
+}
+
+/// Atomically replace a file, syncing its contents and then its parent directory.
+/// Parent-directory open and sync failures are reported, including after rename
+/// has made the new contents visible. Use [`stage_durable`] to distinguish that
+/// post-rename case. The parent must already exist; use
+/// [`create_dir_all_durable`] when creating it.
+pub fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), WriteError> {
+    stage_durable(path, bytes)?
+        .publish()
+        .map(|_| ())
+        .map_err(|error| match error {
+            PublishError::BeforeRename(error)
+            | PublishError::PublishedDurabilityUnconfirmed { source: error, .. } => error,
+        })
 }
 
 /// Durably create a file only if its name is absent. Returns `true` when this
@@ -205,6 +307,31 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"v1");
         write_durable(&path, b"v2-longer").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"v2-longer");
+    }
+
+    #[test]
+    fn staged_write_leaves_target_old_until_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest");
+        write_durable(&path, b"old").unwrap();
+        let staged = stage_durable(&path, b"new").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        staged.publish().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    }
+
+    #[test]
+    fn rename_failure_is_typed_as_not_published_and_keeps_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let staged = stage_durable(&target, b"new").unwrap();
+        assert!(matches!(
+            staged.publish(),
+            Err(PublishError::BeforeRename(_))
+        ));
+        assert!(target.is_dir());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]
