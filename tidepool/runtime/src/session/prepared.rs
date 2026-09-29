@@ -6781,4 +6781,157 @@ mod tests {
         );
         assert_eq!(registry.misses(), 1, "no second compile happened");
     }
+    #[test]
+    fn staged_publications_preserve_real_binding_winners_after_private_retirement() {
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_repr::{Generation, SessionModule};
+
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("declarations.json");
+        let mut lib = super::super::SessionLib::open(
+            tidepool_repr::SessionId(81),
+            dir.path().join("session"),
+            super::super::ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        lib.attach_empty_recovery_graph_v2(&manifest).unwrap();
+        let mut state = super::super::PersistentSession::new(Some(lib), 1024);
+        let producer = producer_program();
+        let top = producer.entry();
+        let program = state.install_prepared(producer).unwrap();
+        state
+            .prepared_mut()
+            .unwrap()
+            .machine
+            .run_entry(
+                program,
+                top,
+                &[],
+                PreparedCallOptions {
+                    observation_budget: RunOptions::default().observation_budget,
+                    collect_before_observation: true,
+                },
+                RealmId::ROOT,
+            )
+            .unwrap();
+        let public_a = state.mint_scope(ScopeId::ROOT).unwrap();
+        let public_b = state.mint_scope(ScopeId::ROOT).unwrap();
+        let private_a = state.mint_detached_scope(public_a).unwrap();
+        let private_b = state.mint_detached_scope(public_b).unwrap();
+        let actor_a = super::super::RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/a").unwrap(),
+            1,
+        )
+        .unwrap();
+        let actor_b = super::super::RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/b").unwrap(),
+            1,
+        )
+        .unwrap();
+        state
+            .bind_durable_public_scope(actor_a.clone(), public_a)
+            .unwrap();
+        state
+            .bind_durable_public_scope(actor_b.clone(), public_b)
+            .unwrap();
+
+        for (name, id, scope) in [("a", 11, private_a), ("b", 12, private_b)] {
+            let engine = state.prepared_mut().unwrap();
+            let handle = engine.machine.retain_top(program, top).unwrap();
+            let root = engine.adopt(handle).unwrap();
+            state
+                .bind_in(
+                    scope,
+                    BindingEntry {
+                        name: tidepool_repr::BindingName(name.into()),
+                        id: SessionVarId::from_extract(id),
+                        module: SessionModule::val(Generation(id)),
+                        value: BoundValue {
+                            root,
+                            handle,
+                            identity: producer_identity(),
+                        },
+                        type_display: None,
+                        defining_expr: None,
+                        scope,
+                    },
+                )
+                .unwrap();
+        }
+
+        let staged_a = state
+            .snapshot_binding_publication(
+                actor_a.clone(),
+                public_a,
+                private_a,
+                vec![SessionVarId::from_extract(11)],
+            )
+            .unwrap()
+            .stage()
+            .unwrap();
+        let staged_b = state
+            .snapshot_binding_publication(
+                actor_b.clone(),
+                public_b,
+                private_b,
+                vec![SessionVarId::from_extract(12)],
+            )
+            .unwrap()
+            .stage()
+            .unwrap();
+        assert_eq!(state.publish_staged_public_manifest(
+            staged_b, &super::super::PublicationDecision::new(),
+        ).unwrap(), super::super::PublicManifestCommit::Durable);
+        let decision_a = super::super::PublicationDecision::new();
+        assert_eq!(
+            state
+                .publish_staged_public_manifest(staged_a, &decision_a)
+                .unwrap(),
+            super::super::PublicManifestCommit::Stale
+        );
+        let restaged_a = state
+            .snapshot_binding_publication(
+                actor_a.clone(),
+                public_a,
+                private_a,
+                vec![SessionVarId::from_extract(11)],
+            )
+            .unwrap()
+            .stage()
+            .unwrap();
+        assert_eq!(
+            state
+                .publish_staged_public_manifest(restaged_a, &decision_a)
+                .unwrap(),
+            super::super::PublicManifestCommit::Durable
+        );
+        state.retire_scope(private_a);
+        state.retire_scope(private_b);
+        assert_eq!(state.resolve_in(public_a, "a").unwrap().id.raw(), 11);
+        assert_eq!(state.resolve_in(public_b, "b").unwrap().id.raw(), 12);
+        for (scope, name) in [(public_a, "a"), (public_b, "b")] {
+            let handle = state.resolve_in(scope, name).unwrap().value.handle;
+            let CodegenPreparedOuter::Constructor { identity, fields } = state
+                .prepared_mut()
+                .unwrap()
+                .machine
+                .inspect_outer(handle, RealmId::ROOT)
+                .expect("published binding remains a live constructor after private retirement");
+            assert_eq!(identity, tidepool_repr::DataConId(980));
+            assert!(matches!(fields.as_slice(), [PreparedResult::Scalar(99)]));
+        }
+
+        let graph = super::super::recovery::read_v2(&manifest, dir.path())
+            .unwrap()
+            .unwrap()
+            .graph;
+        let a = graph.public_binding_tombstones(&actor_a).unwrap();
+        let b = graph.public_binding_tombstones(&actor_b).unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+        assert_eq!(a[0].name, "a");
+        assert_eq!(a[0].winner.variable, 11);
+        assert_eq!(b[0].name, "b");
+        assert_eq!(b[0].winner.variable, 12);
+    }
 }
