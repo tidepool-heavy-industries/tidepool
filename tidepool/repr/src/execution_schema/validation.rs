@@ -1927,16 +1927,24 @@ impl<'a> Validator<'a> {
         {
             return Err(ParseError::UnsupportedVersion(envelope.schema_version));
         }
-        if envelope.execution_abi_version != EXECUTION_ABI_VERSION
-            || requirements.execution_abi_version != EXECUTION_ABI_VERSION
-            || envelope.execution_abi_version != requirements.execution_abi_version
-            || envelope.projection_profile != requirements.projection_profile
+        if envelope.projection_profile != requirements.projection_profile
             || envelope.toolchain != requirements.toolchain
             || envelope.target != requirements.target
         {
             return Err(ParseError::UnsupportedTarget(format!(
                 "artifact {:?} does not match requirements {:?}",
                 envelope.target, requirements.target
+            )));
+        }
+        if envelope.execution_abi_version != EXECUTION_ABI_VERSION
+            || requirements.execution_abi_version != EXECUTION_ABI_VERSION
+            || envelope.execution_abi_version != requirements.execution_abi_version
+        {
+            return Err(ParseError::UnsupportedTarget(format!(
+                "execution ABI mismatch: artifact version {}, expected version {}; caller requested version {}",
+                envelope.execution_abi_version,
+                EXECUTION_ABI_VERSION,
+                requirements.execution_abi_version
             )));
         }
         self.check_text(&envelope.projection_profile)?;
@@ -4311,15 +4319,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_stale_execution_abi_even_if_caller_requests_it() {
+    fn rejects_stale_execution_abi_with_versions_in_diagnostic() {
         let mut program = valid_program();
         program.envelope.execution_abi_version = EXECUTION_ABI_VERSION - 1;
-        let mut stale_requirements = requirements();
-        stale_requirements.execution_abi_version = EXECUTION_ABI_VERSION - 1;
-        assert!(matches!(
-            validate_program(&program, &stale_requirements, DecodeLimits::default()),
-            Err(ParseError::UnsupportedTarget(_))
-        ));
+        let error = validate_program(&program, &requirements(), DecodeLimits::default())
+            .expect_err("stale execution ABI must be rejected");
+        assert_eq!(
+            error,
+            ParseError::UnsupportedTarget(format!(
+                "execution ABI mismatch: artifact version {}, expected version {}; caller requested version {}",
+                EXECUTION_ABI_VERSION - 1,
+                EXECUTION_ABI_VERSION,
+                EXECUTION_ABI_VERSION
+            ))
+        );
     }
 
     fn assert_invalid_signature(program: WireProgram) {
