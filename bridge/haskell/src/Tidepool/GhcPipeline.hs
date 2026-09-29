@@ -1067,17 +1067,29 @@ data ModuleOutput = ModuleOutput
   , moduleOutputResultType :: Maybe Type
   }
 
+-- | A completed executable compile keeps its prepared body and the exact
+-- interface built from the same tidy result together. Leaf interfaces can be
+-- elided until a later request actually has a home importer.
+data ProductInterface
+  = InterfaceElided
+  | InterfaceRetained HomeModInfo
+
+data ModuleProduct = ModuleProduct
+  { productFacts :: ModuleFacts
+  , productOutput :: ModuleOutput
+  , productPrepared :: PreparedModule
+  , productInterface :: ProductInterface
+  }
+
+data MemoPayload
+  = ValidationOnly ModuleFacts
+  | ExecutableProduct ModuleProduct
+
 data GutsMemoEntry = GutsMemoEntry
   { gmeValidity :: MemoValidity
     -- The retained set is part of validity because it changes simplified
     -- Core before the compact output below is derived.
-  , gmeFacts :: ModuleFacts
-  , gmeOutput :: Maybe ModuleOutput
-  , gmePrepared :: Maybe PreparedModule
-  , gmeInterface :: Maybe HomeModInfo
-    -- ^ Exact prepared interface for later importers, without TH linkables.
-    -- Re-adding it after load clears the HPT does not require retaining the
-    -- HscEnv, TcGblEnv, or pre-tidy ModGuts that produced it.
+  , gmePayload :: MemoPayload
   , gmeCycle :: Word64
     -- ^ Diagnostic only (TIDEPOOL_MEMO_TRACE): the compile-cycle id
     -- ('requestIdentity') that produced this entry. Never read by a
@@ -1100,14 +1112,39 @@ observationSummary (CachedObservation summary _) = summary
 observationSummary (FreshObservation front) = mfSummary front
 
 observationFacts :: ModuleObservation -> IO ModuleFacts
-observationFacts (CachedObservation _ entry) = pure (gmeFacts entry)
+observationFacts (CachedObservation _ entry) = pure (payloadFacts (gmePayload entry))
 observationFacts (FreshObservation front) = frontFacts front
 
 -- | Whether this observation still lacks an executable body for the memo.
 observationLacksBody :: ModuleObservation -> Bool
-observationLacksBody (CachedObservation _ entry) =
-  isNothing (gmeOutput entry) || isNothing (gmePrepared entry)
+observationLacksBody (CachedObservation _ entry) = case gmePayload entry of
+  ValidationOnly _ -> True
+  ExecutableProduct _ -> False
 observationLacksBody (FreshObservation _) = True
+
+payloadFacts :: MemoPayload -> ModuleFacts
+payloadFacts (ValidationOnly facts) = facts
+payloadFacts (ExecutableProduct moduleProduct) = productFacts moduleProduct
+
+payloadProduct :: MemoPayload -> Maybe ModuleProduct
+payloadProduct (ValidationOnly _) = Nothing
+payloadProduct (ExecutableProduct moduleProduct) = Just moduleProduct
+
+retainedInterface :: ModuleProduct -> Maybe HomeModInfo
+retainedInterface moduleProduct = case productInterface moduleProduct of
+  InterfaceElided -> Nothing
+  InterfaceRetained hmi -> Just hmi
+
+requireProduct :: ModuleFacts -> ModuleOutput -> Maybe PreparedModule
+  -> Maybe HomeModInfo -> Ghc ModuleProduct
+requireProduct facts output (Just prepared) interface = pure ModuleProduct
+  { productFacts = facts
+  , productOutput = output
+  , productPrepared = prepared
+  , productInterface = maybe InterfaceElided InterfaceRetained interface
+  }
+requireProduct _ _ Nothing _ = liftIO $ ioError $ userError
+    "executable compilation produced no prepared module"
 
 observationFront :: ModuleObservation -> Maybe ModuleFront
 observationFront (CachedObservation _ _) = Nothing
@@ -1509,7 +1546,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                 liftIO (modifyIORef' executableValidRef (Map.insert (ms_mod_name modSum) isValid))
               cachedInterface modSum entry
                 | dropMemoInterface == Just (moduleNameString (ms_mod_name modSum)) = Nothing
-                | otherwise = gmeInterface entry
+                | otherwise = payloadProduct (gmePayload entry) >>= retainedInterface
           -- Under TIDEPOOL_TIMING, name why a memoized module was recompiled.
           let memoMiss modSum reason = when timing $ liftIO $ hPutStrLn stderr $
                 "tidepool-memo-miss module=" ++ moduleNameString (ms_mod_name modSum)
@@ -1617,7 +1654,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                               -- 'sameHash' below (identical source bytes)
                               -- guarantees today's occurrences are the exact
                               -- same ones, with no need to re-parse here.
-                              quasiQuotesPureOnRecord = case moduleFactQuasiQuoteOrigins (gmeFacts entry) of
+                              quasiQuotesPureOnRecord = case moduleFactQuasiQuoteOrigins (payloadFacts (gmePayload entry)) of
                                 AllPureQuasiQuotes _ -> True
                                 NoQuasiQuotes -> True
                                 _ -> False
@@ -1628,7 +1665,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                           -- quasiquoters (unless allowlisted above), or
                           -- addDependentFile inputs. These modules therefore
                           -- remain conservatively uncached.
-                          if not (moduleFactHasDependentFiles (gmeFacts entry))
+                          if not (moduleFactHasDependentFiles (payloadFacts (gmePayload entry)))
                               && compileTimeExecutionTracked
                               && sameHash
                               && sameRetained
@@ -1647,24 +1684,24 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                                 memoMiss modSum "untracked-compile-time-execution"
                                 memoMissTrace modSum
                                   ("no-reuse:untracked-compile-time-execution quasiquotes="
-                                    ++ renderQuasiQuoteOrigins (moduleFactQuasiQuoteOrigins (gmeFacts entry)))
+                                    ++ renderQuasiQuoteOrigins (moduleFactQuasiQuoteOrigins (payloadFacts (gmePayload entry))))
                                   (Just entry)
                                 pure Nothing
                               else do
                                 memoMiss modSum $ unwords
-                                  [ "dependent-files=" ++ show (moduleFactHasDependentFiles (gmeFacts entry))
+                                  [ "dependent-files=" ++ show (moduleFactHasDependentFiles (payloadFacts (gmePayload entry)))
                                   , "same-hash=" ++ show sameHash
                                   , "same-retained=" ++ show sameRetained
                                   , "same-home-dependencies=" ++ show sameHomeDependencies
                                   , "same-incarnation=" ++ show sameIncarnation
-                                  , "quasiquotes=" ++ renderQuasiQuoteOrigins (moduleFactQuasiQuoteOrigins (gmeFacts entry)) ]
+                                  , "quasiquotes=" ++ renderQuasiQuoteOrigins (moduleFactQuasiQuoteOrigins (payloadFacts (gmePayload entry))) ]
                                 memoMissTrace modSum (unwords
-                                  [ "dependent-files=" ++ show (moduleFactHasDependentFiles (gmeFacts entry))
+                                  [ "dependent-files=" ++ show (moduleFactHasDependentFiles (payloadFacts (gmePayload entry)))
                                   , "same-hash=" ++ show sameHash
                                   , "same-retained=" ++ show sameRetained
                                   , "same-home-dependencies=" ++ show sameHomeDependencies
                                   , "same-incarnation=" ++ show sameIncarnation
-                                  , "quasiquotes=" ++ renderQuasiQuoteOrigins (moduleFactQuasiQuoteOrigins (gmeFacts entry)) ]) (Just entry)
+                                  , "quasiquotes=" ++ renderQuasiQuoteOrigins (moduleFactQuasiQuoteOrigins (payloadFacts (gmePayload entry))) ]) (Just entry)
                                 pure Nothing
           let interfaceUses = zipWith homeInterfaceUse summaries (homeInterfaceConsumers summaries)
           (observations, results, preparedModules, mReachable) <- case cpTier plan of
@@ -1677,14 +1714,13 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                   -- A memo hit reuses the prepared body and its exact interface.
                   -- Reinstall it after load's HPT rebuild before any importer runs.
                   Just entry
-                    | Just output <- gmeOutput entry
-                    , Just prepared <- gmePrepared entry
+                    | Just moduleProduct <- payloadProduct (gmePayload entry)
                     , not (needsPreparedInterface interfaceUse) || isJust (cachedInterface modSum entry) -> do
                     recordValidity modSum True
                     recordExecutableValidity modSum True
-                    rememberPreparedSiblings prepared
+                    rememberPreparedSiblings (productPrepared moduleProduct)
                     forM_ (cachedInterface modSum entry) (installPreparedInterface mn)
-                    pure (CachedObservation modSum entry, output, Just prepared)
+                    pure (CachedObservation modSum entry, productOutput moduleProduct, Just (productPrepared moduleProduct))
                   _ -> do
                     recordValidity modSum False
                     recordExecutableValidity modSum False
@@ -1693,7 +1729,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                     -- each cause differs.
                     forM_ cached $ \entry -> do
                       let reason
-                            | isNothing (gmeOutput entry) || isNothing (gmePrepared entry) =
+                            | isNothing (payloadProduct (gmePayload entry)) =
                                 "executable-body-not-prepared"
                             | otherwise = "required-interface-not-retained"
                       memoMiss modSum reason
@@ -1702,6 +1738,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                     (simplified, r, mInterface, mRegisteredTidy) <- compileBack interfaceUse mf
                     prepared <- prepareSelected mf simplified mRegisteredTidy
                     facts <- liftIO (frontFacts mf)
+                    moduleProduct <- requireProduct facts r prepared mInterface
                     case mMemoRef of
                       Just ref -> liftIO (modifyIORef' ref
                         (Map.insert mn (GutsMemoEntry
@@ -1710,10 +1747,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                             (retainedFor modSum)
                             (homeDependencyWitnesses modSum)
                             incarnation)
-                          facts
-                          (Just r)
-                          prepared
-                          mInterface
+                          (ExecutableProduct moduleProduct)
                           requestIdentity
                           (directWitnesses modSum))))
                       Nothing  -> pure ()
@@ -1785,7 +1819,8 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                     Just m  -> Set.delete (mkModuleName m) reachableMods0
                     Nothing -> reachableMods0
               completionRef <- liftIO (newIORef (0 :: Int, 0 :: Integer))
-              let rememberExecutable modSum output prepared mInterface moduleFacts =
+              let rememberExecutable modSum output prepared mInterface moduleFacts = do
+                    moduleProduct <- requireProduct moduleFacts output prepared mInterface
                     case mMemoRef of
                       Just ref -> liftIO (modifyIORef' ref
                         (Map.insert (ms_mod_name modSum)
@@ -1795,10 +1830,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                               (retainedFor modSum)
                               (homeDependencyWitnesses modSum)
                               incarnation)
-                            moduleFacts
-                            (Just output)
-                            prepared
-                            mInterface
+                            (ExecutableProduct moduleProduct)
                             requestIdentity
                             (directWitnesses modSum))))
                       Nothing -> pure ()
@@ -1820,10 +1852,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                               (retainedFor modSum)
                               (homeDependencyWitnesses modSum)
                               incarnation)
-                            moduleFacts
-                            Nothing
-                            Nothing
-                            Nothing
+                            (ValidationOnly moduleFacts)
                             requestIdentity
                             (directWitnesses modSum))))
                       Nothing -> pure ()
@@ -1842,17 +1871,16 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                     -- the optimizer pass entirely.
                     CachedObservation _ entry
                       | depsExecutable
-                      , Just output <- gmeOutput entry
-                      , Just prepared <- gmePrepared entry
+                      , Just moduleProduct <- payloadProduct (gmePayload entry)
                       , not (needsPreparedInterface interfaceUse) || isJust (cachedInterface modSum entry) -> do
                         recordExecutableValidity modSum True
-                        rememberPreparedSiblings prepared
+                        rememberPreparedSiblings (productPrepared moduleProduct)
                         forM_ (cachedInterface modSum entry) (installPreparedInterface (ms_mod_name modSum))
-                        pure [(output, Just prepared)]
+                        pure [(productOutput moduleProduct, Just (productPrepared moduleProduct))]
                     CachedObservation _ entry -> do
                       let reason
                             | not depsExecutable = "dependency-executable-regenerated"
-                            | isNothing (gmeOutput entry) || isNothing (gmePrepared entry) =
+                            | isNothing (payloadProduct (gmePayload entry)) =
                                 "validation-only-promoted"
                             | otherwise = "required-interface-not-retained"
                       memoMiss modSum reason
@@ -1890,7 +1918,8 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                   else case observation of
                     CachedObservation _ entry -> do
                       recordExecutableValidity modSum True
-                      forM_ (gmePrepared entry) rememberPreparedSiblings
+                      forM_ (payloadProduct (gmePayload entry))
+                        (rememberPreparedSiblings . productPrepared)
                       forM_ (cachedInterface modSum entry) (installPreparedInterface (ms_mod_name modSum))
                       pure []
                     -- Without a memo, only dependency and type facts are needed.

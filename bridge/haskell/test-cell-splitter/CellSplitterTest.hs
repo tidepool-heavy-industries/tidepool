@@ -303,9 +303,8 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
       _ <- compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
       (_, warmLog) <- captureStderr root "quasiquote-warm" $
         compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
-      assertContains "QuasiQuotes source remains conservatively uncacheable"
-        "tidepool-memo-miss module=QuasiQuoteDependency reason=untracked-compile-time-execution"
-        warmLog
+      when ("tidepool-memo-miss module=QuasiQuoteDependency" `isInfixOf` warmLog) $
+        fail ("QuasiQuotes with no occurrences missed the memo: " ++ warmLog)
       assertContains "TemplateHaskell source remains conservatively uncacheable"
         "tidepool-memo-miss module=TemplateDependency reason=untracked-compile-time-execution"
         warmLog
@@ -599,13 +598,17 @@ validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
   setEnv "TIDEPOOL_TIMING" "1"
   (withResidentPipelineSelected [root] $ \compile -> do
-      (_, coldLog) <- captureStderr root "validation-cold" $
+      (cold, coldLog) <- captureStderr root "validation-cold" $
         compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
       assertContains "chain dependency witnesses are computed once per node"
         "tidepool-dependency-witness nodes=20 direct_edges=19 digest_computations=20"
         coldLog
-      (_, warmLog) <- captureStderr root "validation-warm" $
+      (warm, warmLog) <- captureStderr root "validation-warm" $
         compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+      let productShape result =
+            (length (pprModules result), length (prBinds (pprPipelineResult result)))
+      assertEqual "validation facts preserve the prepared target product"
+        (productShape cold) (productShape warm)
       forM_ ["WarmReexport", "WarmChild"] $ \name ->
         when (("tidepool-memo-miss module=" ++ name) `isInfixOf` warmLog) $
           fail ("unchanged validation-only module was recompiled: " ++ name)
@@ -620,23 +623,27 @@ validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -
       -- real recompile) while core2core/prepare still run once.
       assertContains "warm compile prepares only its evicted target"
         "front_compiles=2 core_compiles=1 prepared_compiles=1" warmLog
-      _ <- compile PreparedStg mempty GeneralCompile Nothing memoTarget [] Nothing
-      (_, executableWarmLog) <- captureStderr root "executable-warm" $
+      executableCold <- compile PreparedStg mempty GeneralCompile Nothing memoTarget [] Nothing
+      (executableWarm, executableWarmLog) <- captureStderr root "executable-warm" $
         compile PreparedStg mempty GeneralCompile Nothing memoTarget [] Nothing
+      assertEqual "complete memo product preserves its prepared output"
+        (productShape executableCold) (productShape executableWarm)
       when ("tidepool-memo-miss module=MemoProducer" `isInfixOf` executableWarmLog ||
             "tidepool-memo-miss module=MemoConsumer" `isInfixOf` executableWarmLog) $
         fail "unchanged producer or consumer executable was recompiled"
       previousDrop <- lookupEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE"
-      forcedLog <- (do
+      (regenerated, forcedLog) <- (do
           setEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE" "MemoProducer"
-          snd <$> captureStderr root "executable-interface-miss" (
+          captureStderr root "executable-interface-miss" (
             compile PreparedStg mempty GeneralCompile Nothing memoTarget [] Nothing))
         `finally` maybe (unsetEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE")
                         (setEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE") previousDrop
       assertContains "missing producer interface regenerates producer executable"
         "tidepool-memo-miss module=MemoProducer reason=required-interface-not-retained" forcedLog
       assertContains "regenerated producer invalidates cached consumer executable"
-        "tidepool-memo-miss module=MemoConsumer reason=dependency-executable-regenerated" forcedLog)
+        "tidepool-memo-miss module=MemoConsumer reason=dependency-executable-regenerated" forcedLog
+      assertEqual "interface recovery restores the paired prepared body"
+        (productShape executableCold) (productShape regenerated))
     `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
   where
     temporary = do
@@ -947,7 +954,7 @@ requestMemoLifecycle root = do
           Right _ -> fail "changed invalid session dependency reused a stale memo entry"
         assertContains "source-sensitive memo invalidation" sessionMiss changedLog
       writeFile dependencyPath validDependency
-      _ <- captureStderr root "memo-incarnate-restored"
+      (restored, _) <- captureStderr root "memo-incarnate-restored"
         (runRequest $ \compiler -> compileIn incarnate GeneralCompile compiler)
       -- A transaction with no incarnation (a lookup, a plain eval) must not
       -- discard another incarnation's session entries: in a live daemon one
@@ -955,11 +962,14 @@ requestMemoLifecycle root = do
       _ <- captureStderr root "memo-anonymous-between"
         (runRequest $ \compiler ->
           compiler PreparedStg mempty GeneralCompile Nothing otherTargetPath [root] Nothing)
-      (_, incarnateWarmLog) <- captureStderr root "memo-incarnate-warm"
+      (incarnateWarm, incarnateWarmLog) <- captureStderr root "memo-incarnate-warm"
         (runRequest $ \compiler -> compileIn incarnate GeneralCompile compiler)
       when (sessionMiss `isInfixOf` incarnateWarmLog) $
         fail ("an incarnation-less transaction evicted another incarnation's session entry: "
-          ++ incarnateWarmLog))
+          ++ incarnateWarmLog)
+      assertEqual "memo sanitization preserves complete prepared output"
+        (length (pprModules restored), length (prBinds (pprPipelineResult restored)))
+        (length (pprModules incarnateWarm), length (prBinds (pprPipelineResult incarnateWarm))))
     `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
 
 captureStderr :: FilePath -> String -> IO a -> IO (a, String)
