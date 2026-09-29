@@ -12,6 +12,7 @@ use super::SessionError;
 
 #[path = "newrecovery_v2.rs"]
 mod newrecovery_v2;
+pub use newrecovery_v2::RecoveryPublicOwner;
 pub(crate) use newrecovery_v2::*;
 
 const FLOOR: u32 = 1;

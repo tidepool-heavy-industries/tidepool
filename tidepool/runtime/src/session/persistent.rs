@@ -32,8 +32,8 @@ use super::prepared::{
 };
 use super::turn::TurnCertification;
 use super::{
-    DeclarationCandidateRender, ExactExportError, ExactExportSurface, SessionCompileView,
-    SessionError, SessionLib, SourceImports,
+    DeclarationCandidateRender, ExactExportError, ExactExportSurface, RecoveryPublicOwner,
+    SessionCompileView, SessionError, SessionLib, SourceImports,
 };
 
 /// Render the unqualified imports for the exact names visible from each live
@@ -1456,6 +1456,23 @@ impl PersistentSession {
         &self.scopes
     }
 
+    /// Admit one exact actor incarnation as the durable public owner of a
+    /// minted lexical scope. The scope forest is the liveness authority;
+    /// SessionLib only records the checked owner-to-scope association.
+    pub fn bind_durable_public_scope(
+        &mut self,
+        owner: RecoveryPublicOwner,
+        scope: ScopeId,
+    ) -> Result<(), SessionError> {
+        if !self.scopes.is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
+        self.lib
+            .as_mut()
+            .ok_or(SessionError::MissingDeclarationLibrary)?
+            .bind_durable_public_scope(owner, scope)
+    }
+
     /// Record a materialized value binding in `scope`'s frame.
     /// `bind(e) == bind_in(ScopeId::ROOT, e)`.
     ///
@@ -1925,6 +1942,47 @@ pub struct ScopeRetirement {
 #[cfg(test)]
 mod checkpoint_scope_tests {
     use super::*;
+
+    #[test]
+    fn durable_public_owners_require_live_minted_scopes() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("declarations.json");
+        let mut lib = SessionLib::open(
+            tidepool_repr::SessionId(72),
+            dir.path().join("session"),
+            super::super::ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        lib.attach_empty_recovery_graph_v2(&manifest).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024);
+        let first = session.mint_scope(ScopeId::ROOT).unwrap();
+        let second = session.mint_scope(ScopeId::ROOT).unwrap();
+        let actor = |path: &str| {
+            RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse(path).unwrap(), 1).unwrap()
+        };
+        session
+            .bind_durable_public_scope(actor("root/first"), first)
+            .unwrap();
+        session
+            .bind_durable_public_scope(actor("root/second"), second)
+            .unwrap();
+        let unknown = ScopeId(u64::MAX);
+        assert!(matches!(
+            session.bind_durable_public_scope(actor("root/unknown"), unknown),
+            Err(SessionError::DeadScope(scope)) if scope == unknown
+        ));
+        session.retire_scope(first);
+        assert!(matches!(
+            session.bind_durable_public_scope(actor("root/replacement"), first),
+            Err(SessionError::DeadScope(scope)) if scope == first
+        ));
+        assert!(session
+            .bind_durable_public_scope(actor("root/second"), first)
+            .is_err());
+        assert!(session
+            .bind_durable_public_scope(actor("root/first"), second)
+            .is_err());
+    }
 
     #[test]
     fn detached_capture_survives_issuer_retirement_and_can_seed_later_child() {

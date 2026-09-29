@@ -52,11 +52,12 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
             };
             FailureEnvelope::new(class, Phase::Compile, t.to_string())
         }
-        // A stale/forged `ScopeId` reaching a scope-taking mutation is a
-        // caller bug (never the user's declaration, never an environment or
-        // wire-format problem) surfacing while the engine is driving a turn —
-        // the same "failed while running" shape `Runtime` already covers.
-        SessionError::DeadScope(_) | SessionError::StaleStagedDeclaration => {
+        // A stale/forged scope, absent declaration library, or stale staged
+        // candidate at this admission point is a caller/session-state error,
+        // not a user declaration or an environment failure.
+        SessionError::DeadScope(_)
+        | SessionError::MissingDeclarationLibrary
+        | SessionError::StaleStagedDeclaration => {
             FailureEnvelope::new(FailureClass::Runtime, Phase::Run, err.to_string())
         }
         // The declaration source is valid; its durable recovery artifact is

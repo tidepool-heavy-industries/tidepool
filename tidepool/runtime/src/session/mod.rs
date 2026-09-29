@@ -61,7 +61,9 @@ pub use publication::{PublicationCancellation, PublicationDecision, PublicationP
 // ([`resident::ResidentSession::set_image_registry`]).
 pub use tidepool_codegen::prepared_program::{ImageRegistry, Parcel};
 
-pub use recovery::{DeclarationRecoveryReport, LostDeclaration, ReplayedDeclaration};
+pub use recovery::{
+    DeclarationRecoveryReport, LostDeclaration, RecoveryPublicOwner, ReplayedDeclaration,
+};
 
 pub use registry::{
     fresh_session_id, Checkout, CheckoutError, CheckoutReceipt, SessionRegistry, Slot, SlotKind,
@@ -305,6 +307,8 @@ pub enum SessionError {
     /// declaration — a stale or forged `ScopeId`.
     #[error("scope {0:?} is not live (never minted, or already retired)")]
     DeadScope(ScopeId),
+    #[error("session has no persistent declaration library")]
+    MissingDeclarationLibrary,
     #[error(
         "staged declaration no longer matches this session's live declaration or value environment"
     )]
@@ -377,6 +381,9 @@ pub struct SessionLib {
     recovery_manifest_warning: Option<String>,
     recovery_report: Option<DeclarationRecoveryReport>,
     durable_graph: Option<DurableDeclarationGraph>,
+    /// Actor incarnations in one session have distinct process-local lexical
+    /// scopes, including inherited-context children.
+    durable_public_scopes: BTreeMap<RecoveryPublicOwner, ScopeId>,
 }
 
 struct DurableDeclarationGraph {
@@ -560,6 +567,7 @@ impl SessionLib {
             recovery_manifest_warning: None,
             recovery_report: None,
             durable_graph: None,
+            durable_public_scopes: BTreeMap::new(),
         })
     }
 
@@ -593,7 +601,13 @@ impl SessionLib {
             }
         })? {
             Some(read) => {
-                if read.graph.public_root.is_some() || !read.graph.nodes.is_empty() {
+                if read
+                    .graph
+                    .public_surfaces
+                    .iter()
+                    .any(|surface| surface.declaration_root.is_some())
+                    || !read.graph.nodes.is_empty()
+                {
                     return Err(SessionError::RecoveryManifest {
                         path,
                         detail: "published v2 declarations require exact interface hydration"
@@ -626,6 +640,35 @@ impl SessionLib {
             graph,
             unconfirmed: None,
         });
+        Ok(())
+    }
+
+    /// Bind one actor incarnation to its public lexical scope in this process.
+    /// Another actor may share the manifest but cannot claim this scope.
+    fn bind_durable_public_scope(
+        &mut self,
+        owner: RecoveryPublicOwner,
+        scope: ScopeId,
+    ) -> Result<(), SessionError> {
+        if self.durable_graph.is_none()
+            || self
+                .durable_public_scopes
+                .get(&owner)
+                .is_some_and(|bound| *bound != scope)
+            || self
+                .durable_public_scopes
+                .iter()
+                .any(|(bound_owner, bound_scope)| bound_owner != &owner && *bound_scope == scope)
+        {
+            return Err(SessionError::RecoveryManifest {
+                path: self
+                    .durable_graph
+                    .as_ref()
+                    .map_or_else(|| self.root.clone(), |state| state.path.clone()),
+                detail: "declaration manifest has a conflicting public scope owner".into(),
+            });
+        }
+        self.durable_public_scopes.insert(owner, scope);
         Ok(())
     }
 

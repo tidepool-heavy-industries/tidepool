@@ -66,6 +66,37 @@ impl PublicationDecision {
         }
     }
 
+    /// Run the actor's synchronous eligibility transition (for example its
+    /// sleeping-state CAS) under the same short lock as the commit claim.
+    /// `None` means no cancellation was admitted; a claimed commit returns
+    /// pending without invoking the eligibility transition.
+    pub fn request_cancellation_if(
+        &self,
+        eligible: impl FnOnce() -> bool,
+    ) -> Option<PublicationCancellation> {
+        let mut phase = self.phase.lock();
+        match *phase {
+            PublicationPhase::Running => {
+                if !eligible() {
+                    return None;
+                }
+                *phase = PublicationPhase::CancellationRequested;
+                Some(PublicationCancellation::RequestedBeforeCommit)
+            }
+            PublicationPhase::CancellationRequested => {
+                Some(PublicationCancellation::RequestedBeforeCommit)
+            }
+            PublicationPhase::CommitClaimed { .. } => {
+                *phase = PublicationPhase::CommitClaimed {
+                    cancellation_pending: true,
+                };
+                Some(PublicationCancellation::PendingCommitOutcome)
+            }
+            PublicationPhase::Published => Some(PublicationCancellation::AlreadyPublished),
+            PublicationPhase::Terminated => Some(PublicationCancellation::AlreadyTerminated),
+        }
+    }
+
     /// Call under the machine checkout after staging and revalidation. The
     /// returned claim holds no lock while the existing atomic-write owner
     /// renames and confirms the manifest.
@@ -181,5 +212,77 @@ mod tests {
             }
         );
         assert!(!decision.terminate());
+    }
+
+    #[test]
+    fn guarded_sleep_cancellation_and_commit_claim_cannot_both_win() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let cancelled = PublicationDecision::new();
+        let sleeping = AtomicBool::new(true);
+        assert_eq!(
+            cancelled.request_cancellation_if(|| sleeping.swap(false, Ordering::AcqRel)),
+            Some(PublicationCancellation::RequestedBeforeCommit)
+        );
+        assert!(cancelled.claim_commit().is_none());
+
+        let claimed = PublicationDecision::new();
+        let claim = claimed.claim_commit().expect("claim wins first");
+        let called = AtomicBool::new(false);
+        assert_eq!(
+            claimed.request_cancellation_if(|| {
+                called.store(true, Ordering::Release);
+                true
+            }),
+            Some(PublicationCancellation::PendingCommitOutcome)
+        );
+        assert!(!called.load(Ordering::Acquire));
+        assert!(claim.published());
+    }
+
+    #[test]
+    fn concurrent_cancel_and_claim_have_one_winner() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Barrier;
+
+        for _ in 0..32 {
+            let decision = PublicationDecision::new();
+            let sleeping = Arc::new(AtomicBool::new(true));
+            let start = Arc::new(Barrier::new(3));
+            let cancel_thread = {
+                let decision = Arc::clone(&decision);
+                let sleeping = Arc::clone(&sleeping);
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    decision.request_cancellation_if(|| sleeping.swap(false, Ordering::AcqRel))
+                })
+            };
+            let claim_thread = {
+                let decision = Arc::clone(&decision);
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    decision.claim_commit()
+                })
+            };
+            start.wait();
+            let cancellation = cancel_thread.join().unwrap();
+            let claim = claim_thread.join().unwrap();
+            // The only way an accepted pre-claim cancellation can coexist
+            // with a claim is a broken decision lock. Check the pair, not
+            // which racing thread won.
+            if claim.is_none() {
+                assert_eq!(
+                    cancellation,
+                    Some(PublicationCancellation::RequestedBeforeCommit)
+                );
+            } else {
+                assert_eq!(
+                    cancellation,
+                    Some(PublicationCancellation::PendingCommitOutcome)
+                );
+            }
+        }
     }
 }
