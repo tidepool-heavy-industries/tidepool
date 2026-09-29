@@ -676,8 +676,8 @@ mod tests {
     use crate::prepared_program::{GroupInventory, ImageRegistry};
     use tidepool_repr::execution_schema::{
         testing, Atom, CachedHomeOwner, CertifiedGroup, CheckedLayout, ConstructorDecl,
-        ConstructorId, ExprFrame, GlobalDecl, GlobalId, HeapRhs, ImportOwner, ModuleVersion,
-        Signature, SignatureId, UpdatePolicy, ValueRef,
+        ConstructorId, ExprFrame, FieldLayout, GlobalDecl, GlobalId, HeapRhs, ImportOwner,
+        ModuleVersion, Signature, SignatureId, UpdatePolicy, ValueRef,
     };
 
     fn group(name: &str, ordinal: u32, other: &str) -> Arc<CompiledProgram> {
@@ -712,6 +712,61 @@ mod tests {
         )
         .unwrap();
         Arc::new(CompiledProgram::compile_certified_group(&group).unwrap())
+    }
+
+    fn cyclic_heap_top(name: &str, ordinal: u32, other: &str) -> Arc<CompiledProgram> {
+        let mut wire = testing::wire_program();
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("Cycle", "Node"),
+            family: testing::identity("Cycle", "Node"),
+            host_id: tidepool_repr::DataConId(90_003),
+            result_rep: RuntimeRep::LiftedRef,
+            field_reps: vec![RuntimeRep::LiftedRef],
+            strict_fields: vec![false],
+            layout: CheckedLayout {
+                fields: vec![FieldLayout {
+                    rep: RuntimeRep::LiftedRef,
+                    offset: 0,
+                }],
+                alignment: 8,
+                payload_size: 8,
+                root_mask: vec![true],
+            },
+            tag: 1,
+            family_size: 1,
+        });
+        wire.expressions.nodes.clear();
+        if let tidepool_repr::execution_schema::Group::NonRecursive(top) = &mut wire.bindings[0] {
+            top.identity = testing::identity("Fixture", name);
+            top.binding.rhs = HeapRhs::Constructor {
+                constructor: ConstructorId(0),
+                fields: vec![Atom::Ref(ValueRef::Global(GlobalId(0)))],
+            };
+        }
+        let imported = testing::identity("Fixture", other);
+        wire.globals.push(GlobalDecl {
+            identity: imported.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        });
+        let certified = CertifiedGroup::admit(
+            CachedHomeOwner {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                module_version: ModuleVersion([1; 32]),
+                skinny_iface_sha256: [2; 32],
+                product_sha256: [3; 32],
+            },
+            testing::projected_group(wire, ordinal).unwrap(),
+            vec![ImportOwner::Source {
+                version: ModuleVersion([1; 32]),
+                binder: imported,
+            }],
+        )
+        .unwrap();
+        Arc::new(CompiledProgram::compile_certified_group(&certified).unwrap())
     }
 
     fn static_group() -> Arc<CompiledProgram> {
@@ -875,6 +930,74 @@ mod tests {
         assert!(machine.unpin(ids[0]));
         let last = machine.collect_major(machine.quiesce().unwrap()).unwrap();
         assert_eq!(last.programs.len(), 2);
+        assert_eq!(machine.residency().programs, 0);
+    }
+
+    #[test]
+    fn cross_group_heap_top_cycle_survives_collection_and_retires() {
+        let a = cyclic_heap_top("a", 21, "b");
+        let b = cyclic_heap_top("b", 22, "a");
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        let ids = machine
+            .install_shared_batch(vec![
+                BatchProgram {
+                    image: a,
+                    imports: vec![BatchImport::Source {
+                        group: 1,
+                        binding: ValueId(0),
+                    }],
+                },
+                BatchProgram {
+                    image: b,
+                    imports: vec![BatchImport::Source {
+                        group: 0,
+                        binding: ValueId(0),
+                    }],
+                },
+            ])
+            .unwrap();
+        let first = machine.retain_top(ids[0], ValueId(0)).unwrap();
+        let second = machine.retain_top(ids[1], ValueId(0)).unwrap();
+        for id in &ids {
+            machine.pin(*id).unwrap();
+        }
+        let first_collection = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert!(first_collection.programs.is_empty(), "{first_collection:?}");
+        assert_eq!(machine.residency().programs, 2);
+        let PreparedOuter::Constructor {
+            fields: first_fields,
+            ..
+        } = machine.inspect_outer(first, RealmId::ROOT).unwrap();
+        let [PreparedResult::Managed(first_peer)] = first_fields.as_slice() else {
+            panic!("first heap top must point to its peer");
+        };
+        assert_eq!(
+            machine.handle_current_pointer(*first_peer),
+            machine.handle_current_pointer(second)
+        );
+        let PreparedOuter::Constructor {
+            fields: second_fields,
+            ..
+        } = machine.inspect_outer(second, RealmId::ROOT).unwrap();
+        let [PreparedResult::Managed(second_peer)] = second_fields.as_slice() else {
+            panic!("second heap top must point back to its peer");
+        };
+        assert_eq!(
+            machine.handle_current_pointer(*second_peer),
+            machine.handle_current_pointer(first)
+        );
+        for handle in [*first_peer, *second_peer, first, second] {
+            assert!(machine.release(handle));
+        }
+        assert_eq!(machine.residency().programs, 2);
+        for id in &ids {
+            assert!(machine.unpin(*id));
+        }
+        let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(retired.programs.len(), 2);
         assert_eq!(machine.residency().programs, 0);
     }
 
