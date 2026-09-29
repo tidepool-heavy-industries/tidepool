@@ -107,7 +107,7 @@ class FirstPartySources(unittest.TestCase):
         self.assertTrue(matches, buck)
         return buck, {name: ast.literal_eval(mapping) for name, mapping in matches}
 
-    def test_codegen_emits_only_the_native_md5_smoke_test(self):
+    def test_codegen_emits_native_units_and_only_the_md5_integration_test(self):
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
         buck, groups = self.groups("tidepool/codegen")
@@ -116,7 +116,8 @@ class FirstPartySources(unittest.TestCase):
         self.assertIn('deps = [\n        ":tidepool_codegen",', buck)
         self.assertIn("tests/native_md5_link.rs", groups["native_md5_link_sources"])
         self.assertNotIn("prepared_control", buck)
-        self.assertNotIn("tidepool_codegen_unit_tests", buck)
+        self.assertIn("tidepool_codegen_unit_tests", buck)
+        self.assertIn("tidepool_codegen_unit_tests_sources", groups)
 
     def test_source_tree_preserves_fixture_layout_and_target_inputs(self):
         result = self.generate()

@@ -1,0 +1,7 @@
+load("@prelude//:rules.bzl", "python_bootstrap_binary")
+
+python_bootstrap_binary(
+    name = "isolated_libtest",
+    main = "isolated-libtest.py",
+    visibility = ["PUBLIC"],
+)

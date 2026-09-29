@@ -1,4 +1,4 @@
-load("@prelude//:rules.bzl", "rust_binary", "rust_library", "rust_test")
+load("@prelude//:rules.bzl", "rust_binary", "rust_library", "rust_test", "sh_test")
 
 _HOT_CRATES = ["tidepool_codegen", "tidepool_repr", "tidepool_heap"]
 
@@ -23,3 +23,20 @@ def tidepool_rust_binary(name, package_name, package_dir, version, env = {}, rus
 def tidepool_rust_test(name, package_name, package_dir, version, env = {}, rustc_flags = [], **kwargs):
     compiler_env, flags = _common(name, package_name, package_dir, version, env, rustc_flags)
     rust_test(name = name, env = compiler_env, rustc_flags = flags, **kwargs)
+
+def tidepool_rust_isolated_test(name, package_name, package_dir, version, env = {}, rustc_flags = [], **kwargs):
+    # A build-only harness avoids exposing a second, unisolated test target.
+    compiler_env, flags = _common(name, package_name, package_dir, version, env, rustc_flags)
+    rust_binary(
+        name = name + "_binary",
+        env = compiler_env,
+        rustc_flags = flags + ["--test"],
+        **kwargs
+    )
+    sh_test(
+        name = name,
+        test = "//build/rust:isolated_libtest",
+        args = ["$(location :" + name + "_binary)"],
+        env = compiler_env,
+        visibility = kwargs.get("visibility", []),
+    )

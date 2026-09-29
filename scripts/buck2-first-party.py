@@ -30,7 +30,8 @@ unknown = selected - set(local)
 if unknown:
     raise SystemExit(f"unknown Cargo workspace package(s): {', '.join(sorted(unknown))}")
 SUPPORTED_PACKAGES = {"tidepool-atomic-write", "tidepool-repr", "tidepool-heap", "tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen"}
-LIBRARY_ONLY_PACKAGES = {"tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen"}
+NORMAL_DEPENDENCY_ONLY_PACKAGES = {"tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen"}
+UNIT_TEST_PACKAGES = {"tidepool-atomic-write", "tidepool-repr", "tidepool-heap", "tidepool-codegen"}
 unsupported = selected - SUPPORTED_PACKAGES
 if unsupported:
     raise SystemExit(
@@ -263,10 +264,18 @@ for package_name, package in local.items():
     rules = [header]
     if package_name == "tidepool-codegen":
         rules.append('load("//build/rust:codegen-md5.bzl", "tidepool_codegen_md5")\n')
+        rules.append('load("//build/rust:defs.bzl", "tidepool_rust_isolated_test")\n')
     normal_deps, normal_named = dependency_sets(package)
     if package_name == "tidepool-codegen":
         normal_named["prepared_md5_native"] = ":prepared_md5_native"
-    dev_deps, dev_named = dependency_sets(package, include_dev=True) if package_name not in LIBRARY_ONLY_PACKAGES else ([], {})
+    dev_deps, dev_named = dependency_sets(package, include_dev=True) if package_name not in NORMAL_DEPENDENCY_ONLY_PACKAGES else ([], {})
+    unit_deps, unit_named = dev_deps, dev_named
+    if package_name == "tidepool-codegen":
+        # Native engine unit tests use exactly the library's dependency surface.
+        # Admit a new dev dependency explicitly before expanding this closure.
+        if any(dependency["kind"] == "dev" for dependency in package["dependencies"]):
+            raise SystemExit("Model codegen dev dependencies before extending its native unit target")
+        unit_deps, unit_named = normal_deps, normal_named
     targets = package["targets"]
     libraries = [target for target in targets if "lib" in target["kind"] or "proc-macro" in target["kind"]]
     binaries = [target for target in targets if "bin" in target["kind"]]
@@ -281,14 +290,15 @@ for package_name, package in local.items():
         deps = normal_deps + ([":" + libraries[0]["name"]] if libraries else [])
         binary_name = target["name"] + "_bin" if libraries and target["name"] == libraries[0]["name"] else target["name"]
         rules.append(render_rule("tidepool_rust_binary", binary_name, target, package, deps, normal_named))
-    if libraries and package_name not in LIBRARY_ONLY_PACKAGES:
+    if libraries and package_name in UNIT_TEST_PACKAGES:
         library = libraries[0]
         unit_target = dict(library)
         unit_target["name"] = library["name"] + "_unit_tests"
-        rules.append(render_rule("tidepool_rust_test", unit_target["name"], unit_target, package, dev_deps, dev_named))
+        unit_rule = "tidepool_rust_isolated_test" if package_name == "tidepool-codegen" else "tidepool_rust_test"
+        rules.append(render_rule(unit_rule, unit_target["name"], unit_target, package, unit_deps, unit_named))
     selected_tests = [
         target for target in tests
-        if package_name not in LIBRARY_ONLY_PACKAGES
+        if package_name not in NORMAL_DEPENDENCY_ONLY_PACKAGES
         or (package_name == "tidepool-codegen" and target["name"] in CODEGEN_NATIVE_TESTS)
     ]
     for target in selected_tests:
