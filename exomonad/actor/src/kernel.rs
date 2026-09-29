@@ -179,6 +179,10 @@ pub enum KernelMessage {
         control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
         reply: RpcReplyPort<KernelWorkbenchReply>,
     },
+    /// Wakes the actor after its one owned workbench task returns its behavior.
+    WorkbenchCompleted {
+        token: u64,
+    },
     ReconcileWorkbenchCancellation {
         invocation: Option<exomonad_tool::ToolInvocationContext>,
         execution: tidepool_runtime::session::WorkbenchExecutionId,
@@ -229,6 +233,7 @@ impl KernelMessage {
             Self::Call { .. } => "Call",
             Self::Tool { .. } => "Tool",
             Self::Workbench { .. } => "Workbench",
+            Self::WorkbenchCompleted { .. } => "WorkbenchCompleted",
             Self::ReconcileWorkbenchCancellation { .. } => "ReconcileWorkbenchCancellation",
             Self::ReconcileWorkbenchBoundary { .. } => "ReconcileWorkbenchBoundary",
             Self::ToolCompleted { .. } => "ToolCompleted",
@@ -281,6 +286,10 @@ impl std::fmt::Debug for KernelMessage {
                 .debug_struct("Workbench")
                 .field("request", request)
                 .finish_non_exhaustive(),
+            Self::WorkbenchCompleted { token } => formatter
+                .debug_tuple("WorkbenchCompleted")
+                .field(token)
+                .finish(),
             Self::ReconcileWorkbenchCancellation { execution, .. } => formatter
                 .debug_tuple("ReconcileWorkbenchCancellation")
                 .field(execution)

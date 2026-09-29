@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::{FuturesUnordered, StreamExt};
+use futures_util::FutureExt;
 use ractor::{Actor, ActorProcessingErr, ActorRef as RactorRef, SupervisionEvent};
+use tracing::Instrument;
 
 use crate::{
     ActorExitKind, ActorRef, ActorTerminal, ExternalApplicationFailure, ExternalFailureDisposition,
@@ -48,6 +50,9 @@ pub(crate) enum ExitAuthority<'a> {
     /// gone or was killed (W3, W4). No cleanup proof is retained; the
     /// child's `cleanup()` stays `None`.
     SupervisorForced,
+    /// The actor lost the task that owned its behavior. It can report failed
+    /// execution and unconfirmed cleanup, but cannot run behavior shutdown.
+    OwnerLostExecution,
 }
 
 /// What `finish_actor` is settling: an ordinary stop, or a replacement
@@ -800,10 +805,73 @@ pub struct LocalActorState<B> {
     mailbox_admission: crate::kernel::MailboxAdmission,
     hosted_admission: HostedAdmission,
     context: std::sync::Arc<KernelContext>,
-    behavior: B,
+    behavior: BehaviorSlot<B>,
+    pending_workbench: Option<PendingWorkbench<B>>,
+    next_workbench_token: u64,
+    pending_child_exits: Vec<ChildExitNotice>,
     terminal: RetainedActorExit,
     deferred_mailbox: VecDeque<KernelMessage>,
     mailbox_drain_scheduled: bool,
+}
+
+impl<B> Drop for LocalActorState<B> {
+    fn drop(&mut self) {
+        let Some(pending) = self.pending_workbench.take() else {
+            return;
+        };
+        let detail = "actor stopped while its owned workbench task was still running; execution and cleanup are unconfirmed";
+        if let Some(control) = pending.control {
+            control.mark_unconfirmed();
+        }
+        pending
+            .reply
+            .send(Err(KernelInvocationFailure::Failed {
+                actor: self.context.identity,
+                detail: detail.into(),
+            }))
+            .ok();
+        retain_unconfirmed_exit(&self.terminal, self.context.identity, detail);
+    }
+}
+
+/// The behavior has exactly one owner: the actor or its active workbench task.
+struct BehaviorSlot<B>(Option<B>);
+
+impl<B> std::ops::Deref for BehaviorSlot<B> {
+    type Target = B;
+
+    fn deref(&self) -> &B {
+        self.0
+            .as_ref()
+            .expect("behavior is owned by a pending workbench")
+    }
+}
+
+impl<B> std::ops::DerefMut for BehaviorSlot<B> {
+    fn deref_mut(&mut self) -> &mut B {
+        self.0
+            .as_mut()
+            .expect("behavior is owned by a pending workbench")
+    }
+}
+
+struct PendingWorkbench<B> {
+    token: u64,
+    reply: ractor::RpcReplyPort<crate::KernelWorkbenchReply>,
+    control: Option<Arc<crate::WorkbenchExecutionControl>>,
+    execution: Option<tidepool_runtime::session::WorkbenchExecutionId>,
+    completion: Arc<Mutex<Option<WorkbenchTaskOutcome<B>>>>,
+}
+
+enum WorkbenchTaskOutcome<B> {
+    Returned {
+        behavior: B,
+        result: Result<
+            Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
+            Box<dyn std::any::Any + Send>,
+        >,
+    },
+    Lost(String),
 }
 
 struct PendingReplacement {
@@ -850,7 +918,10 @@ where
             drain: DrainState::Open,
             mailbox_admission: arguments.mailbox_admission,
             context,
-            behavior: arguments.behavior,
+            behavior: BehaviorSlot(Some(arguments.behavior)),
+            pending_workbench: None,
+            next_workbench_token: 0,
+            pending_child_exits: Vec::new(),
             terminal: arguments.terminal,
             deferred_mailbox: VecDeque::new(),
             mailbox_drain_scheduled: false,
@@ -918,6 +989,69 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        if let Some(pending) = &state.pending_workbench {
+            match message {
+                KernelMessage::WorkbenchCompleted { token } => {
+                    complete_workbench(&myself, state, token).await;
+                }
+                KernelMessage::DrainMailbox => {
+                    state.mailbox_drain_scheduled = false;
+                }
+                KernelMessage::SealHostedWork { reply } => {
+                    if !matches!(state.hosted_admission, HostedAdmission::Closing)
+                        && !state
+                            .deferred_mailbox
+                            .iter()
+                            .any(|message| matches!(message, KernelMessage::Shutdown { .. }))
+                    {
+                        state.hosted_admission = HostedAdmission::Sealed;
+                        reply
+                            .send(crate::HostedWorkSeal {
+                                actor: state.context.identity,
+                            })
+                            .ok();
+                    }
+                }
+                KernelMessage::Shutdown { terminal, reply } => {
+                    state.mailbox_admission.close();
+                    state
+                        .deferred_mailbox
+                        .push_back(KernelMessage::Shutdown { terminal, reply });
+                }
+                KernelMessage::ReconcileWorkbenchCancellation {
+                    execution,
+                    invocation,
+                    reply,
+                } if pending.execution.as_ref() == Some(&execution)
+                    && pending
+                        .control
+                        .as_ref()
+                        .and_then(|control| control.invocation.as_ref())
+                        == invocation
+                            .clone()
+                            .map(crate::resident_tools::WorkbenchCallKey::from)
+                            .as_ref() =>
+                {
+                    reply
+                        .send(crate::WorkbenchCancellationOutcome::Unconfirmed { execution })
+                        .ok();
+                }
+                KernelMessage::ReconcileWorkbenchBoundary { boundary, reply }
+                    if pending.control.as_ref().is_some_and(|control| {
+                        control
+                            .invocation
+                            .as_ref()
+                            .is_some_and(|key| key.matches_boundary(&boundary))
+                    }) =>
+                {
+                    reply
+                        .send(crate::WorkbenchBoundaryReconciliation::Pending)
+                        .ok();
+                }
+                other => state.deferred_mailbox.push_back(other),
+            }
+            return Ok(());
+        }
         let message = match message {
             message @ KernelMessage::Shutdown { .. } if state.behavior.replacement_staged() => {
                 state.deferred_mailbox.push_back(message);
@@ -942,10 +1076,21 @@ where
             }
             KernelMessage::DrainMailbox => {
                 state.mailbox_drain_scheduled = false;
-                if state.replacement.is_some() || !state.behavior.accepts_mailbox() {
+                if state.replacement.is_some() {
                     return Ok(());
                 }
-                let Some(message) = state.deferred_mailbox.pop_front() else {
+                let message = if state.behavior.accepts_mailbox() {
+                    state.deferred_mailbox.pop_front()
+                } else if !state.behavior.replacement_staged() {
+                    state
+                        .deferred_mailbox
+                        .iter()
+                        .position(|message| matches!(message, KernelMessage::Shutdown { .. }))
+                        .and_then(|index| state.deferred_mailbox.remove(index))
+                } else {
+                    None
+                };
+                let Some(message) = message else {
                     return Ok(());
                 };
                 message
@@ -1297,21 +1442,11 @@ where
                     return Ok(());
                 }
 
-                match state
-                    .behavior
-                    .workbench(&state.context, request, control)
-                    .await
-                {
-                    Ok(step) => {
-                        settle_step(&myself, state, step, |output| {
-                            reply.send(Ok(output)).ok();
-                        })
-                        .await;
-                    }
-                    Err(error) => {
-                        reply.send(Err(error)).ok();
-                    }
-                }
+                start_workbench(&myself, state, request, control, reply);
+                return Ok(());
+            }
+            KernelMessage::WorkbenchCompleted { .. } => {
+                tracing::warn!(actor = %state.context.identity, "stale workbench completion ignored");
             }
             KernelMessage::ReconcileWorkbenchCancellation {
                 execution,
@@ -1363,19 +1498,7 @@ where
                 reply.send(terminal).ok();
             }
         }
-        if state.replacement.is_none()
-            && matches!(state.drain, DrainState::Draining)
-            && state.deferred_mailbox.is_empty()
-            && state.behavior.accepts_mailbox()
-            && state.terminal.get().is_none()
-        {
-            match state.behavior.drain(&state.context).await {
-                Ok(step) => finish_after_step(&myself, state, step).await,
-                Err(error) => {
-                    fail_handler(&myself, state, format!("actor drain failed: {error}")).await
-                }
-            }
-        }
+        maybe_drain(&myself, state).await;
         schedule_deferred_mailbox(&myself, state)?;
         Ok(())
     }
@@ -1428,15 +1551,199 @@ where
         let Some(terminal) = child.terminal().get() else {
             unreachable!("supervision publishes or observes the child terminal result");
         };
-        state
-            .behavior
-            .child_exited(ChildExitNotice {
-                owner: state.context.identity,
-                child,
-                terminal,
-            })
-            .await;
+        let notice = ChildExitNotice {
+            owner: state.context.identity,
+            child,
+            terminal,
+        };
+        if state.pending_workbench.is_some() {
+            state.pending_child_exits.push(notice);
+        } else {
+            state.behavior.child_exited(notice).await;
+        }
         Ok(())
+    }
+}
+
+fn start_workbench<B: KernelBehavior>(
+    myself: &RactorRef<KernelMessage>,
+    state: &mut LocalActorState<B>,
+    request: WorkbenchRequest,
+    control: Option<Arc<crate::WorkbenchExecutionControl>>,
+    reply: ractor::RpcReplyPort<crate::KernelWorkbenchReply>,
+) {
+    let behavior = state.behavior.0.take().expect("one active workbench");
+    state.next_workbench_token = state.next_workbench_token.wrapping_add(1);
+    let token = state.next_workbench_token;
+    let completion = Arc::new(Mutex::new(None));
+    state.pending_workbench = Some(PendingWorkbench {
+        token,
+        reply,
+        control: control.clone(),
+        execution: request.execution_id().cloned(),
+        completion: Arc::clone(&completion),
+    });
+    let context = Arc::clone(&state.context);
+    let myself = myself.clone();
+    let worker = tokio::spawn(
+        async move {
+            let mut behavior = behavior;
+            let result = std::panic::AssertUnwindSafe(async {
+                behavior.workbench(&context, request, control).await
+            })
+            .catch_unwind()
+            .await;
+            WorkbenchTaskOutcome::Returned { behavior, result }
+        }
+        .instrument(tracing::Span::current()),
+    );
+    tokio::spawn(async move {
+        let outcome = match worker.await {
+            Ok(outcome) => outcome,
+            Err(error) => WorkbenchTaskOutcome::Lost(error.to_string()),
+        };
+        *completion.lock() = Some(outcome);
+        if myself
+            .send_message(KernelMessage::WorkbenchCompleted { token })
+            .is_err()
+        {
+            tracing::warn!(
+                token,
+                "workbench owner stopped before task completion was delivered"
+            );
+        }
+    });
+}
+
+async fn complete_workbench<B: KernelBehavior>(
+    myself: &RactorRef<KernelMessage>,
+    state: &mut LocalActorState<B>,
+    token: u64,
+) {
+    if state
+        .pending_workbench
+        .as_ref()
+        .is_none_or(|pending| pending.token != token)
+    {
+        tracing::warn!(token, "stale workbench completion ignored");
+        return;
+    }
+    let pending = state
+        .pending_workbench
+        .take()
+        .expect("matching pending workbench");
+    let outcome = pending.completion.lock().take();
+    let Some(outcome) = outcome else {
+        tracing::error!(token, "workbench completion arrived without its behavior");
+        state.pending_workbench = Some(pending);
+        return;
+    };
+    match outcome {
+        WorkbenchTaskOutcome::Returned { behavior, result } => match result {
+            Ok(Ok(step)) => {
+                state.behavior.0 = Some(behavior);
+                settle_step(myself, state, step, |output| {
+                    pending.reply.send(Ok(output)).ok();
+                })
+                .await;
+            }
+            Ok(Err(error)) => {
+                state.behavior.0 = Some(behavior);
+                pending.reply.send(Err(error)).ok();
+            }
+            Err(_) => {
+                fail_unconfirmed_workbench(
+                    myself,
+                    state,
+                    pending,
+                    "workbench task panicked; execution outcome is unconfirmed".into(),
+                );
+                drop(behavior);
+                return;
+            }
+        },
+        WorkbenchTaskOutcome::Lost(detail) => {
+            fail_unconfirmed_workbench(
+                myself,
+                state,
+                pending,
+                format!(
+                    "workbench task lost its behavior: {detail}; execution outcome is unconfirmed"
+                ),
+            );
+            return;
+        }
+    }
+    if state.terminal.get().is_none() {
+        for notice in std::mem::take(&mut state.pending_child_exits) {
+            state.behavior.child_exited(notice).await;
+        }
+    }
+    maybe_drain(myself, state).await;
+    if state.terminal.get().is_none() {
+        if let Err(error) = schedule_deferred_mailbox(myself, state) {
+            fail_actor(
+                myself,
+                state,
+                format!("could not resume actor mailbox: {error}"),
+            )
+            .await;
+        }
+    }
+}
+
+async fn maybe_drain<B: KernelBehavior>(
+    myself: &RactorRef<KernelMessage>,
+    state: &mut LocalActorState<B>,
+) {
+    if state.replacement.is_none()
+        && matches!(state.drain, DrainState::Draining)
+        && state.deferred_mailbox.is_empty()
+        && state.behavior.accepts_mailbox()
+        && state.terminal.get().is_none()
+    {
+        match state.behavior.drain(&state.context).await {
+            Ok(step) => finish_after_step(myself, state, step).await,
+            Err(error) => fail_handler(myself, state, format!("actor drain failed: {error}")).await,
+        }
+    }
+}
+
+fn fail_unconfirmed_workbench<B: KernelBehavior>(
+    myself: &RactorRef<KernelMessage>,
+    state: &mut LocalActorState<B>,
+    pending: PendingWorkbench<B>,
+    detail: String,
+) {
+    let failure = KernelInvocationFailure::Failed {
+        actor: state.context.identity,
+        detail: detail.clone(),
+    };
+    if let Some(control) = pending.control {
+        control.mark_unconfirmed();
+        control.settle(Err(failure.clone()));
+    }
+    pending.reply.send(Err(failure)).ok();
+    state.hosted_admission = HostedAdmission::Closing;
+    state.mailbox_admission.close();
+    retain_unconfirmed_exit(&state.terminal, state.context.identity, &detail);
+    myself.stop(Some(detail));
+}
+
+fn retain_unconfirmed_exit(terminal: &RetainedActorExit, actor: ActorRef, detail: &str) {
+    let unconfirmed = crate::CleanupComponentOutcome::Unconfirmed(detail.into());
+    terminal.retain_cleanup(crate::ResidentCleanupOutcome {
+        actor,
+        hook: unconfirmed.clone(),
+        realm: unconfirmed.clone(),
+        children: unconfirmed,
+    });
+    if terminal.get().is_none() {
+        publish_exit(
+            terminal,
+            &failed_terminal(detail.into()),
+            ExitAuthority::OwnerLostExecution,
+        );
     }
 }
 
@@ -1447,9 +1754,14 @@ fn schedule_deferred_mailbox<B>(
 where
     B: KernelBehavior,
 {
+    let runnable_shutdown = !state.behavior.replacement_staged()
+        && state
+            .deferred_mailbox
+            .iter()
+            .any(|message| matches!(message, KernelMessage::Shutdown { .. }));
     if state.replacement.is_none()
         && state.terminal.get().is_none()
-        && state.behavior.accepts_mailbox()
+        && (state.behavior.accepts_mailbox() || runnable_shutdown)
         && !state.deferred_mailbox.is_empty()
         && !state.mailbox_drain_scheduled
     {
@@ -1909,6 +2221,8 @@ mod tests {
         /// Q2-B tests; `None` keeps the trait's default (delegate to
         /// `shutdown`, realm `Unsupported`).
         shutdown_override: Option<ShutdownOverride>,
+        workbench_gate: Option<(Arc<Notify>, Arc<Notify>)>,
+        workbench_panics: bool,
     }
 
     #[derive(Clone)]
@@ -2126,7 +2440,18 @@ mod tests {
             _request: WorkbenchRequest,
             _control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
         ) -> BoxFuture<'_, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
-            Box::pin(async {
+            let gate = self.workbench_gate.clone();
+            let panics = self.workbench_panics;
+            Box::pin(async move {
+                self.calls.lock().push("workbench-start");
+                if let Some((entered, release)) = gate {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                if panics {
+                    panic!("workbench probe panic");
+                }
+                self.calls.lock().push("workbench-end");
                 Ok(KernelStep::Continue(WorkbenchResponse {
                     status: WorkbenchRunStatus::Committed,
                     summary: None,
@@ -2134,6 +2459,17 @@ mod tests {
                     next_index: 0,
                     total: 0,
                 }))
+            })
+        }
+
+        fn tool_completed<'a>(
+            &'a mut self,
+            _context: &'a KernelContext,
+            _boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        ) -> BoxFuture<'a, Result<(), KernelBehaviorError>> {
+            Box::pin(async move {
+                self.calls.lock().push("tool-completed");
+                Ok(())
             })
         }
 
@@ -2300,6 +2636,8 @@ mod tests {
                 pending_children: VecDeque::new(),
                 spawned_children,
                 shutdown_override: None,
+                workbench_gate: None,
+                workbench_panics: false,
             },
             calls,
             mailbox_calls,
@@ -2307,6 +2645,278 @@ mod tests {
             spawned_child,
             child_exits,
         }
+    }
+
+    fn send_workbench(actor: &LocalActorRef) -> oneshot::Receiver<crate::KernelWorkbenchReply> {
+        send_workbench_request(actor, WorkbenchRequest::from_cell_input("pure ()"), None)
+    }
+
+    fn send_workbench_request(
+        actor: &LocalActorRef,
+        request: WorkbenchRequest,
+        control: Option<Arc<crate::WorkbenchExecutionControl>>,
+    ) -> oneshot::Receiver<crate::KernelWorkbenchReply> {
+        let (reply, receive) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::Workbench {
+                request,
+                control,
+                reply: reply.into(),
+            })
+            .expect("queue workbench");
+        receive
+    }
+
+    #[tokio::test]
+    async fn workbench_keeps_control_responsive_and_serializes_notebook_calls() {
+        let mut fixture = behavior(false);
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        fixture.behavior.workbench_gate = Some((Arc::clone(&entered), Arc::clone(&release)));
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let execution = tidepool_runtime::session::WorkbenchExecutionId::from_digest([7; 16]);
+        let first = send_workbench_request(
+            &actor,
+            WorkbenchRequest::from_cell_input("pure ()").with_execution_id(execution.clone()),
+            Some(crate::WorkbenchExecutionControl::untracked()),
+        );
+        entered.notified().await;
+        let (reconcile_tx, reconcile_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::ReconcileWorkbenchCancellation {
+                execution: execution.clone(),
+                invocation: None,
+                reply: reconcile_tx.into(),
+            })
+            .expect("reconcile active workbench");
+        assert!(matches!(
+            reconcile_rx.await.expect("reconciliation"),
+            crate::WorkbenchCancellationOutcome::Unconfirmed { execution: actual }
+                if actual == execution
+        ));
+        let second = send_workbench(&actor);
+        actor
+            .seal_hosted_work()
+            .await
+            .expect("seal while notebook runs");
+        assert_eq!(&*fixture.calls.lock(), &["workbench-start"]);
+        release.notify_one();
+        assert!(first.await.expect("first reply").is_ok());
+        assert!(matches!(
+            second.await.expect("second reply"),
+            Err(KernelInvocationFailure::Rejected { .. })
+        ));
+        assert_eq!(
+            &*fixture.calls.lock(),
+            &["workbench-start", "workbench-end"]
+        );
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "done".into(),
+            })
+            .await
+            .expect("shutdown");
+        task.await.expect("actor task");
+    }
+
+    #[tokio::test]
+    async fn second_workbench_starts_only_after_first_returns() {
+        let mut fixture = behavior(false);
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        fixture.behavior.workbench_gate = Some((Arc::clone(&entered), Arc::clone(&release)));
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let first = send_workbench(&actor);
+        entered.notified().await;
+        let second = send_workbench(&actor);
+        tokio::task::yield_now().await;
+        assert_eq!(&*fixture.calls.lock(), &["workbench-start"]);
+        release.notify_one();
+        assert!(first.await.expect("first reply").is_ok());
+        entered.notified().await;
+        assert_eq!(
+            &*fixture.calls.lock(),
+            &["workbench-start", "workbench-end", "workbench-start"]
+        );
+        release.notify_one();
+        assert!(second.await.expect("second reply").is_ok());
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "done".into(),
+            })
+            .await
+            .expect("shutdown");
+        task.await.expect("actor task");
+    }
+
+    #[tokio::test]
+    async fn admitted_completion_precedes_shutdown_after_workbench() {
+        let mut fixture = behavior(false);
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        fixture.behavior.workbench_gate = Some((Arc::clone(&entered), Arc::clone(&release)));
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let workbench = send_workbench(&actor);
+        entered.notified().await;
+        let (completed_tx, completed_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::ToolCompleted {
+                boundary: tidepool_runtime::session::WorkbenchForkBoundary {
+                    thread_id: "thread".into(),
+                    call_id: "call".into(),
+                },
+                reply: completed_tx.into(),
+            })
+            .expect("queue completion");
+        let terminal = ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "stop".into(),
+        };
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::Shutdown {
+                terminal: terminal.clone(),
+                reply: shutdown_tx.into(),
+            })
+            .expect("queue shutdown");
+        release.notify_one();
+        assert!(workbench.await.expect("workbench reply").is_ok());
+        assert!(completed_rx.await.expect("completion reply").is_ok());
+        assert_eq!(shutdown_rx.await.expect("shutdown reply"), terminal);
+        task.await.expect("actor task");
+        assert_eq!(
+            &*fixture.calls.lock(),
+            &[
+                "workbench-start",
+                "workbench-end",
+                "tool-completed",
+                "shutdown"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn workbench_shutdown_waits_for_completion_and_ignores_stale_token() {
+        let mut fixture = behavior(false);
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        fixture.behavior.workbench_gate = Some((Arc::clone(&entered), Arc::clone(&release)));
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let reply = send_workbench(&actor);
+        entered.notified().await;
+        actor
+            .address()
+            .send_message(KernelMessage::WorkbenchCompleted { token: u64::MAX })
+            .expect("stale token");
+        let terminal = ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "stop".into(),
+        };
+        let actor_for_shutdown = actor.clone();
+        let requested = terminal.clone();
+        let shutdown = tokio::spawn(async move { actor_for_shutdown.shutdown(requested).await });
+        while actor.terminal().requested_shutdown().is_none() {
+            tokio::task::yield_now().await;
+        }
+        assert!(actor.terminal().get().is_none());
+        assert_eq!(&*fixture.calls.lock(), &["workbench-start"]);
+        release.notify_one();
+        assert!(reply.await.expect("workbench reply").is_ok());
+        assert_eq!(
+            shutdown.await.expect("shutdown task").expect("shutdown"),
+            terminal
+        );
+        task.await.expect("actor task");
+        assert_eq!(
+            &*fixture.calls.lock(),
+            &["workbench-start", "workbench-end", "shutdown"]
+        );
+    }
+
+    #[tokio::test]
+    async fn workbench_panic_settles_waiter_and_fails_actor() {
+        let mut fixture = behavior(false);
+        fixture.behavior.workbench_panics = true;
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let execution = tidepool_runtime::session::WorkbenchExecutionId::from_digest([8; 16]);
+        let control = crate::WorkbenchExecutionControl::untracked();
+        let reply = send_workbench_request(
+            &actor,
+            WorkbenchRequest::from_cell_input("panic").with_execution_id(execution.clone()),
+            Some(Arc::clone(&control)),
+        );
+        let reply = reply.await.expect("workbench reply");
+        assert!(matches!(
+            &reply,
+            Err(KernelInvocationFailure::Failed { .. })
+        ));
+        assert!(matches!(
+            control.cancellation_outcome(execution, reply),
+            crate::WorkbenchCancellationOutcome::Unconfirmed { .. }
+        ));
+        assert_eq!(actor.terminal().wait().await.kind, ActorExitKind::Failed);
+        task.await.expect("actor task");
+        assert!(matches!(
+            actor.terminal().cleanup().expect("cleanup evidence").hook,
+            crate::CleanupComponentOutcome::Unconfirmed(_)
+        ));
+        assert_eq!(&*fixture.calls.lock(), &["workbench-start"]);
+    }
+
+    #[tokio::test]
+    async fn forced_actor_stop_retains_uncertain_workbench_until_worker_returns() {
+        let mut fixture = behavior(false);
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        fixture.behavior.workbench_gate = Some((Arc::clone(&entered), Arc::clone(&release)));
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let reply = send_workbench(&actor);
+        entered.notified().await;
+        actor.address().stop(None);
+        task.await.expect("actor task");
+        assert_eq!(actor.terminal().wait().await.kind, ActorExitKind::Failed);
+        assert!(matches!(
+            actor.terminal().cleanup().expect("cleanup evidence").hook,
+            crate::CleanupComponentOutcome::Unconfirmed(_)
+        ));
+        assert!(matches!(
+            reply.await.expect("workbench reply"),
+            Err(KernelInvocationFailure::Failed { .. })
+        ));
+        assert_eq!(&*fixture.calls.lock(), &["workbench-start"]);
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if fixture.calls.lock().len() == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owned worker completed after actor stop");
+        assert_eq!(
+            &*fixture.calls.lock(),
+            &["workbench-start", "workbench-end"]
+        );
     }
 
     #[tokio::test]
@@ -3820,7 +4430,10 @@ mod tests {
             mailbox_admission: crate::kernel::MailboxAdmission::default(),
             hosted_admission: HostedAdmission::Open,
             context,
-            behavior: behavior(false).behavior,
+            behavior: BehaviorSlot(Some(behavior(false).behavior)),
+            pending_workbench: None,
+            next_workbench_token: 0,
+            pending_child_exits: Vec::new(),
             terminal: terminal.clone(),
             deferred_mailbox: VecDeque::new(),
             mailbox_drain_scheduled: false,

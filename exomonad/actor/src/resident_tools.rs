@@ -653,7 +653,7 @@ impl ResidentToolClient {
         let _published = HostedCellPublication::publish(&self.actor, &control);
         let _turn = self.dispatch_gate.lock().await;
         {
-            // The cell runs in the actor's own task, so its span cannot be a
+            // The cell runs under the actor span, so its span cannot be a
             // child of the tool call. This event is the join: the provider's
             // call id and the execution id the cell span carries, recorded
             // while both are in one scope.
