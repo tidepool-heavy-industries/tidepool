@@ -1,13 +1,15 @@
 -- | Optional, bounded cache suggestions. The compiler checks each candidate
 -- against its current downsweep before a source module may be skipped.
 module Tidepool.ModuleCandidates
-  ( ModuleCandidate(..), readModuleCandidates ) where
+  ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..)
+  , readModuleCandidates ) where
 
-import Codec.CBOR.Decoding (Decoder, decodeListLen, decodeString)
+import Codec.CBOR.Decoding (Decoder, decodeBool, decodeListLen, decodeString)
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Control.Exception (IOException, try)
 import Control.Monad (replicateM, unless, when)
 import Data.Char (isHexDigit)
+import Data.List (stripPrefix)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Set as Set
@@ -24,7 +26,22 @@ data ModuleCandidate = ModuleCandidate
   , candidateInterfaceSha256 :: String
   , candidateModuleVersion :: String
   , candidateProductSha256 :: String
+  , candidateEvidenceSha256 :: String
+  , candidateImports :: [CandidateImport]
   } deriving (Eq, Show)
+
+data CandidateQualifier
+  = CandidateUnqualified
+  | CandidateThisUnit String
+  | CandidateOtherUnit String
+  deriving (Eq, Ord, Show)
+
+data CandidateImport = CandidateImport
+  { candidateImportQualifier :: CandidateQualifier
+  , candidateImportModule :: String
+  , candidateImportBoot :: Bool
+  , candidateImportSelected :: Maybe FilePath
+  } deriving (Eq, Ord, Show)
 
 maxManifestBytes :: Integer
 maxManifestBytes = 1024 * 1024
@@ -57,7 +74,7 @@ decodeManifest = do
   magic <- decodeString
   unless (magic == "TPMCAN") (fail "candidate manifest has wrong magic")
   version <- decodeString
-  unless (version == "2") (fail "unsupported candidate manifest version")
+  unless (version == "3") (fail "unsupported candidate manifest version")
   total <- decodeListLen
   when (total > maxCandidates) (fail "too many module candidates")
   candidates <- replicateM total decodeCandidate
@@ -68,10 +85,11 @@ decodeManifest = do
 decodeCandidate :: Decoder s ModuleCandidate
 decodeCandidate = do
   count <- decodeListLen
-  unless (count == 8) (fail "module candidate must have eight fields")
+  unless (count == 10) (fail "module candidate must have ten fields")
   let text = T.unpack <$> decodeString
   candidate <- ModuleCandidate <$> text <*> text <*> text
-    <*> text <*> text <*> text <*> text <*> text
+    <*> text <*> text <*> text <*> text <*> text <*> text
+    <*> decodeImports
   unless (not (null (candidateUnit candidate))
       && not (null (candidateModule candidate))
       && isAbsolute (candidateSource candidate)
@@ -79,8 +97,37 @@ decodeCandidate = do
       && isDigest (candidateSourceSha256 candidate)
       && isDigest (candidateInterfaceSha256 candidate)
       && isDigest (candidateModuleVersion candidate)
-      && isDigest (candidateProductSha256 candidate))
+      && isDigest (candidateProductSha256 candidate)
+      && isDigest (candidateEvidenceSha256 candidate))
     (fail "invalid module candidate identity or digest")
   pure candidate
-  where
-    isDigest bytes = length bytes == 64 && all isHexDigit bytes
+
+decodeImports :: Decoder s [CandidateImport]
+decodeImports = do
+  total <- decodeListLen
+  when (total > 512) (fail "too many original imports")
+  replicateM total $ do
+    count <- decodeListLen
+    unless (count == 4) (fail "original import must have four fields")
+    qualifierText <- T.unpack <$> decodeString
+    qualifier <- case qualifierText of
+      "none" -> pure CandidateUnqualified
+      _ | Just unit <- stripPrefix "this:" qualifierText, not (null unit) ->
+            pure (CandidateThisUnit unit)
+        | Just unit <- stripPrefix "other:" qualifierText, not (null unit) ->
+            pure (CandidateOtherUnit unit)
+        | otherwise -> fail "invalid original import qualifier"
+    name <- T.unpack <$> decodeString
+    boot <- decodeBool
+    selectedText <- T.unpack <$> decodeString
+    unless (not (null name) && (null selectedText || isAbsolute selectedText))
+      (fail "invalid original import")
+    pure CandidateImport
+      { candidateImportQualifier = qualifier
+      , candidateImportModule = name
+      , candidateImportBoot = boot
+      , candidateImportSelected = if null selectedText then Nothing else Just selectedText
+      }
+
+isDigest :: String -> Bool
+isDigest bytes = length bytes == 64 && all isHexDigit bytes
