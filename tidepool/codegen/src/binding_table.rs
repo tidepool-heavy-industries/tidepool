@@ -315,6 +315,38 @@ mod promotion_tests {
         assert_eq!(released.len(), 2);
         assert!(table.is_empty());
     }
+
+    #[test]
+    fn exact_retained_import_uses_frozen_scope_not_global_newest() {
+        let mut tree = ScopeTree::new();
+        let mut table = BindingTable::new();
+        let mut first_slot = std::ptr::null_mut();
+        let first = entry("answer", 4, &mut first_slot);
+        let first_id = first.id;
+        let first_identity = first.value.identity.clone();
+        table.bind_in(ScopeId::ROOT, first);
+
+        let captured = tree.mint_child(ScopeId::ROOT).expect("live root");
+        table.seed_scope(&tree, ScopeId::ROOT, captured);
+        let sibling = tree.mint_isolated();
+        let mut newer_slot = std::ptr::null_mut();
+        let newer = entry("answer", 5, &mut newer_slot);
+        let newer_identity = newer.value.identity.clone();
+        table.bind_in(sibling, newer);
+
+        assert_eq!(
+            table
+                .resolve_exact_prepared_in(&tree, captured, &first_identity, 4)
+                .map(|entry| entry.id),
+            Some(first_id)
+        );
+        assert!(table
+            .resolve_exact_prepared_in(&tree, captured, &newer_identity, 5)
+            .is_none());
+        assert!(table
+            .resolve_exact_prepared_in(&tree, sibling, &first_identity, 4)
+            .is_none());
+    }
 }
 
 struct ObservationBinding {
@@ -1257,6 +1289,33 @@ impl BindingTable {
     #[must_use]
     pub fn get(&self, id: SessionVarId) -> Option<&BindingEntry> {
         self.live.get(&id)
+    }
+
+    /// Resolve a compiler-retained import only through the exact lexical
+    /// view that admitted the turn. The compiler supplies both the original
+    /// Name and its value-interface generation; neither a spelling lookup nor
+    /// the newest globally retained binding can authorize a sibling's root.
+    #[must_use]
+    pub fn resolve_exact_prepared_in(
+        &self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+        identity: &tidepool_repr::execution_schema::SymbolIdentity,
+        generation: u64,
+    ) -> Option<&BindingEntry> {
+        if !tree.is_live(scope) {
+            return None;
+        }
+        let module = SessionModule::val(tidepool_repr::Generation(generation));
+        if !self
+            .scope_reachable_modules(tree, scope)
+            .any(|reachable| reachable == module)
+        {
+            return None;
+        }
+        self.live
+            .values()
+            .find(|entry| entry.module == module && entry.value.identity == *identity)
     }
 
     /// Every live binding (including shadowed older gens), unordered.
