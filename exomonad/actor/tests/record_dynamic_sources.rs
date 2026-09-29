@@ -40,6 +40,14 @@ impl DispatchEffect<Sink> for NoHandlers {
     ) -> Result<Option<Response>, EffectError> {
         Ok(None)
     }
+
+    fn prepare_dispatch(
+        &mut self,
+        _: &HaskellValue,
+        _: &EffectContext<'_, Sink>,
+    ) -> Result<tidepool_effect::dispatch::EffectDispatch, EffectError> {
+        Ok(tidepool_effect::dispatch::EffectDispatch::Unhandled)
+    }
 }
 
 #[test]

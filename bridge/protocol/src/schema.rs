@@ -144,6 +144,7 @@ pub struct Effect {
 pub enum HandlerExecution {
     Immediate,
     BlockingPrepared,
+    OwnerPrepared,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

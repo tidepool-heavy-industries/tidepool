@@ -42,4 +42,7 @@ pub enum EffectError {
     /// An effect handler encountered a runtime error.
     #[error("handler error: {0}")]
     Handler(String),
+    /// Owned external work observed a cancellation request before completion.
+    #[error("external effect cancelled")]
+    Cancelled,
 }

@@ -76,4 +76,13 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for 
             RepoEventReq::MailboxDrop(mailbox) => self.mailbox_drop_effect(cx, mailbox),
         }
     }
+
+    fn prepare(
+        &mut self,
+        req: RepoEventReq,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+    ) -> Result<tidepool_effect::dispatch::EffectDispatch, tidepool_effect::error::EffectError>
+    {
+        self.prepare_owned(req, cx)
+    }
 }

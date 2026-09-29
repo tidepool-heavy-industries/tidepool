@@ -476,6 +476,15 @@ mod actual_seal {
         {
             Ok(None)
         }
+
+        fn prepare_dispatch(
+            &mut self,
+            _: &tidepool_bridge::HaskellValue,
+            _: &tidepool_effect::dispatch::EffectContext<'_, TestSink>,
+        ) -> Result<tidepool_effect::dispatch::EffectDispatch, tidepool_effect::error::EffectError>
+        {
+            Ok(tidepool_effect::dispatch::EffectDispatch::Unhandled)
+        }
     }
 
     struct DelegatedEndpoint {

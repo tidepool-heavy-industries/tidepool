@@ -4,7 +4,8 @@ use crate::error::EffectError;
 use frunk::{HCons, HNil};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LockResult, Mutex};
 use tidepool_bridge::error::BridgeError;
 use tidepool_bridge::HaskellValue;
 use tidepool_bridge::{FromHaskell, ToHaskell};
@@ -65,15 +66,66 @@ impl From<HaskellValue> for Response {
 /// The runtime launches `Blocking` on a blocking thread and polls `Async` on
 /// an async executor after releasing its machine checkout.
 pub enum DeferredEffect {
-    Blocking(Mutex<Box<dyn FnOnce() -> Result<Response, EffectError> + Send>>),
+    Blocking(BlockingWork),
     Async(Mutex<Pin<Box<dyn Future<Output = Result<Response, EffectError>> + Send>>>),
+}
+
+/// A retirement request visible to one owned blocking operation. Signalling
+/// does not assert completion: the host still joins the worker's real result.
+#[derive(Clone, Debug, Default)]
+pub struct DeferredCancellation(Arc<AtomicBool>);
+
+impl DeferredCancellation {
+    pub fn request(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn requested(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+/// Linear blocking work with optional cooperative retirement. The mutex makes
+/// a parked outcome `Sync`; consuming this owner still extracts the job once.
+pub struct BlockingWork {
+    task: Mutex<Box<dyn FnOnce() -> Result<Response, EffectError> + Send>>,
+    cancellation: Option<DeferredCancellation>,
+}
+
+impl BlockingWork {
+    pub fn into_inner(
+        self,
+    ) -> LockResult<Box<dyn FnOnce() -> Result<Response, EffectError> + Send>> {
+        self.task.into_inner()
+    }
+
+    #[must_use]
+    pub fn cancellation_signal(&self) -> Option<DeferredCancellation> {
+        self.cancellation.clone()
+    }
 }
 
 impl DeferredEffect {
     /// Own one blocking operation. The mutex makes a parked outcome shareable
     /// as actor state; consuming the enum still transfers the operation once.
     pub fn blocking(work: impl FnOnce() -> Result<Response, EffectError> + Send + 'static) -> Self {
-        Self::Blocking(Mutex::new(Box::new(work)))
+        Self::Blocking(BlockingWork {
+            task: Mutex::new(Box::new(work)),
+            cancellation: None,
+        })
+    }
+
+    /// Own blocking work that can observe a retirement request. The host must
+    /// still wait for the worker to settle before releasing its resources.
+    pub fn cancellable_blocking(
+        work: impl FnOnce() -> Result<Response, EffectError> + Send + 'static,
+        cancellation: DeferredCancellation,
+    ) -> Self {
+        Self::Blocking(BlockingWork {
+            task: Mutex::new(Box::new(work)),
+            cancellation: Some(cancellation),
+        })
     }
 
     /// Own one asynchronous operation with the same linear consumption rule.
@@ -81,6 +133,14 @@ impl DeferredEffect {
         work: impl Future<Output = Result<Response, EffectError>> + Send + 'static,
     ) -> Self {
         Self::Async(Mutex::new(Box::pin(work)))
+    }
+
+    #[must_use]
+    pub fn cancellation_signal(&self) -> Option<DeferredCancellation> {
+        match self {
+            Self::Blocking(work) => work.cancellation_signal(),
+            Self::Async(_) => None,
+        }
     }
 }
 
@@ -207,15 +267,13 @@ pub trait DispatchEffect<U = ()> {
     ) -> Result<Option<Response>, EffectError>;
 
     /// Route a request to either an immediate answer or owned external work.
-    /// Custom dispatchers that only implement `dispatch` stay synchronous.
+    /// Every wrapper must forward this explicitly so it cannot accidentally
+    /// turn a prepared blocking effect back into inline execution.
     fn prepare_dispatch(
         &mut self,
         request: &HaskellValue,
         cx: &EffectContext<'_, U>,
-    ) -> Result<EffectDispatch, EffectError> {
-        self.dispatch(request, cx)
-            .map(|response| response.map_or(EffectDispatch::Unhandled, EffectDispatch::Immediate))
-    }
+    ) -> Result<EffectDispatch, EffectError>;
 }
 
 /// Name an effect request for diagnostics without assigning routing meaning
@@ -239,6 +297,14 @@ impl<U> DispatchEffect<U> for HNil {
         _cx: &EffectContext<'_, U>,
     ) -> Result<Option<Response>, EffectError> {
         Ok(None)
+    }
+
+    fn prepare_dispatch(
+        &mut self,
+        _request: &HaskellValue,
+        _cx: &EffectContext<'_, U>,
+    ) -> Result<EffectDispatch, EffectError> {
+        Ok(EffectDispatch::Unhandled)
     }
 }
 

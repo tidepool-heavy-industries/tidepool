@@ -42,6 +42,14 @@ impl DispatchEffect<TestSink> for NoHandlers {
     ) -> Result<Option<Response>, EffectError> {
         Ok(None)
     }
+
+    fn prepare_dispatch(
+        &mut self,
+        _: &HaskellValue,
+        _: &EffectContext<'_, TestSink>,
+    ) -> Result<tidepool_effect::dispatch::EffectDispatch, EffectError> {
+        Ok(tidepool_effect::dispatch::EffectDispatch::Unhandled)
+    }
 }
 
 #[tokio::test]

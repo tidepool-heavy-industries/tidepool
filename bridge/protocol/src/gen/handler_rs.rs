@@ -250,6 +250,15 @@ fn body(e: &Effect) -> String {
         out.push_str("            },\n");
         out.push_str("        )))\n");
         out.push_str("    }\n");
+    } else if e.handler_execution == HandlerExecution::OwnerPrepared {
+        out.push_str("\n    fn prepare(\n");
+        out.push_str("        &mut self,\n");
+        out.push_str(&format!("        req: {},\n", e.req_enum));
+        out.push_str("        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,\n");
+        out.push_str("    ) -> Result<tidepool_effect::dispatch::EffectDispatch, tidepool_effect::error::EffectError>\n");
+        out.push_str("    {\n");
+        out.push_str("        self.prepare_owned(req, cx)\n");
+        out.push_str("    }\n");
     }
     out.push_str("}\n");
     out

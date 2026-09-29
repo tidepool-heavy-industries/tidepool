@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use tidepool_bridge::FromHaskell;
 use tidepool_bridge::HaskellValue;
-use tidepool_effect::dispatch::{DispatchEffect, EffectContext, Response};
+use tidepool_effect::dispatch::{DispatchEffect, EffectContext, EffectDispatch, Response};
 use tidepool_effect::error::EffectError;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -698,6 +698,17 @@ impl DispatchEffect for Driver {
         self.service(request, cx)
             .map(Some)
             .map_err(|error| EffectError::Handler(error.to_string()))
+    }
+
+    fn prepare_dispatch(
+        &mut self,
+        request: &HaskellValue,
+        cx: &EffectContext<'_>,
+    ) -> std::result::Result<EffectDispatch, EffectError> {
+        // RecipeCheck runs a private one-shot machine whose driver owns the
+        // mutable check session; no shared actor checkout waits on service.
+        self.dispatch(request, cx)
+            .map(|response| response.map_or(EffectDispatch::Unhandled, EffectDispatch::Immediate))
     }
 }
 

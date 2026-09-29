@@ -8,8 +8,8 @@
 //! own continuation; it never crosses to Rust and Rust never roots or applies
 //! one.
 //!
-//! What is left for this module is exactly three effect requests — subscribe,
-//! drain, unsubscribe — over a registry of per-subscription queues. Several
+//! This module serves subscription, mailbox, and await requests over a registry
+//! of per-subscription queues. Several
 //! authored semantics are therefore NOT enforced here, deliberately, because
 //! they are structural in the Haskell and two copies of a rule are two rules
 //! that can disagree:
@@ -86,8 +86,9 @@
 //! ## Loop-iteration-scoped, and re-registered every loop iteration
 //!
 //! A subscription never crosses a resident loop-iteration boundary. The registry is
-//! owned by [`RepoEventHandler`], which is owned by the loop iteration's handler stack;
-//! dropping that stack ends every registration. There is no durable
+//! owned by [`RepoEventHandler`], which is owned by the loop iteration's handler stack.
+//! The stack's owner closes its registrations at loop exit, after any prepared
+//! await settles. There is no durable
 //! subscription store here and there must not be one — an attached Haskell
 //! handle, a parked Haskell continuation, and an event subscription are the
 //! three things that must never survive a loop iteration.
@@ -460,7 +461,17 @@ impl SubscriptionRegistry {
     /// because two `withHandler` scopes over the same worktree are two
     /// independent reactions to one fact, not two claimants on it.
     pub fn publish(&mut self, event: &EvRepositoryEvent) {
-        for (_, sub) in self.subs.iter_mut() {
+        self.publish_to(event, |_| true);
+    }
+
+    /// Deliver an observed source pass only to subscriptions that were live
+    /// when the pass began and remain live now. A newly registered subscriber
+    /// starts after that observation's source-owner boundary.
+    fn publish_to(&mut self, event: &EvRepositoryEvent, eligible: impl Fn(&str) -> bool) {
+        for (raw, sub) in self.subs.iter_mut() {
+            if !eligible(raw) {
+                continue;
+            }
             if !sub.watches.iter().any(|w| event.matches(w)) {
                 continue;
             }
@@ -1059,9 +1070,25 @@ impl MailboxTable {
 ///
 /// Not in `build_base_stack`'s row: this surface is opt-in, so a caller that
 /// wants repository events builds a row containing this handler explicitly.
+#[derive(Clone)]
 pub struct RepoEventHandler {
+    state: std::sync::Arc<parking_lot::Mutex<EventState>>,
+}
+
+enum AwaitFailure {
+    Event(EventError),
+    Cancelled,
+}
+
+impl From<EventError> for AwaitFailure {
+    fn from(error: EventError) -> Self {
+        Self::Event(error)
+    }
+}
+
+struct EventState {
     registry: SubscriptionRegistry,
-    source: Box<dyn ObservationSource>,
+    source: std::sync::Arc<parking_lot::Mutex<Box<dyn ObservationSource>>>,
     poll_interval: Duration,
     sources: Vec<SourceState>,
     mailboxes: MailboxTable,
@@ -1103,7 +1130,13 @@ struct SourceState {
     failure_reported: bool,
 }
 
-impl RepoEventHandler {
+struct SourcePass {
+    worktree: WtWorktreeId,
+    registered: bool,
+    eligible: HashSet<String>,
+}
+
+impl EventState {
     /// The production wiring: reconcile through a real
     /// [`WorktreeMonitor`](exomonad_worktree::WorktreeMonitor).
     pub fn new(monitor: exomonad_worktree::WorktreeMonitor, config: EventConfig) -> Self {
@@ -1149,20 +1182,12 @@ impl RepoEventHandler {
         let mailbox_namespace = registry.namespace.clone();
         Self {
             registry,
-            source,
+            source: std::sync::Arc::new(parking_lot::Mutex::new(source)),
             poll_interval: config.poll_interval,
             sources: Vec::new(),
             mailboxes: MailboxTable::new(config.queue_bound, mailbox_namespace),
             active_owner: None,
         }
-    }
-
-    pub fn registry(&self) -> &SubscriptionRegistry {
-        &self.registry
-    }
-
-    pub fn registry_mut(&mut self) -> &mut SubscriptionRegistry {
-        &mut self.registry
     }
 
     /// Start one driver-owned lifecycle epoch. The driver closes exactly this
@@ -1190,72 +1215,6 @@ impl RepoEventHandler {
     /// body performs. It never loses anything: a pass reports movement relative
     /// to the observer's durable baseline, so a skipped pass is a delayed
     /// report, not a dropped one.
-    fn reconcile(&mut self, subscription: EvSubscriptionId) -> Result<(), EventError> {
-        // Validate membership before changing any deadline, source state, or
-        // queue. A refused drain must leave every live subscription intact.
-        let watched = self.registry.subscription_worktrees(subscription)?;
-        // Deadlines cost no I/O, so they are checked on EVERY pass —
-        // unconditionally, ahead of the git-read rate limit below, and even
-        // when nothing is watched for commits/heads at all.
-        self.registry.fire_due_deadlines(Instant::now());
-        // Git I/O is scoped to the subscription whose drain/await caused this
-        // pass. In particular, an A-only operation must not register, observe,
-        // or retry an unrelated B merely because B is watched elsewhere.
-        if watched.is_empty() {
-            return Ok(());
-        }
-        for worktree in watched {
-            let Some(index) = self
-                .sources
-                .iter()
-                .position(|state| state.worktree == worktree)
-            else {
-                // Subscription registration establishes every source before
-                // inserting the subscription, so this is an internal invariant.
-                continue;
-            };
-            if self.sources[index].failure.is_some() {
-                if !self.sources[index].failure_reported {
-                    continue;
-                }
-            } else if self.sources[index]
-                .last_successful_pass
-                .is_some_and(|last| last.elapsed() < self.poll_interval)
-            {
-                continue;
-            }
-            if !self.sources[index].registered {
-                match self.source.register(&worktree) {
-                    Ok(()) => {
-                        self.sources[index].registered = true;
-                        self.sources[index].failure = None;
-                        self.sources[index].failure_reported = false;
-                    }
-                    Err(error) => {
-                        self.sources[index].failure = Some(SourceFailure::from_event_error(error));
-                        self.sources[index].failure_reported = false;
-                        continue;
-                    }
-                }
-            }
-            match self.source.observe(&worktree) {
-                Ok(events) => {
-                    self.sources[index].failure = None;
-                    self.sources[index].failure_reported = false;
-                    self.sources[index].last_successful_pass = Some(Instant::now());
-                    for event in events {
-                        self.registry.publish(&event);
-                    }
-                }
-                Err(error) => {
-                    self.sources[index].failure = Some(SourceFailure::from_event_error(error));
-                    self.sources[index].failure_reported = false;
-                }
-            }
-        }
-        Ok(())
-    }
-
     fn failure_for(
         &mut self,
         subscription: EvSubscriptionId,
@@ -1281,17 +1240,11 @@ impl RepoEventHandler {
     // dispatch arm wraps the `Result` via `cx.respond` (Ok→Right, Err→Left).
     // See #335 and `bridge/handlers/CLAUDE.md`.
 
-    pub(crate) fn repo_event_subscribe(
-        &mut self,
-        watches: Vec<EvWatch>,
-    ) -> Result<EvSubscriptionId, EventError> {
-        self.repo_event_subscribe_for(PrincipalId::SYSTEM, watches)
-    }
-
-    fn repo_event_subscribe_for(
+    fn subscribe_registered(
         &mut self,
         principal: PrincipalId,
         watches: Vec<EvWatch>,
+        registrations: Vec<(WtWorktreeId, Result<(), EventError>)>,
     ) -> Result<EvSubscriptionId, EventError> {
         // Validate every mailbox before source registration or a retained
         // first-claim can change state. Sends remain shareable by mailbox id.
@@ -1300,27 +1253,7 @@ impl RepoEventHandler {
                 self.mailboxes.check_creator(id, principal, "subscribe")?;
             }
         }
-        // Establish every never-before-seen source cutoff BEFORE making the
-        // subscription live. This reads only the baseline; it neither
-        // reconciles nor publishes journal rows, so historical rows never
-        // replay while movement after this point remains observable.
-        let mut worktrees = Vec::new();
-        for watch in &watches {
-            let worktree = match watch {
-                EvWatch::WatchCommit(id) | EvWatch::WatchHead(id) => id,
-                EvWatch::WatchDeadline(_) | EvWatch::WatchAsync(_) | EvWatch::WatchMailbox(_) => {
-                    continue
-                }
-            };
-            if !worktrees.contains(worktree) {
-                worktrees.push(worktree.clone());
-            }
-        }
-        for worktree in worktrees {
-            if self.sources.iter().any(|state| state.worktree == worktree) {
-                continue;
-            }
-            let registration = self.source.register(&worktree);
+        for (worktree, registration) in registrations {
             self.sources.push(SourceState {
                 worktree,
                 registered: registration.is_ok(),
@@ -1349,61 +1282,6 @@ impl RepoEventHandler {
         Ok(sub)
     }
 
-    /// Subscribe after querying the driver's existing green-thread state.
-    /// This is the level-triggered counterpart to transition broadcasting:
-    /// terminal ids are supplied by the scheduler's authoritative thread
-    /// table, never copied into this handler.
-    pub fn repo_event_subscribe_with_terminal_async(
-        &mut self,
-        watches: Vec<EvWatch>,
-        terminal_async: impl IntoIterator<Item = i64>,
-    ) -> Result<EvSubscriptionId, EventError> {
-        let sub = self.repo_event_subscribe(watches)?;
-        for tid in terminal_async {
-            self.registry.observe_terminal_async(sub.clone(), tid);
-        }
-        Ok(sub)
-    }
-
-    // `pub` (not `fn`, unlike this module's other tagged-verb methods):
-    // the driver-side non-blocking parked-await servicing
-    // calls this DIRECTLY, from `exomonad-harness`, as its own poll step —
-    // never `repo_event_await`, whose internal sleep loop would stall the
-    // whole green-thread scheduler. Identical to the `RepoEventDrain` verb
-    // dispatch (same reconcile-then-drain, same bound/poison rule); this is
-    // a visibility widening only, not a second implementation.
-    pub fn repo_event_drain(
-        &mut self,
-        subscription: EvSubscriptionId,
-    ) -> Result<Vec<EvRepositoryEvent>, EventError> {
-        self.repo_event_drain_for(PrincipalId::SYSTEM, subscription)
-    }
-
-    pub fn repo_event_drain_for(
-        &mut self,
-        principal: PrincipalId,
-        subscription: EvSubscriptionId,
-    ) -> Result<Vec<EvRepositoryEvent>, EventError> {
-        self.registry
-            .check_caller(&subscription, principal, "drain")?;
-        // A drain is where polling happens: `withHandler`'s interposition sends
-        // one before every effect its body performs, so this is the natural —
-        // and rate-limited — heartbeat.
-        self.reconcile(subscription.clone())?;
-        if let Some(error) = self.failure_for(subscription.clone())? {
-            return Err(error);
-        }
-        self.registry.drain(subscription)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn repo_event_unsubscribe(
-        &mut self,
-        subscription: EvSubscriptionId,
-    ) -> Result<(), EventError> {
-        self.repo_event_unsubscribe_for(PrincipalId::SYSTEM, subscription)
-    }
-
     fn repo_event_unsubscribe_for(
         &mut self,
         principal: PrincipalId,
@@ -1412,11 +1290,6 @@ impl RepoEventHandler {
         self.registry
             .check_caller(&subscription, principal, "unsubscribe")?;
         self.registry.unsubscribe(subscription)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn mailbox_new(&mut self) -> Result<EvMailboxId, EventError> {
-        self.mailbox_new_for(PrincipalId::SYSTEM)
     }
 
     fn mailbox_new_for(&mut self, principal: PrincipalId) -> Result<EvMailboxId, EventError> {
@@ -1441,11 +1314,6 @@ impl RepoEventHandler {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn mailbox_drop(&mut self, mailbox: EvMailboxId) -> Result<(), EventError> {
-        self.mailbox_drop_for(PrincipalId::SYSTEM, mailbox)
-    }
-
     fn mailbox_drop_for(
         &mut self,
         principal: PrincipalId,
@@ -1468,6 +1336,383 @@ impl RepoEventHandler {
     /// so it is distinguishable from a real (non-empty) observation without
     /// a second signal. Poison/overflow still fail loudly via `drain`'s own
     /// `Err`, exactly as `repo_event_drain` does.
+    pub(crate) fn repo_event_unsubscribe_effect(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        subscription: EvSubscriptionId,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        cx.respond(self.repo_event_unsubscribe_for(cx.principal(), subscription))
+    }
+
+    pub(crate) fn mailbox_new_effect(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        cx.respond(self.mailbox_new_for(cx.principal()))
+    }
+
+    pub(crate) fn mailbox_send_effect(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        mailbox: EvMailboxId,
+        key: String,
+        payload: crate::effect_glue::JsonArg,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        cx.respond(self.mailbox_send(mailbox, key, payload))
+    }
+
+    pub(crate) fn mailbox_drop_effect(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        mailbox: EvMailboxId,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        cx.respond(self.mailbox_drop_for(cx.principal(), mailbox))
+    }
+}
+
+impl RepoEventHandler {
+    pub(crate) fn prepare_owned(
+        &mut self,
+        req: RepoEventReq,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+    ) -> Result<tidepool_effect::dispatch::EffectDispatch, tidepool_effect::error::EffectError>
+    {
+        use tidepool_effect::dispatch::{
+            DeferredCancellation, DeferredEffect, EffectDispatch, EffectHandler,
+        };
+
+        let mut handler = self.clone();
+        let table = cx.table().clone();
+        let principal = cx.principal();
+        let output = cx.user().clone();
+        let work = match req {
+            RepoEventReq::RepoEventAwait(subscription, timeout_ms) => {
+                let cancellation = DeferredCancellation::default();
+                let worker_signal = cancellation.clone();
+                DeferredEffect::cancellable_blocking(
+                    move || {
+                        let owned = tidepool_effect::dispatch::EffectContext::with_principal(
+                            &table, principal, &output,
+                        );
+                        match handler.repo_event_await_with_cancel(
+                            principal,
+                            subscription,
+                            timeout_ms,
+                            Some(&worker_signal),
+                        ) {
+                            Ok(events) => owned.respond(Ok::<_, EventError>(events)),
+                            Err(AwaitFailure::Event(error)) => {
+                                owned.respond(Err::<Vec<EvRepositoryEvent>, _>(error))
+                            }
+                            Err(AwaitFailure::Cancelled) => {
+                                Err(tidepool_effect::error::EffectError::Cancelled)
+                            }
+                        }
+                    },
+                    cancellation,
+                )
+            }
+            request => DeferredEffect::blocking(move || {
+                let owned = tidepool_effect::dispatch::EffectContext::with_principal(
+                    &table, principal, &output,
+                );
+                handler.handle(request, &owned)
+            }),
+        };
+        Ok(EffectDispatch::Deferred(work))
+    }
+
+    fn reconcile_for(
+        &self,
+        principal: PrincipalId,
+        subscription: &EvSubscriptionId,
+    ) -> Result<(), EventError> {
+        let source = {
+            let mut state = self.state.lock();
+            state
+                .registry
+                .check_caller(subscription, principal, "drain")?;
+            if state
+                .registry
+                .subscription_worktrees(subscription.clone())?
+                .is_empty()
+            {
+                state.registry.fire_due_deadlines(Instant::now());
+                return Ok(());
+            }
+            std::sync::Arc::clone(&state.source)
+        };
+        // Registration takes this same owner before admitting a new source
+        // subscription. A new subscriber cannot enter between our eligible-id
+        // snapshot and the source's durable baseline advance.
+        let mut source = source.lock();
+        let passes = {
+            let mut state = self.state.lock();
+            state
+                .registry
+                .check_caller(subscription, principal, "drain")?;
+            let watched = state
+                .registry
+                .subscription_worktrees(subscription.clone())?;
+            state.registry.fire_due_deadlines(Instant::now());
+            let eligible = state
+                .registry
+                .subs
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect::<HashSet<_>>();
+            let mut passes = Vec::new();
+            for worktree in watched {
+                let Some(source_state) = state.sources.iter().find(|s| s.worktree == worktree)
+                else {
+                    continue;
+                };
+                if source_state.failure.is_some() {
+                    if !source_state.failure_reported {
+                        continue;
+                    }
+                } else if source_state
+                    .last_successful_pass
+                    .is_some_and(|last| last.elapsed() < state.poll_interval)
+                {
+                    continue;
+                }
+                passes.push(SourcePass {
+                    worktree,
+                    registered: source_state.registered,
+                    eligible: eligible.clone(),
+                });
+            }
+            passes
+        };
+        for pass in passes {
+            let (registered, observation) = if !pass.registered {
+                match source.register(&pass.worktree) {
+                    Ok(()) => (true, source.observe(&pass.worktree)),
+                    Err(error) => (false, Err(error)),
+                }
+            } else {
+                (true, source.observe(&pass.worktree))
+            };
+            let mut state = self.state.lock();
+            let source_state = state
+                .sources
+                .iter_mut()
+                .find(|s| s.worktree == pass.worktree)
+                .expect("registered source remains owned by this handler");
+            source_state.registered = registered;
+            match observation {
+                Ok(events) => {
+                    source_state.failure = None;
+                    source_state.failure_reported = false;
+                    source_state.last_successful_pass = Some(Instant::now());
+                    for event in events {
+                        state
+                            .registry
+                            .publish_to(&event, |id| pass.eligible.contains(id));
+                    }
+                }
+                Err(error) => {
+                    source_state.failure = Some(SourceFailure::from_event_error(error));
+                    source_state.failure_reported = false;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn new(monitor: exomonad_worktree::WorktreeMonitor, config: EventConfig) -> Self {
+        Self::from_state(EventState::new(monitor, config))
+    }
+
+    pub fn with_registry(
+        monitor: exomonad_worktree::WorktreeMonitor,
+        registry: exomonad_worktree::WorktreeRegistry,
+        config: EventConfig,
+    ) -> Self {
+        Self::from_state(EventState::with_registry(monitor, registry, config))
+    }
+
+    pub fn with_registry_namespace(
+        monitor: exomonad_worktree::WorktreeMonitor,
+        registry: exomonad_worktree::WorktreeRegistry,
+        config: EventConfig,
+        namespace: String,
+    ) -> Self {
+        Self::from_state(EventState::with_registry_namespace(
+            monitor, registry, config, namespace,
+        ))
+    }
+
+    pub fn with_source(source: Box<dyn ObservationSource>, config: EventConfig) -> Self {
+        Self::from_state(EventState::with_source(source, config))
+    }
+
+    fn from_state(state: EventState) -> Self {
+        Self {
+            state: std::sync::Arc::new(parking_lot::Mutex::new(state)),
+        }
+    }
+
+    pub fn registry(&self) -> parking_lot::MappedMutexGuard<'_, SubscriptionRegistry> {
+        parking_lot::MutexGuard::map(self.state.lock(), |state| &mut state.registry)
+    }
+
+    pub fn registry_mut(&mut self) -> parking_lot::MappedMutexGuard<'_, SubscriptionRegistry> {
+        self.registry()
+    }
+
+    pub fn begin_owner(&mut self, owner: u64) {
+        self.state.lock().begin_owner(owner);
+    }
+
+    pub fn end_owner(&mut self, owner: u64) {
+        self.state.lock().end_owner(owner);
+    }
+
+    pub(crate) fn repo_event_subscribe(
+        &mut self,
+        watches: Vec<EvWatch>,
+    ) -> Result<EvSubscriptionId, EventError> {
+        self.repo_event_subscribe_for(PrincipalId::SYSTEM, watches)
+    }
+
+    fn repo_event_subscribe_for(
+        &mut self,
+        principal: PrincipalId,
+        watches: Vec<EvWatch>,
+    ) -> Result<EvSubscriptionId, EventError> {
+        let mut watched = Vec::new();
+        for watch in &watches {
+            if let EvWatch::WatchCommit(id) | EvWatch::WatchHead(id) = watch {
+                if !watched.contains(id) {
+                    watched.push(id.clone());
+                }
+            }
+        }
+        if watched.is_empty() {
+            return self
+                .state
+                .lock()
+                .subscribe_registered(principal, watches, Vec::new());
+        }
+        let source = std::sync::Arc::clone(&self.state.lock().source);
+        let mut source = source.lock();
+        let new_sources = {
+            let state = self.state.lock();
+            // Refuse foreign mailbox watches before touching any source
+            // baseline or retained mailbox claim.
+            for watch in &watches {
+                if let EvWatch::WatchMailbox(id) = watch {
+                    state.mailboxes.check_creator(id, principal, "subscribe")?;
+                }
+            }
+            watched
+                .into_iter()
+                .filter(|id| !state.sources.iter().any(|s| s.worktree == *id))
+                .collect::<Vec<_>>()
+        };
+        let registrations = new_sources
+            .into_iter()
+            .map(|id| {
+                let result = source.register(&id);
+                (id, result)
+            })
+            .collect();
+        self.state
+            .lock()
+            .subscribe_registered(principal, watches, registrations)
+    }
+
+    pub fn repo_event_subscribe_with_terminal_async(
+        &mut self,
+        watches: Vec<EvWatch>,
+        terminal_async: impl IntoIterator<Item = i64>,
+    ) -> Result<EvSubscriptionId, EventError> {
+        let sub = self.repo_event_subscribe(watches)?;
+        let mut state = self.state.lock();
+        for tid in terminal_async {
+            state.registry.observe_terminal_async(sub.clone(), tid);
+        }
+        Ok(sub)
+    }
+
+    pub fn repo_event_drain(
+        &mut self,
+        subscription: EvSubscriptionId,
+    ) -> Result<Vec<EvRepositoryEvent>, EventError> {
+        self.repo_event_drain_for(PrincipalId::SYSTEM, subscription)
+    }
+
+    pub fn repo_event_drain_for(
+        &mut self,
+        principal: PrincipalId,
+        subscription: EvSubscriptionId,
+    ) -> Result<Vec<EvRepositoryEvent>, EventError> {
+        self.reconcile_for(principal, &subscription)?;
+        let mut state = self.state.lock();
+        state
+            .registry
+            .check_caller(&subscription, principal, "drain")?;
+        if let Some(error) = state.failure_for(subscription.clone())? {
+            return Err(error);
+        }
+        state.registry.drain(subscription)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn repo_event_unsubscribe(
+        &mut self,
+        subscription: EvSubscriptionId,
+    ) -> Result<(), EventError> {
+        self.repo_event_unsubscribe_for(PrincipalId::SYSTEM, subscription)
+    }
+
+    #[cfg(test)]
+    fn repo_event_unsubscribe_for(
+        &mut self,
+        principal: PrincipalId,
+        subscription: EvSubscriptionId,
+    ) -> Result<(), EventError> {
+        self.state
+            .lock()
+            .repo_event_unsubscribe_for(principal, subscription)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mailbox_new(&mut self) -> Result<EvMailboxId, EventError> {
+        self.mailbox_new_for(PrincipalId::SYSTEM)
+    }
+
+    #[cfg(test)]
+    fn mailbox_new_for(&mut self, principal: PrincipalId) -> Result<EvMailboxId, EventError> {
+        self.state.lock().mailbox_new_for(principal)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mailbox_send(
+        &mut self,
+        mailbox: EvMailboxId,
+        key: String,
+        payload: crate::effect_glue::JsonArg,
+    ) -> Result<(), EventError> {
+        self.state.lock().mailbox_send(mailbox, key, payload)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mailbox_drop(&mut self, mailbox: EvMailboxId) -> Result<(), EventError> {
+        self.mailbox_drop_for(PrincipalId::SYSTEM, mailbox)
+    }
+
+    #[cfg(test)]
+    fn mailbox_drop_for(
+        &mut self,
+        principal: PrincipalId,
+        mailbox: EvMailboxId,
+    ) -> Result<(), EventError> {
+        self.state.lock().mailbox_drop_for(principal, mailbox)
+    }
+
     #[cfg(test)]
     pub(crate) fn repo_event_await(
         &mut self,
@@ -1483,50 +1728,51 @@ impl RepoEventHandler {
         subscription: EvSubscriptionId,
         timeout_ms: i64,
     ) -> Result<Vec<EvRepositoryEvent>, EventError> {
-        self.registry
+        match self.repo_event_await_with_cancel(principal, subscription, timeout_ms, None) {
+            Ok(events) => Ok(events),
+            Err(AwaitFailure::Event(error)) => Err(error),
+            Err(AwaitFailure::Cancelled) => unreachable!("await without a signal cannot cancel"),
+        }
+    }
+
+    fn repo_event_await_with_cancel(
+        &mut self,
+        principal: PrincipalId,
+        subscription: EvSubscriptionId,
+        timeout_ms: i64,
+        cancellation: Option<&tidepool_effect::dispatch::DeferredCancellation>,
+    ) -> Result<Vec<EvRepositoryEvent>, AwaitFailure> {
+        self.state
+            .lock()
+            .registry
             .check_caller(&subscription, principal, "await")?;
         let deadline = if timeout_ms < 0 {
-            // The no-deadline SENTINEL, not a bug to guard against: this is
-            // `nextEvent`'s own calling convention (`awaitFirst` passes `-1`),
-            // and it is the documented contract. Rejecting it would break the
-            // one blocking coordination primitive.
             None
         } else {
-            // Plain `+`: `Instant` is a `timespec` whose `tv_sec` is an
-            // `i64`, and the largest `timeout_ms` an `i64` can carry is
-            // ~9.2e15 ms ≈ 9.2e12 seconds — twelve orders of magnitude short
-            // of overflowing it, so no input to this verb can overflow here.
             Some(Instant::now() + Duration::from_millis(timeout_ms as u64))
         };
         loop {
-            self.reconcile(subscription.clone())?;
-            if let Some(error) = self.failure_for(subscription.clone())? {
-                return Err(error);
+            if cancellation.is_some_and(|signal| signal.requested()) {
+                return Err(AwaitFailure::Cancelled);
             }
-            let batch = self.registry.drain(subscription.clone())?;
+            let batch = self.repo_event_drain_for(principal, subscription.clone())?;
             if !batch.is_empty() {
                 return Ok(batch);
             }
-            if let Some(dl) = deadline {
-                if Instant::now() >= dl {
-                    return Ok(Vec::new());
-                }
+            if deadline.is_some_and(|limit| Instant::now() >= limit) {
+                return Ok(Vec::new());
             }
-            // Bound the sleep by the poll interval (so a deadline that fires
-            // between passes is still noticed promptly) and by the
-            // remaining time to the deadline (so we never sleep past it); a
-            // zero poll interval still yields instead of busy-spinning.
-            let mut step = self.poll_interval.max(Duration::from_millis(1));
-            if let Some(dl) = deadline {
-                step = step.min(dl.saturating_duration_since(Instant::now()));
+            let mut step = self
+                .state
+                .lock()
+                .poll_interval
+                .max(Duration::from_millis(1));
+            if let Some(limit) = deadline {
+                step = step.min(limit.saturating_duration_since(Instant::now()));
             }
-            // `repo_event_await` is a synchronous method invoked from
-            // `EffectHandler` dispatch on its own dedicated thread, not
-            // from async code on a shared executor — see `.clippy.toml`'s
-            // dedicated-sync-thread exemption.
             #[allow(
                 clippy::disallowed_methods,
-                reason = "poll loop on a dedicated sync handler thread, not an async executor thread"
+                reason = "blocking Event work runs on its owned worker, outside machine checkout"
             )]
             std::thread::sleep(step);
         }
@@ -1562,14 +1808,16 @@ impl RepoEventHandler {
         cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
         subscription: EvSubscriptionId,
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
-        cx.respond(self.repo_event_unsubscribe_for(cx.principal(), subscription))
+        self.state
+            .lock()
+            .repo_event_unsubscribe_effect(cx, subscription)
     }
 
     pub(crate) fn mailbox_new_effect(
         &mut self,
         cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
-        cx.respond(self.mailbox_new_for(cx.principal()))
+        self.state.lock().mailbox_new_effect(cx)
     }
 
     pub(crate) fn mailbox_send_effect(
@@ -1579,7 +1827,9 @@ impl RepoEventHandler {
         key: String,
         payload: crate::effect_glue::JsonArg,
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
-        cx.respond(self.mailbox_send(mailbox, key, payload))
+        self.state
+            .lock()
+            .mailbox_send_effect(cx, mailbox, key, payload)
     }
 
     pub(crate) fn mailbox_drop_effect(
@@ -1587,7 +1837,7 @@ impl RepoEventHandler {
         cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
         mailbox: EvMailboxId,
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
-        cx.respond(self.mailbox_drop_for(cx.principal(), mailbox))
+        self.state.lock().mailbox_drop_effect(cx, mailbox)
     }
 }
 
@@ -1866,6 +2116,198 @@ mod tests {
                 poll_interval: Duration::ZERO,
             },
         )
+    }
+
+    #[test]
+    fn blocked_observation_does_not_hold_subscription_control_or_replay_to_new_owner() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc::{channel, Receiver, Sender};
+
+        struct GatedSource {
+            entered: Sender<()>,
+            release: Receiver<()>,
+            calls: std::sync::Arc<AtomicUsize>,
+        }
+
+        impl ObservationSource for GatedSource {
+            fn observe(
+                &mut self,
+                _worktree: &WtWorktreeId,
+            ) -> Result<Vec<EvRepositoryEvent>, EventError> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    self.entered.send(()).unwrap();
+                    self.release.recv().unwrap();
+                    Ok(vec![commit_event(1, "gated", "old")])
+                } else {
+                    Ok(Vec::new())
+                }
+            }
+        }
+
+        let (entered_tx, entered_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut handler = RepoEventHandler::with_source(
+            Box::new(GatedSource {
+                entered: entered_tx,
+                release: release_rx,
+                calls: calls.clone(),
+            }),
+            EventConfig {
+                poll_interval: Duration::ZERO,
+                queue_bound: 8,
+            },
+        );
+        let old = handler
+            .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("gated"))])
+            .unwrap();
+        let old_id = old.clone();
+        let mut draining = handler.clone();
+        let join = std::thread::spawn(move || draining.repo_event_drain(old));
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let mut closing = handler.clone();
+        let (closed_tx, closed_rx) = channel();
+        let closer = std::thread::spawn(move || {
+            closed_tx
+                .send(closing.repo_event_unsubscribe(old_id))
+                .unwrap();
+        });
+        assert!(closed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_ok());
+        closer.join().unwrap();
+        release_tx.send(()).unwrap();
+        assert!(matches!(
+            join.join().unwrap(),
+            Err(EventError::EventUnknownSubscription(_))
+        ));
+
+        let fresh = handler
+            .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("gated"))])
+            .unwrap();
+        assert!(handler.repo_event_drain(fresh).unwrap().is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn unbounded_prepared_await_joins_after_retirement_signal() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc::channel;
+        use tidepool_effect::dispatch::{DeferredEffect, EffectContext, EffectDispatch};
+
+        struct NotifyingSource {
+            entered: std::sync::mpsc::Sender<()>,
+            notified: std::sync::Arc<AtomicBool>,
+        }
+
+        impl ObservationSource for NotifyingSource {
+            fn observe(
+                &mut self,
+                _worktree: &WtWorktreeId,
+            ) -> Result<Vec<EvRepositoryEvent>, EventError> {
+                if !self.notified.swap(true, Ordering::SeqCst) {
+                    self.entered.send(()).unwrap();
+                }
+                Ok(Vec::new())
+            }
+        }
+
+        let (entered_tx, entered_rx) = channel();
+        let mut handler = RepoEventHandler::with_source(
+            Box::new(NotifyingSource {
+                entered: entered_tx,
+                notified: std::sync::Arc::new(AtomicBool::new(false)),
+            }),
+            EventConfig {
+                queue_bound: 8,
+                poll_interval: Duration::from_millis(5),
+            },
+        );
+        let subscription = handler
+            .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("quiet"))])
+            .unwrap();
+        let table = tidepool_repr::DataConTable::new();
+        let output = tidepool_mcp::CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &output);
+        let EffectDispatch::Deferred(work) = handler
+            .prepare_owned(RepoEventReq::RepoEventAwait(subscription.clone(), -1), &cx)
+            .unwrap()
+        else {
+            panic!("await must leave the machine as external work")
+        };
+        let signal = work.cancellation_signal().expect("await is cancellable");
+        let DeferredEffect::Blocking(work) = work else {
+            panic!("await is blocking work")
+        };
+        let join = std::thread::spawn(move || work.into_inner().unwrap()());
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        signal.request();
+        assert!(matches!(
+            join.join().unwrap(),
+            Err(tidepool_effect::error::EffectError::Cancelled)
+        ));
+        handler.repo_event_unsubscribe(subscription).unwrap();
+    }
+
+    #[test]
+    fn prepared_await_preserves_observation_completed_during_cancellation() {
+        use std::sync::mpsc::channel;
+        use tidepool_effect::dispatch::{DeferredEffect, EffectContext, EffectDispatch};
+
+        struct GatedSource {
+            entered: std::sync::mpsc::Sender<()>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+
+        impl ObservationSource for GatedSource {
+            fn observe(
+                &mut self,
+                _worktree: &WtWorktreeId,
+            ) -> Result<Vec<EvRepositoryEvent>, EventError> {
+                self.entered.send(()).unwrap();
+                self.release.recv().unwrap();
+                Ok(vec![commit_event(1, "gated", "observed")])
+            }
+        }
+
+        let (entered_tx, entered_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let mut handler = RepoEventHandler::with_source(
+            Box::new(GatedSource {
+                entered: entered_tx,
+                release: release_rx,
+            }),
+            EventConfig {
+                queue_bound: 8,
+                poll_interval: Duration::from_millis(5),
+            },
+        );
+        let subscription = handler
+            .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("gated"))])
+            .unwrap();
+        let table = tidepool_repr::DataConTable::new();
+        let output = tidepool_mcp::CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &output);
+        let EffectDispatch::Deferred(work) = handler
+            .prepare_owned(RepoEventReq::RepoEventAwait(subscription, -1), &cx)
+            .unwrap()
+        else {
+            panic!("await must leave the machine as external work")
+        };
+        let signal = work.cancellation_signal().expect("await is cancellable");
+        let DeferredEffect::Blocking(work) = work else {
+            panic!("await is blocking work")
+        };
+        let join = std::thread::spawn(move || work.into_inner().unwrap()());
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        signal.request();
+        release_tx.send(()).unwrap();
+        assert!(
+            join.join().unwrap().is_ok(),
+            "observed event must win the race"
+        );
     }
 
     #[test]
@@ -2322,8 +2764,8 @@ mod tests {
                 "5:1".into(),
             ))
         );
-        assert!(handler.registry.live_ids().is_empty());
-        assert_eq!(handler.mailboxes.pending.len(), 1);
+        assert!(handler.state.lock().registry.live_ids().is_empty());
+        assert_eq!(handler.state.lock().mailboxes.pending.len(), 1);
         assert_eq!(
             handler.mailbox_drop_for(foreign, mailbox.clone()),
             Err(EventError::EventMailboxDenied(
@@ -2333,7 +2775,7 @@ mod tests {
                 "5:1".into(),
             ))
         );
-        assert!(handler.mailboxes.is_live(&mailbox));
+        assert!(handler.state.lock().mailboxes.is_live(&mailbox));
         handler
             .mailbox_send(
                 mailbox.clone(),
@@ -2350,15 +2792,15 @@ mod tests {
             vec![serde_json::json!("retained"), serde_json::json!("later")]
         );
         handler.mailbox_drop_for(owner, mailbox.clone()).unwrap();
-        assert!(!handler.mailboxes.is_live(&mailbox));
+        assert!(!handler.state.lock().mailboxes.is_live(&mailbox));
     }
 
     #[test]
     fn first_mailboxes_from_fresh_handlers_never_alias() {
         let (mut first, _) = handler_with(vec![], Duration::ZERO);
         let (mut second, _) = handler_with(vec![], Duration::ZERO);
-        first.mailboxes.namespace = "run-one:handler-one".into();
-        second.mailboxes.namespace = "run-two:handler-two".into();
+        first.state.lock().mailboxes.namespace = "run-one:handler-one".into();
+        second.state.lock().mailboxes.namespace = "run-two:handler-two".into();
         let owner = PrincipalId::new(4, 1);
         let old = first.mailbox_new_for(owner).unwrap();
         let current = second.mailbox_new_for(owner).unwrap();
@@ -2376,8 +2818,8 @@ mod tests {
             second.mailbox_drop_for(owner, old.clone()),
             Err(EventError::EventUnknownMailbox(old.raw.clone()))
         );
-        assert!(second.mailboxes.is_live(&current));
-        assert!(second.mailboxes.pending.is_empty());
+        assert!(second.state.lock().mailboxes.is_live(&current));
+        assert!(second.state.lock().mailboxes.pending.is_empty());
 
         second
             .mailbox_send(current.clone(), "own".into(), payload(serde_json::json!(2)))
@@ -2420,7 +2862,7 @@ mod tests {
                 "6:1".into(),
             ))
         );
-        assert!(handler.registry.live_ids().is_empty());
+        assert!(handler.state.lock().registry.live_ids().is_empty());
         let own = handler
             .repo_event_subscribe_for(owner, vec![EvWatch::WatchMailbox(own_mailbox.clone())])
             .unwrap();
@@ -2563,8 +3005,8 @@ mod tests {
         h.mailbox_send(mid.clone(), "b".into(), payload(serde_json::json!(2)))
             .unwrap();
         h.mailbox_drop(mid.clone()).unwrap();
-        assert!(h.mailboxes.pending.is_empty());
-        assert!(!h.mailboxes.overflowed.contains_key(&mid));
+        assert!(h.state.lock().mailboxes.pending.is_empty());
+        assert!(!h.state.lock().mailboxes.overflowed.contains_key(&mid));
         assert_eq!(
             h.mailbox_send(mid.clone(), "c".into(), payload(serde_json::json!(3))),
             Err(EventError::EventUnknownMailbox(mid.raw.clone()))
@@ -2606,8 +3048,8 @@ mod tests {
     fn inherited_subscription_cannot_drain_or_unsubscribe_another_actors_local_first() {
         let (mut parent, _) = handler_with(vec![], Duration::ZERO);
         let (mut child, _) = handler_with(vec![], Duration::ZERO);
-        parent.registry.namespace = "same-run".into();
-        child.registry.namespace = "same-run".into();
+        parent.state.lock().registry.namespace = "same-run".into();
+        child.state.lock().registry.namespace = "same-run".into();
         let parent_principal = PrincipalId::new(1, 1);
         let child_principal = PrincipalId::new(2, 1);
         let parent_sub = parent
@@ -2687,8 +3129,8 @@ mod tests {
     fn same_principal_and_local_counter_from_another_run_cannot_retarget() {
         let (mut first, _) = handler_with(vec![], Duration::ZERO);
         let (mut second, _) = handler_with(vec![], Duration::ZERO);
-        first.registry.namespace = "run-one:handler-one".into();
-        second.registry.namespace = "run-two:handler-two".into();
+        first.state.lock().registry.namespace = "run-one:handler-one".into();
+        second.state.lock().registry.namespace = "run-two:handler-two".into();
         let principal = PrincipalId::new(1, 1);
         let inherited = first
             .repo_event_subscribe_for(principal, vec![EvWatch::WatchDeadline(0)])

@@ -979,6 +979,15 @@ impl tidepool_effect::dispatch::DispatchEffect<CapturedOutput> for NoFixtureHand
     ) -> Result<Option<tidepool_effect::Response>, tidepool_effect::error::EffectError> {
         Ok(None)
     }
+
+    fn prepare_dispatch(
+        &mut self,
+        _: &tidepool_bridge::HaskellValue,
+        _: &tidepool_effect::dispatch::EffectContext<'_, CapturedOutput>,
+    ) -> Result<tidepool_effect::dispatch::EffectDispatch, tidepool_effect::error::EffectError>
+    {
+        Ok(tidepool_effect::dispatch::EffectDispatch::Unhandled)
+    }
 }
 
 #[tokio::test]
