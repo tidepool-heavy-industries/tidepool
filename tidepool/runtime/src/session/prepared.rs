@@ -4831,9 +4831,19 @@ mod tests {
         let target =
             CertifiedTargetImage::compile(testing::prepare(wire).unwrap(), &registry).unwrap();
         let owner = ImportOwner::Source {
-            version: root.version,
-            binder: root.binder,
+            version: root.version.clone(),
+            binder: root.binder.clone(),
         };
+        let source_evidence = BTreeMap::from([
+            (root, (groups[0].owner().clone(), groups[0].original_ordinal())),
+            (
+                SourceBinder {
+                    version: ModuleVersion([1; 32]),
+                    binder: testing::identity("Fixture", "b"),
+                },
+                (groups[1].owner().clone(), groups[1].original_ordinal()),
+            ),
+        ]);
         let mut session = super::super::persistent::PersistentSession::new(None, 1024 * 1024);
         session
             .install_prepared(testing::prepare(testing::wire_program()).unwrap())
@@ -4844,7 +4854,9 @@ mod tests {
                 scope,
                 target,
                 &[owner],
+                &source_evidence,
                 demand.compile(&registry).unwrap(),
+                &[],
                 &HashMap::new(),
             )
             .unwrap();
@@ -4865,7 +4877,9 @@ mod tests {
                 )
                 .unwrap(),
                 &[],
+                &BTreeMap::new(),
                 Vec::new(),
+                &[],
                 &HashMap::new(),
             ),
             Err(PreparedRuntimeError::SourceScopeAdmission)

@@ -14,10 +14,12 @@ use parking_lot::Mutex;
 use tidepool_bridge::HaskellValue;
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::prepared_program::{
-    session_var_id, DemandedImage, ImageRegistry, Parcel, PreparedHandle, PreparedOuter,
-    PreparedResult, ProgramId,
+    session_var_id, DemandedImage, ImageRegistry, InheritedSourceDemand, Parcel, PreparedHandle,
+    PreparedOuter, PreparedResult, ProgramId, SourceBinder,
 };
-use tidepool_repr::execution_schema::{ImportOwner, JsonLayout, PreparedProgram, SymbolIdentity};
+use tidepool_repr::execution_schema::{
+    CachedHomeOwner, ImportOwner, JsonLayout, PreparedProgram, SymbolIdentity,
+};
 
 use super::prepared::{ParkPolicy, PreparedRuntimeError, PreparedSettlement};
 use super::turn::TurnCode;
@@ -213,6 +215,7 @@ impl HostCarrier {
             table: std::borrow::Cow::Borrowed(&self.table),
             sites: std::borrow::Cow::Borrowed(&[]),
             prepared: std::borrow::Cow::Borrowed(&self.prepared),
+            certification: std::borrow::Cow::Owned(Default::default()),
         }
     }
 
@@ -1889,14 +1892,18 @@ where
         scope: ScopeId,
         target: super::prepared::CertifiedTargetImage,
         target_owners: &[ImportOwner],
+        source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
         demanded: Vec<DemandedImage<'_>>,
+        inherited_needed: &[InheritedSourceDemand<'_>],
         package_external: &HashMap<ImportOwner, PreparedHandle>,
     ) -> Result<ProgramId, PreparedRuntimeError> {
         let (program, source_visible) = self.state.install_certified_turn_in(
             scope,
             target,
             target_owners,
+            source_evidence,
             demanded,
+            inherited_needed,
             package_external,
         )?;
         if source_visible {

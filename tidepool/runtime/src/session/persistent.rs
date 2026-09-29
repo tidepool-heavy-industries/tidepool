@@ -12,7 +12,8 @@ use std::sync::Arc;
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BindingTipId, SourceLeaseKey};
 use tidepool_codegen::machine::{CancelHandle, MachineDisposition};
 use tidepool_codegen::prepared_program::{
-    DemandedImage, PreparedHandle, ProgramId, ResidencyCounts, SourceBinder, SourceInstanceLease,
+    DemandedImage, InheritedSourceDemand, PreparedHandle, ProgramId, ResidencyCounts,
+    SourceBinder, SourceInstanceLease,
 };
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
 use tidepool_codegen::suspension::{ContinuationId, RealmId};
@@ -20,7 +21,7 @@ use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::{DataCon, DataConTable, Generation, SessionModule, SessionVarId, VarId};
 
 use tidepool_codegen::binding_table::BoundValue;
-use tidepool_repr::execution_schema::{ImportOwner, PreparedProgram, SymbolIdentity};
+use tidepool_repr::execution_schema::{CachedHomeOwner, ImportOwner, PreparedProgram, SymbolIdentity};
 
 use super::binding_table::{BindRecord, BindingIndex};
 use super::prepared::{
@@ -260,7 +261,9 @@ impl PersistentSession {
         scope: ScopeId,
         target: CertifiedTargetImage,
         target_owners: &[ImportOwner],
+        source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
         demanded: Vec<DemandedImage<'_>>,
+        inherited_needed: &[InheritedSourceDemand<'_>],
         package_external: &HashMap<ImportOwner, PreparedHandle>,
     ) -> Result<(ProgramId, bool), PreparedRuntimeError> {
         if !self.scopes.is_live(scope) {
@@ -324,7 +327,9 @@ impl PersistentSession {
         let mut staged = engine.install_certified_turn(
             target,
             target_owners,
+            source_evidence,
             demanded,
+            inherited_needed,
             &inherited,
             &exact_external,
             &self.bindings,
