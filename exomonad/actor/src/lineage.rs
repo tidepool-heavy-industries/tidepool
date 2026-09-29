@@ -267,7 +267,8 @@ struct ForkGroupsState {
 
 struct ReleasedCheckpoint {
     session: SessionId,
-    cleanup_scope: Option<ScopeId>,
+    scope: Option<ScopeId>,
+    cleanup_pending: bool,
 }
 
 /// Admission ledger for one applicative context-unfold layer.
@@ -523,7 +524,7 @@ impl ForkGroupRegistry {
         let mut state = self.state.lock();
         if let Some(released) = state.released_checkpoints.get(token) {
             return if released.session == session {
-                Ok(released.cleanup_scope)
+                Ok(released.cleanup_pending.then_some(released.scope).flatten())
             } else {
                 Err(CheckpointRefusal::WrongSession)
             };
@@ -556,7 +557,8 @@ impl ForkGroupRegistry {
             token.to_owned(),
             ReleasedCheckpoint {
                 session,
-                cleanup_scope: scope,
+                scope,
+                cleanup_pending: scope.is_some(),
             },
         );
         Ok(scope)
@@ -576,10 +578,10 @@ impl ForkGroupRegistry {
         if released.session != session {
             return Err(CheckpointRefusal::WrongSession);
         }
-        if released.cleanup_scope != Some(scope) {
+        if released.scope != Some(scope) {
             return Err(CheckpointRefusal::CaptureFailed);
         }
-        released.cleanup_scope = None;
+        released.cleanup_pending = false;
         Ok(())
     }
 
@@ -589,8 +591,8 @@ impl ForkGroupRegistry {
             .released_checkpoints
             .iter()
             .filter_map(|(token, released)| {
-                (released.session == session)
-                    .then(|| released.cleanup_scope.map(|scope| (token.clone(), scope)))
+                (released.session == session && released.cleanup_pending)
+                    .then(|| released.scope.map(|scope| (token.clone(), scope)))
                     .flatten()
             })
             .collect()
@@ -688,7 +690,7 @@ impl ForkGroupRegistry {
         }) || state
             .released_checkpoints
             .values()
-            .any(|released| released.session == session && released.cleanup_scope.is_some())
+            .any(|released| released.session == session && released.cleanup_pending)
     }
 
     pub fn begin(
@@ -1735,6 +1737,14 @@ mod tests {
         groups
             .confirm_checkpoint_release(&published, SessionId(7), ScopeId(3))
             .unwrap();
+        assert_eq!(
+            groups.confirm_checkpoint_release(&published, SessionId(7), ScopeId(3)),
+            Ok(())
+        );
+        assert_eq!(
+            groups.confirm_checkpoint_release(&published, SessionId(7), ScopeId(4)),
+            Err(CheckpointRefusal::CaptureFailed)
+        );
         assert!(!groups.retains_session(SessionId(7)));
         published_lease.wait_published().await.unwrap();
         assert_eq!(
