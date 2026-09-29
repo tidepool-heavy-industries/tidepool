@@ -11,7 +11,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 metadata = json.loads(
     subprocess.check_output(
-        ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
+        ["cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", "x86_64-unknown-linux-gnu"],
         cwd=ROOT,
     )
 )
@@ -29,7 +29,8 @@ selected = set(options.package)
 unknown = selected - set(local)
 if unknown:
     raise SystemExit(f"unknown Cargo workspace package(s): {', '.join(sorted(unknown))}")
-SUPPORTED_PACKAGES = {"tidepool-atomic-write", "tidepool-repr", "tidepool-heap"}
+SUPPORTED_PACKAGES = {"tidepool-atomic-write", "tidepool-repr", "tidepool-heap", "tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen"}
+LIBRARY_ONLY_PACKAGES = {"tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen"}
 unsupported = selected - SUPPORTED_PACKAGES
 if unsupported:
     raise SystemExit(
@@ -64,9 +65,28 @@ def dependency_label(dependency):
     return "//third-party/rust:" + name
 
 
-def linux_dependency(dependency):
-    if dependency["target"] is not None:
-        raise SystemExit("Model Cargo-resolved target dependencies before extending this slice")
+resolved_nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
+
+
+def linux_dependency(package, dependency):
+    # Filtered Cargo resolution provides exact package identities, renames and
+    # features. Cargo still retains some inactive dep_kinds on shared packages,
+    # so admit only the platform selector present in this Linux native slice.
+    target = dependency["target"]
+    if target not in (None, "cfg(unix)"):
+        raise SystemExit(f"unsupported Linux dependency selector in {package['name']}: {target}")
+    cargo_name = (dependency["rename"] or dependency["name"]).replace("-", "_")
+    kind = dependency["kind"]
+    matches = [
+        edge for edge in resolved_nodes[package["id"]]["deps"]
+        if edge["name"] == cargo_name
+        and any(item["kind"] == kind and item["target"] == target for item in edge["dep_kinds"])
+    ]
+    if len(matches) != 1:
+        raise SystemExit(f"missing or ambiguous resolved dependency {cargo_name} in {package['name']}")
+    resolved_package = next(p for p in metadata["packages"] if p["id"] == matches[0]["pkg"])
+    if resolved_package["name"] != dependency["name"]:
+        raise SystemExit(f"resolved dependency mismatch for {cargo_name} in {package['name']}")
     return True
 
 
@@ -74,10 +94,13 @@ def dependency_sets(package, include_dev=False):
     deps = []
     named = {}
     for dependency in package["dependencies"]:
-        if dependency["kind"] == "build" or not linux_dependency(dependency):
+        if dependency["kind"] == "build":
+            if package["name"] != "tidepool-codegen" or dependency["name"] != "cc" or dependency["rename"] is not None or dependency["target"] is not None:
+                raise SystemExit(f"Unmodeled build dependency in {package['name']}: {dependency['name']}")
             continue
         if dependency["kind"] == "dev" and not include_dev:
             continue
+        linux_dependency(package, dependency)
         label = dependency_label(dependency)
         if dependency["rename"]:
             named[dependency["rename"].replace("-", "_")] = label
@@ -103,6 +126,23 @@ INTEGRATION_SOURCES = {
     ),
 }
 
+# These codegen fixture includes are inside #[cfg(test)] modules. Keep the
+# library action independent of the Haskell test corpus until test migration.
+CODEGEN_TEST_FIXTURES = {
+    "bridge/haskell/test-prepared-stg/fixtures/freer-resume.cbor",
+    "bridge/haskell/test-prepared-stg/fixtures/freer-retention.cbor",
+}
+
+CODEGEN_NATIVE_TESTS = {"native_md5_link"}
+
+# Each module is declared behind #[cfg(test)] in prepared_program.rs.
+CODEGEN_TEST_ONLY_SOURCES = {
+    "apply_tests.rs", "bytes_tests.rs", "caller_result_tests.rs",
+    "double_to_int_tests.rs", "entry_tests.rs", "foreign_apply_tests.rs",
+    "freer_boundary_tests.rs", "lifetime_tests.rs", "no_success_tests.rs",
+    "retention_tests.rs", "settlement_tests.rs", "tests.rs",
+}
+
 
 def source_inputs(package, target):
     directory = ROOT / CURRENT_DIR
@@ -111,6 +151,12 @@ def source_inputs(package, target):
     external = {}
     if source_root.is_relative_to(directory / "src"):
         sources.update((directory / "src").rglob("*.rs"))
+        if package["name"] == "tidepool-codegen" and target["name"] == "tidepool_codegen":
+            for filename in CODEGEN_TEST_ONLY_SOURCES:
+                source = directory / "src/prepared_program" / filename
+                if not source.is_file():
+                    raise SystemExit(f"missing declared codegen test-only source {source}")
+                sources.discard(source)
     else:
         # Cargo gives the crate root. The repr suite has explicit sibling
         # modules; standalone integration targets need only their own root.
@@ -129,6 +175,8 @@ def source_inputs(package, target):
         "bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor": "//bridge/haskell:m3_vertical_fixture",
         "bridge/haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor": "//bridge/haskell:schema6_intrinsic_fixture",
         "bridge/atomic-write/tests/fixtures/directory_fault.c": "//bridge/atomic-write:directory_fault_fixture",
+        "bridge/haskell/test-prepared-stg/fixtures/freer-resume.cbor": "//bridge/haskell:freer_resume_fixture",
+        "bridge/haskell/test-prepared-stg/fixtures/freer-retention.cbor": "//bridge/haskell:freer_retention_fixture",
     }
     while pending:
         source = pending.pop()
@@ -145,6 +193,8 @@ def source_inputs(package, target):
             if not included.is_relative_to(ROOT):
                 raise SystemExit(f"compile-time input outside repository {included} from {source}")
             repo_relative = included.relative_to(ROOT).as_posix()
+            if package["name"] == "tidepool-codegen" and target["name"] == "tidepool_codegen" and repo_relative in CODEGEN_TEST_FIXTURES:
+                continue
             if repo_relative not in external_labels:
                 raise SystemExit(f"no Buck file input target for {repo_relative} (from {source})")
             external[external_labels[repo_relative]] = repo_relative
@@ -208,11 +258,15 @@ for package_name, package in local.items():
     features = package["features"]
     if features and features != {"default": []}:
         raise SystemExit(f"{package_name} declares unsupported Cargo features: {features}")
-    if any("custom-build" in target["kind"] for target in package["targets"]):
+    if any("custom-build" in target["kind"] for target in package["targets"]) and package_name != "tidepool-codegen":
         raise SystemExit(f"{package_name} has a build.rs target; add a native Buck action before selecting it")
     rules = [header]
+    if package_name == "tidepool-codegen":
+        rules.append('load("//build/rust:codegen-md5.bzl", "tidepool_codegen_md5")\n')
     normal_deps, normal_named = dependency_sets(package)
-    dev_deps, dev_named = dependency_sets(package, include_dev=True)
+    if package_name == "tidepool-codegen":
+        normal_named["prepared_md5_native"] = ":prepared_md5_native"
+    dev_deps, dev_named = dependency_sets(package, include_dev=True) if package_name not in LIBRARY_ONLY_PACKAGES else ([], {})
     targets = package["targets"]
     libraries = [target for target in targets if "lib" in target["kind"] or "proc-macro" in target["kind"]]
     binaries = [target for target in targets if "bin" in target["kind"]]
@@ -221,16 +275,23 @@ for package_name, package in local.items():
         extra = "    proc_macro = True," if "proc-macro" in target["kind"] else ""
         rule = render_rule("tidepool_rust_library", target["name"], target, package, normal_deps, normal_named, extra)
         rules.append(rule)
+    if package_name == "tidepool-codegen":
+        rules.append("tidepool_codegen_md5()\n")
     for target in binaries:
         deps = normal_deps + ([":" + libraries[0]["name"]] if libraries else [])
         binary_name = target["name"] + "_bin" if libraries and target["name"] == libraries[0]["name"] else target["name"]
         rules.append(render_rule("tidepool_rust_binary", binary_name, target, package, deps, normal_named))
-    if libraries:
+    if libraries and package_name not in LIBRARY_ONLY_PACKAGES:
         library = libraries[0]
         unit_target = dict(library)
         unit_target["name"] = library["name"] + "_unit_tests"
         rules.append(render_rule("tidepool_rust_test", unit_target["name"], unit_target, package, dev_deps, dev_named))
-    for target in tests:
+    selected_tests = [
+        target for target in tests
+        if package_name not in LIBRARY_ONLY_PACKAGES
+        or (package_name == "tidepool-codegen" and target["name"] in CODEGEN_NATIVE_TESTS)
+    ]
+    for target in selected_tests:
         deps = dev_deps + ([":" + libraries[0]["name"]] if libraries else [])
         extra = ""
         if package["name"] == "tidepool-atomic-write" and target["name"] == "strict_directory":
@@ -271,4 +332,3 @@ cxx_library(
             sys.exit(1)
     else:
         output_path.write_text(output)
-

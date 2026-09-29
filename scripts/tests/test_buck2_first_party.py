@@ -51,6 +51,15 @@ class FirstPartySources(unittest.TestCase):
         self.write("tidepool/heap/src/lib.rs", "pub fn heap() {}\n")
         self.write("tidepool/heap/tests/gc_unit.rs", "#[test] fn gc() {}\n")
         self.write("tidepool/heap/tests/raw_scan_validation.rs", "#[test] fn scan() {}\n")
+        self.write("tidepool/codegen/Cargo.toml", "[package]\nname = 'tidepool-codegen'\n")
+        self.write("tidepool/codegen/src/lib.rs", "pub mod prepared_program { pub fn session_var_id(_: &str, _: &str) -> u64 { 0 } }\n")
+        self.write("tidepool/codegen/tests/native_md5_link.rs", "#[test] fn linked() {}\n")
+        self.write("tidepool/codegen/tests/prepared_control.rs", "#[test] fn full_suite() {}\n")
+        for source in ("apply_tests.rs", "bytes_tests.rs", "caller_result_tests.rs",
+                      "double_to_int_tests.rs", "entry_tests.rs", "foreign_apply_tests.rs",
+                      "freer_boundary_tests.rs", "lifetime_tests.rs", "no_success_tests.rs",
+                      "retention_tests.rs", "settlement_tests.rs", "tests.rs"):
+            self.write(f"tidepool/codegen/src/prepared_program/{source}", "")
         self.write("bridge/atomic-write/tests/strict_directory.rs", "#[test] fn write() {}\n")
         self.packages = [self.package("tidepool-repr", "tidepool/repr", [
             ("tidepool_repr", "lib", "src/lib.rs"), ("repr", "test", "tests/suites/repr.rs")]),
@@ -60,10 +69,16 @@ class FirstPartySources(unittest.TestCase):
             self.package("tidepool-heap", "tidepool/heap", [
                 ("tidepool_heap", "lib", "src/lib.rs"),
                 ("gc_unit", "test", "tests/gc_unit.rs"),
-                ("raw_scan_validation", "test", "tests/raw_scan_validation.rs")])]
+                ("raw_scan_validation", "test", "tests/raw_scan_validation.rs")]),
+            self.package("tidepool-codegen", "tidepool/codegen", [
+                ("tidepool_codegen", "lib", "src/lib.rs"),
+                ("native_md5_link", "test", "tests/native_md5_link.rs"),
+                ("prepared_control", "test", "tests/prepared_control.rs")])]
         self.metadata = self.base / "metadata.json"
         self.metadata.write_text(json.dumps({"packages": self.packages,
-            "workspace_members": [package["id"] for package in self.packages]}))
+            "workspace_members": [package["id"] for package in self.packages],
+            "resolve": {"nodes": [{"id": package["id"], "deps": []}
+                                  for package in self.packages]}}))
 
     def package(self, name, directory, targets):
         return {"id": name, "name": name, "manifest_path": str(self.root / directory / "Cargo.toml"),
@@ -83,6 +98,7 @@ class FirstPartySources(unittest.TestCase):
         return subprocess.run([sys.executable, str(self.root / "scripts/buck2-first-party.py"),
                                "--package", "tidepool-repr", "--package", "tidepool-atomic-write",
                                "--package", "tidepool-heap",
+                               "--package", "tidepool-codegen",
                                *args], cwd=self.root, env=env, capture_output=True, text=True)
 
     def groups(self, path):
@@ -90,6 +106,17 @@ class FirstPartySources(unittest.TestCase):
         matches = re.findall(r'rust_filegroup\(\n    name = "([^"]+)",\n    mapped_srcs = (\{.*?\}),\n\)', buck, re.S)
         self.assertTrue(matches, buck)
         return buck, {name: ast.literal_eval(mapping) for name, mapping in matches}
+
+    def test_codegen_emits_only_the_native_md5_smoke_test(self):
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        buck, groups = self.groups("tidepool/codegen")
+        self.assertIn('name = "native_md5_link"', buck)
+        self.assertIn('crate_root = "tidepool/codegen/tests/native_md5_link.rs"', buck)
+        self.assertIn('deps = [\n        ":tidepool_codegen",', buck)
+        self.assertIn("tests/native_md5_link.rs", groups["native_md5_link_sources"])
+        self.assertNotIn("prepared_control", buck)
+        self.assertNotIn("tidepool_codegen_unit_tests", buck)
 
     def test_source_tree_preserves_fixture_layout_and_target_inputs(self):
         result = self.generate()
@@ -183,6 +210,23 @@ class FirstPartySources(unittest.TestCase):
         check = self.generate("--check")
         self.assertNotEqual(check.returncode, 0)
         self.assertIn("stale or missing Buck target graph", check.stderr)
+
+    def test_unsupported_target_selector_fails_even_for_shared_resolved_package(self):
+        metadata = json.loads(self.metadata.read_text())
+        package = metadata["packages"][0]
+        dependency = {"name": "libc", "rename": None, "kind": None,
+                      "target": "cfg(windows)", "req": "0.2"}
+        package["dependencies"].append(dependency)
+        metadata["packages"].append({"id": "libc-id", "name": "libc"})
+        metadata["resolve"]["nodes"][0]["deps"].append({
+            "name": "libc", "pkg": "libc-id", "dep_kinds": [
+                {"kind": None, "target": "cfg(windows)"},
+                {"kind": None, "target": "cfg(unix)"},
+            ]})
+        self.metadata.write_text(json.dumps(metadata))
+        result = self.generate()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported Linux dependency selector", result.stderr)
 
 
 if __name__ == "__main__":

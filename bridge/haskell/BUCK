@@ -12,3 +12,16 @@ export_file(
     src = "test-execution-schema-encode/fixtures/schema6-intrinsic.cbor",
     visibility = ["PUBLIC"],
 )
+
+# Compile-time resources referenced by codegen's unit-test modules.
+export_file(
+    name = "freer_resume_fixture",
+    src = "test-prepared-stg/fixtures/freer-resume.cbor",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "freer_retention_fixture",
+    src = "test-prepared-stg/fixtures/freer-retention.cbor",
+    visibility = ["PUBLIC"],
+)

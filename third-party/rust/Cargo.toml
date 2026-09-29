@@ -8,9 +8,26 @@ publish = false
 [lib]
 path = "empty.rs"
 [dependencies]
+"chrono" = { package = "chrono", version = "=0.4.45", default-features = false, features = ["alloc"] }
 "ciborium" = { package = "ciborium", version = "=0.2.2", default-features = true, features = [] }
+"cranelift-codegen" = { package = "cranelift-codegen", version = "=0.129.1", default-features = true, features = [] }
+"cranelift-frontend" = { package = "cranelift-frontend", version = "=0.129.1", default-features = true, features = [] }
+"cranelift-jit" = { package = "cranelift-jit", version = "=0.129.1", default-features = true, features = [] }
+"cranelift-module" = { package = "cranelift-module", version = "=0.129.1", default-features = true, features = [] }
+"cranelift-native" = { package = "cranelift-native", version = "=0.129.1", default-features = true, features = [] }
+"env_logger" = { package = "env_logger", version = "=0.11.11", default-features = true, features = [] }
+"frunk" = { package = "frunk", version = "=0.5.0", default-features = true, features = [] }
+"inventory" = { package = "inventory", version = "=0.3.24", default-features = true, features = [] }
+"libc" = { package = "libc", version = "=0.2.189", default-features = true, features = [] }
+"num-bigint" = { package = "num-bigint", version = "=0.4.8", default-features = true, features = [] }
+"parking_lot" = { package = "parking_lot", version = "=0.12.5", default-features = true, features = [] }
 "proptest" = { package = "proptest", version = "=1.11.0", default-features = true, features = [] }
 "recursion" = { package = "recursion", version = "=0.5.4", default-features = true, features = [] }
+"serde" = { package = "serde", version = "=1.0.229", default-features = true, features = ["derive"] }
 "serde_json" = { package = "serde_json", version = "=1.0.151", default-features = true, features = ["arbitrary_precision"] }
+"stacker" = { package = "stacker", version = "=0.1.25", default-features = true, features = [] }
+"static_assertions" = { package = "static_assertions", version = "=1.1.0", default-features = true, features = [] }
 "tempfile" = { package = "tempfile", version = "=3.27.0", default-features = true, features = [] }
 "thiserror" = { package = "thiserror", version = "=2.0.20", default-features = true, features = [] }
+"tracing" = { package = "tracing", version = "=0.1.44", default-features = true, features = [] }
+"tracing-subscriber" = { package = "tracing-subscriber", version = "=0.3.23", default-features = true, features = ["env-filter"] }

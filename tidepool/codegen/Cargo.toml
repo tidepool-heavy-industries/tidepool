@@ -42,6 +42,10 @@ libc.workspace = true
 cc = "1"
 
 [[test]]
+name = "native_md5_link"
+path = "tests/native_md5_link.rs"
+
+[[test]]
 name = "prepared_control"
 path = "tests/prepared_control.rs"
 
