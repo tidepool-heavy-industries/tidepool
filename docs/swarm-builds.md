@@ -13,7 +13,7 @@ Regenerate or verify the initial slice in the pinned development shell:
 ```sh
 bash scripts/dev-shell.sh scripts/buck2-first-party.py \
   --package tidepool-atomic-write --package tidepool-repr
-scripts/buck2-reindeer.sh
+bash scripts/dev-shell.sh scripts/buck2-reindeer.sh
 ```
 
 Add `--check` to either command to verify generated inputs without retaining
@@ -37,9 +37,8 @@ The flake pins Buck2, Reindeer, Rust, GHC, C/C++, and the action support tools.
 Materialize the declared action closure before configuring the checkout:
 
 ```sh
-nix build --no-link .#buck-toolchain-closure
-scripts/buck2-configure.sh
-export PATH="$(awk -F ' = ' '$1 == "action_path" {print $2}' .buckconfig.local):/run/current-system/sw/bin"
+bash scripts/dev-shell.sh bash -c 'nix build --no-link "${TIDEPOOL_DEV_SHELL%#*}#buck-toolchain-closure"'
+bash scripts/buck2-configure.sh
 ```
 
 `buck-out` must be a bind mount of a per-checkout directory on `/srv/build`; a
@@ -49,8 +48,8 @@ unadmitted agent shell. For initial validation use the admitted build slice and
 keep execution local while NativeLink gates remain pending:
 
 ```sh
-buck2 build --local-only -c remote.enabled=false //tidepool/repr:tidepool_repr
-buck2 test --local-only -c remote.enabled=false \
+bash scripts/buck2-run.sh build --local-only -c remote.enabled=false //tidepool/repr:tidepool_repr
+bash scripts/buck2-run.sh test --print-passing-details --local-only -c remote.enabled=false \
   //bridge/atomic-write:tidepool_atomic_write_unit_tests \
   //bridge/atomic-write:strict_directory \
   //tidepool/repr:tidepool_repr_unit_tests \
@@ -71,3 +70,28 @@ Generated worker artifacts, test fixtures, embedded browser assets, and web
 resource, and toolchain inputs before those surfaces move from their existing
 Cabal/Nix workflows. Remote execution remains disabled until its independent
 closure, isolation, reuse, and cancellation checks pass.
+
+## Daemon lifetime and cache reuse
+
+Keep this checkout's Buck daemon in a persistent user service within the admitted
+slice. A temporary build service stops its daemon when the client exits, losing
+the in-memory dependency graph. After confirming no daemon for this checkout is
+already owned elsewhere, launch the first metadata query as follows:
+
+```sh
+systemd-run --user --collect --property=RemainAfterExit=yes \
+  --unit=tidepool-buck-daemon --slice=tidepool-completion-build.slice \
+  --working-directory="$PWD" \
+  /run/current-system/sw/bin/bash scripts/buck2-run.sh \
+  targets -c remote.enabled=false //bridge/atomic-write:
+```
+
+Inspect the service cgroup and daemon PID before builds. Run build/test clients
+in the same admitted slice; they reuse the daemon. Do not restart a daemon with
+active work. The service is user-owned and does not change host configuration.
+Local execution is the default even if the host has a NativeLink endpoint;
+remote use requires explicit configuration after separate acceptance.
+
+Codex is deprecated and excluded from this migration. Its existing build path
+is retained separately. Toolchain-only Nix evaluation uses the repository's
+committed toolchain source so Buck setup does not fetch or build Codex.
