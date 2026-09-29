@@ -9,9 +9,9 @@ module Tidepool.ExactHydration
   , installExactLexicalGraph
   ) where
 
-import Control.Monad (forM, forM_)
+import Control.Monad (forM, forM_, unless)
 import Control.Exception
-  ( IOException, SomeException, SomeAsyncException, try, fromException, throwIO )
+  ( IOException, SomeException, SomeAsyncException, bracket, try, fromException, throwIO )
 import Data.Char (isHexDigit, toLower)
 import Data.Function (on)
 import Data.List (nubBy)
@@ -51,7 +51,9 @@ import GHC.Unit.Types (unitString, stringToUnit)
 import qualified GHC.Data.Maybe as MErr
 import GHC.Utils.Outputable (text)
 import Numeric (showHex)
+import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO (fixIO)
+import System.IO (hClose, hIsClosed, openBinaryTempFile)
 import qualified Data.Set as Set
 
 -- An artifact is advisory until its bytes and GHC module identity have been
@@ -108,12 +110,14 @@ readOne env artifact = do
     if hexBytes (SHA256.hash bytes) /= map toLower (exactSha256 artifact)
     then pure (Left ("interface digest mismatch: " ++ exactModule artifact))
     else do
-      -- readIface checks the binary format and reconstructs Names under this
-      -- transaction's NameCache. The owner is checked after decoding.
+      -- Decode the exact bytes that passed the digest check. Reading the
+      -- candidate path again would admit a different interface between the
+      -- hash and GHC's decoder, even if a later revalidation observed the
+      -- original bytes restored.
       let owner = mkModule (stringToUnit (exactUnit artifact))
             (mkModuleName (exactModule artifact))
-      decoded <- try @SomeException (readIface (hsc_dflags env) (hsc_NC env) owner
-        (exactPath artifact))
+      decoded <- try @SomeException (withCapturedIface bytes $ \path ->
+        readIface (hsc_dflags env) (hsc_NC env) owner path)
       case decoded of
         Left failure -> case fromException failure :: Maybe SomeAsyncException of
           Just async -> throwIO async
@@ -127,6 +131,19 @@ readOne env artifact = do
             | isJust (mi_extra_decls iface) ->
                 Left ("interface contains defining Core: " ++ exactModule artifact)
             | otherwise -> Right (artifact, iface)
+
+withCapturedIface :: BS.ByteString -> (FilePath -> IO a) -> IO a
+withCapturedIface bytes consume = do
+  directory <- getTemporaryDirectory
+  bracket (openBinaryTempFile directory "tidepool-exact-iface.hi")
+    (\(path, handle) -> do
+      closed <- hIsClosed handle
+      unless closed (hClose handle)
+      removeFile path)
+    (\(path, handle) -> do
+      BS.hPut handle bytes
+      hClose handle
+      consume path)
 
 -- GHC's home-interface knot allows mutually recursive source/boot modules to
 -- resolve each other's original Names while typechecking their details.
