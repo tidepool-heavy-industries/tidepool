@@ -739,6 +739,22 @@ fn workbench_failure(
     }
 }
 
+fn failed_checkpoint_cleanup_response(
+    response: WorkbenchResponse,
+    cleanup: String,
+) -> WorkbenchExecutionFailure {
+    let status = response.status;
+    let next_index = response.next_index;
+    WorkbenchExecutionFailure {
+        receipts: response.items,
+        failed_index: next_index.saturating_sub(1),
+        total: response.total,
+        source: ResidentActorWorkbenchError::ActorProtocol(format!(
+            "{cleanup}; original workbench status {status:?}, next index {next_index}"
+        )),
+    }
+}
+
 fn workbench_failure_after_operations(
     completed: &[WorkbenchItemReceipt],
     failed_index: usize,
@@ -6322,21 +6338,19 @@ where
             let started = std::time::Instant::now();
             let wait = crate::after_tool::wait();
             let observation = self.runtime_observation.clone();
-            // What is parked before the slot runs, so a slot that is cut off can
-            // have exactly its own suspended turn aborted and nothing else.
-            let parked_before = workbench
-                .parked_continuations(context.clone())
-                .await
-                .unwrap_or_default();
             self.after_tool_active = true;
             let answer = {
-                let slot = self.run_after_tool(
-                    kernel,
-                    context,
-                    workbench,
-                    dispatch,
-                    call.name.clone(),
-                    payload,
+                let slot = workbench.with_exact_continuation_cleanup(
+                    context.clone(),
+                    "after-tool slot ran out of time or lost its caller".into(),
+                    self.run_after_tool(
+                        kernel,
+                        context,
+                        workbench,
+                        dispatch,
+                        call.name.clone(),
+                        payload,
+                    ),
                 );
                 tokio::pin!(slot);
                 let expiry = tokio::time::sleep(wait);
@@ -6366,32 +6380,6 @@ where
             self.after_tool_active = false;
             let elapsed = started.elapsed();
             tracing::Span::current().record("elapsed_ms", elapsed.as_millis() as u64);
-            if answer.is_none() {
-                // Nobody is driving the slot any more, so an effect it is
-                // suspended on would never be answered and its turn would hold
-                // the machine against the next call.
-                match workbench
-                    .abort_parked_since(
-                        context.clone(),
-                        parked_before,
-                        "after-tool slot ran out of time".into(),
-                    )
-                    .await
-                {
-                    Ok(aborted) => tracing::info!(
-                        actor = %context.actor,
-                        ordinal,
-                        aborted,
-                        "after-tool slot cut off; its suspended turn was aborted"
-                    ),
-                    Err(error) => tracing::warn!(
-                        actor = %context.actor,
-                        ordinal,
-                        %error,
-                        "after-tool slot cut off and its suspended turn could not be aborted"
-                    ),
-                }
-            }
             // `outcome_detail` is the one bounded line of reason text a compact
             // `info` event can carry for whichever the outcome was: nothing said
             // (empty), a nudge written straight onto the child's own result, a
@@ -8455,12 +8443,16 @@ where
                         failure.source
                     )),
                 }),
-                (Ok(_), Some(cleanup)) => Err(WorkbenchExecutionFailure {
-                    receipts: Vec::new(),
-                    failed_index: 0,
-                    total: 1,
-                    source: ResidentActorWorkbenchError::ActorProtocol(cleanup),
-                }),
+                (
+                    Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response)),
+                    Some(cleanup),
+                )
+                | (
+                    Ok(KernelStep::Stop {
+                        output: response, ..
+                    }),
+                    Some(cleanup),
+                ) => Err(failed_checkpoint_cleanup_response(response, cleanup)),
             };
             let result = result.map_err(|failure| {
                 KernelInvocationFailure::Workbench(crate::KernelWorkbenchFailure {
@@ -10099,8 +10091,9 @@ pub(crate) async fn publish_request_notifications(
 #[cfg(test)]
 mod tests {
     use super::{
-        disposition_for_non_command_failure, lookup_response, settlement_refusal,
-        workbench_failure_after_operations, workbench_response, ChildExitObservations,
+        disposition_for_non_command_failure, failed_checkpoint_cleanup_response, lookup_response,
+        settlement_refusal, workbench_failure_after_operations, workbench_response,
+        ChildExitObservations,
     };
     use crate::resident_workbench::{AgentStopProjection, CleanupStepProjection};
     use crate::{ActorId, ActorRef, Incarnation};
@@ -10109,8 +10102,44 @@ mod tests {
         InspectionAvailability, InspectionResult, ResidentError, TurnClassification, TurnKind,
         TypeMatch, TypeMatchQuality, WorkbenchCellItemKind, WorkbenchExecutionId,
         WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition,
-        WorkbenchOperationId, WorkbenchOperationReceipt, WorkbenchRunStatus,
+        WorkbenchOperationId, WorkbenchOperationReceipt, WorkbenchResponse, WorkbenchRunStatus,
+        WorkbenchTerminalTransfer,
     };
+
+    #[test]
+    fn failed_checkpoint_cleanup_keeps_original_receipts_and_cancellation() {
+        let receipt = WorkbenchItemReceipt {
+            diagnostics: Vec::new(),
+            index: 2,
+            kind: None,
+            span: None,
+            source_items: Vec::new(),
+            status: WorkbenchItemStatus::Committed,
+            output: "effect already completed".into(),
+            warnings: Vec::new(),
+            installed_bindings: Vec::new(),
+            operations: Vec::new(),
+            terminal_transfer: Some(WorkbenchTerminalTransfer::CancellationAcknowledged),
+            failure_layer: None,
+        };
+        let failure = failed_checkpoint_cleanup_response(
+            WorkbenchResponse {
+                status: WorkbenchRunStatus::RequestCancelled,
+                summary: None,
+                items: vec![receipt.clone()],
+                next_index: 3,
+                total: 5,
+            },
+            "injected scope checkout failure".into(),
+        );
+        assert_eq!(failure.receipts, vec![receipt]);
+        assert_eq!(failure.failed_index, 2);
+        assert_eq!(failure.total, 5);
+        let detail = failure.source.to_string();
+        assert!(detail.contains("injected scope checkout failure"));
+        assert!(detail.contains("RequestCancelled"));
+        assert!(detail.contains("next index 3"));
+    }
 
     #[test]
     fn synthetic_route_boundary_cannot_issue_provider_checkpoint() {

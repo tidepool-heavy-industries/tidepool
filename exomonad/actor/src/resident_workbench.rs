@@ -38,9 +38,10 @@ use tidepool_runtime::session::{
     CheckedBinderPin, CheckedExpressionPlan, CompiledTurn, DeclarationCandidateRender,
     DeclarationReceipt, ExpressionPresentation, HostBindingAuthority, HostBindingType, HostCarrier,
     HostPayload, InspectionQuery, InspectionRequest, OutputSink, ParsedBlock,
-    PendingPreparedInstall, PendingPreparedMode, PreparedRuntimeError, ResidentError, ResidentHole,
-    ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody, SourceImports,
-    StagedDeclaration, TurnClassification, TurnCode, TurnKind, TurnRequest, TurnResult,
+    PendingPreparedInstall, PendingPreparedMode, PreparedRuntimeError, ResidentContinuationEvent,
+    ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession,
+    RootCustody, SourceImports, StagedDeclaration, TurnClassification, TurnCode, TurnKind,
+    TurnRequest, TurnResult,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, spawn_blocking_in_span, CompileError, FailureClass,
@@ -54,6 +55,10 @@ use crate::request_effect::{
     WatchForget, WatchPoll, WatchRegistration, WatchesReq,
 };
 use crate::{ActorCompileViewError, ResponseExpectation};
+
+tokio::task_local! {
+    static SLOT_CONTINUATION_OWNER: ParkedHoleAbortRegistration;
+}
 
 impl ResponseExpectation {
     fn request_preamble(
@@ -939,12 +944,11 @@ impl Drop for HostInputRetirement {
     }
 }
 
-/// Owns one invocation's current parked continuation across machine
-/// checkouts. The async owner remains alive while a blocking checkout runs;
-/// its registration is cloned into that checkout so a late suspension can
-/// replace the exact id before the checkout settles. Dropping the owner
-/// queues cleanup of its current id. A late result observes that abandonment
-/// and aborts its exact successor before releasing the checkout.
+/// Owns one invocation's exact parked continuations across machine checkouts.
+/// A slot can suspend a nested helper while its earlier hole remains parked,
+/// so every created id stays owned until the session reports its retirement.
+/// The registration is cloned into blocking checkouts; a late suspension
+/// observes abandonment and queues cleanup of only that invocation's ids.
 pub(crate) struct ParkedHoleAbortGuard {
     shared: Arc<ParkedHoleAbortState>,
 }
@@ -956,8 +960,8 @@ struct ParkedHoleAbortState {
 }
 
 enum ParkedHoleState {
-    Owned(Option<String>),
-    Abandoned(Option<String>),
+    Owned(std::collections::BTreeSet<String>),
+    Abandoned(std::collections::BTreeSet<String>),
     Settled,
 }
 
@@ -989,13 +993,14 @@ impl ParkedHoleAbortGuard {
         let source = access.source.clone();
         let cleanup_context = context.clone();
         let cleanup_reason = reason.clone();
+        let runtime = tokio::runtime::Handle::current();
         let abort: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |cont_id| {
             let machines = Arc::clone(&machines);
             let source = source.clone();
             let context = cleanup_context.clone();
             let reason = cleanup_reason.clone();
             let cleanup_id = cont_id.clone();
-            tokio::spawn(async move {
+            runtime.spawn(async move {
                 let access = ResidentMachineAccess::new(machines, source);
                 if let Err(error) = access
                     .with_machine(context, move |session, _, _| {
@@ -1010,7 +1015,7 @@ impl ParkedHoleAbortGuard {
         Self {
             shared: Arc::new(ParkedHoleAbortState {
                 abort,
-                state: Mutex::new(ParkedHoleState::Owned(latest)),
+                state: Mutex::new(ParkedHoleState::Owned(latest.into_iter().collect())),
                 reason,
             }),
         }
@@ -1039,12 +1044,12 @@ impl Drop for ParkedHoleAbortGuard {
                 }
                 ParkedHoleState::Abandoned(current) => {
                     *state = ParkedHoleState::Abandoned(current);
-                    None
+                    std::collections::BTreeSet::new()
                 }
-                ParkedHoleState::Settled => None,
+                ParkedHoleState::Settled => std::collections::BTreeSet::new(),
             }
         };
-        if let Some(cont_id) = abandoned {
+        for cont_id in abandoned {
             (self.shared.abort)(cont_id);
         }
     }
@@ -1052,7 +1057,43 @@ impl Drop for ParkedHoleAbortGuard {
 
 pub(crate) struct ParkedHoleAbortRegistration(Arc<ParkedHoleAbortState>);
 
+impl Clone for ParkedHoleAbortRegistration {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
 impl ParkedHoleAbortRegistration {
+    fn observe(&self, event: ResidentContinuationEvent) {
+        let abort = {
+            let mut state = self.0.state.lock();
+            match event {
+                ResidentContinuationEvent::Parked(cont_id) => match &mut *state {
+                    ParkedHoleState::Owned(current) => {
+                        current.insert(cont_id);
+                        None
+                    }
+                    ParkedHoleState::Abandoned(current) => {
+                        current.insert(cont_id.clone()).then_some(cont_id)
+                    }
+                    ParkedHoleState::Settled => None,
+                },
+                ResidentContinuationEvent::Retired(cont_id) => {
+                    match &mut *state {
+                        ParkedHoleState::Owned(current) | ParkedHoleState::Abandoned(current) => {
+                            current.remove(&cont_id);
+                        }
+                        ParkedHoleState::Settled => {}
+                    }
+                    None
+                }
+            }
+        };
+        if let Some(cont_id) = abort {
+            (self.0.abort)(cont_id);
+        }
+    }
+
     /// Transfer ownership to the exact continuation returned by this
     /// checkout. If the async owner was dropped while the blocking operation
     /// ran, settle the late successor before releasing the checked-out
@@ -1070,14 +1111,14 @@ impl ParkedHoleAbortRegistration {
             let mut state = self.0.state.lock();
             match std::mem::replace(&mut *state, ParkedHoleState::Settled) {
                 ParkedHoleState::Abandoned(_) => {
-                    *state = ParkedHoleState::Abandoned(successor.clone());
+                    *state = ParkedHoleState::Abandoned(successor.clone().into_iter().collect());
                     true
                 }
                 ParkedHoleState::Owned(_) => {
                     *state = successor
                         .clone()
                         .map_or(ParkedHoleState::Settled, |cont_id| {
-                            ParkedHoleState::Owned(Some(cont_id))
+                            ParkedHoleState::Owned(std::iter::once(cont_id).collect())
                         });
                     false
                 }
@@ -2710,6 +2751,7 @@ where
             operation = "resident_turn",
         );
         self.log_include_roots_if_changed(context.placement.session, &context.source_layer);
+        let slot_owner = SLOT_CONTINUATION_OWNER.try_with(Clone::clone).ok();
         self.with_host_machine(
             context.actor.to_string(),
             context.placement.session,
@@ -2722,7 +2764,15 @@ where
                         context.live_payload,
                     )
                     .map_err(ResidentActorWorkbenchError::Resident)?;
-                operation(session, &context, source)
+                if let Some(owner) = slot_owner {
+                    let observer: Arc<dyn Fn(ResidentContinuationEvent) + Send + Sync> =
+                        Arc::new(move |event| owner.observe(event));
+                    session.with_continuation_observer(observer, |session| {
+                        operation(session, &context, source)
+                    })
+                } else {
+                    operation(session, &context, source)
+                }
             },
         )
         .instrument(compile_span)
@@ -2887,6 +2937,18 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    pub(crate) async fn with_exact_continuation_cleanup<T>(
+        &self,
+        context: crate::ActorSessionContext,
+        reason: String,
+        operation: impl std::future::Future<Output = T>,
+    ) -> T {
+        let guard = ParkedHoleAbortGuard::with_latest(&self.access, context, None, reason);
+        SLOT_CONTINUATION_OWNER
+            .scope(guard.registration(), operation)
+            .await
+    }
+
     /// Resolve this actor's spec without compiling anything, for status and
     /// for a reload receipt that must name the rule before it knows whether
     /// the spec compiles.
@@ -3239,63 +3301,6 @@ where
                     Vec::new(),
                     outcome,
                 )
-            })
-            .await
-    }
-
-    /// The continuations parked in this actor's machine right now, oldest
-    /// first. Taken before a slot runs, so what it leaves behind can be told
-    /// from what was already there.
-    pub(crate) async fn parked_continuations(
-        &self,
-        context: crate::ActorSessionContext,
-    ) -> Result<Vec<String>, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                Ok(session
-                    .parked_holes()
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect())
-            })
-            .await
-    }
-
-    /// Abort continuations parked since `before` was captured. This legacy
-    /// actor-global path is safe only while the actor admits one handler.
-    pub(crate) async fn abort_parked_since(
-        &self,
-        context: crate::ActorSessionContext,
-        before: Vec<String>,
-        reason: String,
-    ) -> Result<usize, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                let mut aborted = 0;
-                for _ in 0..8 {
-                    let Some(cont_id) = session
-                        .parked_holes()
-                        .into_iter()
-                        .find(|hole| !before.iter().any(|known| known == hole))
-                        .map(str::to_owned)
-                    else {
-                        break;
-                    };
-                    match session.abort(&cont_id, reason.clone()) {
-                        Ok(_) if !session.parked_holes().contains(&cont_id.as_str()) => {
-                            aborted += 1;
-                        }
-                        Ok(_) => break,
-                        Err(_error) if !session.parked_holes().contains(&cont_id.as_str()) => {
-                            aborted += 1;
-                        }
-                        Err(error) => {
-                            tracing::warn!(%cont_id, %error, "failed to abort parked continuation");
-                            break;
-                        }
-                    }
-                }
-                Ok(aborted)
             })
             .await
     }
@@ -15101,5 +15106,318 @@ mod request_tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn late_parked_hole_registration_aborts_only_its_own_continuation() {
+        let (machines, mut context, source, _root) = actor_registry_fixture();
+        context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
+        let workbench = Arc::new(ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            source.clone(),
+            None,
+            None,
+            vec![],
+        ));
+        let park = |workbench: Arc<ResidentActorWorkbench<_, _>>,
+                    context: crate::ActorSessionContext,
+                    source: ActorWorkbenchSource| async move {
+            let (block, verdict) = suspending_fragment();
+            let step = workbench
+                .begin_fragment_split(context, source, Vec::new(), block, Some(verdict))
+                .await
+                .expect("fragment parks");
+            let ResidentWorkbenchStep::Running { outcome, .. } = step else {
+                panic!("expected a parked fragment")
+            };
+            *outcome
+        };
+        let owned = park(Arc::clone(&workbench), context.clone(), source.clone()).await;
+        let unrelated = park(Arc::clone(&workbench), context.clone(), source).await;
+        let owned_id = outcome_continuation_id(&owned).expect("owned hole");
+        let unrelated_id = outcome_continuation_id(&unrelated).expect("unrelated hole");
+        assert_ne!(owned_id, unrelated_id);
+
+        let guard = ParkedHoleAbortGuard::with_latest(
+            &workbench.access,
+            context.clone(),
+            None,
+            "slot caller left before its blocking checkout returned".into(),
+        );
+        let registration = guard.registration();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let workbench_for_checkout = Arc::clone(&workbench);
+        let checkout_context = context.clone();
+        let checkout = tokio::spawn(async move {
+            workbench_for_checkout
+                .access
+                .with_machine(checkout_context, move |session, _, _| {
+                    entered_tx.send(()).expect("test awaits checkout");
+                    release_rx.recv().expect("test releases checkout");
+                    registration.replace_in_checkout(session, &owned);
+                    Ok(())
+                })
+                .await
+        });
+        tokio::task::spawn_blocking(move || entered_rx.recv().expect("checkout entered"))
+            .await
+            .expect("waiter joins");
+        drop(guard);
+        release_tx.send(()).expect("checkout still waiting");
+        checkout
+            .await
+            .expect("checkout joins")
+            .expect("checkout succeeds");
+
+        let parked = workbench
+            .access
+            .with_machine(context, move |session, _, _| {
+                Ok(session
+                    .parked_holes()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>())
+            })
+            .await;
+        let parked = parked.expect("inspect parked holes");
+        assert!(!parked.contains(&owned_id));
+        assert!(parked.contains(&unrelated_id));
+    }
+
+    #[tokio::test]
+    async fn cancelled_slot_aborts_a_hole_created_by_a_late_blocking_checkout() {
+        let (machines, mut context, source, _root) = actor_registry_fixture();
+        context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
+        let workbench = Arc::new(ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            source.clone(),
+            None,
+            None,
+            vec![],
+        ));
+        let (block, verdict) = suspending_fragment();
+        let unrelated = workbench
+            .begin_fragment_split(
+                context.clone(),
+                source.clone(),
+                Vec::new(),
+                block,
+                Some(verdict),
+            )
+            .await
+            .expect("unrelated fragment parks");
+        let ResidentWorkbenchStep::Running { outcome, .. } = unrelated else {
+            panic!("expected unrelated suspension")
+        };
+        let unrelated_id = outcome_continuation_id(&outcome).expect("unrelated hole");
+
+        let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let task_workbench = Arc::clone(&workbench);
+        let checkout_workbench = Arc::clone(&workbench);
+        let task_context = context.clone();
+        let task = tokio::spawn(async move {
+            task_workbench
+                .with_exact_continuation_cleanup(
+                    task_context.clone(),
+                    "late blocking slot".into(),
+                    async move {
+                        checkout_workbench
+                            .access
+                            .with_machine(task_context, move |session, context, _| {
+                                let (block, verdict) = suspending_fragment();
+                                let step = begin_fragment(
+                                    session,
+                                    context,
+                                    &source,
+                                    RequestWorkbenchScope {
+                                        response: None,
+                                        request: None,
+                                        type_modules: &[],
+                                    },
+                                    block,
+                                    None,
+                                    Some(&verdict),
+                                )?;
+                                let ResidentWorkbenchStep::Running { outcome, .. } = &step else {
+                                    panic!("expected late suspension")
+                                };
+                                parked_tx
+                                    .send(outcome_continuation_id(outcome).expect("late hole"))
+                                    .expect("test waits for late hole");
+                                release_rx.recv().expect("test releases checkout");
+                                Ok(step)
+                            })
+                            .await
+                    },
+                )
+                .await
+        });
+        let late_id = tokio::task::spawn_blocking(move || parked_rx.recv().expect("hole parked"))
+            .await
+            .expect("waiter joins");
+        task.abort();
+        assert!(task.await.is_err_and(|error| error.is_cancelled()));
+        release_tx.send(()).expect("checkout still blocked");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let ids = workbench
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    Ok(session
+                        .parked_holes()
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>())
+                })
+                .await
+                .expect("inspect parked holes");
+            if !ids.contains(&late_id) {
+                assert!(ids.contains(&unrelated_id));
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "late hole still parked"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_slot_scope_aborts_its_hole_and_keeps_an_unrelated_hole() {
+        let (machines, mut context, source, _root) = actor_registry_fixture();
+        context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
+        let workbench = Arc::new(ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            source.clone(),
+            None,
+            None,
+            vec![],
+        ));
+        let (block, verdict) = suspending_fragment();
+        let unrelated = workbench
+            .begin_fragment_split(
+                context.clone(),
+                source.clone(),
+                Vec::new(),
+                block,
+                Some(verdict),
+            )
+            .await
+            .expect("unrelated fragment parks");
+        let ResidentWorkbenchStep::Running { outcome, .. } = unrelated else {
+            panic!("expected an unrelated suspension")
+        };
+        let unrelated_id = outcome_continuation_id(&outcome).expect("unrelated hole");
+
+        let (parked_tx, parked_rx) = tokio::sync::oneshot::channel();
+        let task_workbench = Arc::clone(&workbench);
+        let slot_workbench = Arc::clone(&workbench);
+        let task_context = context.clone();
+        let task = tokio::spawn(async move {
+            task_workbench
+                .with_exact_continuation_cleanup(
+                    task_context.clone(),
+                    "cancelled slot".into(),
+                    async {
+                        let (block, verdict) = suspending_fragment();
+                        let step = slot_workbench
+                            .begin_fragment_split(
+                                task_context,
+                                source,
+                                Vec::new(),
+                                block,
+                                Some(verdict),
+                            )
+                            .await
+                            .expect("slot fragment parks");
+                        let ResidentWorkbenchStep::Running { outcome, .. } = step else {
+                            panic!("expected slot suspension")
+                        };
+                        parked_tx
+                            .send(outcome_continuation_id(&outcome).expect("slot hole"))
+                            .expect("test waiting for slot hole");
+                        std::future::pending::<()>().await;
+                    },
+                )
+                .await
+        });
+        let slot_id = parked_rx.await.expect("slot parked");
+        task.abort();
+        assert!(task.await.expect_err("cancelled task").is_cancelled());
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let ids = workbench
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    Ok(session
+                        .parked_holes()
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>())
+                })
+                .await
+                .expect("inspect parked holes");
+            if !ids.contains(&slot_id) {
+                assert!(ids.contains(&unrelated_id));
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "slot hole still parked"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[test]
+    fn slot_owner_tracks_resuspension_and_does_not_abort_a_completed_turn() {
+        let aborted = Arc::new(Mutex::new(Vec::<String>::new()));
+        let make_guard = || {
+            let aborted = Arc::clone(&aborted);
+            ParkedHoleAbortGuard {
+                shared: Arc::new(ParkedHoleAbortState {
+                    abort: Arc::new(move |id| aborted.lock().push(id)),
+                    state: Mutex::new(ParkedHoleState::Owned(Default::default())),
+                    reason: "test".into(),
+                }),
+            }
+        };
+
+        let completed = make_guard();
+        let completed_registration = completed.registration();
+        completed_registration.observe(ResidentContinuationEvent::Parked("first".into()));
+        completed_registration.observe(ResidentContinuationEvent::Retired("first".into()));
+        drop(completed);
+        assert!(aborted.lock().is_empty(), "completion must not abort twice");
+
+        let suspended = make_guard();
+        let suspended_registration = suspended.registration();
+        suspended_registration.observe(ResidentContinuationEvent::Parked("old".into()));
+        suspended_registration.observe(ResidentContinuationEvent::Retired("old".into()));
+        suspended_registration.observe(ResidentContinuationEvent::Parked("latest".into()));
+        drop(suspended);
+        assert_eq!(&*aborted.lock(), &["latest"]);
+
+        aborted.lock().clear();
+        let nested = make_guard();
+        let nested_registration = nested.registration();
+        nested_registration.observe(ResidentContinuationEvent::Parked("parent".into()));
+        nested_registration.observe(ResidentContinuationEvent::Parked("helper".into()));
+        nested_registration.observe(ResidentContinuationEvent::Retired("helper".into()));
+        drop(nested);
+        assert_eq!(&*aborted.lock(), &["parent"]);
+
+        aborted.lock().clear();
+        let both = make_guard();
+        let both_registration = both.registration();
+        both_registration.observe(ResidentContinuationEvent::Parked("parent".into()));
+        both_registration.observe(ResidentContinuationEvent::Parked("helper".into()));
+        drop(both);
+        assert_eq!(&*aborted.lock(), &["helper", "parent"]);
     }
 }

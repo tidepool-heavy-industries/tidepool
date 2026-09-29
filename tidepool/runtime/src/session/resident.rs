@@ -715,6 +715,15 @@ pub enum ResidentOutcome {
     },
 }
 
+/// Exact continuation changes made during one checked-out host operation.
+/// A host can attach an observer while it owns the checkout, so a cancelled
+/// caller still learns about a suspension produced by a late blocking run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResidentContinuationEvent {
+    Parked(String),
+    Retired(String),
+}
+
 /// The rendered metadata from one compiler-produced display bundle.
 ///
 /// The page itself is installed in the persistent binding store before this metadata is
@@ -1739,6 +1748,7 @@ pub struct ResidentSession<H, O> {
     /// registry is the ground truth; these are the string identities callers
     /// resume/abort against (atomic validate-before-consume). Top = last.
     parked: Vec<(String, ContinuationId)>,
+    continuation_observer: Option<Arc<dyn Fn(ResidentContinuationEvent) + Send + Sync>>,
     parked_provenance: HashMap<ContinuationId, Arc<ProgramProvenance>>,
     binding_provenance: HashMap<u64, Arc<ProgramProvenance>>,
     /// Host-owned text identities for materialized bindings whose equality is
@@ -1784,6 +1794,7 @@ where
             captured,
             cont_id_issuer: MonotonicIdIssuer::new("scont"),
             parked: Vec::new(),
+            continuation_observer: None,
             parked_provenance: HashMap::new(),
             binding_provenance: HashMap::new(),
             host_text_bindings: HashMap::new(),
@@ -1800,6 +1811,23 @@ where
     /// intended caller.
     pub fn set_image_registry(&mut self, registry: Arc<ImageRegistry>) {
         self.state.set_image_registry(registry);
+    }
+
+    /// Observe only the continuation events caused by this checkout's host
+    /// operation. Restore the previous observer even if the operation panics;
+    /// a later checkout must never inherit another caller's cleanup owner.
+    pub fn with_continuation_observer<T>(
+        &mut self,
+        observer: Arc<dyn Fn(ResidentContinuationEvent) + Send + Sync>,
+        operation: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous = self.continuation_observer.replace(observer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(self)));
+        self.continuation_observer = previous;
+        match result {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
 
     /// Accumulate `decls` on the persistent declaration environment (mirrors the repl's
@@ -4856,6 +4884,9 @@ where
                 let cont_id = self.next_cont_id();
                 self.parked.push((cont_id.clone(), id));
                 self.parked_provenance.insert(id, provenance);
+                if let Some(observer) = &self.continuation_observer {
+                    observer(ResidentContinuationEvent::Parked(cont_id.clone()));
+                }
                 let output = self.captured.snapshot();
                 ResidentOutcome::Suspended {
                     output,
@@ -4868,6 +4899,9 @@ where
                 let cont_id = self.next_cont_id();
                 self.parked.push((cont_id.clone(), id));
                 self.parked_provenance.insert(id, provenance);
+                if let Some(observer) = &self.continuation_observer {
+                    observer(ResidentContinuationEvent::Parked(cont_id.clone()));
+                }
                 ResidentOutcome::Deferred {
                     output: self.captured.snapshot(),
                     hole: ResidentHole::mint(cont_id, seed),
@@ -4890,6 +4924,9 @@ where
         if !still_parked {
             self.parked_provenance.remove(&frame_id);
             self.parked.retain(|(h, _)| h != cont_id);
+            if let Some(observer) = &self.continuation_observer {
+                observer(ResidentContinuationEvent::Retired(cont_id.to_owned()));
+            }
         }
     }
 
@@ -5064,6 +5101,9 @@ where
             self.parked_provenance.remove(id);
         }
         self.parked.retain(|(name, _)| name != hole);
+        if let Some(observer) = &self.continuation_observer {
+            observer(ResidentContinuationEvent::Retired(hole.to_owned()));
+        }
     }
 }
 
