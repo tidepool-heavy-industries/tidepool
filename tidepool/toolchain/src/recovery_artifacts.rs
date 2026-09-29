@@ -21,6 +21,17 @@ pub struct RecoveryArtifactRef {
     pub product_path: PathBuf,
 }
 
+/// A source-less public Join owns only an interface. Its implementation
+/// modules remain independent `RecoveryArtifactRef` product pairs.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecoveryJoinRef {
+    pub toolchain_identity_sha256: [u8; 32],
+    pub unit: String,
+    pub module: String,
+    pub skinny_iface_sha256: [u8; 32],
+    pub interface_path: PathBuf,
+}
+
 pub struct RecoveryArtifactInput<'a> {
     pub owner: &'a CachedHomeOwner,
     pub interface_source: &'a Path,
@@ -34,6 +45,13 @@ pub struct VerifiedRecoveryArtifact {
     pub product_path: PathBuf,
     pub interface_bytes: Vec<u8>,
     pub product_bytes: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub struct VerifiedRecoveryJoin {
+    pub reference: RecoveryJoinRef,
+    pub interface_path: PathBuf,
+    pub interface_bytes: Vec<u8>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -61,6 +79,25 @@ fn checked_relative(path: &Path) -> bool {
         && path
             .components()
             .all(|part| matches!(part, Component::Normal(_)))
+}
+
+fn resolve_owned(recovery_root: &Path, relative: &Path) -> Result<PathBuf, RecoveryArtifactError> {
+    if !checked_relative(relative) {
+        return Err(RecoveryArtifactError::InvalidReference);
+    }
+    let canonical_root = fs::canonicalize(recovery_root)?;
+    let candidate = recovery_root.join(relative);
+    let canonical = match fs::canonicalize(&candidate) {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(RecoveryArtifactError::Unavailable(candidate));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if !canonical.starts_with(&canonical_root) {
+        return Err(RecoveryArtifactError::InvalidReference);
+    }
+    Ok(canonical)
 }
 
 fn read_checked(path: &Path, expected: &[u8; 32]) -> Result<Vec<u8>, RecoveryArtifactError> {
@@ -91,6 +128,39 @@ fn durable_copy(path: &Path, bytes: &[u8], digest: &[u8; 32]) -> Result<(), Reco
     File::open(parent)?.sync_all()?;
     read_checked(path, digest)?;
     Ok(())
+}
+
+/// Seal a validated source-less Joined interface in the run's durable root.
+pub fn materialize_joined_interface(
+    recovery_root: &Path,
+    toolchain_identity_sha256: [u8; 32],
+    unit: &str,
+    module: &str,
+    interface_source: &Path,
+    skinny_iface_sha256: [u8; 32],
+) -> Result<RecoveryJoinRef, RecoveryArtifactError> {
+    if toolchain_identity_sha256 == [0; 32] || unit.is_empty() || module.is_empty() {
+        return Err(RecoveryArtifactError::InvalidReference);
+    }
+    let bytes = read_checked(interface_source, &skinny_iface_sha256)?;
+    let owned = recovery_root.join("artifacts");
+    fs::create_dir_all(&owned)?;
+    File::open(recovery_root)?.sync_all()?;
+    let interface_path =
+        PathBuf::from("artifacts").join(format!("{}.joined.hi", hex(&skinny_iface_sha256)));
+    durable_copy(
+        &recovery_root.join(&interface_path),
+        &bytes,
+        &skinny_iface_sha256,
+    )?;
+    File::open(&owned)?.sync_all()?;
+    Ok(RecoveryJoinRef {
+        toolchain_identity_sha256,
+        unit: unit.to_owned(),
+        module: module.to_owned(),
+        skinny_iface_sha256,
+        interface_path,
+    })
 }
 
 /// Materialize complete checksum-verified pairs before a recovery manifest is
@@ -157,23 +227,8 @@ pub fn verify_materialized_ref(
     {
         return Err(RecoveryArtifactError::InvalidReference);
     }
-    let canonical_root = fs::canonicalize(recovery_root)?;
-    let resolve = |relative: &Path| -> Result<PathBuf, RecoveryArtifactError> {
-        let candidate = recovery_root.join(relative);
-        let canonical = match fs::canonicalize(&candidate) {
-            Ok(path) => path,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(RecoveryArtifactError::Unavailable(candidate));
-            }
-            Err(error) => return Err(error.into()),
-        };
-        if !canonical.starts_with(&canonical_root) {
-            return Err(RecoveryArtifactError::InvalidReference);
-        }
-        Ok(canonical)
-    };
-    let interface_path = resolve(&reference.interface_path)?;
-    let product_path = resolve(&reference.product_path)?;
+    let interface_path = resolve_owned(recovery_root, &reference.interface_path)?;
+    let product_path = resolve_owned(recovery_root, &reference.product_path)?;
     let interface_bytes = read_checked(&interface_path, &reference.skinny_iface_sha256)?;
     let product_bytes = read_checked(&product_path, &reference.product_sha256)?;
     Ok(VerifiedRecoveryArtifact {
@@ -182,6 +237,27 @@ pub fn verify_materialized_ref(
         product_path,
         interface_bytes,
         product_bytes,
+    })
+}
+
+/// Check a sealed Joined interface independently of retained implementation
+/// products, returning the exact captured bytes used for rehydration.
+pub fn verify_materialized_join(
+    recovery_root: &Path,
+    reference: &RecoveryJoinRef,
+) -> Result<VerifiedRecoveryJoin, RecoveryArtifactError> {
+    if reference.toolchain_identity_sha256 == [0; 32]
+        || reference.unit.is_empty()
+        || reference.module.is_empty()
+    {
+        return Err(RecoveryArtifactError::InvalidReference);
+    }
+    let interface_path = resolve_owned(recovery_root, &reference.interface_path)?;
+    let interface_bytes = read_checked(&interface_path, &reference.skinny_iface_sha256)?;
+    Ok(VerifiedRecoveryJoin {
+        reference: reference.clone(),
+        interface_path,
+        interface_bytes,
     })
 }
 
@@ -227,6 +303,27 @@ mod tests {
         assert!(matches!(
             verify_materialized_ref(run.path(), &refs[0]),
             Err(RecoveryArtifactError::DigestMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn joined_interface_has_no_dummy_product() {
+        let run = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let iface = source.path().join("Join.hi");
+        fs::write(&iface, b"joined").unwrap();
+        let digest = Sha256::digest(b"joined").into();
+        let reference =
+            materialize_joined_interface(run.path(), [1; 32], "home", "Joined", &iface, digest)
+                .unwrap();
+        let verified = verify_materialized_join(run.path(), &reference).unwrap();
+        assert_eq!(verified.interface_bytes, b"joined");
+        assert_eq!(reference.interface_path.extension().unwrap(), "hi");
+        let mut escaped = reference.clone();
+        escaped.interface_path = PathBuf::from("../outside");
+        assert!(matches!(
+            verify_materialized_join(run.path(), &escaped),
+            Err(RecoveryArtifactError::InvalidReference)
         ));
     }
 }
