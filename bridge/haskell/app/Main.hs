@@ -481,10 +481,10 @@ writeCertifiedProducts outDir hscEnv prepared productContext preparedArtifacts =
           (candidateUnit candidate, candidateModule candidate) ProductReady)
           availability (pprAcceptedCandidates prepared)
         withAvailability node = node
-          { dependencyModuleProduct = Map.findWithDefault
-              (dependencyModuleProduct node)
-              (dependencyModuleUnit node, dependencyModuleName node)
-              withCertified
+          { dependencyModuleProduct = if dependencyModuleBoot node
+              then ProductBoot
+              else Map.findWithDefault (dependencyModuleProduct node)
+                (dependencyModuleUnit node, dependencyModuleName node) withCertified
           }
         finalDependencies = dependencies
           { dependencyModules = map withAvailability (dependencyModules dependencies) }
