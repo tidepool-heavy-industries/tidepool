@@ -1,21 +1,21 @@
 use std::sync::Arc;
 
 use exomonad_actor::{
-    ActorRef, LocalResidentInstallation, ResidentToolEndpoint, ResidentToolFuture,
+    ActorRef, LocalResidentInstallation, ResidentToolEndpoint, ResidentToolError,
+    ResidentToolFuture,
 };
 use exomonad_tool::{HostedTool, ToolArguments, ToolInvocation, ToolInvocationContext};
 use serde_json::{json, Value};
 
-/// The actor installation supplies declarations and a transport dispatcher.
-/// The installed Haskell handler still needs an actor-owned lease at request
-/// admission; this snapshot alone does not freeze a later spec reload.
-pub(super) struct EmbeddedPolicySnapshot {
+/// The published transport entry for an actor. Each model request pins its
+/// current handler and source through `request_snapshot`.
+pub(super) struct EmbeddedPolicyInstallation {
     actor: ActorRef,
     policy: Arc<dyn ResidentToolEndpoint>,
     tools: Vec<Value>,
 }
 
-impl EmbeddedPolicySnapshot {
+impl EmbeddedPolicyInstallation {
     pub(super) fn from_installation(installation: &LocalResidentInstallation) -> Self {
         Self::new(installation.actor.identity(), installation.policy.clone())
     }
@@ -31,7 +31,29 @@ impl EmbeddedPolicySnapshot {
 
     #[allow(
         dead_code,
-        reason = "the bound harness host consumes these after integration"
+        reason = "the bound harness host calls this at request issue"
+    )]
+    pub(super) fn request_snapshot(&self) -> Result<EmbeddedPolicySnapshot, ResidentToolError> {
+        Ok(EmbeddedPolicySnapshot {
+            actor: self.actor,
+            policy: self.policy.snapshot_for_request()?,
+            tools: self.tools.clone(),
+        })
+    }
+}
+
+/// One issued request keeps the manifest and exact actor-owned handler/source
+/// lease together. The opaque endpoint refuses unsupported snapshots.
+pub(super) struct EmbeddedPolicySnapshot {
+    actor: ActorRef,
+    policy: Arc<dyn ResidentToolEndpoint>,
+    tools: Vec<Value>,
+}
+
+impl EmbeddedPolicySnapshot {
+    #[allow(
+        dead_code,
+        reason = "the bound harness host consumes this after integration"
     )]
     pub(super) fn actor(&self) -> ActorRef {
         self.actor
@@ -39,7 +61,7 @@ impl EmbeddedPolicySnapshot {
 
     #[allow(
         dead_code,
-        reason = "the bound harness host consumes these after integration"
+        reason = "the bound harness host consumes this after integration"
     )]
     pub(super) fn tools(&self) -> &[Value] {
         &self.tools
@@ -96,6 +118,9 @@ mod tests {
     }
 
     impl ResidentToolEndpoint for ProbePolicy {
+        fn snapshot_for_request(&self) -> Result<Arc<dyn ResidentToolEndpoint>, ResidentToolError> {
+            Ok(policy(self.marker))
+        }
         fn tools(&self) -> &[HostedTool] {
             &self.tools
         }
@@ -149,10 +174,12 @@ mod tests {
 
     #[test]
     fn installed_policy_projects_raw_and_strict_function_tools() {
-        let snapshot = EmbeddedPolicySnapshot::new(
+        let snapshot = EmbeddedPolicyInstallation::new(
             exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7)),
             policy("first"),
-        );
+        )
+        .request_snapshot()
+        .unwrap();
         assert_eq!(
             snapshot.actor(),
             exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7))
@@ -181,8 +208,12 @@ mod tests {
     #[tokio::test]
     async fn captured_transport_dispatches_both_input_kinds_after_new_installation() {
         let actor = exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7));
-        let first = EmbeddedPolicySnapshot::new(actor, policy("first"));
-        let second = EmbeddedPolicySnapshot::new(actor, policy("second"));
+        let first = EmbeddedPolicyInstallation::new(actor, policy("first"))
+            .request_snapshot()
+            .unwrap();
+        let second = EmbeddedPolicyInstallation::new(actor, policy("second"))
+            .request_snapshot()
+            .unwrap();
         let raw = first
             .dispatch(
                 "haskell".into(),

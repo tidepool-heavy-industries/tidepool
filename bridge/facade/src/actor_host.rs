@@ -1606,7 +1606,7 @@ struct InteractiveApplicationOwner {
     custody: Option<Arc<dyn exomonad_actor::ForkWorkspaceCustody>>,
     scoped_retention: Option<scoped_custody::ScopedHostRetention>,
     hosted: hosted_retirement::HostedSlot,
-    embedded_policy: Option<Arc<embedded_policy::EmbeddedPolicySnapshot>>,
+    embedded_policy: Option<Arc<embedded_policy::EmbeddedPolicyInstallation>>,
     launch: HostLaunchState,
     pending_activations: Vec<exomonad_actor::ResidentActivation>,
     terminal: Option<ActorTerminal>,
@@ -3969,7 +3969,7 @@ async fn run_interactive_applications(
                 match event {
                     LocalResidentDeployment::PolicyInstalled(installation) => {
                         let embedded_policy = Arc::new(
-                            embedded_policy::EmbeddedPolicySnapshot::from_installation(&installation),
+                            embedded_policy::EmbeddedPolicyInstallation::from_installation(&installation),
                         );
                         if installation.creator.is_none() {
                             launch_context.config = root_config.borrow_and_update().clone();

@@ -2,11 +2,20 @@
 
 The Tidepool facade captures each `LocalResidentInstallation` transport policy
 and its Responses tool projection together when `PolicyInstalled` reaches the
-host. `EmbeddedPolicySnapshot` retains the exact actor incarnation and endpoint;
-raw custom input stays raw, while structured function input stays JSON. This
-captures the manifest/client pair, not the Haskell handler body.
+host. `EmbeddedPolicyInstallation::request_snapshot` calls the actor endpoint's
+opaque `snapshot_for_request` hook. The resulting `EmbeddedPolicySnapshot`
+retains the exact actor incarnation, manifest and installed handler/source lease;
+raw custom input stays raw, while structured function input stays JSON. An
+endpoint without a supported snapshot returns an error.
 
 The full `HostActor` binding awaits these owning contracts:
+
+The external harness crate is not a Tidepool workspace dependency or pinned
+source today. Composition needs a tracked package placement/pin before the
+facade can implement `harness::embedding::HostActor` and compile against it.
+The separate harness companion `87d59967` is based on operation-identity
+candidate `2948eaa`; it narrows admission leases and gives cancellation owners
+the scheduler's exact `OperationId` alongside the opaque job handle.
 
 1. The actor lifecycle owner provides a scoped synchronous admission lease for
    the exact incarnation, fenced against retirement. `HostedWorkSeal` closes
@@ -18,7 +27,7 @@ The full `HostActor` binding awaits these owning contracts:
    or input transaction and drop it before awaiting. The existing actor
    endpoint must atomically accept/fence the actual tool message and own its
    execution after admission; a long-held guard can deadlock self-retirement.
-2. The harness scheduler passes its qualified `OperationId` to
+2. The harness scheduler must pass its qualified `OperationId` to
    `CancellationOwner::cancel`. Its opaque random `JobHandle` cannot be
    converted to `ToolInvocationContext` without a duplicate handle registry.
    Embedded dispatch must require the origin conversation/incarnation, issuing
@@ -29,15 +38,11 @@ The full `HostActor` binding awaits these owning contracts:
    `Conversation::input`: Store commits the idempotent envelope before wake,
    and the pump includes that exact envelope in a request or retains an
    admitted, retryable receipt. Wake acknowledgment alone is not inclusion.
-4. Policy reload needs an actor-owned revision notification or snapshot
-   publication. `ResidentInteractivePolicy::dispatch_boxed` sends a
-   `WorkbenchRequest`, then `ResidentKernelBehavior::execute_workbench` reads
-   the current `compiled_tools` and `dispatch` at execution. A semantic body
-   reload can preserve declarations while changing that handler. At request
-   admission the actor must issue an opaque lease over its installed
-   `ResidentWorkbenchTools` dispatch and declarations. Carry the lease in the
-   internal request and use it at execution, while future requests receive a
-   new version/lease. A model-supplied version string is never authority.
+4. The actor now issues an opaque handler/source lease at request snapshot and
+   carries it beside the runtime `WorkbenchRequest`. The adapter must call
+   `EmbeddedPolicyInstallation::request_snapshot` for each model request and
+   retain its result with that request's published tool surface. The version
+   string is evidence for the harness Store, never model-supplied authority.
 
 The real M1 gate uses the public `Conversation::attach`/`engine` path and a
 deterministic model transport against a resident actor. It must cover a raw
