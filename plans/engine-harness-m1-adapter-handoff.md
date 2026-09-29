@@ -10,12 +10,15 @@ endpoint without a supported snapshot returns an error.
 
 The full `HostActor` binding awaits these owning contracts:
 
-The external harness crate is not a Tidepool workspace dependency or pinned
-source today. Composition needs a tracked package placement/pin before the
-facade can implement `harness::embedding::HostActor` and compile against it.
-The separate harness companion `87d59967` is based on operation-identity
-candidate `2948eaa`; it narrows admission leases and gives cancellation owners
-the scheduler's exact `OperationId` alongside the opaque job handle.
+Tidepool now names the public harness origin with exact candidate revision
+`87d59967f471dc757a7cc7e156bfa9eeabc34774` in `Cargo.toml`; this commit
+is not yet published, so remote builds remain unreproducible. Local checks may
+use an untracked Cargo path patch to the clean companion worktree, never a
+tracked absolute path. Once published, regenerate `Cargo.lock` from that exact
+revision and add its Git source hash to both `cargoLock` users in `flake.nix`.
+The companion is based on operation-identity candidate `2948eaa`; it narrows
+admission leases and gives cancellation owners the scheduler's exact
+`OperationId` alongside the opaque job handle.
 
 1. The actor lifecycle owner provides a scoped synchronous admission lease for
    the exact incarnation, fenced against retirement. `HostedWorkSeal` closes
