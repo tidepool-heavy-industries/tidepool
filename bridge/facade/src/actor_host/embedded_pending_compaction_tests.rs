@@ -414,3 +414,183 @@ async fn production_engine_carries_raw_and_typed_pending_calls_through_compactio
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
+
+#[derive(Clone)]
+struct FailedCompactionTransport {
+    normal_requests: Arc<AtomicU64>,
+    compaction_seen: mpsc::UnboundedSender<()>,
+    resumed_after_failure: mpsc::UnboundedSender<()>,
+}
+
+#[async_trait]
+impl ResponsesTransport for FailedCompactionTransport {
+    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        if request.tools_allowed.as_ref().is_some_and(Vec::is_empty) {
+            assert!(request.tools.is_empty());
+            let _ = self.compaction_seen.send(());
+            return Ok(message_turn("empty-summary", "   "));
+        }
+
+        let round = self.normal_requests.fetch_add(1, Ordering::Relaxed);
+        match round {
+            0 => Ok(ResponsesTurn {
+                response_id: "pending-before-failed-compaction".into(),
+                items: vec![harness::item::Item(json!({
+                    "type":"custom_tool_call",
+                    "call_id":"cleanup-after-failed-compaction",
+                    "name":"raw_hold",
+                    "input":"hold until the test cancels the Engine"
+                }))],
+                usage: harness::transport::Usage {
+                    input_tokens: 100_001,
+                    ..Default::default()
+                },
+            }),
+            1 => {
+                let _ = self.resumed_after_failure.send(());
+                Ok(message_turn(
+                    "continued-after-failed-compaction",
+                    "Continue.",
+                ))
+            }
+            other => panic!("unexpected unbounded normal request {other}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn production_engine_compaction_failure_continues_once_then_cleans_pending_call_on_cancel() {
+    let campaign = TestCampaign::start().await;
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (settled_tx, mut settled_rx) = mpsc::unbounded_channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let endpoint = GatedEndpoint {
+        tools: vec![HostedTool::Custom(CustomToolDeclaration {
+            name: "raw_hold".into(),
+            description: "Hold a raw call until the test releases it.".into(),
+        })],
+        releases: Arc::new(Mutex::new(HashMap::from([(
+            "cleanup-after-failed-compaction".into(),
+            release_rx,
+        )]))),
+        started: started_tx,
+        settled: settled_tx,
+    };
+    let actor = campaign.actor.identity();
+    let mut installation = campaign.root_installation.clone();
+    installation.policy = Arc::new(endpoint);
+
+    let files = tempfile::tempdir().unwrap();
+    let assets = files.path().join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    let session_secret_file = files.path().join("session-secret");
+    std::fs::write(
+        &session_secret_file,
+        "embedded-compaction-secret-is-long-enough",
+    )
+    .unwrap();
+    let codex_auth_file = files.path().join("codex-auth.json");
+    std::fs::write(&codex_auth_file, "{}").unwrap();
+    let settings = crate::exomonad::EmbeddedLaunchConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        asset_root: assets,
+        session_secret_file,
+        codex_auth_file,
+        context_capacity_tokens: 200_000,
+        concurrent_jobs: 2,
+    };
+    let mut service = EmbeddedService::prepare(campaign.session_root.path(), &settings)
+        .await
+        .unwrap();
+    let embedded = attach_actor(
+        &service,
+        campaign.session_root.path(),
+        AgentPath("/root".into()),
+        None,
+        installation,
+        Some("exercise failed compaction cleanup".into()),
+    )
+    .await
+    .unwrap();
+    let (lifecycle, _lifecycle_rx) =
+        watch::channel((Some(actor), harness::server::HostActorLifecycle::Waiting));
+    let (compaction_tx, mut compaction_rx) = mpsc::unbounded_channel();
+    let (resumed_tx, mut resumed_rx) = mpsc::unbounded_channel();
+    let transport = FailedCompactionTransport {
+        normal_requests: Arc::new(AtomicU64::new(0)),
+        compaction_seen: compaction_tx,
+        resumed_after_failure: resumed_tx,
+    };
+    let runtime = Arc::clone(&service.runtime);
+    let engine_transport = transport.clone();
+    let stop_driver = embedded.cancellation.clone();
+    let mut running = tokio::spawn(async move {
+        drive_conversation_with_transport::<Offline, _>(
+            embedded.driver,
+            runtime,
+            &settings,
+            "offline-compaction-failure".into(),
+            Effort::Medium,
+            "production compaction failure test".into(),
+            embedded.cancellation_rx,
+            lifecycle,
+            actor,
+            engine_transport,
+        )
+        .await
+    });
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), started_rx.recv())
+            .await
+            .expect("pending operation did not start")
+            .unwrap(),
+        "cleanup-after-failed-compaction"
+    );
+    tokio::time::timeout(Duration::from_secs(10), compaction_rx.recv())
+        .await
+        .expect("failed compaction was not attempted")
+        .expect("transport dropped compaction signal");
+    tokio::time::timeout(Duration::from_secs(10), resumed_rx.recv())
+        .await
+        .expect("Engine did not continue on the original window")
+        .expect("transport dropped post-failure signal");
+    assert_eq!(transport.normal_requests.load(Ordering::Relaxed), 2);
+    stop_driver.send_replace(true);
+    let cancelled = tokio::time::timeout(Duration::from_secs(10), &mut running)
+        .await
+        .expect("Engine cancellation did not clean the pending call")
+        .unwrap()
+        .expect_err("cancelling the pending Engine should stop the host drive");
+    assert!(cancelled.contains("cancel"), "{cancelled}");
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), settled_rx.recv())
+            .await
+            .expect("cancelled test future did not exit after release")
+            .expect("test endpoint dropped settlement observer"),
+        "cleanup-after-failed-compaction"
+    );
+    let attempts = service
+        .runtime
+        .store()
+        .events(None)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "compaction_attempt")
+        .collect::<Vec<_>>();
+    assert_eq!(attempts.len(), 1);
+    let attempt: serde_json::Value = serde_json::from_str(&attempts[0].payload).unwrap();
+    assert_eq!(attempt["outcome"], "failed");
+    let claim = service
+        .runtime
+        .store()
+        .claims(&CallId("cleanup-after-failed-compaction".into()))
+        .unwrap();
+    assert_eq!(claim.len(), 1);
+    assert_eq!(claim[0].state, ClaimState::Settled);
+    service.shutdown().await.unwrap();
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
