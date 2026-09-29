@@ -173,3 +173,32 @@ The unchanged `exomonad/node/src/process_scope.rs` launcher still uses host
 `pre_exec` to transfer its inherited descriptors and terminal foreground group.
 The thin retained-view command path has measured helper acceptance; that does
 not imply every process/terminal launch now avoids a host fork.
+
+### Build admission correction and joined revision
+
+The original matched-source service was deliberately stopped: its Nix daemon
+children were thrashing under the daemon-specific 7 GiB high / 8 GiB maximum
+while the host had ample free RAM. It did not pass. Evidence is integration
+`target/completion-evidence/nix-memory-pressure-0929.txt`; the original log ends
+in interruption. No daemon or host configuration was changed.
+
+Replacement `tidepool-matched-shell-low-parallel-0929.service` realizes only
+the same exact-source exomonad shell with `--cores 2 --max-jobs 1 --command true`.
+Log `target/completion-evidence/matched-shell-low-parallel.log`. Once it passes,
+run the actual matched build against the final joined source. This shell-only
+realization does not require freezing root production files. At the observed
+retry checkpoint daemon memory was about 4.6 GiB and current pressure zero.
+
+Integration was fast-forwarded to staging `ea3b67134`. Focused joined capture
+and existing M1 acceptance is running as `tidepool-joined-capture-m1-0929`,
+log `target/completion-evidence/joined-capture-m1.log`: three selected tests
+across actor and facade libraries, not yet a recorded final result here.
+
+Companion at clean exact pin `c485edb9` passed 5 embedded_host, 2 credential,
+and 1 expiry/HTTPS-cookie tests through its focused runner. Evidence under
+`/srv/swarm/checkouts/harness-foundation/target/debug/deps/` in
+`focused-undld511`, `focused-xxdy3ez_`, and `focused-2gm1xv_c` respectively.
+Native client exact gitlink `2d58f00c6` already has 13/13 source-exact retained
+passes under its Rust 1.95 toolchain in
+`/srv/swarm/checkouts/foundation-transfer/client/exact13.log`, provenance in
+that transfer README. It was not rerun or counted as joined engine acceptance.
