@@ -15,6 +15,8 @@ pub const HASKELL_TOOL: &str = "haskell";
 pub struct ResidentInteractivePolicy {
     tools: Arc<[HostedTool]>,
     client: ResidentToolClient,
+    installed_tools: Arc<crate::resident_workbench::InstalledToolsState>,
+    issued_tools: Option<crate::InstalledToolLease>,
 }
 
 impl ResidentInteractivePolicy {
@@ -38,6 +40,18 @@ impl ResidentInteractivePolicy {
     /// idempotent instead of requiring every caller to know and repeat the
     /// exact reserved-name set.
     pub fn local_with_tools(actor: crate::LocalActorRef, tools: Vec<HostedTool>) -> Self {
+        Self::local_with_installation(
+            actor,
+            tools,
+            Arc::new(crate::resident_workbench::InstalledToolsState::default()),
+        )
+    }
+
+    pub(crate) fn local_with_installation(
+        actor: crate::LocalActorRef,
+        tools: Vec<HostedTool>,
+        installed_tools: Arc<crate::resident_workbench::InstalledToolsState>,
+    ) -> Self {
         let custom = tools.into_iter().filter(|tool| {
             !matches!(
                 tool.name(),
@@ -56,6 +70,8 @@ impl ResidentInteractivePolicy {
                 .collect::<Vec<_>>()
                 .into(),
             client: ResidentToolClient::local(actor),
+            installed_tools,
+            issued_tools: None,
         }
     }
 
@@ -69,6 +85,8 @@ impl ResidentInteractivePolicy {
             ]
             .into(),
             client,
+            installed_tools: Arc::default(),
+            issued_tools: None,
         }
     }
 }
@@ -131,6 +149,22 @@ fn haskell_tool_instructions() -> &'static str {
 }
 
 impl ResidentToolEndpoint for ResidentInteractivePolicy {
+    fn snapshot_for_request(&self) -> Result<Arc<dyn ResidentToolEndpoint>, ResidentToolError> {
+        let issued_tools = self
+            .issued_tools
+            .clone()
+            .or_else(|| self.installed_tools.current())
+            .ok_or_else(|| {
+                ResidentToolError::Unavailable("actor has no installed tool/source snapshot".into())
+            })?;
+        Ok(Arc::new(Self {
+            tools: self.tools.clone(),
+            client: self.client.clone(),
+            installed_tools: self.installed_tools.clone(),
+            issued_tools: Some(issued_tools),
+        }))
+    }
+
     fn seal_hosted_work_boxed(
         &self,
     ) -> std::pin::Pin<
@@ -185,6 +219,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
     fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
         let client = self.client.clone();
         let tools = self.tools.clone();
+        let installed_tools = self.issued_tools.clone();
         Box::pin(async move {
             let declaration = tools
                 .iter()
@@ -207,9 +242,10 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                     ToolArguments::Structured(value) => value,
                 };
                 return client
-                    .dispatch_workbench(
+                    .dispatch_workbench_issued(
                         WorkbenchRequest::for_tool(invocation.name, arguments),
                         invocation.context,
+                        installed_tools,
                     )
                     .await;
             }
@@ -219,7 +255,9 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                 ));
             };
             let request = WorkbenchRequest::from_cell_input(&source);
-            client.dispatch_workbench(request, invocation.context).await
+            client
+                .dispatch_workbench_issued(request, invocation.context, installed_tools)
+                .await
         })
     }
 

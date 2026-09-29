@@ -1168,7 +1168,7 @@ impl exomonad_actor::KernelBehavior for GatedBehavior {
     fn workbench<'a>(
         &'a mut self,
         _: &'a exomonad_actor::KernelContext,
-        _: tidepool_runtime::session::WorkbenchRequest,
+        _: exomonad_actor::ActorWorkbenchInvocation,
         _: Option<Arc<exomonad_actor::WorkbenchExecutionControl>>,
     ) -> BoxFuture<
         'a,

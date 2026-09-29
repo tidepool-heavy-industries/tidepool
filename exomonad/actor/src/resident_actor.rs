@@ -986,10 +986,10 @@ pub struct ResidentKernelBehavior<H, O> {
     prepared_workspace: Option<crate::PreparedForkWorkspace>,
     worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
     policy_installed: bool,
-    compiled_tools: Option<crate::resident_workbench::ResidentWorkbenchTools>,
+    installed_tools: Arc<crate::resident_workbench::InstalledToolsState>,
     /// How many specs this incarnation has installed. `policy_installed` stays
     /// the first-install latch; a reload is a second, explicit path that
-    /// replaces `compiled_tools` and advances this.
+    /// replaces the current installed record and advances this.
     spec_installs: u64,
     /// Every after-tool invocation this actor has made, and what became of it.
     /// An abstention's reason lives here and nowhere else.
@@ -1178,7 +1178,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             prepared_workspace: None,
             worktree_custody: None,
             policy_installed: false,
-            compiled_tools: None,
+            installed_tools: Arc::default(),
             spec_installs: 0,
             after_tool: crate::after_tool::AfterToolLog::default(),
             after_tool_active: false,
@@ -1688,7 +1688,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         // Discovery is implicit, so the resolved rule and file are reported
         // rather than left to be guessed. A concise view stays concise; every
         // wider view names the spec that is actually live.
-        let spec = match (view, self.compiled_tools.as_ref()) {
+        let spec = match (view, self.installed_tools.current_tools().as_ref()) {
             (StatusView::Concise, _) => String::new(),
             (_, Some(tools)) => format!(
                 "\n  spec: {} slots=[{}]",
@@ -2050,15 +2050,10 @@ where
         self.active_input.take();
         self.boot.take();
         std::mem::take(&mut self.retained_replacements);
-        // `ResidentWorkbenchTools::dispatch` (`resident_workbench.rs`):
-        // every clone of it is scoped to one in-flight tool call
-        // (`execute_workbench`'s own `tool_dispatch`/`hosted_call`/
-        // `cell_call` locals, and `annotate_tool_result`'s `dispatch`
-        // parameter, taken by value and never stored past that one
-        // `async fn` call) — none can be alive once this actor is
-        // terminal, since the kernel admits one turn at a time and
-        // `stopped` only runs once fully quiesced.
-        self.compiled_tools.take();
+        // Issued requests may retain their installation past actor retirement.
+        // Their RootCustody keeps the compiled handler live until the last
+        // request releases its lease.
+        self.installed_tools.clear();
     }
 
     /// The workbench a cell, tool call, or lookup should run against right
@@ -4945,10 +4940,10 @@ where
                 vec!["helpers: this host installs no source layers.".into()],
             );
         };
-        let (outcome, detail) = match layers
+        let (outcome, detail, source_available) = match layers
             .reload_helpers(tidepool_repr::PrincipalId::from(context.actor), also_check)
         {
-            crate::SourceLayerReload::Unavailable(detail) => ("unavailable", detail),
+            crate::SourceLayerReload::Unavailable(detail) => ("unavailable", detail, false),
             crate::SourceLayerReload::Rejected {
                 active,
                 rejected,
@@ -4958,9 +4953,10 @@ where
                 format!(
                     "helpers: rejected {rejected}; {active} remains active. Edited files remain on disk.\n{diagnostics}"
                 ),
+                false,
             ),
             crate::SourceLayerReload::Unchanged { revision } => {
-                ("unchanged", format!("helpers: unchanged at {revision}."))
+                ("unchanged", format!("helpers: unchanged at {revision}."), true)
             }
             crate::SourceLayerReload::Published {
                 previous,
@@ -4976,9 +4972,37 @@ where
                         changed.join(", ")
                     }
                 ),
+                true,
             ),
         };
+        if source_available {
+            match self.freeze_installed_source(context.actor) {
+                Ok(source) => self.installed_tools.publish_source(source),
+                Err(error) => {
+                    self.installed_tools.clear();
+                    return reload_receipt(
+                        "source unavailable",
+                        started,
+                        vec![detail, error.to_string()],
+                    );
+                }
+            }
+        }
         reload_receipt(outcome, started, vec![detail])
+    }
+
+    fn freeze_installed_source(
+        &self,
+        actor: ActorRef,
+    ) -> Result<crate::CheckpointSourceLayer, ResidentActorWorkbenchError> {
+        self.environment.source_layers.as_ref().map_or_else(
+            || Ok(crate::CheckpointSourceLayer::default()),
+            |layers| {
+                layers
+                    .freeze_checkpoint_layer(tidepool_repr::PrincipalId::from(actor))
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)
+            },
+        )
     }
 
     /// Rebuild this actor's spec and swap the retained record between calls.
@@ -4999,7 +5023,7 @@ where
         context: &ActorSessionContext,
         also_check: &[String],
     ) -> String {
-        let Some(active) = self.compiled_tools.as_ref() else {
+        let Some(active) = self.installed_tools.current_tools() else {
             return "this actor installed no agent spec, so there is nothing to reload."
                 .to_string();
         };
@@ -5063,6 +5087,15 @@ where
             }
         }
 
+        match self.freeze_installed_source(context.actor) {
+            Ok(source) => self.installed_tools.publish_source(source),
+            Err(error) => {
+                self.installed_tools.clear();
+                receipt.push(format!("source: {error}"));
+                return reload_receipt("source unavailable", started, receipt);
+            }
+        }
+
         let install = self.spec_installs + 1;
         let prepare_started = std::time::Instant::now();
         let candidate = self
@@ -5099,7 +5132,7 @@ where
             }
         };
 
-        let Some(active) = self.compiled_tools.as_ref() else {
+        let Some(active) = self.installed_tools.current_tools() else {
             receipt
                 .push("spec: the active record vanished mid-reload; nothing was swapped.".into());
             return reload_receipt("not swapped", started, receipt);
@@ -5125,7 +5158,8 @@ where
             receipt.push(format!("slots: {}", candidate.slots.join(", ")));
         }
         self.spec_installs = install;
-        self.compiled_tools = Some(candidate);
+        self.installed_tools
+            .publish_tools(Some(Arc::new(candidate)));
         self.after_tool.forget_failures();
         reload_receipt("swapped", started, receipt)
     }
@@ -5160,15 +5194,23 @@ where
             success = compiled_tools.is_ok(),
             "agent spec preparation"
         );
-        self.compiled_tools = compiled_tools?;
-        let declarations = self
-            .compiled_tools
+        let compiled_tools = compiled_tools?.map(Arc::new);
+        let declarations = compiled_tools
             .as_ref()
             .map(|tools| tools.declarations.clone())
             .unwrap_or_default();
-        let policy: Arc<dyn ResidentToolEndpoint> = Arc::new(
-            crate::ResidentInteractivePolicy::local_with_tools(actor.clone(), declarations),
-        );
+        let source = self.freeze_installed_source(context.actor)?;
+        self.installed_tools.publish(crate::InstalledToolLease::new(
+            context.actor,
+            source,
+            compiled_tools,
+        ));
+        let policy: Arc<dyn ResidentToolEndpoint> =
+            Arc::new(crate::ResidentInteractivePolicy::local_with_installation(
+                actor.clone(),
+                declarations,
+                self.installed_tools.clone(),
+            ));
         let fork_gate = self
             .descriptor
             .fork_group()
@@ -6226,15 +6268,13 @@ where
         kernel: &KernelContext,
         context: &ActorSessionContext,
         workbench: &crate::ResidentActorWorkbench<H, O>,
+        tools: &crate::resident_workbench::ResidentWorkbenchTools,
         dispatch: Arc<RootCustody>,
         call: &tidepool_runtime::session::workbench::WorkbenchToolCall,
         output: String,
     ) -> String {
         use crate::after_tool::{Annotation, Disposition, Invocation};
 
-        let Some(tools) = self.compiled_tools.as_ref() else {
-            return output;
-        };
         if !tools
             .slots
             .iter()
@@ -6531,6 +6571,7 @@ where
         kernel: &KernelContext,
         context: &ActorSessionContext,
         mut request: WorkbenchRequest,
+        installed_tools: Option<crate::InstalledToolLease>,
     ) -> Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure> {
         let execution = request.execution_id().cloned();
         let status_call = request
@@ -6550,9 +6591,9 @@ where
                 && call.name != crate::reload_spec_tool::RELOAD_SPEC_TOOL
                 && call.name != crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
         }) {
-            let tools = self
-                .compiled_tools
+            let tools = installed_tools
                 .as_ref()
+                .and_then(crate::InstalledToolLease::tools)
                 .filter(|tools| {
                     tools.declarations.iter().any(|tool| {
                         tool.name() == call.name
@@ -7014,26 +7055,37 @@ where
                     // block its own repair.
                     let hosted_call = request.tool_call().cloned().zip(tool_dispatch.clone());
                     let cell_call = if hosted_call.is_none() && cell_check.is_some() {
-                        self.compiled_tools.as_ref().map(|tools| {
-                            (
-                                tidepool_runtime::session::workbench::WorkbenchToolCall {
-                                    name: crate::HASKELL_TOOL.to_string(),
-                                    arguments: serde_json::Value::String(
-                                        request.items[index].clone(),
-                                    ),
-                                },
-                                Arc::clone(&tools.dispatch),
-                            )
-                        })
+                        installed_tools
+                            .as_ref()
+                            .and_then(crate::InstalledToolLease::tools)
+                            .map(|tools| {
+                                (
+                                    tidepool_runtime::session::workbench::WorkbenchToolCall {
+                                        name: crate::HASKELL_TOOL.to_string(),
+                                        arguments: serde_json::Value::String(
+                                            request.items[index].clone(),
+                                        ),
+                                    },
+                                    Arc::clone(&tools.dispatch),
+                                )
+                            })
                     } else {
                         None
                     };
                     let output = match hosted_call.or(cell_call) {
                         Some((call, dispatch)) => {
-                            self.annotate_tool_result(
-                                kernel, context, &workbench, dispatch, &call, output,
-                            )
-                            .await
+                            match installed_tools
+                                .as_ref()
+                                .and_then(crate::InstalledToolLease::tools)
+                            {
+                                Some(tools) => {
+                                    self.annotate_tool_result(
+                                        kernel, context, &workbench, tools, dispatch, &call, output,
+                                    )
+                                    .await
+                                }
+                                None => output,
+                            }
                         }
                         None => output,
                     };
@@ -8177,14 +8229,38 @@ where
     fn workbench<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
-        request: WorkbenchRequest,
+        invocation: crate::ActorWorkbenchInvocation,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
     > {
         Box::pin(async move {
-            let context = self.context(kernel.identity());
+            let mut context = self.context(kernel.identity());
+            let request = invocation.request;
+            let installed_tools = match invocation.installed_tools {
+                Some(lease) if lease.actor() != context.actor => {
+                    return Err(KernelInvocationFailure::Rejected {
+                        actor: context.actor,
+                        detail: "issued tool installation belongs to another actor".into(),
+                    });
+                }
+                Some(lease) => Some(lease),
+                None => self.installed_tools.current(),
+            };
+            let current_builtin = request.tool_call().is_some_and(|call| {
+                matches!(
+                    call.name.as_str(),
+                    crate::status_tool::STATUS_TOOL
+                        | crate::reload_spec_tool::RELOAD_SPEC_TOOL
+                        | crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
+                )
+            });
+            if !current_builtin {
+                if let Some(lease) = &installed_tools {
+                    context = context.with_issued_source(lease.source());
+                }
+            }
             if !self.policy_installed
                 || !matches!(
                     self.standing,
@@ -8251,7 +8327,7 @@ where
                 call_incarnation as u64,
             );
             let result = call_scope
-                .run(self.execute_workbench(kernel, &context, request))
+                .run(self.execute_workbench(kernel, &context, request, installed_tools))
                 .await;
             let call_outcome = match &result {
                 Ok(

@@ -18,7 +18,7 @@ use crate::{
     KernelCallFailure, KernelInvocationFailure, KernelMessage, LocalActorRef, MailboxValue,
     RetainedActorExit,
 };
-use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse};
+use tidepool_runtime::session::WorkbenchResponse;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{detail}")]
@@ -672,7 +672,7 @@ pub trait KernelBehavior: Send + 'static {
     fn workbench<'a>(
         &'a mut self,
         context: &'a KernelContext,
-        request: WorkbenchRequest,
+        invocation: crate::ActorWorkbenchInvocation,
         control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
     ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>>;
 
@@ -1436,7 +1436,7 @@ where
                 }
             }
             KernelMessage::Workbench {
-                request,
+                invocation,
                 control,
                 reply,
             } => {
@@ -1453,7 +1453,7 @@ where
                     return Ok(());
                 }
 
-                start_workbench(&myself, state, request, control, reply);
+                start_workbench(&myself, state, invocation, control, reply);
                 return Ok(());
             }
             KernelMessage::WorkbenchCompleted { .. } => {
@@ -1579,7 +1579,7 @@ where
 fn start_workbench<B: KernelBehavior>(
     myself: &RactorRef<KernelMessage>,
     state: &mut LocalActorState<B>,
-    request: WorkbenchRequest,
+    invocation: crate::ActorWorkbenchInvocation,
     control: Option<Arc<crate::WorkbenchExecutionControl>>,
     reply: ractor::RpcReplyPort<crate::KernelWorkbenchReply>,
 ) {
@@ -1594,7 +1594,7 @@ fn start_workbench<B: KernelBehavior>(
         token,
         reply,
         control: control.clone(),
-        execution: request.execution_id().cloned(),
+        execution: invocation.request.execution_id().cloned(),
         completion: Arc::clone(&completion),
         hosted_cell: Arc::clone(state.mailbox_admission.hosted_cell()),
     });
@@ -1604,7 +1604,7 @@ fn start_workbench<B: KernelBehavior>(
         async move {
             let mut behavior = behavior;
             let result = std::panic::AssertUnwindSafe(async {
-                behavior.workbench(&context, request, control).await
+                behavior.workbench(&context, invocation, control).await
             })
             .catch_unwind()
             .await;
@@ -2213,7 +2213,7 @@ mod tests {
     use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
     use parking_lot::Mutex;
     use tidepool_repr::SessionId;
-    use tidepool_runtime::session::{WorkbenchResponse, WorkbenchRunStatus};
+    use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus};
     use tokio::sync::{oneshot, Notify};
 
     use super::*;
@@ -2460,7 +2460,7 @@ mod tests {
         fn workbench(
             &mut self,
             _context: &KernelContext,
-            _request: WorkbenchRequest,
+            _invocation: crate::ActorWorkbenchInvocation,
             _control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
         ) -> BoxFuture<'_, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
             let gate = self.workbench_gate.clone();
@@ -2589,7 +2589,7 @@ mod tests {
         fn workbench<'a>(
             &'a mut self,
             context: &'a KernelContext,
-            _request: WorkbenchRequest,
+            _invocation: crate::ActorWorkbenchInvocation,
             _control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
         ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
             Box::pin(async move {
@@ -2683,7 +2683,7 @@ mod tests {
         actor
             .address()
             .send_message(KernelMessage::Workbench {
-                request,
+                invocation: crate::ActorWorkbenchInvocation::unbound(request),
                 control,
                 reply: reply.into(),
             })
@@ -4190,7 +4190,7 @@ mod tests {
         fn workbench(
             &mut self,
             _context: &KernelContext,
-            _request: WorkbenchRequest,
+            _invocation: crate::ActorWorkbenchInvocation,
             _control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
         ) -> BoxFuture<'_, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
             Box::pin(async {
