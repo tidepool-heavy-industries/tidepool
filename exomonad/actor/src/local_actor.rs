@@ -20,6 +20,9 @@ use crate::{
 };
 use tidepool_runtime::session::WorkbenchResponse;
 
+mod workbench_step;
+pub use workbench_step::{OwnedWorkbenchCompletion, OwnedWorkbenchTask, WorkbenchDispatch};
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{detail}")]
 pub struct KernelBehaviorError {
@@ -677,6 +680,24 @@ pub trait KernelBehavior: Send + 'static {
         control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
     ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>>;
 
+    /// Hand execution-owned work to a task while retaining actor-owned state
+    /// on the mailbox turn. The sequential form keeps an invocation intact
+    /// for behaviors whose work remains actor-owned.
+    fn dispatch_workbench(
+        &mut self,
+        _context: &KernelContext,
+        invocation: crate::ActorWorkbenchInvocation,
+        control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
+    ) -> WorkbenchDispatch<Self>
+    where
+        Self: Sized,
+    {
+        WorkbenchDispatch::Sequential {
+            invocation,
+            control,
+        }
+    }
+
     fn reconcile_workbench_cancellation(
         &self,
         execution: tidepool_runtime::session::WorkbenchExecutionId,
@@ -878,6 +899,7 @@ enum WorkbenchTaskOutcome<B> {
             Box<dyn std::any::Any + Send>,
         >,
     },
+    Owned(OwnedWorkbenchCompletion<B>),
     Lost(String),
 }
 
@@ -1618,12 +1640,11 @@ fn start_workbench<B: KernelBehavior>(
         return;
     };
     state.next_workbench_generation = generation;
-    let step = crate::WorkbenchStepKey::new(
-        state.context.identity,
-        generation,
-        invocation.request.execution_id().cloned(),
-    );
-    let behavior = state.behavior.0.take().expect("one active workbench");
+    let execution = invocation.request.execution_id().cloned();
+    let step = crate::WorkbenchStepKey::new(state.context.identity, generation, execution.clone());
+    let dispatch = state
+        .behavior
+        .dispatch_workbench(&state.context, invocation, control.clone());
     if let Some(control) = control.as_ref() {
         state.mailbox_admission.hosted_cell().claim(control);
     }
@@ -1631,23 +1652,45 @@ fn start_workbench<B: KernelBehavior>(
         step: step.clone(),
         reply,
         control: control.clone(),
-        execution: invocation.request.execution_id().cloned(),
+        execution,
         hosted_cell: Arc::clone(state.mailbox_admission.hosted_cell()),
     });
-    let context = Arc::clone(&state.context);
     let myself = myself.clone();
-    let worker = tokio::spawn(
-        async move {
-            let mut behavior = behavior;
-            let result = std::panic::AssertUnwindSafe(async {
-                behavior.workbench(&context, invocation, control).await
-            })
-            .catch_unwind()
-            .await;
-            WorkbenchTaskOutcome::Returned { behavior, result }
+    let worker = match dispatch {
+        WorkbenchDispatch::Owned(task) => tokio::spawn(
+            async move {
+                match std::panic::AssertUnwindSafe(task.into_future())
+                    .catch_unwind()
+                    .await
+                {
+                    Ok(completion) => WorkbenchTaskOutcome::Owned(completion),
+                    Err(_) => {
+                        WorkbenchTaskOutcome::Lost("execution-owned workbench task panicked".into())
+                    }
+                }
+            }
+            .instrument(tracing::Span::current()),
+        ),
+        WorkbenchDispatch::Sequential {
+            invocation,
+            control,
+        } => {
+            let context = Arc::clone(&state.context);
+            let behavior = state.behavior.0.take().expect("one active workbench");
+            tokio::spawn(
+                async move {
+                    let mut behavior = behavior;
+                    let result = std::panic::AssertUnwindSafe(async {
+                        behavior.workbench(&context, invocation, control).await
+                    })
+                    .catch_unwind()
+                    .await;
+                    WorkbenchTaskOutcome::Returned { behavior, result }
+                }
+                .instrument(tracing::Span::current()),
+            )
         }
-        .instrument(tracing::Span::current()),
-    );
+    };
     tokio::spawn(async move {
         let outcome: Box<dyn std::any::Any + Send> = match worker.await {
             Ok(outcome) => Box::new(outcome),
@@ -1699,6 +1742,29 @@ async fn complete_workbench<B: KernelBehavior>(
         }
     };
     match outcome {
+        WorkbenchTaskOutcome::Owned(completion) => {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                completion.finish(&mut state.behavior)
+            })) {
+                Ok(Ok(step)) => {
+                    settle_step(myself, state, step, |output| {
+                        settle_pending_workbench(pending, Ok(output));
+                    })
+                    .await;
+                }
+                Ok(Err(error)) => settle_pending_workbench(pending, Err(error)),
+                Err(_) => {
+                    fail_unconfirmed_workbench(
+                        myself,
+                        state,
+                        pending,
+                        "execution-owned workbench completion panicked; outcome is unconfirmed"
+                            .into(),
+                    );
+                    return;
+                }
+            }
+        }
         WorkbenchTaskOutcome::Returned { behavior, result } => match result {
             Ok(Ok(step)) => {
                 state.behavior.0 = Some(behavior);
@@ -2291,6 +2357,7 @@ mod tests {
         shutdown_override: Option<ShutdownOverride>,
         workbench_gate: Option<(Arc<Notify>, Arc<Notify>)>,
         workbench_panics: bool,
+        owned_workbench: bool,
     }
 
     #[derive(Clone)]
@@ -2531,6 +2598,43 @@ mod tests {
             })
         }
 
+        fn dispatch_workbench(
+            &mut self,
+            _context: &KernelContext,
+            invocation: crate::ActorWorkbenchInvocation,
+            control: Option<Arc<crate::WorkbenchExecutionControl>>,
+        ) -> WorkbenchDispatch<Self> {
+            if !self.owned_workbench {
+                return WorkbenchDispatch::Sequential {
+                    invocation,
+                    control,
+                };
+            }
+            let calls = Arc::clone(&self.calls);
+            let gate = self.workbench_gate.clone();
+            let panics = self.workbench_panics;
+            WorkbenchDispatch::Owned(OwnedWorkbenchTask::new(Box::pin(async move {
+                calls.lock().push("workbench-start");
+                if let Some((entered, release)) = gate {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                if panics {
+                    panic!("owned workbench probe panic");
+                }
+                OwnedWorkbenchCompletion::new(move |behavior: &mut Self| {
+                    behavior.calls.lock().push("workbench-end");
+                    Ok(KernelStep::Continue(WorkbenchResponse {
+                        status: WorkbenchRunStatus::Committed,
+                        summary: None,
+                        items: Vec::new(),
+                        next_index: 0,
+                        total: 0,
+                    }))
+                })
+            })))
+        }
+
         fn tool_completed<'a>(
             &'a mut self,
             _context: &'a KernelContext,
@@ -2708,6 +2812,7 @@ mod tests {
                 shutdown_override: None,
                 workbench_gate: None,
                 workbench_panics: false,
+                owned_workbench: false,
             },
             calls,
             mailbox_calls,
@@ -2834,6 +2939,68 @@ mod tests {
             .await
             .expect("shutdown");
         task.await.expect("actor task");
+    }
+
+    #[tokio::test]
+    async fn execution_owned_workbench_settles_exact_step_before_next_admission() {
+        let mut fixture = behavior(false);
+        fixture.behavior.owned_workbench = true;
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        fixture.behavior.workbench_gate = Some((Arc::clone(&entered), Arc::clone(&release)));
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let execution = tidepool_runtime::session::WorkbenchExecutionId::from_digest([77; 16]);
+        let first = send_workbench_request(
+            &actor,
+            WorkbenchRequest::from_cell_input("first").with_execution_id(execution.clone()),
+            None,
+        );
+        entered.notified().await;
+        let second = send_workbench(&actor);
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::ReconcileWorkbenchCancellation {
+                invocation: None,
+                execution: execution.clone(),
+                reply: cancel_tx.into(),
+            })
+            .expect("reconcile pending execution");
+        assert!(matches!(
+            cancel_rx.await.expect("cancellation reply"),
+            crate::WorkbenchCancellationOutcome::Unconfirmed { execution: found }
+                if found == execution
+        ));
+        assert_eq!(&*fixture.calls.lock(), &["workbench-start"]);
+        release.notify_one();
+        assert!(first.await.expect("first reply").is_ok());
+        entered.notified().await;
+        assert_eq!(
+            &*fixture.calls.lock(),
+            &["workbench-start", "workbench-end", "workbench-start"]
+        );
+        release.notify_one();
+        assert!(second.await.expect("second reply").is_ok());
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "done".into(),
+            })
+            .await
+            .expect("shutdown");
+        task.await.expect("actor task");
+        assert_eq!(
+            &*fixture.calls.lock(),
+            &[
+                "workbench-start",
+                "workbench-end",
+                "workbench-start",
+                "workbench-end",
+                "shutdown",
+            ]
+        );
     }
 
     #[tokio::test]
@@ -3152,6 +3319,40 @@ mod tests {
             Some(Arc::clone(&control)),
         );
         let reply = reply.await.expect("workbench reply");
+        assert!(matches!(
+            &reply,
+            Err(KernelInvocationFailure::Failed { .. })
+        ));
+        assert!(matches!(
+            control.cancellation_outcome(execution, reply),
+            crate::WorkbenchCancellationOutcome::Unconfirmed { .. }
+        ));
+        assert_eq!(actor.terminal().wait().await.kind, ActorExitKind::Failed);
+        task.await.expect("actor task");
+        assert!(matches!(
+            actor.terminal().cleanup().expect("cleanup evidence").hook,
+            crate::CleanupComponentOutcome::Unconfirmed(_)
+        ));
+        assert_eq!(&*fixture.calls.lock(), &["workbench-start"]);
+    }
+
+    #[tokio::test]
+    async fn execution_owned_workbench_panic_retains_unconfirmed_cleanup() {
+        let mut fixture = behavior(false);
+        fixture.behavior.owned_workbench = true;
+        fixture.behavior.workbench_panics = true;
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let execution = tidepool_runtime::session::WorkbenchExecutionId::from_digest([9; 16]);
+        let control = crate::WorkbenchExecutionControl::untracked();
+        let reply = send_workbench_request(
+            &actor,
+            WorkbenchRequest::from_cell_input("panic").with_execution_id(execution.clone()),
+            Some(Arc::clone(&control)),
+        )
+        .await
+        .expect("workbench reply");
         assert!(matches!(
             &reply,
             Err(KernelInvocationFailure::Failed { .. })
