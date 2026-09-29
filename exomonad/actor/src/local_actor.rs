@@ -1650,9 +1650,6 @@ fn start_workbench<B: KernelBehavior>(
     state.next_workbench_generation = generation;
     let execution = invocation.request.execution_id().cloned();
     let step = crate::WorkbenchStepKey::new(state.context.identity, generation, execution.clone());
-    let dispatch = state
-        .behavior
-        .dispatch_workbench(&state.context, invocation, control.clone());
     if let Some(control) = control.as_ref() {
         state.mailbox_admission.hosted_cell().claim(control);
     }
@@ -1663,6 +1660,26 @@ fn start_workbench<B: KernelBehavior>(
         execution,
         hosted_cell: Arc::clone(state.mailbox_admission.hosted_cell()),
     });
+    let dispatch = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        state
+            .behavior
+            .dispatch_workbench(&state.context, invocation, control.clone())
+    })) {
+        Ok(dispatch) => dispatch,
+        Err(_) => {
+            let pending = state
+                .pending_workbench
+                .take()
+                .expect("admitted workbench step");
+            fail_unconfirmed_workbench(
+                myself,
+                state,
+                pending,
+                "workbench dispatch panicked; execution outcome is unconfirmed".into(),
+            );
+            return;
+        }
+    };
     let myself = myself.clone();
     let worker = match dispatch {
         WorkbenchDispatch::Owned(task) => tokio::spawn(
@@ -2367,6 +2384,7 @@ mod tests {
         workbench_panics: bool,
         owned_workbench: bool,
         owned_cleanup: Option<Arc<Notify>>,
+        dispatch_panics: bool,
     }
 
     #[derive(Clone)]
@@ -2613,6 +2631,9 @@ mod tests {
             invocation: crate::ActorWorkbenchInvocation,
             control: Option<Arc<crate::WorkbenchExecutionControl>>,
         ) -> WorkbenchDispatch<Self> {
+            if self.dispatch_panics {
+                panic!("workbench dispatch probe panic");
+            }
             if !self.owned_workbench {
                 return WorkbenchDispatch::Sequential {
                     invocation,
@@ -2828,6 +2849,7 @@ mod tests {
                 workbench_panics: false,
                 owned_workbench: false,
                 owned_cleanup: None,
+                dispatch_panics: false,
             },
             calls,
             mailbox_calls,
@@ -3383,6 +3405,38 @@ mod tests {
             crate::CleanupComponentOutcome::Unconfirmed(_)
         ));
         assert_eq!(&*fixture.calls.lock(), &["workbench-start"]);
+    }
+
+    #[tokio::test]
+    async fn dispatch_panic_settles_exact_control_as_unconfirmed() {
+        let mut fixture = behavior(false);
+        fixture.behavior.dispatch_panics = true;
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let execution = tidepool_runtime::session::WorkbenchExecutionId::from_digest([10; 16]);
+        let control = crate::WorkbenchExecutionControl::untracked();
+        let reply = send_workbench_request(
+            &actor,
+            WorkbenchRequest::from_cell_input("panic").with_execution_id(execution.clone()),
+            Some(Arc::clone(&control)),
+        )
+        .await
+        .expect("workbench reply");
+        assert!(matches!(
+            &reply,
+            Err(KernelInvocationFailure::Failed { .. })
+        ));
+        assert!(matches!(
+            control.cancellation_outcome(execution, reply),
+            crate::WorkbenchCancellationOutcome::Unconfirmed { .. }
+        ));
+        assert_eq!(actor.terminal().wait().await.kind, ActorExitKind::Failed);
+        task.await.expect("actor task");
+        assert!(matches!(
+            actor.terminal().cleanup().expect("cleanup evidence").hook,
+            crate::CleanupComponentOutcome::Unconfirmed(_)
+        ));
     }
 
     #[tokio::test]
