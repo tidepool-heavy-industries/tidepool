@@ -551,8 +551,8 @@ impl BindingTable {
 
     /// Freeze an environment that can outlive `parent` and every ancestor.
     /// Inherited declaration modules may refer to older shadowed value
-    /// generations, so retain the ancestors' complete live value set as well
-    /// as the names in the ordinary visible tip.
+    /// generations, so retain the ancestors' complete live value set and
+    /// transitive tip dependencies as well as the ordinary visible names.
     pub fn seed_detached_scope(
         &mut self,
         tree: &ScopeTree,
@@ -560,21 +560,13 @@ impl BindingTable {
         child: ScopeId,
     ) -> BindingTipId {
         let id = self.seed_scope(tree, parent, child);
-        let ancestors = tree.lookup_chain(parent);
-        let already = &self.tips[&child].retained;
-        let additional: Vec<_> = self
-            .live
-            .values()
-            .filter(|entry| ancestors.contains(&entry.scope) && !already.contains(&entry.id))
-            .map(|entry| entry.id)
-            .collect();
-        let retained = self.acquire_leases(additional);
-        self.tips.get_mut(&child).unwrap().retained.extend(retained);
+        self.retain_scope_dependencies(tree, parent, child);
         id
     }
 
     /// Retain all value generations an exact external facade from `source`
-    /// could import, without making its names visible in `target`.
+    /// could import, including dependencies its own inherited tip retains,
+    /// without making its names visible in `target`.
     pub fn retain_scope_dependencies(
         &mut self,
         tree: &ScopeTree,
@@ -589,10 +581,28 @@ impl BindingTable {
         let additional: Vec<_> = self
             .live
             .values()
-            .filter(|entry| ancestors.contains(&entry.scope) && !already.contains(&entry.id))
+            .filter(|entry| ancestors.contains(&entry.scope))
             .map(|entry| entry.id)
+            // A detached source may retain an older value owned by a scope
+            // outside its ancestry. Its declarations can still import that
+            // value after the original owner and this source retire.
+            .chain(
+                ancestors
+                    .iter()
+                    .filter_map(|scope| self.tips.get(scope))
+                    .flat_map(|tip| tip.retained.iter().copied()),
+            )
             .collect();
-        let retained = self.acquire_leases(additional);
+        // Expand alias/observation dependencies BEFORE subtracting leases the
+        // target already owns. Filtering only the input IDs would acquire an
+        // extra lease for an already-retained dependency reached through a new
+        // alias, then lose it when the target's HashSet deduplicates the ID.
+        let retained: HashSet<_> = self
+            .dependency_closure(additional)
+            .difference(already)
+            .copied()
+            .collect();
+        self.lease_exact_ids(&retained);
         self.tips
             .get_mut(&target)
             .unwrap()
@@ -620,6 +630,15 @@ impl BindingTable {
         &mut self,
         ids: impl IntoIterator<Item = SessionVarId>,
     ) -> HashSet<SessionVarId> {
+        let retained = self.dependency_closure(ids);
+        self.lease_exact_ids(&retained);
+        retained
+    }
+
+    fn dependency_closure(
+        &self,
+        ids: impl IntoIterator<Item = SessionVarId>,
+    ) -> HashSet<SessionVarId> {
         let mut retained = HashSet::new();
         let mut pending = ids.into_iter().collect::<Vec<_>>();
         while let Some(id) = pending.pop() {
@@ -629,10 +648,13 @@ impl BindingTable {
                 }
             }
         }
-        for id in &retained {
+        retained
+    }
+
+    fn lease_exact_ids(&mut self, ids: &HashSet<SessionVarId>) {
+        for id in ids {
             *self.leases.entry(*id).or_default() += 1;
         }
-        retained
     }
 
     /// Release a previously acquired set; the session owns deregistration of
