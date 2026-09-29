@@ -8407,7 +8407,7 @@ where
                     )
                 }
             };
-            if checkpoint_failed {
+            let checkpoint_cleanup_failure = if checkpoint_failed {
                 if let Some(boundary) = checkpoint_boundary.as_ref() {
                     let retired = self.environment.fork_groups.settle_checkpoints(
                         context.actor,
@@ -8426,13 +8426,15 @@ where
                                 .collect(),
                         )
                         .await
-                        .map_err(|failure| KernelInvocationFailure::Rejected {
-                            actor: context.actor,
-                            detail: format!("failed checkpoint cleanup: {failure}"),
-                        })?;
+                        .err()
+                        .map(|failure| format!("failed checkpoint cleanup: {failure}"))
+                } else {
+                    None
                 }
-            }
-            if rejected {
+            } else {
+                None
+            };
+            if rejected || checkpoint_cleanup_failure.is_some() {
                 let (aborted, notifications) = self
                     .environment
                     .requests
@@ -8442,6 +8444,24 @@ where
                     tracing::debug!(actor = ?context.actor, requests = ?aborted, "aborted unpublished request reservations after rejected workbench input");
                 }
             }
+            let result = match (result, checkpoint_cleanup_failure) {
+                (result, None) => result,
+                (Err(failure), Some(cleanup)) => Err(WorkbenchExecutionFailure {
+                    receipts: failure.receipts,
+                    failed_index: failure.failed_index,
+                    total: failure.total,
+                    source: ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "{}; {cleanup}",
+                        failure.source
+                    )),
+                }),
+                (Ok(_), Some(cleanup)) => Err(WorkbenchExecutionFailure {
+                    receipts: Vec::new(),
+                    failed_index: 0,
+                    total: 1,
+                    source: ResidentActorWorkbenchError::ActorProtocol(cleanup),
+                }),
+            };
             let result = result.map_err(|failure| {
                 KernelInvocationFailure::Workbench(crate::KernelWorkbenchFailure {
                     actor: context.actor,

@@ -939,19 +939,26 @@ impl Drop for HostInputRetirement {
     }
 }
 
-/// Guards a [`ResidentHole`] a caller holds between the checkout that parked
-/// it and a later checkout that will resume or abort it, so a task dropped
-/// while awaiting that later checkout still settles the hole instead of
-/// leaking a parked continuation. [`Self::disarm`] once the owning checkout
-/// is actually in hand — from that point the hole's fate is decided
-/// synchronously inside one held checkout, the same as every other
-/// `resume_*`/abort call, and this guard is no longer needed. If instead
-/// dropped still armed, [`Drop`] spawns one more checkout in the background
-/// to abort the hole there, since `Drop` cannot itself run async code. Same
-/// shape as [`HostInputRetirement`]; not generic over `H`/`O`, for the same
-/// reason.
-struct ParkedHoleAbortGuard {
-    background_abort: Option<Box<dyn FnOnce() + Send>>,
+/// Owns one invocation's current parked continuation across machine
+/// checkouts. The async owner remains alive while a blocking checkout runs;
+/// its registration is cloned into that checkout so a late suspension can
+/// replace the exact id before the checkout settles. Dropping the owner
+/// queues cleanup of its current id. A late result observes that abandonment
+/// and aborts its exact successor before releasing the checkout.
+pub(crate) struct ParkedHoleAbortGuard {
+    shared: Arc<ParkedHoleAbortState>,
+}
+
+struct ParkedHoleAbortState {
+    abort: Arc<dyn Fn(String) + Send + Sync>,
+    state: Mutex<ParkedHoleState>,
+    reason: String,
+}
+
+enum ParkedHoleState {
+    Owned(Option<String>),
+    Abandoned(Option<String>),
+    Settled,
 }
 
 impl ParkedHoleAbortGuard {
@@ -965,48 +972,160 @@ impl ParkedHoleAbortGuard {
         H: DispatchEffect<O> + Send + 'static,
         O: OutputSink + Sync + 'static,
     {
+        Self::with_latest(access, context, Some(cont_id), reason)
+    }
+
+    fn with_latest<H, O>(
+        access: &ResidentMachineAccess<H, O>,
+        context: crate::ActorSessionContext,
+        latest: Option<String>,
+        reason: String,
+    ) -> Self
+    where
+        H: DispatchEffect<O> + Send + 'static,
+        O: OutputSink + Sync + 'static,
+    {
         let machines = Arc::clone(&access.machines);
         let source = access.source.clone();
-        let background_abort: Box<dyn FnOnce() + Send> = Box::new(move || {
+        let cleanup_context = context.clone();
+        let cleanup_reason = reason.clone();
+        let abort: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |cont_id| {
+            let machines = Arc::clone(&machines);
+            let source = source.clone();
+            let context = cleanup_context.clone();
+            let reason = cleanup_reason.clone();
+            let cleanup_id = cont_id.clone();
             tokio::spawn(async move {
                 let access = ResidentMachineAccess::new(machines, source);
                 if let Err(error) = access
                     .with_machine(context, move |session, _, _| {
-                        if let Err(abort_error) = session.abort(&cont_id, reason) {
-                            tracing::warn!(
-                                %cont_id,
-                                %abort_error,
-                                "failed to abort a hole abandoned before its resuming checkout"
-                            );
-                        }
-                        Ok(())
+                        abort_owned_hole(session, cont_id.clone(), reason)
                     })
                     .await
                 {
-                    tracing::warn!(
-                        %error,
-                        "failed to check out the machine to abort a hole abandoned before its resuming checkout"
-                    );
+                    tracing::warn!(cont_id = %cleanup_id, %error, "failed to abort an abandoned continuation");
                 }
             });
         });
         Self {
-            background_abort: Some(background_abort),
+            shared: Arc::new(ParkedHoleAbortState {
+                abort,
+                state: Mutex::new(ParkedHoleState::Owned(latest)),
+                reason,
+            }),
         }
+    }
+
+    fn registration(&self) -> ParkedHoleAbortRegistration {
+        ParkedHoleAbortRegistration(Arc::clone(&self.shared))
     }
 
     /// The owning checkout is in hand: the hole's fate is now decided
     /// synchronously within it, so no background cleanup is needed.
-    fn disarm(mut self) {
-        self.background_abort = None;
+    fn disarm(self) {
+        let mut state = self.shared.state.lock();
+        *state = ParkedHoleState::Settled;
     }
 }
 
 impl Drop for ParkedHoleAbortGuard {
     fn drop(&mut self) {
-        if let Some(background) = self.background_abort.take() {
-            background();
+        let abandoned = {
+            let mut state = self.shared.state.lock();
+            match std::mem::replace(&mut *state, ParkedHoleState::Settled) {
+                ParkedHoleState::Owned(current) => {
+                    *state = ParkedHoleState::Abandoned(current.clone());
+                    current
+                }
+                ParkedHoleState::Abandoned(current) => {
+                    *state = ParkedHoleState::Abandoned(current);
+                    None
+                }
+                ParkedHoleState::Settled => None,
+            }
+        };
+        if let Some(cont_id) = abandoned {
+            (self.shared.abort)(cont_id);
         }
+    }
+}
+
+pub(crate) struct ParkedHoleAbortRegistration(Arc<ParkedHoleAbortState>);
+
+impl ParkedHoleAbortRegistration {
+    /// Transfer ownership to the exact continuation returned by this
+    /// checkout. If the async owner was dropped while the blocking operation
+    /// ran, settle the late successor before releasing the checked-out
+    /// session.
+    fn replace_in_checkout<H, O>(
+        &self,
+        session: &mut ResidentSession<H, O>,
+        outcome: &ResidentOutcome,
+    ) where
+        H: DispatchEffect<O> + Send,
+        O: OutputSink + Sync,
+    {
+        let successor = outcome_continuation_id(outcome);
+        let abandoned = {
+            let mut state = self.0.state.lock();
+            match std::mem::replace(&mut *state, ParkedHoleState::Settled) {
+                ParkedHoleState::Abandoned(_) => {
+                    *state = ParkedHoleState::Abandoned(successor.clone());
+                    true
+                }
+                ParkedHoleState::Owned(_) => {
+                    *state = successor
+                        .clone()
+                        .map_or(ParkedHoleState::Settled, |cont_id| {
+                            ParkedHoleState::Owned(Some(cont_id))
+                        });
+                    false
+                }
+                ParkedHoleState::Settled => false,
+            }
+        };
+        if abandoned {
+            let reason = self.0.reason.clone();
+            if let Some(cont_id) = successor {
+                if let Err(error) = abort_owned_hole(session, cont_id.clone(), reason) {
+                    tracing::warn!(%cont_id, %error, "failed to abort a late continuation after its owner was dropped");
+                    (self.0.abort)(cont_id);
+                }
+            }
+        }
+    }
+}
+
+fn outcome_continuation_id(outcome: &ResidentOutcome) -> Option<String> {
+    match outcome {
+        ResidentOutcome::Suspended { hole, .. } | ResidentOutcome::Deferred { hole, .. } => {
+            Some(hole.cont_id().to_owned())
+        }
+        ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. } => None,
+    }
+}
+
+fn abort_owned_hole<H, O>(
+    session: &mut ResidentSession<H, O>,
+    cont_id: String,
+    reason: String,
+) -> Result<(), ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    if !session.parked_holes().contains(&cont_id.as_str()) {
+        return Ok(());
+    }
+    let outcome = session.abort(&cont_id, reason);
+    if !session.parked_holes().contains(&cont_id.as_str()) {
+        return Ok(());
+    }
+    match outcome {
+        Err(error) => Err(ResidentActorWorkbenchError::Resident(error)),
+        Ok(_) => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+            "aborting continuation {cont_id} left it parked"
+        ))),
     }
 }
 
@@ -2894,9 +3013,10 @@ where
             hole.cont_id().to_string(),
             "tool installer's parked hole was abandoned before its resuming checkout".into(),
         );
-        self.access
+        let registration = abort_guard.registration();
+        let publication = self
+            .access
             .with_machine(compile_context, move |session, context, _| {
-                abort_guard.disarm();
                 let publication = (|| {
                     let ResidentRequest::AgentTools(
                         crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallWith(
@@ -2931,14 +3051,13 @@ where
                 let (declarations, slots, dispatch) = match publication {
                     Ok(publication) => publication,
                     Err(error) => {
-                        if let Err(abort_error) =
-                            session.abort(hole.cont_id(), "tool publication rejected".into())
-                        {
-                            tracing::warn!(
+                        match session.abort(hole.cont_id(), "tool publication rejected".into()) {
+                            Ok(outcome) => registration.replace_in_checkout(session, &outcome),
+                            Err(abort_error) => tracing::warn!(
                                 hole = hole.cont_id(),
                                 %abort_error,
                                 "failed to abort parked hole after tool publication rejection"
-                            );
+                            ),
                         }
                         return Err(error);
                     }
@@ -2946,20 +3065,22 @@ where
                 let settled = session
                     .resume_classified(hole, ())
                     .map_err(classify_resumption)?;
+                registration.replace_in_checkout(session, &settled);
                 if !matches!(
                     settled,
                     ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. }
                 ) {
                     if let ResidentOutcome::Suspended { hole, .. } = settled {
-                        if let Err(abort_error) = session.abort(
+                        match session.abort(
                             hole.cont_id(),
                             "tool installer must finish after publication".into(),
                         ) {
-                            tracing::warn!(
+                            Ok(outcome) => registration.replace_in_checkout(session, &outcome),
+                            Err(abort_error) => tracing::warn!(
                                 hole = hole.cont_id(),
                                 %abort_error,
                                 "failed to abort parked hole after tool installer overrun"
-                            );
+                            ),
                         }
                     }
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -2975,7 +3096,11 @@ where
                     revision,
                 }))
             })
-            .await
+            .await;
+        if publication.is_ok() {
+            abort_guard.disarm();
+        }
+        publication
     }
 
     /// Apply the retained handler with invocation data. No source compiler is involved.
@@ -3136,13 +3261,8 @@ where
             .await
     }
 
-    /// Abort every continuation parked since `before` was taken.
-    ///
-    /// A slot whose wait ran out is no longer being driven, so an effect it
-    /// was suspended on will never be answered. Left parked, that turn holds
-    /// the machine against the next caller. One handler runs at a time per
-    /// actor, so anything parked since the snapshot is the slot's own. An
-    /// aborted turn may suspend again while unwinding, hence the bounded loop.
+    /// Abort continuations parked since `before` was captured. This legacy
+    /// actor-global path is safe only while the actor admits one handler.
     pub(crate) async fn abort_parked_since(
         &self,
         context: crate::ActorSessionContext,
@@ -3151,9 +3271,9 @@ where
     ) -> Result<usize, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let mut aborted = 0usize;
+                let mut aborted = 0;
                 for _ in 0..8 {
-                    let Some(abandoned) = session
+                    let Some(cont_id) = session
                         .parked_holes()
                         .into_iter()
                         .find(|hole| !before.iter().any(|known| known == hole))
@@ -3161,17 +3281,17 @@ where
                     else {
                         break;
                     };
-                    match session.abort(&abandoned, reason.clone()) {
-                        Ok(_) => aborted += 1,
+                    match session.abort(&cont_id, reason.clone()) {
+                        Ok(_) if !session.parked_holes().contains(&cont_id.as_str()) => {
+                            aborted += 1;
+                        }
+                        Ok(_) => break,
+                        Err(_error) if !session.parked_holes().contains(&cont_id.as_str()) => {
+                            aborted += 1;
+                        }
                         Err(error) => {
-                            // The hole stays parked; don't count it as
-                            // aborted or the caller believes cleanup happened
-                            // when it did not.
-                            tracing::warn!(
-                                hole = %abandoned,
-                                %error,
-                                "failed to abort a stray parked continuation"
-                            );
+                            tracing::warn!(%cont_id, %error, "failed to abort parked continuation");
+                            break;
                         }
                     }
                 }
@@ -7795,6 +7915,7 @@ where
             hole.cont_id().to_string(),
             "external operation lost its continuation owner".into(),
         );
+        let registration = guard.registration();
         let result = match work {
             tidepool_effect::DeferredEffect::Blocking(work) => {
                 let work = work
@@ -7813,19 +7934,27 @@ where
                     .await
             }
         };
-        self.access
+        let settled = self
+            .access
             .with_machine(context, move |session, _, _| {
-                guard.disarm();
-                match result {
+                let outcome = match result {
                     Ok(response) => session
                         .resume_response_classified(hole, response)
                         .map_err(classify_resumption),
                     Err(error) => session
                         .abort(hole.cont_id(), error.to_string())
                         .map_err(ResidentActorWorkbenchError::Resident),
-                }
+                }?;
+                registration.replace_in_checkout(session, &outcome);
+                Ok(outcome)
             })
-            .await
+            .await;
+        if settled.is_ok() {
+            // The returned outcome now belongs to the caller, which either
+            // settles it or establishes its own continuation owner.
+            guard.disarm();
+        }
+        settled
     }
 
     pub(crate) async fn resume_value<T: ToHaskell + Send + 'static>(
