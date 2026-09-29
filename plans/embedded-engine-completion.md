@@ -195,3 +195,19 @@ the override before releasing it, including expected panic unwinding. Production
 scanner semantics and parallelism of unrelated tests are unchanged. Heap adds no
 new third-party dependency closure or external runtime fixture. These checks do
 not establish Haskell, codegen, harness, or remote-cache migration acceptance.
+
+Integration test source groups now default to each Cargo target root; the repr
+suite explicitly declares its six Rust files. All seven native test targets
+passed together (310 tests) after this tightening, with nine generator tests.
+A controlled edit to `raw_scan_validation.rs` caused exactly one compile command
+while building both heap integration targets; restoring the file also caused
+one. Logs: `source-closures-gate.log`, `heap-single-source-change.log`,
+`heap-single-source-restored.log`, and `heap-single-source-actions.log` in the
+same Buck evidence directory. The unrelated `gc_unit` action stayed reusable.
+
+Do not share a Cargo target directory across differing completion checkouts.
+A runtime build after the recovery build reused the latter checkout's old
+atomic-write API; rustc identified its source path in
+`target/completion-evidence/permission-recovery/runtime-shared-target-failure.log`.
+The runtime repair now builds in its own target directory. This is a Cargo
+artifact-selection failure, separate from the repaired root permission profile.

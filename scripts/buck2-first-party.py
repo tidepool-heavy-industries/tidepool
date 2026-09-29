@@ -90,6 +90,20 @@ def render_strings(values, indent=4):
     return "\n".join(" " * indent + json.dumps(value) + "," for value in values)
 
 
+# The repr Cargo suite is one explicit integration target with sibling module
+# files. Other current integration targets are standalone crate roots.
+INTEGRATION_SOURCES = {
+    ("tidepool-repr", "repr"): (
+        "tests/suites/repr.rs",
+        "tests/execution_schema_codec.rs",
+        "tests/execution_schema_contract.rs",
+        "tests/extend_checked_equivalence.rs",
+        "tests/metadata_strictness.rs",
+        "tests/strict_jsonl_directory.rs",
+    ),
+}
+
+
 def source_inputs(package, target):
     directory = ROOT / CURRENT_DIR
     source_root = pathlib.Path(target["src_path"]).resolve()
@@ -98,9 +112,17 @@ def source_inputs(package, target):
     if source_root.is_relative_to(directory / "src"):
         sources.update((directory / "src").rglob("*.rs"))
     else:
-        # Integration tests are one native rust_test action. Track only that
-        # package's Rust tests plus literal include_* resources they consume.
-        sources.update((directory / "tests").rglob("*.rs"))
+        # Cargo gives the crate root. The repr suite has explicit sibling
+        # modules; standalone integration targets need only their own root.
+        declared = INTEGRATION_SOURCES.get((package["name"], target["name"]))
+        if declared is None:
+            sources.add(source_root)
+        else:
+            for relative in declared:
+                source = directory / relative
+                if not source.is_file():
+                    raise SystemExit(f"missing integration source {source}")
+                sources.add(source)
     includes = re.compile(r'include_(?:str|bytes)!\s*\(\s*"([^\"]+)"')
     pending = [path for path in sources if path.suffix == ".rs"]
     external_labels = {

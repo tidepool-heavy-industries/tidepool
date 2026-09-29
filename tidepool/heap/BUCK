@@ -74,7 +74,6 @@ rust_filegroup(
     mapped_srcs = {
         "Cargo.toml": "tidepool/heap/Cargo.toml",
         "tests/gc_unit.rs": "tidepool/heap/tests/gc_unit.rs",
-        "tests/raw_scan_validation.rs": "tidepool/heap/tests/raw_scan_validation.rs",
     },
 )
 
@@ -98,7 +97,6 @@ rust_filegroup(
     name = "raw_scan_validation_sources",
     mapped_srcs = {
         "Cargo.toml": "tidepool/heap/Cargo.toml",
-        "tests/gc_unit.rs": "tidepool/heap/tests/gc_unit.rs",
         "tests/raw_scan_validation.rs": "tidepool/heap/tests/raw_scan_validation.rs",
     },
 )
