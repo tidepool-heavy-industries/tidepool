@@ -175,7 +175,7 @@ pub enum ProductAvailability {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleImportEvidence {
-    pub qualifier: String,
+    pub qualifier: ImportQualifier,
     pub module: String,
     pub boot: bool,
     pub selected: Option<PathBuf>,
@@ -191,19 +191,63 @@ pub struct SourceEvidence {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolutionEvidence {
-    pub qualifier: String,
+    pub qualifier: ImportQualifier,
     pub module: String,
     pub boot: bool,
     pub selected: Option<PathBuf>,
     pub candidates: Vec<PathBuf>,
 }
 
-fn valid_import_qualifier(qualifier: &str) -> bool {
-    qualifier == "none"
-        || qualifier
-            .strip_prefix("this:")
-            .or_else(|| qualifier.strip_prefix("other:"))
-            .is_some_and(|unit| !unit.is_empty())
+#[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(into = "String", try_from = "String")]
+pub enum ImportQualifier {
+    Unqualified,
+    ThisUnit(String),
+    OtherUnit(String),
+}
+
+impl TryFrom<String> for ImportQualifier {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value == "none" {
+            return Ok(Self::Unqualified);
+        }
+        if let Some(unit) = value.strip_prefix("this:") {
+            if !unit.is_empty() {
+                return Ok(Self::ThisUnit(unit.to_owned()));
+            }
+        }
+        if let Some(unit) = value.strip_prefix("other:") {
+            if !unit.is_empty() {
+                return Ok(Self::OtherUnit(unit.to_owned()));
+            }
+        }
+        Err("invalid import qualifier")
+    }
+}
+
+impl From<ImportQualifier> for String {
+    fn from(value: ImportQualifier) -> Self {
+        match value {
+            ImportQualifier::Unqualified => "none".into(),
+            ImportQualifier::ThisUnit(unit) => format!("this:{unit}"),
+            ImportQualifier::OtherUnit(unit) => format!("other:{unit}"),
+        }
+    }
+}
+
+impl ImportQualifier {
+    fn valid(&self) -> bool {
+        match self {
+            Self::Unqualified => true,
+            Self::ThisUnit(unit) | Self::OtherUnit(unit) => !unit.is_empty(),
+        }
+    }
+
+    fn is_external_package(&self) -> bool {
+        matches!(self, Self::OtherUnit(_))
+    }
 }
 
 const GENERATED_SOURCE: &str = "@generated-source";
@@ -286,8 +330,8 @@ impl DependencyEvidence {
             let mut imports = std::collections::HashSet::new();
             for imported in &module.imports {
                 if imported.module.is_empty()
-                    || !valid_import_qualifier(&imported.qualifier)
-                    || (imported.qualifier.starts_with("other:") && imported.selected.is_some())
+                    || !imported.qualifier.valid()
+                    || (imported.qualifier.is_external_package() && imported.selected.is_some())
                     || !imports.insert((&imported.qualifier, &imported.module, imported.boot))
                     || imported
                         .selected
@@ -301,9 +345,9 @@ impl DependencyEvidence {
         let mut resolutions = std::collections::HashMap::new();
         for resolution in &self.resolutions {
             if resolution.module.is_empty()
-                || !valid_import_qualifier(&resolution.qualifier)
-                || (resolution.qualifier.starts_with("other:") != resolution.candidates.is_empty())
-                || (resolution.qualifier.starts_with("other:") && resolution.selected.is_some())
+                || !resolution.qualifier.valid()
+                || (resolution.qualifier.is_external_package() != resolution.candidates.is_empty())
+                || (resolution.qualifier.is_external_package() && resolution.selected.is_some())
             {
                 return false;
             }
@@ -563,7 +607,7 @@ mod tests {
                 },
             ],
             resolutions: vec![ResolutionEvidence {
-                qualifier: "none".into(),
+                qualifier: ImportQualifier::Unqualified,
                 module: "Library".into(),
                 boot: false,
                 selected: Some(selected.clone()),
@@ -576,7 +620,7 @@ mod tests {
                 boot: false,
                 source: GENERATED_SOURCE.into(),
                 imports: vec![ModuleImportEvidence {
-                    qualifier: "none".into(),
+                    qualifier: ImportQualifier::Unqualified,
                     module: "Library".into(),
                     boot: false,
                     selected: Some(selected),
@@ -683,7 +727,7 @@ mod tests {
         let mut evidence = evidence(root.path());
         let candidate = root.path().join("first/Package.hs");
         evidence.resolutions.push(ResolutionEvidence {
-            qualifier: "none".into(),
+            qualifier: ImportQualifier::Unqualified,
             module: "Package".into(),
             boot: false,
             selected: None,
@@ -713,11 +757,12 @@ mod tests {
     fn package_qualifier_cannot_alias_an_unqualified_home_import() {
         let root = tempfile::tempdir().unwrap();
         let mut evidence = evidence(root.path());
-        evidence.modules[0].imports[0].qualifier = "other:package-unit".into();
+        evidence.modules[0].imports[0].qualifier =
+            ImportQualifier::OtherUnit("package-unit".into());
         assert!(!evidence.valid("target"));
         evidence.modules[0].imports[0].selected = None;
         evidence.resolutions.push(ResolutionEvidence {
-            qualifier: "other:package-unit".into(),
+            qualifier: ImportQualifier::OtherUnit("package-unit".into()),
             module: "Library".into(),
             boot: false,
             selected: None,
@@ -725,8 +770,10 @@ mod tests {
         });
         assert!(evidence.valid("target"));
         assert!(!evidence.reusable_without_worker("target"));
-        evidence.modules[0].imports[0].qualifier = "other:other-unit".into();
+        evidence.modules[0].imports[0].qualifier = ImportQualifier::OtherUnit("other-unit".into());
         assert!(!evidence.valid("target"));
+        assert!(serde_json::from_str::<ImportQualifier>("\"other:\"").is_err());
+        assert!(serde_json::from_str::<ImportQualifier>("\"unknown\"").is_err());
     }
 
     #[test]
