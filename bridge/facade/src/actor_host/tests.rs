@@ -1,5 +1,77 @@
 use super::*;
 
+#[tokio::test]
+async fn unbounded_repository_event_await_joins_before_actor_retirement() {
+    let campaign = test_campaign::TestCampaign::start().await;
+    let baseline = campaign
+        .forest
+        .measurement_snapshot()
+        .and_then(|snapshot| snapshot.parked)
+        .expect("bootstrapped resident measurement");
+    let actor = campaign.actor.clone();
+    let policy = campaign.root_installation.policy.clone();
+    let invocation = tokio::spawn(async move {
+        policy
+            .dispatch_boxed(ToolInvocation {
+                context: None,
+                name: exomonad_actor::HASKELL_TOOL.into(),
+                arguments: ToolArguments::Raw(
+                    "do { sub <- send (RepoEventSubscribe [WatchDeadline 3600000]) >>= liftEither; \
+                     awaitSubscriptionRaw sub (-1) >>= liftEither }"
+                        .into(),
+                ),
+            })
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if campaign
+                .forest
+                .measurement_snapshot()
+                .and_then(|snapshot| snapshot.parked)
+                .is_some_and(|parked| parked > baseline)
+            {
+                break;
+            }
+            assert!(!invocation.is_finished(), "Event await never parked");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Event await did not park");
+
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        actor.shutdown(ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "retire parked repository event await".into(),
+        }),
+    )
+    .await
+    .expect("actor retirement waited forever for Event await")
+    .expect("actor shutdown request");
+    tokio::time::timeout(Duration::from_secs(30), invocation)
+        .await
+        .expect("Event invocation did not settle after retirement")
+        .expect("Event invocation task panicked")
+        .expect_err("cancelled Event await must not complete successfully");
+    tokio::time::timeout(Duration::from_secs(30), campaign.hosted)
+        .await
+        .expect("hosted actor did not settle")
+        .expect("hosted actor task panicked");
+    assert_eq!(actor.terminal().wait().await.kind, ActorExitKind::Cancelled);
+    assert!(actor.terminal().cleanup().unwrap().is_confirmed());
+    assert_eq!(
+        campaign
+            .forest
+            .measurement_snapshot()
+            .and_then(|snapshot| snapshot.parked),
+        Some(0),
+        "retirement left an Event continuation parked"
+    );
+}
+
 #[test]
 fn recovery_refuses_the_old_implicit_checkout_source_graph() {
     let run = Path::new("/state/exomonad/runs/old-run");
