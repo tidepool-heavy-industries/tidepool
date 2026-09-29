@@ -104,9 +104,14 @@ an already validated declaration/binding delta and has no dependency on the
 actor crate. The control lock spans the visibility swap and records `Published`
 before release. A cancellation that takes that lock first forbids publication;
 one arriving after `Published` cannot revoke the commit. Preparing a compiler
-join or waiting for resources never holds this lock. If another execution has
-advanced the public generation during preparation, restage and revalidate the
-join against that generation without rerunning the original cell or its effects.
+join or waiting for resources never holds this lock. A successful visibility
+swap alone advances the decision to `Published`. A generation mismatch returns
+a typed stale result, leaves the decision unpublished and retains the execution's
+private write set. Release the checkout and decision lock, then restage and
+revalidate against the new public generation without rerunning the original
+cell or its effects. Only a validated join rejected against the current public
+generation is a terminal publication failure; a stale staged candidate is a
+retry, not a failed cell or permission to expose a partial delta.
 Cancellation intent and confirmed cleanup are separate retained observations:
 the exact continuation, command or request owner must report whether its work
 actually stopped. An unconfirmed external operation keeps its cleanup authority.
@@ -144,9 +149,11 @@ outcome when the result cannot be established.
    detached scope leases also retain shadowed ancestor value generations used
    by old declaration modules
    ([persistent.rs](../tidepool/runtime/src/session/persistent.rs),
-   [binding_table.rs](../tidepool/codegen/src/binding_table.rs)). Record the
-   exact source-layer revision and tool surface selected for this call. Build
-   the cell's `ActorSessionContext` with this private lexical scope while
+   [binding_table.rs](../tidepool/codegen/src/binding_table.rs)). Acquire a
+   source-owner lease on the exact admitted source-layer revision before the
+   execution becomes runnable, alongside its immutable tool surface. A revision
+   path and identity alone do not keep its compiler/helper files available.
+   Build the cell's `ActorSessionContext` with this private lexical scope while
    retaining its actor principal, machine session and runtime resource scope.
    `ActorSessionContext::compile_view` must still verify the exact scope
    ([mount.rs](../exomonad/actor/src/mount.rs)). New public commits after this
@@ -294,16 +301,18 @@ performed external effects and independently retained captures remain intact.
 ## Immediate checkpoint boundary
 
 The current `ForkGroupBoundary::Checkpoint` handler calls
-`capture_context_scope(context)` during the effect, which freezes the
-context's lexical scope and source-layer identities before returning its token
+`capture_context_scope(context)` during the effect to freeze the context's
+lexical scope. It separately asks the source owner for source-layer identities
+before returning its token
 ([resident_actor.rs](../exomonad/actor/src/resident_actor.rs),
 [resident_workbench.rs](../exomonad/actor/src/resident_workbench.rs)). With a
 private cell context, this captures the declarations and bindings of completed
 earlier items immediately, even if that cell is still suspended. Function-local
 values still cross only as explicit typed inputs. Record the checkpoint as an
 independent completed fact and keep its detached scope/source leases until its
-own release. The checkpoint must retain the **admitted** source-layer version
-and a strong lease on its immutable revision paths, rather than freezing the
+own release. A successful capture takes its own strong source-owner lease from
+the execution's **admitted** source-layer version, so later parent failure or
+retirement releases only the parent's lease. It must not freeze the
 actor's mutable active source when the effect happens later. Today
 `capture_context_scope` freezes the lexical scope while the adjacent
 `freeze_checkpoint_layer` call rereads active source identities; the before/
