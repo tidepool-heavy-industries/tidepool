@@ -123,6 +123,24 @@ impl ProgramCustody<'_> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ProgramId(u32);
 
+/// One mutable installation of a certified original group. The same image
+/// can have several instances in one machine, each with separate CAFs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct GroupInstanceId(ProgramId);
+
+impl From<ProgramId> for GroupInstanceId {
+    fn from(program: ProgramId) -> Self {
+        Self(program)
+    }
+}
+
+impl GroupInstanceId {
+    #[must_use]
+    pub fn program(self) -> ProgramId {
+        self.0
+    }
+}
+
 /// One installation's code custody, instance identity, machine-local roots,
 /// and the descriptor/dispatch rows retirement must remove.
 struct InstalledProgram<'code> {

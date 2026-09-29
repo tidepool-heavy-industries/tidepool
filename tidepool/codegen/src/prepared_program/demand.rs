@@ -4,17 +4,89 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use tidepool_repr::execution_schema::{
-    CachedHomeOwner, CertifiedGroup, ImportOwner, ModuleVersion, SymbolIdentity,
+    CachedHomeOwner, CertifiedGroup, ImportOwner, ModuleVersion, Signature, SymbolIdentity, ValueId,
 };
 
-use super::{CompileError, CompiledProgram, ImageRegistry};
+use super::{CompileError, CompiledProgram, GroupInstanceId, ImageRegistry, PreparedHandle};
 
 /// A source binder names one implementation at one compiler-assigned module
 /// version. Textual identity alone is insufficient when a module changes.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SourceBinder {
     pub version: ModuleVersion,
     pub binder: SymbolIdentity,
+}
+
+/// Machine-owned root for one materialized source binder in one original
+/// group installation. Cloning this descriptor does not mint another root:
+/// scope custody shares one handle and releases it exactly once when the last
+/// lexical/capture owner closes.
+#[derive(Clone, Debug)]
+pub struct SourceInstanceLease {
+    instance: GroupInstanceId,
+    owner: CachedHomeOwner,
+    original_ordinal: u32,
+    binder: SourceBinder,
+    value: ValueId,
+    handle: PreparedHandle,
+    entry_signature: Option<Signature>,
+}
+
+impl SourceInstanceLease {
+    pub(crate) fn new(
+        instance: GroupInstanceId,
+        owner: CachedHomeOwner,
+        original_ordinal: u32,
+        binder: SourceBinder,
+        value: ValueId,
+        handle: PreparedHandle,
+        entry_signature: Option<Signature>,
+    ) -> Self {
+        Self {
+            instance,
+            owner,
+            original_ordinal,
+            binder,
+            value,
+            handle,
+            entry_signature,
+        }
+    }
+
+    #[must_use]
+    pub fn instance(&self) -> GroupInstanceId {
+        self.instance
+    }
+
+    #[must_use]
+    pub fn owner(&self) -> &CachedHomeOwner {
+        &self.owner
+    }
+
+    #[must_use]
+    pub fn original_ordinal(&self) -> u32 {
+        self.original_ordinal
+    }
+
+    #[must_use]
+    pub fn binder(&self) -> &SourceBinder {
+        &self.binder
+    }
+
+    #[must_use]
+    pub fn value(&self) -> ValueId {
+        self.value
+    }
+
+    #[must_use]
+    pub fn handle(&self) -> PreparedHandle {
+        self.handle
+    }
+
+    #[must_use]
+    pub fn entry_signature(&self) -> Option<&Signature> {
+        self.entry_signature.as_ref()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

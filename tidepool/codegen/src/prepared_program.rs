@@ -86,10 +86,10 @@ impl Drop for ActiveIntrinsicScope<'_> {
     }
 }
 pub use machine::{
-    BatchImport, BatchProgram, ImportBindings, ManagedBuilder, ManagedField, ManagedNode,
-    ParkRequest, PreparedCallOptions, PreparedCompileSnapshot, PreparedHandle, PreparedInput,
-    PreparedMachine, PreparedMachineOptions, PreparedOuter, PreparedResult, PreparedResultBatch,
-    ProgramId, Quiescent, ResidencyCounts, RetirementReceipt,
+    BatchImport, BatchProgram, GroupInstanceId, ImportBindings, ManagedBuilder, ManagedField,
+    ManagedNode, ParkRequest, PreparedCallOptions, PreparedCompileSnapshot, PreparedHandle,
+    PreparedInput, PreparedMachine, PreparedMachineOptions, PreparedOuter, PreparedResult,
+    PreparedResultBatch, ProgramId, Quiescent, ResidencyCounts, RetirementReceipt,
 };
 pub use run::{ExecutionError, ImportShapeFact, RunOptions, RunResult};
 #[cfg(test)]
@@ -100,7 +100,9 @@ mod byte_arrays;
 mod bytes_tests;
 mod data_tag;
 mod demand;
-pub use demand::{DemandError, DemandedImage, GroupInventory, SealedDemand, SourceBinder};
+pub use demand::{
+    DemandError, DemandedImage, GroupInventory, SealedDemand, SourceBinder, SourceInstanceLease,
+};
 #[cfg(test)]
 mod double_to_int_tests;
 mod entry;
