@@ -156,10 +156,9 @@ pub enum InboundNext {
 /// (`resident_actor::live_status_text`). The data lives in
 /// `tidepool::exomonad::source`, which this crate cannot depend on (`tidepool`
 /// depends on `exomonad-actor`, never the reverse); `tidepool`'s composition
-/// root publishes this into the observation channel instead. Absence of a
-/// value for this field (`ActorSourceDriftObservation::layer` is `None`)
-/// means the layer has not been observed yet — never means it was checked
-/// and found identical.
+/// root publishes this into the observation channel instead. Observation
+/// state records whether a sample is current, pending, unavailable, or has
+/// never been checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceLayerDrift {
     pub active_identity: String,
@@ -200,15 +199,93 @@ pub struct FrozenSourceDrift {
     pub changed_modules: Vec<String>,
 }
 
-/// The three source-drift rows of the what-is-live status view, each
-/// observed and published independently. A field left `None` means that row
-/// has not been observed for this actor, which the view renders distinctly
-/// from an observed-and-empty (no drift) result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedSource<T> {
+    pub sample: T,
+    pub observed_at_unix_ms: u64,
+}
+
+/// Current observation state for one source-drift row. Previous data remains
+/// available only as an explicitly named last-known sample while a poll is
+/// pending or unavailable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceObservation<T> {
+    NotObserved,
+    Pending {
+        since_unix_ms: u64,
+        last_known: Option<ObservedSource<T>>,
+    },
+    Available(ObservedSource<T>),
+    Unavailable {
+        at_unix_ms: u64,
+        reason: String,
+        last_known: Option<ObservedSource<T>>,
+    },
+}
+
+impl<T> Default for SourceObservation<T> {
+    fn default() -> Self {
+        Self::NotObserved
+    }
+}
+
+impl<T> SourceObservation<T> {
+    pub fn current(&self) -> Option<&ObservedSource<T>> {
+        match self {
+            Self::Available(sample) => Some(sample),
+            _ => None,
+        }
+    }
+
+    fn into_last_known(self) -> Option<ObservedSource<T>> {
+        match self {
+            Self::Available(sample) => Some(sample),
+            Self::Pending { last_known, .. } | Self::Unavailable { last_known, .. } => last_known,
+            Self::NotObserved => None,
+        }
+    }
+
+    fn begin(&mut self, now: u64) {
+        let last_known = std::mem::take(self).into_last_known();
+        *self = Self::Pending {
+            since_unix_ms: now,
+            last_known,
+        };
+    }
+
+    fn unavailable(&mut self, now: u64, reason: String) {
+        let last_known = std::mem::take(self).into_last_known();
+        *self = Self::Unavailable {
+            at_unix_ms: now,
+            reason,
+            last_known,
+        };
+    }
+
+    fn publish(&mut self, now: u64, sample: T) {
+        *self = Self::Available(ObservedSource {
+            sample,
+            observed_at_unix_ms: now,
+        });
+    }
+}
+
+/// Which rows this actor can actually observe on the next poll.
+#[derive(Debug, Clone, Copy)]
+pub struct SourceDriftTargets {
+    pub layer: bool,
+    pub checkout: bool,
+    pub frozen: bool,
+}
+
+/// The three independently observed source-drift rows of the status view.
+/// An absent service stays `NotObserved`; empty drift is represented only by
+/// an `Available` sample.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ActorSourceDriftObservation {
-    pub layer: Option<SourceLayerDrift>,
-    pub checkout: Option<CheckoutGitDrift>,
-    pub frozen: Option<FrozenSourceDrift>,
+    pub layer: SourceObservation<SourceLayerDrift>,
+    pub checkout: SourceObservation<CheckoutGitDrift>,
+    pub frozen: SourceObservation<FrozenSourceDrift>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -389,17 +466,39 @@ impl ActorRuntimeObservation {
                 },
             ),
         };
-        let source = self
-            .source_drift
-            .checkout
-            .as_ref()
-            .map(|checkout| {
-                format!(
-                    " source={};",
-                    checkout.head.get(..7).unwrap_or(&checkout.head)
-                )
-            })
-            .unwrap_or_default();
+        let source = match &self.source_drift.checkout {
+            SourceObservation::Available(checkout) => format!(
+                " source={};",
+                checkout
+                    .sample
+                    .head
+                    .get(..7)
+                    .unwrap_or(&checkout.sample.head)
+            ),
+            SourceObservation::Pending {
+                last_known: Some(checkout),
+                ..
+            } => format!(
+                " source_last_known={}(pending);",
+                checkout
+                    .sample
+                    .head
+                    .get(..7)
+                    .unwrap_or(&checkout.sample.head)
+            ),
+            SourceObservation::Unavailable {
+                last_known: Some(checkout),
+                ..
+            } => format!(
+                " source_last_known={}(unavailable);",
+                checkout
+                    .sample
+                    .head
+                    .get(..7)
+                    .unwrap_or(&checkout.sample.head)
+            ),
+            _ => String::new(),
+        };
         format!(
             "{label} req={requests} pending; provider={provider}; inbox={inbox}; last_message={last_message};{source} next={next}"
         )
@@ -641,20 +740,78 @@ impl ActorRuntimeObservationHandle {
         observation.prompt_fingerprint = Some(fingerprint.into());
     }
 
+    /// Mark every applicable row pending before the host begins filesystem or
+    /// Git work. An absent source remains unobserved even after earlier polls.
+    pub fn begin_source_drift_poll(&self, targets: SourceDriftTargets) {
+        let now = unix_time_ms();
+        let mut observation = self.inner.write();
+        if targets.layer {
+            observation.source_drift.layer.begin(now);
+        } else {
+            observation.source_drift.layer = SourceObservation::NotObserved;
+        }
+        if targets.checkout {
+            observation.source_drift.checkout.begin(now);
+        } else {
+            observation.source_drift.checkout = SourceObservation::NotObserved;
+        }
+        if targets.frozen {
+            observation.source_drift.frozen.begin(now);
+        } else {
+            observation.source_drift.frozen = SourceObservation::NotObserved;
+        }
+    }
+
     /// Publish row 1 of the source-drift view: this actor's source layer,
     /// active vs. latest observed disk.
     pub fn publish_source_layer_drift(&self, drift: SourceLayerDrift) {
-        self.inner.write().source_drift.layer = Some(drift);
+        self.inner
+            .write()
+            .source_drift
+            .layer
+            .publish(unix_time_ms(), drift);
+    }
+
+    pub fn fail_source_layer_drift(&self, reason: impl Into<String>) {
+        self.inner
+            .write()
+            .source_drift
+            .layer
+            .unavailable(unix_time_ms(), reason.into());
     }
 
     /// Publish row 2: the checkout's Git head and dirty files.
     pub fn publish_checkout_git_drift(&self, drift: CheckoutGitDrift) {
-        self.inner.write().source_drift.checkout = Some(drift);
+        self.inner
+            .write()
+            .source_drift
+            .checkout
+            .publish(unix_time_ms(), drift);
+    }
+
+    pub fn fail_checkout_git_drift(&self, reason: impl Into<String>) {
+        self.inner
+            .write()
+            .source_drift
+            .checkout
+            .unavailable(unix_time_ms(), reason.into());
     }
 
     /// Publish row 3: frozen workspace modules that differ from disk.
     pub fn publish_frozen_source_drift(&self, drift: FrozenSourceDrift) {
-        self.inner.write().source_drift.frozen = Some(drift);
+        self.inner
+            .write()
+            .source_drift
+            .frozen
+            .publish(unix_time_ms(), drift);
+    }
+
+    pub fn fail_frozen_source_drift(&self, reason: impl Into<String>) {
+        self.inner
+            .write()
+            .source_drift
+            .frozen
+            .unavailable(unix_time_ms(), reason.into());
     }
 
     pub fn publish_cache_usage(&self, usage: exomonad_model::ProviderUsageSnapshot) {
@@ -796,6 +953,71 @@ mod tests {
     use super::*;
 
     #[test]
+    fn source_observation_keeps_prior_sample_explicit_across_failed_poll() {
+        let handle = ActorRuntimeObservationHandle::default();
+        let targets = SourceDriftTargets {
+            layer: false,
+            checkout: true,
+            frozen: false,
+        };
+        handle.begin_source_drift_poll(targets);
+        assert!(matches!(
+            handle.snapshot().source_drift.checkout,
+            SourceObservation::Pending {
+                last_known: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            handle.snapshot().source_drift.layer,
+            SourceObservation::NotObserved
+        ));
+
+        let sample = CheckoutGitDrift {
+            head: "abcdef012345".into(),
+            dirty_files: Vec::new(),
+        };
+        handle.publish_checkout_git_drift(sample.clone());
+        assert!(handle.snapshot().source_drift.checkout.current().is_some());
+        handle.begin_source_drift_poll(targets);
+        let pending = handle.snapshot();
+        assert!(
+            matches!(&pending.source_drift.checkout, SourceObservation::Pending { last_known: Some(previous), .. } if previous.sample.eq(&sample))
+        );
+        assert!(pending
+            .delivery_status_line("child", 0, 0)
+            .contains("source_last_known=abcdef0(pending)"));
+
+        handle.fail_checkout_git_drift("git unavailable");
+        let unavailable = handle.snapshot();
+        assert!(
+            matches!(&unavailable.source_drift.checkout, SourceObservation::Unavailable { reason, last_known: Some(previous), .. } if reason == "git unavailable" && previous.sample.eq(&sample))
+        );
+        assert!(unavailable
+            .delivery_status_line("child", 0, 0)
+            .contains("source_last_known=abcdef0(unavailable)"));
+        assert!(!unavailable
+            .delivery_status_line("child", 0, 0)
+            .contains(" source=abcdef0;"));
+
+        handle.publish_checkout_git_drift(CheckoutGitDrift {
+            head: "fedcba987654".into(),
+            dirty_files: vec!["src/lib.rs".into()],
+        });
+        assert_eq!(
+            handle
+                .snapshot()
+                .source_drift
+                .checkout
+                .current()
+                .unwrap()
+                .sample
+                .head,
+            "fedcba987654"
+        );
+    }
+
+    #[test]
     fn delivery_status_line_names_a_fenced_inbox_and_its_recovery() {
         let minute = 60_000;
         let now = 100 * minute;
@@ -820,9 +1042,12 @@ mod tests {
                 next: InboundNext::Resubmitting,
             }),
             source_drift: ActorSourceDriftObservation {
-                checkout: Some(CheckoutGitDrift {
-                    head: "8d45d32f00ba".into(),
-                    dirty_files: Vec::new(),
+                checkout: SourceObservation::Available(ObservedSource {
+                    sample: CheckoutGitDrift {
+                        head: "8d45d32f00ba".into(),
+                        dirty_files: Vec::new(),
+                    },
+                    observed_at_unix_ms: now,
                 }),
                 ..Default::default()
             },

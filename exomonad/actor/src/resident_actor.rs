@@ -1754,10 +1754,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         };
         let operator_checkout = if self.descriptor.effective_role().role() == crate::ActorRole::Root
         {
-            own.source_drift
-                .checkout
-                .as_ref()
-                .map(|checkout| checkout.head.clone())
+            own.source_drift.checkout.clone()
         } else {
             records
                 .iter()
@@ -1765,14 +1762,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     record.descriptor.effective_role().role() == crate::ActorRole::Root
                         && live(identity, record)
                 })
-                .find_map(|(_, record)| {
-                    record
-                        .runtime_observation
-                        .snapshot()
-                        .source_drift
-                        .checkout
-                        .map(|checkout| checkout.head)
-                })
+                .map(|(_, record)| record.runtime_observation.snapshot().source_drift.checkout)
+                .next()
+                .unwrap_or_default()
         };
         let mut children = records
             .iter()
@@ -1784,17 +1776,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             .map(|(_, record)| {
                 (
                     record.descriptor.label().to_owned(),
-                    record
-                        .runtime_observation
-                        .snapshot()
-                        .source_drift
-                        .checkout
-                        .map(|checkout| checkout.head),
+                    record.runtime_observation.snapshot().source_drift.checkout,
                 )
             })
             .collect::<Vec<_>>();
         drop(records);
-        children.sort();
+        children.sort_by(|left, right| left.0.cmp(&right.0));
         RevisionIdentities {
             operator_checkout,
             checked: own.source_drift.checkout,

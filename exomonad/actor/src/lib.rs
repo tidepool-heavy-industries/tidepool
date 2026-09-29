@@ -151,8 +151,9 @@ pub use runtime_observation::{
     ActorActivationKind, ActorRuntimeObservation, ActorRuntimeObservationHandle,
     ActorSourceDriftObservation, ActorWorkbenchPosture, ActorWorkbenchTransfer,
     ActorWorkspaceObservation, CacheBoundaryReason, CheckoutGitDrift, FrozenSourceDrift,
-    InboundDeliveryObservation, InboundNext, InboxDelivery, ProviderUsageSample, SourceLayerDrift,
-    TrackedMessageObservation, TrackedMessageState,
+    InboundDeliveryObservation, InboundNext, InboxDelivery, ObservedSource, ProviderUsageSample,
+    SourceDriftTargets, SourceLayerDrift, SourceObservation, TrackedMessageObservation,
+    TrackedMessageState,
 };
 pub use start::{
     ActorEffectKeyWire, ActorEffectProfileWire, ActorLaunchRoleWire, ActorReplacementDefinition,

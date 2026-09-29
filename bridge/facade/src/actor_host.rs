@@ -7298,11 +7298,9 @@ impl PendingDeliveryWarning {
 /// (`ResidentKernelBehavior::live_status_text`) must stay cheap on every
 /// call.
 ///
-/// Each of the three rows is observed independently, and a row this actor
-/// has nothing to observe for (no source service on the run, no assigned
-/// worktree outside the root's own checkout) is simply left unpublished rather than published as clean —
-/// `ActorRuntimeObservation::source_drift` distinguishes "not observed" from
-/// "checked, identical" for exactly this reason. All filesystem and Git work
+/// Each row is observed independently. An absent service stays unobserved;
+/// every attempted poll publishes pending before I/O and unavailable on error.
+/// All filesystem and Git work
 /// runs on a blocking thread; nothing here runs on the async executor.
 async fn poll_source_drift(
     actor: ActorRef,
@@ -7332,49 +7330,145 @@ async fn poll_source_drift(
     let source_layers = source_layers.cloned();
     let worktrees = worktrees.clone();
     let caller = tidepool_repr::PrincipalId::from(actor);
-    let (layer, frozen, checkout) = tidepool_runtime::spawn_blocking_in_span(move || {
-        let layer = source_layers.as_ref().and_then(|layers| {
-            layers
-                .drift(caller)
-                .inspect_err(|error| {
-                    tracing::debug!(?actor, ?error, "source layer drift unavailable");
-                })
-                .ok()
-        });
-        let frozen = source_layers.as_ref().and_then(|layers| {
-            layers
-                .frozen_drift()
-                .inspect_err(|error| {
-                    tracing::debug!(?actor, %error, "frozen workspace drift unavailable");
-                })
-                .ok()
-        });
+    let targets = exomonad_actor::SourceDriftTargets {
+        layer: source_layers.is_some(),
+        frozen: source_layers.is_some(),
+        checkout: worktree_id.is_some() || root_checkout.is_some(),
+    };
+    runtime_observation.begin_source_drift_poll(targets);
+    let result = tidepool_runtime::spawn_blocking_in_span(move || {
+        let layer = source_layers
+            .as_ref()
+            .map(|layers| layers.drift(caller).map_err(|error| format!("{error:?}")));
+        let frozen = source_layers
+            .as_ref()
+            .map(|layers| layers.frozen_drift().map_err(|error| error.to_string()));
         let checkout = match (worktree_id, root_checkout) {
-            (Some(id), _) => checkout_git_drift(&worktrees, &id)
-                .inspect_err(|error| {
-                    tracing::debug!(?actor, worktree = %id, %error, "checkout drift unavailable");
-                })
-                .ok(),
-            (None, Some(path)) => git_drift_at(worktrees.git(), &path)
-                .inspect_err(|error| {
-                    tracing::debug!(?actor, path = %path.display(), %error, "root checkout drift unavailable");
-                })
-                .ok(),
+            (Some(id), _) => Some(checkout_git_drift(&worktrees, &id)),
+            (None, Some(path)) => Some(git_drift_at(worktrees.git(), &path)),
             (None, None) => None,
         };
         (layer, frozen, checkout)
     })
-    .await
-    .unwrap_or_default();
-    if let Some(layer) = layer {
-        runtime_observation.publish_source_layer_drift(layer);
+    .await;
+    publish_source_drift_result(runtime_observation, targets, result);
+}
+
+type SourceDriftResults = (
+    Option<Result<exomonad_actor::SourceLayerDrift, String>>,
+    Option<Result<exomonad_actor::FrozenSourceDrift, String>>,
+    Option<Result<exomonad_actor::CheckoutGitDrift, String>>,
+);
+
+fn publish_source_drift_result(
+    observation: &exomonad_actor::ActorRuntimeObservationHandle,
+    targets: exomonad_actor::SourceDriftTargets,
+    result: Result<SourceDriftResults, tokio::task::JoinError>,
+) {
+    let (layer, frozen, checkout) = match result {
+        Ok(rows) => rows,
+        Err(error) => {
+            let reason = format!("source drift observation task failed: {error}");
+            tracing::debug!(%reason, "source drift unavailable");
+            if targets.layer {
+                observation.fail_source_layer_drift(reason.clone());
+            }
+            if targets.frozen {
+                observation.fail_frozen_source_drift(reason.clone());
+            }
+            if targets.checkout {
+                observation.fail_checkout_git_drift(reason);
+            }
+            return;
+        }
+    };
+    match layer {
+        Some(Ok(sample)) => observation.publish_source_layer_drift(sample),
+        Some(Err(reason)) => observation.fail_source_layer_drift(reason),
+        None if targets.layer => {
+            observation.fail_source_layer_drift("source layer poll returned no result")
+        }
+        None => {}
     }
-    if let Some(frozen) = frozen {
-        runtime_observation.publish_frozen_source_drift(frozen);
+    match frozen {
+        Some(Ok(sample)) => observation.publish_frozen_source_drift(sample),
+        Some(Err(reason)) => observation.fail_frozen_source_drift(reason),
+        None if targets.frozen => {
+            observation.fail_frozen_source_drift("frozen source poll returned no result")
+        }
+        None => {}
     }
-    if let Some(checkout) = checkout {
-        runtime_observation.publish_checkout_git_drift(checkout);
+    match checkout {
+        Some(Ok(sample)) => observation.publish_checkout_git_drift(sample),
+        Some(Err(reason)) => observation.fail_checkout_git_drift(reason),
+        None if targets.checkout => {
+            observation.fail_checkout_git_drift("checkout poll returned no result")
+        }
+        None => {}
     }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn source_drift_join_failure_marks_attempted_rows_unavailable() {
+    let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
+    let targets = exomonad_actor::SourceDriftTargets {
+        layer: true,
+        frozen: true,
+        checkout: false,
+    };
+    observation.publish_source_layer_drift(exomonad_actor::SourceLayerDrift {
+        active_identity: "old".into(),
+        active_generation: 1,
+        disk_identity: "old".into(),
+        disk_generation: 1,
+        changed_modules: Vec::new(),
+    });
+    observation.begin_source_drift_poll(targets);
+    let failed: Result<SourceDriftResults, _> = tokio::spawn(async {
+        panic!("source observation task panicked");
+        #[allow(unreachable_code)]
+        (None, None, None)
+    })
+    .await;
+    publish_source_drift_result(&observation, targets, failed);
+    let observed = observation.snapshot().source_drift;
+    assert!(matches!(
+        observed.layer,
+        exomonad_actor::SourceObservation::Unavailable {
+            last_known: Some(_),
+            ..
+        }
+    ));
+    assert!(matches!(
+        observed.frozen,
+        exomonad_actor::SourceObservation::Unavailable {
+            last_known: None,
+            ..
+        }
+    ));
+    assert!(matches!(
+        observed.checkout,
+        exomonad_actor::SourceObservation::NotObserved
+    ));
+
+    observation.begin_source_drift_poll(targets);
+    publish_source_drift_result(
+        &observation,
+        targets,
+        Ok((
+            Some(Err("source read failed".into())),
+            Some(Ok(exomonad_actor::FrozenSourceDrift {
+                changed_modules: Vec::new(),
+            })),
+            None,
+        )),
+    );
+    let observed = observation.snapshot().source_drift;
+    assert!(
+        matches!(observed.layer, exomonad_actor::SourceObservation::Unavailable { reason, last_known: Some(_), .. } if reason == "source read failed")
+    );
+    assert!(observed.frozen.current().is_some());
 }
 
 /// The checkout's Git head and dirty files, via [`GitCli`] — the sole

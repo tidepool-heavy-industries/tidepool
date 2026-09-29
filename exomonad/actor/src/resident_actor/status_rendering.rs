@@ -73,61 +73,108 @@ fn same_session_identifiers(source: &str) -> std::collections::HashSet<String> {
 }
 
 /// The three source-drift rows of the what-is-live status view: is what is
-/// running still what is on disk. Each row is independently `None` when it
-/// has not been observed for this actor (see
-/// `runtime_observation::ActorSourceDriftObservation`) and renders as
-/// "not observed" rather than as clean — an unread row must never look like
-/// a checked-and-identical one. A pure formatter, directly testable without
-/// an actor.
+/// running still what is on disk. Only an available sample can report clean.
+/// Pending and failed polls label older samples as last-known evidence.
 pub(super) fn render_source_drift_section(drift: &crate::ActorSourceDriftObservation) -> String {
-    let layer = match &drift.layer {
-        None => "  source layer: not observed".to_owned(),
-        Some(layer) if layer.changed_modules.is_empty() => format!(
-            "  source layer: active={}@{} disk={}@{} (checked, identical)",
-            layer.active_identity,
-            layer.active_generation,
-            layer.disk_identity,
-            layer.disk_generation,
-        ),
-        Some(layer) => {
+    let layer = render_source_observation("source layer", &drift.layer, |layer| {
+        if layer.changed_modules.is_empty() {
+            format!(
+                "active={}@{} disk={}@{} (checked, identical)",
+                layer.active_identity,
+                layer.active_generation,
+                layer.disk_identity,
+                layer.disk_generation
+            )
+        } else {
             let mut changed = layer.changed_modules.clone();
             changed.sort();
             format!(
-                "  source layer: active={}@{} disk={}@{} changed_modules={changed:?}",
+                "active={}@{} disk={}@{} changed_modules={changed:?}",
                 layer.active_identity,
                 layer.active_generation,
                 layer.disk_identity,
                 layer.disk_generation,
             )
         }
-    };
-    let checkout = match &drift.checkout {
-        None => "  checkout: not observed".to_owned(),
-        Some(checkout) if checkout.dirty_files.is_empty() => format!(
-            "  checkout: head={} (checked, clean); binary_build_revision=unavailable (not recorded by this build)",
-            checkout.head,
-        ),
-        Some(checkout) => {
+    });
+    let checkout = render_source_observation("checkout", &drift.checkout, |checkout| {
+        if checkout.dirty_files.is_empty() {
+            format!("head={} (checked, clean); binary_build_revision=unavailable (not recorded by this build)", checkout.head)
+        } else {
             let mut dirty = checkout.dirty_files.clone();
             dirty.sort();
             format!(
-                "  checkout: head={} dirty_files={dirty:?}; binary_build_revision=unavailable (not recorded by this build)",
+                "head={} dirty_files={dirty:?}; binary_build_revision=unavailable (not recorded by this build)",
                 checkout.head,
             )
         }
-    };
-    let frozen = match &drift.frozen {
-        None => "  frozen workspace: not observed".to_owned(),
-        Some(frozen) if frozen.changed_modules.is_empty() => {
-            "  frozen workspace: (checked, identical)".to_owned()
-        }
-        Some(frozen) => {
+    });
+    let frozen = render_source_observation("frozen workspace", &drift.frozen, |frozen| {
+        if frozen.changed_modules.is_empty() {
+            "(checked, identical)".to_owned()
+        } else {
             let mut changed = frozen.changed_modules.clone();
             changed.sort();
-            format!("  frozen workspace: changed_modules={changed:?}")
+            format!("changed_modules={changed:?}")
         }
-    };
+    });
     format!("{layer}\n{checkout}\n{frozen}")
+}
+
+fn render_source_observation<T>(
+    label: &str,
+    state: &crate::SourceObservation<T>,
+    sample: impl Fn(&T) -> String,
+) -> String {
+    use crate::SourceObservation;
+    let last_known = |observed: &crate::ObservedSource<T>| {
+        format!(
+            "; last_known={} observed_at={}",
+            sample(&observed.sample),
+            crate::runtime_observation::render_clock(observed.observed_at_unix_ms)
+        )
+    };
+    match state {
+        SourceObservation::NotObserved => format!("  {label}: not observed"),
+        SourceObservation::Available(observed) => format!(
+            "  {label}: {} observed_at={}",
+            sample(&observed.sample),
+            crate::runtime_observation::render_clock(observed.observed_at_unix_ms)
+        ),
+        SourceObservation::Pending {
+            since_unix_ms,
+            last_known: previous,
+        } => format!(
+            "  {label}: pending since={}{}",
+            crate::runtime_observation::render_clock(*since_unix_ms),
+            previous.as_ref().map_or_else(String::new, &last_known)
+        ),
+        SourceObservation::Unavailable {
+            at_unix_ms,
+            reason,
+            last_known: previous,
+        } => format!(
+            "  {label}: unavailable at={}; reason={}{}",
+            crate::runtime_observation::render_clock(*at_unix_ms),
+            bounded_source_reason(reason),
+            previous.as_ref().map_or_else(String::new, &last_known)
+        ),
+    }
+}
+
+fn bounded_source_reason(reason: &str) -> String {
+    const MAX_CHARS: usize = 160;
+    let mut chars = reason.chars();
+    let prefix: String = chars
+        .by_ref()
+        .take(MAX_CHARS)
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
+    }
 }
 
 /// One collectors-section line of the what-is-live status view: a job, its
@@ -353,22 +400,21 @@ pub(super) fn render_roster_changes(
 }
 
 /// The revision identities one actor works against, each already observed
-/// by the host; `None` means not observed (or, for `assignment_base`, that
-/// the current request carries none).
+/// by the host. Only `assignment_base` is optional request data.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct RevisionIdentities {
     /// HEAD of the run's workspace repository, as the root's checkout poll
     /// last observed it.
-    pub(super) operator_checkout: Option<String>,
+    pub(super) operator_checkout: crate::SourceObservation<crate::CheckoutGitDrift>,
     /// This actor's own assigned checkout, as its checkout poll last
     /// observed it.
-    pub(super) checked: Option<crate::CheckoutGitDrift>,
+    pub(super) checked: crate::SourceObservation<crate::CheckoutGitDrift>,
     /// `taskSource` of the current request's session input.
     pub(super) assignment_base: Option<String>,
-    /// Each live descendant's label and last observed checked head.
-    pub(super) children: Vec<(String, Option<String>)>,
+    /// Each live descendant's label and checkout observation state.
+    pub(super) children: Vec<(String, crate::SourceObservation<crate::CheckoutGitDrift>)>,
     /// This actor's installed source layer against its on-disk capture.
-    pub(super) layer: Option<crate::SourceLayerDrift>,
+    pub(super) layer: crate::SourceObservation<crate::SourceLayerDrift>,
 }
 
 fn short_oid(oid: &str) -> &str {
@@ -383,63 +429,92 @@ fn short_identity(identity: &str) -> &str {
 /// delivery line's `key=value; key=value` style, and what a source reload
 /// would publish. Unobserved values say so; nothing is inferred.
 pub(super) fn render_revisions_section(revisions: &RevisionIdentities) -> String {
-    let operator = revisions
-        .operator_checkout
-        .as_deref()
-        .map_or("unobserved", short_oid);
-    let checked = revisions.checked.as_ref().map_or_else(
-        || "unobserved".to_owned(),
-        |checkout| {
+    let render_checkout = |state: &crate::SourceObservation<crate::CheckoutGitDrift>| {
+        render_revision_observation(state, |checkout| {
             let state = if checkout.dirty_files.is_empty() {
                 "clean".to_owned()
             } else {
                 format!("dirty={}", checkout.dirty_files.len())
             };
             format!("{} {state}", short_oid(&checkout.head))
-        },
-    );
+        })
+    };
+    let operator = render_checkout(&revisions.operator_checkout);
+    let checked = render_checkout(&revisions.checked);
     let base = revisions
         .assignment_base
         .as_deref()
         .map_or("none", short_oid);
-    let (layer, publish) = match &revisions.layer {
-        None => (
-            "source_layer=unobserved".to_owned(),
-            "unknown (source layer unobserved)".to_owned(),
-        ),
-        Some(drift) => (
-            format!(
-                "source_layer={}@{}; disk={}@{}; drifted={}",
-                short_identity(&drift.active_identity),
-                drift.active_generation,
-                short_identity(&drift.disk_identity),
-                drift.disk_generation,
-                if drift.changed_modules.is_empty() {
-                    "no"
-                } else {
-                    "yes"
-                },
-            ),
+    let layer = render_revision_observation(&revisions.layer, |drift| {
+        format!(
+            "{}@{}; disk={}@{}; drifted={}",
+            short_identity(&drift.active_identity),
+            drift.active_generation,
+            short_identity(&drift.disk_identity),
+            drift.disk_generation,
             if drift.changed_modules.is_empty() {
+                "no"
+            } else {
+                "yes"
+            },
+        )
+    });
+    let publish = match revisions.layer.current() {
+        Some(observed) => {
+            if observed.sample.changed_modules.is_empty() {
                 "nothing".to_owned()
             } else {
-                drift.changed_modules.join(", ")
-            },
-        ),
+                observed.sample.changed_modules.join(", ")
+            }
+        }
+        None => "unknown (source layer not currently observed)".to_owned(),
     };
     let mut lines = vec![
         "revisions:".to_owned(),
         format!("  operator_checkout={operator}; checked_head={checked}; assignment_base={base}"),
-        format!("  {layer}"),
+        format!("  source_layer={layer}"),
         format!("  a reload would publish: {publish}"),
     ];
     lines.extend(revisions.children.iter().map(|(label, head)| {
         format!(
             "  descendant {label:?} checked_head={}",
-            head.as_deref().map_or("unobserved", short_oid)
+            render_checkout(head)
         )
     }));
     lines.join("\n")
+}
+
+fn render_revision_observation<T>(
+    state: &crate::SourceObservation<T>,
+    sample: impl Fn(&T) -> String,
+) -> String {
+    match state {
+        crate::SourceObservation::NotObserved => "unobserved".to_owned(),
+        crate::SourceObservation::Available(observed) => sample(&observed.sample),
+        crate::SourceObservation::Pending { last_known, .. } => format!(
+            "pending{}",
+            last_known
+                .as_ref()
+                .map_or_else(String::new, |previous| format!(
+                    "; last_known={} observed_at={}",
+                    sample(&previous.sample),
+                    crate::runtime_observation::render_clock(previous.observed_at_unix_ms)
+                ))
+        ),
+        crate::SourceObservation::Unavailable {
+            reason, last_known, ..
+        } => format!(
+            "unavailable ({}){}",
+            bounded_source_reason(reason),
+            last_known
+                .as_ref()
+                .map_or_else(String::new, |previous| format!(
+                    "; last_known={} observed_at={}",
+                    sample(&previous.sample),
+                    crate::runtime_observation::render_clock(previous.observed_at_unix_ms)
+                ))
+        ),
+    }
 }
 
 /// The Git OID a session input's rendered `taskSource` field names: the
@@ -476,6 +551,13 @@ mod tests {
     use crate::command_jobs::CommandJobSnapshot;
     use crate::{ActorId, Incarnation};
     use tidepool_runtime::session::WorkbenchBinding;
+
+    fn observed<T>(sample: T) -> crate::SourceObservation<T> {
+        crate::SourceObservation::Available(crate::ObservedSource {
+            sample,
+            observed_at_unix_ms: 43_200_000,
+        })
+    }
 
     /// A single-item, single-binding committed reply naming `binding` and
     /// spanning `source` in full, paired with the request that retains
@@ -661,7 +743,7 @@ mod tests {
     #[test]
     fn source_drift_section_names_a_changed_module_in_the_layer_row() {
         let drift = crate::ActorSourceDriftObservation {
-            layer: Some(crate::SourceLayerDrift {
+            layer: observed(crate::SourceLayerDrift {
                 active_identity: "rev-a".into(),
                 active_generation: 3,
                 disk_identity: "rev-b".into(),
@@ -683,7 +765,7 @@ mod tests {
     #[test]
     fn source_drift_section_reports_identical_revisions_as_checked_not_skipped() {
         let drift = crate::ActorSourceDriftObservation {
-            layer: Some(crate::SourceLayerDrift {
+            layer: observed(crate::SourceLayerDrift {
                 active_identity: "rev-a".into(),
                 active_generation: 2,
                 disk_identity: "rev-a".into(),
@@ -702,7 +784,7 @@ mod tests {
     #[test]
     fn source_drift_section_lists_a_dirty_checkouts_files() {
         let drift = crate::ActorSourceDriftObservation {
-            checkout: Some(crate::CheckoutGitDrift {
+            checkout: observed(crate::CheckoutGitDrift {
                 head: "abc123".into(),
                 dirty_files: vec!["src/lib.rs".into(), "Cargo.toml".into()],
             }),
@@ -722,7 +804,7 @@ mod tests {
     #[test]
     fn source_drift_section_reports_a_clean_checkout_as_checked() {
         let drift = crate::ActorSourceDriftObservation {
-            checkout: Some(crate::CheckoutGitDrift {
+            checkout: observed(crate::CheckoutGitDrift {
                 head: "abc123".into(),
                 dirty_files: Vec::new(),
             }),
@@ -738,7 +820,7 @@ mod tests {
     #[test]
     fn source_drift_section_names_frozen_modules_that_differ_from_disk() {
         let drift = crate::ActorSourceDriftObservation {
-            frozen: Some(crate::FrozenSourceDrift {
+            frozen: observed(crate::FrozenSourceDrift {
                 changed_modules: vec!["Project.Types".into()],
             }),
             ..Default::default()
@@ -746,6 +828,61 @@ mod tests {
         let text = render_source_drift_section(&drift);
         assert!(
             text.contains("frozen workspace: changed_modules=[\"Project.Types\"]"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn failed_source_poll_labels_last_known_and_bounds_display_reason() {
+        let previous = crate::ObservedSource {
+            sample: crate::CheckoutGitDrift {
+                head: "abcdef012345".into(),
+                dirty_files: Vec::new(),
+            },
+            observed_at_unix_ms: 43_200_000,
+        };
+        let reason = "x".repeat(300);
+        let drift = crate::ActorSourceDriftObservation {
+            checkout: crate::SourceObservation::Unavailable {
+                at_unix_ms: 43_201_000,
+                reason: reason.clone(),
+                last_known: Some(previous.clone()),
+            },
+            ..Default::default()
+        };
+        let text = render_source_drift_section(&drift);
+        assert!(text.contains("checkout: unavailable"), "{text}");
+        assert!(text.contains("last_known=head=abcdef012345"), "{text}");
+        assert!(!text.contains(&reason), "{text}");
+        assert_eq!(bounded_source_reason(&reason).chars().count(), 161);
+        assert!(
+            matches!(&drift.checkout, crate::SourceObservation::Unavailable { last_known: Some(sample), .. } if sample == &previous)
+        );
+
+        let revisions = RevisionIdentities {
+            checked: drift.checkout,
+            layer: crate::SourceObservation::Pending {
+                since_unix_ms: 43_201_000,
+                last_known: Some(crate::ObservedSource {
+                    sample: crate::SourceLayerDrift {
+                        active_identity: "old".into(),
+                        active_generation: 1,
+                        disk_identity: "new".into(),
+                        disk_generation: 0,
+                        changed_modules: vec!["Project.Work".into()],
+                    },
+                    observed_at_unix_ms: 43_200_000,
+                }),
+            },
+            ..Default::default()
+        };
+        let text = render_revisions_section(&revisions);
+        assert!(text.contains("checked_head=unavailable"), "{text}");
+        assert!(text.contains("last_known=abcdef0 clean"), "{text}");
+        assert!(text.contains("source_layer=pending; last_known="), "{text}");
+        assert!(text.contains("a reload would publish: unknown"), "{text}");
+        assert!(
+            !text.contains("a reload would publish: Project.Work"),
             "{text}"
         );
     }
@@ -818,8 +955,11 @@ mod tests {
     #[test]
     fn status_revisions_section_renders_every_identity() {
         let revisions = RevisionIdentities {
-            operator_checkout: Some("1884c03c8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
-            checked: Some(crate::CheckoutGitDrift {
+            operator_checkout: observed(crate::CheckoutGitDrift {
+                head: "1884c03c8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                dirty_files: Vec::new(),
+            }),
+            checked: observed(crate::CheckoutGitDrift {
                 head: "9a1b2c3dbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 dirty_files: vec!["src/lib.rs".into(), "Cargo.toml".into()],
             }),
@@ -827,11 +967,14 @@ mod tests {
             children: vec![
                 (
                     "worker-a".into(),
-                    Some("77aa001ddddddddddddddddddddddddddddddddd".into()),
+                    observed(crate::CheckoutGitDrift {
+                        head: "77aa001ddddddddddddddddddddddddddddddddd".into(),
+                        dirty_files: Vec::new(),
+                    }),
                 ),
-                ("worker-b".into(), None),
+                ("worker-b".into(), crate::SourceObservation::NotObserved),
             ],
-            layer: Some(crate::SourceLayerDrift {
+            layer: observed(crate::SourceLayerDrift {
                 active_identity: "5f0e2d4c3b2a19180706".into(),
                 active_generation: 3,
                 disk_identity: "e1d2c3b4a5968778695a".into(),
@@ -841,13 +984,13 @@ mod tests {
         };
         assert_eq!(
             render_revisions_section(&revisions),
-            "revisions:\n  operator_checkout=1884c03; checked_head=9a1b2c3 dirty=2; assignment_base=c427057\n  source_layer=5f0e2d4c3b2a@3; disk=e1d2c3b4a596@0; drifted=yes\n  a reload would publish: Project.Shell, Project.Work\n  descendant \"worker-a\" checked_head=77aa001\n  descendant \"worker-b\" checked_head=unobserved"
+            "revisions:\n  operator_checkout=1884c03 clean; checked_head=9a1b2c3 dirty=2; assignment_base=c427057\n  source_layer=5f0e2d4c3b2a@3; disk=e1d2c3b4a596@0; drifted=yes\n  a reload would publish: Project.Shell, Project.Work\n  descendant \"worker-a\" checked_head=77aa001 clean\n  descendant \"worker-b\" checked_head=unobserved"
         );
 
         // Nothing observed: every identity says so, nothing is inferred.
         assert_eq!(
             render_revisions_section(&RevisionIdentities::default()),
-            "revisions:\n  operator_checkout=unobserved; checked_head=unobserved; assignment_base=none\n  source_layer=unobserved\n  a reload would publish: unknown (source layer unobserved)"
+            "revisions:\n  operator_checkout=unobserved; checked_head=unobserved; assignment_base=none\n  source_layer=unobserved\n  a reload would publish: unknown (source layer not currently observed)"
         );
     }
 
