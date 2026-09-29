@@ -161,8 +161,11 @@ fn view_helper_acquisition_retains_its_view_and_rejects_expired_descriptors() {
     use std::ffi::OsStr;
 
     let storage = tempfile::tempdir().unwrap();
-    let (_worker, namespace) = setup(storage.path());
+    let (worker, namespace) = setup(storage.path());
     let entry = namespace.entry().unwrap();
+    // The captured descriptors own the view even after its original process
+    // has exited and been reaped.
+    drop(worker);
     let acquired = entry.acquire().unwrap();
     drop(namespace);
     assert!(
