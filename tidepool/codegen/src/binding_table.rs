@@ -114,6 +114,11 @@ struct BindingTip {
     id: BindingTipId,
     visible: HashMap<BindingName, SessionVarId>,
     retained: HashSet<SessionVarId>,
+    /// Exact ancestor bindings available when this lexical view was frozen,
+    /// including shadowed generations used by inherited declaration code.
+    /// Ordinary descendants borrow the still-live ancestor's ownership;
+    /// detached roots additionally retain these ids in `retained`.
+    available_exact: HashSet<SessionVarId>,
     source_instances: HashSet<SourceLeaseKey>,
 }
 
@@ -325,9 +330,17 @@ mod promotion_tests {
         let first_id = first.id;
         let first_identity = first.value.identity.clone();
         table.bind_in(ScopeId::ROOT, first);
+        let mut shadow_slot = std::ptr::null_mut();
+        table.bind_in(ScopeId::ROOT, entry("answer", 6, &mut shadow_slot));
 
         let captured = tree.mint_child(ScopeId::ROOT).expect("live root");
         table.seed_scope(&tree, ScopeId::ROOT, captured);
+        let mut later_slot = std::ptr::null_mut();
+        let later = entry("later", 7, &mut later_slot);
+        let later_identity = later.value.identity.clone();
+        table.bind_in(ScopeId::ROOT, later);
+        let descendant = tree.mint_child(captured).expect("captured scope lives");
+        table.seed_scope(&tree, captured, descendant);
         let sibling = tree.mint_isolated();
         let mut newer_slot = std::ptr::null_mut();
         let newer = entry("answer", 5, &mut newer_slot);
@@ -342,6 +355,18 @@ mod promotion_tests {
         );
         assert!(table
             .resolve_exact_prepared_in(&tree, captured, &newer_identity, 5)
+            .is_none());
+        assert!(table
+            .resolve_exact_prepared_in(&tree, captured, &later_identity, 7)
+            .is_none());
+        assert_eq!(
+            table
+                .resolve_exact_prepared_in(&tree, descendant, &first_identity, 4)
+                .map(|entry| entry.id),
+            Some(first_id)
+        );
+        assert!(table
+            .resolve_exact_prepared_in(&tree, descendant, &later_identity, 7)
             .is_none());
         assert!(table
             .resolve_exact_prepared_in(&tree, sibling, &first_identity, 4)
@@ -1054,6 +1079,31 @@ impl BindingTable {
             .into_iter()
             .map(|(name, entry)| (name.clone(), entry.id))
             .collect();
+        let owners = if self.tips.contains_key(&parent) {
+            vec![parent]
+        } else {
+            tree.lookup_chain(parent)
+        };
+        let available_exact: HashSet<_> = self
+            .live
+            .values()
+            .filter(|entry| owners.contains(&entry.scope))
+            .map(|entry| entry.id)
+            .chain(
+                owners
+                    .iter()
+                    .filter_map(|scope| self.tips.get(scope))
+                    .flat_map(|tip| tip.available_exact.iter().chain(tip.retained.iter()))
+                    .copied(),
+            )
+            .chain(
+                owners
+                    .iter()
+                    .filter_map(|scope| self.promoted.get(scope))
+                    .flat_map(HashSet::iter)
+                    .copied(),
+            )
+            .collect();
         // Keep the parent's exact value identities rooted for inherited code,
         // but do not give a fresh actor its parent's local display alias name.
         let retained = self.acquire_leases(inherited.iter().map(|(_, id)| *id));
@@ -1071,6 +1121,7 @@ impl BindingTable {
                 id,
                 visible,
                 retained,
+                available_exact,
                 source_instances,
             },
         );
@@ -1309,15 +1360,19 @@ impl BindingTable {
             return None;
         }
         let module = SessionModule::val(tidepool_repr::Generation(generation));
-        if !self
-            .scope_reachable_modules(tree, scope)
-            .any(|reachable| reachable == module)
-        {
-            return None;
-        }
-        self.live
+        let entry = self
+            .live
             .values()
-            .find(|entry| entry.module == module && entry.value.identity == *identity)
+            .find(|entry| entry.module == module && entry.value.identity == *identity)?;
+        let module_reachable = self
+            .scope_reachable_modules(tree, scope)
+            .any(|reachable| reachable == module);
+        (module_reachable
+            || self
+                .tips
+                .get(&scope)
+                .is_some_and(|tip| tip.available_exact.contains(&entry.id)))
+        .then_some(entry)
     }
 
     /// Every live binding (including shadowed older gens), unordered.
