@@ -42,9 +42,12 @@ expensive compiler/test slot. Preserve shared daemons and unrelated worktrees.
 - [x] Weak live image registry, dead-key cleanup and real-owner lifetime tests.
   Integrated: `9c4f92c15` (`foundation/image-lifetime`, candidate `fd6acc569`).
   Four registry tests passed, including last real machine-owner release.
-- [ ] Independent bounded observation loops and inbox delivery, skipped missed
-  ticks, honest shutdown/resource retention. Owner: `foundation/external-execution`.
-- [ ] Reserve folded-cell value identity before off-checkout compilation.
+- [x] Independent bounded observation loops and inbox delivery, skipped missed
+  ticks, honest shutdown/resource retention. Integrated: `a2c82aa07`. Four
+  production-supervisor barrier tests passed, including blocked observation and
+  unfinished blocking work at retirement. Source freshness remains separate below.
+- [x] Reserve folded-cell value identity before off-checkout compilation.
+  Integrated: `dafd3112a`; four actor generation/split-install tests passed.
 - [ ] Restore hosted Codex call terminal settlement and waiter notification.
 - [ ] Represent failed/stale source observation honestly instead of presenting
   an earlier successful observation as a current check.
@@ -54,6 +57,9 @@ expensive compiler/test slot. Preserve shared daemons and unrelated worktrees.
 - [ ] One module product owns compiler/source/dependency identity, paired
   interface and prepared definitions, exports/imports and reachability evidence.
   Extend the existing artifact owner; do not add a second cache.
+  Worker-local paired products integrated in `0cc562a14`; five focused Haskell
+  entrypoints passed. Durable toolchain-qualified artifacts remain unfinished.
+  Plugin marker scoping correction integrated in `151ad4f7a`.
 - [ ] Distinguish compile-time Template Haskell execution from reusable runtime
   output. Untracked compile-time effects remain uncached.
 - [ ] Demand native fragments by recursive binding group; batch missing groups
@@ -114,3 +120,16 @@ Long shared-machine holds, serial Git/process setup and blocked observation
 loops amplify each other. The controlled fork experiment confirms a large
 mapping/resident-memory cost, but does not attribute all production wait time
 to fork. Continue measuring at the owning boundaries after each change.
+
+## Active integration notes
+
+The Codex settlement repair is in the isolated `foundation/client-settlement`
+worktree. Its first focused test compile exposed twelve stale test API calls,
+and the existing `host_input.rs` regression file was not registered. Those
+repairs and the new response-only terminal regression are drafted; no client
+tests have executed yet. The pinned client and running services are unchanged.
+
+Three Sol Medium lanes are implementing installation environments, owned
+external effects, and responsive actor execution. Root owns cross-layer review,
+actor effect adaptation, client repair, and integration. Builds use one slot;
+drafts and successful formatting are not verification.
