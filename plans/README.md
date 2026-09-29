@@ -79,6 +79,9 @@ unconsumed proposals are removed; Git retains their history.
 
 ## Referenced evidence
 
+- [Installed-request transfer review](foundation-installed-tools-transfer.md):
+  short admission lifetime, request-owner gaps, and source/handler publication
+  semantics for the staged host adapter.
 - [Retained-view launch measurement](foundation-view-spawn-measurement.md):
   bounded small/large synthetic-host comparison and spawn syscall trace for
   the thin namespace command helper.
