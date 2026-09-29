@@ -68,6 +68,10 @@ pub enum PreparedRuntimeError {
     CertifiedTargetOwners,
     #[error("certified install includes a source group unreachable from its target")]
     UnreachableCertifiedGroup,
+    #[error("certified source installation targeted a closed or conflicting lexical scope")]
+    SourceScopeAdmission,
+    #[error("lexical scope has multiple mutable instances for certified source {0:?}")]
+    AmbiguousSourceInstance(SourceBinder),
     #[error("prepared execution failed: {0}")]
     Run(ExecutionError),
     #[error("session binding {0:?} is not a live prepared binding")]
@@ -217,6 +221,8 @@ impl PreparedRuntimeError {
             | Self::MissingCertifiedOwner(_)
             | Self::CertifiedTargetOwners
             | Self::UnreachableCertifiedGroup
+            | Self::SourceScopeAdmission
+            | Self::AmbiguousSourceInstance(_)
             | Self::UnknownBinding(_)
             | Self::UnsettledEntry { .. }
             | Self::MachineNotInstalled
@@ -380,6 +386,10 @@ impl CertifiedTargetImage {
             CompiledProgram::compile_prepared_definitions(&prepared).map(Arc::new)
         })?;
         Ok(Self { prepared, image })
+    }
+
+    pub(crate) fn globals(&self) -> &[tidepool_repr::execution_schema::GlobalDecl] {
+        self.prepared.globals()
     }
 }
 
@@ -4569,6 +4579,77 @@ mod tests {
         engine.quiesce_and_collect_now().unwrap();
         assert_eq!(engine.residency().programs, 1);
         assert!(engine.unpin(bootstrap));
+    }
+
+    #[test]
+    fn certified_target_registration_uses_exact_persistent_scope_custody() {
+        use tidepool_codegen::prepared_program::GroupInventory;
+        use tidepool_repr::execution_schema::{ImportOwner, ModuleVersion};
+
+        let groups = [
+            certified_source_group("a", 2, "b"),
+            certified_source_group("b", 7, "a"),
+        ];
+        let root = SourceBinder {
+            version: ModuleVersion([1; 32]),
+            binder: testing::identity("Fixture", "a"),
+        };
+        let registry = ImageRegistry::new();
+        let demand = GroupInventory::new(&groups)
+            .unwrap()
+            .seal([root.clone()])
+            .unwrap();
+        let mut wire = testing::wire_program();
+        wire.globals.push(GlobalDecl {
+            identity: root.binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        });
+        let target =
+            CertifiedTargetImage::compile(testing::prepare(wire).unwrap(), &registry).unwrap();
+        let owner = ImportOwner::Source {
+            version: root.version,
+            binder: root.binder,
+        };
+        let mut session = super::super::persistent::PersistentSession::new(None, 1024 * 1024);
+        session
+            .install_prepared(testing::prepare(testing::wire_program()).unwrap())
+            .unwrap();
+        let scope = session.mint_isolated_scope();
+        session
+            .install_certified_turn_in(
+                scope,
+                target,
+                &[owner],
+                demand.compile(&registry).unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            session
+                .bindings()
+                .source_instances_in(session.scope_tree(), scope)
+                .len(),
+            2
+        );
+        assert!(session.residency().unwrap().programs >= 4);
+        assert!(matches!(
+            session.install_certified_turn_in(
+                tidepool_codegen::scope::ScopeId(u64::MAX),
+                CertifiedTargetImage::compile(
+                    testing::prepare(testing::wire_program()).unwrap(),
+                    &registry,
+                )
+                .unwrap(),
+                &[],
+                Vec::new(),
+                &HashMap::new(),
+            ),
+            Err(PreparedRuntimeError::SourceScopeAdmission)
+        ));
+        assert!(session.residency().unwrap().programs >= 4);
     }
 
     #[test]

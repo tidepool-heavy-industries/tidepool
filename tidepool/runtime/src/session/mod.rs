@@ -577,6 +577,12 @@ impl SessionLib {
                 });
             }
             let migration = recovery::migrate_v1(&manifest);
+            if migration.high_water.0 == u64::MAX {
+                return Err(SessionError::RecoveryManifest {
+                    path,
+                    detail: "legacy declaration generation space exhausted".into(),
+                });
+            }
             self.log.restore_high_water(migration.high_water);
             report.lost = migration.lost;
             let mut replay_failed = false;

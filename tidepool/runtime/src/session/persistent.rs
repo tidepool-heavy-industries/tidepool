@@ -5,22 +5,27 @@
 //! Suspension is threadless: a continuation is rooted as data and a later
 //! entry may resume it from a fresh evaluation thread.
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BindingTipId, SourceLeaseKey};
 use tidepool_codegen::machine::{CancelHandle, MachineDisposition};
-use tidepool_codegen::prepared_program::{ResidencyCounts, SourceInstanceLease};
+use tidepool_codegen::prepared_program::{
+    DemandedImage, PreparedHandle, ProgramId, ResidencyCounts, SourceBinder, SourceInstanceLease,
+};
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
 use tidepool_codegen::suspension::{ContinuationId, RealmId};
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::{DataCon, DataConTable, Generation, SessionModule, SessionVarId, VarId};
 
 use tidepool_codegen::binding_table::BoundValue;
-use tidepool_repr::execution_schema::{PreparedProgram, SymbolIdentity};
+use tidepool_repr::execution_schema::{ImportOwner, PreparedProgram, SymbolIdentity};
 
 use super::binding_table::{BindRecord, BindingIndex};
-use super::prepared::{InstallSnapshot, PreparedEngine, PreparedRuntimeError};
+use super::prepared::{
+    CertifiedTargetImage, InstallSnapshot, PreparedEngine, PreparedRuntimeError,
+};
 use super::{
     DeclarationCandidateRender, ExactExportError, ExactExportSurface, SessionCompileView,
     SessionError, SessionLib, SourceImports,
@@ -244,6 +249,112 @@ impl PersistentSession {
     ) -> Result<Vec<SourceLeaseKey>, Vec<SourceInstanceLease>> {
         self.bindings
             .register_source_instances_in(&self.scopes, scope, tokens)
+    }
+
+    /// Install a certified target against this exact lexical view and place
+    /// every newly materialized source root under its scope before returning
+    /// the executable target. The machine batch is unpublished until the
+    /// registrar accepts all roots; rejection releases its handles and pins.
+    pub(crate) fn install_certified_turn_in(
+        &mut self,
+        scope: ScopeId,
+        target: CertifiedTargetImage,
+        target_owners: &[ImportOwner],
+        demanded: Vec<DemandedImage<'_>>,
+        package_external: &HashMap<ImportOwner, PreparedHandle>,
+    ) -> Result<(ProgramId, bool), PreparedRuntimeError> {
+        if !self.scopes.is_live(scope) {
+            return Err(PreparedRuntimeError::SourceScopeAdmission);
+        }
+        let mut inherited = BTreeMap::<SourceBinder, SourceInstanceLease>::new();
+        for lease in self.bindings.source_instances_in(&self.scopes, scope) {
+            let binder = lease.binder().clone();
+            if inherited
+                .insert(binder.clone(), lease.clone())
+                .is_some_and(|previous| {
+                    previous.instance() != lease.instance() || previous.handle() != lease.handle()
+                })
+            {
+                return Err(PreparedRuntimeError::AmbiguousSourceInstance(binder));
+            }
+        }
+        let mut exact_external = package_external
+            .iter()
+            .filter(|(owner, _)| matches!(owner, ImportOwner::Package { .. }))
+            .map(|(owner, handle)| (owner.clone(), *handle))
+            .collect::<HashMap<_, _>>();
+        for (globals, owners) in std::iter::once((target.globals(), target_owners)).chain(
+            demanded.iter().map(|selected| {
+                (
+                    selected.group().definitions().globals(),
+                    selected.group().imports(),
+                )
+            }),
+        ) {
+            if globals.len() != owners.len() {
+                return Err(PreparedRuntimeError::CertifiedTargetOwners);
+            }
+            for (global, owner) in globals.iter().zip(owners) {
+                let ImportOwner::Retained { id, generation } = owner else {
+                    continue;
+                };
+                let entry = self
+                    .bindings
+                    .resolve_exact_prepared_in(&self.scopes, scope, &global.identity, *generation)
+                    .filter(|entry| entry.id == *id)
+                    .ok_or_else(|| PreparedRuntimeError::MissingCertifiedOwner(owner.clone()))?;
+                exact_external.insert(owner.clone(), entry.value.handle);
+            }
+        }
+        let engine = self
+            .machine
+            .as_mut()
+            .ok_or(PreparedRuntimeError::MachineNotInstalled)?;
+        let installed = engine.install_certified_turn(
+            target,
+            target_owners,
+            demanded,
+            &inherited,
+            &exact_external,
+            &self.bindings,
+        )?;
+        let target_id = installed.target;
+        let groups = installed.groups;
+        match self.register_source_instances_in(scope, installed.leases) {
+            Ok(keys) => {
+                let engine = self
+                    .machine
+                    .as_mut()
+                    .expect("certified machine remains installed");
+                for group in groups {
+                    assert!(
+                        engine.unpin(group),
+                        "new certified group retains its install pin"
+                    );
+                }
+                Ok((target_id, !keys.is_empty()))
+            }
+            Err(tokens) => {
+                let engine = self
+                    .machine
+                    .as_mut()
+                    .expect("certified machine remains installed");
+                for token in tokens {
+                    assert!(
+                        engine.release(token.handle()),
+                        "rejected source token remains rooted"
+                    );
+                }
+                for program in groups.into_iter().chain(std::iter::once(target_id)) {
+                    assert!(
+                        engine.unpin(program),
+                        "rejected certified program retains its pin"
+                    );
+                }
+                engine.quiesce_and_collect_now()?;
+                Err(PreparedRuntimeError::SourceScopeAdmission)
+            }
+        }
     }
 
     /// Keep eight automatic observations per scope. Explicit persistent code

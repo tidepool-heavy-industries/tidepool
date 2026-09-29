@@ -14,9 +14,10 @@ use parking_lot::Mutex;
 use tidepool_bridge::HaskellValue;
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::prepared_program::{
-    session_var_id, ImageRegistry, Parcel, PreparedHandle, PreparedOuter, PreparedResult, ProgramId,
+    session_var_id, DemandedImage, ImageRegistry, Parcel, PreparedHandle, PreparedOuter,
+    PreparedResult, ProgramId,
 };
-use tidepool_repr::execution_schema::{JsonLayout, PreparedProgram, SymbolIdentity};
+use tidepool_repr::execution_schema::{ImportOwner, JsonLayout, PreparedProgram, SymbolIdentity};
 
 use super::prepared::{ParkPolicy, PreparedRuntimeError, PreparedSettlement};
 use super::turn::TurnCode;
@@ -1877,6 +1878,31 @@ where
             self.advance_public_visibility(scope);
         }
         Ok(keys)
+    }
+
+    /// Admit one compiler-certified target and its demanded source closure
+    /// against a single scope snapshot under this session's machine checkout.
+    /// The persistent registrar owns every new source root before the target
+    /// can be run; failed registration rolls the native batch back.
+    pub(crate) fn install_certified_turn_in(
+        &mut self,
+        scope: ScopeId,
+        target: super::prepared::CertifiedTargetImage,
+        target_owners: &[ImportOwner],
+        demanded: Vec<DemandedImage<'_>>,
+        package_external: &HashMap<ImportOwner, PreparedHandle>,
+    ) -> Result<ProgramId, PreparedRuntimeError> {
+        let (program, source_visible) = self.state.install_certified_turn_in(
+            scope,
+            target,
+            target_owners,
+            demanded,
+            package_external,
+        )?;
+        if source_visible {
+            self.advance_public_visibility(scope);
+        }
+        Ok(program)
     }
 
     /// Observe only the continuation events caused by this checkout's host
