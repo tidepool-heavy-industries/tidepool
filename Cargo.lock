@@ -3545,6 +3545,7 @@ dependencies = [
  "tidepool-testing",
  "tidepool-toolchain",
  "tokio",
+ "tokio-tungstenite",
  "toml",
  "tracing",
  "tracing-appender",

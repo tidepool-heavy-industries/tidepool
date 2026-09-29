@@ -325,8 +325,10 @@ mod tests {
     use crate::actor_host::embedded_service::{
         attach_actor, drive_conversation_with_transport, submit_browser_command, EmbeddedService,
     };
+    use crate::actor_host::publish_embedded_root_snapshot;
     use crate::actor_host::test_campaign::TestCampaign;
     use async_trait::async_trait;
+    use futures_util::StreamExt;
     use harness::{
         embedding::InputObservation,
         engine::ResponsesTransport,
@@ -335,6 +337,32 @@ mod tests {
         transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError},
     };
     use std::{sync::Mutex, time::Duration};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    #[test]
+    fn m1_only_accepts_fresh_root_and_rejects_inherited_or_child_attachments() {
+        let root = exomonad_actor::ActorRef::first(exomonad_actor::ActorId(1));
+        let child = exomonad_actor::ActorRef::first(exomonad_actor::ActorId(2));
+        assert_eq!(
+            crate::actor_host::embedded_root_attachment_error(root, true, false, None),
+            None
+        );
+        assert!(
+            crate::actor_host::embedded_root_attachment_error(root, true, true, None)
+                .unwrap()
+                .contains("checkpoint")
+        );
+        assert!(
+            crate::actor_host::embedded_root_attachment_error(root, true, false, Some(child))
+                .unwrap()
+                .contains("inherited claims")
+        );
+        assert!(
+            crate::actor_host::embedded_root_attachment_error(child, false, false, None)
+                .unwrap()
+                .contains("explicit fresh-launch")
+        );
+    }
 
     #[derive(Clone)]
     struct Offline;
@@ -348,21 +376,35 @@ mod tests {
     struct ParkUntilInput {
         entered: Arc<tokio::sync::Notify>,
         completed: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
         requests: Arc<Mutex<Vec<ResponsesRequest>>>,
     }
 
     #[async_trait]
     impl ResponsesTransport for ParkUntilInput {
         async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
-            let mut requests = self.requests.lock().unwrap();
-            requests.push(request);
-            let round = requests.len();
-            drop(requests);
+            let round = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(request);
+                requests.len()
+            };
             let items = if round == 1 {
+                vec![
+                    Item(json!({
+                        "type":"custom_tool_call", "call_id":"raw-cell-1",
+                        "name":"haskell", "input":"40 + 2 :: Int"
+                    })),
+                    Item(json!({
+                        "type":"function_call", "call_id":"wait-for-cell",
+                        "name":"wait_agent", "arguments":"{}"
+                    })),
+                ]
+            } else if round == 2 {
                 self.entered.notify_one();
+                self.release.notified().await;
                 vec![Item(json!({
-                    "type":"function_call", "call_id":"wait-for-input",
-                    "name":"wait_agent", "arguments":"{}"
+                    "type":"message", "role":"assistant", "phase":"final_answer",
+                    "content":[{"type":"output_text","text":"cell finished"}]
                 }))]
             } else {
                 self.completed.notify_one();
@@ -436,6 +478,7 @@ mod tests {
         let transport = ParkUntilInput {
             entered: Arc::new(tokio::sync::Notify::new()),
             completed: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
             requests: Arc::new(Mutex::new(vec![])),
         };
         let embedded = attach_actor(
@@ -469,7 +512,6 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), transport.entered.notified())
             .await
             .unwrap();
-
         let origin = format!("https://{}", service.address);
         let api = format!("http://{}/api", service.address);
         let client = reqwest::Client::new();
@@ -491,7 +533,7 @@ mod tests {
         let response = client
             .post(format!("{api}/commands"))
             .header("Origin", &origin)
-            .header(reqwest::header::COOKIE, cookie)
+            .header(reqwest::header::COOKIE, &cookie)
             .json(&harness::server::ClientCommand::Submit {
                 command: "wake me".into(),
             })
@@ -504,30 +546,72 @@ mod tests {
             .await
             .unwrap();
         assert!(receipt.wake_error.is_none(), "{receipt:?}");
+        transport.release.notify_one();
         tokio::time::timeout(Duration::from_secs(5), transport.completed.notified())
             .await
             .unwrap();
         cancellation.send_replace(true);
-        tokio::time::timeout(Duration::from_secs(5), running)
+        let engine_result = tokio::time::timeout(Duration::from_secs(5), running)
             .await
             .unwrap()
-            .unwrap()
             .unwrap();
+        match engine_result {
+            Ok(()) => {}
+            Err(error) if error == "engine cancelled" => {}
+            Err(error) => panic!("embedded Engine failed: {error}"),
+        }
         let requests = transport.requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
         assert_eq!(
-            requests[1]
+            requests[2]
                 .input
                 .iter()
                 .filter(|item| item.0["content"] == "wake me")
                 .count(),
             1
         );
+        assert!(
+            requests[1]
+                .input
+                .iter()
+                .any(|item| item.0.to_string().contains("42")),
+            "settled Haskell result was not present in the next request: {:#?}",
+            requests[1].input
+        );
+        assert!(
+            requests[2]
+                .input
+                .iter()
+                .any(|item| item.0.to_string().contains("42")),
+            "raw-cell result was not retained: {:#?}",
+            requests[2].input
+        );
         assert!(matches!(
             conversation.input_observation(receipt.envelope_id).unwrap(),
             InputObservation::Included(_)
         ));
         drop(requests);
+        publish_embedded_root_snapshot(&service.control, &conversation);
+        for _ in 0..2 {
+            let mut request = format!("ws://{}/api/ws", service.address)
+                .into_client_request()
+                .unwrap();
+            request
+                .headers_mut()
+                .insert("Origin", origin.parse().unwrap());
+            request
+                .headers_mut()
+                .insert("Cookie", cookie.parse().unwrap());
+            let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+            let frame: serde_json::Value =
+                serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap())
+                    .unwrap();
+            assert!(frame.get("snapshot").is_some(), "{frame}");
+            assert_eq!(frame["snapshot"]["actors"].as_array().unwrap().len(), 1);
+            assert_eq!(frame["snapshot"]["actors"][0]["modelConversation"], "/root");
+            assert_eq!(frame["snapshot"]["conversations"][0]["path"], "/root");
+            socket.close(None).await.unwrap();
+        }
         service.shutdown().await.unwrap();
         campaign.forest.shutdown().await;
         campaign.hosted.await.unwrap();

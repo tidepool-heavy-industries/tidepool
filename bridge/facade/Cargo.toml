@@ -75,6 +75,7 @@ reqwest.workspace = true
 
 [dev-dependencies]
 tidepool-testing.workspace = true
+tokio-tungstenite = "0.29"
 
 [build-dependencies]
 tidepool-toolchain.workspace = true

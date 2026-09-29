@@ -1256,6 +1256,66 @@ struct InteractiveDeployment {
     fork_parent_thread: Option<BackendThreadId>,
 }
 
+struct PendingEmbeddedLaunch {
+    embedded: embedded_service::EmbeddedActor,
+    settings: crate::exomonad::EmbeddedLaunchConfig,
+    local_actor: LocalActorRef,
+    model: String,
+    effort: harness::model::Effort,
+    instructions: String,
+}
+
+fn embedded_root_attachment_error(
+    actor: ActorRef,
+    is_root: bool,
+    has_checkpoint: bool,
+    context_parent: Option<ActorRef>,
+) -> Option<String> {
+    if has_checkpoint {
+        return Some(format!(
+            "embedded actor {actor:?} has a retained checkpoint attachment that M1 cannot restore"
+        ));
+    }
+    if context_parent.is_some() {
+        return Some(format!(
+            "embedded actor {actor:?} inherits context from {context_parent:?}; M1 cannot restore inherited claims"
+        ));
+    }
+    if !is_root {
+        return Some(format!(
+            "embedded child actor {actor:?} has no explicit fresh-launch attachment in M1"
+        ));
+    }
+    None
+}
+
+fn publish_embedded_root_snapshot(
+    control: &harness::server::ServerControl,
+    conversation: &harness::embedding::Conversation,
+) {
+    let identity = conversation.identity();
+    let path = identity.actor.0.clone();
+    control.set_snapshot(harness::server::Snapshot {
+        actors: vec![harness::server::HostActorProjection {
+            identity: harness::server::HostActorIdentity {
+                run: identity.run.clone(),
+                actor: identity.actor.clone(),
+                incarnation: identity.incarnation.clone(),
+            },
+            parent: None,
+            kind: harness::server::HostActorKind::Model,
+            lifecycle: harness::server::HostActorLifecycle::Waiting,
+            model_conversation: Some(path.clone()),
+        }],
+        conversations: vec![serde_json::json!({
+            "id": path.clone(),
+            "path": path,
+            "state": "idle",
+        })],
+        ..harness::server::Snapshot::default()
+    });
+}
+
 #[derive(Clone)]
 struct PendingUpdateReconciliation {
     inbox: Arc<ActorInbox>,
@@ -3858,13 +3918,9 @@ async fn run_interactive_applications(
     let mut embedded_tasks: JoinSet<(ActorRef, LocalActorRef, Result<(), String>)> = JoinSet::new();
     let mut embedded_cancellations = HashMap::new();
     let mut embedded_live = BTreeSet::new();
-    let mut embedded_conversations: HashMap<
-        ActorRef,
-        (
-            harness::model::AgentPath,
-            Arc<harness::embedding::Conversation>,
-        ),
-    > = HashMap::new();
+    let mut embedded_pending = HashMap::new();
+    let mut embedded_conversations: HashMap<ActorRef, Arc<harness::embedding::Conversation>> =
+        HashMap::new();
     let mut embedded_root: Option<Arc<harness::embedding::Conversation>> = None;
     let mut binding_discoveries = JoinSet::new();
     let mut retirements = JoinSet::new();
@@ -4144,40 +4200,22 @@ async fn run_interactive_applications(
                                 Some(format!("{effort:?}")),
                             );
                             let local_actor = installation.actor.clone();
-                            let path = if is_root {
-                                harness::model::AgentPath("/root".into())
-                            } else {
-                                let Some(parent_actor) = installation.context_parent else {
-                                    break Some(format!(
-                                        "embedded actor {actor:?} has no retained context parent; inherited launch is unavailable"
-                                    ));
-                                };
-                                let Some((parent_path, _)) = embedded_conversations.get(&parent_actor) else {
-                                    break Some(format!(
-                                        "embedded actor {actor:?} context parent {parent_actor:?} has no attached conversation"
-                                    ));
-                                };
-                                harness::model::AgentPath(format!(
-                                    "{}/actor_{}_{}",
-                                    parent_path.0, actor.id.0, actor.incarnation.0
-                                ))
-                            };
-                            let parent = (!is_root).then(|| {
-                                let parent_actor = installation.context_parent.expect("checked above");
-                                embedded_conversations
-                                    .get(&parent_actor)
-                                    .expect("checked above")
-                                    .0
-                                    .clone()
-                            });
-                            let initial_input = installation.initial_user_message.clone();
+                            if let Some(error) = embedded_root_attachment_error(
+                                actor,
+                                is_root,
+                                installation.checkpoint.is_some(),
+                                installation.context_parent,
+                            ) {
+                                break Some(error);
+                            }
+                            let path = harness::model::AgentPath("/root".into());
                             let embedded = match embedded_service::attach_actor(
                                 service,
                                 &launch_context.run_root,
                                 path.clone(),
-                                parent,
+                                None,
                                 *installation,
-                                initial_input,
+                                None,
                             )
                             .await {
                                 Ok(embedded) => embedded,
@@ -4186,35 +4224,19 @@ async fn run_interactive_applications(
                                 )),
                             };
                             let root_conversation = Arc::clone(&embedded.conversation);
-                            embedded_conversations.insert(
+                            embedded_conversations.insert(actor, Arc::clone(&root_conversation));
+                            embedded_cancellations.insert(actor, embedded.cancellation.clone());
+                            embedded_pending.insert(
                                 actor,
-                                (path, Arc::clone(&root_conversation)),
-                            );
-                            embedded_cancellations.insert(actor, embedded.cancellation);
-                            embedded_live.insert(actor);
-                            let runtime = Arc::clone(&service.runtime);
-                            embedded_tasks.spawn(async move {
-                                let result = embedded_service::drive_conversation(
-                                    embedded.driver,
-                                    runtime,
-                                    &settings,
+                                PendingEmbeddedLaunch {
+                                    embedded,
+                                    settings,
+                                    local_actor,
                                     model,
                                     effort,
                                     instructions,
-                                    embedded.cancellation_rx,
-                                )
-                                .await;
-                                (actor, local_actor, result)
-                            });
-                            if is_root {
-                                embedded_root = Some(root_conversation);
-                                readiness
-                                    .send(ActorHostReadiness::EmbeddedReady {
-                                        root: root_identity,
-                                        address: service.address,
-                                    })
-                                    .ok();
-                            }
+                                },
+                            );
                             continue;
                         }
                         let fork_parent_thread = match (
@@ -4335,7 +4357,7 @@ async fn run_interactive_applications(
                     LocalResidentDeployment::SessionReady { activation } => {
                         let actor = activation.id.actor();
                         if launch_context.config.backend == crate::exomonad::ExomonadBackend::Embedded {
-                            let Some((_, conversation)) = embedded_conversations.get(&actor) else {
+                            let Some(conversation) = embedded_conversations.get(&actor) else {
                                 break Some(format!("embedded actor {actor:?} received an activation before conversation attachment"));
                             };
                             let sequence = activation.id.sequence();
@@ -4348,6 +4370,53 @@ async fn run_interactive_applications(
                                 .await
                             {
                                 break Some(format!("embedded activation for {actor:?} was not admitted: {error}"));
+                            }
+                            if let Some(pending) = embedded_pending.remove(&actor) {
+                                let Some(service) = embedded_service.as_ref() else {
+                                    break Some("embedded backend lost its prepared service".into());
+                                };
+                                let PendingEmbeddedLaunch {
+                                    embedded,
+                                    settings,
+                                    local_actor,
+                                    model,
+                                    effort,
+                                    instructions,
+                                } = pending;
+                                let runtime = Arc::clone(&service.runtime);
+                                let address = service.address;
+                                let root_conversation = Arc::clone(&embedded.conversation);
+                                embedded_live.insert(actor);
+                                embedded_tasks.spawn(async move {
+                                    let result = embedded_service::drive_conversation(
+                                        embedded.driver,
+                                        runtime,
+                                        &settings,
+                                        model,
+                                        effort,
+                                        instructions,
+                                        embedded.cancellation_rx,
+                                    )
+                                    .await;
+                                    (actor, local_actor, result)
+                                });
+                                if actor == root_identity {
+                                    embedded_root = Some(root_conversation);
+                                    publish_embedded_root_snapshot(
+                                        &service.control,
+                                        conversation,
+                                    );
+                                    readiness
+                                        .send(ActorHostReadiness::EmbeddedReady {
+                                            root: root_identity,
+                                            address,
+                                        })
+                                        .ok();
+                                }
+                            } else if !embedded_live.contains(&actor) {
+                                break Some(format!(
+                                    "embedded actor {actor:?} received an activation without a pending launch"
+                                ));
                             }
                             continue;
                         }
@@ -4373,6 +4442,7 @@ async fn run_interactive_applications(
 
                     LocalResidentDeployment::Retired { actor, terminal } => {
                         worktree_authority.remove_grant(actor.into());
+                        embedded_pending.remove(&actor);
                         if let Some(cancel) = embedded_cancellations.remove(&actor) {
                             cancel.send_replace(true);
                         }
@@ -4985,6 +5055,7 @@ async fn run_interactive_applications(
         owner.native_retirement = native_retirement;
         owner.cancel();
     }
+    embedded_pending.clear();
     for cancellation in embedded_cancellations.values() {
         cancellation.send_replace(true);
     }
