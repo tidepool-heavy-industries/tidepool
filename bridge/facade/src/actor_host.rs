@@ -19,6 +19,7 @@ mod commands;
 mod custody_tests;
 #[cfg(test)]
 mod documentation_tests;
+mod embedded_policy;
 mod host_incarnation;
 mod hosted_retirement;
 #[cfg(test)]
@@ -1605,6 +1606,7 @@ struct InteractiveApplicationOwner {
     custody: Option<Arc<dyn exomonad_actor::ForkWorkspaceCustody>>,
     scoped_retention: Option<scoped_custody::ScopedHostRetention>,
     hosted: hosted_retirement::HostedSlot,
+    embedded_policy: Option<Arc<embedded_policy::EmbeddedPolicySnapshot>>,
     launch: HostLaunchState,
     pending_activations: Vec<exomonad_actor::ResidentActivation>,
     terminal: Option<ActorTerminal>,
@@ -1771,6 +1773,7 @@ impl InteractiveApplicationOwner {
             custody.actor_stopped(&terminal);
         }
         self.terminal.get_or_insert(terminal);
+        drop(self.embedded_policy.take());
         self.cancel();
     }
 }
@@ -3965,6 +3968,9 @@ async fn run_interactive_applications(
                 let Some(event) = event else { break None };
                 match event {
                     LocalResidentDeployment::PolicyInstalled(installation) => {
+                        let embedded_policy = Arc::new(
+                            embedded_policy::EmbeddedPolicySnapshot::from_installation(&installation),
+                        );
                         if installation.creator.is_none() {
                             launch_context.config = root_config.borrow_and_update().clone();
                             root_identity = installation.actor.identity();
@@ -4019,6 +4025,7 @@ async fn run_interactive_applications(
                             custody: installation.worktree_custody.clone(),
                             scoped_retention: None,
                             hosted: hosted_slot.clone(),
+                            embedded_policy: Some(embedded_policy),
                             launch: HostLaunchState::Pending,
                             pending_activations: Vec::new(),
                             terminal: None,
