@@ -126,10 +126,30 @@ to fork. Continue measuring at the owning boundaries after each change.
 The Codex settlement repair is in the isolated `foundation/client-settlement`
 worktree. Its first focused test compile exposed twelve stale test API calls,
 and the existing `host_input.rs` regression file was not registered. Those
-repairs and the new response-only terminal regression are drafted; no client
-tests have executed yet. The pinned client and running services are unchanged.
+repairs now compile. The expanded focused run executed 13 tests: 11 passed,
+including both terminal-settlement regressions; two older newly enabled
+host-input tests failed on fixture drift and remain to repair. The pinned
+client and running services are unchanged.
 
 Three Sol Medium lanes are implementing installation environments, owned
 external effects, and responsive actor execution. Root owns cross-layer review,
 actor effect adaptation, client repair, and integration. Builds use one slot;
 drafts and successful formatting are not verification.
+
+## User review boundary
+
+Inanna requested an explicit yield before the next major design review.
+Finish and review the active fixes and their focused verification, including
+constructor identity, code lookup/coalescing, external execution, actor control,
+client settlement and source observation freshness. Do not begin implementation
+of either remaining design parcel before that review:
+
+- Durable module artifacts and demand-driven native compilation.
+- Git admission and the thin namespace launcher.
+
+When the active work reaches a reviewable handoff, flag that the review point
+has arrived and yield to Inanna, who will set up the higher-effort review.
+Present current evidence, remaining decisions and curated alternatives. If an
+active fix exposes a consequential unresolved design choice sooner, flag it
+and yield at that point instead. These parcels remain required in the overall
+foundation plan; this boundary changes sequencing, not the intended outcome.
