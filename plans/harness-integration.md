@@ -71,7 +71,11 @@ than appending mandatory native spawn/message/checkpoint tools.
 5. A completed old cell cannot restore its entire starting environment. Exports
    include compiler-owned declaration identities, not merely rendered names.
    Preserve ownership of roots/code referenced by older captures.
-6. Failure/cancellation publishes no notebook definitions. Completed effects,
+6. Publication has one runtime-owned commit point ordered against cancellation.
+   Cancellation before commit publishes no notebook definitions; after commit it
+   cannot undo them. Invalid declaration joins fail atomically, even if each
+   private environment was valid. Independently retained captures survive a
+   failed join. Completed effects,
    commands and receipts remain observable; failure is not rollback. Explicit
    effects such as successful source reload keep their own commit semantics.
 7. Dependent steps belong in one cell or a later admission after completion.

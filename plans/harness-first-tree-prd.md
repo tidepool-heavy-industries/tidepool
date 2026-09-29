@@ -84,8 +84,20 @@ the current public environment. Unrelated concurrent writes survive; same-name
 publication completion order determines future admission. Existing cells and
 captures retain their old meanings and supporting code/source/value leases.
 
-Failure or cancellation publishes no new notebook definitions. Already performed
-external effects and their evidence remain real. Explicit source reloads retain
+Declaration conflicts are separate from ordinary name shadowing. Individually
+valid private declarations may form an invalid public environment (for example,
+incompatible instances or exports). Validate the proposed join before visibility;
+an invalid join fails atomically and publishes no part of the delta. Preserve
+independently retained captures and report the publication failure separately
+from already-performed effects. Never promise that every declaration is mergeable.
+
+The runtime publication owner provides one authoritative commit point, ordered
+against cancellation. Cancellation winning before that point prevents publication;
+publication winning first remains committed despite a later cancellation request.
+A failed join or pre-publication cancellation publishes no notebook definitions.
+Staging outside the checkout must revalidate its target public generation before
+commit; retry join preparation as needed without reexecuting the cell's effects.
+Already performed external effects and their evidence remain real. Explicit source reloads retain
 the source owner's commit contract. Preserve declaration dependencies, instances,
 constructors and shadowed values: a rendered-name merge is not sufficient.
 
@@ -98,6 +110,12 @@ Connect the runtime checkpoint capability to harness `Checkpoint<T>` using an
 opaque host attachment that retains the exact Haskell environment and source
 leases. Capture includes the issuing cell's completed private scaffold at the
 effect boundary; function-local values cross only as explicit typed inputs.
+A capture freezes lexical resolution and retains its supporting capabilities,
+not the world: mutable values, external resources and checkout contents keep their
+own sharing/copying and lifetime contracts. Source leases retain the specified
+compiler/helper source versions; they do not snapshot arbitrary filesystem reads.
+Child admission revalidates authority; retaining a capability does not grant new
+privileges or undo revocation.
 
 The child can start before the parent cell returns. Reuse one capture for several
 children, each with its own admitted actor and checkout. Later parent failure or
@@ -126,18 +144,41 @@ owner. Interrupt, retirement request and proven cleanup are distinct. A dropped
 result waiter or browser connection cannot establish cancellation. Preserve late
 evidence and cleanup authority when an external operation remains unconfirmed.
 
-## Recommended implementation sequence
+## Two independently reviewable milestones
 
-1. Finish and review the engine foundation under its current acceptance gates.
-2. Reconcile its owners with `harness-integration-runtime.md`; implement private
-   execution/publication and reusable runtime captures with focused owner checks.
-3. Wire the accepted harness revision into an opt-in embedded backend: bound
-   host capability, provider dispatcher, wake/control, conversation head handling,
-   authenticated browser server and lifecycle projection. Preserve Codex viability.
-4. Exercise the real resident path with deterministic model transport. Test
-   async calls and pending-parent child launch before paying for a model tree.
-5. Build the matched Exomonad binary and assets; record revisions and run the
-   bounded live tree below. Launch only after all required gates pass.
+Finish and review the engine foundation under its current acceptance gates first.
+Then establish these two milestones; the first is useful evidence, not the release
+of the full concurrent worker-tree contract.
+
+### M1: embedded sequential resident path
+
+Wire the accepted harness revision into an opt-in embedded backend: bound host
+capability, provider dispatcher, wake/control, conversation head handling,
+authenticated browser server and lifecycle projection. Use the current sequential
+notebook admission/publication contract explicitly. Retain cancellation and
+reconnect evidence through the real resident path with deterministic transport.
+Do not advertise concurrent cells or atomic cell publication in this milestone.
+Preserve Codex viability. G0/G1, scoped cancellation and identity isolation are
+M1's gates; G4's sibling-execution case belongs to M2.
+
+Before sharing the scheduler across conversations, qualify internal operation
+identity by its originating conversation/incarnation, original request and original
+provider call ID. Preserve the provider ID verbatim on the wire. Resolve a
+checkpoint's inherited pending claim to that same origin operation, not to a new
+operation in the child conversation. Store claims, scheduler admission, completion,
+cancellation and replay must agree on this identity; this is harness-owner work,
+not a Tidepool-side ID rewrite. Exercise equal provider call IDs in independent
+conversations, repeated IDs in different requests, and inherited shared claims.
+The exact Rust key and storage migration require review against existing owners
+before implementation. Current global CallId keying is not sufficient evidence.
+
+### M2: private executions, reusable captures and full tree
+
+Reconcile the foundation's owners with `harness-integration-runtime.md`; design
+and review the per-execution state and publication boundary before implementation.
+Implement private execution/publication and reusable runtime captures, then prove
+G2–G4 using real resident execution and deterministic model transport. Build the
+matched binary/assets and launch G5 only after the required gates pass.
 
 Composition and resident work may proceed independently once their interface is
 agreed. Share one expensive compiler slot. Use bounded Luna work for mechanical
@@ -149,9 +190,9 @@ consumers/tests and Sol for cross-owner state transitions. Review exact commits.
 | --- | --- |
 | G0: candidate integrity | Accepted harness revision, engine revision and adapter diff recorded; relevant targets compile; existing Codex path remains usable |
 | G1: real cell | Actual embedded Engine dispatches raw Haskell to an authorized resident actor, retains result and survives browser reconnect without reexecution |
-| G2: concurrent cells | Cell A parks; B executes and publishes; A resumes and publishes without erasing B. Same-name ordering, captured old meaning and failed-cell nonpublication are exercised |
+| G2: concurrent cells | Cell A parks; B executes and publishes; A resumes and publishes without erasing B. Same-name ordering, captured old meaning, invalid declaration joins and failed-cell nonpublication are exercised |
 | G3: inherited launch | Inside an unfinished parent cell, capture scaffold and launch two children from it; children use captured Haskell/helper definitions and return typed replies. Repeat with later parent failure and retained capture |
-| G4: control/lifetime | Cancel one execution while its sibling proceeds; fence stale completion; preserve unconfirmed external work; retirement releases only resources whose owners are actually done |
+| G4: control/lifetime | Exercise both cancellation/publication orders with explicit barriers; cancel one execution while its sibling proceeds; fence stale completion; preserve unconfirmed external work; retirement releases only resources whose owners are actually done |
 | G5: live useful tree | Browser-operated Sol Medium root completes a bounded task through recursive Luna owners and leaves, reviewed joins and integration; root interview and trace retained |
 
 For G5 choose a disposable project with two independent small components. Each
@@ -181,10 +222,10 @@ recovery, automatic effect replay or mandatory fresh machine per child here.
 Plain-text compaction uses the harness implementation; the host supplies capacity
 and preserves runtime state independently of conversation summarization.
 
-The harness scheduler currently requires unique call IDs within its instance and
-refuses collisions. Choose and document scheduler ownership; never silently
-rewrite provider call IDs. If the connected provider violates this assumption,
-repair its keying in the harness owner before launch.
+A shared process should reduce per-agent client-process overhead. It does not by
+itself reclaim compiler state or native code, or parallelize machine CPU execution.
+Concurrent cells enable useful progress around waits. Measure those mechanisms
+separately rather than attributing every improvement to the harness migration.
 
 Escalate any incompatible engine design or required weakening of publication,
 checkpoint lifetime or cleanup semantics. Report the exact conflicting owner and
