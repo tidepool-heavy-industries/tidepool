@@ -7,6 +7,10 @@ unconsumed proposals are removed; Git retains their history.
 
 ## Open design questions
 
+- [Engine foundation](engine-foundation.md): approved compiler context/artifact,
+  native code lifetime and external execution redesign after the wave22
+  investigation; implementation ledger and acceptance evidence.
+
 - [Continuation simplification](continuation-simplification.md): compiler memo
   repair, dynamic actor sources, Luna review, and message-based coordination.
 
