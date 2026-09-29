@@ -10,7 +10,7 @@
               needing the launcher"
 )]
 #![cfg(target_os = "linux")]
-use std::{fs, path::Path, process::Command};
+use std::{fs, path::{Path, PathBuf}, process::Command};
 
 #[test]
 fn fault_child() {
@@ -56,17 +56,23 @@ fn fault_child() {
 #[test]
 fn strict_directory_faults_are_reported_after_visible_publication() {
     let temp = tempfile::tempdir().unwrap();
-    let library = temp.path().join("fault.so");
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/directory_fault.c");
-    assert!(Command::new("cc")
-        .args(["-shared", "-fPIC", "-Wall", "-Werror"])
-        .arg(source)
-        .args(["-o"])
-        .arg(&library)
-        .arg("-ldl")
-        .status()
-        .unwrap()
-        .success());
+    let library = std::env::var_os("TIDEPOOL_DIRECTORY_FAULT_LIBRARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let library = temp.path().join("fault.so");
+            let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/directory_fault.c");
+            assert!(Command::new("cc")
+                .args(["-shared", "-fPIC", "-Wall", "-Werror"])
+                .arg(source)
+                .args(["-o"])
+                .arg(&library)
+                .arg("-ldl")
+                .status()
+                .unwrap()
+                .success());
+            library
+        });
     for (index, (operation, kind, ok, hits)) in [
         ("durable", "open", false, true),
         ("durable", "sync", false, true),

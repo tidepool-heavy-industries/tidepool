@@ -49,8 +49,17 @@ tidepool_rust_test(
     deps = [
         "//third-party/rust:tempfile",
         ":tidepool_atomic_write",
+        ":directory_fault_shared",
     ],
-    env = {"PATH": read_root_config("nix", "action_path")},
+    env = {"TIDEPOOL_DIRECTORY_FAULT_LIBRARY": "$(location :directory_fault_shared)"},
+    visibility = ["PUBLIC"],
+)
+
+cxx_library(
+    name = "directory_fault_shared",
+    srcs = ["tests/fixtures/directory_fault.c"],
+    preferred_linkage = "shared",
+    linker_flags = ["-ldl"],
     visibility = ["PUBLIC"],
 )
 
