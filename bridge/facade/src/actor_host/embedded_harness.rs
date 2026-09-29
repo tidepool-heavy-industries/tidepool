@@ -498,7 +498,8 @@ mod tests {
                 // Keep the round nonfinal after settlement so the next boundary compacts.
                 vec![Item(json!({
                     "type":"custom_tool_call", "call_id":"raw-cell-2",
-                    "name":"haskell", "input":"1 + 1 :: Int"
+                    "name":"haskell",
+                    "input":include_str!("embedded_checkpoint_capture.hs")
                 }))]
             } else {
                 self.completed.notify_one();
@@ -519,7 +520,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_embedded_service_authenticates_browser_and_wakes_real_actor_engine() {
+    async fn production_embedded_engine_compacts_and_publishes_checkpoint_effect() {
         let campaign = TestCampaign::start().await;
         let actor = campaign.actor.identity();
         let installation = Arc::new(EmbeddedPolicyInstallation::from_installation(
@@ -682,6 +683,47 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), transport.completed.notified())
             .await
             .unwrap();
+        let checkpoint_call = harness::model::CallId("raw-cell-2".into());
+        let checkpoint_claim = store
+            .claims(&checkpoint_call)
+            .unwrap()
+            .into_iter()
+            .find(|claim| claim.operation.origin == embedded_origin)
+            .expect("the real Engine checkpoint call must retain its exact operation");
+        let checkpoint_output = tokio::time::timeout(
+            Duration::from_secs(30),
+            service
+                .runtime
+                .scheduler()
+                .wait(&checkpoint_claim.operation),
+        )
+        .await
+        .expect("real Haskell checkpoint effect did not settle")
+        .unwrap();
+        let checkpoint_response = match checkpoint_output {
+            harness::turn::JobOutput::Completed(Ok(response)) => response,
+            other => panic!("real Haskell checkpoint effect failed: {other:?}"),
+        };
+        let committed_run =
+            serde_json::to_value(tidepool_runtime::session::WorkbenchRunStatus::Committed).unwrap();
+        let committed_item =
+            serde_json::to_value(tidepool_runtime::session::WorkbenchItemStatus::Committed)
+                .unwrap();
+        assert_eq!(
+            checkpoint_response["status"], committed_run,
+            "{checkpoint_response}"
+        );
+        let checkpoint_items = checkpoint_response["items"]
+            .as_array()
+            .expect("WorkbenchResponse.items must be an array");
+        let checkpoint_item = checkpoint_items
+            .last()
+            .expect("checkpoint workbench response must contain the result item");
+        assert_eq!(
+            checkpoint_item["status"], committed_item,
+            "{checkpoint_response}"
+        );
+        assert_eq!(checkpoint_item["output"], "True", "{checkpoint_response}");
         cancellation.send_replace(true);
         let engine_result = tokio::time::timeout(Duration::from_secs(5), running)
             .await
@@ -716,49 +758,6 @@ mod tests {
             InputObservation::Included(_)
         ));
         drop(requests);
-        let capture = EmbeddedCheckpointCapture {
-            store: store.clone(),
-            identity: host_identity.clone(),
-            operation: claim.operation.clone(),
-            thread_id: format!("{}:{}", host_identity.run, host_identity.actor.0),
-        };
-        let boundary = tidepool_runtime::session::WorkbenchForkBoundary {
-            thread_id: capture.thread_id.clone(),
-            call_id: claim.operation.call.0.clone(),
-        };
-        let attachment = capture
-            .capture("captured-child", &boundary)
-            .expect("host capture must freeze the exact Engine call boundary");
-        let captured = attachment
-            .downcast::<EmbeddedHostedCheckpoint>()
-            .expect("host capture must retain its typed harness checkpoint");
-        assert_eq!(captured.checkpoint.origin(), &host_identity.actor);
-        assert_eq!(
-            captured.checkpoint.source_request(),
-            &claim.operation.request
-        );
-        assert_eq!(captured.checkpoint.boundary_call(), &claim.operation.call);
-        assert_eq!(captured.checkpoint.metadata()["name"], "captured-child");
-
-        let missing_call = harness::model::CallId("missing-host-call".into());
-        let missing = EmbeddedCheckpointCapture {
-            store,
-            identity: host_identity,
-            operation: OperationId {
-                call: missing_call.clone(),
-                ..claim.operation.clone()
-            },
-            thread_id: capture.thread_id.clone(),
-        };
-        let missing_boundary = tidepool_runtime::session::WorkbenchForkBoundary {
-            thread_id: missing.thread_id.clone(),
-            call_id: missing_call.0,
-        };
-        assert!(matches!(
-            missing.capture("not-captured", &missing_boundary),
-            Err(HostedCheckpointCaptureError::CaptureFailed)
-        ));
-
         publish_embedded_root_snapshot(
             &service.control,
             conversation.identity(),
