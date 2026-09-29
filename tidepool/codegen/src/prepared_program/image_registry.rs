@@ -14,10 +14,12 @@
 //! even when hashes collide. The registry owns no image: installed machines,
 //! parcels, and active compiles hold strong references. Access removes a dead
 //! key immediately; an amortized sweep reclaims dead keys in other buckets.
+//! An in-flight entry holds only the election and wakeup state for callers
+//! compiling after machine checkout release.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 
 use tidepool_repr::execution_schema::LinkedProgram;
 
@@ -30,15 +32,97 @@ pub struct ImageRegistry {
     entries: Mutex<Entries>,
     /// Lifetime lookups that found an existing image. Never decremented.
     hits: AtomicU64,
-    /// Lifetime lookups that found nothing (the caller then compiles and
-    /// [`Self::insert`]s). Never decremented.
+    /// Lifetime lookups or admissions that elected a compiler. Never decremented.
     misses: AtomicU64,
 }
 
 #[derive(Default)]
 struct Entries {
-    images: HashMap<LinkedProgram, Weak<CompiledProgram>>,
+    images: HashMap<LinkedProgram, Entry>,
     since_sweep: usize,
+}
+
+enum Entry {
+    Ready(Weak<CompiledProgram>),
+    Compiling(Arc<Flight>),
+}
+
+#[derive(Default)]
+struct Flight {
+    finished: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl Flight {
+    fn wait(&self) {
+        let mut finished = self.finished.lock().unwrap_or_else(PoisonError::into_inner);
+        while !*finished {
+            finished = self
+                .changed
+                .wait(finished)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    fn finish(&self) {
+        *self.finished.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.changed.notify_all();
+    }
+}
+
+/// The elected compiler's publication obligation. Dropping it on a returned
+/// error or panic clears the candidate and wakes followers to retry.
+struct CompileLease<'a> {
+    registry: &'a ImageRegistry,
+    key: LinkedProgram,
+    flight: Arc<Flight>,
+    published: bool,
+}
+
+impl CompileLease<'_> {
+    fn publish(mut self, image: Arc<CompiledProgram>) -> Arc<CompiledProgram> {
+        let mut entries = self
+            .registry
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (selected, publish) = match entries.images.get(&self.key) {
+            Some(Entry::Ready(existing)) => (existing.upgrade().unwrap_or(image), true),
+            Some(Entry::Compiling(current)) if Arc::ptr_eq(current, &self.flight) => (image, true),
+            Some(Entry::Compiling(_)) => (image, false),
+            None => (image, true),
+        };
+        if publish {
+            entries
+                .images
+                .insert(self.key.clone(), Entry::Ready(Arc::downgrade(&selected)));
+        }
+        entries.tick();
+        self.published = true;
+        drop(entries);
+        self.flight.finish();
+        selected
+    }
+}
+
+impl Drop for CompileLease<'_> {
+    fn drop(&mut self) {
+        if self.published {
+            return;
+        }
+        let mut entries = self
+            .registry
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if matches!(entries.images.get(&self.key), Some(Entry::Compiling(current)) if Arc::ptr_eq(current, &self.flight))
+        {
+            entries.images.remove(&self.key);
+        }
+        entries.tick();
+        drop(entries);
+        self.flight.finish();
+    }
 }
 
 impl Entries {
@@ -48,7 +132,10 @@ impl Entries {
     fn tick(&mut self) {
         self.since_sweep += 1;
         if self.since_sweep >= self.images.len().max(1) {
-            self.images.retain(|_, image| image.strong_count() != 0);
+            self.images.retain(|_, entry| match entry {
+                Entry::Ready(image) => image.strong_count() != 0,
+                Entry::Compiling(_) => true,
+            });
             self.since_sweep = 0;
         }
     }
@@ -64,8 +151,11 @@ impl ImageRegistry {
     #[must_use]
     pub fn lookup(&self, key: &LinkedProgram) -> Option<Arc<CompiledProgram>> {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        let found = entries.images.get(key).and_then(Weak::upgrade);
-        if found.is_none() {
+        let found = match entries.images.get(key) {
+            Some(Entry::Ready(image)) => image.upgrade(),
+            _ => None,
+        };
+        if matches!(entries.images.get(key), Some(Entry::Ready(_))) && found.is_none() {
             entries.images.remove(key);
         }
         entries.tick();
@@ -77,22 +167,82 @@ impl ImageRegistry {
         found
     }
 
-    /// Register `image` as the compiled form of `key`. First writer wins:
-    /// if another caller already inserted an entry for content-and-target-
-    /// equal `key` (a race between two machines that both missed the same
-    /// lookup and compiled concurrently), the ALREADY-registered `Arc` is
-    /// returned and `image` is dropped -- every later caller, and this one,
-    /// then shares exactly one compiled image for that content, never two.
+    /// Register `image` as the compiled form of `key`. A live first writer
+    /// wins, including against an in-flight compiler. This nonblocking entry
+    /// point is for callers that cannot wait while holding machine checkout.
     #[must_use]
     pub fn insert(&self, key: LinkedProgram, image: Arc<CompiledProgram>) -> Arc<CompiledProgram> {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(existing) = entries.images.get(&key).and_then(Weak::upgrade) {
+        if let Some(existing) = match entries.images.get(&key) {
+            Some(Entry::Ready(image)) => image.upgrade(),
+            _ => None,
+        } {
             entries.tick();
             return existing;
         }
-        entries.images.insert(key, Arc::downgrade(&image));
+        let displaced = entries
+            .images
+            .insert(key, Entry::Ready(Arc::downgrade(&image)));
         entries.tick();
+        drop(entries);
+        if let Some(Entry::Compiling(flight)) = displaced {
+            flight.finish();
+        }
         image
+    }
+
+    /// Share one in-flight compile for this exact linked program. Call only
+    /// after releasing a machine checkout: followers may wait while another
+    /// thread compiles. The closure runs outside the registry lock; an error
+    /// or panic drops the lease and wakes followers to elect another compiler.
+    pub fn get_or_compile<E>(
+        &self,
+        key: &LinkedProgram,
+        compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
+    ) -> Result<Arc<CompiledProgram>, E> {
+        enum Admission {
+            Ready(Arc<CompiledProgram>),
+            Wait(Arc<Flight>),
+            Compile(Arc<Flight>),
+        }
+        let mut compile = Some(compile);
+        loop {
+            let admission = {
+                let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+                let admission = match entries.images.get(key) {
+                    Some(Entry::Ready(image)) => image.upgrade().map(Admission::Ready),
+                    Some(Entry::Compiling(flight)) => Some(Admission::Wait(Arc::clone(flight))),
+                    None => None,
+                };
+                let admission = admission.unwrap_or_else(|| {
+                    let flight = Arc::new(Flight::default());
+                    entries
+                        .images
+                        .insert(key.clone(), Entry::Compiling(Arc::clone(&flight)));
+                    Admission::Compile(flight)
+                });
+                entries.tick();
+                admission
+            };
+            match admission {
+                Admission::Ready(image) => {
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                    return Ok(image);
+                }
+                Admission::Wait(flight) => flight.wait(),
+                Admission::Compile(flight) => {
+                    self.misses.fetch_add(1, Ordering::Relaxed);
+                    let lease = CompileLease {
+                        registry: self,
+                        key: key.clone(),
+                        flight,
+                        published: false,
+                    };
+                    let image = compile.take().expect("one compile closure per admission")()?;
+                    return Ok(lease.publish(image));
+                }
+            }
+        }
     }
 
     /// Lifetime lookups that hit an already-compiled image.
@@ -112,6 +262,9 @@ impl ImageRegistry {
 mod tests {
     use super::super::{PreparedMachine, PreparedMachineOptions, RunOptions};
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
     use tidepool_repr::execution_schema::{
         link_program, testing, Atom, ExprFrame, MachineImports, ScalarLiteral,
     };
@@ -132,6 +285,24 @@ mod tests {
 
     fn compiled() -> Arc<CompiledProgram> {
         Arc::new(CompiledProgram::compile(&program()).expect("fixture compiles"))
+    }
+
+    fn wait_for_follower(registry: &ImageRegistry, key: &LinkedProgram) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let admitted = {
+                let entries = registry.entries.lock().unwrap();
+                matches!(entries.images.get(key), Some(Entry::Compiling(flight)) if Arc::strong_count(flight) >= 3)
+            };
+            if admitted {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "follower did not join flight"
+            );
+            std::thread::yield_now();
+        }
     }
 
     #[test]
@@ -233,5 +404,139 @@ mod tests {
         assert!(Arc::ptr_eq(&registry.lookup(&live_key).unwrap(), &live));
         assert!(Arc::ptr_eq(&registry.lookup(&live_key).unwrap(), &live));
         assert_eq!(registry.entries.lock().unwrap().images.len(), 1);
+    }
+
+    #[test]
+    fn concurrent_requests_compile_once_and_share_the_winner() {
+        let registry = Arc::new(ImageRegistry::new());
+        let key = program();
+        let compiles = Arc::new(AtomicUsize::new(0));
+        let (started_send, started_recv) = mpsc::channel();
+        let (release_send, release_recv) = mpsc::channel();
+        let leader_registry = Arc::clone(&registry);
+        let leader_key = key.clone();
+        let leader_compiles = Arc::clone(&compiles);
+        let first = std::thread::spawn(move || {
+            leader_registry
+                .get_or_compile(&leader_key, || {
+                    leader_compiles.fetch_add(1, Ordering::SeqCst);
+                    started_send.send(()).unwrap();
+                    release_recv.recv().unwrap();
+                    Ok::<_, ()>(compiled())
+                })
+                .unwrap()
+        });
+        started_recv.recv_timeout(Duration::from_secs(2)).unwrap();
+        let follower_registry = Arc::clone(&registry);
+        let follower_key = key.clone();
+        let follower_compiles = Arc::clone(&compiles);
+        let second = std::thread::spawn(move || {
+            follower_registry
+                .get_or_compile(&follower_key, || {
+                    follower_compiles.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, ()>(compiled())
+                })
+                .unwrap()
+        });
+        wait_for_follower(&registry, &key);
+        release_send.send(()).unwrap();
+        let first = first.join().unwrap();
+        let second = second.join().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(compiles.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn nonblocking_insert_wins_over_an_in_flight_compile() {
+        let registry = Arc::new(ImageRegistry::new());
+        let key = program();
+        let (started_send, started_recv) = mpsc::channel();
+        let (release_send, release_recv) = mpsc::channel();
+        let leader_registry = Arc::clone(&registry);
+        let leader_key = key.clone();
+        let leader = std::thread::spawn(move || {
+            leader_registry
+                .get_or_compile(&leader_key, || {
+                    started_send.send(()).unwrap();
+                    release_recv.recv().unwrap();
+                    Ok::<_, ()>(compiled())
+                })
+                .unwrap()
+        });
+        started_recv.recv_timeout(Duration::from_secs(2)).unwrap();
+        let inserted = registry.insert(key.clone(), compiled());
+        release_send.send(()).unwrap();
+        let elected = leader.join().unwrap();
+        assert!(Arc::ptr_eq(&inserted, &elected));
+        assert!(Arc::ptr_eq(&inserted, &registry.lookup(&key).unwrap()));
+    }
+
+    #[test]
+    fn panicked_compiler_wakes_follower_to_retry() {
+        let registry = Arc::new(ImageRegistry::new());
+        let key = program();
+        let (started_send, started_recv) = mpsc::channel();
+        let (release_send, release_recv) = mpsc::channel();
+        let leader_registry = Arc::clone(&registry);
+        let leader_key = key.clone();
+        let leader = std::thread::spawn(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                leader_registry.get_or_compile(
+                    &leader_key,
+                    || -> Result<Arc<CompiledProgram>, ()> {
+                        started_send.send(()).unwrap();
+                        release_recv.recv().unwrap();
+                        panic!("injected compiler panic");
+                    },
+                )
+            }))
+        });
+        started_recv.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (result_send, result_recv) = mpsc::channel();
+        let follower_registry = Arc::clone(&registry);
+        let follower_key = key.clone();
+        let follower = std::thread::spawn(move || {
+            let image = follower_registry
+                .get_or_compile(&follower_key, || Ok::<_, ()>(compiled()))
+                .unwrap();
+            result_send.send(image).unwrap();
+        });
+        wait_for_follower(&registry, &key);
+        release_send.send(()).unwrap();
+        assert!(leader.join().unwrap().is_err());
+        assert!(result_recv.recv_timeout(Duration::from_secs(2)).is_ok());
+        follower.join().unwrap();
+    }
+
+    #[test]
+    fn failed_compiler_wakes_follower_to_retry() {
+        let registry = Arc::new(ImageRegistry::new());
+        let key = program();
+        let (started_send, started_recv) = mpsc::channel();
+        let (release_send, release_recv) = mpsc::channel();
+        let leader_registry = Arc::clone(&registry);
+        let leader_key = key.clone();
+        let leader = std::thread::spawn(move || {
+            leader_registry.get_or_compile(&leader_key, || {
+                started_send.send(()).unwrap();
+                release_recv.recv().unwrap();
+                Err::<Arc<CompiledProgram>, _>("injected compile error")
+            })
+        });
+        started_recv.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (result_send, result_recv) = mpsc::channel();
+        let follower_registry = Arc::clone(&registry);
+        let follower_key = key.clone();
+        let follower = std::thread::spawn(move || {
+            let image = follower_registry
+                .get_or_compile(&follower_key, || Ok::<_, &'static str>(compiled()))
+                .unwrap();
+            result_send.send(image).unwrap();
+        });
+        wait_for_follower(&registry, &key);
+        release_send.send(()).unwrap();
+        assert!(leader.join().unwrap().is_err());
+        assert!(result_recv.recv_timeout(Duration::from_secs(2)).is_ok());
+        follower.join().unwrap();
     }
 }
