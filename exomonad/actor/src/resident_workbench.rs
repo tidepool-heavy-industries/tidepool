@@ -1199,6 +1199,10 @@ pub(crate) struct CleanupReceiptProjection {
     reason = "boundaries deliberately retain linear runtime custody without a second allocation layer"
 )]
 pub(crate) enum ResidentActorBoundary {
+    External {
+        continuation: ResidentHole,
+        work: tidepool_effect::DeferredEffect,
+    },
     Console {
         continuation: ResidentHole,
         text: String,
@@ -1404,6 +1408,7 @@ impl ResidentActorBoundary {
     pub(crate) fn operation(&self) -> &'static str {
         match self {
             Self::Completed => "program completion",
+            Self::External { .. } => "external effect",
             Self::Sleep { .. } => "sleep",
             Self::Jev { .. } => "jev",
             Self::Command { .. } => "command job",
@@ -3205,7 +3210,7 @@ where
                     compiled.into_code(),
                     tidepool_repr::SessionVarId::from_extract(binder.var_id),
                 ) {
-                    Ok(ResidentOutcome::Suspended { hole, .. }) => {
+                    Ok(ResidentOutcome::Suspended { hole, .. } | ResidentOutcome::Deferred { hole, .. }) => {
                         if let Err(abort_error) = session
                             .abort(hole.cont_id(), "pure activation preview suspended".into())
                         {
@@ -5721,6 +5726,23 @@ where
                 installed_bindings,
             })
         }
+        ResidentOutcome::Deferred {
+            output,
+            hole,
+            request,
+            work,
+        } => {
+            fragment.output.extend(output);
+            Ok(ResidentWorkbenchStep::Running {
+                fragment: Box::new(fragment),
+                outcome: Box::new(ResidentOutcome::Deferred {
+                    output: Vec::new(),
+                    hole,
+                    request,
+                    work,
+                }),
+            })
+        }
         ResidentOutcome::Suspended {
             output,
             hole,
@@ -6250,6 +6272,22 @@ where
         let (hole, request) = match outcome {
             ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. } => {
                 return Ok(ResidentActorBoundary::Completed);
+            }
+            ResidentOutcome::Deferred { hole, work, .. } => {
+                if matches!(mode, BoundaryCapture::Replacement) {
+                    let reason = "replacement staging cannot execute external effects".to_owned();
+                    let (_, consumed) = self.abort_live(context, hole, reason.clone()).await;
+                    if !consumed {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "replacement external effect could not be retired".into(),
+                        ));
+                    }
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(reason));
+                }
+                return Ok(ResidentActorBoundary::External {
+                    continuation: hole,
+                    work,
+                });
             }
             ResidentOutcome::Suspended { hole, request, .. } => (hole, request),
         };
@@ -7113,30 +7151,45 @@ where
             crate::ActorExitKind::Failed => 1,
             crate::ActorExitKind::Cancelled => 2,
         };
-        self.access
+        let mut outcome = self
+            .access
             .with_machine_wait(
-                context,
+                context.clone(),
                 Some(admission_timeout),
-                move |session, _context, _| match session
-                    .run_rooted_entry("actor_shutdown", hook, argument, realm, None)
-                    .map_err(ResidentActorWorkbenchError::Resident)?
-                {
-                    ResidentOutcome::Completed { .. } => Ok(()),
-                    ResidentOutcome::BindingsCommitted { .. } => {
-                        Err(ResidentActorWorkbenchError::ActorProtocol(
-                            "shutdown completed as an impossible projected binding".into(),
-                        ))
-                    }
-                    ResidentOutcome::Suspended { request, .. } => {
-                        let request = ResidentRequest::decode(&request, session.data_con_table())?;
-                        Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                            "shutdown suspended on disallowed `{}`",
-                            request.operation()
-                        )))
-                    }
+                move |session, _context, _| {
+                    session
+                        .run_rooted_entry("actor_shutdown", hook, argument, realm, None)
+                        .map_err(ResidentActorWorkbenchError::Resident)
                 },
             )
-            .await
+            .await?;
+        loop {
+            match outcome {
+                ResidentOutcome::Completed { .. } => return Ok(()),
+                ResidentOutcome::Deferred { hole, work, .. } => {
+                    outcome = self.run_external(context.clone(), hole, work).await?;
+                }
+                ResidentOutcome::BindingsCommitted { .. } => {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "shutdown completed as an impossible projected binding".into(),
+                    ));
+                }
+                ResidentOutcome::Suspended { hole, request, .. } => {
+                    return self
+                        .access
+                        .with_machine(context, move |session, _, _| {
+                            let operation =
+                                ResidentRequest::decode(&request, session.data_con_table())?
+                                    .operation()
+                                    .to_owned();
+                            let reason = format!("shutdown suspended on disallowed `{operation}`");
+                            let _ = session.abort(hole.cont_id(), reason.clone());
+                            Err(ResidentActorWorkbenchError::ActorProtocol(reason))
+                        })
+                        .await;
+                }
+            }
+        }
     }
 
     pub(crate) async fn resume_readiness(
@@ -7631,6 +7684,53 @@ where
                     Ok(_) => Err(ResidentActorWorkbenchError::ActorProtocol(
                         "aborted command observation unexpectedly completed".into(),
                     )),
+                }
+            })
+            .await
+    }
+
+    /// Run owned external work with no machine checkout held. The caller owns
+    /// this operation until settlement; abandoning its reply does not cancel it.
+    pub(crate) async fn run_external(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        work: tidepool_effect::DeferredEffect,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        let guard = ParkedHoleAbortGuard::new(
+            &self.access,
+            context.clone(),
+            hole.cont_id().to_string(),
+            "external operation lost its continuation owner".into(),
+        );
+        let result = match work {
+            tidepool_effect::DeferredEffect::Blocking(work) => {
+                let work = work
+                    .into_inner()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match tidepool_runtime::spawn_blocking_in_span(work).await {
+                    Ok(result) => result,
+                    Err(error) => Err(tidepool_effect::EffectError::Handler(format!(
+                        "external operation terminated without a confirmed result: {error}"
+                    ))),
+                }
+            }
+            tidepool_effect::DeferredEffect::Async(work) => {
+                work.into_inner()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .await
+            }
+        };
+        self.access
+            .with_machine(context, move |session, _, _| {
+                guard.disarm();
+                match result {
+                    Ok(response) => session
+                        .resume_response_classified(hole, response)
+                        .map_err(classify_resumption),
+                    Err(error) => session
+                        .abort(hole.cont_id(), error.to_string())
+                        .map_err(ResidentActorWorkbenchError::Resident),
                 }
             })
             .await
@@ -14588,6 +14688,82 @@ mod request_tests {
                 items: Vec::new(),
             },
         )
+    }
+
+    #[tokio::test]
+    async fn external_work_releases_machine_until_its_failure_settles() {
+        let (machines, mut context, source, _root) = actor_registry_fixture();
+        context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
+        let workbench =
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
+        let runner = Arc::new(ResidentActorRunner::new(
+            Arc::clone(&machines),
+            source.clone(),
+        ));
+        let (block, verdict) = suspending_fragment();
+        let step = workbench
+            .begin_fragment_split(context.clone(), source, Vec::new(), block, Some(verdict))
+            .await
+            .expect("fragment parks");
+        let ResidentWorkbenchStep::Running { outcome, .. } = step else {
+            panic!("expected a parked fragment");
+        };
+        let ResidentOutcome::Suspended { hole, .. } = *outcome else {
+            panic!("expected a parked continuation");
+        };
+        let cont_id = hole.cont_id().to_string();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let task = {
+            let runner = Arc::clone(&runner);
+            let context = context.clone();
+            tokio::spawn(async move {
+                runner
+                    .run_external(
+                        context,
+                        hole,
+                        tidepool_effect::DeferredEffect::blocking(move || {
+                            started_tx.send(()).expect("observer waiting");
+                            release_rx.recv().expect("release external work");
+                            Err(tidepool_effect::EffectError::Handler(
+                                "external refusal".into(),
+                            ))
+                        }),
+                    )
+                    .await
+            })
+        };
+        started_rx.await.expect("external work started");
+        let observed = tokio::time::timeout(
+            Duration::from_secs(5),
+            runner.access.with_machine(context.clone(), {
+                let cont_id = cont_id.clone();
+                move |session, _, _| Ok(session.parked_holes().contains(&cont_id.as_str()))
+            }),
+        )
+        .await;
+        // Release the worker even if admission failed, so a failing assertion
+        // cannot leave a blocking thread behind in the test runtime.
+        release_tx.send(()).expect("external work still waiting");
+        assert!(observed
+            .expect("other machine work must progress")
+            .expect("checkout"));
+        let failure = task
+            .await
+            .expect("external driver joins")
+            .expect_err("external failure");
+        assert!(
+            failure.to_string().contains("external refusal"),
+            "{failure}"
+        );
+        let parked = runner
+            .access
+            .with_machine(context, move |session, _, _| {
+                Ok(session.parked_holes().contains(&cont_id.as_str()))
+            })
+            .await
+            .expect("final checkout");
+        assert!(!parked, "failed external work must retire its continuation");
     }
 
     /// `prepare_tools` holds a suspended `ResidentHole` (from

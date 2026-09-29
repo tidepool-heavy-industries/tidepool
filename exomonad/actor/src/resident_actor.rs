@@ -2931,6 +2931,12 @@ where
             '_,
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
         > = match boundary {
+            ResidentActorBoundary::External { continuation, work } => Box::pin(async move {
+                self.environment
+                    .runner
+                    .run_external(context.clone(), continuation, work)
+                    .await
+            }),
             ResidentActorBoundary::Console { continuation, text } => Box::pin(async move {
                 tracing::debug!(actor = ?context.actor, output = %crate::workbench_display::bounded_output(&text, 8192), "actor console");
                 self.environment
