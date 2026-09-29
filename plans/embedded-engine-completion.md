@@ -211,3 +211,28 @@ atomic-write API; rustc identified its source path in
 `target/completion-evidence/permission-recovery/runtime-shared-target-failure.log`.
 The runtime repair now builds in its own target directory. This is a Cargo
 artifact-selection failure, separate from the repaired root permission profile.
+
+## Permission-recovery runtime checkpoints
+
+- `37cad0a0e5` records per-actor durable surfaces, cancellation arbitration,
+  and live-scope admission at `PersistentSession`. The repaired isolated Cargo
+  target passed 21 recovery/publication tests plus the exact live-scope test.
+  Joined engine `3824ad3f38` includes it; `cargo check -p tidepool --lib` passed
+  against that join in 1m36s using its own target directory. The logs are
+  `permission-recovery/tidepool-runtime-repair-gate7.log` and
+  `permission-recovery/tidepool-runtime-owner-gate.log` under this checkout's
+  completion evidence; the joined checkout retains
+  `joined-public-surfaces-check.log`. Actor publication transport and whole-graph
+  revalidation before rename are still pending. A per-actor epoch is not a
+  whole-manifest compare-and-swap.
+- `e816fffe1b` on `completion/recovery-certification-repaired` preserves exact
+  `.hi.owners` bytes and refuses immutable artifact collisions. Its focused
+  recovery/certification and exclusive-write gate passed 14 tests, retained in
+  `permission-recovery/tidepool-recovery-repair-gate2.log`. It remains a separate
+  candidate: integrate with the compiler's package/owner sidecar producer
+  contract, not its older branch ancestry. The original compiler/recovery WIP
+  remains preserved.
+
+These are component checkpoints. Neither establishes concurrent private
+execution, atomic production publication, independent capture delivery, or G3
+worker-tree acceptance.
