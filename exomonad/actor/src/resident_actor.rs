@@ -3811,12 +3811,21 @@ where
                     .fork_groups
                     .release_checkpoint(&token, context.placement.session);
                 let result: Result<(), crate::CheckpointRefusal> = match result {
-                    Ok(Some(scope)) => self
-                        .environment
-                        .runner
-                        .retire_checkpoint_scopes(context.placement.session, vec![scope])
-                        .await
-                        .map_err(|_| crate::CheckpointRefusal::CaptureFailed),
+                    Ok(Some(scope)) => {
+                        let cleanup = self
+                            .environment
+                            .runner
+                            .retire_checkpoint_scopes(context.placement.session, vec![scope])
+                            .await;
+                        match cleanup {
+                            Ok(()) => self.environment.fork_groups.confirm_checkpoint_release(
+                                &token,
+                                context.placement.session,
+                                scope,
+                            ),
+                            Err(_) => Err(crate::CheckpointRefusal::CaptureFailed),
+                        }
+                    }
                     Ok(None) => Ok(()),
                     Err(refusal) => Err(refusal),
                 };
@@ -8988,6 +8997,33 @@ where
                 .await
             {
                 tracing::warn!(actor = ?kernel.identity(), %error, "failed checkpoint scope cleanup was retained");
+            }
+            let pending_releases = self.environment.fork_groups.pending_release_scopes(session);
+            if !pending_releases.is_empty() {
+                match self
+                    .environment
+                    .runner
+                    .retire_checkpoint_scopes(
+                        session,
+                        pending_releases.iter().map(|(_, scope)| *scope).collect(),
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        for (token, scope) in pending_releases {
+                            if let Err(error) = self
+                                .environment
+                                .fork_groups
+                                .confirm_checkpoint_release(&token, session, scope)
+                            {
+                                tracing::warn!(actor = ?kernel.identity(), ?error, "checkpoint release confirmation failed");
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(actor = ?kernel.identity(), %error, "checkpoint release cleanup was retained");
+                    }
+                }
             }
             self.release_session_state();
             // A live actor or published checkpoint keeps the issuing machine

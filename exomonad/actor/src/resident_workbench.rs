@@ -15055,6 +15055,9 @@ mod request_tests {
             .retire_checkpoint_scopes(context.placement.session, retired.into_iter().collect())
             .await
             .expect("release captured scope by session owner");
+        groups
+            .confirm_checkpoint_release(&token, context.placement.session, captured_scope)
+            .expect("retirement acknowledged");
         assert!(!groups.retains_session(context.placement.session));
         assert!(matches!(
             groups.checkpoint(&token, context.placement.session),
@@ -15089,6 +15092,80 @@ mod request_tests {
             .await
             .expect("inspect child scope");
         assert!(names.contains(&"childValue".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_release_retains_exact_scope_after_checkout_failure_until_retry() {
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let runner = ResidentActorRunner::new(Arc::clone(&machines), source);
+        let scope = runner
+            .capture_context_scope(context.clone())
+            .await
+            .expect("captured scope");
+        let groups = crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default());
+        let token = groups.capture_checkpoint(
+            "retryable release".into(),
+            context.actor,
+            crate::EffectiveRole::root(),
+            None,
+            None,
+            crate::CheckpointSourceLayer::default(),
+            context.placement.session,
+            scope,
+            tidepool_runtime::session::WorkbenchForkBoundary {
+                thread_id: "thread".into(),
+                call_id: "call".into(),
+            },
+        );
+        groups
+            .settle_checkpoint(&token, context.placement.session, true)
+            .expect("capture published");
+        let removed = machines
+            .remove(
+                context.placement.session,
+                "inject checkpoint cleanup checkout failure",
+            )
+            .expect("machine was registered");
+        assert_eq!(
+            groups.release_checkpoint(&token, context.placement.session),
+            Ok(Some(scope))
+        );
+        assert!(runner
+            .retire_checkpoint_scopes(context.placement.session, vec![scope])
+            .await
+            .is_err());
+        assert_eq!(
+            groups.pending_release_scopes(context.placement.session),
+            vec![(token.clone(), scope)]
+        );
+        assert!(groups.retains_session(context.placement.session));
+        assert_eq!(
+            groups.checkpoint(&token, context.placement.session).err(),
+            Some(crate::CheckpointRefusal::ReleasedCheckpoint)
+        );
+        let tidepool_runtime::session::Slot::Idle(machine) = removed else {
+            panic!("fixture machine was idle");
+        };
+        machines.insert_idle(context.placement.session, machine);
+        let retry = groups
+            .release_checkpoint(&token, context.placement.session)
+            .expect("idempotent retry");
+        assert_eq!(retry, Some(scope));
+        runner
+            .retire_checkpoint_scopes(context.placement.session, vec![scope])
+            .await
+            .expect("retry retires exact scope");
+        groups
+            .confirm_checkpoint_release(&token, context.placement.session, scope)
+            .expect("cleanup acknowledged");
+        assert!(groups
+            .pending_release_scopes(context.placement.session)
+            .is_empty());
+        assert!(!groups.retains_session(context.placement.session));
+        assert_eq!(
+            groups.release_checkpoint(&token, context.placement.session),
+            Ok(None)
+        );
     }
 
     #[tokio::test]

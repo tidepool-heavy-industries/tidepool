@@ -260,8 +260,14 @@ struct ForkGroupsState {
     active: HashSet<ActorRef>,
     cleaning: HashSet<ActorRef>,
     checkpoints: HashMap<String, CheckpointLease>,
-    // A token keeps only its session after release, for idempotency and typed refusal.
-    released_checkpoints: HashMap<String, SessionId>,
+    // Release revokes admission immediately, while the exact captured scope
+    // remains owned here until the session confirms its retirement.
+    released_checkpoints: HashMap<String, ReleasedCheckpoint>,
+}
+
+struct ReleasedCheckpoint {
+    session: SessionId,
+    cleanup_scope: Option<ScopeId>,
 }
 
 /// Admission ledger for one applicative context-unfold layer.
@@ -479,7 +485,7 @@ impl ForkGroupRegistry {
             Some(lease) => lease.clone(),
             None => {
                 return match state.released_checkpoints.get(token) {
-                    Some(released_session) if *released_session == session => {
+                    Some(released) if released.session == session => {
                         Err(CheckpointRefusal::ReleasedCheckpoint)
                     }
                     Some(_) => Err(CheckpointRefusal::WrongSession),
@@ -501,8 +507,8 @@ impl ForkGroupRegistry {
     }
 
     /// Revoke future admissions and return the captured root for retirement.
-    /// Repeating release does not retire a root twice. Admitted children own
-    /// independent detached scopes, so their environment is unaffected.
+    /// A retry returns the same scope until retirement is acknowledged.
+    /// Admitted children own independent detached scopes.
     pub fn release_checkpoint(
         &self,
         token: &str,
@@ -515,9 +521,9 @@ impl ForkGroupRegistry {
             return Err(CheckpointRefusal::ProcessRestartUnsupported);
         }
         let mut state = self.state.lock();
-        if let Some(released_session) = state.released_checkpoints.get(token) {
-            return if *released_session == session {
-                Ok(None)
+        if let Some(released) = state.released_checkpoints.get(token) {
+            return if released.session == session {
+                Ok(released.cleanup_scope)
             } else {
                 Err(CheckpointRefusal::WrongSession)
             };
@@ -546,8 +552,48 @@ impl ForkGroupRegistry {
             | CheckpointPhase::Released
             | CheckpointPhase::ReleasedAfterPublication => None,
         };
-        state.released_checkpoints.insert(token.to_owned(), session);
+        state.released_checkpoints.insert(
+            token.to_owned(),
+            ReleasedCheckpoint {
+                session,
+                cleanup_scope: scope,
+            },
+        );
         Ok(scope)
+    }
+
+    pub fn confirm_checkpoint_release(
+        &self,
+        token: &str,
+        session: SessionId,
+        scope: ScopeId,
+    ) -> Result<(), CheckpointRefusal> {
+        let mut state = self.state.lock();
+        let released = state
+            .released_checkpoints
+            .get_mut(token)
+            .ok_or(CheckpointRefusal::UnavailableCheckpoint)?;
+        if released.session != session {
+            return Err(CheckpointRefusal::WrongSession);
+        }
+        if released.cleanup_scope != Some(scope) {
+            return Err(CheckpointRefusal::CaptureFailed);
+        }
+        released.cleanup_scope = None;
+        Ok(())
+    }
+
+    pub fn pending_release_scopes(&self, session: SessionId) -> Vec<(String, ScopeId)> {
+        self.state
+            .lock()
+            .released_checkpoints
+            .iter()
+            .filter_map(|(token, released)| {
+                (released.session == session)
+                    .then(|| released.cleanup_scope.map(|scope| (token.clone(), scope)))
+                    .flatten()
+            })
+            .collect()
     }
 
     pub fn settle_checkpoints(
@@ -636,9 +682,13 @@ impl ForkGroupRegistry {
     /// A published lease keeps its issuing machine resident after the actor
     /// and its ordinary supervision scope retire.
     pub fn retains_session(&self, session: SessionId) -> bool {
-        self.state.lock().checkpoints.values().any(|lease| {
+        let state = self.state.lock();
+        state.checkpoints.values().any(|lease| {
             lease.session == session && *lease.phase.borrow() == CheckpointPhase::Published
-        })
+        }) || state
+            .released_checkpoints
+            .values()
+            .any(|released| released.session == session && released.cleanup_scope.is_some())
     }
 
     pub fn begin(
@@ -1614,6 +1664,10 @@ mod tests {
             groups.release_checkpoint(&delivered, SessionId(7)),
             Ok(Some(ScopeId(3)))
         );
+        assert!(groups.retains_session(SessionId(7)));
+        groups
+            .confirm_checkpoint_release(&delivered, SessionId(7), ScopeId(3))
+            .unwrap();
         assert!(!groups.retains_session(SessionId(7)));
     }
 
@@ -1648,6 +1702,13 @@ mod tests {
             groups.release_checkpoint(&pending, SessionId(7)),
             Ok(Some(ScopeId(3)))
         );
+        assert_eq!(
+            groups.release_checkpoint(&pending, SessionId(7)),
+            Ok(Some(ScopeId(3)))
+        );
+        groups
+            .confirm_checkpoint_release(&pending, SessionId(7), ScopeId(3))
+            .unwrap();
         assert_eq!(groups.release_checkpoint(&pending, SessionId(7)), Ok(None));
         groups.settle_checkpoints(issuer, &boundary, true);
         assert_eq!(
@@ -1670,6 +1731,10 @@ mod tests {
             groups.release_checkpoint(&published, SessionId(7)),
             Ok(Some(ScopeId(3)))
         );
+        assert!(groups.retains_session(SessionId(7)));
+        groups
+            .confirm_checkpoint_release(&published, SessionId(7), ScopeId(3))
+            .unwrap();
         assert!(!groups.retains_session(SessionId(7)));
         published_lease.wait_published().await.unwrap();
         assert_eq!(
