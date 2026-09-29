@@ -4601,8 +4601,6 @@ mod tests {
         }
         engine.quiesce_and_collect_now().unwrap();
         assert_eq!(engine.residency().programs, 1);
-
-        assert_eq!(engine.residency().programs, 1);
         let before_abort = (
             engine.residency(),
             engine.code_export_count(),
