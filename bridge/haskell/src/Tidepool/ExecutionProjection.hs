@@ -4,6 +4,8 @@ module Tidepool.ExecutionProjection
   , projectPrepared
   , projectPreparedTarget
   , projectPreparedTargetWithConstructors
+  , ProjectedGroup(..), ProjectedGroupBody(..)
+  , projectPreparedModuleGroups, projectPreparedModuleGroupsSelected
   , PreparedProjection
   , prepareProjection
   , prepareProjectionWithReachability
@@ -150,6 +152,8 @@ data PState = PState
   , timeAuthority :: Maybe TimeAuthority
   , jsonAuthority :: Maybe JsonAuthority
   , textUnit :: Maybe TextUnitAuthority
+  -- Tops outside the group currently being projected become explicit imports.
+  , externalizedTops :: Set SymbolIdentity
   }
 
 type P a = StateT PState (Either ProjectionError) a
@@ -190,12 +194,86 @@ resolveTextPackageUnit hscEnv =
 -- | Narrow test seam for GHC literals which cannot be written in source Haskell.
 projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionError Atom
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
-  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty Nothing Nothing Nothing Nothing)
+  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty Nothing Nothing Nothing Nothing Set.empty)
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
 projectPrepared context modules =
   fst <$> projectPreparedWithTopSymbols context modules (buildTopIdentityMap modules)
+
+-- Preserve the original STG position before retained tops are removed. A
+-- recursive group is projected as one indivisible unit, with its own tables.
+projectPreparedModuleGroups :: ProjectionContext -> PreparedModule
+  -> Either ProjectionError [ProjectedGroup]
+projectPreparedModuleGroups context prepared =
+  projectPreparedModuleGroupsSelected context prepared Nothing
+
+projectPreparedModuleGroupsSelected :: ProjectionContext -> PreparedModule
+  -> Maybe (Set Word32) -> Either ProjectionError [ProjectedGroup]
+projectPreparedModuleGroupsSelected context prepared selection = traverse projectOne surviving
+  where
+    identities = buildTopIdentityMap [prepared]
+    originals = pmBindings prepared
+    ordinalByFirst = Map.fromList
+      [ (getKey (varUnique first), fromIntegral ordinal)
+      | (ordinal, (binding, _)) <- zip [0 :: Int ..] originals
+      , first : _ <- [topBinders binding] ]
+    surviving =
+      [ item
+      | item@(binding, _) <- pmBindings (dropRetainedTops context prepared)
+      , first : _ <- [topBinders binding]
+      , Just ordinal <- [Map.lookup (getKey (varUnique first)) ordinalByFirst]
+      , maybe True (Set.member ordinal) selection ]
+    allSymbols = Set.fromList
+      [ symbol
+      | (binding, _) <- originals, binder <- topBinders binding
+      , Just symbol <- [lookupVarEnv identities binder] ]
+    owner = (Text.pack (unitString (moduleUnit (pmModule prepared))),
+             Text.pack (moduleNameString (moduleName (pmModule prepared))))
+    projectOne item@(binding, _) = do
+      first <- case topBinders binding of
+        value : _ -> Right value
+        [] -> Left (UnsupportedPreparedShape "prepared group has no binder")
+      ordinal <- maybe (Left (UnsupportedPreparedShape "prepared group lost its ordinal"))
+        Right (Map.lookup (getKey (varUnique first)) ordinalByFirst)
+      binders <- traverse (\binder -> maybe
+        (Left (UnsupportedPreparedShape "prepared top has no identity")) Right
+        (lookupVarEnv identities binder)) (topBinders binding)
+      let onlyGroup = prepared { pmBindings = [item] }
+          outside = allSymbols `Set.difference` Set.fromList binders
+          initial = PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv identities
+            Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] []
+            (projectionTarget context) (projectionRetainedGenerations context)
+            (if pmCoverage prepared == CompleteSourceModule
+              then Set.singleton owner else Set.empty)
+            (projectionFormattingAuthority context) (projectionTimeAuthority context)
+            (projectionJsonAuthority context) (projectionTextUnit context) outside
+      ((groups, types, sites, verbSites, jsonLayout), final) <- runStateT
+        (do validatePreparedEvidence context [onlyGroup]
+            preallocate [onlyGroup]
+            groups <- projectModule onlyGroup
+            (types, sites, verbSites) <- lowerPreparedEvidence context [onlyGroup]
+            jsonLayout <- traverse (traverse internConstructor . jsonAuthorityLayout)
+              (projectionJsonAuthority context)
+            pure (groups, types, sites, verbSites, jsonLayout)) initial
+      pure ProjectedGroup
+        { projectedOriginalOrdinal = ordinal
+        , projectedBinders = binders
+        , projectedBody = ProjectedGroupBody
+            { projectedEnvelope = ProgramEnvelope schemaVersion
+                (projectionProfile context) (projectionToolchain context)
+                executionAbiVersion (projectionTarget context)
+            , projectedSignatures = map fst (signatures final)
+            , projectedGlobals = globalDecls final
+            , projectedConstructors = constructorDecls final
+            , projectedOperations = operationDecls final
+            , projectedBindings = map NonRecursive (reverse (implicitTops final)) ++ groups
+            , projectedTypes = types
+            , projectedSites = sites
+            , projectedVerbSites = verbSites
+            , projectedJsonLayout = jsonLayout
+            }
+        }
 
 -- | Corpus tooling enumerates the same identities that projection resolves,
 -- before any target filtering. Preserve module/binding emission order and never
@@ -225,6 +303,7 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
         (projectionFormattingAuthority context) (projectionTimeAuthority context)
         (projectionJsonAuthority context)
         (projectionTextUnit context)
+        Set.empty
       -- An executable import's own top-level definition is never walked:
       -- 'homeModules'/'topIdentityMap' above still see the real, unfiltered
       -- module set (so a same-name internal identity cannot borrow home-module
@@ -1576,10 +1655,12 @@ projectReference binder = do
         else do
           topNames <- gets topSymbols
           tops <- gets topValues
+          offGroup <- gets externalizedTops
           let symbol = lookupVarEnv topNames binder
           case symbol of
             Just home -> case Map.lookup home tops of
               Just identity -> pure (Local identity)
+              Nothing | home `Set.member` offGroup -> Global <$> internGlobal binder
               Nothing -> lift (Left (MissingPreparedTop home))
             Nothing -> case nullaryWorkerConstructor binder of
               Just con -> Local <$> internNullaryWorker binder con
@@ -1589,9 +1670,11 @@ deferredFunctionReference :: Id -> DeferredFunction -> P ValueId
 deferredFunctionReference binder deferred = do
   topNames <- gets topSymbols
   tops <- gets topValues
+  offGroup <- gets externalizedTops
   case lookupVarEnv topNames binder of
     Just symbol -> case Map.lookup symbol tops of
       Just identity -> pure identity
+      Nothing | symbol `Set.member` offGroup -> internDeferredFunction binder deferred
       Nothing -> lift (Left (MissingPreparedTop symbol))
     Nothing -> internDeferredFunction binder deferred
 
@@ -1766,11 +1849,16 @@ withScope action = do
   pure result
 
 internGlobal :: Id -> P GlobalId
-internGlobal binder
-  | not (isExternalName (varName binder)) =
-      lift (Left (UnboundPreparedInternal
-        (Text.pack (occNameString (nameOccName (varName binder))))))
-  | otherwise = case nameModule_maybe (varName binder) of
+internGlobal binder = do
+  names <- gets topSymbols
+  offGroup <- gets externalizedTops
+  let mapped = lookupVarEnv names binder
+      groupImport = maybe False (`Set.member` offGroup) mapped
+  if groupImport then internExternalGlobal binder
+  else if not (isExternalName (varName binder)) then
+    lift (Left (UnboundPreparedInternal
+      (Text.pack (occNameString (nameOccName (varName binder))))))
+  else case nameModule_maybe (varName binder) of
       Nothing -> lift (Left (InvalidPreparedIdentity
         ("global has no defining module: "
           <> Text.pack (occNameString (nameOccName (varName binder))))))
@@ -1812,8 +1900,10 @@ internGlobal binder
           signature <- traverse internSignature entry
           existing <- gets globalDecls
           generations <- gets retainedGenerations
+          names <- gets topSymbols
           let identity = GlobalId (fromIntegral (length existing))
-              symbol = idSymbol "value" externalBinder
+              symbol = fromMaybe (idSymbol "value" externalBinder)
+                (lookupVarEnv names externalBinder)
               retainedGeneration = Map.lookup symbol generations
               declaration = GlobalDecl symbol rep signature evaluated
                 retainedGeneration
