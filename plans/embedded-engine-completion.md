@@ -309,3 +309,30 @@ comparison. Pinned native GHC regeneration confirmed only the fingerprint change
 and refusal expectations were identical. The refreshed oracle and full fixture
 rerun are pending acceptance; the retained run is
 `/tmp/tidepool-compiler-owner/target/prepared-corpus/run.32RorB`.
+
+The compiler candidate was accepted as `4466cdbbc` after the full fixture rerun:
+692 Suite execution checks passed, the additional cohorts passed, and seven
+embedded prepared artifacts were accepted. The native oracle refresh changed
+only its input fingerprint; values/refusals and the payload seal were identical.
+Durable authored allocation `95d005f10` passed seven combined allocation and
+publication tests, including restart immediately after failed validation.
+Joined candidate `d9c3204167` includes both; its facade library check passed.
+Logs are retained under `target/completion-evidence/permission-recovery/`; the
+joined checkout retains `joined-compiler-runtime-check.log`.
+
+The next native Buck codegen unit target is not accepted yet. Its first run
+listed 515 tests: 504 passed, 10 failed, and one was ignored. The test binary
+shares process-global heap overrides and an external-descriptor singleton;
+ordinary per-case Nextest isolation is absent in the default Buck runner.
+Evidence: `target/completion-evidence/buck/codegen-units-gate.log`. An attempted
+filter through the built-in executor terminated that executor, retained in
+`codegen-isolated-probe.log`; the shared Buck daemon was not restarted.
+
+The next paired-publication prerequisite is a certified authored declaration
+carrier. Existing declaration inspection returns source/type information but
+no certified module product, so expression products cannot stand in for the
+reserved declaration module. Compiler-owned certification must return exact
+owned artifact bytes and package/dependency witnesses before runtime can admit
+that authored node to the durable graph. Source-less Join certification must
+also attest consulted orphan/family package metadata; an empty witness cannot
+be assumed merely because the Join has no authored source.
