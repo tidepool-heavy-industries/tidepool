@@ -1,6 +1,8 @@
 # Foundation transfer and next design review
 
 Working checkpoint, 2026-09-29. This is not a completed handoff or launch approval.
+The source-box record below is historical. Destination results and remaining
+limits are recorded in [engine-foundation-destination.md](engine-foundation-destination.md).
 The user wants the next xhigh ownership/publication review on the new 128 GiB
 build server. Latest steering prioritizes transfer soon: finish a bounded repair
 checkpoint here and move expensive joined checks to the destination. Do not
