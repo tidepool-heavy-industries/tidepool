@@ -89,7 +89,7 @@ pub use interactive_session::{
     ResidentInteractiveSession, SiblingPreview,
 };
 pub use kernel::{
-    CallAncestry, KernelCallFailure, KernelCallReply, KernelInvocationFailure,
+    ActorAdmissionLease, CallAncestry, KernelCallFailure, KernelCallReply, KernelInvocationFailure,
     KernelInvocationReply, KernelMessage, KernelWorkbenchFailure, KernelWorkbenchReply,
     LocalActorRef,
 };

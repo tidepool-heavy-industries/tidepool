@@ -816,6 +816,7 @@ pub struct LocalActorState<B> {
 
 impl<B> Drop for LocalActorState<B> {
     fn drop(&mut self) {
+        self.mailbox_admission.close();
         if let Some(pending) = self.pending_workbench.take() {
             let detail = "actor stopped while its owned workbench task was still running; execution and cleanup are unconfirmed";
             if let Some(control) = pending.control.as_ref() {
@@ -1171,6 +1172,7 @@ where
                 }
             }
             KernelMessage::ReplacementFence => {
+                state.mailbox_admission.wait_transactions().await;
                 let Some(mut pending) = state.replacement.take() else {
                     return Err(std::io::Error::other(
                         "replacement fence has no prepared successor",
@@ -1520,7 +1522,7 @@ where
     ) -> Result<(), ActorProcessingErr> {
         let (cell, observed) = match event {
             SupervisionEvent::ActorStarted(_) | SupervisionEvent::ProcessGroupChanged(_) => {
-                return Ok(())
+                return Ok(());
             }
             SupervisionEvent::ActorTerminated(cell, _, reason) => {
                 let summary = reason.unwrap_or_else(|| {
@@ -1966,6 +1968,7 @@ where
     // completion cannot run across this snapshot or after stopping the actor.
     state.hosted_admission = HostedAdmission::Closing;
     state.mailbox_admission.close();
+    state.mailbox_admission.wait_transactions().await;
     // Wait for admitted startup to register, then permanently reject creation,
     // including through cloned contexts and shutdown hooks.
     *state.context.child_admission_closed.write().await = true;
@@ -2899,6 +2902,28 @@ mod tests {
         ));
         actor.hosted_cell().accept(&control);
         assert!(actor.hosted_cell().find(|_| true).is_none());
+    }
+
+    #[tokio::test]
+    async fn retirement_waits_for_short_host_admission_transaction() {
+        let fixture = behavior(false);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        let lease = actor.admit_transaction().unwrap();
+        let retiring = actor.shutdown(ActorTerminal {
+            kind: ActorExitKind::Completed,
+            summary: "done".into(),
+        });
+        tokio::pin!(retiring);
+        // Polling submits shutdown and closes admission before yielding.
+        assert!(futures_util::poll!(&mut retiring).is_pending());
+        assert!(actor.admit_transaction().is_err());
+        assert!(actor.terminal().get().is_none());
+        assert!(!fixture.calls.lock().contains(&"shutdown"));
+        drop(lease);
+        retiring.await.unwrap();
+        task.await.unwrap();
+        assert!(fixture.calls.lock().contains(&"shutdown"));
+        assert!(actor.admit_transaction().is_err());
     }
 
     #[tokio::test]

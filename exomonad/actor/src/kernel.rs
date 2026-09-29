@@ -336,10 +336,7 @@ pub struct LocalActorRef {
 /// are per-incarnation state every handle to the actor (the directory's and
 /// the spawner's alike) must observe identically.
 #[derive(Clone, Default)]
-pub(crate) struct MailboxAdmission(
-    std::sync::Arc<parking_lot::Mutex<AdmissionState>>,
-    HostedCellSlot,
-);
+pub(crate) struct MailboxAdmission(std::sync::Arc<AdmissionOwner>, HostedCellSlot);
 
 /// One incarnation's published hosted calls, from transport queuing through
 /// actor-owned completion. Multiple callers may be queued behind one active
@@ -431,10 +428,32 @@ impl HostedCellPublications {
 }
 
 #[derive(Default)]
-enum AdmissionState {
-    #[default]
-    Open,
-    Closed,
+struct AdmissionOwner {
+    state: parking_lot::Mutex<AdmissionState>,
+    released: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct AdmissionState {
+    closed: bool,
+    transactions: usize,
+}
+
+/// Protects a synchronous host transaction from cooperative actor retirement.
+/// Drop before waking the actor or awaiting dispatched work: accepted actor work
+/// has its own completion owner and must never retain this admission lease.
+/// Forced process/actor loss is not a confirmed cooperative retirement.
+#[must_use]
+pub struct ActorAdmissionLease(std::sync::Arc<AdmissionOwner>);
+
+impl Drop for ActorAdmissionLease {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock();
+        state.transactions -= 1;
+        if state.transactions == 0 {
+            self.0.released.notify_waiters();
+        }
+    }
 }
 
 impl MailboxAdmission {
@@ -442,7 +461,34 @@ impl MailboxAdmission {
         &self.1
     }
     pub(crate) fn close(&self) {
-        *self.0.lock() = AdmissionState::Closed;
+        self.0.state.lock().closed = true;
+    }
+
+    fn transaction(&self) -> Option<ActorAdmissionLease> {
+        let mut state = self.0.state.lock();
+        if state.closed {
+            return None;
+        }
+        state.transactions += 1;
+        Some(ActorAdmissionLease(std::sync::Arc::clone(&self.0)))
+    }
+
+    /// Admission must already be closed. Register the waiter before inspecting
+    /// the count so the final lease's drop cannot be lost between them.
+    pub(crate) async fn wait_transactions(&self) {
+        loop {
+            let released = self.0.released.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
+            {
+                let state = self.0.state.lock();
+                debug_assert!(state.closed);
+                if state.transactions == 0 {
+                    return;
+                }
+            }
+            released.await;
+        }
     }
 
     pub(crate) fn close_with_fence(
@@ -457,9 +503,9 @@ impl MailboxAdmission {
         address: &RactorRef<KernelMessage>,
         fence: KernelMessage,
     ) -> Result<(), Box<ractor::MessagingErr<KernelMessage>>> {
-        let mut admission = self.0.lock();
+        let mut admission = self.0.state.lock();
         address.send_message(fence).map_err(Box::new)?;
-        *admission = AdmissionState::Closed;
+        admission.closed = true;
         Ok(())
     }
 }
@@ -605,14 +651,22 @@ impl LocalActorRef {
 
     /// Admission and queue insertion share the close fence. Accepted payloads
     /// belong to the existing Ractor mailbox even while execution is paused.
-    fn admit_mailbox(&self, message: KernelMessage) -> Result<(), KernelCallFailure> {
-        let admission = self.admission.0.lock();
-        if matches!(*admission, AdmissionState::Closed) {
+    pub(crate) fn admit_mailbox(&self, message: KernelMessage) -> Result<(), KernelCallFailure> {
+        let admission = self.admission.0.state.lock();
+        if admission.closed {
             return Err(KernelCallFailure::MailboxClosed(self.identity));
         }
         self.address
             .send_message(message)
             .map_err(|_| KernelCallFailure::TargetExited(self.identity))
+    }
+
+    /// Admit a short synchronous Store/binding transaction. This is not an
+    /// execution lease; dispatch must enqueue under the actor's mailbox fence.
+    pub fn admit_transaction(&self) -> Result<ActorAdmissionLease, KernelCallFailure> {
+        self.admission
+            .transaction()
+            .ok_or(KernelCallFailure::MailboxClosed(self.identity))
     }
 
     pub fn cast(&self, sender: ActorRef, request: MailboxValue) -> Result<(), KernelCallFailure> {
@@ -720,6 +774,7 @@ impl LocalActorRef {
         &self,
         terminal: ActorTerminal,
     ) -> Result<ActorTerminal, KernelInvocationFailure> {
+        self.admission.close();
         let terminal = self.terminal.request_shutdown(terminal);
         let (reply, receive) = tokio::sync::oneshot::channel();
         if self
@@ -768,6 +823,24 @@ impl LocalActorRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn admission_close_waits_for_all_transactions_and_rejects_new_ones() {
+        let admission = MailboxAdmission::default();
+        let first = admission.transaction().unwrap();
+        let second = admission.transaction().unwrap();
+        admission.close();
+        assert!(admission.transaction().is_none());
+        let waiting = admission.wait_transactions();
+        tokio::pin!(waiting);
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        drop(first);
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        drop(second);
+        assert!(futures_util::poll!(&mut waiting).is_ready());
+        // A last drop before waiter registration also completes immediately.
+        admission.wait_transactions().await;
+    }
 
     #[test]
     fn call_ancestry_rejects_direct_and_indirect_reentry() {
