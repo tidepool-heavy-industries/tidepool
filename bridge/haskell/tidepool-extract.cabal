@@ -123,6 +123,7 @@ test-suite declaration-join-proof
     base >= 4.20 && < 5,
     directory,
     filepath,
+    ghc >= 9.12 && < 9.13,
     tidepool-extract-internal
   default-language: GHC2024
   ghc-options:      -Wall

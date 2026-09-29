@@ -8,14 +8,14 @@ current owners and the smallest source changes that can preserve capture identit
 and completion-order publication. It does not authorize replay of effects or
 restoration of live heap values after host loss.
 
-The implementation branch now includes per-execution hosted-call tracking
-(`1059890d1`) and transitive binding retention (`41583b5eb`). The baseline
-analysis below explains the remaining scheduling and publication work; the
-single hosted visibility slot described below has already been replaced.
+The joined foundation includes per-execution hosted-call tracking and transitive
+binding retention (`41583b5eb`, joined by `9bdec2912`). The analysis below is
+reconciled against the joined candidate `11c96dc0e`. It does not imply that
+the foundation admits concurrent workbench executions.
 
 ## Baseline execution and the blocking seams
 
-### Foundation reconciliation — preparation at `4a8088c93`
+### Foundation reconciliation — joined candidate `11c96dc0e`
 
 The first-tree PRD now separates sequential embedding (M1) from concurrent
 private executions and reusable captures (M2). This inventory is design input,
@@ -25,7 +25,7 @@ foundation candidates; reconcile them against the accepted integration revision.
 
 | Seam | Preparation / required decision |
 | --- | --- |
-| `LocalActor` and hosted-call visibility | The in-flight foundation candidate moves one owned behavior into an active task and retains accepted controls independently of caller futures. This makes control responsive; it does not make the behavior available to a second execution. Preserve its settlement owner when introducing execution-local state. |
+| `LocalActor` and hosted-call visibility | The joined foundation moves one owned behavior into an active task and retains accepted controls independently of caller futures. This makes control responsive; it does not make the behavior available to a second execution. Preserve its settlement owner when introducing execution-local state. |
 | `ResidentKernelBehavior` | Classify `active_workbench_control`, `fork_publication`, after-tool activity, pending replies/cancellations and route state by their actual consumers. Some describe model/request turns rather than notebook executions. Do not mechanically clone the whole behavior or move every field into a cell record. |
 | After-tool cleanup | `run_after_tool` callers snapshot `parked_continuations` and use `abort_parked_since` on timeout. Replace session-wide subtraction with exact owned continuation cleanup before concurrent handlers can run. |
 | External operations | Reuse the foundation's deferred work and parked continuation. Cancellation must signal supported operations and retain actual completion/cleanup evidence; removing the caller's waiter cannot settle the operation. |
@@ -49,29 +49,20 @@ a second scheduler, completion registry or durable copy of live Haskell values.
   [resident_tools.rs](../exomonad/actor/src/resident_tools.rs)). Keep this
   identity as the key of each cell's state and settlement; do not mint another
   execution identity when a call wakes.
-- `ResidentToolClient::dispatch_workbench` holds `dispatch_gate` through the
-  whole call and keeps one `active_workbench` slot. The shared actor handle has
-  one `HostedCellSlot`. Dropping the dispatch future drops
-  `HostedCellPublication` and clears that *visibility* slot, but an already
-  sent `KernelMessage::Workbench` still owns its request and control. The
-  actor records and settles the control when the behavior finishes. A drop
-  after send can leave the client's `active_workbench` slot stale because its
-  ordinary clear is after the oneshot receive; this is not proof that the
-  actor's continuation was aborted. `cancel_workbench` only claims the active
-  call while it is in `WORKBENCH_SLEEPING`; a computing call returns
-  `NotSleeping` ([resident_tools.rs](../exomonad/actor/src/resident_tools.rs)).
-  Removal of the dispatch gate or a new claim protocol must retain exact
-  settlement and clean up the per-call client record on every dropped future.
-- `LocalActor::handle` awaits `behavior.workbench(...)` directly. That method
-  borrows `&mut ResidentKernelBehavior` through `execute_workbench`, which
-  awaits preparation, each effect and final settlement. Ractor cannot dispatch
-  another cell, control input, reconciliation or a ready mailbox message while
-  this handler awaits. The actor also holds one `active_workbench_control`,
-  `fork_publication`, current posture and several mutable effect-routing fields
-  ([local_actor.rs](../exomonad/actor/src/local_actor.rs),
-  [resident_actor.rs](../exomonad/actor/src/resident_actor.rs)). The machine's
-  short checkouts already release between suspended operations; the enclosing
-  actor future is the scheduling blocker.
+- `ResidentToolClient::dispatch_workbench` still holds `dispatch_gate` through
+  the call. It publishes an exact `WorkbenchExecutionControl` before the gate;
+  the shared `HostedCellSlot` now retains multiple controls. The gate also
+  serializes ordinary `Tool` calls and direct untracked workbenches, so its
+  removal needs an explicit admission rule for those operations. A dropped
+  caller future does not own or cancel an actor-admitted call. Sleep cancellation
+  still requires `WORKBENCH_SLEEPING`; a computing call returns `NotSleeping`
+  ([resident_tools.rs](../exomonad/actor/src/resident_tools.rs)).
+- `LocalActor` owns one `BehaviorSlot` and one `pending_workbench`. It moves
+  the **whole** behavior into a spawned call task, retaining the reply/control
+  until completion. Its Ractor handler can seal admission, defer shutdown and
+  answer some reconciliation messages, but defers unrelated mailbox work and
+  child-exit handling until the behavior returns. This is responsive control,
+  not execution interleaving ([local_actor.rs](../exomonad/actor/src/local_actor.rs)).
 - An accepted call must become actor-owned state keyed by exact execution ID.
   Drive one bounded machine step per actor message, return from the handler
   whenever an external effect parks, and send its result back as an exact
@@ -83,6 +74,54 @@ a second scheduler, completion registry or durable copy of live Haskell values.
   B's continuation. The existing single `Sleep` control, fork boundary,
   request reservations and after-tool state need per-cell ownership or an
   explicit actor-global operation with a stated admission fence.
+
+### M2 ownership and minimal transitions
+
+| Owner | Retained state and transition |
+| --- | --- |
+| `LocalActor` / Ractor | Exact-incarnation admission, lifecycle, mailbox order and a map of admitted workbench executions. Admit a call once, then schedule bounded machine steps and exact completion messages. Never move the whole `ResidentKernelBehavior` into a long-running cell task. |
+| Actor's resident behavior | Descriptor, installed policy and reload generation, model-turn `standing`/checkpoint/input, request reply and cancellation settlement, source connections, roster snapshot and aggregate observation. Ordinary synchronous mailbox turns remain non-reentrant. |
+| One workbench execution | Original request/reply/control, immutable admitted source and tool leases, captured declaration/binding tips, private scope and final write set, current continuation identity, effect receipts, fork provenance, after-tool recursion state and publication decision. The same execution identity survives every park and wake. |
+| Route operation | `active_route` and `ForkPublication::Route` belong to the exact watch callback, not to any concurrently admitted cell. Boundary-indexed pending fork publications remain actor-retained until published or explicitly reconciled. |
+| `WorkbenchExecutions` | Existing exact-call replay and terminal receipt authority. A retry observes the original result or an unconfirmed fence; it never reruns source or effects. |
+| Resident session | Machine checkout, declaration join validation, binding leases and the one atomic public tip swap. The checkout serializes sibling commits; it does not schedule actor work. |
+
+An admitted call first captures the current published environment and admitted
+source/tool versions under one checkout. A machine step may return a completed
+result or an exact parked continuation. On park, the actor records that hole in
+the execution and returns to Ractor. An external operation owns only its own
+payload and sends an `(execution, continuation generation, result)` completion;
+the actor checks both identities before resuming. Retirement or a dropped client
+waiter cannot turn uncertain external work into a clean cancellation.
+
+`WorkbenchExecutionControl` should add a typed per-execution decision state for
+publication (`Running`, `CancellationRequested`, `Published`, terminal without
+publication) under one short lock. Its existing sleep atomics and terminal
+watch do not establish this order. The actor calls
+`control.commit_if_allowed(|| session.commit_prepared_delta(...))` **inside**
+the machine checkout. `ResidentSession` owns a synchronous, no-await commit of
+an already validated declaration/binding delta and has no dependency on the
+actor crate. The control lock spans the visibility swap and records `Published`
+before release. A cancellation that takes that lock first forbids publication;
+one arriving after `Published` cannot revoke the commit. Preparing a compiler
+join or waiting for resources never holds this lock. If another execution has
+advanced the public generation during preparation, restage and revalidate the
+join against that generation without rerunning the original cell or its effects.
+Cancellation intent and confirmed cleanup are separate retained observations:
+the exact continuation, command or request owner must report whether its work
+actually stopped. An unconfirmed external operation keeps its cleanup authority.
+
+Two actor-wide cleanup paths need exact operation ownership before interleaving.
+`requests.abort_unsubmitted(actor)` currently removes **every** reserved request
+for that incarnation, including a sibling cell's two-step request admission;
+the rejected-workbench and route-finish paths both call it. Attach the creating
+execution or route identity to the reservation and abort only that operation's
+unsubmitted IDs; actor retirement may still sweep the whole incarnation. The
+after-tool timeout currently subtracts a snapshot of all parked machine holes.
+Record the slot's exact continuation IDs and abort those IDs only. Keep its
+ordinal/log actor-owned while recursion suppression and parked holes belong to
+the slot invocation. Publish per-execution posture into an actor aggregate so
+one completed cell cannot display `Idle` over a sleeping sibling.
 
 Current `Sleep` cancellation calls `abort_live` on the exact parked
 `ResidentHole`, then acknowledges cancellation only if the hole was consumed
@@ -197,18 +236,22 @@ re-exports that parent plus the turn's own source
 contains its admission snapshot, so assigning it to the public scope would
 erase intervening public commits. Replaying private text against the new
 public tip may resolve names to different values or types. Extend `SessionLib`
-with a compiler-validated *join* generation: its ordinary parent is the
-current public tip, and its separate exact import names only the private
-cell's final declaration exports. Hide replaced public heads using GHC's
-`ExportItem` structure, including constructors and class methods. Preserve
-the private modules and all value leases they require for the lifetime of
-that join and later compiled code. A new public generation gives later
-admissions the merged view while already admitted cells continue to import
-their captured generations.
+with an explicit `DeclNode::Join` (or equivalent typed variant), rather than
+pretending that a join is another authored `DeclTurn`. Its ordinary parent is
+the **current** public tip; a separate exact private generation supplies only
+the cell's final declaration exports. Record original export provenance, GHC
+`ExportItem`s, normalized imports/prologues, instance modules and retractions
+in the join receipt. Hide replaced public heads using `ExportItem`, including
+constructors and class methods. Retain the original private modules and their
+value/source leases for the lifetime of the join and later compiled code; do
+not mint new `SessionVarId`s or recompile private source against a changed
+public environment. Later admissions see the merged generation while already
+admitted cells keep their captured meaning.
 
 The join's delta is not just exported heads. Track private `DeclTurn`s with
-instance declarations even when their `ExportItem` set is empty; GHC must
-validate their instance visibility and conflicts in the joined environment.
+instance declarations even when their `ExportItem` set is empty. A selective
+name import can omit their binders while still carrying instances. The
+compiler proof found that `import M ()` carries instances in GHC 9.12.2.
 Carry normalized authored imports/prologues needed by those declarations,
 without importing the private cell's entire captured namespace as newly
 public. Track declaration retractions caused by a later private materialized
@@ -222,6 +265,32 @@ staged-declaration validation/adoption discipline as the model for write and
 tip rollback ([persistent.rs](../tidepool/runtime/src/session/persistent.rs),
 [mod.rs](../tidepool/runtime/src/session/mod.rs)).
 
+The focused `declaration-join-proof` compiler suite exercises hand-written
+wrappers corresponding to those imports through the resident checked-environment
+pipeline. Its six join/consumer pairs distinguish acceptance at the proposed
+commit gate from behavior in a later cell:
+
+| Case | Joined wrapper | Later consumer | Consequence |
+| --- | --- | --- | --- |
+| Private hidden name | accepted | hidden-name use rejected | Explicit exports preserve name isolation. |
+| Same-name private replacement with a different type | accepted | private `Int` plus unrelated public `Int` accepted | Selective hiding chooses the private origin and preserves unrelated public names. |
+| Two distinct instance-only modules imported with `()` | accepted | both instances usable | An empty name import still carries instances. |
+| Duplicate `instance C Int` from two valid modules | **accepted** | overlapping-instance use rejected | Compiling the wrapper alone is insufficient to validate publication. |
+| Two unrelated classes named `C`, both exported | rejected | rejected | GHC catches ambiguous class exports at the wrapper. |
+| Conflicting `type instance F Int` | rejected | rejected | GHC catches this family conflict at the wrapper. |
+
+`validate_rendered_module` currently asks GHC for each term export's type, or
+for `()` when there are no term exports. The duplicate-class-instance
+counterexample passes that validation shape and fails only when a later cell
+uses the class. M2 therefore needs a worker-owned check of the **combined
+imported instance environment**, including heads reachable only through
+`M ()`, before the staged join becomes visible. Wrapper compilation remains
+required for names, exports, families and normalized imports; it is not the
+whole validation. The worker should return a typed result for the exact staged
+join. If GHC cannot prove a particular combination safe, publication fails
+atomically with a declaration-join diagnostic, while the cell's already
+performed external effects and independently retained captures remain intact.
+
 ## Immediate checkpoint boundary
 
 The current `ForkGroupBoundary::Checkpoint` handler calls
@@ -233,7 +302,14 @@ private cell context, this captures the declarations and bindings of completed
 earlier items immediately, even if that cell is still suspended. Function-local
 values still cross only as explicit typed inputs. Record the checkpoint as an
 independent completed fact and keep its detached scope/source leases until its
-own release. The current end-of-workbench failure path calls
+own release. The checkpoint must retain the **admitted** source-layer version
+and a strong lease on its immutable revision paths, rather than freezing the
+actor's mutable active source when the effect happens later. Today
+`capture_context_scope` freezes the lexical scope while the adjacent
+`freeze_checkpoint_layer` call rereads active source identities; the before/
+after comparison only detects a change during that capture, not a source
+reload between cell admission and capture. The current end-of-workbench failure
+path calls
 `settle_checkpoints(..., false)` and retires checkpoints from that boundary;
 change it so failure of the enclosing cell does not revoke a checkpoint that
 already returned successfully. A checkpoint attempted but not committed may
@@ -279,4 +355,7 @@ must refer to the same effect boundary and original provider identities.
    the exact actor incarnation and return the retained result without
    reexecuting source.
 
-No builds or tests were run for this read-only investigation and plan write.
+The declaration-join proof is a compiler experiment, not an implementation of
+private execution or publication. Its exact command and retained output are
+reported with the candidate commit; the remaining M2 checks above have not
+run on a concurrent resident implementation.

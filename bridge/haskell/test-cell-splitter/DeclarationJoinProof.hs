@@ -1,7 +1,8 @@
 module Main where
 
-import Control.Exception (SomeException, bracket, try)
+import Control.Exception (bracket, try)
 import Control.Monad (forM_, unless)
+import GHC.Types.SourceError (SourceError)
 import System.Directory (copyFile, createDirectory, getTemporaryDirectory, removeDirectoryRecursive, removeFile)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
@@ -20,7 +21,7 @@ main = forM_ cases $ \(name, modules, joinAccepted, consumerAccepted) ->
       let check file = try (runRequest $ \compile ->
             compile CheckedEnvironment mempty GeneralCompile Nothing
               (root </> file) [root] Nothing)
-            :: IO (Either SomeException CheckedEnvironmentResult)
+            :: IO (Either SourceError CheckedEnvironmentResult)
       join <- check "Join.hs"
       assertOutcome name "join" joinAccepted join
       consumer <- check "Consumer.hs"
@@ -28,6 +29,7 @@ main = forM_ cases $ \(name, modules, joinAccepted, consumerAccepted) ->
   where
     cases =
       [ ("hidden", ["Private.hs", "Public.hs", "Join.hs", "Consumer.hs"], True, False)
+      , ("shadowed", ["Private.hs", "Public.hs", "Join.hs", "Consumer.hs"], True, True)
       , ("distinct-instances", ["Common.hs", "Private.hs", "Public.hs", "Join.hs", "Consumer.hs"], True, True)
       , ("duplicate-instances", ["Common.hs", "Private.hs", "Public.hs", "Join.hs", "Consumer.hs"], True, False)
       , ("class-conflict", ["Private.hs", "Public.hs", "Join.hs", "Consumer.hs"], False, False)
