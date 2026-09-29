@@ -341,9 +341,98 @@ pub(crate) struct MailboxAdmission(
     HostedCellSlot,
 );
 
-/// The model-visible hosted call this incarnation is executing, if any.
-pub(crate) type HostedCellSlot =
-    std::sync::Arc<parking_lot::Mutex<Option<std::sync::Arc<crate::WorkbenchExecutionControl>>>>;
+/// One incarnation's published hosted calls, from transport queuing through
+/// actor-owned completion. Multiple callers may be queued behind one active
+/// notebook; dropping one waiter must not erase another call's control.
+pub(crate) type HostedCellSlot = std::sync::Arc<HostedCellPublications>;
+
+#[derive(Default)]
+pub(crate) struct HostedCellPublications(parking_lot::Mutex<Vec<HostedCellEntry>>);
+
+struct HostedCellEntry {
+    control: std::sync::Arc<crate::WorkbenchExecutionControl>,
+    accepted: bool,
+}
+
+impl HostedCellPublications {
+    pub(crate) fn publish_transport(
+        &self,
+        control: std::sync::Arc<crate::WorkbenchExecutionControl>,
+    ) {
+        self.0.lock().push(HostedCellEntry {
+            control,
+            accepted: false,
+        });
+    }
+
+    pub(crate) fn accept(&self, control: &std::sync::Arc<crate::WorkbenchExecutionControl>) {
+        let mut entries = self.0.lock();
+        if let Some(entry) = entries
+            .iter_mut()
+            .find(|entry| std::sync::Arc::ptr_eq(&entry.control, control))
+        {
+            entry.accepted = true;
+        }
+    }
+
+    pub(crate) fn claim(&self, control: &std::sync::Arc<crate::WorkbenchExecutionControl>) {
+        let mut entries = self.0.lock();
+        if let Some(entry) = entries
+            .iter_mut()
+            .find(|entry| std::sync::Arc::ptr_eq(&entry.control, control))
+        {
+            entry.accepted = true;
+        } else if control.invocation.is_some() {
+            entries.push(HostedCellEntry {
+                control: std::sync::Arc::clone(control),
+                accepted: true,
+            });
+        }
+    }
+
+    pub(crate) fn withdraw_transport(
+        &self,
+        control: &std::sync::Arc<crate::WorkbenchExecutionControl>,
+    ) {
+        self.0
+            .lock()
+            .retain(|entry| entry.accepted || !std::sync::Arc::ptr_eq(&entry.control, control));
+    }
+
+    pub(crate) fn complete(&self, control: &std::sync::Arc<crate::WorkbenchExecutionControl>) {
+        self.0
+            .lock()
+            .retain(|entry| !std::sync::Arc::ptr_eq(&entry.control, control));
+    }
+
+    pub(crate) fn take_accepted_and_clear(
+        &self,
+    ) -> Vec<std::sync::Arc<crate::WorkbenchExecutionControl>> {
+        self.0
+            .lock()
+            .drain(..)
+            .filter_map(|entry| entry.accepted.then_some(entry.control))
+            .collect()
+    }
+
+    pub(crate) fn find(
+        &self,
+        predicate: impl Fn(&crate::WorkbenchExecutionControl) -> bool,
+    ) -> Option<std::sync::Arc<crate::WorkbenchExecutionControl>> {
+        self.0
+            .lock()
+            .iter()
+            .find(|entry| predicate(&entry.control))
+            .map(|entry| std::sync::Arc::clone(&entry.control))
+    }
+
+    fn computing(&self) -> bool {
+        self.0
+            .lock()
+            .iter()
+            .any(|entry| entry.control.is_computing_hosted_cell())
+    }
+}
 
 #[derive(Default)]
 enum AdmissionState {
@@ -353,6 +442,9 @@ enum AdmissionState {
 }
 
 impl MailboxAdmission {
+    pub(crate) fn hosted_cell(&self) -> &HostedCellSlot {
+        &self.1
+    }
     pub(crate) fn close(&self) {
         *self.0.lock() = AdmissionState::Closed;
     }
@@ -399,11 +491,7 @@ impl LocalActorRef {
     /// native submission while this holds.
     #[must_use]
     pub fn hosted_cell_computing(&self) -> bool {
-        self.admission
-            .1
-            .lock()
-            .as_ref()
-            .is_some_and(|control| control.is_computing_hosted_cell())
+        self.admission.1.computing()
     }
 
     pub(crate) async fn abort_prepared_replacement(&self) -> Result<(), KernelBehaviorError> {

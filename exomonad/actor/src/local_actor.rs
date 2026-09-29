@@ -816,21 +816,30 @@ pub struct LocalActorState<B> {
 
 impl<B> Drop for LocalActorState<B> {
     fn drop(&mut self) {
-        let Some(pending) = self.pending_workbench.take() else {
-            return;
-        };
-        let detail = "actor stopped while its owned workbench task was still running; execution and cleanup are unconfirmed";
-        if let Some(control) = pending.control.as_ref() {
-            control.mark_unconfirmed();
+        if let Some(pending) = self.pending_workbench.take() {
+            let detail = "actor stopped while its owned workbench task was still running; execution and cleanup are unconfirmed";
+            if let Some(control) = pending.control.as_ref() {
+                control.mark_unconfirmed();
+            }
+            settle_pending_workbench(
+                pending,
+                Err(KernelInvocationFailure::Failed {
+                    actor: self.context.identity,
+                    detail: detail.into(),
+                }),
+            );
+            retain_unconfirmed_exit(&self.terminal, self.context.identity, detail);
         }
-        settle_pending_workbench(
-            pending,
-            Err(KernelInvocationFailure::Failed {
-                actor: self.context.identity,
-                detail: detail.into(),
-            }),
-        );
-        retain_unconfirmed_exit(&self.terminal, self.context.identity, detail);
+        for control in self
+            .mailbox_admission
+            .hosted_cell()
+            .take_accepted_and_clear()
+        {
+            control.mark_unconfirmed();
+            control.settle(Err(KernelInvocationFailure::ActorExited(
+                self.context.identity,
+            )));
+        }
     }
 }
 
@@ -861,6 +870,7 @@ struct PendingWorkbench<B> {
     control: Option<Arc<crate::WorkbenchExecutionControl>>,
     execution: Option<tidepool_runtime::session::WorkbenchExecutionId>,
     completion: Arc<Mutex<Option<WorkbenchTaskOutcome<B>>>>,
+    hosted_cell: crate::kernel::HostedCellSlot,
 }
 
 enum WorkbenchTaskOutcome<B> {
@@ -1361,14 +1371,12 @@ where
             },
             KernelMessage::Tool { invocation, reply } => {
                 if !matches!(state.hosted_admission, HostedAdmission::Open) {
-                    let rejection = Err(KernelInvocationFailure::Rejected {
-                        actor: state.context.identity,
-                        detail: "hosted work admission is sealed".into(),
-                    });
-                    if let Some(control) = control {
-                        control.settle(rejection.clone());
-                    }
-                    reply.send(rejection).ok();
+                    reply
+                        .send(Err(KernelInvocationFailure::Rejected {
+                            actor: state.context.identity,
+                            detail: "hosted work admission is sealed".into(),
+                        }))
+                        .ok();
                     return Ok(());
                 }
 
@@ -1435,12 +1443,15 @@ where
                 reply,
             } => {
                 if !matches!(state.hosted_admission, HostedAdmission::Open) {
-                    reply
-                        .send(Err(KernelInvocationFailure::Rejected {
-                            actor: state.context.identity,
-                            detail: "hosted work admission is sealed".into(),
-                        }))
-                        .ok();
+                    let rejection = Err(KernelInvocationFailure::Rejected {
+                        actor: state.context.identity,
+                        detail: "hosted work admission is sealed".into(),
+                    });
+                    if let Some(control) = control {
+                        control.settle(rejection.clone());
+                        state.mailbox_admission.hosted_cell().complete(&control);
+                    }
+                    reply.send(rejection).ok();
                     return Ok(());
                 }
 
@@ -1575,6 +1586,9 @@ fn start_workbench<B: KernelBehavior>(
     reply: ractor::RpcReplyPort<crate::KernelWorkbenchReply>,
 ) {
     let behavior = state.behavior.0.take().expect("one active workbench");
+    if let Some(control) = control.as_ref() {
+        state.mailbox_admission.hosted_cell().claim(control);
+    }
     state.next_workbench_token = state.next_workbench_token.wrapping_add(1);
     let token = state.next_workbench_token;
     let completion = Arc::new(Mutex::new(None));
@@ -1584,6 +1598,7 @@ fn start_workbench<B: KernelBehavior>(
         control: control.clone(),
         execution: request.execution_id().cloned(),
         completion: Arc::clone(&completion),
+        hosted_cell: Arc::clone(state.mailbox_admission.hosted_cell()),
     });
     let context = Arc::clone(&state.context);
     let myself = myself.clone();
@@ -1734,6 +1749,7 @@ fn fail_unconfirmed_workbench<B: KernelBehavior>(
 fn settle_pending_workbench<B>(pending: PendingWorkbench<B>, reply: crate::KernelWorkbenchReply) {
     if let Some(control) = pending.control {
         control.settle(reply.clone());
+        pending.hosted_cell.complete(&control);
     }
     pending.reply.send(reply).ok();
 }
@@ -2195,7 +2211,7 @@ mod tests {
     use crate::ActorLifecycle;
     use std::sync::Arc;
 
-    use exomonad_tool::{ToolArguments, ToolInvocation};
+    use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
     use parking_lot::Mutex;
     use tidepool_repr::SessionId;
     use tidepool_runtime::session::{WorkbenchResponse, WorkbenchRunStatus};
@@ -2798,6 +2814,61 @@ mod tests {
         .await
         .expect("actor settled retained control");
         assert!(settled.is_ok());
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "done".into(),
+            })
+            .await
+            .expect("shutdown");
+        task.await.expect("actor task");
+    }
+
+    #[tokio::test]
+    async fn abandoned_hosted_caller_keeps_active_cell_visible_until_actor_settles() {
+        let mut fixture = behavior(false);
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        fixture.behavior.workbench_gate = Some((Arc::clone(&entered), Arc::clone(&release)));
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let client = crate::resident_tools::ResidentToolClient::local(actor.clone());
+        let caller = tokio::spawn(async move {
+            client
+                .dispatch_workbench(
+                    WorkbenchRequest::from_cell_input("pure ()"),
+                    Some(ToolInvocationContext {
+                        context_call_id: None,
+                        thread_id: "thread".into(),
+                        turn_id: "turn".into(),
+                        call_id: "call".into(),
+                        namespace: None,
+                    }),
+                )
+                .await
+        });
+        entered.notified().await;
+        let control = actor
+            .hosted_cell()
+            .find(|_| true)
+            .expect("accepted control");
+        caller.abort();
+        let _ = caller.await;
+        assert!(actor.hosted_cell_computing());
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if control.terminal_reply().is_some() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actor settled abandoned call");
+        assert!(control.terminal_reply().expect("terminal").is_ok());
+        assert!(!actor.hosted_cell_computing());
         actor
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
