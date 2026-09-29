@@ -79,6 +79,39 @@ acceptance of the ten later commits.
    tokens reject new admissions; existing children and successful captures survive
    issuer failure. Browser includes actual Haskell-only workflow actors.
 
+## Native Buck migration
+
+Added 2026-09-29 alongside implementation. Make Buck the native project build
+and test graph wherever viable, not a wrapper around whole Cargo/Cabal builds.
+Use standard rules and toolchains, explicit dependency edges and declared inputs;
+keep generation, compilation, test execution and browser assets separate cacheable
+actions. Preserve existing authoritative checks until equivalent executed Buck
+coverage is accepted. Nix continues to supply pinned toolchain closures; the
+resident Haskell compiler remains a runtime service.
+
+Port build metadata from `build/buck2-swarm` onto the accepted engine source,
+without importing its old source ancestry or replacing current flake outputs.
+Begin with atomic-write and repr, then expand through native engine/runtime,
+extractor, facade and matching harness/browser actions. Regenerate and validate
+Rust dependency metadata against current manifests and lockfiles. Inspect actual
+Prelude Haskell actions before choosing module target boundaries: cache
+granularity is determined by actions and their inputs, not target count alone.
+Avoid opaque workspace-wide actions where native incremental rules are viable.
+
+Run Buck from an existing checkout with a real `buck-out` bind mount, with its
+daemon and children admitted to the completion slice. Preserve default isolation
+for cache reuse. Use `--local-only -c remote.enabled=false` until remote closure,
+isolation and cache acceptance is separately recorded. No remote-cache claims
+follow from local hits.
+
+For each migrated boundary, retain a cold build, unchanged warm build, executed
+test counts, and a controlled source/fixture invalidation check showing only the
+affected dependency closure reruns. Inspect action inputs for checkout-specific
+paths, undeclared ambient tools and unnecessarily broad source sets. Stable
+independent actions should permit parallel scheduling and cache reuse. Record
+remaining coarse actions explicitly rather than claiming full cache granularity
+from a successful build.
+
 ## Acceptance
 
 - G0: exact reviewed engine/harness/assets/workspace pins, migration/refusal,
