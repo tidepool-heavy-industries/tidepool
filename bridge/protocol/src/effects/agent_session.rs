@@ -93,6 +93,7 @@ pub fn agent_session() -> Effect {
         helpers: Vec::new(),
         polymorphism: Polymorphism::ResultBound { tyvar: "output" },
         generated_handler: false,
+        handler_execution: crate::schema::HandlerExecution::Immediate,
         caller_principal: false,
     }
 }

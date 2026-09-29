@@ -230,6 +230,7 @@ pub fn green() -> Effect {
         polymorphism: Polymorphism::None,
         // There is deliberately no `GreenHandler` (see the module doc).
         generated_handler: false,
+        handler_execution: crate::schema::HandlerExecution::Immediate,
         caller_principal: false,
     }
 }

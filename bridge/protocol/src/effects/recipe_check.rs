@@ -125,6 +125,7 @@ pub fn recipe_check() -> Effect {
         helpers: vec![],
         polymorphism: Polymorphism::None,
         generated_handler: false,
+        handler_execution: crate::schema::HandlerExecution::Immediate,
         caller_principal: false,
     }
 }

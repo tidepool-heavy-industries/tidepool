@@ -105,6 +105,62 @@ impl EffectHandler for SecondHandler {
     }
 }
 
+#[test]
+fn prepared_dispatch_keeps_external_work_owned_and_preserves_principal() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tidepool_effect::dispatch::{DeferredEffect, EffectDispatch};
+    use tidepool_repr::PrincipalId;
+
+    struct DeferredHandler(Arc<AtomicUsize>);
+    impl EffectHandler for DeferredHandler {
+        type Request = FirstRequest;
+
+        fn handle(
+            &mut self,
+            _request: FirstRequest,
+            _cx: &EffectContext<'_>,
+        ) -> Result<Response, EffectError> {
+            panic!("deferred handler must not execute synchronously")
+        }
+
+        fn prepare(
+            &mut self,
+            request: FirstRequest,
+            cx: &EffectContext<'_>,
+        ) -> Result<EffectDispatch, EffectError> {
+            let principal = cx.principal();
+            let calls = Arc::clone(&self.0);
+            Ok(EffectDispatch::Deferred(DeferredEffect::blocking(
+                move || {
+                    assert_eq!(principal, PrincipalId::new(17, 3));
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(HaskellValue::Lit(Literal::LitInt(request.0 + 1)).into())
+                },
+            )))
+        }
+    }
+
+    let table = table();
+    let cx = EffectContext::with_principal(&table, PrincipalId::new(17, 3), &());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut handlers = hlist![DeferredHandler(Arc::clone(&calls)), SecondHandler];
+    let deferred = handlers.prepare_dispatch(&request(FIRST, 41), &cx).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let EffectDispatch::Deferred(DeferredEffect::Blocking(work)) = deferred else {
+        panic!("expected owned blocking work")
+    };
+    assert_eq!(
+        completed_int(Some(work.into_inner().unwrap()().unwrap()), &table),
+        42
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        handlers.prepare_dispatch(&request(UNKNOWN, 0), &cx),
+        Ok(EffectDispatch::Unhandled)
+    ));
+}
+
 fn completed_int(response: Option<Response>, table: &DataConTable) -> i64 {
     match response.map(|response| response.to_value(table)) {
         Some(Ok(HaskellValue::Lit(Literal::LitInt(n)))) => n,

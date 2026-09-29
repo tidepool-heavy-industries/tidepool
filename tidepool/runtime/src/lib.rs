@@ -285,10 +285,10 @@ pub fn run_prepared_program<U, H: DispatchEffect<U>>(
     user: &U,
     on_ready: impl FnOnce(CancelHandle),
 ) -> Result<HaskellValue, RuntimeError> {
-    use session::prepared::{ParkPolicy, PreparedEngine};
+    use session::prepared::{ParkPolicy, PreparedEngine, PreparedRuntimeError};
     use session::resident::{finish_prepared, PreparedRun, SettlePlan};
     use tidepool_codegen::suspension::RealmId;
-    use tidepool_effect::dispatch::request_constructor;
+    use tidepool_effect::dispatch::{request_constructor, DeferredEffect};
     use tidepool_effect::error::EffectError;
     use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
     use tidepool_repr::PrincipalId;
@@ -303,7 +303,7 @@ pub fn run_prepared_program<U, H: DispatchEffect<U>>(
         live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
     };
     let settlement = engine.run_settled(program, realm)?;
-    let run = finish_prepared(
+    let mut run = finish_prepared(
         &mut engine,
         program,
         realm,
@@ -314,28 +314,75 @@ pub fn run_prepared_program<U, H: DispatchEffect<U>>(
         user,
         settlement,
     )?;
-    match run {
-        PreparedRun::Done { value, .. } => Ok(value),
-        PreparedRun::Suspended { id, request } => {
-            let constructor = request_constructor(&request, table);
-            // No handler claimed it and there is no resume path in a
-            // one-shot run: release the parked frame rather than leak it.
-            if let Err(err) = engine.abort_parked(id) {
-                tracing::warn!(
-                    ?err,
-                    ?id,
-                    "failed to abort parked frame for unhandled effect"
-                );
+    loop {
+        match run {
+            PreparedRun::Done { value, .. } => return Ok(value),
+            PreparedRun::Deferred { id, work, .. } => {
+                let response = match work {
+                    DeferredEffect::Blocking(work) => {
+                        work.into_inner()
+                            .unwrap_or_else(|poison| poison.into_inner())()
+                        .map_err(RuntimeError::Jit)
+                    }
+                    DeferredEffect::Async(_) => {
+                        Err(PreparedRuntimeError::DeferredRequiresAsyncHost.into())
+                    }
+                };
+                let response = match response {
+                    Ok(response) => response,
+                    Err(error) => {
+                        if let Err(abort_error) = engine.abort_parked(id) {
+                            tracing::warn!(?abort_error, ?id, "failed to abort deferred frame");
+                        }
+                        return Err(error);
+                    }
+                };
+                let resumed = match engine.resume_with_structural_answer(id, &response, table) {
+                    Ok(resumed) => resumed,
+                    Err(error) => {
+                        if let Err(abort_error) = engine.abort_parked(id) {
+                            tracing::warn!(
+                                ?abort_error,
+                                ?id,
+                                "failed to abort refused deferred answer"
+                            );
+                        }
+                        return Err(error.into());
+                    }
+                };
+                run = finish_prepared(
+                    &mut engine,
+                    resumed.runner,
+                    resumed.realm,
+                    SettlePlan::Observe,
+                    park,
+                    table,
+                    handlers,
+                    user,
+                    resumed.settlement,
+                )?;
             }
-            Err(RuntimeError::Jit(EffectError::UnhandledEffect {
-                constructor,
-            }))
-        }
-        PreparedRun::Projected { .. } => {
-            unreachable!("SettlePlan::Observe never produces a projected run")
-        }
-        PreparedRun::Display { .. } => {
-            unreachable!("SettlePlan::Observe never produces a display bundle")
+            PreparedRun::Suspended { id, request } => {
+                let constructor = request_constructor(&request, table);
+                // No handler claimed it and there is no resume path in a
+                // one-shot run: release the parked frame rather than leak it.
+                if let Err(err) = engine.abort_parked(id) {
+                    tracing::warn!(
+                        ?err,
+                        ?id,
+                        "failed to abort parked frame for unhandled effect"
+                    );
+                }
+                return Err(RuntimeError::Jit(EffectError::UnhandledEffect {
+                    constructor,
+                }));
+            }
+            PreparedRun::Projected { .. } => {
+                unreachable!("SettlePlan::Observe never produces a projected run")
+            }
+            PreparedRun::Display { .. } => {
+                unreachable!("SettlePlan::Observe never produces a display bundle")
+            }
         }
     }
 }

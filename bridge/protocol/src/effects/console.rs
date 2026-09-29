@@ -56,6 +56,7 @@ pub fn console() -> Effect {
         // `suspension_roster`'s doc). `true` documents the real shape even
         // though this Effect stays out of `effects::all()` for now.
         generated_handler: true,
+        handler_execution: crate::schema::HandlerExecution::Immediate,
         caller_principal: false,
     }
 }

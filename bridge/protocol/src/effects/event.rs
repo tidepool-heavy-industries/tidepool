@@ -203,6 +203,7 @@ pub fn event() -> Effect {
         helpers: helpers(),
         polymorphism: Polymorphism::None,
         generated_handler: true,
+        handler_execution: crate::schema::HandlerExecution::Immediate,
         caller_principal: true,
     }
 }

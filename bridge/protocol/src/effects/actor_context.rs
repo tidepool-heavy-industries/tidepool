@@ -55,6 +55,7 @@ pub fn actor_context() -> Effect {
         }],
         polymorphism: Polymorphism::None,
         generated_handler: false,
+        handler_execution: crate::schema::HandlerExecution::Immediate,
         caller_principal: false,
     }
 }

@@ -2,6 +2,9 @@
 
 use crate::error::EffectError;
 use frunk::{HCons, HNil};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Mutex;
 use tidepool_bridge::error::BridgeError;
 use tidepool_bridge::HaskellValue;
 use tidepool_bridge::{FromHaskell, ToHaskell};
@@ -56,6 +59,47 @@ impl From<HaskellValue> for Response {
     fn from(v: HaskellValue) -> Self {
         Self::new(v)
     }
+}
+
+/// Owned external work prepared while the request and principal are available.
+/// The runtime launches `Blocking` on a blocking thread and polls `Async` on
+/// an async executor after releasing its machine checkout.
+pub enum DeferredEffect {
+    Blocking(Mutex<Box<dyn FnOnce() -> Result<Response, EffectError> + Send>>),
+    Async(Mutex<Pin<Box<dyn Future<Output = Result<Response, EffectError>> + Send>>>),
+}
+
+impl DeferredEffect {
+    /// Own one blocking operation. The mutex makes a parked outcome shareable
+    /// as actor state; consuming the enum still transfers the operation once.
+    pub fn blocking(work: impl FnOnce() -> Result<Response, EffectError> + Send + 'static) -> Self {
+        Self::Blocking(Mutex::new(Box::new(work)))
+    }
+
+    /// Own one asynchronous operation with the same linear consumption rule.
+    pub fn asynchronous(
+        work: impl Future<Output = Result<Response, EffectError>> + Send + 'static,
+    ) -> Self {
+        Self::Async(Mutex::new(Box::pin(work)))
+    }
+}
+
+impl std::fmt::Debug for DeferredEffect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Blocking(_) => f.write_str("DeferredEffect::Blocking(..)"),
+            Self::Async(_) => f.write_str("DeferredEffect::Async(..)"),
+        }
+    }
+}
+
+/// Nominal dispatch result. A deferred operation owns all of its inputs;
+/// neither a VM value nor an `EffectContext` borrow crosses the boundary.
+#[derive(Debug)]
+pub enum EffectDispatch {
+    Unhandled,
+    Immediate(Response),
+    Deferred(DeferredEffect),
 }
 
 /// Shared context passed to effect handlers during dispatch.
@@ -136,6 +180,16 @@ pub trait EffectHandler<U = ()> {
         req: Self::Request,
         cx: &EffectContext<'_, U>,
     ) -> Result<Response, EffectError>;
+
+    /// Prepare owned work before the machine checkout is released. Handlers
+    /// that do not need deferral keep their existing synchronous `handle`.
+    fn prepare(
+        &mut self,
+        req: Self::Request,
+        cx: &EffectContext<'_, U>,
+    ) -> Result<EffectDispatch, EffectError> {
+        self.handle(req, cx).map(EffectDispatch::Immediate)
+    }
 }
 
 /// Constructor-based effect routing over an HList of handlers.
@@ -151,6 +205,17 @@ pub trait DispatchEffect<U = ()> {
         request: &HaskellValue,
         cx: &EffectContext<'_, U>,
     ) -> Result<Option<Response>, EffectError>;
+
+    /// Route a request to either an immediate answer or owned external work.
+    /// Custom dispatchers that only implement `dispatch` stay synchronous.
+    fn prepare_dispatch(
+        &mut self,
+        request: &HaskellValue,
+        cx: &EffectContext<'_, U>,
+    ) -> Result<EffectDispatch, EffectError> {
+        self.dispatch(request, cx)
+            .map(|response| response.map_or(EffectDispatch::Unhandled, EffectDispatch::Immediate))
+    }
 }
 
 /// Name an effect request for diagnostics without assigning routing meaning
@@ -194,6 +259,18 @@ impl<U, H: EffectHandler<U>, T: DispatchEffect<U>> DispatchEffect<U> for HCons<H
             Err(error) => Err(EffectError::Bridge(error)),
         }
     }
+
+    fn prepare_dispatch(
+        &mut self,
+        request: &HaskellValue,
+        cx: &EffectContext<'_, U>,
+    ) -> Result<EffectDispatch, EffectError> {
+        match H::Request::from_value(request, cx.table()) {
+            Ok(req) => self.head.prepare(req, cx),
+            Err(BridgeError::UnknownDataCon(_)) => self.tail.prepare_dispatch(request, cx),
+            Err(error) => Err(EffectError::Bridge(error)),
+        }
+    }
 }
 
 // Forwarding impls: a `&mut H` or a boxed handler dispatches through its inner
@@ -209,6 +286,14 @@ impl<U, H: DispatchEffect<U> + ?Sized> DispatchEffect<U> for &mut H {
     ) -> Result<Option<Response>, EffectError> {
         (**self).dispatch(request, cx)
     }
+
+    fn prepare_dispatch(
+        &mut self,
+        request: &HaskellValue,
+        cx: &EffectContext<'_, U>,
+    ) -> Result<EffectDispatch, EffectError> {
+        (**self).prepare_dispatch(request, cx)
+    }
 }
 
 impl<U, H: DispatchEffect<U> + ?Sized> DispatchEffect<U> for Box<H> {
@@ -218,6 +303,14 @@ impl<U, H: DispatchEffect<U> + ?Sized> DispatchEffect<U> for Box<H> {
         cx: &EffectContext<'_, U>,
     ) -> Result<Option<Response>, EffectError> {
         (**self).dispatch(request, cx)
+    }
+
+    fn prepare_dispatch(
+        &mut self,
+        request: &HaskellValue,
+        cx: &EffectContext<'_, U>,
+    ) -> Result<EffectDispatch, EffectError> {
+        (**self).prepare_dispatch(request, cx)
     }
 }
 

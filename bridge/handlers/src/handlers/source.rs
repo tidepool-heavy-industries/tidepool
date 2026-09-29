@@ -54,6 +54,7 @@ pub trait SourceReloadService: Send + Sync {
 /// Absent a service — a run with no workspace, and every test stack that never
 /// installs one — every verb answers `SourceUnavailable` rather than silently
 /// succeeding against nothing.
+#[derive(Clone)]
 pub struct SourceHandler {
     service: Option<Arc<dyn SourceReloadService>>,
 }

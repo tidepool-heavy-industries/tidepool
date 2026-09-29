@@ -109,6 +109,7 @@ pub fn agent_tools() -> Effect {
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,
         generated_handler: false,
+        handler_execution: crate::schema::HandlerExecution::Immediate,
         caller_principal: false,
     }
 }

@@ -147,6 +147,7 @@ pub fn fork() -> Effect {
         polymorphism: Polymorphism::None,
         // No real `tidepool-handlers` handler (see the module doc).
         generated_handler: false,
+        handler_execution: crate::schema::HandlerExecution::Immediate,
         caller_principal: false,
     }
 }

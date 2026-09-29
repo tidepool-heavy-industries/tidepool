@@ -635,6 +635,25 @@ impl tidepool_mcp::DescribeEffect for FsWriteHandler {
 impl tidepool_effect::dispatch::EffectHandler<CapturedOutput> for FsWriteHandler {
     type Request = FsWriteReq;
 
+    fn prepare(
+        &mut self,
+        request: Self::Request,
+        cx: &EffectContext<'_, CapturedOutput>,
+    ) -> Result<tidepool_effect::dispatch::EffectDispatch, EffectError> {
+        use tidepool_effect::dispatch::{DeferredEffect, EffectDispatch};
+
+        let mut handler = self.clone();
+        let table = cx.table().clone();
+        let principal = cx.principal();
+        let output = cx.user().clone();
+        Ok(EffectDispatch::Deferred(DeferredEffect::blocking(
+            move || {
+                let owned = EffectContext::with_principal(&table, principal, &output);
+                handler.handle(request, &owned)
+            },
+        )))
+    }
+
     fn handle(
         &mut self,
         request: Self::Request,
@@ -661,6 +680,27 @@ mod tests {
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
     use tidepool_repr::DataConTable;
 
+    #[test]
+    fn prepared_fs_read_runs_after_checkout_releases() {
+        use tidepool_effect::dispatch::{DeferredEffect, EffectDispatch};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut handler = FsBackend::new(dir.path().to_path_buf());
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+        let prepared = handler
+            .prepare(FsReadReq::FsRead("late.txt".into()), &cx)
+            .unwrap();
+        std::fs::write(dir.path().join("late.txt"), "ready").unwrap();
+        let EffectDispatch::Deferred(DeferredEffect::Blocking(work)) = prepared else {
+            panic!("filesystem read must be prepared as owned blocking work")
+        };
+        let response = work.into_inner().unwrap()().unwrap();
+        let value: Result<String, FsError> =
+            FromHaskell::from_value(&response_value(response, &table), &table).unwrap();
+        assert_eq!(value.unwrap(), "ready");
+    }
     #[test]
     fn test_pattern_mentions() {
         assert!(!pattern_mentions("**/*.rs", "target"));

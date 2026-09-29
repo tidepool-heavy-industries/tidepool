@@ -507,6 +507,7 @@ pub fn actor() -> Effect {
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,
         generated_handler: false,
+        handler_execution: crate::schema::HandlerExecution::Immediate,
         caller_principal: false,
     }
 }

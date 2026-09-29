@@ -117,6 +117,10 @@ pub enum PreparedRuntimeError {
     /// cannot be handled either.
     #[error("the turn requested an effect under HandleOrError; the prepared route parks nothing under that policy")]
     UnhandledRequest,
+    /// A one-shot synchronous driver reached async work and has no executor
+    /// or retained completion channel to run it.
+    #[error("deferred effect requires an async host")]
+    DeferredRequiresAsyncHost,
     /// The session's effect handler stack claimed a parked request and then
     /// failed. The frame was aborted; nothing stays parked.
     #[error("effect handler for `{constructor}` failed: {detail}")]
@@ -210,6 +214,7 @@ impl PreparedRuntimeError {
             | Self::UntypedRequest { .. }
             | Self::UnsitedAnswer
             | Self::UnhandledRequest
+            | Self::DeferredRequiresAsyncHost
             | Self::NoResumeEntry { .. }
             | Self::AnswerDelivery { .. }
             | Self::AnswerConstructor { .. }

@@ -90,4 +90,23 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for 
             WorktreeReq::WorktreeTryMerge(request) => cx.respond(self.worktree_try_merge(request)),
         }
     }
+
+    fn prepare(
+        &mut self,
+        req: WorktreeReq,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+    ) -> Result<tidepool_effect::dispatch::EffectDispatch, tidepool_effect::error::EffectError>
+    {
+        use tidepool_effect::dispatch::{DeferredEffect, EffectContext, EffectDispatch};
+        let mut handler = self.clone();
+        let table = cx.table().clone();
+        let principal = cx.principal();
+        let user = cx.user().clone();
+        Ok(EffectDispatch::Deferred(DeferredEffect::blocking(
+            move || {
+                let owned = EffectContext::with_principal(&table, principal, &user);
+                handler.handle(req, &owned)
+            },
+        )))
+    }
 }

@@ -14,7 +14,7 @@
 //! and the arm forwards it.
 
 use super::{header, index_body, module_name, snake_case, GeneratedFile};
-use crate::schema::Effect;
+use crate::schema::{Effect, HandlerExecution};
 
 /// Where this effect's generated glue lives, relative to the workspace root.
 #[must_use]
@@ -228,6 +228,29 @@ fn body(e: &Effect) -> String {
         }
     }
     out.push_str("        }\n");
-    out.push_str("    }\n}\n");
+    out.push_str("    }\n");
+    if e.handler_execution == HandlerExecution::BlockingPrepared {
+        out.push_str("\n    fn prepare(\n");
+        out.push_str("        &mut self,\n");
+        out.push_str(&format!("        req: {},\n", e.req_enum));
+        out.push_str("        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,\n");
+        out.push_str("    ) -> Result<tidepool_effect::dispatch::EffectDispatch, tidepool_effect::error::EffectError>\n");
+        out.push_str("    {\n");
+        out.push_str("        use tidepool_effect::dispatch::{DeferredEffect, EffectContext, EffectDispatch};\n");
+        out.push_str("        let mut handler = self.clone();\n");
+        out.push_str("        let table = cx.table().clone();\n");
+        out.push_str("        let principal = cx.principal();\n");
+        out.push_str("        let user = cx.user().clone();\n");
+        out.push_str("        Ok(EffectDispatch::Deferred(DeferredEffect::blocking(\n");
+        out.push_str("            move || {\n");
+        out.push_str(
+            "                let owned = EffectContext::with_principal(&table, principal, &user);\n",
+        );
+        out.push_str("                handler.handle(req, &owned)\n");
+        out.push_str("            },\n");
+        out.push_str("        )))\n");
+        out.push_str("    }\n");
+    }
+    out.push_str("}\n");
     out
 }

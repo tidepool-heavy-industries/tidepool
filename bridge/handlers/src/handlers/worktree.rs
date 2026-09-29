@@ -486,6 +486,28 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
 {
     type Request = WorktreeReq;
 
+    fn prepare(
+        &mut self,
+        req: WorktreeReq,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+    ) -> Result<tidepool_effect::dispatch::EffectDispatch, tidepool_effect::error::EffectError>
+    {
+        use tidepool_effect::dispatch::{DeferredEffect, EffectDispatch};
+
+        let mut handler = self.clone();
+        let table = cx.table().clone();
+        let principal = cx.principal();
+        let output = cx.user().clone();
+        Ok(EffectDispatch::Deferred(DeferredEffect::blocking(
+            move || {
+                let owned = tidepool_effect::dispatch::EffectContext::with_principal(
+                    &table, principal, &output,
+                );
+                handler.handle(req, &owned)
+            },
+        )))
+    }
+
     fn handle(
         &mut self,
         req: WorktreeReq,

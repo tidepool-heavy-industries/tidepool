@@ -131,6 +131,7 @@ pub fn finalize() -> Effect {
         polymorphism: Polymorphism::ArgBound { tyvar: "v" },
         // No real `tidepool-handlers` handler (see the module doc).
         generated_handler: false,
+        handler_execution: crate::schema::HandlerExecution::Immediate,
         caller_principal: false,
     }
 }

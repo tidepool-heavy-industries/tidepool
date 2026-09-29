@@ -21,7 +21,9 @@ use tidepool_repr::execution_schema::{JsonLayout, PreparedProgram, SymbolIdentit
 use super::prepared::{ParkPolicy, PreparedRuntimeError, PreparedSettlement};
 use super::turn::TurnCode;
 use tidepool_codegen::suspension::{ContinuationId, RealmId, ValueHandle};
-use tidepool_effect::dispatch::{request_constructor, DispatchEffect, EffectContext, Response};
+use tidepool_effect::dispatch::{
+    request_constructor, DeferredEffect, DispatchEffect, EffectContext, EffectDispatch, Response,
+};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::{
@@ -702,6 +704,15 @@ pub enum ResidentOutcome {
         hole: ResidentHole,
         request: HaskellValue,
     },
+    /// A handler claimed this request and prepared owned external work. The
+    /// frame remains parked; a host runs `work` and resumes `hole` with its
+    /// structural response after the machine checkout has been released.
+    Deferred {
+        output: Vec<String>,
+        hole: ResidentHole,
+        request: HaskellValue,
+        work: DeferredEffect,
+    },
 }
 
 /// The rendered metadata from one compiler-produced display bundle.
@@ -991,6 +1002,11 @@ pub(crate) enum PreparedRun {
     Suspended {
         id: ContinuationId,
         request: HaskellValue,
+    },
+    Deferred {
+        id: ContinuationId,
+        request: HaskellValue,
+        work: DeferredEffect,
     },
 }
 
@@ -1491,11 +1507,11 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
         // never reaches here (`park_suspension` refuses it). The handler
         // stack sees the observed request, the run's principal and the
         // session's output sink.
-        let response = if park.effect_policy == EffectRunPolicy::SuspendAll {
-            None
+        let dispatch = if park.effect_policy == EffectRunPolicy::SuspendAll {
+            EffectDispatch::Unhandled
         } else {
             let cx = EffectContext::with_principal(table, park.principal, captured);
-            match handlers.dispatch(&parked.request, &cx) {
+            match handlers.prepare_dispatch(&parked.request, &cx) {
                 Ok(response) => response,
                 Err(error) => {
                     let constructor = request_constructor(&parked.request, table);
@@ -1514,11 +1530,21 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
                 }
             }
         };
-        let Some(response) = response else {
-            return Ok(PreparedRun::Suspended {
-                id: parked.id,
-                request: parked.request,
-            });
+        let response = match dispatch {
+            EffectDispatch::Unhandled => {
+                return Ok(PreparedRun::Suspended {
+                    id: parked.id,
+                    request: parked.request,
+                });
+            }
+            EffectDispatch::Immediate(response) => response,
+            EffectDispatch::Deferred(work) => {
+                return Ok(PreparedRun::Deferred {
+                    id: parked.id,
+                    request: parked.request,
+                    work,
+                });
+            }
         };
         let resumed = match engine.resume_with_structural_answer(parked.id, &response, table) {
             Ok(resumed) => resumed,
@@ -3846,6 +3872,12 @@ where
                     provenance,
                 )
             }
+            PreparedRun::Deferred { id, request, work } => self.classify_parked(
+                ParkedRun::Deferred { id, request, work },
+                resumed,
+                seed,
+                provenance,
+            ),
         };
         // The between-turn quiescent point: a fresh or resumed turn that
         // settled or parked just released whatever it retired-in-place, so
@@ -4160,6 +4192,19 @@ where
                 return Err(PreparedRuntimeError::UnsettledEntry {
                     program,
                     detail: "display bundle suspended while constructing a pure page",
+                }
+                .into());
+            }
+            PreparedRun::Deferred { id, .. } => {
+                self.on_eval_thread(move |engine, _, _, _| {
+                    engine
+                        .abort_parked(id)
+                        .map_err(|error| EffectError::Handler(error.to_string()))?;
+                    Ok(())
+                })?;
+                return Err(PreparedRuntimeError::UnsettledEntry {
+                    program,
+                    detail: "display bundle deferred while constructing a pure page",
                 }
                 .into());
             }
@@ -4818,6 +4863,18 @@ where
                     request,
                 }
             }
+            ParkedRun::Deferred { id, request, work } => {
+                self.retire_resumed(resumed);
+                let cont_id = self.next_cont_id();
+                self.parked.push((cont_id.clone(), id));
+                self.parked_provenance.insert(id, provenance);
+                ResidentOutcome::Deferred {
+                    output: self.captured.snapshot(),
+                    hole: ResidentHole::mint(cont_id, seed),
+                    request,
+                    work,
+                }
+            }
         }
     }
 
@@ -5091,6 +5148,11 @@ enum ParkedRun {
     Suspended {
         id: ContinuationId,
         request: HaskellValue,
+    },
+    Deferred {
+        id: ContinuationId,
+        request: HaskellValue,
+        work: DeferredEffect,
     },
 }
 

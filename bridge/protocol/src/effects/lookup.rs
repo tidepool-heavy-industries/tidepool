@@ -46,6 +46,7 @@ pub fn lookup() -> Effect {
         }],
         polymorphism: Polymorphism::None,
         generated_handler: false,
+        handler_execution: crate::schema::HandlerExecution::Immediate,
         caller_principal: false,
     }
 }

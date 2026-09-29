@@ -123,6 +123,9 @@ pub struct Effect {
     /// contribute its DECL text (`decl_rs`) once its helpers are fully
     /// schema-representable, entirely independent of this flag.
     pub generated_handler: bool,
+    /// Whether the generated handler answers inline or prepares owned
+    /// blocking work for execution after the machine checkout is released.
+    pub handler_execution: HandlerExecution,
     /// Does this effect's handler need to know WHICH actor asked?
     ///
     /// An ordinary handler answers the same way for every caller, so its
@@ -135,6 +138,12 @@ pub struct Effect {
     /// response. It is deliberately per effect rather than per verb: an effect
     /// that resolves a caller resolves it for its whole surface.
     pub caller_principal: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandlerExecution {
+    Immediate,
+    BlockingPrepared,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

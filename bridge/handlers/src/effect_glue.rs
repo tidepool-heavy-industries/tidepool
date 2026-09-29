@@ -87,10 +87,82 @@ macro_rules! effect_rust_projection {
                     )*
                 }
             }
+
+            crate::effect_glue::effect_prepare_method!($eff, $req);
         }
     };
 }
 pub(crate) use effect_rust_projection;
+
+/// Filesystem reads can block on the host filesystem. Keep the generated
+/// request match as the only behavior owner and move that same `handle` call
+/// to a blocking worker after capturing its typed request and exact context.
+macro_rules! effect_prepare_method {
+    (FsRead, $req:ident) => {
+        crate::effect_glue::blocking_prepare_method!($req);
+    };
+    (Git, $req:ident) => {
+        crate::effect_glue::blocking_prepare_method!($req);
+    };
+    (Exec, $req:ident) => {
+        crate::effect_glue::blocking_prepare_method!($req);
+    };
+    (Http, $req:ident) => {
+        crate::effect_glue::blocking_prepare_method!($req);
+    };
+    (KV, $req:ident) => {
+        crate::effect_glue::blocking_prepare_method!($req);
+    };
+    (Llm, $req:ident) => {
+        fn prepare(
+            &mut self,
+            req: $req,
+            cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        ) -> Result<tidepool_effect::dispatch::EffectDispatch, tidepool_effect::error::EffectError>
+        {
+            let mut handler = self.clone();
+            handler.call_count = std::sync::Arc::clone(&self.call_count);
+            let table = cx.table().clone();
+            let principal = cx.principal();
+            let output = cx.user().clone();
+            Ok(tidepool_effect::dispatch::EffectDispatch::Deferred(
+                tidepool_effect::dispatch::DeferredEffect::blocking(move || {
+                    let owned = tidepool_effect::dispatch::EffectContext::with_principal(
+                        &table, principal, &output,
+                    );
+                    tidepool_effect::dispatch::EffectHandler::handle(&mut handler, req, &owned)
+                }),
+            ))
+        }
+    };
+    ($other:ident, $req:ident) => {};
+}
+pub(crate) use effect_prepare_method;
+
+macro_rules! blocking_prepare_method {
+    ($req:ident) => {
+        fn prepare(
+            &mut self,
+            req: $req,
+            cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        ) -> Result<tidepool_effect::dispatch::EffectDispatch, tidepool_effect::error::EffectError>
+        {
+            let mut handler = self.clone();
+            let table = cx.table().clone();
+            let principal = cx.principal();
+            let output = cx.user().clone();
+            Ok(tidepool_effect::dispatch::EffectDispatch::Deferred(
+                tidepool_effect::dispatch::DeferredEffect::blocking(move || {
+                    let owned = tidepool_effect::dispatch::EffectContext::with_principal(
+                        &table, principal, &output,
+                    );
+                    tidepool_effect::dispatch::EffectHandler::handle(&mut handler, req, &owned)
+                }),
+            ))
+        }
+    };
+}
+pub(crate) use blocking_prepare_method;
 
 /// Emit the whole `errors` ADT as one item (a macro can't sit in enum-variant
 /// position, so the variants are built inline here from the re-matched block).

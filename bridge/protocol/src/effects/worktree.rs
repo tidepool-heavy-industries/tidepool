@@ -114,6 +114,7 @@ pub fn worktree() -> Effect {
         helpers: helpers(),
         polymorphism: Polymorphism::None,
         generated_handler: true,
+        handler_execution: crate::schema::HandlerExecution::BlockingPrepared,
         caller_principal: false,
     }
 }

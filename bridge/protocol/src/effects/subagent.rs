@@ -123,6 +123,7 @@ pub fn subagent() -> Effect {
         // doc): the hand macro also feeds `tidepool-handlers`'s real
         // `SubagentHandler` projection, out of this migration's scope.
         generated_handler: true,
+        handler_execution: crate::schema::HandlerExecution::Immediate,
         caller_principal: false,
     }
 }

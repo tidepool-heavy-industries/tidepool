@@ -308,6 +308,7 @@ pub fn source() -> Effect {
         ],
         polymorphism: Polymorphism::None,
         generated_handler: true,
+        handler_execution: crate::schema::HandlerExecution::BlockingPrepared,
         // A reload acts on the CALLER's own source layer: the root's for the
         // root, and an actor's own checkout layer for an actor that has one.
         // The handler needs the kernel-issued principal to reach it.
