@@ -45,6 +45,7 @@ import Tidepool.ExecutionIR
 import Tidepool.PreparedSites
   ( PreparedSite(..), SiteRejection(..), buildYieldSite, lookupPreparedVerb, resolvePreparedSiblings )
 import RetainedPluginTest (verifyCompilerReuse, verifyPreparedScope)
+import ModuleProductRoundtripTest (verifyModuleProductInterfaceRoundtrip)
 import TypeEvidenceChecks (runTypeEvidenceChecks)
 import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthority)
 
@@ -512,6 +513,13 @@ main = do
         (removePathForcibly work >> createDirectoryIfMissing True work >> pure work)
         removePathForcibly
         $ \dir -> verifyCompilerReuse dir >> verifyPreparedScope dir
+    ["--module-product-roundtrip"] -> do
+      tmp <- getTemporaryDirectory
+      let work = tmp </> "tidepool-module-product-roundtrip-test"
+      bracket
+        (removePathForcibly work >> createDirectoryIfMissing True work >> pure work)
+        removePathForcibly
+        verifyModuleProductInterfaceRoundtrip
     [] -> fullMain
     _ -> ioError (userError ("unknown test arguments: " ++ show args))
 
