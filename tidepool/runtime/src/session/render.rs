@@ -240,6 +240,32 @@ impl DeclLog {
         generation
     }
 
+    pub(crate) fn is_reserved(&self, generation: Generation) -> bool {
+        matches!(self.turns.get(&generation), Some(DeclarationSlot::Reserved))
+    }
+
+    pub(crate) fn commit_reserved_authored(
+        &mut self,
+        generation: Generation,
+        turn: DeclTurn,
+    ) -> bool {
+        if generation.0 == 0
+            || turn
+                .parent
+                .is_some_and(|parent| parent.0 >= generation.0 || self.turn(parent).is_none())
+        {
+            return false;
+        }
+        let Some(slot) = self.turns.get_mut(&generation) else {
+            return false;
+        };
+        if !matches!(slot, DeclarationSlot::Reserved) {
+            return false;
+        }
+        *slot = DeclarationSlot::Committed(turn);
+        true
+    }
+
     fn next_generation(&mut self) -> Generation {
         self.high_water = Generation(
             self.high_water

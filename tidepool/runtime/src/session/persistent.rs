@@ -1234,10 +1234,10 @@ impl PersistentSession {
     }
 
     /// Render and validate the exact next declaration module against the
-    /// actor's source layer without changing the live log, scope tip,
-    /// recovery manifest, or binding store.
+    /// actor's source layer without changing the live scope tip or binding
+    /// store. Attached-v2 sessions first burn the module identity durably.
     pub fn stage_declarations_in(
-        &self,
+        &mut self,
         scope: ScopeId,
         receipt: &super::DeclarationReceipt,
         external: &SourceImports,
@@ -1246,15 +1246,16 @@ impl PersistentSession {
         let (persistent_imports, import_modules, visible_values) =
             self.declaration_staging_context_in(scope, receipt, external)?;
         #[allow(clippy::expect_used, reason = "decl plane present")]
-        let lib = self.lib.as_ref().expect("decl plane present");
+        let live_modules = self.live_val_modules();
+        let lib = self.lib.as_mut().expect("decl plane present");
         let candidate = lib
-            .render_candidate_in(
+            .render_admitted_candidate_in(
                 scope,
                 &persistent_imports,
                 receipt,
                 &import_modules,
-                &self.live_val_modules(),
-            )
+                &live_modules,
+            )?
             .with_source_layer(source_layer);
         super::validate_declaration_candidate(candidate, &lib.root)
             .map(|staged| staged.with_visible_values(visible_values))
@@ -1262,14 +1263,15 @@ impl PersistentSession {
 
     /// The pure half of a split cell preparation's declaration staging:
     /// render the next candidate module and capture the exact live-value
-    /// environment it must still match at adopt time, without writing to
-    /// disk, invoking GHC, or changing any live session state. Pair with
+    /// environment it must still match at adopt time. Attached-v2 sessions
+    /// reserve its identity durably before the candidate leaves the checkout;
+    /// the render itself invokes no compiler. Pair with
     /// [`super::validate_declaration_candidate`] off-checkout (attach the
     /// returned `visible_values` to its `StagedDeclaration` via
     /// [`super::StagedDeclaration::with_visible_values`]) and
     /// [`Self::adopt_staged_declaration_in`] on a later checkout.
     pub fn render_declaration_candidate_in(
-        &self,
+        &mut self,
         scope: ScopeId,
         receipt: &super::DeclarationReceipt,
         external: &SourceImports,
@@ -1277,14 +1279,15 @@ impl PersistentSession {
         let (persistent_imports, import_modules, visible_values) =
             self.declaration_staging_context_in(scope, receipt, external)?;
         #[allow(clippy::expect_used, reason = "decl plane present")]
-        let lib = self.lib.as_ref().expect("decl plane present");
-        let candidate = lib.render_candidate_in(
+        let live_modules = self.live_val_modules();
+        let lib = self.lib.as_mut().expect("decl plane present");
+        let candidate = lib.render_admitted_candidate_in(
             scope,
             &persistent_imports,
             receipt,
             &import_modules,
-            &self.live_val_modules(),
-        );
+            &live_modules,
+        )?;
         Ok((candidate, visible_values))
     }
 

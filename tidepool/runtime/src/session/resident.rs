@@ -2038,7 +2038,7 @@ where
     }
 
     pub fn stage_declarations_in(
-        &self,
+        &mut self,
         scope: ScopeId,
         receipt: &super::DeclarationReceipt,
         imports: &super::SourceImports,
@@ -2051,7 +2051,7 @@ where
     /// The checkout-only half of staging a declaration off-checkout: see
     /// [`PersistentSession::render_declaration_candidate_in`].
     pub fn render_declaration_candidate_in(
-        &self,
+        &mut self,
         scope: ScopeId,
         receipt: &super::DeclarationReceipt,
         imports: &super::SourceImports,
