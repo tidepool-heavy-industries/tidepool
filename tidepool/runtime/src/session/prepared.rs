@@ -4570,11 +4570,7 @@ mod tests {
         let capture_scope = scopes.mint_isolated();
         let mut bindings = BindingTable::new();
         let keys = bindings
-            .register_source_instances_in(
-                &scopes,
-                source_scope,
-                installed_leases,
-            )
+            .register_source_instances_in(&scopes, source_scope, installed_leases)
             .unwrap();
         assert_eq!(keys.len(), 2);
         assert_eq!(bindings.source_instances_in(&scopes, source_scope).len(), 2);

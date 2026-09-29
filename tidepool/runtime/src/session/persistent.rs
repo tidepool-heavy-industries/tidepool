@@ -310,7 +310,7 @@ impl PersistentSession {
             .machine
             .as_mut()
             .ok_or(PreparedRuntimeError::MachineNotInstalled)?;
-        let installed = engine.install_certified_turn(
+        let mut staged = engine.install_certified_turn(
             target,
             target_owners,
             demanded,
@@ -318,40 +318,22 @@ impl PersistentSession {
             &exact_external,
             &self.bindings,
         )?;
-        let target_id = installed.target;
-        let groups = installed.groups;
-        match self.register_source_instances_in(scope, installed.leases) {
+        let tokens = std::mem::take(&mut staged.leases);
+        match self.register_source_instances_in(scope, tokens) {
             Ok(keys) => {
                 let engine = self
                     .machine
                     .as_mut()
                     .expect("certified machine remains installed");
-                for group in groups {
-                    assert!(
-                        engine.unpin(group),
-                        "new certified group retains its install pin"
-                    );
-                }
-                Ok((target_id, !keys.is_empty()))
+                let target = engine.commit_certified_turn(staged);
+                Ok((target, !keys.is_empty()))
             }
             Err(tokens) => {
                 let engine = self
                     .machine
                     .as_mut()
                     .expect("certified machine remains installed");
-                for token in tokens {
-                    assert!(
-                        engine.release(token.handle()),
-                        "rejected source token remains rooted"
-                    );
-                }
-                for program in groups.into_iter().chain(std::iter::once(target_id)) {
-                    assert!(
-                        engine.unpin(program),
-                        "rejected certified program retains its pin"
-                    );
-                }
-                engine.quiesce_and_collect_now()?;
+                engine.abort_certified_turn(staged, tokens)?;
                 Err(PreparedRuntimeError::SourceScopeAdmission)
             }
         }
