@@ -120,7 +120,8 @@ fn record_run_backend(
         run_id: run_id.to_owned(),
         backend,
     };
-    if path.exists() {
+    let bytes = serde_json::to_vec_pretty(&selected)?;
+    if !tidepool_atomic_write::write_durable_new(&path, &bytes)? {
         let existing: RunBackendRecord = serde_json::from_slice(&std::fs::read(&path)?)?;
         if existing != selected {
             return Err(runtime_error(format!(
@@ -128,8 +129,6 @@ fn record_run_backend(
                 path.display()
             )));
         }
-    } else {
-        tidepool_atomic_write::write_durable(&path, &serde_json::to_vec_pretty(&selected)?)?;
     }
     Ok(())
 }
@@ -3323,6 +3322,36 @@ mod tests {
         assert!(verify_run_backend(root.path(), "run-1", ExomonadBackend::Codex).is_err());
         assert!(verify_run_backend(root.path(), "run-2", ExomonadBackend::Embedded).is_err());
         assert!(record_run_backend(root.path(), "run-1", ExomonadBackend::Codex).is_err());
+    }
+
+    #[test]
+    fn competing_backend_initializers_keep_one_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        let (codex, embedded) = std::thread::scope(|threads| {
+            let codex = threads.spawn(|| {
+                barrier.wait();
+                record_run_backend(root.path(), "run-1", ExomonadBackend::Codex).is_ok()
+            });
+            let embedded = threads.spawn(|| {
+                barrier.wait();
+                record_run_backend(root.path(), "run-1", ExomonadBackend::Embedded).is_ok()
+            });
+            (codex.join().unwrap(), embedded.join().unwrap())
+        });
+        assert_ne!(codex, embedded);
+        let record: RunBackendRecord =
+            serde_json::from_slice(&std::fs::read(root.path().join("backend.json")).unwrap())
+                .unwrap();
+        assert_eq!(record.run_id, "run-1");
+        assert_eq!(
+            record.backend,
+            if codex {
+                ExomonadBackend::Codex
+            } else {
+                ExomonadBackend::Embedded
+            }
+        );
     }
 
     #[test]

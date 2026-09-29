@@ -1,4 +1,4 @@
-//! Same-directory atomic replacement, with strict and best-effort durability tiers.
+//! Same-directory atomic publication, with replacement and exclusive creation.
 //!
 //! [`write_durable`] syncs the file and containing directory and reports every
 //! failure. An error after rename can leave the new contents visible: callers
@@ -60,6 +60,42 @@ pub fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), WriteError> {
         source: e.error,
     })?;
     sync_parent_directory(path)
+}
+
+/// Durably create a file only if its name is absent. Returns `true` when this
+/// call published the file and `false` when another publisher already owns the
+/// name. A failed directory sync can occur after publication, so errors do not
+/// prove the file is absent. The parent directory must already exist.
+pub fn write_durable_new(path: &Path, bytes: &[u8]) -> Result<bool, WriteError> {
+    let dir = parent_dir(path);
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|source| WriteError {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    tmp.write_all(bytes).map_err(|source| WriteError {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    tmp.as_file().sync_all().map_err(|source| WriteError {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    match tmp.persist_noclobber(path) {
+        Ok(_) => {
+            sync_parent_directory(path)?;
+            Ok(true)
+        }
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // The winner may still be syncing the directory. Confirm its name
+            // before returning a durable existing-file observation.
+            sync_parent_directory(path)?;
+            Ok(false)
+        }
+        Err(error) => Err(WriteError {
+            path: path.to_path_buf(),
+            source: error.error,
+        }),
+    }
 }
 
 /// Sync the directory containing a published path. The caller must sync the
@@ -169,6 +205,31 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"v1");
         write_durable(&path, b"v2-longer").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"v2-longer");
+    }
+
+    #[test]
+    fn write_durable_new_has_one_winner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("selected.txt");
+        let handles: Vec<_> = (0..8)
+            .map(|index| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let payload = format!("writer-{index}");
+                    (index, write_durable_new(&path, payload.as_bytes()).unwrap())
+                })
+            })
+            .collect();
+        let winners: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter_map(|(index, created)| created.then_some(index))
+            .collect();
+        assert_eq!(winners.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("writer-{}", winners[0])
+        );
     }
 
     #[test]
