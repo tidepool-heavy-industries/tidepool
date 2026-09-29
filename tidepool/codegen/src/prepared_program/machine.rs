@@ -9616,4 +9616,205 @@ mod tests {
         assert_eq!(cached_a, headers_a);
         assert_eq!(cached_b, headers_a);
     }
+
+    fn captured_binding(
+        name: &str,
+        generation: u64,
+        slot: crate::old_space::RootSlot,
+    ) -> crate::binding_table::BindingEntry {
+        use crate::binding_table::{BindingEntry, BoundValue};
+        use tidepool_repr::{BindingName, Generation, SessionModule, SessionVarId};
+
+        BindingEntry {
+            name: BindingName(name.into()),
+            id: SessionVarId::from_extract(generation),
+            module: SessionModule::val(Generation(generation)),
+            value: BoundValue {
+                root: slot,
+                handle: PreparedHandle::new(ValueHandle(generation), RuntimeRep::LiftedRef),
+                identity: SymbolIdentity {
+                    unit: "test".into(),
+                    module: format!("Val.G{generation}"),
+                    namespace: "value".into(),
+                    occurrence: name.into(),
+                    record_parent: None,
+                },
+            },
+            type_display: None,
+            defining_expr: None,
+            scope: crate::scope::ScopeId::ROOT,
+        }
+    }
+
+    #[test]
+    fn second_detached_capture_keeps_shadowed_first_source_binding_alive() {
+        use crate::binding_table::BindingTable;
+        use crate::scope::ScopeTree;
+        use tidepool_repr::{SessionModule, SessionVarId};
+
+        let mut scopes = ScopeTree::new();
+        let original = scopes.mint_isolated();
+        let mut old_root = Box::new(std::ptr::null_mut::<u8>());
+        let mut new_root = Box::new(std::ptr::null_mut::<u8>());
+        let mut bindings = BindingTable::new();
+        // SAFETY: these stable box cells outlive the binding table in this test;
+        // no code dereferences their null payloads.
+        let old_slot = unsafe { crate::old_space::RootSlot::new(old_root.as_mut()) };
+        let new_slot = unsafe { crate::old_space::RootSlot::new(new_root.as_mut()) };
+        let old = SessionVarId::from_extract(1);
+        bindings.bind_in(original, captured_binding("value", 1, old_slot));
+        bindings.bind_in(original, captured_binding("value", 2, new_slot));
+
+        let first = scopes.mint_isolated();
+        bindings.seed_detached_scope(&scopes, original, first);
+        assert_eq!(
+            bindings
+                .resolve_in(&scopes, first, "value")
+                .map(|entry| entry.id),
+            Some(SessionVarId::from_extract(2))
+        );
+        assert_eq!(
+            bindings.lease_count(old),
+            1,
+            "the first capture retains its hidden source dependency"
+        );
+
+        let second = scopes.mint_isolated();
+        bindings.seed_detached_scope(&scopes, first, second);
+        assert_eq!(
+            bindings.lease_count(old),
+            2,
+            "the second capture must inherit the hidden dependency"
+        );
+        for scope in scopes.retire(original) {
+            bindings.drain_scope(scope);
+        }
+        for scope in scopes.retire(first) {
+            bindings.drain_scope(scope);
+        }
+        assert!(
+            bindings.get(old).is_some(),
+            "the second detached capture still needs this source binding"
+        );
+        assert!(bindings
+            .scope_reachable_modules(&scopes, second)
+            .any(|module| module == SessionModule::val(tidepool_repr::Generation(1))));
+        for scope in scopes.retire(second) {
+            bindings.drain_scope(scope);
+        }
+        assert!(
+            bindings.get(old).is_none(),
+            "the final capture released its dependency"
+        );
+    }
+
+    #[test]
+    fn importing_detached_source_retains_its_inherited_hidden_dependency() {
+        use crate::binding_table::BindingTable;
+        use crate::scope::ScopeTree;
+        use tidepool_repr::SessionVarId;
+
+        let mut scopes = ScopeTree::new();
+        let original = scopes.mint_isolated();
+        let mut old_root = Box::new(std::ptr::null_mut::<u8>());
+        let mut new_root = Box::new(std::ptr::null_mut::<u8>());
+        let mut bindings = BindingTable::new();
+        // SAFETY: stable box cells outlive the table and their payloads are never read.
+        let old_slot = unsafe { crate::old_space::RootSlot::new(old_root.as_mut()) };
+        let new_slot = unsafe { crate::old_space::RootSlot::new(new_root.as_mut()) };
+        let old = SessionVarId::from_extract(11);
+        bindings.bind_in(original, captured_binding("value", 11, old_slot));
+        bindings.bind_in(original, captured_binding("value", 12, new_slot));
+
+        let source = scopes.mint_isolated();
+        bindings.seed_detached_scope(&scopes, original, source);
+        let receiver = scopes.mint_isolated();
+        let receiver_base = scopes.mint_isolated();
+        bindings.seed_detached_scope(&scopes, receiver_base, receiver);
+        assert!(bindings.retain_scope_dependencies(&scopes, source, receiver));
+        assert_eq!(
+            bindings.lease_count(old),
+            2,
+            "the receiver must retain the source's hidden dependency"
+        );
+        assert!(bindings.retain_scope_dependencies(&scopes, source, receiver));
+        assert_eq!(
+            bindings.lease_count(old),
+            2,
+            "repeated import must not acquire a second receiver lease"
+        );
+
+        for scope in scopes.retire(original) {
+            bindings.drain_scope(scope);
+        }
+        for scope in scopes.retire(source) {
+            bindings.drain_scope(scope);
+        }
+        assert!(bindings.get(old).is_some());
+        for scope in scopes.retire(receiver) {
+            bindings.drain_scope(scope);
+        }
+        assert!(bindings.get(old).is_none());
+    }
+
+    #[test]
+    fn importing_alias_does_not_double_lease_existing_dependency() {
+        use crate::binding_table::BindingTable;
+        use crate::scope::ScopeTree;
+        use tidepool_repr::SessionVarId;
+
+        let mut scopes = ScopeTree::new();
+        let original = scopes.mint_isolated();
+        let mut value_root = Box::new(std::ptr::null_mut::<u8>());
+        let mut alias_root = Box::new(std::ptr::null_mut::<u8>());
+        let mut bindings = BindingTable::new();
+        // SAFETY: stable box cells outlive the table and their payloads are never read.
+        let value_slot = unsafe { crate::old_space::RootSlot::new(value_root.as_mut()) };
+        let alias_slot = unsafe { crate::old_space::RootSlot::new(alias_root.as_mut()) };
+        let value = SessionVarId::from_extract(21);
+        let alias = SessionVarId::from_extract(22);
+        bindings.bind_in(original, captured_binding("value", 21, value_slot));
+
+        let receiver = scopes.mint_isolated();
+        bindings.seed_detached_scope(&scopes, original, receiver);
+        assert_eq!(bindings.lease_count(value), 1);
+        bindings
+            .bind_alias_in(original, captured_binding("alias", 22, alias_slot), value)
+            .expect("same-scope alias");
+        let source = scopes.mint_isolated();
+        bindings.seed_detached_scope(&scopes, original, source);
+        assert_eq!(bindings.lease_count(value), 2);
+        assert_eq!(bindings.lease_count(alias), 1);
+
+        assert!(bindings.retain_scope_dependencies(&scopes, source, receiver));
+        assert_eq!(
+            bindings.lease_count(value),
+            2,
+            "receiver already owns the alias dependency"
+        );
+        assert_eq!(bindings.lease_count(alias), 2);
+        assert!(bindings.retain_scope_dependencies(&scopes, source, receiver));
+        assert_eq!(
+            bindings.lease_count(value),
+            2,
+            "repeat import remains balanced"
+        );
+        assert_eq!(bindings.lease_count(alias), 2);
+
+        for scope in scopes.retire(original) {
+            bindings.drain_scope(scope);
+        }
+        for scope in scopes.retire(source) {
+            bindings.drain_scope(scope);
+        }
+        assert!(bindings.get(value).is_some());
+        for scope in scopes.retire(receiver) {
+            bindings.drain_scope(scope);
+        }
+        assert!(
+            bindings.get(value).is_none(),
+            "final target release frees the source root"
+        );
+        assert!(bindings.get(alias).is_none());
+    }
 }
