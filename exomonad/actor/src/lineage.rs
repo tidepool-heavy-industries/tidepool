@@ -10,6 +10,7 @@ use tidepool_repr::{ActorPath, ActorPathError, ActorPathSegment};
 use tidepool_runtime::session::WorkbenchForkBoundary;
 
 use crate::ActorRef;
+use crate::HostedCheckpointAttachment;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorPathReservation {
@@ -317,7 +318,21 @@ pub struct CheckpointLease {
     pub session: SessionId,
     pub scope: ScopeId,
     pub boundary: WorkbenchForkBoundary,
+    pub host_attachment: Option<HostedCheckpointAttachment>,
     phase: tokio::sync::watch::Sender<CheckpointPhase>,
+}
+
+impl CheckpointLease {
+    #[must_use]
+    pub fn host_attachment<T: std::any::Any + Send + Sync>(&self) -> Option<Arc<T>> {
+        if matches!(
+            *self.phase.borrow(),
+            CheckpointPhase::Pending | CheckpointPhase::Failed
+        ) {
+            return None;
+        }
+        self.host_attachment.as_ref()?.downcast()
+    }
 }
 
 impl CheckpointLease {
@@ -435,6 +450,33 @@ impl ForkGroupRegistry {
         scope: ScopeId,
         boundary: WorkbenchForkBoundary,
     ) -> String {
+        self.capture_checkpoint_with_host_attachment(
+            name,
+            issuer,
+            issuer_role,
+            issuer_model,
+            issuer_effort,
+            issuer_source_layer,
+            session,
+            scope,
+            boundary,
+            None,
+        )
+    }
+
+    pub fn capture_checkpoint_with_host_attachment(
+        &self,
+        name: String,
+        issuer: ActorRef,
+        issuer_role: crate::EffectiveRole,
+        issuer_model: Option<crate::Model>,
+        issuer_effort: Option<crate::ForkEffort>,
+        issuer_source_layer: crate::CheckpointSourceLayer,
+        session: SessionId,
+        scope: ScopeId,
+        boundary: WorkbenchForkBoundary,
+        host_attachment: Option<HostedCheckpointAttachment>,
+    ) -> String {
         let token = format!("{}:{}", self.checkpoint_namespace, uuid::Uuid::new_v4());
         let (phase, _) = tokio::sync::watch::channel(CheckpointPhase::Pending);
         let mut state = self.state.lock();
@@ -464,6 +506,7 @@ impl ForkGroupRegistry {
                 session,
                 scope,
                 boundary,
+                host_attachment,
                 phase,
             },
         );

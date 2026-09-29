@@ -667,6 +667,7 @@ pub trait KernelBehavior: Send + 'static {
         &'a mut self,
         context: &'a KernelContext,
         invocation: exomonad_tool::ToolInvocation,
+        hosted_checkpoint_capture: Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
     ) -> BoxFuture<'a, Result<KernelStep<serde_json::Value>, KernelInvocationFailure>>;
 
     fn workbench<'a>(
@@ -1377,7 +1378,29 @@ where
                     return Ok(());
                 }
 
-                match state.behavior.tool(&state.context, invocation).await {
+                match state.behavior.tool(&state.context, invocation, None).await {
+                    Ok(step) => {
+                        settle_step(&myself, state, step, |output| {
+                            reply.send(Ok(output)).ok();
+                        })
+                        .await;
+                    }
+                    Err(error) => {
+                        reply.send(Err(error)).ok();
+                    }
+                }
+            }
+            KernelMessage::ToolWithHostedCheckpoint { invocation, capture, reply } => {
+                if !matches!(state.hosted_admission, HostedAdmission::Open) {
+                    reply
+                        .send(Err(KernelInvocationFailure::Rejected {
+                            actor: state.context.identity,
+                            detail: "hosted work admission is sealed".into(),
+                        }))
+                        .ok();
+                    return Ok(());
+                }
+                match state.behavior.tool(&state.context, invocation, Some(capture)).await {
                     Ok(step) => {
                         settle_step(&myself, state, step, |output| {
                             reply.send(Ok(output)).ok();
@@ -2423,6 +2446,7 @@ mod tests {
             &'a mut self,
             context: &'a KernelContext,
             invocation: ToolInvocation,
+            _hosted_checkpoint_capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
         ) -> BoxFuture<'a, Result<KernelStep<serde_json::Value>, KernelInvocationFailure>> {
             Box::pin(async move {
                 let name = invocation.name;
@@ -2599,6 +2623,7 @@ mod tests {
             &'a mut self,
             context: &'a KernelContext,
             _invocation: ToolInvocation,
+            _hosted_checkpoint_capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
         ) -> BoxFuture<'a, Result<KernelStep<serde_json::Value>, KernelInvocationFailure>> {
             Box::pin(async move {
                 Err(KernelInvocationFailure::Rejected {
@@ -4274,6 +4299,7 @@ mod tests {
             &'a mut self,
             context: &'a KernelContext,
             _invocation: ToolInvocation,
+            _hosted_checkpoint_capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
         ) -> BoxFuture<'a, Result<KernelStep<serde_json::Value>, KernelInvocationFailure>> {
             Box::pin(async move {
                 Err(KernelInvocationFailure::Rejected {

@@ -1067,7 +1067,10 @@ struct ActiveWorkbenchExecution {
 // end of its input. A resident handler has no later notebook completion.
 enum ForkPublication {
     Resident,
-    Workbench(Option<tidepool_runtime::session::WorkbenchForkBoundary>),
+    Workbench {
+        boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
+        capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
+    },
     Route(tidepool_runtime::session::WorkbenchForkBoundary),
 }
 
@@ -1075,15 +1078,25 @@ impl ForkPublication {
     fn boundary(&self) -> Option<&tidepool_runtime::session::WorkbenchForkBoundary> {
         match self {
             Self::Resident => None,
-            Self::Workbench(boundary) => boundary.as_ref(),
+            Self::Workbench { boundary, .. } => boundary.as_ref(),
             Self::Route(boundary) => Some(boundary),
         }
     }
 
     fn hosted_boundary(&self) -> Option<&tidepool_runtime::session::WorkbenchForkBoundary> {
         match self {
-            Self::Workbench(Some(boundary)) => Some(boundary),
-            Self::Resident | Self::Workbench(None) | Self::Route(_) => None,
+            Self::Workbench {
+                boundary: Some(boundary),
+                ..
+            } => Some(boundary),
+            Self::Resident | Self::Workbench { .. } | Self::Route(_) => None,
+        }
+    }
+
+    fn capture(&self) -> Option<&Arc<dyn crate::HostedCheckpointCapture>> {
+        match self {
+            Self::Workbench { capture, .. } => capture.as_ref(),
+            Self::Resident | Self::Route(_) => None,
         }
     }
 }
@@ -3750,7 +3763,21 @@ where
                             .map_err(|_| crate::CheckpointRefusal::CaptureFailed)?;
                         return Err(crate::CheckpointRefusal::CaptureFailed);
                     }
-                    Ok(self.environment.fork_groups.capture_checkpoint(
+                    let attachment = match self.fork_publication.capture() {
+                        Some(capture) => match capture.capture(&name, &boundary) {
+                            Ok(attachment) => Some(attachment),
+                            Err(_) => {
+                                self.environment
+                                    .runner
+                                    .retire_fork_scopes(context.clone(), vec![scope])
+                                    .await
+                                    .map_err(|_| crate::CheckpointRefusal::CaptureFailed)?;
+                                return Err(crate::CheckpointRefusal::CaptureFailed);
+                            }
+                        },
+                        None => None,
+                    };
+                    Ok(self.environment.fork_groups.capture_checkpoint_with_host_attachment(
                         name,
                         context.actor,
                         self.descriptor.effective_role().clone(),
@@ -3760,6 +3787,7 @@ where
                         context.placement.session,
                         scope,
                         boundary,
+                        attachment,
                     ))
                 }
                 .await;
@@ -8136,6 +8164,7 @@ where
         request: MailboxValue,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
         Box::pin(async move {
+            self.fork_publication = ForkPublication::Resident;
             let context = self.context(kernel.identity());
             self.input_origin = ActorInputOrigin::ActorMessageFrom(actor_address(sender));
             let (_, step) = self
@@ -8161,6 +8190,7 @@ where
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<MailboxValue>, KernelBehaviorError>>
     {
         Box::pin(async move {
+            self.fork_publication = ForkPublication::Resident;
             let context = self.context(kernel.identity());
             self.input_origin = ActorInputOrigin::ActorMessageFrom(actor_address(caller));
             let (reply, step) = self
@@ -8185,12 +8215,32 @@ where
         &'a mut self,
         kernel: &'a KernelContext,
         invocation: exomonad_tool::ToolInvocation,
+        hosted_checkpoint_capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<KernelStep<serde_json::Value>, KernelInvocationFailure>,
     > {
         Box::pin(async move {
             let context = self.context(kernel.identity());
+            let hosted_boundary = hosted_checkpoint_capture.as_ref().and_then(|_| {
+                let invocation_context = invocation.context.as_ref()?;
+                invocation_context.context_call_id.as_ref().map(|call_id| {
+                    tidepool_runtime::session::WorkbenchForkBoundary {
+                        thread_id: invocation_context.thread_id.clone(),
+                        call_id: call_id.clone(),
+                    }
+                })
+            });
+            if hosted_checkpoint_capture.is_some()
+                && hosted_boundary.as_ref().is_none_or(|boundary| {
+                    boundary.thread_id.is_empty() || boundary.call_id.is_empty()
+                })
+            {
+                return Err(KernelInvocationFailure::Rejected {
+                    actor: context.actor,
+                    detail: "hosted checkpoint capture requires an exact provider invocation".into(),
+                });
+            }
             let awaiting = match std::mem::replace(&mut self.standing, ResidentStanding::Boot) {
                 ResidentStanding::Tools(awaiting) => awaiting,
                 standing => {
@@ -8214,6 +8264,10 @@ where
             let arguments = match invocation.arguments {
                 exomonad_tool::ToolArguments::Raw(text) => serde_json::Value::String(text),
                 exomonad_tool::ToolArguments::Structured(value) => value,
+            };
+            self.fork_publication = ForkPublication::Workbench {
+                boundary: hosted_boundary,
+                capture: hosted_checkpoint_capture,
             };
             let mut outcome = self
                 .environment
@@ -8254,6 +8308,7 @@ where
                             actor: context.actor,
                             detail: "actor awaited another tool invocation without replying".into(),
                         })?;
+                        self.fork_publication = ForkPublication::Resident;
                         self.set_standing(context.actor, ResidentStanding::Tools(next));
                         return Ok(KernelStep::Continue(result));
                     }
@@ -8262,6 +8317,7 @@ where
                             actor: context.actor,
                             detail: "actor completed a tool invocation without replying".into(),
                         })?;
+                        self.fork_publication = ForkPublication::Resident;
                         self.set_standing(context.actor, ResidentStanding::Terminal);
                         return Ok(KernelStep::Stop {
                             output: result,
@@ -8295,6 +8351,7 @@ where
     > {
         Box::pin(async move {
             let mut context = self.context(kernel.identity());
+            let capture = invocation.hosted_checkpoint_capture;
             let request = invocation.request;
             let installed_tools = match invocation.installed_tools {
                 Some(lease) if lease.actor() != context.actor => {
@@ -8403,7 +8460,10 @@ where
                         installed_tools,
                         admitted_source,
                     });
-            self.fork_publication = ForkPublication::Workbench(request.fork_boundary().cloned());
+            self.fork_publication = ForkPublication::Workbench {
+                boundary: request.fork_boundary().cloned(),
+                capture,
+            };
             // One INFO line per hosted tool call or cell, breaking down
             // where its wall time went (checkout wait/hold, compile, Jev,
             // exec) — see `crate::call_timing`. The scope wraps the whole
@@ -10299,7 +10359,10 @@ mod tests {
         assert!(super::ForkPublication::Route(boundary.clone())
             .hosted_boundary()
             .is_none());
-        assert!(super::ForkPublication::Workbench(Some(boundary))
+        assert!(super::ForkPublication::Workbench {
+            boundary: Some(boundary),
+            capture: None,
+        }
             .hosted_boundary()
             .is_some());
     }
