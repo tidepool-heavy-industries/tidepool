@@ -57,6 +57,19 @@ Compilation has graph-inventory and product-consumption phases within the
 existing transaction. Inventory includes exact source/options, ordinary/boot
 nodes, direct resolution and negative witnesses, package-interface identities
 and scoped retained context. Revalidate consumed evidence before publication.
+Rust may supply bounded candidate bundles to one existing compile transaction;
+the worker performs downsweep, verifies candidates and chooses reuse inside that
+same request. Candidate lookup is not semantic admission. Do not split inventory
+and compilation into unbound requests.
+
+A certified cached-home owner carries exact unit/module, module version, skinny
+interface digest and product digest. Recovery records its exact SymbolIdentity
+as a separate cached-home reference, never as a retained SessionVarId. Requested
+candidates become certified only after worker verification. Rust resolves the
+binder to one original group ordinal in the paired product and checks closure,
+representation and signature before sealing; local arena IDs must not collide
+through naive group concatenation. Unknown home implementations still fail.
+
 Use SCC closure identities to avoid cyclic hashes. Assign module versions
 before annotating exact inter-module owner references; validate every edge and
 integrity-check the final bundle. Unknown compile-time inputs cause misses.
