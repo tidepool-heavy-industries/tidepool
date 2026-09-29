@@ -782,13 +782,29 @@ fn assemble_with_products(
         DecodeLimits::default(),
     )?;
     if let Some(evidence) = evidence {
+        let mut emitted = std::collections::HashSet::new();
         for product in &artifacts.module_products {
-            if !evidence.modules.iter().any(|module| {
-                !module.boot && module.unit == product.unit && module.module == product.module
-            }) {
+            if !emitted.insert((&product.unit, &product.module))
+                || !evidence.modules.iter().any(|module| {
+                    !module.boot
+                        && module.product == cache::ProductAvailability::Ready
+                        && module.unit == product.unit
+                        && module.module == product.module
+                })
+            {
                 return Err(CompileError::ExtractFailed(format!(
-                    "module product {}:{} has no matching graph node",
+                    "module product {}:{} has no unique ready graph node",
                     product.unit, product.module
+                )));
+            }
+        }
+        for module in &evidence.modules {
+            if module.product == cache::ProductAvailability::Ready
+                && !emitted.contains(&(&module.unit, &module.module))
+            {
+                return Err(CompileError::ExtractFailed(format!(
+                    "ready graph node {}:{} has no module product",
+                    module.unit, module.module
                 )));
             }
         }
@@ -1083,6 +1099,7 @@ mod module_product_tests {
             .iter()
             .find(|node| node.module == "ModuleProductB" && !node.boot)
             .expect("consumer graph node");
+        assert_eq!(consumer.product, cache::ProductAvailability::Ready);
         assert!(consumer.imports.iter().any(|imported| {
             imported.module == "ModuleProductA" && imported.selected.is_some()
         }));
@@ -1306,10 +1323,10 @@ mod constructor_identity_tests {
 mod dependency_cache_tests {
     use super::*;
 
-    /// One real compiler preparation family tests both bundle reuse and the
-    /// import search witnesses; no independent fixture compile per assertion.
+    /// A package-importing graph, including implicit Prelude, must enter GHC
+    /// for package selection even if its paired bundle remains available.
     #[test]
-    fn compiler_evidence_controls_hits_and_home_shadow_invalidation() {
+    fn package_imports_force_worker_selection_for_home_shadow_changes() {
         let root = tempfile::tempdir().unwrap();
         let first = root.path().join("first");
         let second = root.path().join("second");
@@ -1337,20 +1354,16 @@ mod dependency_cache_tests {
             prepared
         };
         assert!(compile(), "fresh recipe compiles");
-        assert!(!compile(), "unchanged evidence reuses the bundle");
-        std::fs::write(
-            second.join("Unrelated.hs"),
-            "module Unrelated where\nvalue = False\n",
-        )
-        .unwrap();
-        assert!(!compile(), "unconsumed files do not invalidate");
+        assert!(
+            compile(),
+            "package lookup requires the worker on a repeated request"
+        );
         std::fs::write(
             &library,
             "module CacheDependency where\nvalue = (42 :: Int)\n",
         )
         .unwrap();
         assert!(compile(), "consumed source bytes invalidate");
-        assert!(!compile());
         let shadow = first.join("CacheDependency.hs");
         std::fs::write(
             &shadow,
@@ -1358,9 +1371,7 @@ mod dependency_cache_tests {
         )
         .unwrap();
         assert!(compile(), "a new higher-priority home module invalidates");
-        assert!(!compile());
         std::fs::remove_file(shadow).unwrap();
         assert!(compile(), "removing the selected module invalidates");
-        assert!(!compile());
     }
 }

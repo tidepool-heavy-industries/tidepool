@@ -7,6 +7,7 @@ module Tidepool.DependencyEvidence
   , DependencyResolution(..)
   , DependencyModule(..)
   , DependencyImport(..)
+  , ProductAvailability(..)
   , sourceEvidence
   , sourceEvidenceWithFingerprint
   , revalidateDependencyEvidence
@@ -41,7 +42,16 @@ data DependencyModule = DependencyModule
   , dependencyModuleBoot :: Bool
   , dependencyModuleSource :: FilePath
   , dependencyModuleImports :: [DependencyImport]
+  , dependencyModuleProduct :: ProductAvailability
   }
+
+data ProductAvailability
+  = ProductReady
+  | ProductBoot
+  | ProductInterfaceOnly
+  | ProductMissingInterface
+  | ProductProjectionRejected
+  deriving (Eq, Show)
 
 data DependencyImport = DependencyImport
   { dependencyImportName :: String
@@ -87,7 +97,7 @@ revalidateDependencyEvidence evidence = and <$> forM (dependencySources evidence
 
 renderDependencyEvidence :: DependencyEvidence -> String
 renderDependencyEvidence evidence =
-  "{\"version\":2"
+  "{\"version\":3"
     ++ ",\"cache_safe\":" ++ bool (dependencyCacheSafe evidence)
     ++ ",\"selection_complete\":" ++ bool (dependencySelectionComplete evidence)
     ++ ",\"sources\":[" ++ comma (map source (dependencySources evidence)) ++ "]"
@@ -112,8 +122,14 @@ renderDependencyEvidence evidence =
         ++ ",\"module\":" ++ jsonString (dependencyModuleName item)
         ++ ",\"boot\":" ++ bool (dependencyModuleBoot item)
         ++ ",\"source\":" ++ jsonString (dependencyModuleSource item)
-        ++ ",\"imports\":[" ++ comma (map importNode (dependencyModuleImports item)) ++ "]}"
+        ++ ",\"imports\":[" ++ comma (map importNode (dependencyModuleImports item)) ++ "]"
+        ++ ",\"product\":" ++ jsonString (productAvailability (dependencyModuleProduct item)) ++ "}"
     importNode item =
       "{\"module\":" ++ jsonString (dependencyImportName item)
         ++ ",\"boot\":" ++ bool (dependencyImportBoot item)
         ++ ",\"selected\":" ++ maybe "null" jsonString (dependencyImportSelected item) ++ "}"
+    productAvailability ProductReady = "ready"
+    productAvailability ProductBoot = "boot"
+    productAvailability ProductInterfaceOnly = "interface_only"
+    productAvailability ProductMissingInterface = "missing_interface"
+    productAvailability ProductProjectionRejected = "projection_rejected"

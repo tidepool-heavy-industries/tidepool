@@ -159,6 +159,17 @@ pub struct ModuleEvidence {
     pub boot: bool,
     pub source: PathBuf,
     pub imports: Vec<ModuleImportEvidence>,
+    pub product: ProductAvailability,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductAvailability {
+    Ready,
+    Boot,
+    InterfaceOnly,
+    MissingInterface,
+    ProjectionRejected,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,7 +231,7 @@ impl DependencyEvidence {
     /// Validate contents and negative witnesses. IO errors are misses, including
     /// inaccessible candidates: absence must be known, not guessed.
     pub fn valid(&self, source: &str) -> bool {
-        if self.version != 2
+        if self.version != 3
             || !self.cache_safe
             || self.sources.is_empty()
             || self.modules.is_empty()
@@ -258,6 +269,7 @@ impl DependencyEvidence {
                 || module.module.is_empty()
                 || !paths.contains(&module.source)
                 || !modules.insert((&module.unit, &module.module, module.boot))
+                || module.boot != (module.product == ProductAvailability::Boot)
             {
                 return false;
             }
@@ -313,6 +325,19 @@ impl DependencyEvidence {
             }
         }
         true
+    }
+
+    /// A source-path witness cannot prove GHC's package lookup result. The
+    /// existing invocation cache returns before entering the worker, so only
+    /// a request with no package imports can reuse its output until lookup is
+    /// revalidated by a worker in the same compile transaction.
+    fn reusable_without_worker(&self, source: &str) -> bool {
+        self.packages.is_empty()
+            && self
+                .resolutions
+                .iter()
+                .all(|resolution| resolution.selected.is_some())
+            && self.valid(source)
     }
 }
 
@@ -442,7 +467,7 @@ fn decode_bundle(
         }
         if name == "dependencies.json" {
             let evidence: DependencyEvidence = serde_json::from_slice(value).ok()?;
-            if !evidence.valid(source) {
+            if !evidence.reusable_without_worker(source) {
                 return None;
             }
             recorded_evidence = Some(evidence);
@@ -503,7 +528,7 @@ mod tests {
         fs::create_dir_all(root.join("first")).unwrap();
         fs::write(&selected, "library = 1").unwrap();
         DependencyEvidence {
-            version: 2,
+            version: 3,
             cache_safe: true,
             selection_complete: true,
             sources: vec![
@@ -522,7 +547,7 @@ mod tests {
                 selected: Some(selected.clone()),
                 candidates: vec![root.join("first/Library.hs"), selected.clone()],
             }],
-            packages: vec!["base".into()],
+            packages: vec![],
             modules: vec![ModuleEvidence {
                 unit: "main".into(),
                 module: "Target".into(),
@@ -533,6 +558,7 @@ mod tests {
                     boot: false,
                     selected: Some(selected),
                 }],
+                product: ProductAvailability::Ready,
             }],
         }
     }
@@ -640,8 +666,23 @@ mod tests {
             candidates: vec![candidate.clone()],
         });
         assert!(evidence.valid("target"));
+        assert!(!evidence.reusable_without_worker("target"));
         fs::write(candidate, "module Package where").unwrap();
         assert!(!evidence.valid("target"));
+    }
+
+    #[test]
+    fn package_import_needs_worker_validation_before_a_direct_cache_hit() {
+        let root = tempfile::tempdir().unwrap();
+        let mut evidence = evidence(root.path());
+        evidence.packages.push("Data.List".into());
+        assert!(
+            evidence.valid("target"),
+            "fresh worker inventory remains usable"
+        );
+        assert!(!evidence.reusable_without_worker("target"));
+        evidence.packages.clear();
+        assert!(evidence.reusable_without_worker("target"));
     }
 
     #[test]
@@ -771,10 +812,10 @@ mod tests {
     #[test]
     fn bundle_integrity_binds_evidence_and_exact_named_artifacts() {
         let root = tempfile::tempdir().unwrap();
-        let evidence = serde_json::to_vec(&evidence(root.path())).unwrap();
+        let evidence_bytes = serde_json::to_vec(&evidence(root.path())).unwrap();
         let artifacts = [
             ("meta.cbor", Some(b"meta".as_slice())),
-            ("dependencies.json", Some(evidence.as_slice())),
+            ("dependencies.json", Some(evidence_bytes.as_slice())),
         ];
         let manifest =
             tidepool_extract_report::artifact_manifest::ArtifactManifest::from_artifacts(artifacts);
@@ -790,5 +831,23 @@ mod tests {
         bytes[end] ^= 1;
         assert!(decode_bundle(&bytes, &["meta.cbor"], "target").is_none());
         assert!(decode_bundle(&bytes[..end], &["meta.cbor"], "target").is_none());
+
+        let mut package_evidence = evidence(root.path());
+        package_evidence.packages.push("Data.List".into());
+        let package_evidence = serde_json::to_vec(&package_evidence).unwrap();
+        let package_artifacts = [
+            ("meta.cbor", Some(b"meta".as_slice())),
+            ("dependencies.json", Some(package_evidence.as_slice())),
+        ];
+        let package_manifest =
+            tidepool_extract_report::artifact_manifest::ArtifactManifest::from_artifacts(
+                package_artifacts,
+            );
+        let mut package_bytes = Vec::new();
+        append_frame(&mut package_bytes, &package_manifest.encode());
+        for (_, value) in package_artifacts {
+            append_frame(&mut package_bytes, value.unwrap());
+        }
+        assert!(decode_bundle(&package_bytes, &["meta.cbor"], "target").is_none());
     }
 }

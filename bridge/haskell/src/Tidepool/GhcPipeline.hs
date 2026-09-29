@@ -151,7 +151,7 @@ import Tidepool.RetainedUnfoldings
 import Tidepool.TurnSource (extractModuleName)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..)
-  , DependencyModule(..), DependencyImport(..)
+  , DependencyModule(..), DependencyImport(..), ProductAvailability(..)
   , sourceEvidenceWithFingerprint )
 
 -- | Selects the compiler representation produced at the internal GHC API
@@ -2233,6 +2233,7 @@ dependencyEvidenceFor (sources, sourcesComplete) graph moduleFacts = do
               (Map.lookup (imported, boot) selected)
           | (imported, boot) <- directImports
           ]
+      , dependencyModuleProduct = if isBoot then ProductBoot else ProductInterfaceOnly
       }
   let hasUntrackedExecution =
         any (hasUntrackedCompileTimeExecution . ms_hspp_opts) graphSummaries

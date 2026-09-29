@@ -88,7 +88,8 @@ import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut)
 import Tidepool.Timing (readTimingEnabled, timePhase)
 import Tidepool.TurnSource (extractModuleName, spliceTemplate)
 import Tidepool.DependencyEvidence
-  ( DependencyEvidence, renderDependencyEvidence, revalidateDependencyEvidence )
+  ( DependencyEvidence(..), DependencyModule(..), ProductAvailability(..)
+  , renderDependencyEvidence, revalidateDependencyEvidence )
 
 renderAsksJson :: [Tidepool.EffectSchema.YieldSite] -> String
 renderAsksJson sites = "[" ++ intercalate "," (map renderAskJson sites) ++ "]"
@@ -433,9 +434,17 @@ processFile compiler caches timing args path = do
       else timePhase timing "prepared_sidecars" $ writePreparedSidecars SeparateYieldSites outDir binds tycons mCapturedTy warnTexts preparedArtifacts
 
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
-    timePhase timing "module_products" $ writeModuleProducts outDir hscEnv
+    availability <- timePhase timing "module_products" $ writeModuleProducts outDir hscEnv
       productContext (pprModules prepared) (pprProductInterfaces prepared)
-    writeDependencyEvidence outDir (pprDependencies prepared)
+    let dependencies = pprDependencies prepared
+        withAvailability node = node
+          { dependencyModuleProduct = Map.findWithDefault
+              (dependencyModuleProduct node)
+              (dependencyModuleUnit node, dependencyModuleName node)
+              availability
+          }
+    writeDependencyEvidence outDir (dependencies
+      { dependencyModules = map withAvailability (dependencyModules dependencies) })
 
   reportDiags res
 
@@ -527,20 +536,22 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
 -- target compile. A complete product pairs every admitted group with the
 -- skinny interface emitted by the same GHC transaction.
 writeModuleProducts :: FilePath -> HscEnv -> Maybe ProjectionContext
-  -> [PreparedModule] -> Map.Map ModuleName ModIface -> IO ()
-writeModuleProducts _ _ Nothing _ _ = pure ()
+  -> [PreparedModule] -> Map.Map ModuleName ModIface
+  -> IO (Map.Map (String, String) ProductAvailability)
+writeModuleProducts _ _ Nothing _ _ = pure Map.empty
 writeModuleProducts outDir hscEnv (Just context) modules interfaces = do
-  products <- fmap mapMaybeProduct $ forM modules $ \prepared -> do
+  outcomes <- forM modules $ \prepared -> do
     let name = moduleName (pmModule prepared)
+        key = (unitString (moduleUnit (pmModule prepared)), moduleNameString name)
     case Map.lookup name interfaces of
       Nothing -> do
         hPutStrLn stderr ("module product unavailable: no interface for " ++ moduleNameString name)
-        pure Nothing
+        pure (key, ProductMissingInterface, Nothing)
       Just interface -> case projectPreparedModuleGroups context prepared of
         Left reason -> do
           hPutStrLn stderr ("module product unavailable: " ++ moduleNameString name
             ++ ": " ++ show reason)
-          pure Nothing
+          pure (key, ProductProjectionRejected, Nothing)
         Right groups -> do
           (path, handle) <- openBinaryTempFile outDir "module-product.hi"
           hClose handle
@@ -548,11 +559,11 @@ writeModuleProducts outDir hscEnv (Just context) modules interfaces = do
             writeBinIface (targetProfile (hsc_dflags hscEnv)) QuietBinIFace
               NormalCompression path interface
             BS.readFile path) `finally` removeFile path
-          pure (Just (T.pack (unitString (moduleUnit (pmModule prepared))),
-            T.pack (moduleNameString name), bytes, groups))
-  BS.writeFile (outDir </> "module-products.cbor") (encodeModuleProducts products)
- where
-  mapMaybeProduct = mapMaybe id
+          pure (key, ProductReady, Just (T.pack (fst key),
+            T.pack (snd key), bytes, groups))
+  BS.writeFile (outDir </> "module-products.cbor")
+    (encodeModuleProducts [product | (_, _, Just product) <- outcomes])
+  pure (Map.fromList [(key, status) | (key, status, _) <- outcomes])
 
 requireProjection :: Either ProjectionError a -> IO a
 requireProjection = \case
