@@ -7,6 +7,45 @@
 use ractor::{ActorRef as RactorRef, RpcReplyPort};
 use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse};
 
+/// Exact identity of one actor-owned workbench execution step. The generation
+/// is local to the actor incarnation; the request identity is correlation
+/// metadata and is absent for direct notebook submissions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkbenchStepKey {
+    actor: ActorRef,
+    generation: u64,
+    request_execution: Option<tidepool_runtime::session::WorkbenchExecutionId>,
+}
+
+impl WorkbenchStepKey {
+    pub(crate) fn new(
+        actor: ActorRef,
+        generation: u64,
+        request_execution: Option<tidepool_runtime::session::WorkbenchExecutionId>,
+    ) -> Self {
+        Self {
+            actor,
+            generation,
+            request_execution,
+        }
+    }
+
+    #[must_use]
+    pub fn actor(&self) -> ActorRef {
+        self.actor
+    }
+
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    #[must_use]
+    pub fn request_execution(&self) -> Option<&tidepool_runtime::session::WorkbenchExecutionId> {
+        self.request_execution.as_ref()
+    }
+}
+
 use crate::{
     ActorRef, ActorTerminal, ExternalApplicationFailure, ExternalFailureDisposition,
     KernelBehaviorError, MailboxValue, RetainedActorExit,
@@ -207,7 +246,8 @@ pub enum KernelMessage {
     },
     /// Wakes the actor after its one owned workbench task returns its behavior.
     WorkbenchCompleted {
-        token: u64,
+        step: WorkbenchStepKey,
+        outcome: Box<dyn std::any::Any + Send>,
     },
     ReconcileWorkbenchCancellation {
         invocation: Option<exomonad_tool::ToolInvocationContext>,
@@ -312,9 +352,9 @@ impl std::fmt::Debug for KernelMessage {
                 .debug_struct("Workbench")
                 .field("request", &invocation.request)
                 .finish_non_exhaustive(),
-            Self::WorkbenchCompleted { token } => formatter
+            Self::WorkbenchCompleted { step, .. } => formatter
                 .debug_tuple("WorkbenchCompleted")
-                .field(token)
+                .field(step)
                 .finish(),
             Self::ReconcileWorkbenchCancellation { execution, .. } => formatter
                 .debug_tuple("ReconcileWorkbenchCancellation")

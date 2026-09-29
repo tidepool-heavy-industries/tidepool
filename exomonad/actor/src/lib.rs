@@ -91,7 +91,7 @@ pub use interactive_session::{
 pub use kernel::{
     ActorAdmissionLease, ActorWorkbenchInvocation, CallAncestry, KernelCallFailure,
     KernelCallReply, KernelInvocationFailure, KernelInvocationReply, KernelMessage,
-    KernelWorkbenchFailure, KernelWorkbenchReply, LocalActorRef,
+    KernelWorkbenchFailure, KernelWorkbenchReply, LocalActorRef, WorkbenchStepKey,
 };
 pub use lineage::{
     ActorLineageRegistry, ActorPathReservation, CheckpointLease, CheckpointRefusal,

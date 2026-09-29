@@ -806,8 +806,8 @@ pub struct LocalActorState<B> {
     hosted_admission: HostedAdmission,
     context: std::sync::Arc<KernelContext>,
     behavior: BehaviorSlot<B>,
-    pending_workbench: Option<PendingWorkbench<B>>,
-    next_workbench_token: u64,
+    pending_workbench: Option<PendingWorkbench>,
+    next_workbench_generation: u64,
     pending_child_exits: Vec<ChildExitNotice>,
     terminal: RetainedActorExit,
     deferred_mailbox: VecDeque<KernelMessage>,
@@ -861,12 +861,11 @@ impl<B> std::ops::DerefMut for BehaviorSlot<B> {
     }
 }
 
-struct PendingWorkbench<B> {
-    token: u64,
+struct PendingWorkbench {
+    step: crate::WorkbenchStepKey,
     reply: ractor::RpcReplyPort<crate::KernelWorkbenchReply>,
     control: Option<Arc<crate::WorkbenchExecutionControl>>,
     execution: Option<tidepool_runtime::session::WorkbenchExecutionId>,
-    completion: Arc<Mutex<Option<WorkbenchTaskOutcome<B>>>>,
     hosted_cell: crate::kernel::HostedCellSlot,
 }
 
@@ -927,7 +926,7 @@ where
             context,
             behavior: BehaviorSlot(Some(arguments.behavior)),
             pending_workbench: None,
-            next_workbench_token: 0,
+            next_workbench_generation: 0,
             pending_child_exits: Vec::new(),
             terminal: arguments.terminal,
             deferred_mailbox: VecDeque::new(),
@@ -998,8 +997,8 @@ where
     ) -> Result<(), ActorProcessingErr> {
         if let Some(pending) = &state.pending_workbench {
             match message {
-                KernelMessage::WorkbenchCompleted { token } => {
-                    complete_workbench(&myself, state, token).await;
+                KernelMessage::WorkbenchCompleted { step, outcome } => {
+                    complete_workbench(&myself, state, step, outcome).await;
                 }
                 KernelMessage::DrainMailbox => {
                     state.mailbox_drain_scheduled = false;
@@ -1456,8 +1455,8 @@ where
                 start_workbench(&myself, state, invocation, control, reply);
                 return Ok(());
             }
-            KernelMessage::WorkbenchCompleted { .. } => {
-                tracing::warn!(actor = %state.context.identity, "stale workbench completion ignored");
+            KernelMessage::WorkbenchCompleted { step, .. } => {
+                tracing::warn!(actor = %state.context.identity, ?step, "stale workbench completion ignored");
             }
             KernelMessage::ReconcileWorkbenchCancellation {
                 execution,
@@ -1583,19 +1582,33 @@ fn start_workbench<B: KernelBehavior>(
     control: Option<Arc<crate::WorkbenchExecutionControl>>,
     reply: ractor::RpcReplyPort<crate::KernelWorkbenchReply>,
 ) {
+    let Some(generation) = state.next_workbench_generation.checked_add(1) else {
+        let failure = Err(KernelInvocationFailure::Failed {
+            actor: state.context.identity,
+            detail: "workbench step generation exhausted".into(),
+        });
+        if let Some(control) = control {
+            control.settle(failure.clone());
+            state.mailbox_admission.hosted_cell().complete(&control);
+        }
+        reply.send(failure).ok();
+        return;
+    };
+    state.next_workbench_generation = generation;
+    let step = crate::WorkbenchStepKey::new(
+        state.context.identity,
+        generation,
+        invocation.request.execution_id().cloned(),
+    );
     let behavior = state.behavior.0.take().expect("one active workbench");
     if let Some(control) = control.as_ref() {
         state.mailbox_admission.hosted_cell().claim(control);
     }
-    state.next_workbench_token = state.next_workbench_token.wrapping_add(1);
-    let token = state.next_workbench_token;
-    let completion = Arc::new(Mutex::new(None));
     state.pending_workbench = Some(PendingWorkbench {
-        token,
+        step: step.clone(),
         reply,
         control: control.clone(),
         execution: invocation.request.execution_id().cloned(),
-        completion: Arc::clone(&completion),
         hosted_cell: Arc::clone(state.mailbox_admission.hosted_cell()),
     });
     let context = Arc::clone(&state.context);
@@ -1613,17 +1626,19 @@ fn start_workbench<B: KernelBehavior>(
         .instrument(tracing::Span::current()),
     );
     tokio::spawn(async move {
-        let outcome = match worker.await {
-            Ok(outcome) => outcome,
-            Err(error) => WorkbenchTaskOutcome::Lost(error.to_string()),
+        let outcome: Box<dyn std::any::Any + Send> = match worker.await {
+            Ok(outcome) => Box::new(outcome),
+            Err(error) => Box::new(WorkbenchTaskOutcome::<B>::Lost(error.to_string())),
         };
-        *completion.lock() = Some(outcome);
         if myself
-            .send_message(KernelMessage::WorkbenchCompleted { token })
+            .send_message(KernelMessage::WorkbenchCompleted {
+                step: step.clone(),
+                outcome,
+            })
             .is_err()
         {
             tracing::warn!(
-                token,
+                ?step,
                 "workbench owner stopped before task completion was delivered"
             );
         }
@@ -1633,25 +1648,32 @@ fn start_workbench<B: KernelBehavior>(
 async fn complete_workbench<B: KernelBehavior>(
     myself: &RactorRef<KernelMessage>,
     state: &mut LocalActorState<B>,
-    token: u64,
+    step: crate::WorkbenchStepKey,
+    outcome: Box<dyn std::any::Any + Send>,
 ) {
     if state
         .pending_workbench
         .as_ref()
-        .is_none_or(|pending| pending.token != token)
+        .is_none_or(|pending| pending.step != step)
     {
-        tracing::warn!(token, "stale workbench completion ignored");
+        tracing::warn!(actor = %state.context.identity, ?step, "stale workbench completion ignored");
         return;
     }
     let pending = state
         .pending_workbench
         .take()
         .expect("matching pending workbench");
-    let outcome = pending.completion.lock().take();
-    let Some(outcome) = outcome else {
-        tracing::error!(token, "workbench completion arrived without its behavior");
-        state.pending_workbench = Some(pending);
-        return;
+    let outcome = match outcome.downcast::<WorkbenchTaskOutcome<B>>() {
+        Ok(outcome) => *outcome,
+        Err(_) => {
+            fail_unconfirmed_workbench(
+                myself,
+                state,
+                pending,
+                "workbench step returned an outcome for a different behavior type".into(),
+            );
+            return;
+        }
     };
     match outcome {
         WorkbenchTaskOutcome::Returned { behavior, result } => match result {
@@ -1727,7 +1749,7 @@ async fn maybe_drain<B: KernelBehavior>(
 fn fail_unconfirmed_workbench<B: KernelBehavior>(
     myself: &RactorRef<KernelMessage>,
     state: &mut LocalActorState<B>,
-    pending: PendingWorkbench<B>,
+    pending: PendingWorkbench,
     detail: String,
 ) {
     let failure = KernelInvocationFailure::Failed {
@@ -1744,7 +1766,7 @@ fn fail_unconfirmed_workbench<B: KernelBehavior>(
     myself.stop(Some(detail));
 }
 
-fn settle_pending_workbench<B>(pending: PendingWorkbench<B>, reply: crate::KernelWorkbenchReply) {
+fn settle_pending_workbench(pending: PendingWorkbench, reply: crate::KernelWorkbenchReply) {
     if let Some(control) = pending.control {
         control.settle(reply.clone());
         pending.hosted_cell.complete(&control);
@@ -2977,7 +2999,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workbench_shutdown_waits_for_completion_and_ignores_stale_token() {
+    async fn workbench_shutdown_waits_for_completion_and_ignores_stale_step() {
         let mut fixture = behavior(false);
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
@@ -2989,8 +3011,11 @@ mod tests {
         entered.notified().await;
         actor
             .address()
-            .send_message(KernelMessage::WorkbenchCompleted { token: u64::MAX })
-            .expect("stale token");
+            .send_message(KernelMessage::WorkbenchCompleted {
+                step: crate::WorkbenchStepKey::new(actor.identity(), u64::MAX, None),
+                outcome: Box::new(()),
+            })
+            .expect("stale step");
         let terminal = ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "stop".into(),
@@ -3014,6 +3039,77 @@ mod tests {
             &*fixture.calls.lock(),
             &["workbench-start", "workbench-end", "shutdown"]
         );
+    }
+
+    #[tokio::test]
+    async fn stale_step_and_cancellation_do_not_touch_a_new_workbench_execution() {
+        let mut fixture = behavior(false);
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        fixture.behavior.workbench_gate = Some((Arc::clone(&entered), Arc::clone(&release)));
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let first_execution =
+            tidepool_runtime::session::WorkbenchExecutionId::from_digest([31; 16]);
+        let first = send_workbench_request(
+            &actor,
+            WorkbenchRequest::from_cell_input("first").with_execution_id(first_execution.clone()),
+            None,
+        );
+        entered.notified().await;
+        release.notify_one();
+        assert!(first.await.expect("first reply").is_ok());
+
+        let second_execution =
+            tidepool_runtime::session::WorkbenchExecutionId::from_digest([32; 16]);
+        let mut second = send_workbench_request(
+            &actor,
+            WorkbenchRequest::from_cell_input("second").with_execution_id(second_execution.clone()),
+            None,
+        );
+        entered.notified().await;
+
+        actor
+            .address()
+            .send_message(KernelMessage::WorkbenchCompleted {
+                step: crate::WorkbenchStepKey::new(
+                    actor.identity(),
+                    1,
+                    Some(first_execution.clone()),
+                ),
+                outcome: Box::new(()),
+            })
+            .expect("queue old step completion");
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::ReconcileWorkbenchCancellation {
+                invocation: None,
+                execution: first_execution.clone(),
+                reply: cancel_tx.into(),
+            })
+            .expect("queue old cancellation reconciliation");
+
+        assert!(matches!(
+            second.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        release.notify_one();
+        assert!(second.await.expect("second reply").is_ok());
+        assert!(matches!(
+            cancel_rx.await.expect("old cancellation reply"),
+            crate::WorkbenchCancellationOutcome::UnknownEvaluation { execution }
+                if execution == first_execution
+        ));
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary: "done".into(),
+            })
+            .await
+            .expect("shutdown");
+        task.await.expect("actor task");
     }
 
     #[tokio::test]
@@ -4614,7 +4710,7 @@ mod tests {
             context,
             behavior: BehaviorSlot(Some(behavior(false).behavior)),
             pending_workbench: None,
-            next_workbench_token: 0,
+            next_workbench_generation: 0,
             pending_child_exits: Vec::new(),
             terminal: terminal.clone(),
             deferred_mailbox: VecDeque::new(),
