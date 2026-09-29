@@ -39,6 +39,7 @@ library tidepool-extract-internal
     Tidepool.Identity
     Tidepool.Introspection
     Tidepool.Metadata
+    Tidepool.ModuleCandidates
     Tidepool.PrimOps
     Tidepool.PreparedStg
     Tidepool.PreparedRecovery
@@ -199,6 +200,8 @@ test-suite execution-schema-encode
     base >= 4.20 && < 5,
     bytestring,
     cborg,
+    directory,
+    text,
     tidepool-extract-internal
   default-language: GHC2024
   default-extensions: OverloadedStrings

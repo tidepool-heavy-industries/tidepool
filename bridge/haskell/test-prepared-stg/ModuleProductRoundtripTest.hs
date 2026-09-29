@@ -61,7 +61,7 @@ verifyModuleProductInterfaceRoundtrip work = do
   ordinary <- runPipelineSelected PreparedStg b [work]
   unless (Map.null (pprProductInterfaces ordinary)) $
     ioError (userError "ordinary prepared compilation retained product interfaces")
-  result <- runPipelineSelected PreparedProducts b [work]
+  result <- runPipelineSelected (PreparedProducts Nothing) b [work]
   let prepared = [module_ | module_ <- pprModules result
                           , moduleNameString (moduleName (pmModule module_))
                               == "ModuleProductA"]

@@ -47,6 +47,7 @@ data RequestField
   | TurnPin String
   | HarnessProfile
   | BuildProductsDir FilePath
+  | ModuleCandidates FilePath
   | InspectType String
   | InspectInfo String
   | InspectBrowse String
@@ -97,6 +98,7 @@ data WorkerRequest = WorkerRequest
   , requestTurnPin :: Maybe String
   , requestHarnessProfile :: Bool
   , requestBuildProductsDir :: Maybe FilePath
+  , requestModuleCandidates :: Maybe FilePath
   , requestInspections :: [InspectionRequest]
   , requestInspectOut :: Maybe FilePath
   , requestInspectTypeBatch :: Maybe FilePath
@@ -137,6 +139,7 @@ emptyWorkerRequest = WorkerRequest
   , requestTurnPin = Nothing
   , requestHarnessProfile = False
   , requestBuildProductsDir = Nothing
+  , requestModuleCandidates = Nothing
   , requestInspections = []
   , requestInspectOut = Nothing
   , requestInspectTypeBatch = Nothing
@@ -209,6 +212,7 @@ requestFromFields = foldl apply emptyWorkerRequest
       TurnPin pin -> request { requestTurnPin = Just pin }
       HarnessProfile -> request { requestHarnessProfile = True }
       BuildProductsDir path -> request { requestBuildProductsDir = Just path }
+      ModuleCandidates path -> request { requestModuleCandidates = Just path }
       InspectType expression -> request
         { requestInspections = requestInspections request ++ [InspectTypeOf expression] }
       InspectInfo name -> request
@@ -235,7 +239,7 @@ requestFromFields = foldl apply emptyWorkerRequest
       CellFoldTurn -> request { requestCellFoldTurn = True }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v12"
+workerRequestFlag = "--worker-request-v13"
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -254,7 +258,7 @@ type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 decodeRequest :: BS.ByteString -> Either String [RequestField]
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ012"
+  if magic /= "TPREQ013"
     then Left "worker request: unsupported magic or version"
     else do
       (count, rest) <- pWord32 body
@@ -264,7 +268,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ012" <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = "TPREQ013" <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
@@ -286,6 +290,7 @@ encodeField field = case field of
   ClassifyOut value -> taggedText 21 value
   HarnessProfile -> BS.singleton 24
   BuildProductsDir value -> taggedText 25 value
+  ModuleCandidates value -> taggedText 46 value
   InspectType value -> taggedText 26 value
   InspectInfo value -> taggedText 27 value
   InspectOut value -> taggedText 28 value
@@ -389,6 +394,7 @@ pField bytes = do
     21 -> mapParser ClassifyOut pText rest
     24 -> Right (HarnessProfile, rest)
     25 -> mapParser BuildProductsDir pText rest
+    46 -> mapParser ModuleCandidates pText rest
     26 -> mapParser InspectType pText rest
     27 -> mapParser InspectInfo pText rest
     28 -> mapParser InspectOut pText rest

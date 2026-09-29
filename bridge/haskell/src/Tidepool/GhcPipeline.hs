@@ -158,7 +158,7 @@ import Tidepool.DependencyEvidence
 -- boundary. Metadata consumers stop at the checked environment.
 data PipelineSelection result where
   PreparedStg :: PipelineSelection PreparedPipelineResult
-  PreparedProducts :: PipelineSelection PreparedPipelineResult
+  PreparedProducts :: Maybe FilePath -> PipelineSelection PreparedPipelineResult
   CheckedEnvironment :: PipelineSelection CheckedEnvironmentResult
 
 data PreparationKind = CheckOnly | PrepareStg
@@ -225,11 +225,11 @@ data CheckedEnvironmentResult = CheckedEnvironmentResult
 
 selectionKind :: PipelineSelection result -> PreparationKind
 selectionKind PreparedStg = PrepareStg
-selectionKind PreparedProducts = PrepareStg
+selectionKind (PreparedProducts _) = PrepareStg
 selectionKind CheckedEnvironment = CheckOnly
 
 capturesProductInterfaces :: PipelineSelection result -> Bool
-capturesProductInterfaces PreparedProducts = True
+capturesProductInterfaces (PreparedProducts _) = True
 capturesProductInterfaces _ = False
 
 data PipelineResult = PipelineResult
@@ -2068,7 +2068,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
           , pprDependencies = dependencies
           , pprProductInterfaces = productInterfaces
           }
-      PreparedProducts -> do
+      PreparedProducts _ -> do
         (result, modules, dependencies, productInterfaces) <- compileExecutable
         pure PreparedPipelineResult
           { pprPipelineResult = result

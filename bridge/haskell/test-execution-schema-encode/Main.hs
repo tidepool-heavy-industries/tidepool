@@ -1,20 +1,65 @@
 module Main (main) where
 
 import Codec.CBOR.Read (deserialiseFromBytes)
+import Codec.CBOR.Encoding (encodeListLen, encodeString)
 import Codec.CBOR.Term (Term(..), decodeTerm)
+import Codec.CBOR.Write (toStrictByteString)
+import Control.Exception (bracket)
 import Control.Monad (unless)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
+import Data.Text qualified as T
 import Data.Word (Word64)
 import System.Environment (getArgs)
+import System.Directory (getTemporaryDirectory, removeFile)
+import System.IO (openBinaryTempFile, hClose)
 import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionSchema
+import Tidepool.ModuleCandidates (readModuleCandidates)
 
 assert :: Bool -> String -> IO ()
 assert condition message = unless condition (ioError (userError message))
 
+candidateManifestChecks :: IO ()
+candidateManifestChecks = do
+  temp <- getTemporaryDirectory
+  bracket (openBinaryTempFile temp "tidepool-candidates.cbor")
+    (\(path, _) -> removeFile path)
+    (\(path, handle) -> do
+      hClose handle
+      let digest = T.pack (replicate 64 'a')
+          candidate = encodeListLen 8
+            <> encodeString "main" <> encodeString "Fixture"
+            <> encodeString "/tmp/Fixture.hs" <> encodeString digest
+            <> encodeString "/tmp/Fixture.hi" <> encodeString digest
+            <> encodeString digest <> encodeString digest
+          manifest items = toStrictByteString
+            (encodeListLen 3 <> encodeString "TPMCAN" <> encodeString "2"
+              <> encodeListLen (fromIntegral (length items)) <> mconcat items)
+      BS.writeFile path (manifest [candidate])
+      valid <- readModuleCandidates path
+      assert (case valid of Right [_] -> True; _ -> False)
+        "bounded module candidate manifest did not decode"
+      BS.writeFile path (BS.snoc (manifest [candidate]) 0)
+      trailing <- readModuleCandidates path
+      assert (case trailing of Left _ -> True; _ -> False)
+        "candidate manifest accepted trailing bytes"
+      BS.writeFile path (manifest [candidate, candidate])
+      duplicate <- readModuleCandidates path
+      assert (case duplicate of Left _ -> True; _ -> False)
+        "candidate manifest accepted duplicate owners"
+      BS.writeFile path (manifest [encodeListLen 8
+        <> encodeString "main" <> encodeString "Fixture"
+        <> encodeString "relative.hs" <> encodeString digest
+        <> encodeString "/tmp/Fixture.hi" <> encodeString digest
+        <> encodeString digest <> encodeString digest])
+      relative <- readModuleCandidates path
+      assert (case relative of Left _ -> True; _ -> False)
+        "candidate manifest accepted a relative source path")
+
 main :: IO ()
 main = do
+  candidateManifestChecks
   arguments <- getArgs
   let first = encodeWireProgram representative
       second = encodeWireProgram representative

@@ -570,6 +570,13 @@ impl ExtractCmd {
         self
     }
 
+    /// Supply one bounded candidate manifest for the worker to validate
+    /// against its current downsweep before reusing any home module.
+    pub fn module_candidates(&mut self, path: &Path) -> &mut Self {
+        self.request.module_candidates(path);
+        self
+    }
+
     /// `--session-root <dir>` — where `Tidepool.Session.Val.G<g>` ifaces are
     /// written and where `--inject-val` ifaces are looked up.
     pub fn session_root(&mut self, dir: impl AsRef<OsStr>) -> &mut Self {

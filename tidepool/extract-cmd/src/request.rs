@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v12";
-const MAGIC: &[u8; 8] = b"TPREQ012";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v13";
+const MAGIC: &[u8; 8] = b"TPREQ013";
 
 /// A probe flag deliberately outside the versioned request grammar above: it
 /// asks a worker binary to print the request flag it was built against and
@@ -70,6 +70,7 @@ enum Field {
     CellOut(OsString),
     TurnPin(String),
     BuildProductsDir(OsString),
+    ModuleCandidates(PathBuf),
     SessionRoot(OsString),
     /// The session's incarnation identity (the Rust `SessionId`, rendered as
     /// decimal text) -- absent for a one-shot compile or an older caller.
@@ -159,6 +160,9 @@ impl ExtractRequest {
                 Some("--turn-pin") => request.turn_pin(text_value(&mut args, "--turn-pin")?),
                 Some("--build-products-dir") => {
                     request.build_products_dir(value(&mut args, "--build-products-dir")?)
+                }
+                Some("--module-candidates") => {
+                    request.module_candidates(Path::new(value(&mut args, "--module-candidates")?))
                 }
                 Some("--session-root") => request.session_root(value(&mut args, "--session-root")?),
                 Some("--session-incarnation") => {
@@ -254,6 +258,7 @@ impl ExtractRequest {
                 21 => Field::ClassifyOut(decoder.os_string()?),
                 24 => Field::HarnessProfile,
                 25 => Field::BuildProductsDir(decoder.os_string()?),
+                46 => Field::ModuleCandidates(PathBuf::from(decoder.os_string()?)),
                 26 => Field::InspectType(decoder.string()?),
                 27 => Field::InspectInfo(decoder.string()?),
                 28 => Field::InspectOut(decoder.os_string()?),
@@ -416,6 +421,10 @@ impl ExtractRequest {
             .push(Field::BuildProductsDir(value.as_ref().to_owned()));
     }
 
+    pub(crate) fn module_candidates(&mut self, value: &Path) {
+        self.fields.push(Field::ModuleCandidates(value.to_owned()));
+    }
+
     pub(crate) fn session_root(&mut self, value: impl AsRef<OsStr>) {
         self.fields
             .push(Field::SessionRoot(value.as_ref().to_owned()));
@@ -519,6 +528,9 @@ impl ExtractRequest {
                 Field::CellOut(value) => flag(&mut flags, "--cell-out", value),
                 Field::TurnPin(value) => flag(&mut flags, "--turn-pin", OsStr::new(value)),
                 Field::BuildProductsDir(value) => flag(&mut flags, "--build-products-dir", value),
+                Field::ModuleCandidates(value) => {
+                    flag(&mut flags, "--module-candidates", value.as_os_str())
+                }
                 Field::SessionRoot(value) => flag(&mut flags, "--session-root", value),
                 Field::SessionIncarnation(value) => {
                     flag(&mut flags, "--session-incarnation", value)
@@ -614,7 +626,7 @@ impl ExtractRequest {
     ///   warm-up exists for has already happened.
     pub(crate) fn redirect_outputs_for_warm_up(&mut self, dir: &Path) {
         self.fields
-            .retain(|field| !matches!(field, Field::BindGen(_)));
+            .retain(|field| !matches!(field, Field::BindGen(_) | Field::ModuleCandidates(_)));
         for field in &mut self.fields {
             match field {
                 Field::OutputDir(value) => *value = dir.join("output-dir").into_os_string(),
@@ -771,7 +783,7 @@ impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidWorkerArgv => {
-                f.write_str("worker argv must be exactly --worker-request-v12 PAYLOAD")
+                f.write_str("worker argv must be exactly --worker-request-v13 PAYLOAD")
             }
             Self::NonUtf8Payload => f.write_str("worker request payload is not UTF-8"),
             Self::InvalidHeader => f.write_str("invalid worker request header"),
@@ -847,6 +859,7 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         Field::CellOut(value) => tagged_frame(out, 33, value),
         Field::TurnPin(value) => tagged_frame(out, 34, OsStr::new(value)),
         Field::BuildProductsDir(value) => tagged_frame(out, 25, value),
+        Field::ModuleCandidates(value) => tagged_frame(out, 46, value.as_os_str()),
         Field::SessionRoot(value) => tagged_frame(out, 12, value),
         Field::SessionIncarnation(value) => tagged_frame(out, 44, value),
         Field::InjectVal(value) => tagged_frame(out, 13, value),
@@ -1102,6 +1115,22 @@ mod tests {
     }
 
     #[test]
+    fn module_candidates_round_trip_and_do_not_enter_warm_up() {
+        let mut request = ExtractRequest::default();
+        request.input("Expr.hs");
+        request.module_candidates(Path::new("/tmp/candidates.cbor"));
+        let decoded = ExtractRequest::decode(&request.encode()).unwrap();
+        assert_eq!(decoded.cli_argv(), request.cli_argv());
+        assert!(matches!(
+            decoded.fields.as_slice(),
+            [Field::Input(_), Field::ModuleCandidates(_)]
+        ));
+        let mut warm = decoded;
+        warm.redirect_outputs_for_warm_up(Path::new("/tmp/warm"));
+        assert!(matches!(warm.fields.as_slice(), [Field::Input(_)]));
+    }
+
+    #[test]
     fn strict_inspection_round_trips_through_the_typed_protocol() {
         let mut request = ExtractRequest::default();
         request.inspection_strict();
@@ -1189,6 +1218,7 @@ mod tests {
             "--worker-request-v9",
             "--worker-request-v10",
             "--worker-request-v11",
+            "--worker-request-v12",
         ] {
             assert_eq!(
                 ExtractRequest::decode_worker_argv(&[flag.into(), payload.clone()]).unwrap_err(),
@@ -1211,6 +1241,7 @@ mod tests {
             b"TPREQ009",
             b"TPREQ010",
             b"TPREQ011",
+            b"TPREQ012",
         ] {
             let mut request = magic.to_vec();
             request.extend_from_slice(&0u32.to_le_bytes());
