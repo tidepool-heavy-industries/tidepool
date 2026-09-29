@@ -3,7 +3,8 @@
 -- | Deterministic CBOR encoding for the internal prepared-execution schema.
 -- The reader owns validation; this module preserves the already-normalized
 -- table order and uses only definite-length arrays and primitive leaves.
-module Tidepool.ExecutionEncode (encodeWireProgram) where
+module Tidepool.ExecutionEncode
+  ( encodeWireProgram, encodeProjectedGroup, encodeModuleProducts ) where
 
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
@@ -12,6 +13,7 @@ import Data.Foldable (fold)
 import Data.List (mapAccumL)
 import Data.Sequence (Seq, (|>))
 import Data.Sequence qualified as Seq
+import Data.Text (Text)
 import Data.Word (Word64)
 import Tidepool.ExecutionSchema
 
@@ -40,6 +42,57 @@ encodeWireProgram program = toStrictByteString $ array
  where
   envelope = programEnvelope program
   ((_, frames), bindings) = mapAccumL encodeTopGroup (0, Seq.empty) (programBindings program)
+
+-- | Entry-free, independently decodable definition arena for one original
+-- STG group. The body uses the same table grammar as a prepared program, but
+-- no target entry is selected or serialized. The owning module/version and
+-- exact import owners are attached by the product inventory before caching.
+encodeProjectedGroup :: ProjectedGroup -> ByteString
+encodeProjectedGroup group = toStrictByteString $ array
+  [ encodeString "TPGRP"
+  , encodeWord64 1
+  , encodeWord32 (projectedOriginalOrdinal group)
+  , list encodeSymbol (projectedBinders group)
+  , encodeWord64 (envelopeSchemaVersion envelope)
+  , encodeString (envelopeProjectionProfile envelope)
+  , encodeString (envelopeToolchain envelope)
+  , encodeWord64 (envelopeExecutionAbiVersion envelope)
+  , encodeTarget (envelopeTarget envelope)
+  , list encodeSignature (projectedSignatures body)
+  , list encodeGlobal (projectedGlobals body)
+  , list encodeConstructor (projectedConstructors body)
+  , list encodeOperation (projectedOperations body)
+  , encodeListLen (fromIntegral (Seq.length frames)) <> fold frames
+  , list id bindings
+  , list encodeTypeNode (projectedTypes body)
+  , list encodeSiteRow (projectedSites body)
+  , list encodeVerbSite (projectedVerbSites body)
+  , case projectedJsonLayout body of
+      Nothing -> tag 0
+      Just layout -> tagged 1 [encodeJsonLayout layout]
+  ]
+ where
+  body = projectedBody group
+  envelope = projectedEnvelope body
+  ((_, frames), bindings) = mapAccumL encodeTopGroup (0, Seq.empty)
+    (projectedBindings body)
+
+-- | The worker's neutral product sidecar. Interface bytes and every group
+-- inhabit the same bounded document, so a cache owner cannot pair a group's
+-- definitions with a different GHC interface by listing separate files.
+encodeModuleProducts :: [(Text, Text, ByteString, [ProjectedGroup])] -> ByteString
+encodeModuleProducts modules = toStrictByteString $ array
+  [ encodeString "TPMOD"
+  , encodeWord64 1
+  , list encodeModule modules
+  ]
+ where
+  encodeModule (unit, name, interface, groups) = array
+    [ encodeString unit
+    , encodeString name
+    , encodeBytes interface
+    , list (encodeBytes . encodeProjectedGroup) groups
+    ]
 
 array :: [Encoding] -> Encoding
 array fields = encodeListLen (fromIntegral (length fields)) <> fold fields

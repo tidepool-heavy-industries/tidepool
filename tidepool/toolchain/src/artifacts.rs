@@ -16,6 +16,7 @@ use serde::Deserialize;
 use tempfile::TempDir;
 use tidepool_extract_cmd::ExtractCmd;
 use tidepool_repr::execution_schema::DecodeLimits;
+use tidepool_repr::execution_schema::RawModuleProduct;
 use tidepool_repr::serial::{read_metadata, MetaWarnings};
 use tidepool_repr::DataConTable;
 
@@ -230,6 +231,10 @@ pub struct CompiledArtifacts {
     pub warnings: MetaWarnings,
     /// Per-target prepared program and asks sidecar, keyed by target name.
     pub targets: BTreeMap<String, TargetArtifact>,
+    /// Entry-free definitions and skinny interfaces from the same worker
+    /// transaction. These are raw products until graph evidence assigns
+    /// exact module versions and every import owner.
+    pub module_products: Vec<RawModuleProduct>,
 }
 
 // ---------------------------------------------------------------------------
@@ -346,14 +351,16 @@ pub fn compile_invocation(
                 });
                 if let Some(key) = &key {
                     let load_start = Instant::now();
-                    if let Some((meta_bytes, raw)) =
+                    if let Some((meta_bytes, raw, product_bytes)) =
                         load_memo(key, &name_refs, inv.targets, inv.source)
                     {
-                        if let Ok(artifacts) = assemble(&meta_bytes, &raw, &mut on_stage) {
+                        if let Ok(artifacts) =
+                            assemble_with_products(&meta_bytes, &raw, &product_bytes, &mut on_stage)
+                        {
                             on_stage(
                                 timing::STAGE_CBOR_READ,
                                 load_start.elapsed(),
-                                total_bytes(&meta_bytes, &raw),
+                                total_bytes(&meta_bytes, &raw, &product_bytes),
                             );
                             return Ok(CompileAttempt::Cached(Box::new(artifacts)));
                         }
@@ -392,7 +399,7 @@ pub fn compile_invocation(
         "extract spawn"
     );
 
-    let (meta_bytes, raw) = extract_and_read(
+    let (meta_bytes, raw, product_bytes) = extract_and_read(
         run,
         temp_dir.path(),
         inv.targets,
@@ -408,7 +415,7 @@ pub fn compile_invocation(
     // Store only what DESERIALIZED, so a malformed artifact set is never
     // memoized into a permanently-failing entry. Best-effort: an unwritable
     // memo costs a recompile, it never fails a compile.
-    let artifacts = assemble(&meta_bytes, &raw, &mut on_stage)?;
+    let artifacts = assemble_with_products(&meta_bytes, &raw, &product_bytes, &mut on_stage)?;
     if let Some(key) = &inv_key {
         if let Some(evidence) = std::fs::read(temp_dir.path().join("dependencies.json"))
             .ok()
@@ -416,7 +423,15 @@ pub fn compile_invocation(
                 cache::DependencyEvidence::from_worker(&bytes, &input_path, inv.source)
             })
         {
-            store_memo(key, &name_refs, &meta_bytes, &raw, &evidence, inv.source);
+            store_memo(
+                key,
+                &name_refs,
+                &meta_bytes,
+                &raw,
+                &product_bytes,
+                &evidence,
+                inv.source,
+            );
         }
     }
     Ok(artifacts)
@@ -492,7 +507,7 @@ pub(crate) fn extract_and_read(
     multi: bool,
     mut on_stage: impl FnMut(&str, Duration, u64),
     log_stderr: impl FnOnce(&str, bool),
-) -> Result<(Vec<u8>, Vec<RawTargetOutput>), CompileError> {
+) -> Result<(Vec<u8>, Vec<RawTargetOutput>, Vec<u8>), CompileError> {
     on_stage(timing::STAGE_EXTRACT_SPAWN, run.elapsed, 0);
 
     let stderr = run.stderr_lossy();
@@ -531,6 +546,14 @@ pub(crate) fn extract_and_read(
         return Err(CompileError::MissingOutput(meta_path));
     }
     let meta_bytes = std::fs::read(&meta_path)?;
+    let products_path = temp_dir.join("module-products.cbor");
+    let product_bytes = std::fs::read(&products_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            CompileError::MissingOutput(products_path)
+        } else {
+            CompileError::Io(error)
+        }
+    })?;
 
     let mut raw = Vec::with_capacity(targets.len());
     for target in targets {
@@ -554,9 +577,9 @@ pub(crate) fn extract_and_read(
     on_stage(
         timing::STAGE_CBOR_READ,
         cbor_read_start.elapsed(),
-        total_bytes(&meta_bytes, &raw),
+        total_bytes(&meta_bytes, &raw, &product_bytes),
     );
-    Ok((meta_bytes, raw))
+    Ok((meta_bytes, raw, product_bytes))
 }
 
 /// A prepared program's constructor declaration RESOLVES in the accompanying
@@ -730,7 +753,23 @@ pub(crate) fn assemble(
         table,
         warnings,
         targets,
+        module_products: Vec::new(),
     })
+}
+
+fn assemble_with_products(
+    meta_bytes: &[u8],
+    raw: &[RawTargetOutput],
+    product_bytes: &[u8],
+    on_stage: impl FnMut(&str, Duration, u64),
+) -> Result<CompiledArtifacts, CompileError> {
+    let mut artifacts = assemble(meta_bytes, raw, on_stage)?;
+    artifacts.module_products = tidepool_repr::execution_schema::parse_module_products(
+        product_bytes,
+        &crate::prepared_artifact::production_requirements()?,
+        DecodeLimits::default(),
+    )?;
+    Ok(artifacts)
 }
 
 /// Read the required typed-yield sidecar. The extractor writes `[]` for a
@@ -771,7 +810,7 @@ pub fn read_yield_sites(path: &Path) -> Result<Vec<YieldSite>, CompileError> {
 /// `targets.len() > 1` test the Haskell side uses to decide which shape to
 /// write, so the memo's names track the extract's own contract.
 fn artifact_names(targets: &[&str], multi: bool) -> Vec<String> {
-    let mut names = Vec::with_capacity(1 + targets.len() * 2);
+    let mut names = Vec::with_capacity(2 + targets.len() * 2);
     names.push("meta.cbor".to_string());
     for target in targets {
         names.push(prepared_artifact_name(target));
@@ -781,14 +820,16 @@ fn artifact_names(targets: &[&str], multi: bool) -> Vec<String> {
             "asks.json".to_string()
         });
     }
+    names.push("module-products.cbor".to_string());
     names
 }
 
 /// Total bytes read for this compile, for the `cbor_read` timing stage —
 /// identical on the memo path and the spawn path, since both count the same
 /// artifacts.
-fn total_bytes(meta_bytes: &[u8], raw: &[RawTargetOutput]) -> u64 {
+fn total_bytes(meta_bytes: &[u8], raw: &[RawTargetOutput], product_bytes: &[u8]) -> u64 {
     let total = meta_bytes.len()
+        + product_bytes.len()
         + raw
             .iter()
             .map(|r| r.prepared_bytes.len() + r.asks_bytes.len())
@@ -804,7 +845,7 @@ fn load_memo(
     names: &[&str],
     targets: &[&str],
     source: &str,
-) -> Option<(Vec<u8>, Vec<RawTargetOutput>)> {
+) -> Option<(Vec<u8>, Vec<RawTargetOutput>, Vec<u8>)> {
     let loaded = cache::artifacts_load(key, names, source)?;
     let mut it = loaded.into_iter();
     // Every artifact is required. An extractor represents a target with no
@@ -820,7 +861,7 @@ fn load_memo(
             prepared_bytes: Arc::new(prepared_bytes),
         });
     }
-    Some((meta_bytes, raw))
+    Some((meta_bytes, raw, it.next()??))
 }
 
 /// Store this invocation's full artifact set under `names`, in the order
@@ -830,6 +871,7 @@ fn store_memo(
     names: &[&str],
     meta_bytes: &[u8],
     raw: &[RawTargetOutput],
+    product_bytes: &[u8],
     evidence: &cache::DependencyEvidence,
     source: &str,
 ) {
@@ -844,6 +886,9 @@ fn store_memo(
         };
         artifacts.push((prepared_name, Some(r.prepared_bytes.as_slice())));
         artifacts.push((asks_name, Some(r.asks_bytes.as_slice())));
+    }
+    if let Some(name) = names.next() {
+        artifacts.push((name, Some(product_bytes)));
     }
     cache::artifacts_store(key, &artifacts, evidence, source);
 }
@@ -973,6 +1018,34 @@ mod typed_site_tests {
         assert_eq!(selections.len(), 2);
         assert_ne!(selections[0].0, selections[1].0);
         assert_ne!(selections[0].1, selections[1].1);
+    }
+}
+
+#[cfg(test)]
+mod module_product_tests {
+    use super::*;
+
+    /// This test intentionally crosses the matched Rust frontend, Haskell
+    /// worker, entry-free wire reader and invocation bundle. Run it with
+    /// `TIDEPOOL_EXTRACT` and `TIDEPOOL_EXTRACT_WORKER` from this checkout.
+    #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
+    fn real_worker_products_survive_the_production_compile_front_door() {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/test-prepared-stg");
+        let source = std::fs::read_to_string(root.join("ModuleProductB.hs")).unwrap();
+        let compiled = compile_targets(&source, &["consume"], &[root], |_, _, _| {}).unwrap();
+        let modules: std::collections::BTreeSet<_> = compiled
+            .module_products
+            .iter()
+            .map(|product| product.module.as_str())
+            .collect();
+        assert!(modules.contains("ModuleProductA"));
+        assert!(modules.contains("ModuleProductB"));
+        assert!(compiled
+            .module_products
+            .iter()
+            .any(|product| product.module == "ModuleProductA" && product.groups.len() >= 2));
     }
 }
 

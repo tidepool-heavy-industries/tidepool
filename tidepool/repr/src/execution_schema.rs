@@ -6,6 +6,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::session_ids::SessionVarId;
+
 pub const SCHEMA_VERSION: u64 = 14;
 pub const EXECUTION_ABI_VERSION: u64 = 8;
 
@@ -869,6 +871,91 @@ pub struct WireProgram {
     pub json_layout: Option<JsonLayout>,
 }
 
+/// The entry-free definition and table portion shared by complete programs
+/// and projected module groups. A neutral product cannot name an executable
+/// root until graph ownership has been checked and a real entry is selected.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ProgramDefinitions {
+    pub envelope: ProgramEnvelope,
+    pub signatures: Vec<Signature>,
+    pub globals: Vec<GlobalDecl>,
+    pub constructors: Vec<ConstructorDecl>,
+    pub operations: Vec<OperationDecl>,
+    pub expressions: Expr,
+    pub bindings: Vec<Group<TopBinding>>,
+    pub types: Vec<TypeNode>,
+    pub sites: Vec<SiteRow>,
+    pub verb_sites: Vec<(ConstructorId, u64)>,
+    pub json_layout: Option<JsonLayout>,
+}
+
+impl ProgramDefinitions {
+    fn into_wire(self, entry: ValueId) -> WireProgram {
+        WireProgram {
+            envelope: self.envelope,
+            signatures: self.signatures,
+            globals: self.globals,
+            constructors: self.constructors,
+            operations: self.operations,
+            expressions: self.expressions,
+            bindings: self.bindings,
+            entry,
+            types: self.types,
+            sites: self.sites,
+            verb_sites: self.verb_sites,
+            json_layout: self.json_layout,
+        }
+    }
+}
+
+/// One borrowed semantic view for full programs and entry-free groups. The
+/// validator receives the entry separately, so neutral definitions never
+/// carry a fabricated root.
+#[derive(Clone, Copy)]
+pub(super) struct DefinitionsView<'a> {
+    envelope: &'a ProgramEnvelope,
+    signatures: &'a Vec<Signature>,
+    globals: &'a Vec<GlobalDecl>,
+    constructors: &'a Vec<ConstructorDecl>,
+    operations: &'a Vec<OperationDecl>,
+    expressions: &'a Expr,
+    bindings: &'a Vec<Group<TopBinding>>,
+    types: &'a Vec<TypeNode>,
+    sites: &'a Vec<SiteRow>,
+    verb_sites: &'a Vec<(ConstructorId, u64)>,
+    json_layout: &'a Option<JsonLayout>,
+}
+
+macro_rules! definitions_view {
+    ($value:expr) => {
+        DefinitionsView {
+            envelope: &$value.envelope,
+            signatures: &$value.signatures,
+            globals: &$value.globals,
+            constructors: &$value.constructors,
+            operations: &$value.operations,
+            expressions: &$value.expressions,
+            bindings: &$value.bindings,
+            types: &$value.types,
+            sites: &$value.sites,
+            verb_sites: &$value.verb_sites,
+            json_layout: &$value.json_layout,
+        }
+    };
+}
+
+impl<'a> From<&'a WireProgram> for DefinitionsView<'a> {
+    fn from(value: &'a WireProgram) -> Self {
+        definitions_view!(value)
+    }
+}
+
+impl<'a> From<&'a ProgramDefinitions> for DefinitionsView<'a> {
+    fn from(value: &'a ProgramDefinitions) -> Self {
+        definitions_view!(value)
+    }
+}
+
 /// Validated but not yet linked program. Its fields remain private so every
 /// executable consumer crosses the same validation boundary.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -950,6 +1037,194 @@ impl LinkedProgram {
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct MachineImports {
     pub values: BTreeMap<SymbolIdentity, ImportedValue>,
+}
+
+/// A content identity assigned to a complete ordinary/boot module graph
+/// before exact import edges are annotated. The digest includes its scoped
+/// compiler context and SCC closure, never mutable binding values.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ModuleVersion(pub [u8; 32]);
+
+/// The semantic owner of a projected external value. A spelling and physical
+/// signature can corroborate an owner but cannot select one.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum ImportOwner {
+    Source {
+        version: ModuleVersion,
+        binder: SymbolIdentity,
+    },
+    Retained {
+        id: SessionVarId,
+        generation: u64,
+    },
+    Package {
+        unit: String,
+        module: String,
+        binder: SymbolIdentity,
+        interface_digest: [u8; 32],
+    },
+}
+
+/// One original recursive-group arena with no selected executable entry.
+/// Its imports remain unavailable until the graph inventory supplies one
+/// exact owner per declared external value.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ProjectedGroup {
+    original_ordinal: u32,
+    binders: Vec<SymbolIdentity>,
+    definitions: ProgramDefinitions,
+}
+
+impl ProjectedGroup {
+    #[must_use]
+    pub fn original_ordinal(&self) -> u32 {
+        self.original_ordinal
+    }
+
+    #[must_use]
+    pub fn binders(&self) -> &[SymbolIdentity] {
+        &self.binders
+    }
+
+    #[must_use]
+    pub fn globals(&self) -> &[GlobalDecl] {
+        &self.definitions.globals
+    }
+}
+
+/// Parse a neutral group without selecting an entry. The shared prepared
+/// validator checks all expressions, layouts and tables, omitting only the
+/// entry-specific function result rule.
+pub fn parse_projected_group(
+    bytes: &[u8],
+    requirements: &ProgramRequirements,
+    limits: DecodeLimits,
+) -> Result<ProjectedGroup, ParseError> {
+    let (original_ordinal, binders, definitions) = codec::decode_group_wire(bytes, limits)?;
+    validation::validate_group(&definitions, requirements, limits)?;
+    let unique: std::collections::BTreeSet<_> = binders.iter().collect();
+    if unique.len() != binders.len() {
+        return Err(ParseError::DuplicateDefinition(
+            "projected group binder".into(),
+        ));
+    }
+    Ok(ProjectedGroup {
+        original_ordinal,
+        binders,
+        definitions,
+    })
+}
+
+/// One source module's skinny GHC interface and entry-free definitions as
+/// emitted by a single compiler transaction. This is not cache admission:
+/// the toolchain must still attach complete graph evidence and exact owners.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RawModuleProduct {
+    pub unit: String,
+    pub module: String,
+    pub interface: Vec<u8>,
+    pub groups: Vec<ProjectedGroup>,
+}
+
+/// Read the worker sidecar that atomically pairs skinny interfaces with
+/// neutral definitions. Every group crosses the normal bounded semantic
+/// validator before the bundle is returned.
+pub fn parse_module_products(
+    bytes: &[u8],
+    requirements: &ProgramRequirements,
+    limits: DecodeLimits,
+) -> Result<Vec<RawModuleProduct>, ParseError> {
+    use ciborium::value::Value;
+
+    let Value::Array(header) = codec::decode_value(bytes, limits)? else {
+        return Err(ParseError::Malformed(
+            "module products require an array".into(),
+        ));
+    };
+    if header.len() != 3
+        || header[0] != Value::Text("TPMOD".into())
+        || header[1] != Value::Integer(1.into())
+    {
+        return Err(ParseError::Malformed(
+            "unsupported module products header".into(),
+        ));
+    }
+    let Value::Array(modules) = &header[2] else {
+        return Err(ParseError::Malformed(
+            "module products require modules".into(),
+        ));
+    };
+    if modules.len() > limits.max_table_entries {
+        return Err(ParseError::LimitExceeded("module products"));
+    }
+    let mut seen_modules = std::collections::BTreeSet::new();
+    let mut output = Vec::with_capacity(modules.len());
+    for module in modules {
+        let Value::Array(fields) = module else {
+            return Err(ParseError::Malformed(
+                "module product requires an array".into(),
+            ));
+        };
+        let [Value::Text(unit), Value::Text(name), Value::Bytes(interface), Value::Array(groups)] =
+            fields.as_slice()
+        else {
+            return Err(ParseError::Malformed(
+                "invalid module product fields".into(),
+            ));
+        };
+        if unit.is_empty()
+            || name.is_empty()
+            || interface.is_empty()
+            || unit.len() > limits.max_string_bytes
+            || name.len() > limits.max_string_bytes
+        {
+            return Err(ParseError::Malformed(
+                "invalid module product identity or interface".into(),
+            ));
+        }
+        if !seen_modules.insert((unit.clone(), name.clone())) {
+            return Err(ParseError::DuplicateDefinition(format!(
+                "module {unit}:{name}"
+            )));
+        }
+        if groups.len() > limits.max_table_entries {
+            return Err(ParseError::LimitExceeded("projected groups"));
+        }
+        let mut seen_ordinals = std::collections::BTreeSet::new();
+        let mut seen_binders = std::collections::BTreeSet::new();
+        let mut projected = Vec::with_capacity(groups.len());
+        for group in groups {
+            let Value::Bytes(group_bytes) = group else {
+                return Err(ParseError::Malformed(
+                    "projected group requires bytes".into(),
+                ));
+            };
+            let parsed = parse_projected_group(group_bytes, requirements, limits)?;
+            if !seen_ordinals.insert(parsed.original_ordinal()) {
+                return Err(ParseError::DuplicateDefinition(
+                    "original group ordinal".into(),
+                ));
+            }
+            for binder in parsed.binders() {
+                if binder.unit != *unit
+                    || binder.module != *name
+                    || !seen_binders.insert(binder.clone())
+                {
+                    return Err(ParseError::InvalidReference(format!(
+                        "invalid product binder {binder:?}"
+                    )));
+                }
+            }
+            projected.push(parsed);
+        }
+        output.push(RawModuleProduct {
+            unit: unit.clone(),
+            module: name.clone(),
+            interface: interface.clone(),
+            groups: projected,
+        });
+    }
+    Ok(output)
 }
 
 /// Producer and target facts accepted by this execution consumer.
@@ -1051,4 +1326,94 @@ pub(super) fn linked_from_validated(
     imports: Vec<ImportedValue>,
 ) -> LinkedProgram {
     LinkedProgram { prepared, imports }
+}
+
+#[cfg(test)]
+mod projected_group_tests {
+    use super::*;
+    use ciborium::value::Value;
+
+    fn fixture() -> (Vec<u8>, ProgramRequirements, SymbolIdentity) {
+        let bytes =
+            include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor");
+        let prepared = parse_program(bytes, &requirements(), DecodeLimits::default()).unwrap();
+        let entry = prepared
+            .bindings()
+            .iter()
+            .flat_map(|group| match group {
+                Group::NonRecursive(top) => vec![top],
+                Group::Recursive(tops) => tops.iter().collect(),
+            })
+            .find(|top| top.binding.id == prepared.entry())
+            .unwrap()
+            .identity
+            .clone();
+        let Value::Array(mut fields) = ciborium::de::from_reader(bytes.as_slice()).unwrap() else {
+            panic!("fixture is not a program array")
+        };
+        fields.remove(12);
+        let mut group = vec![
+            Value::Text("TPGRP".into()),
+            Value::Integer(1.into()),
+            Value::Integer(7.into()),
+            symbol_value(&entry),
+        ];
+        group[3] = Value::Array(vec![group[3].clone()]);
+        group.extend(fields.into_iter().skip(1));
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&Value::Array(group), &mut encoded).unwrap();
+        (encoded, requirements(), entry)
+    }
+
+    fn requirements() -> ProgramRequirements {
+        let envelope = testing::envelope();
+        ProgramRequirements {
+            schema_version: envelope.schema_version,
+            projection_profile: envelope.projection_profile,
+            toolchain: envelope.toolchain,
+            execution_abi_version: envelope.execution_abi_version,
+            target: envelope.target,
+        }
+    }
+
+    fn symbol_value(symbol: &SymbolIdentity) -> Value {
+        Value::Array(vec![
+            Value::Text(symbol.unit.clone()),
+            Value::Text(symbol.module.clone()),
+            Value::Text(symbol.namespace.clone()),
+            Value::Text(symbol.occurrence.clone()),
+            match &symbol.record_parent {
+                None => Value::Array(vec![Value::Integer(0.into())]),
+                Some(parent) => {
+                    Value::Array(vec![Value::Integer(1.into()), Value::Text(parent.clone())])
+                }
+            },
+        ])
+    }
+
+    #[test]
+    fn entry_free_group_preserves_ordinal_without_executable_admission() {
+        let (bytes, requirements, entry) = fixture();
+        let group = parse_projected_group(&bytes, &requirements, DecodeLimits::default()).unwrap();
+        assert_eq!(group.original_ordinal(), 7);
+        assert_eq!(group.binders(), &[entry.clone()]);
+        assert!(!group.definitions.bindings.is_empty());
+    }
+
+    #[test]
+    fn group_header_and_binder_tampering_fail_before_publication() {
+        let (bytes, requirements, _) = fixture();
+        let Value::Array(mut fields) = ciborium::de::from_reader(bytes.as_slice()).unwrap() else {
+            unreachable!()
+        };
+        fields[0] = Value::Text("TPSTG".into());
+        let mut changed = Vec::new();
+        ciborium::ser::into_writer(&Value::Array(fields.clone()), &mut changed).unwrap();
+        assert!(parse_projected_group(&changed, &requirements, DecodeLimits::default()).is_err());
+        fields[0] = Value::Text("TPGRP".into());
+        fields[3] = Value::Array(vec![symbol_value(&testing::identity("Other", "missing"))]);
+        changed.clear();
+        ciborium::ser::into_writer(&Value::Array(fields), &mut changed).unwrap();
+        assert!(parse_projected_group(&changed, &requirements, DecodeLimits::default()).is_err());
+    }
 }

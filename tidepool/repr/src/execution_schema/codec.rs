@@ -6,9 +6,9 @@ use super::{
     Alternative, AlternativePattern, Architecture, Atom, CaseKind, CheckedLayout, ConstructorDecl,
     ConstructorId, CtorRow, DecodeLimits, Endianness, Expr, ExprFrame, FieldLayout, GlobalDecl,
     GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationDecl, OperationId,
-    ParseError, ProgramEnvelope, RuntimeRep, ScalarLiteral, Signature, SignatureId, SiteDelivery,
-    SiteRow, SymbolIdentity, TargetDescriptor, TopBinding, TypeNode, TypeNodeId, UpdatePolicy,
-    ValueId, ValueRef, WireProgram,
+    ParseError, ProgramDefinitions, ProgramEnvelope, RuntimeRep, ScalarLiteral, Signature,
+    SignatureId, SiteDelivery, SiteRow, SymbolIdentity, TargetDescriptor, TopBinding, TypeNode,
+    TypeNodeId, UpdatePolicy, ValueId, ValueRef, WireProgram,
 };
 
 // Flat schema records have bounded container nesting regardless of program
@@ -18,6 +18,60 @@ const MAX_CONTAINER_NESTING: usize = 32;
 /// Decode only the closed flat CBOR grammar into an unpublished wire value.
 /// Semantic validation and construction publication remain in `decode`.
 pub(super) fn decode_wire(bytes: &[u8], limits: DecodeLimits) -> Result<WireProgram, ParseError> {
+    let value = decode_value(bytes, limits)?;
+    Decoder::new(limits).program(&value)
+}
+
+/// Decode an entry-free original STG group using the same bounded table and
+/// expression grammar as a complete program.
+pub(super) fn decode_group_wire(
+    bytes: &[u8],
+    limits: DecodeLimits,
+) -> Result<(u32, Vec<SymbolIdentity>, ProgramDefinitions), ParseError> {
+    let Value::Array(fields) = decode_value(bytes, limits)? else {
+        return Err(malformed("projected group", "array"));
+    };
+    if fields.len() != 19 || text_raw(&fields[0], "group magic")? != "TPGRP" {
+        return Err(ParseError::Malformed(
+            "invalid projected group header".into(),
+        ));
+    }
+    if unsigned(&fields[1], "group schema version")? != 1 {
+        return Err(ParseError::Malformed(
+            "unsupported projected group version".into(),
+        ));
+    }
+    let ordinal = u32_value(&fields[2], "original group ordinal")?;
+    let mut decoder = Decoder::new(limits);
+    let binders = decoder.list(&fields[3], true, |this, value| this.symbol(value))?;
+    if binders.is_empty() {
+        return Err(ParseError::Malformed(
+            "projected group has no binders".into(),
+        ));
+    }
+    let definitions = decoder.definitions(&fields[4..].iter().collect::<Vec<_>>())?;
+    let top_symbols: std::collections::BTreeSet<_> = definitions
+        .bindings
+        .iter()
+        .flat_map(|group| match group {
+            Group::NonRecursive(top) => vec![(top.identity.clone(), top.binding.id)],
+            Group::Recursive(tops) => tops
+                .iter()
+                .map(|top| (top.identity.clone(), top.binding.id))
+                .collect(),
+        })
+        .collect();
+    for binder in &binders {
+        if !top_symbols.iter().any(|(symbol, _)| symbol == binder) {
+            return Err(ParseError::InvalidReference(format!(
+                "group binder {binder:?} is absent"
+            )));
+        }
+    }
+    Ok((ordinal, binders, definitions))
+}
+
+pub(super) fn decode_value(bytes: &[u8], limits: DecodeLimits) -> Result<Value, ParseError> {
     if bytes.len() > limits.max_bytes {
         return Err(ParseError::ByteLimit {
             limit: limits.max_bytes,
@@ -42,7 +96,7 @@ pub(super) fn decode_wire(bytes: &[u8], limits: DecodeLimits) -> Result<WireProg
     if cursor.position() as usize != bytes.len() {
         return Err(ParseError::TrailingBytes);
     }
-    Decoder::new(limits).program(&value)
+    Ok(value)
 }
 
 /// Walk one complete CBOR item, rejecting indefinite containers before
@@ -200,28 +254,42 @@ impl Decoder {
                 "invalid prepared program magic".into(),
             ));
         }
-        let schema_version = unsigned(&header[1], "schema version")?;
+        let fields = array(value, 17, "program")?;
+        let definition_fields = fields[1..12]
+            .iter()
+            .chain(fields[13..].iter())
+            .collect::<Vec<_>>();
+        let definitions = self.definitions(&definition_fields)?;
+        Ok(definitions.into_wire(ValueId(u32_value(&fields[12], "entry value ID")?)))
+    }
+
+    fn definitions(&mut self, fields: &[&Value]) -> Result<ProgramDefinitions, ParseError> {
+        if fields.len() != 15 {
+            return Err(ParseError::Malformed(
+                "wrong definitions field count".into(),
+            ));
+        }
+        let schema_version = unsigned(fields[0], "schema version")?;
         if schema_version != super::SCHEMA_VERSION {
             return Err(ParseError::UnsupportedVersion(schema_version));
         }
-        let fields = array(value, 17, "program")?;
-        let target = self.target(&fields[5])?;
-        let signatures = self.list(&fields[6], true, |this, value| this.signature(value))?;
-        let globals = self.list(&fields[7], true, |this, value| this.global(value))?;
-        let constructors = self.list(&fields[8], true, |this, value| this.constructor(value))?;
-        let operations = self.list(&fields[9], true, |this, value| this.operation(value))?;
-        let expressions = self.expr(&fields[10])?;
-        let bindings = self.list(&fields[11], true, |this, value| this.top_group(value))?;
-        let types = self.type_nodes(&fields[13])?;
-        let sites = self.sites(&fields[14])?;
-        let verb_sites = self.verb_sites(&fields[15])?;
-        let json_layout = self.optional_json_layout(&fields[16])?;
-        Ok(WireProgram {
+        let target = self.target(fields[4])?;
+        let signatures = self.list(fields[5], true, |this, value| this.signature(value))?;
+        let globals = self.list(fields[6], true, |this, value| this.global(value))?;
+        let constructors = self.list(fields[7], true, |this, value| this.constructor(value))?;
+        let operations = self.list(fields[8], true, |this, value| this.operation(value))?;
+        let expressions = self.expr(fields[9])?;
+        let bindings = self.list(fields[10], true, |this, value| this.top_group(value))?;
+        let types = self.type_nodes(fields[11])?;
+        let sites = self.sites(fields[12])?;
+        let verb_sites = self.verb_sites(fields[13])?;
+        let json_layout = self.optional_json_layout(fields[14])?;
+        Ok(ProgramDefinitions {
             envelope: ProgramEnvelope {
                 schema_version,
-                projection_profile: self.text(&fields[2], "projection profile")?,
-                toolchain: self.text(&fields[3], "toolchain")?,
-                execution_abi_version: unsigned(&fields[4], "execution ABI version")?,
+                projection_profile: self.text(fields[1], "projection profile")?,
+                toolchain: self.text(fields[2], "toolchain")?,
+                execution_abi_version: unsigned(fields[3], "execution ABI version")?,
                 target,
             },
             signatures,
@@ -230,7 +298,6 @@ impl Decoder {
             operations,
             expressions,
             bindings,
-            entry: ValueId(u32_value(&fields[12], "entry value ID")?),
             types,
             sites,
             verb_sites,

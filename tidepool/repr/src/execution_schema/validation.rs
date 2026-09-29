@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     Alternative, AlternativePattern, Atom, CaseKind, CheckedLayout, ConstructorDecl, ConstructorId,
-    DecodeLimits, Expr, ExprFrame, GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId,
-    OperationId, ParseError, ProgramRequirements, ResultContract, RuntimeRep, ScalarLiteral,
-    SignatureId, SymbolIdentity, TypeNode, TypeNodeId, ValueId, ValueRef, WireProgram,
-    EXECUTION_ABI_VERSION, SCHEMA_VERSION, SYNTHETIC_SITE_BIT,
+    DecodeLimits, DefinitionsView, Expr, ExprFrame, GlobalId, Group, HeapBinding, HeapRhs,
+    JoinBinding, JoinId, OperationId, ParseError, ProgramDefinitions, ProgramRequirements,
+    ResultContract, RuntimeRep, ScalarLiteral, SignatureId, SymbolIdentity, TypeNode, TypeNodeId,
+    ValueId, ValueRef, WireProgram, EXECUTION_ABI_VERSION, SCHEMA_VERSION, SYNTHETIC_SITE_BIT,
 };
 use recursion::{try_expand_and_collapse, MappableFrame, PartiallyApplied};
 use std::{cell::RefCell, rc::Rc};
@@ -1270,8 +1270,17 @@ pub(super) fn validate_program(
     Validator::new(wire, limits).validate(requirements)
 }
 
+pub(super) fn validate_group(
+    definitions: &ProgramDefinitions,
+    requirements: &ProgramRequirements,
+    limits: DecodeLimits,
+) -> Result<(), ParseError> {
+    Validator::new_group(definitions, limits).validate(requirements)
+}
+
 struct Validator<'a> {
-    wire: &'a WireProgram,
+    wire: DefinitionsView<'a>,
+    entry: Option<ValueId>,
     limits: DecodeLimits,
     work: usize,
     top_values: BTreeSet<ValueId>,
@@ -1281,7 +1290,19 @@ struct Validator<'a> {
 impl<'a> Validator<'a> {
     fn new(wire: &'a WireProgram, limits: DecodeLimits) -> Self {
         Self {
-            wire,
+            wire: wire.into(),
+            entry: Some(wire.entry),
+            limits,
+            work: 0,
+            top_values: BTreeSet::new(),
+            defined_values: BTreeSet::new(),
+        }
+    }
+
+    fn new_group(definitions: &'a ProgramDefinitions, limits: DecodeLimits) -> Self {
+        Self {
+            wire: definitions.into(),
+            entry: None,
             limits,
             work: 0,
             top_values: BTreeSet::new(),
@@ -1306,7 +1327,7 @@ impl<'a> Validator<'a> {
             return Err(ParseError::LimitExceeded("verb sites"));
         }
 
-        for signature in &self.wire.signatures {
+        for signature in self.wire.signatures {
             self.bump_work(
                 signature.arguments.len()
                     + signature
@@ -1325,7 +1346,7 @@ impl<'a> Validator<'a> {
         }
 
         let mut global_symbols = BTreeSet::new();
-        for global in &self.wire.globals {
+        for global in self.wire.globals {
             self.bump_work(1)?;
             self.check_symbol(&global.identity)?;
             if !global_symbols.insert(global.identity.clone()) {
@@ -1349,7 +1370,7 @@ impl<'a> Validator<'a> {
         let mut constructor_host_ids = BTreeSet::new();
         let mut family_sizes = BTreeMap::new();
         let mut family_tags = BTreeSet::new();
-        for constructor in &self.wire.constructors {
+        for constructor in self.wire.constructors {
             self.bump_work(constructor.field_reps.len() + 1)?;
             self.check_symbol(&constructor.identity)?;
             self.check_symbol(&constructor.family)?;
@@ -1401,7 +1422,7 @@ impl<'a> Validator<'a> {
             self.check_layout(&constructor.field_reps, &constructor.layout)?;
         }
 
-        if let Some(layout) = &self.wire.json_layout {
+        if let Some(layout) = self.wire.json_layout {
             self.check_json_layout(layout)?;
         }
 
@@ -1410,7 +1431,7 @@ impl<'a> Validator<'a> {
         self.check_verb_sites()?;
 
         let mut operation_contracts = BTreeSet::new();
-        for operation in &self.wire.operations {
+        for operation in self.wire.operations {
             if self
                 .signature(operation.signature)?
                 .results
@@ -1461,7 +1482,7 @@ impl<'a> Validator<'a> {
         }
 
         let mut top_symbols = BTreeSet::new();
-        for group in &self.wire.bindings {
+        for group in self.wire.bindings {
             match group {
                 Group::NonRecursive(binding) => {
                     self.register_top(binding, &mut top_symbols)?;
@@ -1479,20 +1500,21 @@ impl<'a> Validator<'a> {
                 }
             }
         }
-        if !self.top_values.contains(&self.wire.entry) {
-            return Err(ParseError::InvalidReference(format!(
-                "entry value {:?} is not a top-level binding",
-                self.wire.entry
-            )));
+        if let Some(entry) = self.entry {
+            if !self.top_values.contains(&entry) {
+                return Err(ParseError::InvalidReference(format!(
+                    "entry value {entry:?} is not a top-level binding"
+                )));
+            }
         }
 
-        for group in &self.wire.bindings {
+        for group in self.wire.bindings {
             let tops = match group {
                 Group::NonRecursive(top) => std::slice::from_ref(top),
                 Group::Recursive(tops) => tops,
             };
             for top in tops {
-                if top.binding.id == self.wire.entry {
+                if self.entry == Some(top.binding.id) {
                     if let HeapRhs::Function { signature, .. } = &top.binding.rhs {
                         if self.signature(*signature)?.results.is_caller_result() {
                             return Err(ParseError::InvalidSignature(
@@ -1507,7 +1529,7 @@ impl<'a> Validator<'a> {
         if self.wire.expressions.nodes.len() > self.limits.max_nodes {
             return Err(ParseError::LimitExceeded("nodes"));
         }
-        check_flat_tree(&self.wire.expressions, &self.wire.bindings)?;
+        check_flat_tree(self.wire.expressions, self.wire.bindings)?;
 
         self.walk_bindings(false)?;
         self.walk_bindings(true)?;
@@ -1537,7 +1559,7 @@ impl<'a> Validator<'a> {
         // Top declaration metadata is published before any RHS walks. Errors
         // in this phase intentionally precede RHS errors; source order applies
         // to the subsequent walks.
-        for group in &wire.bindings {
+        for group in wire.bindings {
             match group {
                 Group::NonRecursive(binding) => walker.publish_top(&binding.binding)?,
                 Group::Recursive(bindings) => {
@@ -1547,7 +1569,7 @@ impl<'a> Validator<'a> {
                 }
             }
         }
-        for group in &wire.bindings {
+        for group in wire.bindings {
             match group {
                 Group::NonRecursive(binding) => {
                     let mark = walker.undo.len();
@@ -1920,7 +1942,7 @@ impl<'a> Validator<'a> {
     }
 
     fn check_envelope(&mut self, requirements: &ProgramRequirements) -> Result<(), ParseError> {
-        let envelope = &self.wire.envelope;
+        let envelope = self.wire.envelope;
         if envelope.schema_version != SCHEMA_VERSION
             || requirements.schema_version != SCHEMA_VERSION
             || envelope.schema_version != requirements.schema_version

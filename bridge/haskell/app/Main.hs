@@ -4,12 +4,12 @@ module Main where
 
 import System.Environment (getArgs)
 import System.FilePath (takeBaseName, takeDirectory, takeFileName, (</>))
-import System.Directory (createDirectoryIfMissing, setCurrentDirectory)
+import System.Directory (createDirectoryIfMissing, removeFile, setCurrentDirectory)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Control.Exception
-  ( evaluate, try, catch, throwIO, SomeAsyncException, SomeException, Exception
+  ( evaluate, try, catch, finally, throwIO, SomeAsyncException, SomeException, Exception
   , fromException, toException, IOException )
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (intercalate, nub)
@@ -17,12 +17,15 @@ import Data.Maybe (fromMaybe, mapMaybe, isJust)
 import Data.Word (Word64)
 import Control.Monad (foldM, forM, forM_, when)
 import System.Exit (ExitCode(..), exitWith)
-import System.IO (hPutStrLn, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8)
+import System.IO (hClose, hPutStrLn, openBinaryTempFile, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8)
 import qualified System.Info as SystemInfo
 
 import GHC.Types.SourceError (SourceError)
 import GHC (Module, ModuleName, moduleName, moduleNameString, moduleUnit)
-import GHC.Driver.Env (HscEnv)
+import GHC.Driver.Env (HscEnv, hsc_dflags)
+import GHC.Driver.Session (targetProfile)
+import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
+import GHC.Unit.Module.ModIface (ModIface)
 import GHC.Unit.Types (unitString)
 import GHC.Core (Bind(..), CoreBind)
 import GHC.Core.DataCon (DataCon)
@@ -48,8 +51,8 @@ import Tidepool.GhcPipeline
   , withResidentPipelineSelectedRequests, CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances
   , cellExpressionPlans
   , satisfiesCapturedConstraint, stripMonadHead )
-import Tidepool.ExecutionEncode (encodeWireProgram)
-import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelected, resolveTextPackageUnit)
+import Tidepool.ExecutionEncode (encodeWireProgram, encodeModuleProducts)
+import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelected, projectPreparedModuleGroups, resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedJson (resolveJsonAuthority)
@@ -401,7 +404,7 @@ processFile compiler caches timing args path = do
     -- Multi-target extraction can inject stable session values without
     -- becoming a session bind/reference operation.
     let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
-    prepared <- compiler PreparedStg (Map.keysSet (requestRetainedGenerations args)) GeneralCompile scope path (requestIncludes args) (requestBuildProductsDir args)
+    prepared <- compiler PreparedProducts (Map.keysSet (requestRetainedGenerations args)) GeneralCompile scope path (requestIncludes args) (requestBuildProductsDir args)
     let result = pprPipelineResult prepared
     let binds = prBinds result
         tycons = prTyCons result
@@ -423,13 +426,15 @@ processFile compiler caches timing args path = do
     let preparedTargets = case requestTargets args of
           targets@(_ : _) -> targets
           [] -> maybe [] pure mTarget
-    preparedArtifacts <- prepareArtifacts caches path hscEnv (pprModules prepared) preparedTargets
+    (preparedArtifacts, productContext) <- prepareArtifacts caches path hscEnv (pprModules prepared) preparedTargets
       (standardAuxiliaryRoots binds) (requestRetainedGenerations args)
     if null preparedArtifacts
       then ioError (userError "prepared extraction requires --target or --targets")
       else timePhase timing "prepared_sidecars" $ writePreparedSidecars SeparateYieldSites outDir binds tycons mCapturedTy warnTexts preparedArtifacts
 
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
+    timePhase timing "module_products" $ writeModuleProducts outDir hscEnv
+      productContext (pprModules prepared) (pprProductInterfaces prepared)
     writeDependencyEvidence outDir (pprDependencies prepared)
 
   reportDiags res
@@ -453,8 +458,8 @@ data PreparedArtifact = PreparedArtifact
 -- Project before writing artifacts so the shared constructor
 -- table includes exactly the GHC constructors admitted by prepared execution.
 prepareArtifacts :: RecoveryCaches -> FilePath -> HscEnv -> [PreparedModule] -> [String] -> [String]
-  -> Map.Map SymbolIdentity Word64 -> IO [PreparedArtifact]
-prepareArtifacts _ _ _ _ [] _ _ = pure []
+  -> Map.Map SymbolIdentity Word64 -> IO ([PreparedArtifact], Maybe ProjectionContext)
+prepareArtifacts _ _ _ _ [] _ _ = pure ([], Nothing)
 prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliaryRoots retainedGenerations = do
   timing <- readTimingEnabled
   formattingAuthority <- timePhase timing "formatting_authority" $ resolveFormattingAuthority hscEnv
@@ -493,7 +498,7 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
           }
   recover <- newPreparedRecovery hscEnv (rcFatIface caches) (rcOwnerIface caches)
     (rcPreparedBodies caches) (contextFor firstTarget) modules
-  forM targets $ \target -> do
+  artifacts <- forM targets $ \target -> do
     let context = contextFor target
     -- Three flat phases, one row each per target (see Tidepool.Timing).
     -- Selection forces its complete identity/binding inventory. Lowering is
@@ -516,6 +521,38 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
           , Tidepool.EffectSchema.ysSite site `Set.member` admitted
           ]
     pure (PreparedArtifact target bytes constructors yieldSites)
+  pure (artifacts, Just (contextFor firstTarget))
+
+-- A failed unrelated group is an explicit product miss, never a newly fatal
+-- target compile. A complete product pairs every admitted group with the
+-- skinny interface emitted by the same GHC transaction.
+writeModuleProducts :: FilePath -> HscEnv -> Maybe ProjectionContext
+  -> [PreparedModule] -> Map.Map ModuleName ModIface -> IO ()
+writeModuleProducts _ _ Nothing _ _ = pure ()
+writeModuleProducts outDir hscEnv (Just context) modules interfaces = do
+  products <- fmap mapMaybeProduct $ forM modules $ \prepared -> do
+    let name = moduleName (pmModule prepared)
+    case Map.lookup name interfaces of
+      Nothing -> do
+        hPutStrLn stderr ("module product unavailable: no interface for " ++ moduleNameString name)
+        pure Nothing
+      Just interface -> case projectPreparedModuleGroups context prepared of
+        Left reason -> do
+          hPutStrLn stderr ("module product unavailable: " ++ moduleNameString name
+            ++ ": " ++ show reason)
+          pure Nothing
+        Right groups -> do
+          (path, handle) <- openBinaryTempFile outDir "module-product.hi"
+          hClose handle
+          bytes <- (do
+            writeBinIface (targetProfile (hsc_dflags hscEnv)) QuietBinIFace
+              NormalCompression path interface
+            BS.readFile path) `finally` removeFile path
+          pure (Just (T.pack (unitString (moduleUnit (pmModule prepared))),
+            T.pack (moduleNameString name), bytes, groups))
+  BS.writeFile (outDir </> "module-products.cbor") (encodeModuleProducts products)
+ where
+  mapMaybeProduct = mapMaybe id
 
 requireProjection :: Either ProjectionError a -> IO a
 requireProjection = \case
@@ -764,7 +801,7 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
         warnTexts   = map T.pack (prWarnings result)
     -- Projection remains outside compileVariants. Its entry is the settled
     -- scaffold, and its constructors join the shared metadata before write.
-    preparedArtifacts <- prepareArtifacts caches compiledPath hscEnv preparedModules
+    (preparedArtifacts, _) <- prepareArtifacts caches compiledPath hscEnv preparedModules
       [preparedScaffoldTargetName] (standardAuxiliaryRoots binds) (requestRetainedGenerations args)
     let asksSites = concatMap paYieldSites preparedArtifacts
     timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
