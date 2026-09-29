@@ -4882,7 +4882,9 @@ mod tests {
 
     #[test]
     fn later_sibling_binder_reuses_exact_scoped_group_instance() {
-        use tidepool_codegen::prepared_program::GroupInventory;
+        use tidepool_codegen::prepared_program::{
+            GroupInventory, PendingGroupInventory, SourceGroupOutline,
+        };
         use tidepool_repr::execution_schema::{
             CachedHomeOwner, CertifiedGroup, ImportOwner, ModuleVersion,
         };
@@ -4918,6 +4920,8 @@ mod tests {
             vec![],
         )
         .unwrap();
+        let pending_outline =
+            SourceGroupOutline::from_projected(group.owner().clone(), &projected, vec![]).unwrap();
         let groups = [group];
         let source_evidence = certified_source_evidence(&groups);
         let inventory = GroupInventory::new(&groups).unwrap();
@@ -4989,6 +4993,12 @@ mod tests {
         let group_misses = registry.misses();
         assert!(sibling_demand.compile(&registry).unwrap().is_empty());
         assert_eq!(registry.misses(), group_misses);
+        let pending_sibling = PendingGroupInventory::new(vec![pending_outline])
+            .unwrap()
+            .seal_with_inherited([binder("b")], &existing, &anchors)
+            .unwrap();
+        assert!(pending_sibling.new_group_indices().is_empty());
+        assert_eq!(pending_sibling.inherited_demands().len(), 1);
         let mut bad_wire = testing::wire_program();
         bad_wire.signatures.push(Signature {
             arguments: vec![],
@@ -5010,7 +5020,7 @@ mod tests {
             }],
             &source_evidence,
             vec![],
-            sibling_demand.inherited_demands(),
+            pending_sibling.inherited_demands(),
             &existing,
             &HashMap::new(),
             &BindingTable::new(),
@@ -5035,7 +5045,7 @@ mod tests {
                 }],
                 &source_evidence,
                 vec![],
-                sibling_demand.inherited_demands(),
+                pending_sibling.inherited_demands(),
                 &existing,
                 &HashMap::new(),
                 &BindingTable::new(),
