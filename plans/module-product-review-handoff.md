@@ -38,21 +38,31 @@ consumer across this boundary.
   `ModuleProductA` and leaf `ModuleProductB`. The exact `--retained-scope`
   command above passed one suite/one case, and the exact worker build command
   above succeeded. These runs cover the import cleanup made after the commit.
+- A paired follow-up read the serialized fat and skinny interfaces into
+  separate fresh GHC sessions after hiding `ModuleProductA.hs`; both sessions
+  reconstructed the interface and typechecked `ModuleProductB` (one suite/one
+  case passed). Home products therefore no longer request
+  `Opt_WriteIfSimplifiedCore`. The final gate uses only the home product's
+  skinny interface and passed one suite/one case; the retained-scope case
+  passed one suite/one case, and the worker built. The final serialized home
+  interface was 2,336 bytes for this fixture. This is not a general size or
+  speed measurement. The test checks that changing bytes changes their SHA-256
+  digest; no cache owner yet checks or refuses a mismatched bundle.
 
 ## Producer contract now present
 
 `bridge/haskell/src/Tidepool/GhcPipeline.hs` now has explicit
 `PreparedProducts` selection. Only that mode puts each executable module's
-exact fat `ModIface` in `PreparedPipelineResult.pprProductInterfaces`, keyed by
+skinny `ModIface` in `PreparedPipelineResult.pprProductInterfaces`, keyed by
 its home `ModuleName`. The interface and `PreparedModule` come from one tidy
 result. Ordinary `PreparedStg` preserves the baseline early exit for a leaf
 with no later home importer and builds a skinny interface only for a needed
 importer. Product mode captures even leaf interfaces, while HPT installation
 always strips `mi_extra_decls` and occurs only for a later importer. Memo
-reuse in product mode requires a retained fat interface; an ordinary memo
-entry that is skinny or elided is rebuilt. Ordinary reuse of a previous fat
-memo entry still installs a skinny HPT interface and returns an empty product
-map. The request-local result owns references to fat interfaces; there is no
+reuse in product mode requires a retained interface; an ordinary memo entry
+with an interface can be reused, while an elided leaf entry is rebuilt.
+Ordinary compilation returns an empty product map. The request-local result
+owns references to the skinny interfaces; there is no
 durable writer or reader of them yet. The private `ProductInterface` sum type
 still admits `InterfaceElided`, so a future writer must refuse an absent pair
 rather than assume every path was covered.
@@ -76,9 +86,9 @@ remap/deduplicate them by checked identity and content.
 The compiler fingerprint fix is present unchanged in this branch:
 `RetainedUnfoldings.hs` has the same Git blob as current integration
 (`b409df6bfcacac4d1d8090f42578d2a38f8e734c`). `compileFront` scopes
-`mfHscEnv` with `scopeRetainedHscEnv (ms_mod modSum)` before optimization;
-the fat-interface option is added to that saved environment and does not
-replace its module-scoped plugin option. The retained-scope test passed, but
+`mfHscEnv` with `scopeRetainedHscEnv (ms_mod modSum)` before optimization.
+Home products no longer set the fat-interface option. The retained-scope
+test passed, but
 the 0/1,000/10,000-symbol cost gate remains to run on the target host.
 
 ## Consumer boundaries and decisions

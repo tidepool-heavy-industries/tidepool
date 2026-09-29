@@ -47,14 +47,13 @@ import Tidepool.GhcPipeline
 import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.PreparedStg (PreparedModule(..))
 
--- Exercise the exact fat interface retained for a prepared defining module,
+-- Exercise the skinny interface retained for a prepared defining module,
 -- then import it from a new GHC session with its source absent.
 verifyModuleProductInterfaceRoundtrip :: FilePath -> IO ()
 verifyModuleProductInterfaceRoundtrip work = do
   let a = work </> "ModuleProductA.hs"
       b = work </> "ModuleProductB.hs"
       hi = work </> "ModuleProductA.hi"
-      skinnyHi = work </> "ModuleProductA.skinny.hi"
       tamperedHi = work </> "ModuleProductA.tampered.hi"
       name = mkModuleName "ModuleProductA"
   copyFile "test-prepared-stg/ModuleProductA.hs" a
@@ -131,24 +130,20 @@ verifyModuleProductInterfaceRoundtrip work = do
   skinny <- case lookupHpt (hsc_HPT producer) name of
     Just hmi -> pure (hm_iface hmi)
     Nothing -> ioError (userError "prepared HPT omitted ModuleProductA interface")
-  unless (case mi_extra_decls iface of Just (_ : _) -> True; _ -> False) $
-    ioError (userError "prepared interface lost its defining Core")
+  unless (case mi_extra_decls iface of Nothing -> True; _ -> False) $
+    ioError (userError "home product interface retained defining Core")
   unless (case mi_extra_decls skinny of Nothing -> True; _ -> False) $
     ioError (userError "prepared HPT retained defining Core")
   writeBinIface (targetProfile (hsc_dflags producer)) QuietBinIFace
     NormalCompression hi iface
-  writeBinIface (targetProfile (hsc_dflags producer)) QuietBinIFace
-    NormalCompression skinnyHi skinny
-  fatSize <- getFileSize hi
-  skinnySize <- getFileSize skinnyHi
-  hPutStrLn stderr ("module-product-interface-bytes fat=" ++ show fatSize
-    ++ " skinny=" ++ show skinnySize)
+  productSize <- getFileSize hi
+  hPutStrLn stderr ("module-product-interface-bytes home=" ++ show productSize)
   digest <- SHA256.hash <$> BS.readFile hi
   copyFile hi tamperedHi
   BS.appendFile tamperedHi (BS.singleton 0)
   tampered <- SHA256.hash <$> BS.readFile tamperedHi
   unless (tampered /= digest) $
-    ioError (userError "paired interface digest accepted changed bytes")
+    ioError (userError "paired interface digest did not change with bytes")
   renameFile a (work </> "ModuleProductA.hidden")
 
   libdir <- getLibdir
@@ -162,8 +157,8 @@ verifyModuleProductInterfaceRoundtrip work = do
     restored <- case readResult of
       MErr.Failed _ -> liftIO $ ioError (userError "serialized product interface did not read")
       MErr.Succeeded value -> pure value
-    unless (case mi_extra_decls restored of Just (_ : _) -> True; _ -> False) $
-      liftIO $ ioError (userError "serialized product interface lost defining Core")
+    unless (case mi_extra_decls restored of Nothing -> True; _ -> False) $
+      liftIO $ ioError (userError "serialized home product retained defining Core")
     details <- liftIO $ initIfaceCheck (text "module product rehydration") fresh
       (typecheckIface restored)
     let hmi = HomeModInfo restored details emptyHomeModInfoLinkable
