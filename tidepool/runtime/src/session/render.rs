@@ -212,6 +212,16 @@ impl DeclLog {
         self.high_water
     }
 
+    /// Carry burned identities into a new incarnation before any declaration
+    /// is admitted. Recovery must not create a different module at an old G<n>.
+    pub(crate) fn restore_high_water(&mut self, high_water: Generation) -> bool {
+        if !self.turns.is_empty() || self.high_water != Generation(0) {
+            return false;
+        }
+        self.high_water = high_water;
+        true
+    }
+
     /// Append a committed turn (its `parent` must already be set by the caller —
     /// `DeclLog` has no notion of scope and cannot infer it), returning the
     /// new (current) generation.
