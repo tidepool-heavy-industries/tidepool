@@ -31,6 +31,8 @@ mod jev_tests;
 #[cfg(test)]
 mod lookup_availability_tests;
 #[cfg(test)]
+mod m1_host_tests;
+#[cfg(test)]
 mod observation_budget_tests;
 mod overlay_resource;
 pub(crate) use overlay_resource::valid_artifact_path;
@@ -1282,10 +1284,17 @@ fn embedded_root_attachment_error(
 
 fn publish_embedded_root_snapshot(
     control: &harness::server::ServerControl,
-    conversation: &harness::embedding::Conversation,
+    identity: &harness::embedding::HostIdentity,
+    lifecycle: harness::server::HostActorLifecycle,
 ) {
-    let identity = conversation.identity();
     let path = identity.actor.0.clone();
+    let conversation_state = match lifecycle {
+        harness::server::HostActorLifecycle::Running => "busy",
+        harness::server::HostActorLifecycle::Waiting => "idle",
+        harness::server::HostActorLifecycle::Retiring => "retiring",
+        harness::server::HostActorLifecycle::Retired => "retired",
+        harness::server::HostActorLifecycle::Lost => "unavailable",
+    };
     control.set_snapshot(harness::server::Snapshot {
         actors: vec![harness::server::HostActorProjection {
             identity: harness::server::HostActorIdentity {
@@ -1295,13 +1304,13 @@ fn publish_embedded_root_snapshot(
             },
             parent: None,
             kind: harness::server::HostActorKind::Model,
-            lifecycle: harness::server::HostActorLifecycle::Waiting,
+            lifecycle,
             model_conversation: Some(path.clone()),
         }],
         conversations: vec![serde_json::json!({
             "id": path.clone(),
             "path": path,
-            "state": "idle",
+            "state": conversation_state,
         })],
         ..harness::server::Snapshot::default()
     });
@@ -3912,6 +3921,9 @@ async fn run_interactive_applications(
     let mut embedded_conversations: HashMap<ActorRef, Arc<harness::embedding::Conversation>> =
         HashMap::new();
     let mut embedded_root: Option<Arc<harness::embedding::Conversation>> = None;
+    let mut embedded_root_identity: Option<harness::embedding::HostIdentity> = None;
+    let (embedded_lifecycle_tx, mut embedded_lifecycle_rx) =
+        watch::channel(harness::server::HostActorLifecycle::Waiting);
     let mut binding_discoveries = JoinSet::new();
     let mut retirements = JoinSet::new();
     // Supervisors waiting for a stopped actor's release receipt. Served from
@@ -3929,6 +3941,19 @@ async fn run_interactive_applications(
             _ = wait_for_shutdown(shutdown.clone()) => break None,
             changed = root_config.changed() => {
                 if changed.is_ok() { launch_context.config = root_config.borrow_and_update().clone(); }
+            }
+            changed = embedded_lifecycle_rx.changed() => {
+                if changed.is_ok() {
+                    if let (Some(identity), Some(service)) =
+                        (embedded_root_identity.as_ref(), embedded_service.as_ref())
+                    {
+                        publish_embedded_root_snapshot(
+                            &service.control,
+                            identity,
+                            *embedded_lifecycle_rx.borrow_and_update(),
+                        );
+                    }
+                }
             }
             _ = health.tick() => {
                 if let Some(service) = embedded_service.as_mut() {
@@ -4059,17 +4084,26 @@ async fn run_interactive_applications(
                 }
             }
             command = async {
-                match (embedded_service.as_mut(), embedded_root.as_ref()) {
-                    (Some(service), Some(_)) => service.commands.recv().await,
-                    _ => std::future::pending().await,
+                match embedded_service.as_mut() {
+                    Some(service) => service.commands.recv().await,
+                    None => std::future::pending().await,
                 }
             } => {
                 let Some(command) = command else {
                     break Some("embedded browser command channel closed".into());
                 };
-                let root = embedded_root.as_ref().expect("branch requires attached root").clone();
                 let control = &embedded_service.as_ref().expect("branch requires service").control;
                 let command_id = command.command_id.clone();
+                let Some(root) = embedded_root.as_ref().cloned() else {
+                    let error = "embedded root is unavailable";
+                    tracing::warn!(%error, command_id = %command_id, "embedded browser input was not admitted");
+                    control.publish("command.rejected", serde_json::json!({
+                        "commandId": command_id,
+                        "error": error,
+                    }));
+                    continue;
+                };
+                embedded_lifecycle_tx.send_replace(harness::server::HostActorLifecycle::Running);
                 if let Err(error) = embedded_service::submit_browser_command(command, &root, control).await {
                     tracing::warn!(%error, command_id = %command_id, "embedded browser input was not admitted");
                     control.publish("command.rejected", serde_json::json!({
@@ -4084,6 +4118,20 @@ async fn run_interactive_applications(
                     Err(error) => break Some(format!("embedded Engine task failed: {error}")),
                 };
                 embedded_live.remove(&actor);
+                let lifecycle = match local_actor.terminal().get().map(|terminal| terminal.kind) {
+                    Some(ActorExitKind::Completed | ActorExitKind::Cancelled) => {
+                        harness::server::HostActorLifecycle::Retired
+                    }
+                    Some(ActorExitKind::Failed) | None => harness::server::HostActorLifecycle::Lost,
+                };
+                if actor == root_identity {
+                    embedded_lifecycle_tx.send_replace(lifecycle);
+                    if let (Some(identity), Some(service)) =
+                        (embedded_root_identity.as_ref(), embedded_service.as_ref())
+                    {
+                        publish_embedded_root_snapshot(&service.control, identity, lifecycle);
+                    }
+                }
                 embedded_cancellations.remove(&actor);
                 embedded_conversations.remove(&actor);
                 if actor == root_identity {
@@ -4200,6 +4248,7 @@ async fn run_interactive_applications(
                             }
                             let path = harness::model::AgentPath("/root".into());
                             let initial_input = installation.initial_user_message.clone();
+                            let has_initial_input = initial_input.is_some();
                             let embedded = match embedded_service::attach_actor(
                                 service,
                                 &launch_context.run_root,
@@ -4219,6 +4268,7 @@ async fn run_interactive_applications(
                             embedded_cancellations.insert(actor, embedded.cancellation.clone());
                             embedded_live.insert(actor);
                             let runtime = Arc::clone(&service.runtime);
+                            let embedded_lifecycle = embedded_lifecycle_tx.clone();
                             embedded_tasks.spawn(async move {
                                 let result = embedded_service::drive_conversation(
                                     embedded.driver,
@@ -4228,6 +4278,7 @@ async fn run_interactive_applications(
                                     effort,
                                     instructions,
                                     embedded.cancellation_rx,
+                                    embedded_lifecycle,
                                 )
                                 .await;
                                 (actor, local_actor, result)
@@ -4238,7 +4289,18 @@ async fn run_interactive_applications(
                             // carries subsequent typed request input only.
                             if is_root {
                                 embedded_root = Some(Arc::clone(&root_conversation));
-                                publish_embedded_root_snapshot(&service.control, &root_conversation);
+                                let lifecycle = if has_initial_input {
+                                    harness::server::HostActorLifecycle::Running
+                                } else {
+                                    harness::server::HostActorLifecycle::Waiting
+                                };
+                                embedded_root_identity = Some(root_conversation.identity().clone());
+                                embedded_lifecycle_tx.send_replace(lifecycle);
+                                publish_embedded_root_snapshot(
+                                    &service.control,
+                                    root_conversation.identity(),
+                                    lifecycle,
+                                );
                                 readiness
                                     .send(ActorHostReadiness::EmbeddedReady {
                                         root: root_identity,
@@ -4410,6 +4472,17 @@ async fn run_interactive_applications(
                         embedded_conversations.remove(&actor);
                         if actor == root_identity {
                             embedded_root = None;
+                            let lifecycle = if terminal.kind == ActorExitKind::Failed {
+                                harness::server::HostActorLifecycle::Lost
+                            } else {
+                                harness::server::HostActorLifecycle::Retired
+                            };
+                            embedded_lifecycle_tx.send_replace(lifecycle);
+                            if let (Some(identity), Some(service)) =
+                                (embedded_root_identity.as_ref(), embedded_service.as_ref())
+                            {
+                                publish_embedded_root_snapshot(&service.control, identity, lifecycle);
+                            }
                         }
                         if let Some(resources) = &launch_context.config.command_resources {
                             let producer = format!("{}-{}", actor.id.0, actor.incarnation.0);

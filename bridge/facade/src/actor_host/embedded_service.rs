@@ -155,6 +155,7 @@ pub(super) async fn drive_conversation(
     effort: Effort,
     instructions: String,
     cancellation: watch::Receiver<bool>,
+    lifecycle: watch::Sender<harness::server::HostActorLifecycle>,
 ) -> Result<(), String> {
     drive_conversation_with_transport::<CodexFileAuth, _>(
         embedded,
@@ -164,6 +165,7 @@ pub(super) async fn drive_conversation(
         effort,
         instructions,
         cancellation,
+        lifecycle,
         ResponsesClient::new(CodexFileAuth::new(settings.codex_auth_file.clone())),
     )
     .await
@@ -177,6 +179,7 @@ pub(super) async fn drive_conversation_with_transport<A, C>(
     effort: Effort,
     instructions: String,
     mut cancellation: watch::Receiver<bool>,
+    lifecycle: watch::Sender<harness::server::HostActorLifecycle>,
     transport: C,
 ) -> Result<(), String>
 where
@@ -244,6 +247,7 @@ where
             .send(first)
             .map_err(|_| "embedded Engine wake receiver closed")?;
         let recovering_this_round = recovering;
+        lifecycle.send_replace(harness::server::HostActorLifecycle::Running);
         let run = async {
             if recovering_this_round {
                 engine
@@ -281,6 +285,7 @@ where
                 actor.0
             ));
         }
+        lifecycle.send_replace(harness::server::HostActorLifecycle::Waiting);
         recovering = false;
     }
 }

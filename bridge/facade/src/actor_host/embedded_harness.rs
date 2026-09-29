@@ -517,6 +517,8 @@ mod tests {
         .unwrap();
         let conversation = Arc::clone(&embedded.conversation);
         let cancellation = embedded.cancellation;
+        let (lifecycle, _lifecycle_rx) =
+            tokio::sync::watch::channel(harness::server::HostActorLifecycle::Waiting);
         let settings_for_engine = settings.clone();
         let runtime = Arc::clone(&service.runtime);
         let transport_for_engine = transport.clone();
@@ -529,6 +531,7 @@ mod tests {
                 Effort::Medium,
                 "resident test".into(),
                 embedded.cancellation_rx,
+                lifecycle,
                 transport_for_engine,
             )
             .await
@@ -619,7 +622,11 @@ mod tests {
             InputObservation::Included(_)
         ));
         drop(requests);
-        publish_embedded_root_snapshot(&service.control, &conversation);
+        publish_embedded_root_snapshot(
+            &service.control,
+            conversation.identity(),
+            harness::server::HostActorLifecycle::Waiting,
+        );
         for _ in 0..2 {
             let mut request = format!("ws://{}/api/ws", service.address)
                 .into_client_request()

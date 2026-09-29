@@ -27,6 +27,7 @@ pub(super) fn commit_workspace(workspace: &std::path::Path) {
 }
 
 pub(super) struct TestCampaign {
+    pub config: ActorHostConfig,
     pub _repository: exomonad_worktree::testing::TestRepo,
     pub _runtime: tempfile::TempDir,
     pub session_root: tempfile::TempDir,
@@ -281,6 +282,7 @@ impl TestCampaign {
         .await
         .unwrap();
         Self {
+            config,
             _repository: repository,
             _runtime: runtime,
             session_root,
