@@ -26,7 +26,7 @@ import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeMod
 import GHC.Types.Avail (availNames)
 import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache)
 import GHC.Iface.Make (mkIfaceTc)
-import GHC.Unit.Module.ModIface (mi_extra_decls, set_mi_extra_decls)
+import GHC.Unit.Module.ModIface (set_mi_extra_decls)
 import GHC.Iface.Tidy (mkBootModDetailsTc)
 import GHC.Types.SourceFile (HscSource(..))
 import GHC.Types.Error (mkUnknownDiagnostic, MessageClass(..), mkLocMessage, getMessages, errMsgDiagnostic)
