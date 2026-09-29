@@ -1771,6 +1771,42 @@ mod tests {
     }
 
     #[test]
+    fn safe_legacy_replay_renumbers_and_rebinds_future_manifest_to_successor() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("recovery.json");
+        recovery::write(
+            &manifest,
+            41,
+            &[recovery::RecoveryTurn::new(
+                41,
+                3,
+                vec!["answer :: Int\nanswer = 42".into()],
+                Vec::new(),
+                true,
+            )],
+        )
+        .unwrap();
+        let mut lib = staged_test_lib(&root);
+        let report = lib.attach_recovery_manifest(&manifest).unwrap();
+        assert_eq!(report.replayed.len(), 1);
+        assert_eq!(report.replayed[0].source_generation, 3);
+        assert_eq!(report.replayed[0].successor_generation, 4);
+        assert_eq!(lib.declaration_value_type(4, "answer"), Some("Int"));
+        assert_eq!(
+            lib.define_batch(&["next :: Int\nnext = answer + 1"])
+                .unwrap(),
+            Generation(5)
+        );
+        let successor = recovery::read(&manifest).unwrap().unwrap();
+        assert_eq!(successor.source_session, lib.id.0);
+        assert_eq!(successor.turns.len(), 2);
+        assert!(successor
+            .turns
+            .iter()
+            .all(|turn| turn.origin_session == lib.id.0));
+    }
+
+    #[test]
     fn adopting_a_validated_candidate_commits_it_once_and_keeps_its_artifact() {
         let root = tempfile::tempdir().unwrap();
         let manifest = root.path().join("recovery.json");
