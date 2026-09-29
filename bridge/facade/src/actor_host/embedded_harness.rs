@@ -517,8 +517,10 @@ mod tests {
         .unwrap();
         let conversation = Arc::clone(&embedded.conversation);
         let cancellation = embedded.cancellation;
-        let (lifecycle, _lifecycle_rx) =
-            tokio::sync::watch::channel(harness::server::HostActorLifecycle::Waiting);
+        let (lifecycle, _lifecycle_rx) = tokio::sync::watch::channel((
+            Some(actor),
+            harness::server::HostActorLifecycle::Waiting,
+        ));
         let settings_for_engine = settings.clone();
         let runtime = Arc::clone(&service.runtime);
         let transport_for_engine = transport.clone();
@@ -532,6 +534,7 @@ mod tests {
                 "resident test".into(),
                 embedded.cancellation_rx,
                 lifecycle,
+                actor,
                 transport_for_engine,
             )
             .await

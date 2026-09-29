@@ -1316,6 +1316,14 @@ fn publish_embedded_root_snapshot(
     });
 }
 
+fn embedded_lifecycle_update_is_current(
+    update_actor: Option<ActorRef>,
+    root_actor: ActorRef,
+    conversation_attached: bool,
+) -> bool {
+    update_actor == Some(root_actor) && conversation_attached
+}
+
 #[derive(Clone)]
 struct PendingUpdateReconciliation {
     inbox: Arc<ActorInbox>,
@@ -3922,8 +3930,10 @@ async fn run_interactive_applications(
         HashMap::new();
     let mut embedded_root: Option<Arc<harness::embedding::Conversation>> = None;
     let mut embedded_root_identity: Option<harness::embedding::HostIdentity> = None;
-    let (embedded_lifecycle_tx, mut embedded_lifecycle_rx) =
-        watch::channel(harness::server::HostActorLifecycle::Waiting);
+    let (embedded_lifecycle_tx, mut embedded_lifecycle_rx) = watch::channel((
+        None::<ActorRef>,
+        harness::server::HostActorLifecycle::Waiting,
+    ));
     let mut binding_discoveries = JoinSet::new();
     let mut retirements = JoinSet::new();
     // Supervisors waiting for a stopped actor's release receipt. Served from
@@ -3944,14 +3954,17 @@ async fn run_interactive_applications(
             }
             changed = embedded_lifecycle_rx.changed() => {
                 if changed.is_ok() {
-                    if let (Some(identity), Some(service)) =
-                        (embedded_root_identity.as_ref(), embedded_service.as_ref())
-                    {
-                        publish_embedded_root_snapshot(
-                            &service.control,
-                            identity,
-                            *embedded_lifecycle_rx.borrow_and_update(),
-                        );
+                    let (actor, lifecycle) = *embedded_lifecycle_rx.borrow_and_update();
+                    if embedded_lifecycle_update_is_current(
+                        actor,
+                        root_identity,
+                        embedded_root.is_some(),
+                    ) {
+                        if let (Some(identity), Some(service)) =
+                            (embedded_root_identity.as_ref(), embedded_service.as_ref())
+                        {
+                            publish_embedded_root_snapshot(&service.control, identity, lifecycle);
+                        }
                     }
                 }
             }
@@ -4103,7 +4116,6 @@ async fn run_interactive_applications(
                     }));
                     continue;
                 };
-                embedded_lifecycle_tx.send_replace(harness::server::HostActorLifecycle::Running);
                 if let Err(error) = embedded_service::submit_browser_command(command, &root, control).await {
                     tracing::warn!(%error, command_id = %command_id, "embedded browser input was not admitted");
                     control.publish("command.rejected", serde_json::json!({
@@ -4125,7 +4137,7 @@ async fn run_interactive_applications(
                     Some(ActorExitKind::Failed) | None => harness::server::HostActorLifecycle::Lost,
                 };
                 if actor == root_identity {
-                    embedded_lifecycle_tx.send_replace(lifecycle);
+                    embedded_lifecycle_tx.send_replace((Some(actor), lifecycle));
                     if let (Some(identity), Some(service)) =
                         (embedded_root_identity.as_ref(), embedded_service.as_ref())
                     {
@@ -4269,6 +4281,7 @@ async fn run_interactive_applications(
                             embedded_live.insert(actor);
                             let runtime = Arc::clone(&service.runtime);
                             let embedded_lifecycle = embedded_lifecycle_tx.clone();
+                            let embedded_actor = actor;
                             embedded_tasks.spawn(async move {
                                 let result = embedded_service::drive_conversation(
                                     embedded.driver,
@@ -4279,6 +4292,7 @@ async fn run_interactive_applications(
                                     instructions,
                                     embedded.cancellation_rx,
                                     embedded_lifecycle,
+                                    embedded_actor,
                                 )
                                 .await;
                                 (actor, local_actor, result)
@@ -4295,7 +4309,7 @@ async fn run_interactive_applications(
                                     harness::server::HostActorLifecycle::Waiting
                                 };
                                 embedded_root_identity = Some(root_conversation.identity().clone());
-                                embedded_lifecycle_tx.send_replace(lifecycle);
+                                embedded_lifecycle_tx.send_replace((Some(actor), lifecycle));
                                 publish_embedded_root_snapshot(
                                     &service.control,
                                     root_conversation.identity(),
@@ -4477,7 +4491,7 @@ async fn run_interactive_applications(
                             } else {
                                 harness::server::HostActorLifecycle::Retired
                             };
-                            embedded_lifecycle_tx.send_replace(lifecycle);
+                            embedded_lifecycle_tx.send_replace((Some(actor), lifecycle));
                             if let (Some(identity), Some(service)) =
                                 (embedded_root_identity.as_ref(), embedded_service.as_ref())
                             {

@@ -4,6 +4,30 @@ use futures_util::StreamExt;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
+#[test]
+fn delayed_embedded_lifecycle_updates_cannot_replace_terminal_root_projection() {
+    let retired = ActorRef::first(exomonad_actor::ActorId(7));
+    let replacement = ActorRef {
+        id: retired.id,
+        incarnation: exomonad_actor::Incarnation(retired.incarnation.0 + 1),
+    };
+    assert!(embedded_lifecycle_update_is_current(
+        Some(replacement),
+        replacement,
+        true,
+    ));
+    assert!(!embedded_lifecycle_update_is_current(
+        Some(retired),
+        replacement,
+        true,
+    ));
+    assert!(!embedded_lifecycle_update_is_current(
+        Some(replacement),
+        replacement,
+        false,
+    ));
+}
+
 #[tokio::test]
 async fn production_host_marks_embedded_root_ready_and_retires_invalid_auth_failure() {
     let files = tempfile::tempdir().unwrap();
