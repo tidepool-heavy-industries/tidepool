@@ -11,7 +11,13 @@ The full `HostActor` binding awaits these owning contracts:
 1. The actor lifecycle owner provides a scoped synchronous admission lease for
    the exact incarnation, fenced against retirement. `HostedWorkSeal` closes
    admission and cannot serve as that lease. A terminal-state precheck alone
-   races retirement.
+   races retirement. The harness currently holds its `HostActor::admit` guard
+   across dispatcher `.await` in `PinnedProvider::call_with_context` and
+   `call_custom_with_context`, and across `wake().await` in
+   `Conversation::input`. Narrow that guard to the synchronous Store binding
+   or input transaction and drop it before awaiting. The existing actor
+   endpoint must atomically accept/fence the actual tool message and own its
+   execution after admission; a long-held guard can deadlock self-retirement.
 2. The harness scheduler passes its qualified `OperationId` to
    `CancellationOwner::cancel`. Its opaque random `JobHandle` cannot be
    converted to `ToolInvocationContext` without a duplicate handle registry.
