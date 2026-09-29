@@ -6,6 +6,8 @@ import System.Environment (getArgs)
 import System.FilePath (takeBaseName, takeDirectory, takeFileName, (</>))
 import System.Directory (createDirectoryIfMissing, removeFile, setCurrentDirectory)
 import qualified Data.ByteString as BS
+import Codec.CBOR.Encoding (encodeBytes, encodeListLen, encodeString, encodeWord)
+import Codec.CBOR.Write (toStrictByteString)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Control.Exception
@@ -68,6 +70,10 @@ import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithCached )
 import Tidepool.ModuleCandidates (ModuleCandidate(..))
 import Tidepool.CertifiedProducts (encodeCertifiedProducts)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..))
+import Tidepool.PackageWitness (PackageImportRoot, encodePackageImports)
+import qualified Crypto.Hash.SHA256 as SHA256
+import Numeric (showHex)
 import Tidepool.DeclarationJoin
   ( DeclarationOperation(..), readDeclarationOperation, validateDeclarationJoin
   , renderDeclarationJoinOutcome, inspectDeclarationArtifacts
@@ -476,6 +482,7 @@ writeCertifiedProducts
 writeCertifiedProducts outDir hscEnv prepared productContext preparedArtifacts = do
     (availability, freshProducts) <- writeModuleProducts outDir hscEnv
       productContext (pprModules prepared) (pprProductInterfaces prepared)
+      (pprPackageRoots prepared)
     let dependencies = pprDependencies prepared
         withCertified = foldr (\candidate -> Map.insert
           (candidateUnit candidate, candidateModule candidate) ProductReady)
@@ -591,22 +598,23 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
 -- skinny interface emitted by the same GHC transaction.
 writeModuleProducts :: FilePath -> HscEnv -> Maybe ProjectionContext
   -> [PreparedModule] -> Map.Map ModuleName ModIface
+  -> Map.Map ModuleName [PackageImportRoot]
   -> IO (Map.Map (String, String) ProductAvailability,
          [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])])
-writeModuleProducts _ _ Nothing _ _ = pure (Map.empty, [])
-writeModuleProducts outDir hscEnv (Just context) modules interfaces = do
+writeModuleProducts _ _ Nothing _ _ _ = pure (Map.empty, [])
+writeModuleProducts outDir hscEnv (Just context) modules interfaces packageRoots = do
   outcomes <- forM modules $ \prepared -> do
     let name = moduleName (pmModule prepared)
         key = (unitString (moduleUnit (pmModule prepared)), moduleNameString name)
     case Map.lookup name interfaces of
       Nothing -> do
         hPutStrLn stderr ("module product unavailable: no interface for " ++ moduleNameString name)
-        pure (key, ProductMissingInterface, Nothing)
+        pure (key, ProductMissingInterface, Nothing, Nothing)
       Just interface -> case projectPreparedModuleGroups context prepared of
         Left reason -> do
           hPutStrLn stderr ("module product unavailable: " ++ moduleNameString name
             ++ ": " ++ show reason)
-          pure (key, ProductProjectionRejected, Nothing)
+          pure (key, ProductProjectionRejected, Nothing, Nothing)
         Right groups -> do
           (path, handle) <- openBinaryTempFile outDir "module-product.hi"
           hClose handle
@@ -614,11 +622,34 @@ writeModuleProducts outDir hscEnv (Just context) modules interfaces = do
             writeBinIface (targetProfile (hsc_dflags hscEnv)) QuietBinIFace
               NormalCompression path interface
             BS.readFile path) `finally` removeFile path
+          roots <- case Map.lookup name packageRoots of
+            Nothing -> ioError (userError
+              ("resolved direct package import inventory missing for " ++ moduleNameString name))
+            Just selected -> pure selected
+          let iface = ExactIfaceArtifact (fst key) (snd key) ""
+                (shaHex bytes) []
+              sidecar = encodePackageImports iface roots
+          when (BS.length sidecar > 4 * 1024 * 1024) $
+            ioError (userError "direct package import witness exceeds four MiB")
           pure (key, ProductReady, Just (T.pack (fst key),
-            T.pack (snd key), bytes, groups))
-  let products = [moduleProduct | (_, _, Just moduleProduct) <- outcomes]
+            T.pack (snd key), bytes, groups), Just sidecar)
+  let products = [moduleProduct | (_, _, Just moduleProduct, _) <- outcomes]
+      packageBundles =
+        [(unit, moduleName', sidecar)
+        | ((unit, moduleName'), _, Just _, Just sidecar) <- outcomes]
   BS.writeFile (outDir </> "module-products.cbor") (encodeModuleProducts products)
-  pure (Map.fromList [(key, status) | (key, status, _) <- outcomes], products)
+  BS.writeFile (outDir </> "module-package-imports.cbor")
+    (toStrictByteString (encodeListLen 3
+      <> encodeString (T.pack "TPPKGBUNDLES") <> encodeWord 1
+      <> encodeListLen (fromIntegral (length packageBundles))
+      <> foldMap (\(unit, moduleName', sidecar) -> encodeListLen 3
+        <> encodeString (T.pack unit) <> encodeString (T.pack moduleName')
+        <> encodeBytes sidecar) packageBundles))
+  pure (Map.fromList [(key, status) | (key, status, _, _) <- outcomes], products)
+
+shaHex :: BS.ByteString -> String
+shaHex = concatMap (\byte -> let text = showHex byte "" in
+  replicate (2 - length text) '0' ++ text) . BS.unpack . SHA256.hash
 
 requireProjection :: Either ProjectionError a -> IO a
 requireProjection = \case

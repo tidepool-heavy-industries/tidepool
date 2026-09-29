@@ -15,15 +15,15 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use tempfile::TempDir;
 use tidepool_extract_cmd::ExtractCmd;
+use tidepool_repr::DataConTable;
 use tidepool_repr::execution_schema::DecodeLimits;
 use tidepool_repr::execution_schema::{PreparedProgram, RawModuleProduct};
-use tidepool_repr::serial::{read_metadata, MetaWarnings};
-use tidepool_repr::DataConTable;
+use tidepool_repr::serial::{MetaWarnings, read_metadata};
 
-use crate::prepared_artifact::{prepared_artifact_name, PreparedArtifact};
+use crate::prepared_artifact::{PreparedArtifact, prepared_artifact_name};
 use crate::{
-    cache, certified_products, diag, extract_module_name, extract_spawn_error, module_candidates,
-    timing, CompileError,
+    CompileError, cache, certified_products, diag, extract_module_name, extract_spawn_error,
+    module_candidates, timing,
 };
 
 // ---------------------------------------------------------------------------
@@ -240,6 +240,7 @@ pub struct CompiledArtifacts {
     /// exact module versions and every import owner.
     pub module_products: Vec<RawModuleProduct>,
     pub certified_groups: Vec<certified_products::PendingCertifiedGroup>,
+    pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
     /// Exact post-downsweep graph paired with these products when the worker
     /// supplied complete, revalidated cache evidence. A later compiler
     /// request still needs its own precompile graph check before reuse.
@@ -259,8 +260,7 @@ pub struct ModuleCandidateOffer {
 impl ModuleCandidateOffer {
     pub fn select(producer: &[u8], include: &[PathBuf], scratch: &Path) -> Self {
         Self {
-            selected: module_candidates::select(producer, include, scratch)
-                .filter(|set| !set.by_owner.is_empty()),
+            selected: module_candidates::select(producer, include, scratch),
             producer: producer.to_vec(),
             include: include.to_vec(),
         }
@@ -273,13 +273,55 @@ impl ModuleCandidateOffer {
     }
 
     pub fn has_candidates(&self) -> bool {
-        self.selected.is_some()
+        self.selected.as_ref().is_some_and(|set| !set.by_owner.is_empty())
     }
 }
 
 pub struct SealedTurnProducts {
     pub certified_groups: Vec<certified_products::PendingCertifiedGroup>,
     pub pending_imports: Vec<certified_products::PendingImportOwner>,
+    pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
+}
+
+fn has_ready_home_module(evidence: &cache::DependencyEvidence) -> bool {
+    evidence.modules.iter().any(|module| {
+        !module.boot && module.product == cache::ProductAvailability::Ready
+    })
+}
+
+fn ensure_ready_module_inventory(
+    modules: &[certified_products::CertifiedModuleReceipt],
+    evidence: &cache::DependencyEvidence,
+) -> Result<(), CompileError> {
+    let seen: std::collections::HashSet<_> = modules
+        .iter()
+        .map(|module| (module.unit.as_str(), module.module.as_str()))
+        .collect();
+    for module in &evidence.modules {
+        if !module.boot
+            && module.product == cache::ProductAvailability::Ready
+            && !seen.contains(&(module.unit.as_str(), module.module.as_str()))
+        {
+            return Err(CompileError::ExtractFailed(format!(
+                "ready module {}:{} lacks certified product",
+                module.unit, module.module,
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_no_uncertified_globals(artifacts: &CompiledArtifacts) -> Result<(), CompileError> {
+    if artifacts
+        .targets
+        .values()
+        .any(|target| !target.prepared.prepared().globals().is_empty())
+    {
+        return Err(CompileError::ExtractFailed(
+            "prepared target globals require certified owners".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Seal the exact worker-authored source and product sidecars of a successful
@@ -299,6 +341,7 @@ pub fn seal_turn_outputs(
         ));
     }
     let product_bytes = std::fs::read(output_dir.join("module-products.cbor"))?;
+    let package_bundle_bytes = std::fs::read(output_dir.join("module-package-imports.cbor"))?;
     let evidence_bytes = std::fs::read(output_dir.join("dependencies.json"))?;
     let receipt_bytes = std::fs::read(output_dir.join("certified-products.cbor"))?;
     let fresh_products = tidepool_repr::execution_schema::parse_module_products(
@@ -306,8 +349,11 @@ pub fn seal_turn_outputs(
         &crate::prepared_artifact::production_requirements()?,
         module_candidates::product_decode_limits(),
     )?;
-    let needs_certificate =
-        offer.has_candidates() || !fresh_products.is_empty() || !prepared.globals().is_empty();
+    let evidence = cache::DependencyEvidence::from_worker(&evidence_bytes, source_path, source);
+    let needs_certificate = offer.has_candidates()
+        || !fresh_products.is_empty()
+        || !prepared.globals().is_empty()
+        || evidence.as_ref().is_some_and(has_ready_home_module);
     if receipt_bytes.is_empty() {
         if needs_certificate {
             return Err(CompileError::ExtractFailed(
@@ -318,7 +364,6 @@ pub fn seal_turn_outputs(
     }
     let receipt = certified_products::decode_receipt(&receipt_bytes)
         .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-    let evidence = cache::DependencyEvidence::from_worker(&evidence_bytes, source_path, source);
     let Some(valid) = evidence.as_ref().filter(|evidence| evidence.valid(source)) else {
         if needs_certificate
             || receipt
@@ -332,11 +377,12 @@ pub fn seal_turn_outputs(
         }
         return Ok(None);
     };
-    let groups = certified_products::certify_products(
+    let certified = certified_products::certify_products(
         offer.selected.as_ref(),
         &receipt,
         &fresh_products,
         &product_bytes,
+        &package_bundle_bytes,
         &evidence_bytes,
         source_path,
         valid,
@@ -345,21 +391,7 @@ pub fn seal_turn_outputs(
         &offer.include,
     )
     .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-    let mut seen = std::collections::HashSet::new();
-    for module in &receipt.modules {
-        seen.insert((module.unit.as_str(), module.module.as_str()));
-    }
-    for module in &valid.modules {
-        if module.product == cache::ProductAvailability::Ready
-            && !module.boot
-            && !seen.contains(&(module.unit.as_str(), module.module.as_str()))
-        {
-            return Err(CompileError::ExtractFailed(format!(
-                "turn ready module {}:{} lacks certified product",
-                module.unit, module.module,
-            )));
-        }
-    }
+    ensure_ready_module_inventory(&receipt.modules, valid)?;
     let accepted = receipt
         .targets
         .get(target)
@@ -370,7 +402,7 @@ pub fn seal_turn_outputs(
         ));
     }
     let pending_imports =
-        certified_products::certify_target_owners(prepared, accepted, &groups, &receipt.packages)
+        certified_products::certify_target_owners(prepared, accepted, &certified.groups, &receipt.packages)
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     module_candidates::publish(
         &offer.producer,
@@ -378,11 +410,13 @@ pub fn seal_turn_outputs(
         valid,
         &fresh_products,
         &product_bytes,
+        &package_bundle_bytes,
         source,
     );
     Ok(Some(SealedTurnProducts {
-        certified_groups: groups,
+        certified_groups: certified.groups,
         pending_imports,
+        recovery_products: certified.recovery_products,
     }))
 }
 
@@ -549,8 +583,7 @@ fn compile_invocation_inner(
                         temp_dir.path(),
                     )
                 })
-                .flatten()
-                .filter(|selected| !selected.by_owner.is_empty());
+                .flatten();
             if let Some(selected) = &candidate_set {
                 cmd.module_candidates(&selected.manifest_path);
             }
@@ -600,7 +633,7 @@ fn compile_invocation_inner(
     );
     let (meta_bytes, raw, product_bytes) = match extracted {
         Ok(output) => output,
-        Err(error) if allow_candidates && candidate_set.is_some() => {
+        Err(error) if allow_candidates && candidate_set.as_ref().is_some_and(|set| !set.by_owner.is_empty()) => {
             tracing::warn!(%error, "candidate compile failed; retrying without candidates");
             return compile_invocation_inner(inv, on_stage, false);
         }
@@ -612,13 +645,30 @@ fn compile_invocation_inner(
     // memo costs a recompile, it never fails a compile.
     let assembled = (|| {
         let evidence_bytes = std::fs::read(temp_dir.path().join("dependencies.json"))?;
+        let package_bundle_bytes =
+            std::fs::read(temp_dir.path().join("module-package-imports.cbor"))?;
         let evidence =
             cache::DependencyEvidence::from_worker(&evidence_bytes, &input_path, inv.source);
         let receipt_bytes = std::fs::read(temp_dir.path().join("certified-products.cbor"))?;
         if receipt_bytes.is_empty() {
-            if candidate_set.is_some() {
+            if candidate_set.as_ref().is_some_and(|set| !set.by_owner.is_empty()) {
                 return Err(CompileError::ExtractFailed(
                     "candidate product certificate unavailable".into(),
+                ));
+            }
+            let fresh_products = tidepool_repr::execution_schema::parse_module_products(
+                &product_bytes,
+                &crate::prepared_artifact::production_requirements()?,
+                module_candidates::product_decode_limits(),
+            )?;
+            if !fresh_products.is_empty() {
+                return Err(CompileError::ExtractFailed(
+                    "fresh module product certificate unavailable".into(),
+                ));
+            }
+            if evidence.as_ref().is_some_and(has_ready_home_module) {
+                return Err(CompileError::ExtractFailed(
+                    "ready module product certificate unavailable".into(),
                 ));
             }
             let artifacts = assemble_with_products(
@@ -629,18 +679,15 @@ fn compile_invocation_inner(
                 evidence.as_ref(),
                 &mut *on_stage,
             )?;
+            ensure_no_uncertified_globals(&artifacts)?;
             if let Some(evidence) = evidence.as_ref() {
-                let fresh_products = tidepool_repr::execution_schema::parse_module_products(
-                    &product_bytes,
-                    &crate::prepared_artifact::production_requirements()?,
-                    module_candidates::product_decode_limits(),
-                )?;
                 module_candidates::publish(
                     &producer,
                     inv.include,
                     evidence,
                     &fresh_products,
                     &product_bytes,
+                    &package_bundle_bytes,
                     inv.source,
                 );
             }
@@ -654,12 +701,18 @@ fn compile_invocation_inner(
             module_candidates::product_decode_limits(),
         )?;
         let valid_evidence = evidence.as_ref().filter(|value| value.valid(inv.source));
-        let certified_groups = if let Some(valid) = valid_evidence {
-            certified_products::certify_products(
+        let cached_receipts: Vec<_> = receipt
+            .modules
+            .iter()
+            .filter(|module| module.origin == certified_products::ProductOrigin::Cached)
+            .collect();
+        let certified = if let Some(valid) = valid_evidence {
+            let certified = certified_products::certify_products(
                 candidate_set.as_ref(),
                 &receipt,
                 &fresh_products,
                 &product_bytes,
+                &package_bundle_bytes,
                 &evidence_bytes,
                 &input_path,
                 valid,
@@ -667,20 +720,23 @@ fn compile_invocation_inner(
                 &producer,
                 inv.include,
             )
-            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+            ensure_ready_module_inventory(&receipt.modules, valid)?;
+            certified
         } else {
-            Vec::new()
+            if !fresh_products.is_empty()
+                || !receipt.modules.is_empty()
+                || receipt.targets.values().any(|accepted| !accepted.is_empty())
+            {
+                return Err(CompileError::ExtractFailed(
+                    "module or target owner lacks valid final dependency evidence".into(),
+                ));
+            }
+            certified_products::CertifiedProducts {
+                groups: Vec::new(),
+                recovery_products: Vec::new(),
+            }
         };
-        let cached_receipts: Vec<_> = receipt
-            .modules
-            .iter()
-            .filter(|module| module.origin == certified_products::ProductOrigin::Cached)
-            .collect();
-        if valid_evidence.is_none() && !cached_receipts.is_empty() {
-            return Err(CompileError::ExtractFailed(
-                "cached module lacks valid final dependency evidence".into(),
-            ));
-        }
         let extra_products: Vec<_> = cached_receipts
             .iter()
             .map(|module| {
@@ -705,6 +761,9 @@ fn compile_invocation_inner(
             evidence.as_ref(),
             &mut on_stage,
         )?;
+        if valid_evidence.is_none() {
+            ensure_no_uncertified_globals(&artifacts)?;
+        }
         if receipt.targets.len() != artifacts.targets.len() {
             return Err(CompileError::ExtractFailed(
                 "target product receipt count".into(),
@@ -718,13 +777,14 @@ fn compile_invocation_inner(
                 target.pending_imports = certified_products::certify_target_owners(
                     target.prepared.prepared(),
                     accepted,
-                    &certified_groups,
+                    &certified.groups,
                     &receipt.packages,
                 )
                 .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
             }
         }
-        artifacts.certified_groups = certified_groups;
+        artifacts.certified_groups = certified.groups;
+        artifacts.recovery_products = certified.recovery_products;
         if let Some(evidence) = evidence.as_ref() {
             module_candidates::publish(
                 &producer,
@@ -732,6 +792,7 @@ fn compile_invocation_inner(
                 evidence,
                 &fresh_products,
                 &product_bytes,
+                &package_bundle_bytes,
                 inv.source,
             );
         }
@@ -753,7 +814,7 @@ fn compile_invocation_inner(
         Ok(artifacts)
     })();
     match assembled {
-        Err(error) if allow_candidates && candidate_set.is_some() => {
+        Err(error) if allow_candidates && candidate_set.as_ref().is_some_and(|set| !set.by_owner.is_empty()) => {
             tracing::warn!(%error, "candidate certification failed; retrying without candidates");
             compile_invocation_inner(inv, on_stage, false)
         }
@@ -1086,6 +1147,7 @@ pub(crate) fn assemble(
         targets,
         module_products: Vec::new(),
         certified_groups: Vec::new(),
+        recovery_products: Vec::new(),
         module_inventory: None,
     })
 }
@@ -1188,6 +1250,7 @@ fn artifact_names(targets: &[&str], multi: bool) -> Vec<String> {
         });
     }
     names.push("module-products.cbor".to_string());
+    names.push("module-package-imports.cbor".to_string());
     names
 }
 
@@ -1399,6 +1462,43 @@ mod module_product_tests {
     use crate::certified_products::ProductOrigin;
     use std::io::Write;
 
+    #[test]
+    fn ready_zero_group_module_requires_a_receipt_even_without_products() {
+        let evidence = cache::DependencyEvidence {
+            version: 4,
+            cache_safe: true,
+            selection_complete: true,
+            sources: vec![],
+            resolutions: vec![],
+            packages: vec![],
+            modules: vec![cache::ModuleEvidence {
+                unit: "main".into(),
+                module: "InstanceOnly".into(),
+                boot: false,
+                source: PathBuf::from("InstanceOnly.hs"),
+                imports: vec![],
+                product: cache::ProductAvailability::Ready,
+            }],
+        };
+        assert!(has_ready_home_module(&evidence));
+        assert!(matches!(
+            ensure_ready_module_inventory(&[], &evidence),
+            Err(CompileError::ExtractFailed(_))
+        ));
+        let owner = certified_products::CertifiedModuleReceipt {
+            origin: ProductOrigin::Cached,
+            unit: "main".into(),
+            module: "InstanceOnly".into(),
+            module_version: None,
+            skinny_iface_sha256: [1; 32],
+            product_sha256: [2; 32],
+            source_sha256: [3; 32],
+            dependency_witness_sha256: [4; 32],
+            groups: vec![],
+        };
+        ensure_ready_module_inventory(&[owner], &evidence).unwrap();
+    }
+
     /// This test intentionally crosses the matched Rust frontend, Haskell
     /// worker, entry-free wire reader and invocation bundle. Run it with
     /// `TIDEPOOL_EXTRACT` and `TIDEPOOL_EXTRACT_WORKER` from this checkout.
@@ -1416,10 +1516,12 @@ mod module_product_tests {
             .collect();
         assert!(modules.contains("ModuleProductA"));
         assert!(modules.contains("ModuleProductB"));
-        assert!(compiled
-            .module_products
-            .iter()
-            .any(|product| product.module == "ModuleProductA" && product.groups.len() >= 2));
+        assert!(
+            compiled
+                .module_products
+                .iter()
+                .any(|product| product.module == "ModuleProductA" && product.groups.len() >= 2)
+        );
         let inventory = compiled
             .module_inventory
             .expect("safe worker graph must accompany its module products");
@@ -1467,15 +1569,19 @@ mod module_product_tests {
         assert_ne!(changed, first);
         let second =
             compile_targets(&changed, &["consume"], &[root.clone()], |_, _, _| {}).unwrap();
-        assert!(second
-            .module_products
-            .iter()
-            .any(|product| product.module == "ModuleProductA"));
-        assert!(second
-            .certified_groups
-            .iter()
-            .any(|group| group.origin() == ProductOrigin::Cached
-                && group.owner().module == "ModuleProductA"));
+        assert!(
+            second
+                .module_products
+                .iter()
+                .any(|product| product.module == "ModuleProductA")
+        );
+        assert!(
+            second
+                .certified_groups
+                .iter()
+                .any(|group| group.origin() == ProductOrigin::Cached
+                    && group.owner().module == "ModuleProductA")
+        );
         assert_eq!(
             second.targets["consume"].pending_imports.len(),
             second.targets["consume"]
@@ -1492,28 +1598,34 @@ mod module_product_tests {
             .unwrap();
         let changed_again = first.replace("produce + 1", "produce + 3");
         let third = compile_targets(&changed_again, &["consume"], &[root], |_, _, _| {}).unwrap();
-        assert!(third
-            .certified_groups
-            .iter()
-            .any(|group| group.origin() == ProductOrigin::Fresh
-                && group.owner().module == "ModuleProductA"));
-        assert!(!third
-            .certified_groups
-            .iter()
-            .any(|group| group.origin() == ProductOrigin::Cached
-                && group.owner().module == "ModuleProductA"));
+        assert!(
+            third
+                .certified_groups
+                .iter()
+                .any(|group| group.origin() == ProductOrigin::Fresh
+                    && group.owner().module == "ModuleProductA")
+        );
+        assert!(
+            !third
+                .certified_groups
+                .iter()
+                .any(|group| group.origin() == ProductOrigin::Cached
+                    && group.owner().module == "ModuleProductA")
+        );
         match old_cache {
             Some(path) => unsafe { std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", path) },
             None => unsafe { std::env::remove_var("TIDEPOOL_COMPILE_CACHE_DIR") },
         }
     }
+
+
 }
 
 #[cfg(test)]
 mod constructor_identity_tests {
     use super::*;
     use tidepool_repr::execution_schema::ConstructorDecl;
-    use tidepool_repr::serial::{write_metadata, MetaWarnings};
+    use tidepool_repr::serial::{MetaWarnings, write_metadata};
     use tidepool_repr::{DataCon, SrcBang};
 
     /// A real, GHC-produced prepared program — `M3Vertical.hs`'s `entry`,
