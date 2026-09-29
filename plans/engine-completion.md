@@ -352,3 +352,29 @@ acquisition test now exits and reaps the original view process before acquiring
 and executing through its retained namespace. It passed 1/1, eight skipped;
 log: Git checkout `target/completion-evidence/view-holder-exit.log`. This adds
 original-process-death coverage to the previous descriptor-lifetime evidence.
+
+### Admitted execution state and delivered capture tokens
+
+Integrated runtime `fe32541ee` as `c1cdb71b3`: one active execution record owns
+its exact ID, admitted source context, installed tool lease and control. Capture
+uses that immutable source snapshot and publishes its exact token after confirmed
+boundary delivery, including a reported failure of the resumed computation. Later
+parent failure retires only still-pending captures. Execution remains serial.
+
+Four focused actor tests passed; facade library consumers compiled. Runtime logs:
+`target/completion-evidence/capture-final.log` and `capture-consumer-final.log`.
+The delivery-classification test injects a Delivered failure; real Haskell
+parent/child capture lifetime acceptance is still required. Immutable source
+revision directories are retained by the run owner; actor retirement does not
+reclaim them. Final lexical-scope release remains a separate acceptance gate.
+
+### Qualified dependency evidence
+
+Integrated compiler `691eba05d` and `9fc7b2d72` as `a93d576a5` and `e472a3b7e`.
+Version 4 preserves package qualifiers on direct imports and rejects package/home
+aliasing. Rust policy uses a validated qualifier enum with the same versioned
+wire encoding. A fresh worker built, cell-splitter tests passed with an explicit
+package-import case, 13 focused cache tests passed, and one matched worker test
+passed. Logs in compiler `target/engine-completion-inventory-v4-*.log`.
+This closes a provenance prerequisite; worker hydration and actual reuse hits
+remain open. The conservative direct-cache package gate is unchanged.
