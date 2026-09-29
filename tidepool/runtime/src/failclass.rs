@@ -57,6 +57,8 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         // not a user declaration or an environment failure.
         SessionError::DeadScope(_)
         | SessionError::MissingDeclarationLibrary
+        | SessionError::WrongPublicManifestTicket
+        | SessionError::InvalidPublicBindingPromotion(_)
         | SessionError::StaleStagedDeclaration => {
             FailureEnvelope::new(FailureClass::Runtime, Phase::Run, err.to_string())
         }

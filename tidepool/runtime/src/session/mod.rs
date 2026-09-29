@@ -309,6 +309,10 @@ pub enum SessionError {
     DeadScope(ScopeId),
     #[error("session has no persistent declaration library")]
     MissingDeclarationLibrary,
+    #[error("staged public manifest belongs to a different session, actor, or manifest")]
+    WrongPublicManifestTicket,
+    #[error("public binding promotion failed preflight: {0:?}")]
+    InvalidPublicBindingPromotion(tidepool_codegen::binding_table::BindingPromotionError),
     #[error(
         "staged declaration no longer matches this session's live declaration or value environment"
     )]
@@ -332,6 +336,106 @@ pub struct PublicVisibilitySnapshot {
     pub declaration_tip: Generation,
     pub bindings: Vec<(String, SessionVarId)>,
     pub source_instances: Vec<SourceLeaseKey>,
+}
+
+/// Immutable v2 manifest baseline captured under the owning session checkout.
+/// Staging its replacement is fallible and may run after that checkout ends.
+pub struct PublicManifestBase {
+    session: SessionId,
+    path: PathBuf,
+    owner: RecoveryPublicOwner,
+    public_scope: ScopeId,
+    private_scope: ScopeId,
+    write_ids: Vec<SessionVarId>,
+    expected_bindings: Vec<(String, SessionVarId)>,
+    expected_declaration_tip: Generation,
+    final_bindings: Vec<(String, SessionVarId)>,
+    graph: recovery::RecoveryGraph,
+}
+
+/// A fully written, fsynced manifest candidate. Only the owning session may
+/// compare its baseline and rename it while holding the machine checkout.
+pub struct StagedPublicManifest {
+    session: SessionId,
+    path: PathBuf,
+    owner: RecoveryPublicOwner,
+    public_scope: ScopeId,
+    private_scope: ScopeId,
+    write_ids: Vec<SessionVarId>,
+    expected_bindings: Vec<(String, SessionVarId)>,
+    expected_declaration_tip: Generation,
+    base_checksum: String,
+    base_high_water: Generation,
+    staged: recovery::StagedRecoveryManifest,
+}
+
+/// A stale stage preserves the execution's intent; its caller can stage again
+/// from the new public graph without repeating the execution's effects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublicManifestCommit {
+    Stale,
+    Cancelled,
+    BeforeRename { detail: String },
+    Durable,
+    PublishedDurabilityUnconfirmed { detail: String },
+}
+
+impl PublicManifestBase {
+    /// Stage binding-only visibility. Existing source-instance evidence is
+    /// preserved; adding new source instances requires a separate exact issuer.
+    pub fn stage(self) -> Result<StagedPublicManifest, SessionError> {
+        let root = self
+            .path
+            .parent()
+            .ok_or_else(|| SessionError::RecoveryManifest {
+                path: self.path.clone(),
+                detail: "recovery manifest has no parent directory".into(),
+            })?;
+        let surface = self
+            .graph
+            .public_surfaces
+            .iter()
+            .find(|s| s.owner == self.owner);
+        let epoch = surface.map_or(0, |s| s.epoch);
+        let source_instances = surface.map_or_else(Vec::new, |s| s.source_instances.clone());
+        let bindings = self
+            .final_bindings
+            .into_iter()
+            .map(|(name, id)| recovery::RecoveryPublicBinding {
+                name,
+                owner: recovery::RecoveryBindingId {
+                    session: self.session.0,
+                    variable: id.raw(),
+                },
+            })
+            .collect();
+        let staged = recovery::stage_public_visibility_v2(
+            &self.path,
+            root,
+            &self.graph,
+            self.owner.clone(),
+            epoch,
+            bindings,
+            source_instances,
+        )
+        .map_err(|error| SessionError::RecoveryManifest {
+            path: self.path.clone(),
+            detail: error.to_string(),
+        })?;
+        Ok(StagedPublicManifest {
+            session: self.session,
+            path: self.path,
+            owner: self.owner,
+            public_scope: self.public_scope,
+            private_scope: self.private_scope,
+            write_ids: self.write_ids,
+            expected_bindings: self.expected_bindings,
+            expected_declaration_tip: self.expected_declaration_tip,
+            base_checksum: self.graph.checksum,
+            base_high_water: self.graph.high_water,
+            staged,
+        })
+    }
 }
 
 /// A resident session's declaration library. Owns the ordered decl log, the
@@ -670,6 +774,89 @@ impl SessionLib {
         }
         self.durable_public_scopes.insert(owner, scope);
         Ok(())
+    }
+
+    fn snapshot_public_manifest(
+        &self,
+        owner: RecoveryPublicOwner,
+        public_scope: ScopeId,
+        private_scope: ScopeId,
+        write_ids: Vec<SessionVarId>,
+        expected_bindings: Vec<(String, SessionVarId)>,
+        expected_declaration_tip: Generation,
+        final_bindings: Vec<(String, SessionVarId)>,
+    ) -> Result<PublicManifestBase, SessionError> {
+        let state = self
+            .durable_graph
+            .as_ref()
+            .ok_or_else(|| SessionError::RecoveryManifest {
+                path: self.root.clone(),
+                detail: "v2 recovery graph is not attached".into(),
+            })?;
+        if state.unconfirmed.is_some()
+            || self.durable_public_scopes.get(&owner) != Some(&public_scope)
+        {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        Ok(PublicManifestBase {
+            session: self.id,
+            path: state.path.clone(),
+            owner,
+            public_scope,
+            private_scope,
+            write_ids,
+            expected_bindings,
+            expected_declaration_tip,
+            final_bindings,
+            graph: state.graph.clone(),
+        })
+    }
+
+    fn public_manifest_ticket_is_current(
+        &self,
+        ticket: &StagedPublicManifest,
+    ) -> Result<bool, SessionError> {
+        let state = self
+            .durable_graph
+            .as_ref()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        if ticket.session != self.id
+            || ticket.path != state.path
+            || self.durable_public_scopes.get(&ticket.owner) != Some(&ticket.public_scope)
+        {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        Ok(!(state.unconfirmed.is_some()
+            || state.graph.checksum != ticket.base_checksum
+            || state.graph.high_water != ticket.base_high_water))
+    }
+
+    fn publish_staged_public_manifest_unchecked(
+        &mut self,
+        ticket: StagedPublicManifest,
+    ) -> PublicManifestCommit {
+        let state = self
+            .durable_graph
+            .as_mut()
+            .expect("ticket preflight found manifest");
+        match ticket.staged.publish() {
+            recovery::RecoveryPublishOutcome::BeforeRename { detail, .. } => {
+                PublicManifestCommit::BeforeRename { detail }
+            }
+            recovery::RecoveryPublishOutcome::Durable { graph, .. } => {
+                state.graph = graph;
+                PublicManifestCommit::Durable
+            }
+            recovery::RecoveryPublishOutcome::PublishedDurabilityUnconfirmed {
+                graph,
+                publication,
+                detail,
+            } => {
+                state.graph = graph;
+                state.unconfirmed = Some(publication);
+                PublicManifestCommit::PublishedDurabilityUnconfirmed { detail }
+            }
+        }
     }
 
     /// Burn a unique Join module identity before exposing it to the compiler.
