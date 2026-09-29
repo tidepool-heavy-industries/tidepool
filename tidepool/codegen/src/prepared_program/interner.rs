@@ -1,17 +1,16 @@
-//! Machine-wide constructor descriptor interning.
+//! Constructor descriptor interning across machines in one process.
 //!
 //! Every dispatch site in generated code compares an object's header word
 //! (the pinned `ObjectDescriptor`'s own address) against descriptor
 //! addresses baked in at codegen. A constructor's descriptor is determined
 //! by its declaration, never by the program declaring it, so two programs
-//! installed on one machine must share one descriptor per constructor
-//! identity for a later program's `Case`, evaluated-constructor enter and
-//! observation to recognise cells the earlier program built. The interner
-//! is that sharing: the owning `PreparedMachine` compiles every later
-//! program against it, and absorbs each installed program's own entries.
+//! installed on any machine must share one live descriptor for a complete
+//! declaration and target. The process pool keeps weak references; each
+//! machine interner still owns its local identity and host-ID conflict policy
+//! and retains the descriptors used by installed programs.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_repr::execution_schema::{
@@ -60,6 +59,62 @@ pub(crate) struct ExternalDescriptors {
 /// mints once and every later caller gets clones of the same three `Arc`s
 /// regardless of which interner or machine asked.
 static PROCESS_EXTERNALS: OnceLock<(TargetDescriptor, ExternalDescriptors)> = OnceLock::new();
+
+/// Constructor identity must be process-canonical while any compiled code or
+/// transferred value still refers to it: generated `Case` compares descriptor
+/// addresses, including when code compiled against one machine is installed
+/// on another. This weak pool gives separate machine interners the same live
+/// descriptor without keeping abandoned constructors alive for the process.
+static PROCESS_CONSTRUCTORS: OnceLock<Mutex<ConstructorPool>> = OnceLock::new();
+
+#[derive(Default)]
+struct ConstructorPool {
+    entries: HashMap<(TargetDescriptor, ConstructorDecl), Weak<ObjectDescriptor>>,
+    since_sweep: usize,
+}
+
+impl ConstructorPool {
+    fn tick(&mut self) {
+        self.since_sweep += 1;
+        if self.since_sweep >= self.entries.len().max(1) {
+            self.entries
+                .retain(|_, descriptor| descriptor.strong_count() != 0);
+            self.since_sweep = 0;
+        }
+    }
+}
+
+fn shared_constructor(
+    target: &TargetDescriptor,
+    declaration: &ConstructorDecl,
+) -> Result<Arc<ObjectDescriptor>, CompileError> {
+    let key = (target.clone(), declaration.clone());
+    let pool = PROCESS_CONSTRUCTORS.get_or_init(|| Mutex::new(ConstructorPool::default()));
+    {
+        let mut entries = pool.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(descriptor) = entries.entries.get(&key).and_then(Weak::upgrade) {
+            entries.tick();
+            return Ok(descriptor);
+        }
+        entries.entries.remove(&key);
+        entries.tick();
+    }
+
+    let layout = StorageLayout::for_reps(target, &declaration.field_reps)?;
+    let minted = Arc::new(ObjectDescriptor::constructor(
+        declaration.tag,
+        layout,
+        None,
+    )?);
+    let mut entries = pool.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(descriptor) = entries.entries.get(&key).and_then(Weak::upgrade) {
+        entries.tick();
+        return Ok(descriptor);
+    }
+    entries.entries.insert(key, Arc::downgrade(&minted));
+    entries.tick();
+    Ok(minted)
+}
 
 impl ExternalDescriptors {
     fn mint(target: &TargetDescriptor) -> Result<Self, CompileError> {
@@ -242,12 +297,7 @@ impl DescriptorInterner {
                 existing: Box::new(existing.clone()),
             });
         }
-        let layout = StorageLayout::for_reps(target, &declaration.field_reps)?;
-        let descriptor = Arc::new(ObjectDescriptor::constructor(
-            declaration.tag,
-            layout,
-            None,
-        )?);
+        let descriptor = shared_constructor(target, declaration)?;
         self.insert_new(declaration, Arc::clone(&descriptor));
         Ok(descriptor)
     }
@@ -392,6 +442,34 @@ mod tests {
             &externals_b.bytes_array
         ));
         assert_eq!(externals_a.headers(), externals_b.headers());
+    }
+
+    #[test]
+    fn independent_interners_share_live_constructor_but_pool_does_not_own_it() {
+        let declaration = declaration("CanonicalPoolLifetime", 10331);
+        let target = target();
+        let mut first = DescriptorInterner::default();
+        let mut second = DescriptorInterner::default();
+        let first_descriptor = first.intern(&target, &declaration).unwrap();
+        let second_descriptor = second.intern(&target, &declaration).unwrap();
+        assert!(Arc::ptr_eq(&first_descriptor, &second_descriptor));
+        let weak = Arc::downgrade(&first_descriptor);
+        drop(first_descriptor);
+        drop(second_descriptor);
+        drop(first);
+        drop(second);
+        assert!(weak.upgrade().is_none(), "the pool retains only Weak refs");
+
+        let mut next = DescriptorInterner::default();
+        let replacement = next.intern(&target, &declaration).unwrap();
+        assert_eq!(
+            replacement.kind(),
+            tidepool_heap::execution_descriptor::ObjectKind::Constructor
+        );
+        assert!(Arc::ptr_eq(
+            &replacement,
+            &next.by_host(declaration.host_id).unwrap().1
+        ));
     }
 
     #[test]
