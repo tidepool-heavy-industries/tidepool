@@ -323,7 +323,7 @@ pub struct LocalActorRef {
     admission: MailboxAdmission,
 }
 
-/// Admission shares its fence with the incarnation's hosted-cell slot: both
+/// Admission shares its fence with the incarnation's hosted calls: both
 /// are per-incarnation state every handle to the actor (the directory's and
 /// the spawner's alike) must observe identically.
 #[derive(Clone, Default)]
@@ -332,9 +332,16 @@ pub(crate) struct MailboxAdmission(
     HostedCellSlot,
 );
 
-/// The model-visible hosted call this incarnation is executing, if any.
-pub(crate) type HostedCellSlot =
-    std::sync::Arc<parking_lot::Mutex<Option<std::sync::Arc<crate::WorkbenchExecutionControl>>>>;
+/// Calls waiting on the dispatch gate remain visible to the host. Each
+/// execution can also have a transport retry waiting behind its original.
+pub(crate) type HostedCellSlot = std::sync::Arc<
+    parking_lot::Mutex<
+        std::collections::HashMap<
+            tidepool_runtime::session::WorkbenchExecutionId,
+            Vec<crate::resident_tools::HostedCellEntry>,
+        >,
+    >,
+>;
 
 #[derive(Default)]
 enum AdmissionState {
@@ -393,8 +400,9 @@ impl LocalActorRef {
         self.admission
             .1
             .lock()
-            .as_ref()
-            .is_some_and(|control| control.is_computing_hosted_cell())
+            .values()
+            .flatten()
+            .any(|entry| entry.control.is_computing_hosted_cell())
     }
 
     pub(crate) async fn abort_prepared_replacement(&self) -> Result<(), KernelBehaviorError> {

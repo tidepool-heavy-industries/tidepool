@@ -208,7 +208,7 @@ impl WorkbenchExecutionControl {
             )
     }
 
-    async fn settled(&self) -> crate::KernelWorkbenchReply {
+    pub(crate) async fn settled(&self) -> crate::KernelWorkbenchReply {
         let mut settlement = self.settlement.subscribe();
         loop {
             if let Some(reply) = settlement.borrow_and_update().clone() {
@@ -220,7 +220,7 @@ impl WorkbenchExecutionControl {
         }
     }
 
-    fn terminal_reply(&self) -> Option<crate::KernelWorkbenchReply> {
+    pub(crate) fn terminal_reply(&self) -> Option<crate::KernelWorkbenchReply> {
         self.settlement.borrow().clone()
     }
 
@@ -256,33 +256,97 @@ impl WorkbenchExecutionControl {
     }
 }
 
-/// Publishes one hosted call's control on its actor's hosted-cell slot and
-/// clears it on drop, including when the dispatching future is torn down.
-/// A later call that replaced the slot keeps it.
+/// One publication in the incarnation's hosted-call collection. Only a call
+/// past the dispatch gate can be steered directly through this control.
+pub(crate) struct HostedCellEntry {
+    pub(crate) control: Arc<WorkbenchExecutionControl>,
+    running: bool,
+}
+
+/// Removes a queued call on future teardown. A running call remains published
+/// until the actor settles it, even if its transport waiter disappears.
 struct HostedCellPublication {
     slot: crate::kernel::HostedCellSlot,
+    execution: WorkbenchExecutionId,
     control: Arc<WorkbenchExecutionControl>,
+    terminal: crate::RetainedActorExit,
 }
 
 impl HostedCellPublication {
-    fn publish(actor: &crate::LocalActorRef, control: &Arc<WorkbenchExecutionControl>) -> Self {
+    fn publish(
+        actor: &crate::LocalActorRef,
+        execution: WorkbenchExecutionId,
+        control: &Arc<WorkbenchExecutionControl>,
+    ) -> Self {
         let slot = Arc::clone(actor.hosted_cell());
-        *slot.lock() = Some(Arc::clone(control));
+        slot.lock()
+            .entry(execution.clone())
+            .or_default()
+            .push(HostedCellEntry {
+                control: Arc::clone(control),
+                running: false,
+            });
         Self {
             slot,
+            execution,
             control: Arc::clone(control),
+            terminal: actor.terminal().clone(),
         }
+    }
+
+    fn mark_running(&self) {
+        if let Some(entries) = self.slot.lock().get_mut(&self.execution) {
+            if let Some(entry) = entries
+                .iter_mut()
+                .find(|entry| Arc::ptr_eq(&entry.control, &self.control))
+            {
+                entry.running = true;
+            }
+        }
+        // The actor owns the execution after dispatch. A lost transport
+        // waiter cannot revoke its direct cancellation handle; settlement or
+        // actor exit releases that handle even if the waiter never returns.
+        let slot = Arc::clone(&self.slot);
+        let execution = self.execution.clone();
+        let control = Arc::clone(&self.control);
+        let terminal = self.terminal.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = control.settled() => {},
+                _ = terminal.wait() => {},
+            }
+            remove_hosted_cell(&slot, &execution, &control);
+        });
     }
 }
 
 impl Drop for HostedCellPublication {
     fn drop(&mut self) {
-        let mut slot = self.slot.lock();
-        if slot
-            .as_ref()
-            .is_some_and(|published| Arc::ptr_eq(published, &self.control))
-        {
-            *slot = None;
+        let running = self
+            .slot
+            .lock()
+            .get(&self.execution)
+            .is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| Arc::ptr_eq(&entry.control, &self.control) && entry.running)
+            });
+        if !running || self.control.terminal_reply().is_some() {
+            remove_hosted_cell(&self.slot, &self.execution, &self.control);
+        }
+    }
+}
+
+fn remove_hosted_cell(
+    slot: &crate::kernel::HostedCellSlot,
+    execution: &WorkbenchExecutionId,
+    control: &Arc<WorkbenchExecutionControl>,
+) {
+    let mut slot = slot.lock();
+    if let Some(entries) = slot.get_mut(execution) {
+        entries.retain(|entry| !Arc::ptr_eq(&entry.control, control));
+        if entries.is_empty() {
+            slot.remove(execution);
         }
     }
 }
@@ -399,16 +463,10 @@ pub trait ResidentToolEndpoint: Send + Sync {
     }
 }
 
-/// The single in-flight workbench execution this client is currently
-/// dispatching to, if any, alongside the control handle used to steer it.
-type ActiveWorkbenchSlot =
-    Arc<parking_lot::Mutex<Option<(WorkbenchExecutionId, Arc<WorkbenchExecutionControl>)>>>;
-
 #[derive(Clone)]
 pub(crate) struct ResidentToolClient {
     actor: crate::LocalActorRef,
     dispatch_gate: Arc<tokio::sync::Mutex<()>>,
-    active_workbench: ActiveWorkbenchSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -489,7 +547,6 @@ impl ResidentToolClient {
         Self {
             actor,
             dispatch_gate: Arc::new(tokio::sync::Mutex::new(())),
-            active_workbench: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -499,11 +556,12 @@ impl ResidentToolClient {
     ) -> Result<WorkbenchCancellationOutcome, ResidentToolError> {
         let execution = execution_id(self.actor.identity(), &invocation.clone().into());
         let control = self
-            .active_workbench
+            .actor
+            .hosted_cell()
             .lock()
-            .as_ref()
-            .filter(|(active, _)| active == &execution)
-            .map(|(_, control)| Arc::clone(control));
+            .get(&execution)
+            .and_then(|entries| entries.iter().find(|entry| entry.running))
+            .map(|entry| Arc::clone(&entry.control));
         let Some(control) = control else {
             let (reply, receive) = oneshot::channel();
             self.actor
@@ -578,13 +636,17 @@ impl ResidentToolClient {
         boundary: tidepool_runtime::session::WorkbenchForkBoundary,
     ) -> Result<WorkbenchBoundaryReconciliation, ResidentToolError> {
         if self
-            .active_workbench
+            .actor
+            .hosted_cell()
             .lock()
-            .as_ref()
-            .is_some_and(|(_, control)| {
-                control.invocation.as_ref().is_some_and(|invocation| {
-                    invocation.matches_boundary(&boundary) && control.terminal_reply().is_none()
-                })
+            .values()
+            .flatten()
+            .any(|entry| {
+                entry.running
+                    && entry.control.invocation.as_ref().is_some_and(|invocation| {
+                        invocation.matches_boundary(&boundary)
+                            && entry.control.terminal_reply().is_none()
+                    })
             })
         {
             return Ok(WorkbenchBoundaryReconciliation::Pending);
@@ -650,7 +712,7 @@ impl ResidentToolClient {
         // returns or is dropped: while queued on the gate or computing,
         // `cancel_workbench` cannot interrupt it, and the host's delivery
         // pump must not start an input exchange that would wait on it.
-        let _published = HostedCellPublication::publish(&self.actor, &control);
+        let published = HostedCellPublication::publish(&self.actor, execution.clone(), &control);
         let _turn = self.dispatch_gate.lock().await;
         {
             // The cell runs in the actor's own task, so its span cannot be a
@@ -667,7 +729,7 @@ impl ResidentToolClient {
                 "workbench cell dispatched to its actor"
             );
         }
-        *self.active_workbench.lock() = Some((execution, Arc::clone(&control)));
+        published.mark_running();
         self.dispatch_registered_workbench(request, control).await
     }
 
@@ -689,7 +751,6 @@ impl ResidentToolClient {
         {
             let error = crate::KernelInvocationFailure::ActorExited(self.actor.identity());
             control.settle(Err(error.clone()));
-            self.active_workbench.lock().take();
             return Err(ResidentToolError::Invocation(error));
         }
         let reply = receive.await.map_err(|_| {
@@ -698,7 +759,6 @@ impl ResidentToolClient {
             )
         })?;
         control.settle(reply.clone());
-        self.active_workbench.lock().take();
         let response = reply.map_err(ResidentToolError::Invocation)?;
         serde_json::to_value(response).map_err(ResidentToolError::Encoding)
     }
@@ -980,12 +1040,143 @@ mod tests {
 
         // An execution whose reply is lost is cleared too.
         let torn_down = dispatch(client.clone(), invocation);
-        let (_control, reply) = received.recv().await.unwrap();
+        let (control, reply) = received.recv().await.unwrap();
+        let control = control.unwrap();
         assert!(actor.hosted_cell_computing());
         drop(reply);
         assert!(torn_down.await.unwrap().is_err());
+        assert!(
+            actor.hosted_cell_computing(),
+            "a lost transport waiter does not end the actor's execution"
+        );
+        control.settle(terminal_reply());
         assert!(!actor.hosted_cell_computing());
 
+        address.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hosted_calls_retain_each_execution_and_cancel_only_the_running_match() {
+        let (send, _received) = tokio::sync::mpsc::unbounded_channel();
+        let (address, task) = ractor::Actor::spawn(None, WorkbenchCollector, send)
+            .await
+            .unwrap();
+        let actor = crate::LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
+        let client = ResidentToolClient::local(actor.clone());
+        let invocation = |call_id: &str| ToolInvocationContext {
+            context_call_id: Some(format!("outer-{call_id}")),
+            thread_id: "thread".into(),
+            turn_id: "turn".into(),
+            call_id: call_id.into(),
+            namespace: None,
+        };
+        let first = invocation("first");
+        let second = invocation("second");
+        let first_id = execution_id(actor.identity(), &first.clone().into());
+        let second_id = execution_id(actor.identity(), &second.clone().into());
+        let first_control = WorkbenchExecutionControl::new(Some(first.clone().into()));
+        let second_control = WorkbenchExecutionControl::new(Some(second.clone().into()));
+        let first_publication =
+            HostedCellPublication::publish(&actor, first_id.clone(), &first_control);
+        let second_publication =
+            HostedCellPublication::publish(&actor, second_id.clone(), &second_control);
+        first_publication.mark_running();
+        first_control.arm_sleep();
+        assert!(
+            actor.hosted_cell_computing(),
+            "the queued second call is visible"
+        );
+        first_control.settle(terminal_reply());
+        drop(first_publication);
+        assert!(
+            actor.hosted_cell_computing(),
+            "dropping one call preserves the other"
+        );
+
+        // A retry with the same identity waits behind the original. Dropping
+        // it must not erase the original's direct cancellation control.
+        let retry_control = WorkbenchExecutionControl::new(Some(second.clone().into()));
+        let retry = HostedCellPublication::publish(&actor, second_id, &retry_control);
+        second_publication.mark_running();
+        second_control.arm_sleep();
+        drop(retry);
+        assert!(!actor.hosted_cell_computing());
+
+        let cancelling = tokio::spawn(async move { client.cancel_workbench(second).await });
+        second_control.wait_for_cancellation().await;
+        assert!(!first_control.cancellation_requested());
+        assert!(!retry_control.cancellation_requested());
+        second_control.acknowledge_cancellation();
+        second_control.settle(terminal_reply());
+        assert!(matches!(
+            cancelling.await.unwrap().unwrap(),
+            WorkbenchCancellationOutcome::Cancelled { execution, .. } if execution == execution_id(actor.identity(), &invocation("second").into())
+        ));
+        drop(second_publication);
+        assert!(actor.hosted_cell().lock().is_empty());
+        assert!(!actor.hosted_cell_computing());
+        address.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lost_transport_waiter_keeps_running_cell_cancellable_until_settlement() {
+        let (send, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let (address, task) = ractor::Actor::spawn(None, WorkbenchCollector, send)
+            .await
+            .unwrap();
+        let actor = crate::LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
+        let client = ResidentToolClient::local(actor.clone());
+        let invocation = ToolInvocationContext {
+            context_call_id: Some("outer-call".into()),
+            thread_id: "thread".into(),
+            turn_id: "turn".into(),
+            call_id: "call".into(),
+            namespace: None,
+        };
+        let execution = execution_id(actor.identity(), &invocation.clone().into());
+        let dispatch_client = client.clone();
+        let dispatch_invocation = invocation.clone();
+        let dispatch = tokio::spawn(async move {
+            dispatch_client
+                .dispatch_workbench(
+                    WorkbenchRequest::from_cell_input("cell"),
+                    Some(dispatch_invocation),
+                )
+                .await
+        });
+        let (control, reply) = received.recv().await.unwrap();
+        let control = control.unwrap();
+        control.arm_sleep();
+        dispatch.abort();
+        assert!(dispatch.await.is_err());
+        assert!(matches!(
+            client
+                .reconcile_workbench(tidepool_runtime::session::WorkbenchForkBoundary {
+                    thread_id: "thread".into(),
+                    call_id: "outer-call".into(),
+                })
+                .await
+                .unwrap(),
+            WorkbenchBoundaryReconciliation::Pending
+        ));
+        let cancelling = tokio::spawn(async move { client.cancel_workbench(invocation).await });
+        control.wait_for_cancellation().await;
+        control.acknowledge_cancellation();
+        control.settle(terminal_reply());
+        assert!(matches!(
+            cancelling.await.unwrap().unwrap(),
+            WorkbenchCancellationOutcome::Cancelled { execution: actual, .. } if actual == execution
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !actor.hosted_cell().lock().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("settlement releases the retained running control");
+        drop(reply);
         address.stop(None);
         task.await.unwrap();
     }

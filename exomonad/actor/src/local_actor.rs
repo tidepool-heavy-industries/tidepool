@@ -1288,27 +1288,39 @@ where
                 reply,
             } => {
                 if !matches!(state.hosted_admission, HostedAdmission::Open) {
-                    reply
-                        .send(Err(KernelInvocationFailure::Rejected {
-                            actor: state.context.identity,
-                            detail: "hosted work admission is sealed".into(),
-                        }))
-                        .ok();
+                    let result = Err(KernelInvocationFailure::Rejected {
+                        actor: state.context.identity,
+                        detail: "hosted work admission is sealed".into(),
+                    });
+                    if let Some(control) = &control {
+                        control.settle(result.clone());
+                    }
+                    reply.send(result).ok();
                     return Ok(());
                 }
 
                 match state
                     .behavior
-                    .workbench(&state.context, request, control)
+                    .workbench(&state.context, request, control.clone())
                     .await
                 {
                     Ok(step) => {
                         settle_step(&myself, state, step, |output| {
+                            if let Some(control) = &control {
+                                if control.terminal_reply().is_none() {
+                                    control.settle(Ok(output.clone()));
+                                }
+                            }
                             reply.send(Ok(output)).ok();
                         })
                         .await;
                     }
                     Err(error) => {
+                        if let Some(control) = &control {
+                            if control.terminal_reply().is_none() {
+                                control.settle(Err(error.clone()));
+                            }
+                        }
                         reply.send(Err(error)).ok();
                     }
                 }
@@ -1898,6 +1910,7 @@ mod tests {
         mailbox_calls: Arc<Mutex<Vec<SessionId>>>,
         release_first: Arc<Notify>,
         fail_cast: bool,
+        reject_workbench: bool,
         mailbox_ready: bool,
         spawned_child: Arc<Mutex<Option<LocalActorRef>>>,
         child_exits: Arc<Mutex<Vec<ActorTerminal>>>,
@@ -2126,7 +2139,15 @@ mod tests {
             _request: WorkbenchRequest,
             _control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
         ) -> BoxFuture<'_, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
-            Box::pin(async {
+            let reject = self.reject_workbench;
+            let actor = _context.identity;
+            Box::pin(async move {
+                if reject {
+                    return Err(KernelInvocationFailure::Rejected {
+                        actor,
+                        detail: "probe rejects workbench".into(),
+                    });
+                }
                 Ok(KernelStep::Continue(WorkbenchResponse {
                     status: WorkbenchRunStatus::Committed,
                     summary: None,
@@ -2294,6 +2315,7 @@ mod tests {
                 mailbox_calls: Arc::clone(&mailbox_calls),
                 release_first: Arc::clone(&release),
                 fail_cast,
+                reject_workbench: false,
                 mailbox_ready: true,
                 spawned_child: Arc::clone(&spawned_child),
                 child_exits: Arc::clone(&child_exits),
@@ -2307,6 +2329,47 @@ mod tests {
             spawned_child,
             child_exits,
         }
+    }
+
+    #[tokio::test]
+    async fn workbench_rejections_settle_control_without_a_transport_waiter() {
+        let mut fixture = behavior(false);
+        fixture.behavior.reject_workbench = true;
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        let send_without_waiter = |control: Arc<crate::WorkbenchExecutionControl>| {
+            let (reply, receive) = oneshot::channel();
+            actor
+                .address()
+                .send_message(KernelMessage::Workbench {
+                    request: WorkbenchRequest::from_cell_input("cell"),
+                    control: Some(control),
+                    reply: reply.into(),
+                })
+                .unwrap();
+            drop(receive);
+        };
+
+        let early = crate::WorkbenchExecutionControl::untracked();
+        send_without_waiter(Arc::clone(&early));
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), early.settled())
+                .await
+                .unwrap(),
+            Err(KernelInvocationFailure::Rejected { detail, .. }) if detail == "probe rejects workbench"
+        ));
+
+        actor.seal_hosted_work().await.unwrap();
+        let sealed = crate::WorkbenchExecutionControl::untracked();
+        send_without_waiter(Arc::clone(&sealed));
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), sealed.settled())
+                .await
+                .unwrap(),
+            Err(KernelInvocationFailure::Rejected { detail, .. }) if detail == "hosted work admission is sealed"
+        ));
+
+        actor.address().stop(None);
+        task.await.unwrap();
     }
 
     #[tokio::test]
