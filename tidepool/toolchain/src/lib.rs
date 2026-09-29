@@ -21,6 +21,7 @@ pub mod digest;
 pub mod failclass;
 pub mod paths;
 pub mod prepared_artifact;
+pub mod recovery_artifacts;
 pub mod timing;
 pub mod toolchain;
 
