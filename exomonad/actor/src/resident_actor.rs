@@ -1063,6 +1063,22 @@ struct ActiveWorkbenchExecution {
     admitted_source: crate::CheckpointSourceLayer,
 }
 
+struct WorkbenchAdmission {
+    context: ActorSessionContext,
+    request: WorkbenchRequest,
+    installed_tools: Option<crate::InstalledToolLease>,
+    admitted_source: crate::CheckpointSourceLayer,
+    current_builtin: bool,
+    capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
+    control: Option<Arc<crate::WorkbenchExecutionControl>>,
+    invocation: Option<crate::resident_tools::WorkbenchCallKey>,
+}
+
+enum WorkbenchPreflight {
+    Retained(crate::KernelWorkbenchReply),
+    Admitted(WorkbenchAdmission),
+}
+
 // Even a raw operator notebook with no provider boundary publishes at the
 // end of its input. A resident handler has no later notebook completion.
 enum ForkPublication {
@@ -1252,6 +1268,97 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     }
     fn context(&self, actor: ActorRef) -> ActorSessionContext {
         self.descriptor.session_context(actor)
+    }
+
+    fn preflight_workbench(
+        &self,
+        actor: ActorRef,
+        invocation: crate::ActorWorkbenchInvocation,
+        control: Option<Arc<crate::WorkbenchExecutionControl>>,
+    ) -> Result<WorkbenchPreflight, KernelInvocationFailure>
+    where
+        H: DispatchEffect<O> + Send + 'static,
+        O: OutputSink + Sync + 'static,
+    {
+        let mut context = self.context(actor);
+        let request = invocation.request;
+        let installed_tools = match invocation.installed_tools {
+            Some(lease) if lease.actor() != context.actor => {
+                return Err(KernelInvocationFailure::Rejected {
+                    actor: context.actor,
+                    detail: "issued tool installation belongs to another actor".into(),
+                });
+            }
+            Some(lease) => Some(lease),
+            None => self.installed_tools.current(),
+        };
+        let current_builtin = request.tool_call().is_some_and(|call| {
+            matches!(
+                call.name.as_str(),
+                crate::status_tool::STATUS_TOOL
+                    | crate::reload_spec_tool::RELOAD_SPEC_TOOL
+                    | crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
+            )
+        });
+        if !self.policy_installed
+            || !matches!(
+                self.standing,
+                ResidentStanding::Interactive(_)
+                    | ResidentStanding::Receiving(_)
+                    | ResidentStanding::Workbench
+            )
+        {
+            return Err(KernelInvocationFailure::Rejected {
+                actor: context.actor,
+                detail: "actor has no active Haskell application workbench".into(),
+            });
+        }
+        let invocation_key = control
+            .as_ref()
+            .and_then(|control| control.invocation.clone());
+        if let Some(execution) = request.execution_id() {
+            match self.workbench_executions.lock().lookup(
+                execution,
+                &request,
+                invocation_key.as_ref(),
+            ) {
+                Err(failure) => {
+                    return Err(KernelInvocationFailure::Rejected {
+                        actor: context.actor,
+                        detail: match failure {
+                            WorkbenchReplayFailure::DifferentInput => "one hosted call identity was retried with different Haskell input",
+                            WorkbenchReplayFailure::Unconfirmed => "the original hosted call outcome is unconfirmed; replay cannot repeat its effects",
+                        }
+                        .into(),
+                    });
+                }
+                Ok(Some(reply)) => return Ok(WorkbenchPreflight::Retained(reply)),
+                Ok(None) => {}
+            }
+        }
+        let admitted_source = installed_tools
+            .as_ref()
+            .map_or_else(
+                || self.freeze_installed_source(context.actor),
+                |lease| Ok(lease.source().clone()),
+            )
+            .map_err(|error| KernelInvocationFailure::Rejected {
+                actor: context.actor,
+                detail: format!("cannot admit exact source layer: {error}"),
+            })?;
+        if !current_builtin {
+            context = context.with_issued_source(&admitted_source);
+        }
+        Ok(WorkbenchPreflight::Admitted(WorkbenchAdmission {
+            context,
+            request,
+            installed_tools,
+            admitted_source,
+            current_builtin,
+            capture: invocation.hosted_checkpoint_capture,
+            control,
+            invocation: invocation_key,
+        }))
     }
 
     fn active_reservation_owner(&self) -> Option<RequestReservationOwner> {
@@ -8354,81 +8461,23 @@ where
         Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
     > {
         Box::pin(async move {
-            let mut context = self.context(kernel.identity());
-            let capture = invocation.hosted_checkpoint_capture;
-            let request = invocation.request;
-            let installed_tools = match invocation.installed_tools {
-                Some(lease) if lease.actor() != context.actor => {
-                    return Err(KernelInvocationFailure::Rejected {
-                        actor: context.actor,
-                        detail: "issued tool installation belongs to another actor".into(),
-                    });
-                }
-                Some(lease) => Some(lease),
-                None => self.installed_tools.current(),
+            let admitted = self.preflight_workbench(kernel.identity(), invocation, control)?;
+            let WorkbenchAdmission {
+                context,
+                request,
+                installed_tools,
+                admitted_source,
+                current_builtin,
+                capture,
+                control,
+                invocation,
+            } = match admitted {
+                WorkbenchPreflight::Retained(reply) => return reply.map(KernelStep::Continue),
+                WorkbenchPreflight::Admitted(admitted) => admitted,
             };
-            let current_builtin = request.tool_call().is_some_and(|call| {
-                matches!(
-                    call.name.as_str(),
-                    crate::status_tool::STATUS_TOOL
-                        | crate::reload_spec_tool::RELOAD_SPEC_TOOL
-                        | crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
-                )
-            });
-            if !self.policy_installed
-                || !matches!(
-                    self.standing,
-                    ResidentStanding::Interactive(_)
-                        | ResidentStanding::Receiving(_)
-                        | ResidentStanding::Workbench
-                )
-            {
-                return Err(KernelInvocationFailure::Rejected {
-                    actor: context.actor,
-                    detail: "actor has no active Haskell application workbench".into(),
-                });
-            }
             let execution = request.execution_id().cloned();
-            let invocation = control
-                .as_ref()
-                .and_then(|control| control.invocation.as_ref());
-            if let Some(execution) = &execution {
-                let retained = self
-                    .workbench_executions
-                    .lock()
-                    .lookup(execution, &request, invocation);
-                match retained {
-                    Err(failure) => {
-                        let result = Err(KernelInvocationFailure::Rejected {
-                            actor: context.actor,
-                            detail: match failure {
-                                WorkbenchReplayFailure::DifferentInput => "one hosted call identity was retried with different Haskell input",
-                                WorkbenchReplayFailure::Unconfirmed => "the original hosted call outcome is unconfirmed; replay cannot repeat its effects",
-                            }.into(),
-                        });
-                        return result.map(KernelStep::Continue);
-                    }
-                    Ok(Some(reply)) => {
-                        return reply.map(KernelStep::Continue);
-                    }
-                    Ok(None) => {}
-                }
-            }
             let retained_request = execution.as_ref().map(|_| request.clone());
             let checkpoint_boundary = request.fork_boundary().cloned();
-            let admitted_source = installed_tools
-                .as_ref()
-                .map_or_else(
-                    || self.freeze_installed_source(context.actor),
-                    |lease| Ok(lease.source().clone()),
-                )
-                .map_err(|error| KernelInvocationFailure::Rejected {
-                    actor: context.actor,
-                    detail: format!("cannot admit exact source layer: {error}"),
-                })?;
-            if !current_builtin {
-                context = context.with_issued_source(&admitted_source);
-            }
             let public_visibility = if current_builtin {
                 None
             } else {
@@ -8446,9 +8495,11 @@ where
             if let Some(execution) = &execution {
                 // Persist the fence in the forest-retained journal before effects
                 // can run; actor termination cannot turn uncertainty into replay.
-                self.workbench_executions
-                    .lock()
-                    .begin(execution, request.clone(), invocation);
+                self.workbench_executions.lock().begin(
+                    execution,
+                    request.clone(),
+                    invocation.as_ref(),
+                );
             }
             let local_execution_id = execution.clone().unwrap_or_else(|| {
                 WorkbenchExecutionId::from_digest(*uuid::Uuid::new_v4().as_bytes())
@@ -8659,7 +8710,7 @@ where
                     request,
                     reply,
                     cancellation,
-                    invocation,
+                    invocation.as_ref(),
                 );
             }
             result
