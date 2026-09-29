@@ -314,6 +314,18 @@ pub enum SessionError {
     RecoveryManifest { path: PathBuf, detail: String },
 }
 
+/// Exact public lexical view captured under one resident-machine checkout.
+/// The epoch is resident-session owned and distinct from compiler allocation
+/// generations; the declaration tip and full binding identities also permit
+/// exact stale checks while concurrent publication is being introduced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicVisibilitySnapshot {
+    pub scope: ScopeId,
+    pub epoch: u64,
+    pub declaration_tip: Generation,
+    pub bindings: Vec<(String, SessionVarId)>,
+}
+
 /// A resident session's declaration library. Owns the ordered decl log, the
 /// monotonic generation, and the on-disk include tree.
 pub struct SessionLib {

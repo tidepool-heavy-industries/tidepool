@@ -1736,6 +1736,7 @@ pub struct ResidentSession<H, O> {
     /// merge + fragment-run primitives all live in the session state, shared with the
     /// repl's resident session.
     state: PersistentSession,
+    public_visibility_epochs: HashMap<ScopeId, u64>,
     /// The effect handler stack, borrowed by each turn's eval thread.
     handlers: H,
     /// The console-output buffer turns write into.
@@ -1790,6 +1791,7 @@ where
         let state = PersistentSession::new(lib, nursery_size);
         ResidentSession {
             state,
+            public_visibility_epochs: HashMap::new(),
             handlers,
             captured,
             cont_id_issuer: MonotonicIdIssuer::new("scont"),
@@ -1811,6 +1813,39 @@ where
     /// intended caller.
     pub fn set_image_registry(&mut self, registry: Arc<ImageRegistry>) {
         self.state.set_image_registry(registry);
+    }
+
+    fn advance_public_visibility(&mut self, scope: ScopeId) {
+        let epoch = self.public_visibility_epochs.entry(scope).or_default();
+        *epoch = epoch
+            .checked_add(1)
+            .expect("public visibility epoch exhausted");
+    }
+
+    /// Capture both halves of the actor's public lexical environment under
+    /// the caller's machine checkout. `epoch` is not a compiler generation;
+    /// exact declaration and binding identities remain the stale authority.
+    pub fn public_visibility_snapshot_in(
+        &self,
+        scope: ScopeId,
+    ) -> Option<super::PublicVisibilitySnapshot> {
+        if !self.state.scope_tree().is_live(scope) || !self.state.has_lib() {
+            return None;
+        }
+        let mut bindings: Vec<_> = self
+            .state
+            .bindings()
+            .iter_current_in(self.state.scope_tree(), scope)
+            .into_iter()
+            .map(|(name, entry)| (name.0.clone(), entry.id))
+            .collect();
+        bindings.sort_by(|left, right| left.0.cmp(&right.0));
+        Some(super::PublicVisibilitySnapshot {
+            scope,
+            epoch: self.public_visibility_epochs.get(&scope).copied().unwrap_or(0),
+            declaration_tip: self.state.lib().scope_tip(scope),
+            bindings,
+        })
     }
 
     /// Observe only the continuation events caused by this checkout's host
@@ -1839,7 +1874,7 @@ where
         &mut self,
         decls: &[&str],
     ) -> Result<tidepool_repr::Generation, SessionError> {
-        self.state.define_scoped(decls)
+        self.define_scoped_in(ScopeId::ROOT, decls)
     }
 
     /// Scoped [`Self::define_scoped`]: append to `scope`'s own decl tip, which
@@ -1851,7 +1886,9 @@ where
         scope: ScopeId,
         decls: &[&str],
     ) -> Result<tidepool_repr::Generation, SessionError> {
-        self.state.define_scoped_in(scope, decls)
+        let generation = self.state.define_scoped_in(scope, decls)?;
+        self.advance_public_visibility(scope);
+        Ok(generation)
     }
 
     /// Commit declarations against frontend-owned imports without recording
@@ -1862,8 +1899,11 @@ where
         decls: &[&str],
         imports: &SourceImports,
     ) -> Result<tidepool_repr::Generation, SessionError> {
-        self.state
-            .define_scoped_with_imports_in(scope, decls, imports)
+        let generation = self
+            .state
+            .define_scoped_with_imports_in(scope, decls, imports)?;
+        self.advance_public_visibility(scope);
+        Ok(generation)
     }
 
     pub fn stage_declarations_in(
@@ -1901,15 +1941,21 @@ where
         receipt: &super::DeclarationReceipt,
         imports: &SourceImports,
     ) -> Result<super::DeclarationPlaneCommit, SessionError> {
-        self.state
-            .commit_declaration_receipt_in(scope, receipt, imports)
+        let committed = self
+            .state
+            .commit_declaration_receipt_in(scope, receipt, imports)?;
+        self.advance_public_visibility(scope);
+        Ok(committed)
     }
 
     pub fn adopt_staged_declaration_in(
         &mut self,
         staged: super::StagedDeclaration,
     ) -> Result<super::DeclarationPlaneCommit, SessionError> {
-        self.state.adopt_staged_declaration_in(staged)
+        let scope = staged.scope();
+        let committed = self.state.adopt_staged_declaration_in(staged)?;
+        self.advance_public_visibility(scope);
+        Ok(committed)
     }
 
     pub fn discard_staged_declaration(&self, staged: &super::StagedDeclaration) {
@@ -2066,6 +2112,7 @@ where
             source,
         )?;
         self.state.set_val_gen(generation);
+        self.advance_public_visibility(scope);
         if let Some(provenance) = provenance {
             self.binding_provenance.insert(id.raw(), provenance);
         }
@@ -2919,7 +2966,11 @@ where
     /// itself.
     pub fn retire_host_binding_owner(&mut self, session_root: &Path, binder: &BoundBinder) {
         let id = SessionVarId::from_extract(binder.var_id);
+        let scope = self.state.bindings().get(id).map(|entry| entry.scope);
         self.state.retire_binding_owner(id);
+        if let Some(scope) = scope {
+            self.advance_public_visibility(scope);
+        }
         self.hidden_host_bindings.remove(&id);
         self.reap_evicted_stub_sources_in(session_root);
     }
@@ -3536,6 +3587,7 @@ where
     /// scope is a no-op returning an all-zero receipt.
     pub fn retire_scope(&mut self, scope: ScopeId) -> ScopeRetirement {
         let retirement = self.state.retire_scope(scope);
+        self.advance_public_visibility(scope);
         self.host_text_bindings
             .retain(|id, _| self.state.bindings().get(*id).is_some());
         self.hidden_host_bindings
@@ -3990,6 +4042,7 @@ where
                 }
                 return Err(error.into());
             }
+            self.advance_public_visibility(scope);
         }
         self.state.set_val_gen(generation);
         Ok(())

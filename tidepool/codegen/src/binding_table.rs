@@ -61,6 +61,13 @@ use crate::scope::{ScopeId, ScopeTree};
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BindingTipId(pub u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingPromotionError {
+    MissingOrForeignBinding,
+    NotCurrentInSource,
+    DuplicateName,
+}
+
 #[derive(Debug)]
 struct BindingTip {
     id: BindingTipId,
@@ -141,6 +148,10 @@ pub struct BindingTable {
     observations: HashMap<SessionVarId, ObservationBinding>,
     next_observation_order: u64,
     scope_local_aliases: HashSet<SessionVarId>,
+    /// Exact private owners and their dependency closure retained by a
+    /// public scope after promotion. The original ids, interfaces and roots
+    /// remain in `live`; retiring the private scope cannot evict them.
+    promoted: HashMap<ScopeId, HashSet<SessionVarId>>,
 }
 
 struct ObservationBinding {
@@ -162,6 +173,7 @@ impl Default for BindingTable {
             observations: HashMap::new(),
             next_observation_order: 0,
             scope_local_aliases: HashSet::new(),
+            promoted: HashMap::new(),
         }
     }
 }
@@ -369,6 +381,48 @@ impl BindingTable {
         id
     }
 
+    /// Make exact completed private bindings visible in `target` without
+    /// cloning roots or selecting winners by compile-generation order. The
+    /// caller validates both live scopes and declaration compatibility before
+    /// this infallible visibility change. Every requested name is validated
+    /// first, so an invalid batch leaves the target frame untouched.
+    pub fn promote_exact_bindings_in(
+        &mut self,
+        source: ScopeId,
+        target: ScopeId,
+        ids: &[SessionVarId],
+    ) -> Result<(), BindingPromotionError> {
+        let mut names = HashSet::new();
+        let mut writes = Vec::with_capacity(ids.len());
+        for &id in ids {
+            let entry = self
+                .live
+                .get(&id)
+                .filter(|entry| entry.scope == source)
+                .ok_or(BindingPromotionError::MissingOrForeignBinding)?;
+            if self.current.get(&source).and_then(|frame| frame.get(&entry.name)) != Some(&id) {
+                return Err(BindingPromotionError::NotCurrentInSource);
+            }
+            if !names.insert(entry.name.clone()) {
+                return Err(BindingPromotionError::DuplicateName);
+            }
+            writes.push((entry.name.clone(), id));
+        }
+        let retained = self.dependency_closure(ids.iter().copied());
+        let existing = self.promoted.entry(target).or_default();
+        let added: HashSet<_> = retained.difference(existing).copied().collect();
+        existing.extend(added.iter().copied());
+        self.lease_exact_ids(&added);
+        let frame = self.current.entry(target).or_default();
+        for (name, id) in writes {
+            if let Some(hidden) = self.hidden.get_mut(&target) {
+                hidden.remove(&name);
+            }
+            frame.insert(name, id);
+        }
+        Ok(())
+    }
+
     /// Publish an alias of an existing root through the ordinary scoped name
     /// map. Its source remains live while the alias is current, captured by
     /// another observation, or externally leased. Replacing the alias lets
@@ -491,6 +545,9 @@ impl BindingTable {
     /// order [`ScopeTree::retire`] hands back.
     pub fn drain_scope(&mut self, scope: ScopeId) -> Vec<BindingEntry> {
         let mut released = self.release_tip(scope);
+        if let Some(promoted) = self.promoted.remove(&scope) {
+            released.extend(self.release_leases(promoted));
+        }
         let mut ids: Vec<SessionVarId> = self
             .live
             .iter()

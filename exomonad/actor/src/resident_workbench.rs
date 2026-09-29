@@ -6356,6 +6356,23 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    pub(crate) async fn public_visibility_snapshot(
+        &self,
+        context: crate::ActorSessionContext,
+    ) -> Result<tidepool_runtime::session::PublicVisibilitySnapshot, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, |session, context, _| {
+                session
+                    .public_visibility_snapshot_in(context.placement.lexical_scope)
+                    .ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "workbench public lexical scope is unavailable".into(),
+                        )
+                    })
+            })
+            .await
+    }
+
     pub(crate) async fn capture_context_scope(
         &self,
         context: crate::ActorSessionContext,
