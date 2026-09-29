@@ -72,6 +72,11 @@ pub enum PreparedRuntimeError {
     SourceScopeAdmission,
     #[error("lexical scope has multiple mutable instances for certified source {0:?}")]
     AmbiguousSourceInstance(SourceBinder),
+    #[error("lexical scope has multiple mutable instances for certified group {owner:?} ordinal {ordinal}")]
+    AmbiguousSourceGroup {
+        owner: tidepool_repr::execution_schema::CachedHomeOwner,
+        ordinal: u32,
+    },
     #[error("prepared execution failed: {0}")]
     Run(ExecutionError),
     #[error("session binding {0:?} is not a live prepared binding")]
@@ -223,6 +228,7 @@ impl PreparedRuntimeError {
             | Self::UnreachableCertifiedGroup
             | Self::SourceScopeAdmission
             | Self::AmbiguousSourceInstance(_)
+            | Self::AmbiguousSourceGroup { .. }
             | Self::UnknownBinding(_)
             | Self::UnsettledEntry { .. }
             | Self::MachineNotInstalled

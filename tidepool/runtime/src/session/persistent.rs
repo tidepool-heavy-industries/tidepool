@@ -267,7 +267,18 @@ impl PersistentSession {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
         }
         let mut inherited = BTreeMap::<SourceBinder, SourceInstanceLease>::new();
+        let mut inherited_groups = HashMap::new();
         for lease in self.bindings.source_instances_in(&self.scopes, scope) {
+            let group = (lease.owner().clone(), lease.original_ordinal());
+            if inherited_groups
+                .insert(group.clone(), lease.instance())
+                .is_some_and(|previous| previous != lease.instance())
+            {
+                return Err(PreparedRuntimeError::AmbiguousSourceGroup {
+                    owner: group.0,
+                    ordinal: group.1,
+                });
+            }
             let binder = lease.binder().clone();
             if inherited
                 .insert(binder.clone(), lease.clone())
