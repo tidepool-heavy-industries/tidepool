@@ -434,6 +434,7 @@ pub struct CompiledProgram {
 pub(crate) struct TopExport {
     pub identity: tidepool_repr::execution_schema::SymbolIdentity,
     pub rep: RuntimeRep,
+    pub entry_signature: Option<Signature>,
     pub evaluated: bool,
 }
 
@@ -1298,6 +1299,13 @@ impl CompiledProgram {
                         TopExport {
                             identity: top.identity.clone(),
                             rep: plan.value_reps[&top.binding.id],
+                            entry_signature: match &top.binding.rhs {
+                                HeapRhs::Function { signature, .. }
+                                | HeapRhs::Thunk { signature, .. } => {
+                                    Some(plan.program.signatures()[signature.0 as usize].clone())
+                                }
+                                HeapRhs::Constructor { .. } | HeapRhs::Bytes(_) => None,
+                            },
                             evaluated: !matches!(top.binding.rhs, HeapRhs::Thunk { .. }),
                         },
                     )

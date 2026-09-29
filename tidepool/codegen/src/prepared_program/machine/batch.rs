@@ -1,12 +1,19 @@
 //! Atomic installation of mutually importing native group images.
 
 use super::*;
+use tidepool_repr::execution_schema::Signature;
 
 /// One import slot's already admitted owner. `Source` selects a top in this
 /// sealed batch; it never accepts a spelling-only match.
 pub enum BatchImport {
-    Existing(PreparedHandle),
-    Source { group: usize, binding: ValueId },
+    Existing {
+        handle: PreparedHandle,
+        entry_signature: Option<Signature>,
+    },
+    Source {
+        group: usize,
+        binding: ValueId,
+    },
 }
 
 pub struct BatchProgram {
@@ -83,7 +90,16 @@ impl PreparedMachine<'_> {
                             .top_exports
                             .get(binding)
                             .ok_or(ExecutionError::MissingEntry(*binding))?;
-                        if export.identity != slot.identity || export.rep != slot.rep {
+                        if export.identity != slot.identity
+                            || slot.entry_signature.as_ref().is_some_and(|expected| {
+                                export.entry_signature.as_ref() != Some(expected)
+                            })
+                        {
+                            return Err(ExecutionError::BatchSourceContract(Box::new(
+                                slot.identity.clone(),
+                            )));
+                        }
+                        if export.rep != slot.rep {
                             return Err(ExecutionError::ImportShape {
                                 identity: Box::new(slot.identity.clone()),
                                 expected: ImportShapeFact::Representation(slot.rep),
@@ -98,7 +114,19 @@ impl PreparedMachine<'_> {
                             });
                         }
                     }
-                    BatchImport::Existing(handle) => {
+                    BatchImport::Existing {
+                        handle,
+                        entry_signature,
+                    } => {
+                        if slot
+                            .entry_signature
+                            .as_ref()
+                            .is_some_and(|expected| entry_signature.as_ref() != Some(expected))
+                        {
+                            return Err(ExecutionError::BatchSourceContract(Box::new(
+                                slot.identity.clone(),
+                            )));
+                        }
                         if handle.rep != slot.rep {
                             return Err(ExecutionError::ImportShape {
                                 identity: Box::new(slot.identity.clone()),
@@ -171,21 +199,23 @@ impl PreparedMachine<'_> {
             blocks,
             owners,
             stack_maps,
+            candidate_alloc_start: None,
             committed: false,
         };
-        let staged = transaction
-            .machine
-            .stage_batch(&candidates, &external, heap_reserve);
-        let catalog = if staged.is_ok() && transaction.machine.static_catalog.is_none() {
-            transaction
-                .machine
-                .machine
-                .prepared_static_catalog()
-                .map(Some)
-                .map_err(|error| runtime_error(&transaction.machine.machine, error))
+        let staged = transaction.machine.stage_batch(
+            &candidates,
+            &external,
+            heap_reserve,
+            &mut transaction.candidate_alloc_start,
+        );
+        let catalog = if staged.is_ok() {
+            transaction.machine.install_catalog_after_stage()
         } else {
             Ok(None)
         };
+        if staged.is_ok() && catalog.is_ok() {
+            transaction.machine.commit_batch_metadata(&candidates);
+        }
         transaction.committed = staged.is_ok() && catalog.is_ok();
         drop(transaction);
         staged?;
@@ -245,6 +275,7 @@ impl PreparedMachine<'_> {
         candidates: &[Candidate],
         external: &[(usize, usize, PreparedHandle)],
         heap_reserve: usize,
+        candidate_alloc_start: &mut Option<*mut u8>,
     ) -> Result<(), ExecutionError> {
         let first = self.machine.gc_active_range().is_none();
         for (index, candidate) in candidates.iter().enumerate() {
@@ -300,6 +331,7 @@ impl PreparedMachine<'_> {
             return Err(runtime_error(&self.machine, RuntimeError::HeapOverflow));
         }
         let base = unsafe { start.add(cursor) };
+        *candidate_alloc_start = Some(base);
         let mut offsets = Vec::with_capacity(candidates.len());
         let mut used = 0usize;
         for candidate in candidates {
@@ -397,60 +429,20 @@ impl PreparedMachine<'_> {
             }
         }
 
-        // Registration and metadata publication only after the entire graph
-        // is initialized. Every image still has its own instance and roots.
-        for candidate in candidates {
-            let registry = &self.descriptor_registry;
-            self.descriptors.extend(
-                candidate
-                    .instance
-                    .descriptors
-                    .iter()
-                    .filter(|descriptor| !registry.contains_key(&descriptor.initial_header_word()))
-                    .cloned(),
-            );
-            self.descriptor_registry.extend(
-                candidate
-                    .instance
-                    .descriptor_registry
-                    .iter()
-                    .map(|(&header, metadata)| (header, metadata.clone())),
-            );
-            self.machine.register_prepared_constructors(
-                candidate
-                    .instance
-                    .descriptor_registry
-                    .iter()
-                    .filter_map(|(&header, metadata)| match &metadata.meaning {
-                        super::super::DescriptorMeaning::Constructor(observation) => {
-                            Some((header, observation.identity))
-                        }
-                        _ => None,
-                    }),
-            );
-            self.machine.register_prepared_entries(
-                (&*candidate.environment as *const InstallationEnvironment).cast(),
-                candidate.image.callables.iter().map(|callable| {
-                    (
-                        candidate.instance.header(callable.header),
-                        callable.signature.clone(),
-                        candidate.image.pipeline.get_function_ptr(callable.function),
-                    )
-                }),
-                candidate
-                    .image
-                    .thunk_entries
-                    .iter()
-                    .map(|&(header, function)| {
-                        (
-                            candidate.instance.header(header),
-                            candidate.image.pipeline.get_function_ptr(function),
-                        )
-                    }),
-            );
-            self.machine.absorb_interned_bytes(&candidate.image.bytes);
-        }
         Ok(())
+    }
+
+    /// No fallible work remains after catalog acquisition. In particular,
+    /// raw code/environment pointers must not enter the dispatch table while
+    /// an installation error can still drop their owners.
+    fn commit_batch_metadata(&mut self, candidates: &[Candidate]) {
+        for candidate in candidates {
+            self.commit_install_metadata(
+                &candidate.image,
+                &candidate.instance,
+                &candidate.environment,
+            );
+        }
     }
 }
 
@@ -458,11 +450,16 @@ impl PreparedMachine<'_> {
 mod tests {
     use super::*;
     use tidepool_repr::execution_schema::{
-        testing, CachedHomeOwner, CertifiedGroup, GlobalDecl, ImportOwner, ModuleVersion,
+        testing, Atom, CachedHomeOwner, CertifiedGroup, CheckedLayout, ConstructorDecl,
+        ConstructorId, ExprFrame, GlobalDecl, GlobalId, HeapRhs, ImportOwner, ModuleVersion,
+        Signature, SignatureId, ValueRef,
     };
 
     fn group(name: &str, ordinal: u32, other: &str) -> Arc<CompiledProgram> {
         let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.expressions.nodes[0] =
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
         if let tidepool_repr::execution_schema::Group::NonRecursive(top) = &mut wire.bindings[0] {
             top.identity = testing::identity("Fixture", name);
         }
@@ -470,7 +467,7 @@ mod tests {
         wire.globals.push(GlobalDecl {
             identity: imported.clone(),
             rep: RuntimeRep::LiftedRef,
-            entry_signature: None,
+            entry_signature: Some(SignatureId(0)),
             required_evaluated: false,
             required_generation: None,
         });
@@ -492,6 +489,47 @@ mod tests {
         Arc::new(CompiledProgram::compile_certified_group(&group).unwrap())
     }
 
+    fn static_group() -> Arc<CompiledProgram> {
+        let mut wire = testing::wire_program();
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("Static", "Tag"),
+            family: testing::identity("Static", "Tag"),
+            host_id: tidepool_repr::DataConId(90_001),
+            result_rep: RuntimeRep::LiftedRef,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+            tag: 1,
+            family_size: 1,
+        });
+        if let tidepool_repr::execution_schema::Group::NonRecursive(top) = &mut wire.bindings[0] {
+            top.identity = testing::identity("Fixture", "static");
+            top.binding.rhs = HeapRhs::Constructor {
+                constructor: ConstructorId(0),
+                fields: vec![],
+            };
+        }
+        wire.expressions.nodes.clear();
+        let group = CertifiedGroup::admit(
+            CachedHomeOwner {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                module_version: ModuleVersion([1; 32]),
+                skinny_iface_sha256: [2; 32],
+                product_sha256: [3; 32],
+            },
+            testing::projected_group(wire, 11).unwrap(),
+            vec![],
+        )
+        .unwrap();
+        Arc::new(CompiledProgram::compile_certified_group(&group).unwrap())
+    }
+
     #[test]
     fn cyclic_batch_installs_atomically_and_retires_after_final_pin() {
         let a = group("a", 2, "b");
@@ -500,28 +538,64 @@ mod tests {
             nursery_bytes: 4096,
         })
         .unwrap();
-        let ids = machine
-            .install_shared_batch(vec![
+        let batch = || {
+            vec![
                 BatchProgram {
-                    image: a,
+                    image: Arc::clone(&a),
                     imports: vec![BatchImport::Source {
                         group: 1,
                         binding: ValueId(0),
                     }],
                 },
                 BatchProgram {
-                    image: b,
+                    image: Arc::clone(&b),
                     imports: vec![BatchImport::Source {
                         group: 0,
                         binding: ValueId(0),
                     }],
                 },
-            ])
-            .unwrap();
+            ]
+        };
+        let ids = machine.install_shared_batch(batch()).unwrap();
         assert_eq!(ids.len(), 2);
+        let second = machine.install_shared_batch(batch()).unwrap();
+        let first_b = machine.retain_top(ids[1], ValueId(0)).unwrap();
+        let second_b = machine.retain_top(second[1], ValueId(0)).unwrap();
+        assert_ne!(
+            machine.handle_current_pointer(first_b),
+            machine.handle_current_pointer(second_b)
+        );
+        let call = PreparedCallOptions {
+            observation_budget: 0,
+            collect_before_observation: true,
+        };
+        let first_a = machine
+            .run_entry_retained(ids[0], ValueId(0), &[], call, RealmId::ROOT)
+            .unwrap();
+        let [PreparedResult::Managed(returned_b)] = first_a.values.as_slice() else {
+            panic!("group a must return imported group b's closure");
+        };
+        assert_eq!(
+            machine.handle_current_pointer(*returned_b),
+            machine.handle_current_pointer(first_b)
+        );
+        assert!(machine.release(*returned_b));
+        let second_a = machine
+            .run_entry_retained(second[0], ValueId(0), &[], call, RealmId::ROOT)
+            .unwrap();
+        let [PreparedResult::Managed(returned_second_b)] = second_a.values.as_slice() else {
+            panic!("second group a must return its own group b's closure");
+        };
+        assert_eq!(
+            machine.handle_current_pointer(*returned_second_b),
+            machine.handle_current_pointer(second_b)
+        );
+        assert!(machine.release(*returned_second_b));
+        assert!(machine.release(first_b));
+        assert!(machine.release(second_b));
         machine.pin(ids[0]).unwrap();
         let first = machine.collect_major(machine.quiesce().unwrap()).unwrap();
-        assert!(first.programs.is_empty());
+        assert_eq!(first.programs.len(), 2);
         assert_eq!(machine.residency().programs, 2);
         assert!(machine.unpin(ids[0]));
         let last = machine.collect_major(machine.quiesce().unwrap()).unwrap();
@@ -547,5 +621,132 @@ mod tests {
             }])
             .is_err());
         assert_eq!(machine.residency(), before);
+    }
+
+    #[test]
+    fn source_signature_mismatch_rejects_entire_batch() {
+        let mut a = group("a", 2, "b");
+        let b = group("b", 7, "a");
+        Arc::get_mut(&mut a).unwrap().import_slots[0].entry_signature = Some(Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+        });
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        assert!(matches!(
+            machine.install_shared_batch(vec![
+                BatchProgram {
+                    image: a,
+                    imports: vec![BatchImport::Source {
+                        group: 1,
+                        binding: ValueId(0)
+                    }],
+                },
+                BatchProgram {
+                    image: b,
+                    imports: vec![BatchImport::Source {
+                        group: 0,
+                        binding: ValueId(0)
+                    }],
+                },
+            ]),
+            Err(ExecutionError::BatchSourceContract(_))
+        ));
+        assert_eq!(machine.residency(), ResidencyCounts::default());
+    }
+
+    #[test]
+    fn batch_copies_static_regions_per_installation() {
+        let image = static_group();
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        let first = machine
+            .install_shared_batch(vec![BatchProgram {
+                image: Arc::clone(&image),
+                imports: vec![],
+            }])
+            .unwrap()[0];
+        let second = machine
+            .install_shared_batch(vec![BatchProgram {
+                image,
+                imports: vec![],
+            }])
+            .unwrap()[0];
+        let first_top = machine.retain_top(first, ValueId(0)).unwrap();
+        let second_top = machine.retain_top(second, ValueId(0)).unwrap();
+        assert_ne!(
+            machine.handle_current_pointer(first_top),
+            machine.handle_current_pointer(second_top)
+        );
+        assert!(machine.release(first_top));
+        assert!(machine.release(second_top));
+        let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(retired.programs.len(), 2);
+        assert_eq!(machine.residency().programs, 0);
+    }
+
+    #[test]
+    fn late_catalog_failure_rolls_back_batch_and_single_install() {
+        let a = group("a", 2, "b");
+        let b = group("b", 7, "a");
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        machine.fail_catalog_after_stage = true;
+        let batch = || {
+            vec![
+                BatchProgram {
+                    image: Arc::clone(&a),
+                    imports: vec![BatchImport::Source {
+                        group: 1,
+                        binding: ValueId(0),
+                    }],
+                },
+                BatchProgram {
+                    image: Arc::clone(&b),
+                    imports: vec![BatchImport::Source {
+                        group: 0,
+                        binding: ValueId(0),
+                    }],
+                },
+            ]
+        };
+        assert!(machine.install_shared_batch(batch()).is_err());
+        assert_eq!(machine.residency(), ResidencyCounts::default());
+        assert!(machine.descriptor_registry.is_empty());
+        machine.fail_catalog_after_stage = false;
+        let ids = machine.install_shared_batch(batch()).unwrap();
+        machine.pin(ids[0]).unwrap();
+        let before = machine.residency();
+        machine.fail_catalog_after_stage = true;
+        assert!(machine.install_shared_batch(batch()).is_err());
+        assert_eq!(machine.residency(), before);
+        machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(machine.residency().programs, 2);
+        machine.fail_catalog_after_stage = false;
+
+        let prepared = testing::prepare(testing::wire_program()).unwrap();
+        let linked = tidepool_repr::execution_schema::link_program(
+            prepared,
+            &tidepool_repr::execution_schema::MachineImports::default(),
+        )
+        .unwrap();
+        let single = Arc::new(CompiledProgram::compile(&linked).unwrap());
+        machine.fail_catalog_after_stage = true;
+        let before = machine.residency();
+        assert!(machine
+            .install_shared(Arc::clone(&single), ImportBindings::new())
+            .is_err());
+        assert_eq!(machine.residency(), before);
+        machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        machine.fail_catalog_after_stage = false;
+        machine
+            .install_shared(single, ImportBindings::new())
+            .unwrap();
     }
 }

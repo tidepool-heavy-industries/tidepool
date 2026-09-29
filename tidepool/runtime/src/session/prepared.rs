@@ -6,7 +6,7 @@
 //! Parsing, linking, compiled-owner construction, execution, cancellation,
 //! disposition, and retained-program reuse cross this boundary in that order.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use tidepool_bridge::{BridgeError, HaskellValue, HaskellVisitor};
@@ -15,11 +15,11 @@ use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
 use super::binding_table::BindingIndex;
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
-    CompileError, CompiledProgram, ExecutionError, ImageRegistry, ImportBindings, ManagedBuilder,
-    ManagedField, ManagedNode, Parcel, ParkRequest, PreparedCallOptions, PreparedFrameEvidence,
-    PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions,
-    PreparedOuter as CodegenPreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
-    RunOptions, MAX_ANSWER_DEPTH,
+    BatchImport, BatchProgram, CompileError, CompiledProgram, DemandError, DemandedImage,
+    ExecutionError, ImageRegistry, ImportBindings, ManagedBuilder, ManagedField, ManagedNode,
+    Parcel, ParkRequest, PreparedCallOptions, PreparedFrameEvidence, PreparedHandle, PreparedInput,
+    PreparedMachine, PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter, PreparedResult,
+    PreparedResultBatch, ProgramId, RunOptions, SourceBinder, MAX_ANSWER_DEPTH,
 };
 // Re-exported: callers of this module's resource-scope cancellation API
 // (`open_realm`/`cancel_handle`/`close_realm`) need both types without a
@@ -29,9 +29,9 @@ pub use tidepool_codegen::machine::MachineDisposition;
 use tidepool_codegen::suspension::ContinuationId;
 pub use tidepool_codegen::suspension::{RealmId, ValueHandle};
 use tidepool_repr::execution_schema::{
-    link_program, CtorRow, Group, HeapRhs, ImportedValue, JsonLayout, LinkError, MachineImports,
-    ParseError, PreparedProgram, RuntimeRep, Signature, SiteDelivery, SiteRow, SymbolIdentity,
-    TypeNode, TypeNodeId, ValueId,
+    link_program, CtorRow, DefinitionsView, Group, HeapRhs, ImportOwner, ImportedValue, JsonLayout,
+    LinkError, MachineImports, ParseError, PreparedProgram, RuntimeRep, Signature, SiteDelivery,
+    SiteRow, SymbolIdentity, TypeNode, TypeNodeId, ValueId,
 };
 use tidepool_repr::{DataConId, DataConTable, Literal, PrincipalId, SessionVarId};
 
@@ -59,6 +59,10 @@ pub enum PreparedRuntimeError {
     Cancelled,
     #[error("prepared compilation rejected: {0}")]
     Compile(CompileError),
+    #[error(transparent)]
+    Demand(#[from] DemandError),
+    #[error("no exact live owner for certified import {0:?}")]
+    MissingCertifiedOwner(ImportOwner),
     #[error("prepared execution failed: {0}")]
     Run(ExecutionError),
     #[error("session binding {0:?} is not a live prepared binding")]
@@ -204,6 +208,8 @@ impl PreparedRuntimeError {
         match self {
             Self::Parse(_)
             | Self::Link(_)
+            | Self::Demand(_)
+            | Self::MissingCertifiedOwner(_)
             | Self::UnknownBinding(_)
             | Self::UnsettledEntry { .. }
             | Self::MachineNotInstalled
@@ -238,6 +244,7 @@ impl PreparedRuntimeError {
                 | ExecutionError::ArgumentRepresentation { .. }
                 | ExecutionError::UnknownPreparedHandle
                 | ExecutionError::ImportShape { .. }
+                | ExecutionError::BatchSourceContract(_)
                 | ExecutionError::DescriptorShape { .. }
                 | ExecutionError::HostIdConflict { .. }
                 | ExecutionError::ForeignExternals
@@ -279,7 +286,7 @@ impl From<LinkError> for PreparedRuntimeError {
 /// machine has taken its code: the declared entry and, per top-level binding,
 /// the identity and entry signature an importer links against.
 struct ProgramFacts {
-    entry: ValueId,
+    entry: Option<ValueId>,
     tops: BTreeMap<ValueId, (SymbolIdentity, Option<Signature>)>,
     /// The `Tidepool.Internal.Resume.Settled` constructors this program
     /// declares, when its entry is a turn's settled scaffold.
@@ -411,6 +418,10 @@ impl SettledIds {
 
 impl ProgramFacts {
     fn of(prepared: &PreparedProgram) -> Self {
+        Self::of_definitions(prepared.definitions(), Some(prepared.entry()))
+    }
+
+    fn of_definitions(prepared: DefinitionsView<'_>, entry: Option<ValueId>) -> Self {
         let tops: BTreeMap<ValueId, (SymbolIdentity, Option<Signature>)> = prepared
             .bindings()
             .iter()
@@ -428,9 +439,9 @@ impl ProgramFacts {
                 (top.binding.id, (top.identity.clone(), export))
             })
             .collect();
-        let entry = prepared.entry();
-        let entry_module = tops
-            .get(&entry)
+        let entry_module = entry
+            .as_ref()
+            .and_then(|entry| tops.get(entry))
             .map(|(identity, _)| identity.module.clone());
         let resume = entry_module.clone().and_then(|module| {
             tops.iter().find_map(|(id, (identity, _))| {
@@ -2096,6 +2107,58 @@ impl PreparedEngine {
         })
     }
 
+    /// Check duplicate site and verb ownership across a batch before any
+    /// machine mutation. Equal evidence keeps its first planned owner.
+    fn plan_batch_evidence(
+        &self,
+        facts: &[ProgramFacts],
+    ) -> Result<Vec<EvidencePlan>, PreparedRuntimeError> {
+        let mut sites = BTreeMap::<u64, (usize, usize)>::new();
+        let mut verbs = BTreeMap::<DataConId, (usize, usize)>::new();
+        let mut plans = Vec::with_capacity(facts.len());
+        for (group, group_facts) in facts.iter().enumerate() {
+            let mut plan = self.plan_evidence(group_facts)?;
+            let mut accepted_sites = Vec::new();
+            for (site, row) in plan.sites.drain(..) {
+                if let Some(&(prior_group, prior_row)) = sites.get(&site) {
+                    if !sites_equivalent(
+                        &facts[prior_group],
+                        &facts[prior_group].sites[prior_row],
+                        group_facts,
+                        &group_facts.sites[row],
+                    ) {
+                        return Err(PreparedRuntimeError::DuplicateSite { site });
+                    }
+                } else {
+                    sites.insert(site, (group, row));
+                    accepted_sites.push((site, row));
+                }
+            }
+            plan.sites = accepted_sites;
+            let mut accepted_verbs = Vec::new();
+            for (host_id, row) in plan.verb_sites.drain(..) {
+                if let Some(&(prior_group, prior_row)) = verbs.get(&host_id) {
+                    if !sites_equivalent(
+                        &facts[prior_group],
+                        &facts[prior_group].sites[prior_row],
+                        group_facts,
+                        &group_facts.sites[row],
+                    ) {
+                        return Err(PreparedRuntimeError::DuplicateSite {
+                            site: group_facts.sites[row].site,
+                        });
+                    }
+                } else {
+                    verbs.insert(host_id, (group, row));
+                    accepted_verbs.push((host_id, row));
+                }
+            }
+            plan.verb_sites = accepted_verbs;
+            plans.push(plan);
+        }
+        Ok(plans)
+    }
+
     /// Offer `program`'s package tops to every later turn as executable
     /// imports, so the next turn's projection drops their bodies instead of
     /// handing this machine a second copy to compile.
@@ -2284,6 +2347,119 @@ impl PreparedEngine {
         Ok((values, imports))
     }
 
+    /// Install an off-checkout compiled, worker-certified source closure.
+    /// The caller supplies external handles under their exact retained or
+    /// package owner, including the package interface digest; the legacy
+    /// name-keyed package export table is not an owner authority here.
+    /// Every returned program is pinned across the install-to-bind gap.
+    pub fn install_certified_demand(
+        &mut self,
+        demanded: Vec<DemandedImage<'_>>,
+        exact_external: &HashMap<ImportOwner, PreparedHandle>,
+        bindings: &BindingTable,
+    ) -> Result<Vec<ProgramId>, PreparedRuntimeError> {
+        let mut source = BTreeMap::<SourceBinder, (usize, ValueId)>::new();
+        for (index, selected) in demanded.iter().enumerate() {
+            let group = selected.group();
+            let definitions = group.definitions();
+            for binder in group.binders() {
+                let top = definitions.bindings().iter().find_map(|binding| {
+                    let tops = match binding {
+                        Group::NonRecursive(top) => std::slice::from_ref(top),
+                        Group::Recursive(tops) => tops.as_slice(),
+                    };
+                    tops.iter().find(|top| &top.identity == binder)
+                });
+                let key = SourceBinder {
+                    version: group.owner().module_version.clone(),
+                    binder: binder.clone(),
+                };
+                let id = top
+                    .ok_or_else(|| DemandError::MissingSource(key.clone()))?
+                    .binding
+                    .id;
+                if source.insert(key.clone(), (index, id)).is_some() {
+                    return Err(DemandError::DuplicateBinder(key).into());
+                }
+            }
+        }
+
+        let facts: Vec<_> = demanded
+            .iter()
+            .map(|selected| ProgramFacts::of_definitions(selected.group().definitions(), None))
+            .collect();
+        let plans = self.plan_batch_evidence(&facts)?;
+        let mut programs = Vec::with_capacity(demanded.len());
+        for selected in &demanded {
+            let group = selected.group();
+            let mut imports = Vec::with_capacity(group.imports().len());
+            for (declaration, owner) in group.definitions().globals().iter().zip(group.imports()) {
+                match owner {
+                    ImportOwner::Source { version, binder } => {
+                        let key = SourceBinder {
+                            version: version.clone(),
+                            binder: binder.clone(),
+                        };
+                        let &(group, binding) = source
+                            .get(&key)
+                            .ok_or_else(|| DemandError::MissingSource(key.clone()))?;
+                        imports.push(BatchImport::Source { group, binding });
+                    }
+                    ImportOwner::Retained { id, generation } => {
+                        let entry = bindings.get(*id).ok_or_else(|| {
+                            PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
+                        })?;
+                        let handle = exact_external.get(owner).copied().ok_or_else(|| {
+                            PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
+                        })?;
+                        if entry.module.gen().0 != *generation
+                            || entry.value.identity != declaration.identity
+                            || entry.value.handle != handle
+                        {
+                            return Err(PreparedRuntimeError::MissingCertifiedOwner(owner.clone()));
+                        }
+                        imports.push(BatchImport::Existing {
+                            handle,
+                            entry_signature: None,
+                        });
+                    }
+                    ImportOwner::Package { .. } => {
+                        let handle = exact_external.get(owner).copied().ok_or_else(|| {
+                            PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
+                        })?;
+                        let entry_signature = self
+                            .code_exports
+                            .get(&declaration.identity)
+                            .filter(|export| export.handle == handle)
+                            .and_then(|export| export.entry.clone());
+                        imports.push(BatchImport::Existing {
+                            handle,
+                            entry_signature,
+                        });
+                    }
+                }
+            }
+            programs.push(BatchProgram {
+                image: Arc::clone(selected.image()),
+                imports,
+            });
+        }
+
+        let ids = self
+            .machine
+            .install_shared_batch(programs)
+            .map_err(PreparedRuntimeError::Run)?;
+        for ((id, facts), plan) in ids.iter().copied().zip(facts).zip(plans) {
+            self.machine
+                .pin(id)
+                .expect("batch returned an installed program");
+            self.programs.insert(id, facts);
+            self.publish_evidence(id, plan);
+        }
+        self.installs_since_major += ids.len();
+        Ok(ids)
+    }
+
     /// Step (a) of the off-checkout split install: resolve `prepared`'s
     /// imports, plan its evidence and take a compile snapshot -- everything
     /// [`Self::compile_off_checkout`] needs -- without compiling. Run this
@@ -2412,7 +2588,10 @@ impl PreparedEngine {
             .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
                 program,
             )))?;
-        let entry = facts.entry;
+        let entry = facts.entry.ok_or(PreparedRuntimeError::UnsettledEntry {
+            program,
+            detail: "the installed definitions have no executable entry",
+        })?;
         // The decoder needs the settled constructors; refuse before running
         // an entry whose layer could never be read.
         if facts.settled.is_none() {
@@ -3734,7 +3913,7 @@ impl PreparedEngine {
         let facts = self.programs.get(&program)?;
         facts
             .tops
-            .get(&facts.entry)
+            .get(&facts.entry?)
             .map(|(identity, _)| identity.unit.clone())
     }
 }
@@ -3752,6 +3931,144 @@ mod tests {
     };
     use tidepool_repr::DataCon;
     use tidepool_repr::SessionModule;
+
+    fn certified_source_group(
+        name: &str,
+        ordinal: u32,
+        imported: &str,
+    ) -> tidepool_repr::execution_schema::CertifiedGroup {
+        use tidepool_repr::execution_schema::{
+            CachedHomeOwner, CertifiedGroup, ImportOwner, ModuleVersion,
+        };
+        let mut wire = testing::wire_program();
+        if let Group::NonRecursive(top) = &mut wire.bindings[0] {
+            top.identity = testing::identity("Fixture", name);
+        }
+        let binder = testing::identity("Fixture", imported);
+        wire.globals.push(GlobalDecl {
+            identity: binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        });
+        CertifiedGroup::admit(
+            CachedHomeOwner {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                module_version: ModuleVersion([1; 32]),
+                skinny_iface_sha256: [2; 32],
+                product_sha256: [3; 32],
+            },
+            testing::projected_group(wire, ordinal).unwrap(),
+            vec![ImportOwner::Source {
+                version: ModuleVersion([1; 32]),
+                binder,
+            }],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn certified_demand_installs_cyclic_groups_with_distinct_instances() {
+        use tidepool_codegen::prepared_program::GroupInventory;
+        let groups = [
+            certified_source_group("a", 2, "b"),
+            certified_source_group("b", 7, "a"),
+        ];
+        let inventory = GroupInventory::new(&groups).unwrap();
+        let demand = inventory
+            .seal([SourceBinder {
+                version: tidepool_repr::execution_schema::ModuleVersion([1; 32]),
+                binder: testing::identity("Fixture", "a"),
+            }])
+            .unwrap();
+        let registry = ImageRegistry::new();
+        let (mut engine, base) =
+            PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
+        let bindings = BindingTable::new();
+        let first = engine
+            .install_certified_demand(
+                demand.compile(&registry).unwrap(),
+                &HashMap::new(),
+                &bindings,
+            )
+            .unwrap();
+        let second = engine
+            .install_certified_demand(
+                demand.compile(&registry).unwrap(),
+                &HashMap::new(),
+                &bindings,
+            )
+            .unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 2);
+        assert_ne!(first, second);
+        assert_eq!(registry.misses(), 2);
+        assert_eq!(registry.hits(), 2);
+        assert_eq!(engine.residency().programs, 5);
+        for id in first.into_iter().chain(second) {
+            assert!(engine.unpin(id));
+        }
+        assert!(engine.unpin(base));
+        engine.quiesce_and_collect_now().unwrap();
+        // Bootstrap's package code export retains its original program.
+        assert_eq!(engine.residency().programs, 1);
+        assert_eq!(engine.programs.len(), 1);
+        assert!(engine.programs.contains_key(&base));
+    }
+
+    #[test]
+    fn certified_package_import_requires_exact_interface_owner() {
+        use tidepool_codegen::prepared_program::GroupInventory;
+        use tidepool_repr::execution_schema::{
+            CachedHomeOwner, CertifiedGroup, ImportOwner, ModuleVersion,
+        };
+        let mut wire = testing::wire_program();
+        let package = testing::identity("Package", "value");
+        wire.globals.push(GlobalDecl {
+            identity: package.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        });
+        let owner = ImportOwner::Package {
+            unit: package.unit.clone(),
+            module: package.module.clone(),
+            binder: package,
+            interface_digest: [9; 32],
+        };
+        let group = CertifiedGroup::admit(
+            CachedHomeOwner {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                module_version: ModuleVersion([1; 32]),
+                skinny_iface_sha256: [2; 32],
+                product_sha256: [3; 32],
+            },
+            testing::projected_group(wire, 2).unwrap(),
+            vec![owner.clone()],
+        )
+        .unwrap();
+        let groups = [group];
+        let demand = GroupInventory::new(&groups)
+            .unwrap()
+            .seal([SourceBinder {
+                version: ModuleVersion([1; 32]),
+                binder: testing::identity("Fixture", "entry"),
+            }])
+            .unwrap();
+        let registry = ImageRegistry::new();
+        let (mut engine, _) =
+            PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
+        let before = engine.residency();
+        assert!(matches!(
+            engine.install_certified_demand(demand.compile(&registry).unwrap(), &HashMap::new(), &BindingTable::new()),
+            Err(PreparedRuntimeError::MissingCertifiedOwner(missing)) if missing == owner
+        ));
+        assert_eq!(engine.residency(), before);
+    }
 
     #[test]
     fn integrity_failure_is_typed_independently_from_its_cause() {

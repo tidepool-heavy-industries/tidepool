@@ -55,6 +55,7 @@ pub(crate) struct ImportSlot {
     pub identity: SymbolIdentity,
     pub slot: usize,
     pub rep: RuntimeRep,
+    pub entry_signature: Option<Signature>,
     pub required_evaluated: bool,
 }
 
@@ -415,6 +416,9 @@ impl<'a> ProgramPlan<'a> {
                 identity: declaration.identity.clone(),
                 slot: top_slots.len() + index,
                 rep: declaration.rep,
+                entry_signature: declaration
+                    .entry_signature
+                    .map(|signature| program.signatures()[signature.0 as usize].clone()),
                 required_evaluated: declaration.required_evaluated,
             })
             .collect::<Vec<_>>();

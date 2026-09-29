@@ -246,6 +246,8 @@ pub struct PreparedMachine<'code> {
     /// delta every time.
     compiled_functions: u64,
     compiled_code_bytes: u64,
+    #[cfg(test)]
+    fail_catalog_after_stage: bool,
     /// Static allocation starts mapped to their installed program. The
     /// catalog owns the regions; this is only the reverse owner lookup for a
     /// validated observation hit.
@@ -687,12 +689,18 @@ struct InstallTransaction<'a, 'code> {
     blocks: Vec<(*mut u64, usize)>,
     owners: Option<tidepool_heap::gc::raw::OwnersMark>,
     stack_maps: usize,
+    /// Nursery cursor after any capacity collection and before candidate
+    /// objects. Rollback must not leave unregistered objects in the scan range.
+    candidate_alloc_start: Option<*mut u8>,
     committed: bool,
 }
 
 impl Drop for InstallTransaction<'_, '_> {
     fn drop(&mut self) {
         if !self.committed {
+            if let Some(start) = self.candidate_alloc_start {
+                self.machine.vmctx.alloc_ptr = start;
+            }
             let roots: Vec<*mut *mut u8> = self
                 .blocks
                 .iter()
@@ -716,6 +724,8 @@ impl Drop for InstallTransaction<'_, '_> {
                     .finish_prepared_descriptor_owners(owners, false);
             } else {
                 self.machine.machine.clear_gc_state();
+                self.machine.vmctx.alloc_ptr = std::ptr::null_mut();
+                self.machine.vmctx.alloc_limit = std::ptr::null_mut();
             }
         } else if let Some(owners) = self.owners.take() {
             self.machine
@@ -800,6 +810,8 @@ impl<'code> PreparedMachine<'code> {
             region_owners: HashMap::new(),
             compiled_functions: 0,
             compiled_code_bytes: 0,
+            #[cfg(test)]
+            fail_catalog_after_stage: false,
         })
     }
 
@@ -986,28 +998,29 @@ impl<'code> PreparedMachine<'code> {
             blocks: vec![block],
             owners,
             stack_maps,
+            candidate_alloc_start: None,
             committed: false,
         };
         let staged = transaction.machine.install_staged(
             program.get(),
             &instance,
-            &environment,
             imports,
             &roots,
+            &mut transaction.candidate_alloc_start,
         );
         // Acquire the shared owner while the install transaction can still
         // roll descriptors and the candidate static region back. A failed
         // borrow must never commit metadata whose program custody will drop.
-        let catalog = if staged.is_ok() && transaction.machine.static_catalog.is_none() {
-            transaction
-                .machine
-                .machine
-                .prepared_static_catalog()
-                .map(Some)
-                .map_err(|error| runtime_error(&transaction.machine.machine, error))
+        let catalog = if staged.is_ok() {
+            transaction.machine.install_catalog_after_stage()
         } else {
             Ok(None)
         };
+        if staged.is_ok() && catalog.is_ok() {
+            transaction
+                .machine
+                .commit_install_metadata(program.get(), &instance, &environment);
+        }
         transaction.committed = staged.is_ok() && catalog.is_ok();
         // Rollback (if any) deregisters the candidate block's roots while
         // `program` still owns the block.
@@ -1067,9 +1080,9 @@ impl<'code> PreparedMachine<'code> {
         &mut self,
         compiled: &CompiledProgram,
         instance: &InstanceImage,
-        environment: &InstallationEnvironment,
         imports: &ImportBindings,
         block: &RootWords,
+        candidate_alloc_start: &mut Option<*mut u8>,
     ) -> Result<Arc<StaticRegion>, ExecutionError> {
         // A constructor identity this machine already shares must be
         // declared identically, with the same descriptor, by the incoming
@@ -1230,6 +1243,7 @@ impl<'code> PreparedMachine<'code> {
             // `from_borrowed`), so this loop is a defensive no-op here, kept
             // symmetric with the second-program branch below.
             self.publish_imports(&resolved_imports, block)?;
+            *candidate_alloc_start = Some(start);
             let heap_used = match initialize_heap_tops(
                 start,
                 size,
@@ -1311,6 +1325,7 @@ impl<'code> PreparedMachine<'code> {
                 }
             };
             let remaining = size - cursor;
+            *candidate_alloc_start = Some(self.vmctx.alloc_ptr);
             let heap_used = match initialize_heap_tops(
                 self.vmctx.alloc_ptr,
                 remaining,
@@ -1346,6 +1361,18 @@ impl<'code> PreparedMachine<'code> {
         // program's own heap tops initialized -- see the per-branch comments
         // above), so there is nothing left to publish here.
 
+        Ok(statics)
+    }
+
+    /// All fallible staging and static-catalog acquisition has completed.
+    /// Raw dispatch pointers join the machine only while their candidate
+    /// code, environment and descriptor owner are certain to survive.
+    fn commit_install_metadata(
+        &mut self,
+        compiled: &CompiledProgram,
+        instance: &InstanceImage,
+        environment: &InstallationEnvironment,
+    ) {
         // Interned constructor layouts are shared by every program that
         // declares them and are never retired, so union by header identity:
         // a plain extend would grow this list by each install's shared
@@ -1417,7 +1444,26 @@ impl<'code> PreparedMachine<'code> {
         // dangling address, only (harmlessly) an uninstalled program's
         // literals never reaching the pool at all.
         self.machine.absorb_interned_bytes(&compiled.bytes);
-        Ok(statics)
+    }
+
+    fn install_catalog_after_stage(
+        &self,
+    ) -> Result<
+        Option<Rc<RefCell<tidepool_heap::static_region::StaticRegionCatalog>>>,
+        ExecutionError,
+    > {
+        #[cfg(test)]
+        if self.fail_catalog_after_stage {
+            return Err(ExecutionError::Invariant("injected static catalog failure"));
+        }
+        if self.static_catalog.is_some() {
+            Ok(None)
+        } else {
+            self.machine
+                .prepared_static_catalog()
+                .map(Some)
+                .map_err(|error| runtime_error(&self.machine, error))
+        }
     }
 
     // --- residency: pins, quiescence, major collection, retirement --------

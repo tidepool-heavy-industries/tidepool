@@ -53,8 +53,18 @@ pub struct SealedDemand<'a> {
 }
 
 pub struct DemandedImage<'a> {
-    pub group: &'a CertifiedGroup,
-    pub image: Arc<CompiledProgram>,
+    group: &'a CertifiedGroup,
+    image: Arc<CompiledProgram>,
+}
+
+impl<'a> DemandedImage<'a> {
+    pub fn group(&self) -> &'a CertifiedGroup {
+        self.group
+    }
+
+    pub fn image(&self) -> &Arc<CompiledProgram> {
+        &self.image
+    }
 }
 
 impl<'a> GroupInventory<'a> {

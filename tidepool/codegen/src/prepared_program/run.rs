@@ -72,6 +72,8 @@ pub enum ExecutionError {
         expected: ImportShapeFact,
         found: ImportShapeFact,
     },
+    #[error("batch source import {0:?} has a different binder identity or entry signature")]
+    BatchSourceContract(Box<SymbolIdentity>),
     #[error("program {0:?} is not installed on this machine")]
     UnknownProgram(ProgramId),
     /// No frame is parked under this id on this machine: never parked here,
