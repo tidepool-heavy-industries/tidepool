@@ -121,11 +121,14 @@ compiler, runtime and facade transitions; Luna owns bounded independent leaves.
 Use Astra only for consequential unresolved decisions and exact-commit review.
 Each assignment uses its own real Git worktree and mutable build outputs.
 
-Use declared Nix wrappers. Initially bound local build scopes to 40 GiB total
-(24 GiB compiler/integration plus 16 GiB secondary), disable swap within scopes,
-and coordinate one expensive compiler/Nix realization. Nix daemon work is not
-bounded by the caller scope; realize expensive closures serially and account
-for it separately. Never restart shared daemons or obtain sudo for a build.
+Use declared Nix wrappers. Admit builds through the user-owned
+`tidepool-completion-build.slice`: 88 GiB memory high, 104 GiB maximum, and
+2 GiB swap maximum. Launch build commands with `systemd-run --user` under
+that slice even when the interactive session itself is outside it. Begin with
+one expensive build; increase concurrency after checking aggregate accounting.
+Nix daemon work is not bounded by the caller slice; realize expensive closures
+serially and account for it separately. Never restart shared daemons or obtain
+sudo for a build.
 
 Compile changed consumers, run exact focused success/failure tests, format, and
 record full revision, command, executed count, exit status and retained log.
@@ -200,3 +203,20 @@ with `cannot connect to socket at '/nix/var/nix/daemon-socket/socket': Operation
 not permitted`. New source changes require verification once the declared
 build environment is available. Existing passing evidence does not cover them.
 Push hold and live G5 approval gate remain unchanged.
+
+
+## Resumed admission, 2026-09-29
+
+- Infrastructure fix `91151b0f9` opens the pinned dev flake through the worktree
+  root. It is retained on integration before the recovered checkpoint record.
+- Nix access is restored. The declared shell reports Rust 1.93.0 and GHC 9.12.2.
+- A systemd user service probe ran inside the completion build slice and exited
+  zero. The slice reports 88 GiB high, 104 GiB maximum, and 2 GiB swap maximum.
+  The interactive session remains outside it, so each build must be admitted.
+- Original worktrees and scratch candidates remain retained. Compiler and facade
+  owners reconcile their source before new edits; source reconciliation does not
+  establish verification of the recovered candidates.
+- Compiler structural fixtures get the first expensive build slot. Runtime exact
+  continuation cleanup and M1 production wiring proceed independently. Sol owns
+  the compiler boundary; Luna owns the two bounded runtime/facade parcels.
+- Pushes and live G5 remain gated as above.
