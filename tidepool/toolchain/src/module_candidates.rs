@@ -16,7 +16,7 @@ use crate::cache::{DependencyEvidence, ProductAvailability};
 const RECORD_LIMIT: usize = 32 << 20;
 const MANIFEST_LIMIT: usize = 1 << 20;
 const CANDIDATE_LIMIT: usize = 128;
-const RECORD_DIR: &str = "module-candidates-v2";
+const RECORD_DIR: &str = "module-candidates-v3";
 
 #[derive(Clone, Debug)]
 pub(crate) struct CandidateBundle {
@@ -26,6 +26,9 @@ pub(crate) struct CandidateBundle {
     pub source_sha256: String,
     pub iface_path: PathBuf,
     pub iface_sha256: String,
+    pub product_bytes: Vec<u8>,
+    pub evidence: DependencyEvidence,
+    pub target_source: String,
 }
 
 #[derive(Clone, Debug)]
@@ -65,12 +68,20 @@ fn absolute(path: &Path) -> Option<PathBuf> {
     canonical.is_absolute().then_some(canonical)
 }
 
-fn context_paths(include: &[PathBuf]) -> Option<Vec<PathBuf>> {
+pub(crate) fn context_paths(include: &[PathBuf]) -> Option<Vec<PathBuf>> {
     include.iter().map(|p| absolute(p)).collect()
 }
 
-fn record_dir() -> PathBuf {
-    crate::paths::compile_cache_dir().join(RECORD_DIR)
+fn record_dir(endpoint_identity: &[u8], include: &[PathBuf]) -> PathBuf {
+    let mut material = Vec::new();
+    material.extend_from_slice(endpoint_identity);
+    for path in include {
+        material.push(0);
+        material.extend_from_slice(path.as_os_str().as_encoded_bytes());
+    }
+    crate::paths::compile_cache_dir()
+        .join(RECORD_DIR)
+        .join(sha(&material))
 }
 
 /// Persist each eligible ordinary source module in its own bounded record.
@@ -106,7 +117,7 @@ pub(crate) fn publish(
     if parsed != products {
         return;
     }
-    let dir = record_dir();
+    let dir = record_dir(endpoint_identity, &include);
     if fs::create_dir_all(&dir).is_err() {
         return;
     }
@@ -154,7 +165,7 @@ pub(crate) fn publish(
         }
         let record = Record {
             tag: "TPMCAN".into(),
-            version: 2,
+            version: 3,
             endpoint: endpoint_identity.to_vec(),
             include: include.clone(),
             evidence: evidence.clone(),
@@ -187,20 +198,40 @@ pub(crate) fn publish(
 }
 
 fn version_hash(record: &Record) -> [u8; 32] {
+    module_version_for_product(
+        &record.endpoint,
+        &record.include,
+        &record.source_sha256,
+        &record.interface,
+        &record.products,
+        &record.evidence,
+    )
+    .0
+}
+
+/// The include paths must already be canonicalized by `context_paths`.
+pub(crate) fn module_version_for_product(
+    endpoint_identity: &[u8],
+    include: &[PathBuf],
+    source_sha256: &str,
+    interface: &[u8],
+    products: &[u8],
+    evidence: &DependencyEvidence,
+) -> ModuleVersion {
     let mut h = Sha256::new();
-    h.update(b"tidepool-module-candidate-v2\0");
-    h.update(&record.endpoint);
-    for path in &record.include {
+    h.update(b"tidepool-module-candidate-v3\0");
+    h.update(endpoint_identity);
+    for path in include {
         h.update(path.as_os_str().as_encoded_bytes());
         h.update([0]);
     }
-    h.update(&record.source_sha256);
-    h.update(&record.interface);
-    h.update(&record.products);
-    if let Ok(evidence) = serde_json::to_vec(&record.evidence) {
-        h.update(evidence);
+    h.update(source_sha256);
+    h.update(interface);
+    h.update(products);
+    if let Ok(encoded) = serde_json::to_vec(evidence) {
+        h.update(encoded);
     }
-    h.finalize().into()
+    ModuleVersion(h.finalize().into())
 }
 
 /// Read and validate a deterministic, bounded subset of stored records.
@@ -210,7 +241,7 @@ pub(crate) fn select(
     scratch: &Path,
 ) -> Option<CandidateSet> {
     let include = context_paths(include)?;
-    let dir = record_dir();
+    let dir = record_dir(endpoint_identity, &include);
     let mut paths: Vec<_> = fs::read_dir(dir)
         .ok()?
         .filter_map(Result::ok)
@@ -233,7 +264,7 @@ pub(crate) fn select(
             continue;
         };
         if record.tag != "TPMCAN"
-            || record.version != 2
+            || record.version != 3
             || record.endpoint != endpoint_identity
             || record.include != include
             || record.source.is_relative()
@@ -290,6 +321,23 @@ pub(crate) fn select(
         }
         let iface_sha = Sha256::digest(&record.interface);
         let product_sha: [u8; 32] = Sha256::digest(&record.products).into();
+        let Ok(evidence_bytes) = serde_json::to_vec(&record.evidence) else {
+            continue;
+        };
+        let evidence_sha = sha(&evidence_bytes);
+        let Some(module_evidence) = record.evidence.modules.iter().find(|module| {
+            module.unit == record.unit && module.module == record.module && !module.boot
+                && module.source == record.source
+        }) else {
+            continue;
+        };
+        let imports = module_evidence.imports.iter().map(|imported| Value::Array(vec![
+            Value::Text(String::from(imported.qualifier.clone())),
+            Value::Text(imported.module.clone()),
+            Value::Bool(imported.boot),
+            Value::Text(imported.selected.as_ref().map_or_else(String::new,
+                |path| path.to_string_lossy().into_owned())),
+        ])).collect();
         let owner = CachedHomeOwner {
             unit: record.unit.clone(),
             module: record.module.clone(),
@@ -311,6 +359,9 @@ pub(crate) fn select(
             source_sha256: record.source_sha256.clone(),
             iface_path: iface_path.clone(),
             iface_sha256: sha(&record.interface),
+            product_bytes: record.products.clone(),
+            evidence: record.evidence.clone(),
+            target_source: record.target_source.clone(),
         };
         if by_owner
             .insert((owner.unit.clone(), owner.module.clone()), bundle)
@@ -327,11 +378,13 @@ pub(crate) fn select(
             Value::Text(sha(&record.interface)),
             Value::Text(hex(&owner.module_version.0)),
             Value::Text(hex(&product_sha)),
+            Value::Text(evidence_sha),
+            Value::Array(imports),
         ]));
     }
     let value = Value::Array(vec![
         Value::Text("TPMCAN".into()),
-        Value::Text("2".into()),
+        Value::Text("3".into()),
         Value::Array(manifest),
     ]);
     let mut encoded = Vec::new();
@@ -411,7 +464,7 @@ mod tests {
         };
         let record = Record {
             tag: "TPMCAN".into(),
-            version: 2,
+            version: 3,
             endpoint: b"endpoint".to_vec(),
             include: vec![],
             evidence,
@@ -425,7 +478,7 @@ mod tests {
         };
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&record, &mut bytes).unwrap();
-        let dir = root.join(RECORD_DIR);
+        let dir = root.join(RECORD_DIR).join(sha(b"endpoint"));
         fs::create_dir_all(&dir).unwrap();
         let name = format!(
             "{}.cbor",
@@ -463,7 +516,7 @@ mod tests {
             .is_empty());
 
         fs::write(&source, "module Library where").unwrap();
-        let dir = root.path().join(RECORD_DIR);
+        let dir = root.path().join(RECORD_DIR).join(sha(b"endpoint"));
         for entry in fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
             fs::remove_file(path).unwrap();
@@ -495,7 +548,7 @@ mod tests {
             "Library",
             product_bytes("u", "Library", &[0x42]),
         );
-        let dir = root.path().join(RECORD_DIR);
+        let dir = root.path().join(RECORD_DIR).join(sha(b"endpoint"));
         let original = fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
         fs::copy(original, dir.join("duplicate.cbor")).unwrap();
         assert!(select_in(root.path(), scratch.path()).is_none());
