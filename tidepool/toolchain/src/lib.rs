@@ -20,6 +20,7 @@ pub mod certified_products;
 pub mod diag;
 pub mod digest;
 pub mod failclass;
+pub(crate) mod module_candidates;
 pub mod paths;
 pub mod prepared_artifact;
 pub mod recovery_artifacts;
