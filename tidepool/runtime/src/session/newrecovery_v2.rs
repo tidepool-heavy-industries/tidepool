@@ -44,6 +44,10 @@ pub(crate) struct RecoveryNode {
     pub artifact_refs: Vec<String>,
     pub exports: Vec<RecoveryExport>,
     pub retracts: Vec<RecoverySymbolIdentity>,
+    /// GHC-normalized import specifications introduced by this turn. These
+    /// are metadata for rebuilding the next workbench context, never replayed
+    /// as declaration source.
+    pub workbench_imports: Vec<String>,
     pub instances: Vec<RecoveryInstanceEvidence>,
     pub live_dependencies: Vec<RecoveryLiveDependency>,
     pub state: RecoveryNodeState,
@@ -497,6 +501,33 @@ impl RecoveryGraph {
         Ok(visible)
     }
 
+    /// Imports visible after the exact lexical chain ending at `root`.
+    /// Preserve declaration order while removing specifications reintroduced
+    /// verbatim by later turns, matching `SourceImports::extend`.
+    pub(crate) fn workbench_imports(&self, root: Generation) -> Result<Vec<String>, RecoveryError> {
+        self.validate()?;
+        let by_id: BTreeMap<_, _> = self.nodes.iter().map(|node| (node.id, node)).collect();
+        let mut chain = Vec::new();
+        let mut cursor = Some(root);
+        while let Some(id) = cursor {
+            let node = by_id
+                .get(&id)
+                .ok_or_else(|| error("workbench import ancestry is incomplete"))?;
+            chain.push(*node);
+            cursor = node.parent;
+        }
+        chain.reverse();
+        let mut imports = Vec::new();
+        for node in chain {
+            for spec in &node.workbench_imports {
+                if !imports.contains(spec) {
+                    imports.push(spec.clone());
+                }
+            }
+        }
+        Ok(imports)
+    }
+
     /// Validate every materialized artifact against the run-owned recovery
     /// root. Symlinks that escape the root are rejected.
     pub(crate) fn validate_artifact_files(
@@ -573,6 +604,21 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
         {
             return Err(error(format!(
                 "recovery node {} must report its live-value dependencies",
+                node.id.0
+            )));
+        }
+        if node.workbench_imports.iter().any(|spec| {
+            let trimmed = spec.trim();
+            trimmed.is_empty()
+                || trimmed != spec
+                || spec.contains('\n')
+                || spec.contains('\r')
+                || spec
+                    .strip_prefix("import")
+                    .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
+        }) {
+            return Err(error(format!(
+                "recovery node {} has invalid workbench import metadata",
                 node.id.0
             )));
         }
@@ -928,6 +974,16 @@ mod tests {
         }
     }
 
+    fn identity_in(module: &str, occurrence: &str) -> RecoverySymbolIdentity {
+        RecoverySymbolIdentity {
+            unit: "main".into(),
+            module: module.into(),
+            namespace: "value".into(),
+            occurrence: occurrence.into(),
+            record_parent: None,
+        }
+    }
+
     fn fixture(root: &Path) -> RecoveryGraph {
         let source = tempfile::tempdir().unwrap();
         let iface = source.path().join("Lib.hi");
@@ -973,6 +1029,7 @@ mod tests {
                     artifact_refs: vec![key],
                     exports: vec![export.clone()],
                     retracts: vec![],
+                    workbench_imports: vec!["qualified Data.Map.Strict as Map".into()],
                     instances: vec![],
                     live_dependencies: vec![],
                     state: RecoveryNodeState::ExactArtifactClosure,
@@ -985,6 +1042,7 @@ mod tests {
                     artifact_refs: vec![],
                     exports: vec![export],
                     retracts: vec![],
+                    workbench_imports: vec!["Data.Proxy (Proxy (..))".into()],
                     instances: vec![],
                     live_dependencies: vec![],
                     state: RecoveryNodeState::MissingArtifactClosure {
@@ -1079,6 +1137,42 @@ mod tests {
         let projected = graph.projection(&losses).unwrap();
         assert!(
             matches!(projected.get(&identity("answer")), Some(RecoveryHead::Tombstone(t)) if t.winner == Generation(2))
+        );
+    }
+
+    #[test]
+    fn missing_replacement_tombstone_retracts_old_original_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut graph = fixture(dir.path());
+        let old = identity_in("G1", "foo");
+        let replacement = identity_in("G2", "foo");
+        graph.nodes[0].exports[0].identity = old.clone();
+        graph.nodes[1].exports[0].identity = replacement.clone();
+        graph.nodes[1].retracts = vec![old.clone()];
+        graph.seal().unwrap();
+
+        let projected = graph.projection(&BTreeMap::new()).unwrap();
+        assert!(!projected.contains_key(&old));
+        assert!(matches!(
+            projected.get(&replacement),
+            Some(RecoveryHead::Tombstone(t)) if t.winner == Generation(2)
+        ));
+    }
+
+    #[test]
+    fn workbench_imports_fold_in_lexical_order_and_keep_exact_specs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut graph = fixture(dir.path());
+        graph.nodes[1]
+            .workbench_imports
+            .push("qualified Data.Map.Strict as Map".into());
+        graph.seal().unwrap();
+        assert_eq!(
+            graph.workbench_imports(Generation(2)).unwrap(),
+            [
+                "qualified Data.Map.Strict as Map",
+                "Data.Proxy (Proxy (..))"
+            ]
         );
     }
 }
