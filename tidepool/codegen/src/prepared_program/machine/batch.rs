@@ -2,7 +2,7 @@
 
 use super::super::{DemandedImage, SourceBinder, SourceInstanceLease};
 use super::*;
-use tidepool_repr::execution_schema::{CachedHomeOwner, Signature};
+use tidepool_repr::execution_schema::{CachedHomeOwner, CertifiedGroup, Signature};
 
 /// One import slot's already admitted owner. `Source` selects a top in this
 /// sealed batch; it never accepts a spelling-only match.
@@ -88,6 +88,67 @@ struct Candidate {
 }
 
 impl PreparedMachine<'_> {
+    /// Root a newly demanded sibling binder from an exact lexical group
+    /// instance already held by `anchor`. The original program's CAFs stay
+    /// shared; this creates one new scoped handle without reinstalling code.
+    pub fn retain_certified_source_top(
+        &mut self,
+        anchor: &SourceInstanceLease,
+        group: &CertifiedGroup,
+        binder: &SourceBinder,
+    ) -> Result<SourceInstanceLease, ExecutionError> {
+        let mismatch = || ExecutionError::BatchSourceContract(Box::new(binder.binder.clone()));
+        if anchor.owner() != group.owner()
+            || anchor.original_ordinal() != group.original_ordinal()
+            || binder.version != group.owner().module_version
+            || !group.binders().contains(&binder.binder)
+            || !group.binders().contains(&anchor.binder().binder)
+        {
+            return Err(mismatch());
+        }
+        let value = group
+            .definitions()
+            .bindings()
+            .iter()
+            .flat_map(|item| match item {
+                tidepool_repr::execution_schema::Group::NonRecursive(top) => {
+                    std::slice::from_ref(top)
+                }
+                tidepool_repr::execution_schema::Group::Recursive(tops) => tops.as_slice(),
+            })
+            .find(|top| top.identity == binder.binder)
+            .map(|top| top.binding.id)
+            .ok_or_else(|| mismatch())?;
+        let installed = self
+            .programs
+            .get(&anchor.instance().program())
+            .ok_or(ExecutionError::UnknownProgram(anchor.instance().program()))?;
+        let image = installed.program.get();
+        if image.certified_source.as_ref()
+            != Some(&(group.owner().clone(), group.original_ordinal()))
+            || image
+                .top_exports
+                .get(&anchor.value())
+                .map(|top| &top.identity)
+                != Some(&anchor.binder().binder)
+            || image.top_exports.get(&value).map(|top| &top.identity) != Some(&binder.binder)
+        {
+            return Err(mismatch());
+        }
+        let entry_signature = image.top_exports[&value].entry_signature.clone();
+        self.handle_is_evaluated(anchor.handle())?;
+        let handle = self.retain_top(anchor.instance().program(), value)?;
+        Ok(SourceInstanceLease::new(
+            anchor.instance(),
+            group.owner().clone(),
+            group.original_ordinal(),
+            binder.clone(),
+            value,
+            handle,
+            entry_signature,
+        ))
+    }
+
     /// Install a closed batch of independently compiled original groups as
     /// one transaction. Every candidate receives a fresh root block, static
     /// instance and mutable CAFs; source imports may point forward or form a

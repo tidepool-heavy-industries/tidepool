@@ -102,7 +102,8 @@ mod bytes_tests;
 mod data_tag;
 mod demand;
 pub use demand::{
-    DemandError, DemandedImage, GroupInventory, SealedDemand, SourceBinder, SourceInstanceLease,
+    DemandError, DemandedImage, GroupInventory, InheritedSourceDemand, SealedDemand, SourceBinder,
+    SourceInstanceLease,
 };
 #[cfg(test)]
 mod double_to_int_tests;
