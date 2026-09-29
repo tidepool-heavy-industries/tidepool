@@ -326,18 +326,30 @@ pub(crate) fn select(
         };
         let evidence_sha = sha(&evidence_bytes);
         let Some(module_evidence) = record.evidence.modules.iter().find(|module| {
-            module.unit == record.unit && module.module == record.module && !module.boot
+            module.unit == record.unit
+                && module.module == record.module
+                && !module.boot
                 && module.source == record.source
         }) else {
             continue;
         };
-        let imports = module_evidence.imports.iter().map(|imported| Value::Array(vec![
-            Value::Text(String::from(imported.qualifier.clone())),
-            Value::Text(imported.module.clone()),
-            Value::Bool(imported.boot),
-            Value::Text(imported.selected.as_ref().map_or_else(String::new,
-                |path| path.to_string_lossy().into_owned())),
-        ])).collect();
+        let imports = module_evidence
+            .imports
+            .iter()
+            .map(|imported| {
+                Value::Array(vec![
+                    Value::Text(String::from(imported.qualifier.clone())),
+                    Value::Text(imported.module.clone()),
+                    Value::Bool(imported.boot),
+                    Value::Text(
+                        imported
+                            .selected
+                            .as_ref()
+                            .map_or_else(String::new, |path| path.to_string_lossy().into_owned()),
+                    ),
+                ])
+            })
+            .collect();
         let owner = CachedHomeOwner {
             unit: record.unit.clone(),
             module: record.module.clone(),
