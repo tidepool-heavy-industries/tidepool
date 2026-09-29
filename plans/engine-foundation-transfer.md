@@ -6,6 +6,35 @@ build server. Latest steering prioritizes transfer soon: finish a bounded repair
 checkpoint here and move expensive joined checks to the destination. Do not
 enable concurrent private executions before that review.
 
+## Pushed WIP checkpoint
+
+The user requested that in-progress work be committed and pushed for transfer.
+The following branch tips are published; this is candidate work, not a completed
+integration or release:
+
+| Repository | Branch | Code revision |
+| --- | --- | --- |
+| Tidepool | `foundation/integration` | `24516ebb5f29a7e9a5f3245c485b578f31f1658f` |
+| Tidepool | `foundation/module-product` | `fbcfb02027632e2a53199c0a6ef6843f5cc2a577` |
+| Tidepool | `foundation/harness-m1-adapter` | `e4bb3ddc4b59f01acedcc28b9950377a2299f38a` |
+| Codex (`inanna-malick/codex`) | `foundation/client-settlement` | `c09c2b067774be4104fad878ee271a6a14f12690` |
+| Harness | `integration/actor-admission-companion` | `c485edb9b697ffc671b22c9ef25a73fc84763d76` |
+
+Tidepool main carries this transfer record. The adapter branch may have a later
+documentation-only handoff commit; its code revision above is exact. Adapter
+Cargo files pin the harness companion above. The client pin is not yet updated
+in integration. Module-product and adapter are dependent branches, not disjoint
+patch stacks: inspect ancestry and apply only missing commits when joining.
+
+The final cancellation repair preserves an owner's completed reply through the
+harness scheduler's existing terminal arbitration. Request snapshots now use a
+short actor admission lease. The companion's owner-completion race passed 1/1;
+the adapter's retirement race passed 1/1 (549 skipped) with the matched battery.
+These repairs still need final independent review and joined verification.
+No build is required on the source box before transfer. ABI regeneration,
+structural gates, Nix hashes and the next xhigh design review belong on the
+destination. Preserve source-box worktrees; no live sessions are transferred.
+
 ## Source and integration
 
 - Main planning baseline: `a2e98636b`.
@@ -32,7 +61,7 @@ enable concurrent private executions before that review.
 | Git admission/helper | Repairs `479a801bb`, measurement `85139acf6`, integrated; 9 admission and 4 integration checks passed after repair | Joined checks; synthetic spawn results in `foundation-view-spawn-measurement.md` |
 | Compiler producer proof | `fbcfb02027632e2a53199c0a6ef6843f5cc2a577` on `foundation/module-product`; hidden-source fat/skinny comparison passed, final roundtrip 1/1, retained-scope 1/1, worker built | Final skinny simplification not joined; durable encoding/versioned imports/cache/demand consumers are not implemented |
 | Client settlement | `c09c2b067774be4104fad878ee271a6a14f12690` on `foundation/client-settlement`; final focused run 13/13 passed | Commit must be transferred and pinned; broad client suite not run |
-| Sequential embedding | Adapter `fc916b091cf4367ae79588d3695ed7696aa05867`: real resident/Engine wake 1/1, lib compiled; harness companion `0fa0caf410667e35ab34d11c231a71ba2b0d246d`: 5 focused tests passed | Review found cancellation outcome loss; bounded repair in progress. Request-start/retirement admission needs checking. Public Git pin/Nix hash and full M1 gates remain |
+| Sequential embedding | Original adapter wake 1/1 and companion 5 focused tests passed; final pushed repairs and two race checks listed above | Final repair review, Nix hashes, owner composition and full M1 gates remain |
 
 The final home-product fixture's skinny interface is 2,336 bytes versus the
 earlier fat 2,747 bytes. Both forms passed source-hidden typechecking; home
@@ -66,11 +95,11 @@ After reviewing/joining final candidates and resolving companion dependencies:
 5. Finish joined codegen/runtime coverage and portable Cargo/Nix pins. Treat
    local Git URL redirects used for candidate tests as temporary evidence only.
 
-Adapter review: mapping `WorkbenchCancellationOutcome::Expired { reply }` to
+Adapter review found that mapping `WorkbenchCancellationOutcome::Expired { reply }` to
 `Stopped` can overwrite a completed success with `Cancelled` in the harness
-scheduler. Preserve the actual completed outcome. Request snapshot admission
-also needs a defined ordering against actor retirement. Neither concern is
-resolved merely by the earlier happy-path wake test.
+scheduler. The pushed repair retains that outcome and fences request snapshots
+against retirement; review its exact implementation and tests before joining.
+The earlier happy-path wake test alone did not establish either property.
 
 ## Next xhigh review
 
