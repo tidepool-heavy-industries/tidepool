@@ -61,10 +61,14 @@ and retained log. Building a test binary is not running it. Re-run once to
 record a real action-cache hit, then change one selected source or fixture and
 verify only its affected dependency closure rebuilds.
 
-The inherited migration's Haskell rule groups worker sources under one library
-target. Inspect the pinned Prelude's actual action graph before making any
-module-granularity claim; a target count alone does not establish cache
-granularity.
+The exact Prelude bundled with Buck snapshot `20260926-200119` uses one
+`haskell_compile_*` action for all sources of each target/link style. Its
+`haskell/compile.bzl` gathers the target's Haskell sources and hidden boot inputs,
+then submits a single compiler action (inspected locally after materialization;
+SHA-256 `04bf88781d70b603d4ca7679d11efb72c8b35fab965c82103f0f5186559e2f27`).
+Per-module Haskell cache granularity is therefore still open. Model import,
+Template Haskell and boot/SCC dependencies explicitly before replacing that
+boundary; splitting target names alone does not establish independent caching.
 Generated worker artifacts, test fixtures, embedded browser assets, and web
 `dist` outputs must remain separate declared actions with explicit source,
 resource, and toolchain inputs before those surfaces move from their existing
