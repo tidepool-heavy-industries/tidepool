@@ -20,6 +20,8 @@ mod custody_tests;
 #[cfg(test)]
 mod documentation_tests;
 mod embedded_harness;
+#[cfg(test)]
+mod embedded_pending_compaction_tests;
 mod embedded_policy;
 mod embedded_service;
 mod host_incarnation;

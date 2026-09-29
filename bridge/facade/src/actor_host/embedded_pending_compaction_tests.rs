@@ -1,0 +1,358 @@
+use super::embedded_service::{attach_actor, drive_conversation_with_transport, EmbeddedService};
+use super::test_campaign::TestCampaign;
+use async_trait::async_trait;
+use exomonad_actor::{ResidentToolEndpoint, ResidentToolError, ResidentToolFuture};
+use exomonad_tool::{
+    CustomToolDeclaration, HostedTool, ToolArguments, ToolDeclaration, ToolInvocation, ToolKind,
+};
+use harness::{
+    engine::ResponsesTransport,
+    model::{AgentPath, Effort},
+    transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError},
+};
+use serde_json::json;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::sync::{mpsc, oneshot, watch};
+
+struct Offline;
+
+impl Auth for Offline {
+    fn access(&self) -> Result<(String, String), TransportError> {
+        panic!("the scripted transport must not request credentials")
+    }
+}
+
+struct GatedEndpoint {
+    tools: Vec<HostedTool>,
+    releases: Arc<Mutex<HashMap<String, oneshot::Receiver<()>>>>,
+    started: mpsc::UnboundedSender<String>,
+    settled: mpsc::UnboundedSender<String>,
+}
+
+impl ResidentToolEndpoint for GatedEndpoint {
+    fn snapshot_for_request(&self) -> Result<Arc<dyn ResidentToolEndpoint>, ResidentToolError> {
+        Ok(Arc::new(Self {
+            tools: self.tools.clone(),
+            releases: self.releases.clone(),
+            started: self.started.clone(),
+            settled: self.settled.clone(),
+        }))
+    }
+
+    fn tools(&self) -> &[HostedTool] {
+        &self.tools
+    }
+
+    fn instructions(&self) -> Option<&str> {
+        None
+    }
+
+    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+        let Some(context) = invocation.context else {
+            return Box::pin(async {
+                Err(ResidentToolError::Unavailable(
+                    "test invocation has no exact call context".into(),
+                ))
+            });
+        };
+        let call_id = context.call_id;
+        let release = self.releases.lock().unwrap().remove(&call_id);
+        let Some(release) = release else {
+            return Box::pin(async move {
+                Err(ResidentToolError::Unavailable(format!(
+                    "no held call registered for {call_id}"
+                )))
+            });
+        };
+        let started = self.started.clone();
+        let settled = self.settled.clone();
+        Box::pin(async move {
+            started
+                .send(call_id.clone())
+                .map_err(|_| ResidentToolError::Unavailable("test observer closed".into()))?;
+            release.await.map_err(|_| {
+                ResidentToolError::Unavailable("test call release was dropped".into())
+            })?;
+            let result = match invocation.arguments {
+                ToolArguments::Raw(_) => json!("raw late output"),
+                ToolArguments::Structured(_) => json!({"result":"typed late output"}),
+            };
+            settled
+                .send(call_id)
+                .map_err(|_| ResidentToolError::Unavailable("test observer closed".into()))?;
+            Ok(result)
+        })
+    }
+}
+
+#[derive(Clone)]
+struct CompactionTransport {
+    model_requests: Arc<Mutex<Vec<ResponsesRequest>>>,
+    successor_seen: mpsc::UnboundedSender<()>,
+    late_output_seen: mpsc::UnboundedSender<()>,
+}
+
+#[async_trait]
+impl ResponsesTransport for CompactionTransport {
+    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        if request.tools_allowed.as_ref().is_some_and(Vec::is_empty) {
+            assert!(request.tools.is_empty());
+            for call_id in ["raw-pending-call", "typed-pending-call"] {
+                assert!(
+                    !request
+                        .input
+                        .iter()
+                        .any(|item| item.0["call_id"] == call_id),
+                    "compaction must not summarize an unanswered call: {:#?}",
+                    request.input
+                );
+            }
+            return Ok(message_turn(
+                "plain-text-compaction",
+                "Keep the raw and typed operations pending.",
+            ));
+        }
+
+        let round = {
+            let mut requests = self.model_requests.lock().unwrap();
+            requests.push(request.clone());
+            requests.len()
+        };
+        match round {
+            1 => Ok(ResponsesTurn {
+                response_id: "pending-calls".into(),
+                items: vec![
+                    harness::item::Item(json!({
+                        "type":"custom_tool_call",
+                        "call_id":"raw-pending-call",
+                        "name":"raw_hold",
+                        "input":"opaque raw input"
+                    })),
+                    harness::item::Item(json!({
+                        "type":"function_call",
+                        "call_id":"typed-pending-call",
+                        "name":"typed_hold",
+                        "arguments":"{\"value\":7}"
+                    })),
+                ],
+                usage: harness::transport::Usage {
+                    input_tokens: 100_001,
+                    ..Default::default()
+                },
+            }),
+            2 => {
+                for call_id in ["raw-pending-call", "typed-pending-call"] {
+                    assert!(
+                        request
+                            .input
+                            .iter()
+                            .any(|item| item.0["call_id"] == call_id),
+                        "successor request must carry exact pending call {call_id}: {:#?}",
+                        request.input
+                    );
+                }
+                let _ = self.successor_seen.send(());
+                Ok(message_turn("await-late-output", "Waiting for both tools."))
+            }
+            3 => {
+                for (call_id, expected) in [
+                    ("raw-pending-call", "raw late output"),
+                    ("typed-pending-call", "typed late output"),
+                ] {
+                    assert!(
+                        request.input.iter().any(|item| {
+                            item.0["call_id"] == call_id && item.0.to_string().contains(expected)
+                        }),
+                        "successor request must contain late output for {call_id}: {:#?}",
+                        request.input
+                    );
+                }
+                let _ = self.late_output_seen.send(());
+                Ok(message_turn("finished", "Both late outputs were retained."))
+            }
+            other => panic!("unexpected model request {other}"),
+        }
+    }
+}
+
+fn message_turn(response_id: &str, text: &str) -> ResponsesTurn {
+    ResponsesTurn {
+        response_id: response_id.into(),
+        items: vec![harness::item::Item(json!({
+            "type":"message",
+            "role":"assistant",
+            "phase":"final_answer",
+            "content":[{"type":"output_text","text":text}]
+        }))],
+        usage: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn production_engine_carries_raw_and_typed_pending_calls_through_compaction_and_late_output()
+{
+    let campaign = TestCampaign::start().await;
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (settled_tx, mut settled_rx) = mpsc::unbounded_channel();
+    let (raw_release_tx, raw_release_rx) = oneshot::channel();
+    let (typed_release_tx, typed_release_rx) = oneshot::channel();
+    let endpoint = GatedEndpoint {
+        tools: vec![
+            HostedTool::Custom(CustomToolDeclaration {
+                name: "raw_hold".into(),
+                description: "Hold a raw call until the test releases it.".into(),
+            }),
+            HostedTool::Function(ToolDeclaration {
+                name: "typed_hold".into(),
+                description: "Hold a typed call until the test releases it.".into(),
+                input_schema: json!({
+                    "type":"object",
+                    "properties":{"value":{"type":"integer"}},
+                    "required":["value"],
+                    "additionalProperties":false
+                }),
+                output_schema: None,
+                kind: ToolKind::Call,
+            }),
+        ],
+        releases: Arc::new(Mutex::new(HashMap::from([
+            ("raw-pending-call".into(), raw_release_rx),
+            ("typed-pending-call".into(), typed_release_rx),
+        ]))),
+        started: started_tx,
+        settled: settled_tx,
+    };
+    let actor = campaign.actor.identity();
+    let mut installation = campaign.root_installation.clone();
+    installation.policy = Arc::new(endpoint);
+
+    let files = tempfile::tempdir().unwrap();
+    let assets = files.path().join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    let session_secret_file = files.path().join("session-secret");
+    std::fs::write(
+        &session_secret_file,
+        "embedded-compaction-secret-is-long-enough",
+    )
+    .unwrap();
+    let codex_auth_file = files.path().join("codex-auth.json");
+    std::fs::write(&codex_auth_file, "{}").unwrap();
+    let settings = crate::exomonad::EmbeddedLaunchConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        asset_root: assets,
+        session_secret_file,
+        codex_auth_file,
+        context_capacity_tokens: 200_000,
+        concurrent_jobs: 2,
+    };
+    let mut service = EmbeddedService::prepare(campaign.session_root.path(), &settings)
+        .await
+        .unwrap();
+    let embedded = attach_actor(
+        &service,
+        campaign.session_root.path(),
+        AgentPath("/root".into()),
+        None,
+        installation,
+        Some("exercise pending-call compaction".into()),
+    )
+    .await
+    .unwrap();
+    let (lifecycle, _lifecycle_rx) =
+        watch::channel((Some(actor), harness::server::HostActorLifecycle::Waiting));
+    let (successor_tx, mut successor_rx) = mpsc::unbounded_channel();
+    let (late_output_tx, mut late_output_rx) = mpsc::unbounded_channel();
+    let transport = CompactionTransport {
+        model_requests: Arc::new(Mutex::new(Vec::new())),
+        successor_seen: successor_tx,
+        late_output_seen: late_output_tx,
+    };
+    let settings_for_engine = settings.clone();
+    let runtime = Arc::clone(&service.runtime);
+    let engine_transport = transport.clone();
+    let conversation = Arc::clone(&embedded.conversation);
+    let stop_driver = embedded.cancellation.clone();
+    let mut running = tokio::spawn(async move {
+        drive_conversation_with_transport::<Offline, _>(
+            embedded.driver,
+            runtime,
+            &settings_for_engine,
+            "offline-compaction".into(),
+            Effort::Medium,
+            "production pending-call test".into(),
+            embedded.cancellation_rx,
+            lifecycle,
+            actor,
+            engine_transport,
+        )
+        .await
+    });
+
+    let first = tokio::time::timeout(Duration::from_secs(10), started_rx.recv())
+        .await
+        .expect("raw call did not start")
+        .unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(10), started_rx.recv())
+        .await
+        .expect("typed call did not start")
+        .unwrap();
+    assert_eq!(
+        [first.as_str(), second.as_str()]
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+        ["raw-pending-call", "typed-pending-call"]
+            .into_iter()
+            .collect()
+    );
+    tokio::time::timeout(Duration::from_secs(10), successor_rx.recv())
+        .await
+        .expect("compacted successor request did not include pending calls")
+        .expect("transport dropped successor signal");
+    raw_release_tx.send(()).unwrap();
+    typed_release_tx.send(()).unwrap();
+    for _ in 0..2 {
+        tokio::time::timeout(Duration::from_secs(5), settled_rx.recv())
+            .await
+            .expect("released operations did not settle")
+            .expect("test endpoint dropped settlement observer");
+    }
+    conversation
+        .input(
+            "release-follow-up",
+            "operator",
+            "Continue after both held operations settle.",
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), late_output_rx.recv())
+        .await
+        .expect("Engine did not make a request after both late outputs settled")
+        .expect("transport dropped late-output request signal");
+    stop_driver.send_replace(true);
+
+    tokio::time::timeout(Duration::from_secs(10), &mut running)
+        .await
+        .expect("Engine did not settle the late outputs")
+        .unwrap()
+        .unwrap();
+    let requests = transport.model_requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    for (call_id, output) in [
+        ("raw-pending-call", "raw late output"),
+        ("typed-pending-call", "typed late output"),
+    ] {
+        assert!(requests[2]
+            .input
+            .iter()
+            .any(|item| { item.0["call_id"] == call_id && item.0.to_string().contains(output) }));
+    }
+    drop(requests);
+    service.shutdown().await.unwrap();
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
