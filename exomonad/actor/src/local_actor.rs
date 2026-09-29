@@ -1412,7 +1412,11 @@ where
                     }
                 }
             }
-            KernelMessage::ToolWithHostedCheckpoint { invocation, capture, reply } => {
+            KernelMessage::ToolWithHostedCheckpoint {
+                invocation,
+                capture,
+                reply,
+            } => {
                 if !matches!(state.hosted_admission, HostedAdmission::Open) {
                     reply
                         .send(Err(KernelInvocationFailure::Rejected {
@@ -1422,7 +1426,11 @@ where
                         .ok();
                     return Ok(());
                 }
-                match state.behavior.tool(&state.context, invocation, Some(capture)).await {
+                match state
+                    .behavior
+                    .tool(&state.context, invocation, Some(capture))
+                    .await
+                {
                     Ok(step) => {
                         settle_step(&myself, state, step, |output| {
                             reply.send(Ok(output)).ok();
@@ -2358,6 +2366,7 @@ mod tests {
         workbench_gate: Option<(Arc<Notify>, Arc<Notify>)>,
         workbench_panics: bool,
         owned_workbench: bool,
+        owned_cleanup: Option<Arc<Notify>>,
     }
 
     #[derive(Clone)]
@@ -2613,6 +2622,7 @@ mod tests {
             let calls = Arc::clone(&self.calls);
             let gate = self.workbench_gate.clone();
             let panics = self.workbench_panics;
+            let cleanup = self.owned_cleanup.clone();
             WorkbenchDispatch::Owned(OwnedWorkbenchTask::new(Box::pin(async move {
                 calls.lock().push("workbench-start");
                 if let Some((entered, release)) = gate {
@@ -2622,7 +2632,7 @@ mod tests {
                 if panics {
                     panic!("owned workbench probe panic");
                 }
-                OwnedWorkbenchCompletion::new(move |behavior: &mut Self| {
+                let completion = OwnedWorkbenchCompletion::new(move |behavior: &mut Self| {
                     behavior.calls.lock().push("workbench-end");
                     Ok(KernelStep::Continue(WorkbenchResponse {
                         status: WorkbenchRunStatus::Committed,
@@ -2631,7 +2641,11 @@ mod tests {
                         next_index: 0,
                         total: 0,
                     }))
-                })
+                });
+                match cleanup {
+                    Some(cleanup) => completion.on_abandoned(move || cleanup.notify_one()),
+                    None => completion,
+                }
             })))
         }
 
@@ -2813,6 +2827,7 @@ mod tests {
                 workbench_gate: None,
                 workbench_panics: false,
                 owned_workbench: false,
+                owned_cleanup: None,
             },
             calls,
             mailbox_calls,
@@ -3421,6 +3436,42 @@ mod tests {
             control.terminal_reply(),
             Some(Err(KernelInvocationFailure::Failed { .. }))
         ));
+    }
+
+    #[tokio::test]
+    async fn forced_stop_abandons_execution_owned_completion() {
+        let mut fixture = behavior(false);
+        fixture.behavior.owned_workbench = true;
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let cleaned = Arc::new(Notify::new());
+        fixture.behavior.workbench_gate = Some((Arc::clone(&entered), Arc::clone(&release)));
+        fixture.behavior.owned_cleanup = Some(Arc::clone(&cleaned));
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let control = crate::WorkbenchExecutionControl::untracked();
+        let reply = send_workbench_request(
+            &actor,
+            WorkbenchRequest::from_cell_input("pure ()"),
+            Some(Arc::clone(&control)),
+        );
+        entered.notified().await;
+        actor.address().stop(None);
+        task.await.expect("actor task");
+        assert!(matches!(
+            reply.await.expect("workbench reply"),
+            Err(KernelInvocationFailure::Failed { .. })
+        ));
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), cleaned.notified())
+            .await
+            .expect("execution-owned completion was abandoned");
+        assert!(matches!(
+            actor.terminal().cleanup().expect("cleanup evidence").hook,
+            crate::CleanupComponentOutcome::Unconfirmed(_)
+        ));
+        assert_eq!(&*fixture.calls.lock(), &["workbench-start"]);
     }
 
     #[tokio::test]
