@@ -299,3 +299,41 @@ The additional helper acquisition regression in `aafac64d1` passed alongside
 the previous two helper tests (3/3, log `view-lease.log` in the Git checkout's
 completion evidence). It proves independently acquired descriptor retention and
 rejection of an expired reference, not exporter-process-death coverage.
+
+### Product coverage and direct-cache safety
+
+Integrated compiler `0198ecbfc` as `72a9e66b8`. Module inventory now distinguishes
+ready, boot, interface-only, missing-interface and rejected-projection nodes;
+ready nodes and emitted products must match one-to-one. Direct whole-invocation
+hits refuse unproved package selection without discarding fresh structural
+inventory or candidate bundles. Ordinary package-importing programs temporarily
+miss this direct cache until worker-validated reuse is implemented.
+
+Exact gates: 94 toolchain tests passed, one ignored; full corpus 261 targets,
+692 Suite passes and seven embedded artifacts. Logs in the compiler checkout:
+`target/engine-completion-availability-rust2.log`,
+`target/engine-completion-availability-fixtures.log`, and
+`target/engine-completion-worker-inventory-v3.log`. The earlier unbound Rust run
+failed its missing-extractor guard and is not passing evidence.
+
+### Exact continuation cleanup
+
+Integrated runtime `b8f15130d` plus `addd503c3` as `3d73e2290` and `90b17c8af`.
+The accepted unit is their net result: slot-owned exact continuation events
+replace actor-wide parked-set subtraction. A panic-safe checkout observer is
+restored before the next checkout; task-local ownership is explicitly captured
+before blocking work. An exact per-slot set retains nested obligations. Late
+caller cancellation queues cleanup through the existing session access owner.
+Checkpoint-cleanup failures still abort exact unpublished request reservations
+and record replay evidence, retaining prior receipts.
+
+Six focused tests passed at `addd503c3`; facade library consumers compiled.
+Evidence: runtime checkout `target/completion-evidence/exact-continuations.log`
+and `target/tidepool-test-runs/20260929T161744Z-489677-battery`. Tests cover the
+existing armed guard, late registration, slot cancellation, cancellation during
+a real blocking checkout with an unrelated survivor, nested/resuspended/normal
+completion ownership, and checkpoint-failure receipt retention.
+
+Concurrent execution/publication remains disabled. Next runtime parcel moves
+actual execution consumers into an execution-owned record while preserving
+sequential behavior until the publication boundary is ready.
