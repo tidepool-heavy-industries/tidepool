@@ -2932,10 +2932,25 @@ where
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
         > = match boundary {
             ResidentActorBoundary::External { continuation, work } => Box::pin(async move {
-                self.environment
-                    .runner
-                    .run_external(context.clone(), continuation, work)
-                    .await
+                let cancellation = work.cancellation_signal();
+                let running =
+                    self.environment
+                        .runner
+                        .run_external(context.clone(), continuation, work);
+                tokio::pin!(running);
+                if let Some(cancellation) = cancellation {
+                    tokio::select! {
+                        outcome = &mut running => outcome,
+                        _ = kernel.wait_requested_shutdown() => {
+                            cancellation.request();
+                            // Requesting retirement does not prove that external
+                            // work stopped. Its owner must observe and settle it.
+                            running.await
+                        }
+                    }
+                } else {
+                    running.await
+                }
             }),
             ResidentActorBoundary::Console { continuation, text } => Box::pin(async move {
                 tracing::debug!(actor = ?context.actor, output = %crate::workbench_display::bounded_output(&text, 8192), "actor console");
