@@ -25,9 +25,13 @@ impl<B> OwnedWorkbenchTask<B> {
 /// The task's result and any execution state that must rejoin its owning
 /// behavior. The finalizer runs on the actor, never on the worker task.
 pub struct OwnedWorkbenchCompletion<B> {
-    finish: Box<
-        dyn FnOnce(&mut B) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure> + Send,
+    finish: Option<
+        Box<
+            dyn FnOnce(&mut B) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>
+                + Send,
+        >,
     >,
+    on_abandoned: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl<B> OwnedWorkbenchCompletion<B> {
@@ -37,15 +41,38 @@ impl<B> OwnedWorkbenchCompletion<B> {
             + 'static,
     ) -> Self {
         Self {
-            finish: Box::new(finish),
+            finish: Some(Box::new(finish)),
+            on_abandoned: None,
         }
     }
 
+    /// Queue exact execution cleanup if the actor stops, ignores a stale
+    /// completion, or its finalizer fails before claiming the result.
+    pub fn on_abandoned(mut self, cleanup: impl FnOnce() + Send + 'static) -> Self {
+        assert!(self.on_abandoned.is_none(), "one workbench cleanup owner");
+        self.on_abandoned = Some(Box::new(cleanup));
+        self
+    }
+
     pub(super) fn finish(
-        self,
+        mut self,
         behavior: &mut B,
     ) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure> {
-        (self.finish)(behavior)
+        let result = self.finish.take().expect("one completion finalizer")(behavior);
+        if result.is_ok() {
+            self.on_abandoned.take();
+        }
+        result
+    }
+}
+
+impl<B> Drop for OwnedWorkbenchCompletion<B> {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.on_abandoned.take() {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(cleanup)).is_err() {
+                tracing::error!("execution-owned workbench abandonment callback panicked");
+            }
+        }
     }
 }
 
