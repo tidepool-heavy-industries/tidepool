@@ -24,6 +24,12 @@ pub(crate) enum GitAccess {
     Capture,
 }
 
+impl GitAccess {
+    pub(crate) fn permits(self, requested: Self) -> bool {
+        self != Self::Read || requested == Self::Read
+    }
+}
+
 /// Kernel identity of the opened lock file, independent of its path spelling
 /// in a host or mounted worktree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

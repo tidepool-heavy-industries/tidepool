@@ -28,6 +28,7 @@ pub enum HeadState {
 impl HeadState {
     /// Read HEAD without confusing a failed inspection with detachment.
     pub(crate) fn read(git: &GitCli, cwd: &Path) -> Result<Self, WorktreeError> {
+        let _scope = git.read_scope(cwd)?;
         let oid = GitOid::from_raw(git.try_read(cwd, &["rev-parse", "HEAD"])?.trimmed());
         match git.read(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]) {
             Ok(out) => Ok(Self::OnBranch {

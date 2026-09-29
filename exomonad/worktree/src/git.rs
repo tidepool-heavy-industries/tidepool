@@ -11,7 +11,6 @@
 //! libgit2 models incompletely. Reconciled inspection through the same tool the
 //! writers use is the honest observer.
 
-use parking_lot::{RawFairMutex, RawThreadId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -80,11 +79,6 @@ impl GitOutput {
     }
 }
 
-/// Runs git commands with a scrubbed environment.
-type AdmissionMutex = parking_lot::lock_api::ReentrantMutex<RawFairMutex, RawThreadId, ()>;
-type LocalAdmissionGuard<'a> =
-    parking_lot::lock_api::ReentrantMutexGuard<'a, RawFairMutex, RawThreadId, ()>;
-
 std::thread_local! {
     static ACTIVE_BACKINGS: std::cell::RefCell<Vec<ScopeBacking>> = const { std::cell::RefCell::new(Vec::new()) };
     static SCOPED_IDENTITIES: std::cell::RefCell<Vec<ScopedIdentity>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -95,6 +89,7 @@ struct ScopeBacking {
     owner: Arc<()>,
     backing: GitBacking,
     permit: Arc<GitPermit>,
+    access: GitAccess,
 }
 
 #[derive(Clone)]
@@ -107,15 +102,14 @@ struct ScopedIdentity {
     view: GitExecutionView,
 }
 
-pub struct GitScopeGuard<'a> {
-    _local: LocalAdmissionGuard<'a>,
+pub struct GitScopeGuard {
     owner: Arc<()>,
     backing_count: usize,
     identity_count: usize,
     _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
-impl Drop for GitScopeGuard<'_> {
+impl Drop for GitScopeGuard {
     fn drop(&mut self) {
         ACTIVE_BACKINGS.with(|active| {
             let mut active = active.borrow_mut();
@@ -140,8 +134,14 @@ impl Drop for GitScopeGuard<'_> {
     }
 }
 
-pub type GitCaptureGuard<'a> = GitScopeGuard<'a>;
-pub type GitWriteGuard<'a> = GitScopeGuard<'a>;
+pub type GitCaptureGuard = GitScopeGuard;
+pub type GitWriteGuard = GitScopeGuard;
+
+#[derive(Clone, Copy)]
+enum ScopePurpose {
+    Transaction,
+    Command,
+}
 
 #[derive(Clone)]
 enum GitExecutionView {
@@ -234,9 +234,6 @@ impl GitExecutionView {
 
 #[derive(Clone, Debug, Default)]
 pub struct GitCli {
-    // Fair handoff keeps frequent short Git reads from starving a queued
-    // source checkpoint. Recursive calls on the capture thread remain valid.
-    admission: std::sync::Arc<AdmissionMutex>,
     /// Extra environment applied to every invocation (the snapshot lane sets
     /// `GIT_INDEX_FILE` here; the monitor sets nothing).
     env: BTreeMap<String, String>,
@@ -251,6 +248,14 @@ impl GitCli {
         Self::default()
     }
 
+    /// Keep a multi-command observation coherent with cooperating writers.
+    /// Nested reads reuse this permit; a read scope cannot be promoted to a
+    /// write or capture scope while another reader may hold the backing.
+    pub fn read_scope(&self, cwd: &Path) -> Result<GitScopeGuard, WorktreeError> {
+        self.scope_within(cwd, GitAccess::Read, Duration::MAX)?
+            .ok_or_else(|| crate::storage::storage_failure(cwd, "Git read admission timed out"))
+    }
+
     /// Create a repository before a common Git directory exists to admit.
     /// The caller owns the new directory's allocation; subsequent commands
     /// enter the ordinary backing admission protocol.
@@ -259,7 +264,6 @@ impl GitCli {
         cwd: &Path,
         options: &[S],
     ) -> Result<GitOutput, WorktreeError> {
-        let _local = self.admission.lock();
         let mut args = vec![OsString::from("init")];
         args.extend(options.iter().map(|option| option.as_ref().to_owned()));
         let view = self
@@ -289,7 +293,7 @@ impl GitCli {
     /// Exclude cooperating Git operations on this repository while capturing
     /// source and private metadata. The capture thread may read its own scope.
     /// Native writers require their separate process admission and sampling.
-    pub fn try_capture(&self, cwd: &Path) -> Result<Option<GitCaptureGuard<'_>>, WorktreeError> {
+    pub fn try_capture(&self, cwd: &Path) -> Result<Option<GitCaptureGuard>, WorktreeError> {
         self.capture_within(cwd, Duration::ZERO)
     }
 
@@ -299,7 +303,7 @@ impl GitCli {
         &self,
         cwd: &Path,
         timeout: Duration,
-    ) -> Result<Option<GitCaptureGuard<'_>>, WorktreeError> {
+    ) -> Result<Option<GitCaptureGuard>, WorktreeError> {
         self.scope_within(cwd, GitAccess::Capture, timeout)
     }
 
@@ -309,11 +313,11 @@ impl GitCli {
         &self,
         cwd: &Path,
         timeout: Duration,
-    ) -> Result<Option<GitWriteGuard<'_>>, WorktreeError> {
+    ) -> Result<Option<GitWriteGuard>, WorktreeError> {
         self.scope_within(cwd, GitAccess::Write, timeout)
     }
 
-    pub fn write_scope(&self, cwd: &Path) -> Result<GitWriteGuard<'_>, WorktreeError> {
+    pub fn write_scope(&self, cwd: &Path) -> Result<GitWriteGuard, WorktreeError> {
         self.write_within(cwd, Duration::MAX)?
             .ok_or_else(|| crate::storage::storage_failure(cwd, "Git write admission timed out"))
     }
@@ -321,7 +325,7 @@ impl GitCli {
     /// Acquire all existing repository backings in kernel-identity order. A
     /// merge can mutate its superproject and initialized workspace repository;
     /// sorting prevents opposite source/target merges from deadlocking.
-    pub fn write_scope_many(&self, paths: &[&Path]) -> Result<GitWriteGuard<'_>, WorktreeError> {
+    pub fn write_scope_many(&self, paths: &[&Path]) -> Result<GitWriteGuard, WorktreeError> {
         if paths.is_empty() {
             return Err(crate::storage::storage_failure(
                 Path::new("/"),
@@ -342,7 +346,7 @@ impl GitCli {
         cwd: &Path,
         access: GitAccess,
         timeout: Duration,
-    ) -> Result<Option<GitScopeGuard<'_>>, WorktreeError> {
+    ) -> Result<Option<GitScopeGuard>, WorktreeError> {
         self.scope_many_within(&[cwd], access, timeout)
     }
 
@@ -351,11 +355,18 @@ impl GitCli {
         paths: &[&Path],
         access: GitAccess,
         timeout: Duration,
-    ) -> Result<Option<GitScopeGuard<'_>>, WorktreeError> {
+    ) -> Result<Option<GitScopeGuard>, WorktreeError> {
+        self.admit_scope(paths, access, timeout, ScopePurpose::Transaction)
+    }
+
+    fn admit_scope(
+        &self,
+        paths: &[&Path],
+        access: GitAccess,
+        timeout: Duration,
+        purpose: ScopePurpose,
+    ) -> Result<Option<GitScopeGuard>, WorktreeError> {
         let started = std::time::Instant::now();
-        let Some(local) = self.admission.try_lock_for(timeout) else {
-            return Ok(None);
-        };
         let owner = Arc::new(());
         let mut common_by_backing = BTreeMap::new();
         let mut scoped = Vec::new();
@@ -412,6 +423,20 @@ impl GitCli {
             }
         }
         let active = ACTIVE_BACKINGS.with(|active| active.borrow().clone());
+        if matches!(purpose, ScopePurpose::Command) {
+            for scope in &scoped {
+                if active.iter().any(|held| held.backing == scope.backing)
+                    && !existing
+                        .iter()
+                        .any(|held| held.requested == scope.requested)
+                {
+                    return Err(crate::storage::storage_failure(
+                        &scope.requested,
+                        "Git worktree was not included in the active admission scope",
+                    ));
+                }
+            }
+        }
         if let Some(highest) = active.iter().map(|scope| scope.backing).max() {
             if common_by_backing.keys().any(|backing| {
                 !active.iter().any(|scope| scope.backing == *backing) && backing < &highest
@@ -422,19 +447,27 @@ impl GitCli {
                 ));
             }
         }
+        #[cfg(test)]
+        admission_tests::before_acquire();
         let mut backings = Vec::new();
         for (backing, (candidate, cwd)) in common_by_backing {
-            let permit = if let Some(existing) =
+            let (permit, held_access) = if let Some(existing) =
                 active.iter().rev().find(|scope| scope.backing == backing)
             {
-                existing.permit.clone()
+                if !existing.access.permits(access) {
+                    return Err(crate::storage::storage_failure(
+                        cwd,
+                        "cannot promote a Git read admission to write or capture",
+                    ));
+                }
+                (existing.permit.clone(), existing.access)
             } else {
                 match GitPermit::acquire(
                     candidate,
                     access,
                     timeout.saturating_sub(started.elapsed()),
                 ) {
-                    Ok(permit) => Arc::new(permit),
+                    Ok(permit) => (Arc::new(permit), access),
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
                     Err(error) => return Err(crate::storage::storage_failure(cwd, error)),
                 }
@@ -443,6 +476,7 @@ impl GitCli {
                 owner: owner.clone(),
                 backing,
                 permit,
+                access: held_access,
             });
         }
         // A view or Git pointer can move while flock waits. Recheck every
@@ -485,7 +519,6 @@ impl GitCli {
         ACTIVE_BACKINGS.with(|active| active.borrow_mut().extend(backings.iter().cloned()));
         SCOPED_IDENTITIES.with(|active| active.borrow_mut().extend(scoped.iter().cloned()));
         Ok(Some(GitScopeGuard {
-            _local: local,
             owner,
             backing_count: backings.len(),
             identity_count: scoped.len(),
@@ -714,7 +747,6 @@ impl GitCli {
         args: &[S],
         access: GitAccess,
     ) -> Result<std::process::Output, GitFailureReceipt> {
-        let _admission = self.admission.lock();
         let arg_strings: Vec<String> = args
             .iter()
             .map(|a| a.as_ref().to_string_lossy().into_owned())
@@ -728,77 +760,23 @@ impl GitCli {
             stderr,
         };
 
-        let view = self
-            .execution_view(cwd)
-            .map_err(|e| receipt(None, String::new(), e.to_string()))?;
-        let common = self.common_directory(cwd, &view)?;
-        let candidate =
-            GitCandidate::open(&common).map_err(|e| receipt(None, String::new(), e.to_string()))?;
-        let backing = candidate.backing;
-        let scoped = SCOPED_IDENTITIES.with(|scoped| {
+        let guard = self
+            .admit_scope(&[cwd], access, Duration::MAX, ScopePurpose::Command)
+            .map_err(|error| match error {
+                WorktreeError::GitFailure(failure) => failure,
+                error => receipt(None, String::new(), error.to_string()),
+            })?
+            .ok_or_else(|| receipt(None, String::new(), "Git admission timed out".to_owned()))?;
+        let view = SCOPED_IDENTITIES.with(|scoped| {
             scoped
                 .borrow()
                 .iter()
                 .rev()
-                .find(|scope| scope.requested == cwd)
-                .cloned()
-        });
-        if let Some(expected) = scoped.as_ref() {
-            let same_view = expected
+                .find(|scope| Arc::ptr_eq(&scope.owner, &guard.owner) && scope.requested == cwd)
+                .expect("admission publishes the requested view")
                 .view
-                .same_view_as(&view)
-                .map_err(|e| receipt(None, String::new(), e.to_string()))?;
-            let worktree = view
-                .worktree_identity()
-                .map_err(|e| receipt(None, String::new(), e.to_string()))?;
-            let git_dir = self
-                .git_directory(cwd, &view)?
-                .metadata()
-                .map_err(|e| receipt(None, String::new(), e.to_string()))?;
-            if !same_view
-                || expected.worktree != worktree
-                || expected.git_dir != (git_dir.dev(), git_dir.ino())
-                || expected.backing != backing
-            {
-                return Err(receipt(
-                    None,
-                    String::new(),
-                    "Git backing or worktree view changed during admitted operation".to_owned(),
-                ));
-            }
-        }
-        let active = ACTIVE_BACKINGS
-            .with(|owners| owners.borrow().iter().any(|owner| owner.backing == backing));
-        if active && scoped.is_none() {
-            return Err(receipt(
-                None,
-                String::new(),
-                "Git worktree was not included in the active admission scope".to_owned(),
-            ));
-        }
-        let reversed = ACTIVE_BACKINGS.with(|owners| {
-            owners
-                .borrow()
-                .iter()
-                .map(|owner| owner.backing)
-                .max()
-                .is_some_and(|highest| !active && backing < highest)
+                .clone()
         });
-        if reversed {
-            return Err(receipt(
-                None,
-                String::new(),
-                "nested Git admission would reverse backing order".to_owned(),
-            ));
-        }
-        let _permit = if active {
-            None
-        } else {
-            Some(
-                GitPermit::acquire(candidate, access, Duration::MAX)
-                    .map_err(|e| receipt(None, String::new(), e.to_string()))?,
-            )
-        };
         let out = view
             .output(args, &self.environment())
             .map_err(|e| receipt(None, String::new(), format!("spawn failed: {e}")))?;
@@ -1307,6 +1285,230 @@ pub mod inspect {
 
 #[cfg(test)]
 mod admission_tests {
+    thread_local! {
+        static BEFORE_ACQUIRE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            std::cell::RefCell::new(None);
+    }
+
+    pub(super) fn before_acquire() {
+        let hook = BEFORE_ACQUIRE.with(|hook| hook.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[test]
+    fn command_revalidates_repository_after_waiting_for_admission() {
+        let first = crate::testing::TestRepo::init().unwrap();
+        let second = crate::testing::TestRepo::init().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let alias = root.path().join("source");
+        std::os::unix::fs::symlink(first.path(), &alias).unwrap();
+        let git = first.git().clone();
+        let writer = git.write_scope(&alias).unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let reader_path = alias.clone();
+        let reader = std::thread::spawn(move || {
+            BEFORE_ACQUIRE.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    ready_tx.send(()).unwrap();
+                    resume_rx
+                        .recv_timeout(super::Duration::from_secs(5))
+                        .unwrap();
+                }));
+            });
+            git.read(&reader_path, &["rev-parse", "--git-common-dir"])
+        });
+        ready_rx
+            .recv_timeout(super::Duration::from_secs(5))
+            .unwrap();
+        let replacement = root.path().join("replacement");
+        std::os::unix::fs::symlink(second.path(), &replacement).unwrap();
+        std::fs::rename(&replacement, &alias).unwrap();
+        drop(writer);
+        resume_tx.send(()).unwrap();
+        let failure = reader.join().unwrap().unwrap_err();
+        assert!(failure.stderr.contains("changed while acquiring admission"));
+    }
+
+    #[test]
+    fn cloned_clients_admit_concurrent_reads() {
+        let repo = crate::testing::TestRepo::init().unwrap();
+        let git = repo.git().clone();
+        let _read = git.read_scope(repo.path()).unwrap();
+        let reader = git.clone();
+        let path = repo.path().to_owned();
+        std::thread::spawn(move || {
+            let _scope = reader
+                .scope_within(&path, super::GitAccess::Read, super::Duration::ZERO)
+                .unwrap()
+                .expect("compatible read cannot wait on another client clone");
+            reader
+                .read(&path, &["rev-parse", "--git-common-dir"])
+                .unwrap();
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn cloned_clients_do_not_exclude_unrelated_repositories() {
+        let first = crate::testing::TestRepo::init().unwrap();
+        let second = crate::testing::TestRepo::init().unwrap();
+        let git = first.git().clone();
+        let _writer = git.write_scope(first.path()).unwrap();
+        let other = git.clone();
+        let path = second.path().to_owned();
+        std::thread::spawn(move || {
+            let _scope = other
+                .write_within(&path, super::Duration::ZERO)
+                .unwrap()
+                .expect("an unrelated backing has its own admission");
+            other
+                .try_run(&path, &["config", "test.admitted", "true"])
+                .unwrap();
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn read_scope_refuses_write_promotion_but_retains_inherited_write_authority() {
+        let repo = crate::testing::TestRepo::init().unwrap();
+        let git = repo.git();
+        let read = git.read_scope(repo.path()).unwrap();
+        assert!(git
+            .write_within(repo.path(), super::Duration::ZERO)
+            .is_err());
+        assert!(git.try_capture(repo.path()).is_err());
+        assert!(git
+            .try_run(repo.path(), &["config", "test.promoted", "true"])
+            .is_err());
+        git.read(repo.path(), &["rev-parse", "--git-common-dir"])
+            .unwrap();
+        drop(read);
+        let _write = git.write_scope(repo.path()).unwrap();
+        let _nested_read = git.read_scope(repo.path()).unwrap();
+        git.try_run(repo.path(), &["config", "test.admitted", "true"])
+            .unwrap();
+    }
+
+    #[test]
+    fn cooperating_processes_share_repository_admission() {
+        const CHILD_PATH: &str = "EXOMONAD_ADMISSION_TEST_PATH";
+        const CHILD_EXPECTED: &str = "EXOMONAD_ADMISSION_TEST_EXPECTED";
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let git = super::GitCli::new();
+            let path = std::path::PathBuf::from(path);
+            let actual = [
+                super::GitAccess::Read,
+                super::GitAccess::Write,
+                super::GitAccess::Capture,
+            ]
+            .map(|access| {
+                let permit = git
+                    .scope_within(&path, access, super::Duration::ZERO)
+                    .unwrap();
+                if permit.is_some() {
+                    git.read(&path, &["rev-parse", "HEAD"]).unwrap();
+                }
+                permit.is_some()
+            });
+            let expected = match std::env::var(CHILD_EXPECTED).unwrap().as_str() {
+                "open" => [true, true, true],
+                "read-only" => [true, false, false],
+                "blocked" => [false, false, false],
+                other => panic!("unknown child expectation {other}"),
+            };
+            assert_eq!(actual, expected);
+            return;
+        }
+        let repo = crate::testing::TestRepo::init().unwrap();
+        repo.writer().commit_file("file", "seed", "seed").unwrap();
+        let sibling_root = tempfile::tempdir().unwrap();
+        let sibling = sibling_root.path().join("sibling");
+        repo.git()
+            .try_run(
+                repo.path(),
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "sibling",
+                    sibling.to_str().unwrap(),
+                ],
+            )
+            .unwrap();
+        let probe = |expected| {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "git::admission_tests::cooperating_processes_share_repository_admission",
+                    "--nocapture",
+                ])
+                .env(CHILD_PATH, &sibling)
+                .env(CHILD_EXPECTED, expected)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "child failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "child selected no test"
+            );
+        };
+        probe("open");
+        let read = repo.git().read_scope(repo.path()).unwrap();
+        probe("read-only");
+        drop(read);
+        let write = repo.git().write_scope(repo.path()).unwrap();
+        probe("blocked");
+        drop(write);
+        let capture = repo.git().try_capture(repo.path()).unwrap().unwrap();
+        probe("blocked");
+        drop(capture);
+        probe("open");
+    }
+
+    #[test]
+    fn opposite_repository_orders_acquire_without_deadlock() {
+        let first = crate::testing::TestRepo::init().unwrap();
+        let second = crate::testing::TestRepo::init().unwrap();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let threads = [false, true].map(|reverse| {
+            let mut paths = [first.path().to_owned(), second.path().to_owned()];
+            if reverse {
+                paths.reverse();
+            }
+            let start = start.clone();
+            std::thread::spawn(move || {
+                let git = super::GitCli::new();
+                start.wait();
+                let _scope = git
+                    .scope_many_within(
+                        &[&paths[0], &paths[1]],
+                        super::GitAccess::Write,
+                        super::Duration::from_secs(5),
+                    )
+                    .unwrap()
+                    .expect("opposite caller ordering cannot deadlock");
+                for path in &paths {
+                    git.try_run(path, &["config", "test.admitted", "true"])
+                        .unwrap();
+                }
+            })
+        });
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    }
+
     #[test]
     fn nested_scope_retains_flock_when_outer_guard_drops_first() {
         let repo = crate::testing::TestRepo::init().unwrap();
