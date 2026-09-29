@@ -137,6 +137,7 @@ pub(super) fn read_root(run: &Path, read_bound: u64) -> RootBinding {
             root_thread,
         }) => (Some(root_actor), Some(root_thread.0)),
         Some(RunPhase::AwaitingBinding { root_actor }) => (Some(root_actor), None),
+        Some(RunPhase::EmbeddedReady { root_actor, .. }) => (Some(root_actor), None),
         Some(RunPhase::Recovering { .. }) => (None, None),
         _ => (None, None),
     };

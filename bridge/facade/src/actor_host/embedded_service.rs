@@ -1,8 +1,9 @@
 use std::{num::NonZeroU64, path::Path, sync::Arc};
 
+use exomonad_actor::LocalResidentInstallation;
 use harness::{
     engine::EngineConfig,
-    model::Effort,
+    model::{AgentPath, Effort},
     server::{ClientCommand, QueuedCommand, ServerConfig, ServerControl, SessionSecret},
     transport::{auth::CodexFileAuth, ResponsesClient},
 };
@@ -12,15 +13,25 @@ use tokio::{
     task::JoinHandle,
 };
 
-use super::embedded_harness::{EmbeddedConversation, EmbeddedHarnessRuntime};
+use super::{
+    embedded_harness::{EmbeddedConversation, EmbeddedHarnessRuntime},
+    embedded_policy::EmbeddedPolicyInstallation,
+};
 use crate::exomonad::EmbeddedLaunchConfig;
 
 pub(super) struct EmbeddedService {
     pub(super) runtime: Arc<EmbeddedHarnessRuntime>,
     pub(super) commands: mpsc::Receiver<QueuedCommand>,
     pub(super) control: ServerControl,
-    pub(super) server: JoinHandle<Result<(), String>>,
+    server: Option<JoinHandle<Result<(), String>>>,
     pub(super) address: std::net::SocketAddr,
+}
+
+pub(super) struct EmbeddedActor {
+    pub(super) conversation: Arc<harness::embedding::Conversation>,
+    pub(super) driver: EmbeddedConversation,
+    pub(super) cancellation: watch::Sender<bool>,
+    pub(super) cancellation_rx: watch::Receiver<bool>,
 }
 
 impl EmbeddedService {
@@ -58,15 +69,81 @@ impl EmbeddedService {
             runtime,
             commands,
             control,
-            server,
+            server: Some(server),
             address,
         })
     }
+
+    pub(super) fn server_finished(&self) -> bool {
+        self.server.as_ref().is_some_and(JoinHandle::is_finished)
+    }
+
+    pub(super) async fn shutdown(&mut self) -> Result<(), String> {
+        let Some(server) = self.server.take() else {
+            return Ok(());
+        };
+        if !server.is_finished() {
+            server.abort();
+        }
+        match server.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(error),
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+
+pub(super) async fn attach_actor(
+    service: &EmbeddedService,
+    run_root: &Path,
+    path: AgentPath,
+    parent: Option<AgentPath>,
+    installation: LocalResidentInstallation,
+    initial_input: Option<String>,
+) -> Result<EmbeddedActor, String> {
+    let actor = installation.actor.identity();
+    let identity = harness::embedding::HostIdentity {
+        run: super::runtime_namespace(run_root),
+        actor: path,
+        incarnation: actor.incarnation.0.to_string(),
+    };
+    let policy = Arc::new(EmbeddedPolicyInstallation::from_installation(&installation));
+    let embedded = service
+        .runtime
+        .attach(
+            identity,
+            installation.actor.clone(),
+            policy,
+            parent.as_ref(),
+        )
+        .map_err(|error| error.to_string())?;
+    if let Some(input) = initial_input {
+        embedded
+            .conversation
+            .input(
+                &format!("launch:{}:{}", actor.id.0, actor.incarnation.0),
+                "operator",
+                &input,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let conversation = Arc::clone(&embedded.conversation);
+    let (cancel, cancellation) = watch::channel(false);
+    Ok(EmbeddedActor {
+        conversation,
+        driver: embedded,
+        cancellation: cancel,
+        cancellation_rx: cancellation,
+    })
 }
 
 impl Drop for EmbeddedService {
     fn drop(&mut self) {
-        self.server.abort();
+        if let Some(server) = &self.server {
+            server.abort();
+        }
     }
 }
 
@@ -77,8 +154,35 @@ pub(super) async fn drive_conversation(
     model: String,
     effort: Effort,
     instructions: String,
-    mut cancellation: watch::Receiver<bool>,
+    cancellation: watch::Receiver<bool>,
 ) -> Result<(), String> {
+    drive_conversation_with_transport::<CodexFileAuth, _>(
+        embedded,
+        runtime,
+        settings,
+        model,
+        effort,
+        instructions,
+        cancellation,
+        ResponsesClient::new(CodexFileAuth::new(settings.codex_auth_file.clone())),
+    )
+    .await
+}
+
+pub(super) async fn drive_conversation_with_transport<A, C>(
+    embedded: EmbeddedConversation,
+    runtime: Arc<EmbeddedHarnessRuntime>,
+    settings: &EmbeddedLaunchConfig,
+    model: String,
+    effort: Effort,
+    instructions: String,
+    mut cancellation: watch::Receiver<bool>,
+    transport: C,
+) -> Result<(), String>
+where
+    A: harness::transport::Auth,
+    C: harness::engine::ResponsesTransport,
+{
     let EmbeddedConversation {
         conversation,
         mut incoming,
@@ -86,8 +190,8 @@ pub(super) async fn drive_conversation(
     } = embedded;
     let actor = conversation.identity().actor.clone();
     let engine = conversation
-        .engine::<CodexFileAuth, _>(
-            ResponsesClient::new(CodexFileAuth::new(settings.codex_auth_file.clone())),
+        .engine::<A, _>(
+            transport,
             runtime.scheduler(),
             EngineConfig {
                 instructions,
@@ -113,8 +217,14 @@ pub(super) async fn drive_conversation(
         }
         // Wakes are hints. A prior Engine round may have returned while a
         // forwarded hint remained in its receiver; the Store is authoritative.
-        let first = match store.unread(&actor.0).map_err(|error| error.to_string())?.first() {
-            Some(envelope) => harness::mailbox::DurableMailboxWake { envelope_id: envelope.id },
+        let first = match store
+            .unread(&actor.0)
+            .map_err(|error| error.to_string())?
+            .first()
+        {
+            Some(envelope) => harness::mailbox::DurableMailboxWake {
+                envelope_id: envelope.id,
+            },
             None => tokio::select! {
                 biased;
                 changed = cancellation.changed() => {
@@ -179,7 +289,7 @@ pub(super) async fn submit_browser_command(
     command: QueuedCommand,
     root: &harness::embedding::Conversation,
     control: &ServerControl,
-) -> Result<(), String> {
+) -> Result<harness::embedding::InputReceipt, String> {
     match command.command {
         ClientCommand::Submit { command: text } => {
             let receipt = root
@@ -194,7 +304,7 @@ pub(super) async fn submit_browser_command(
                     "wakeError": receipt.wake_error,
                 }),
             );
-            Ok(())
+            Ok(receipt)
         }
     }
 }

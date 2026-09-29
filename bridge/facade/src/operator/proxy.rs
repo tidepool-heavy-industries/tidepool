@@ -452,6 +452,7 @@ mod tests {
                 }
                 crate::exomonad::RunPhase::AwaitingBinding { .. }
                 | crate::exomonad::RunPhase::Ready { .. }
+                | crate::exomonad::RunPhase::EmbeddedReady { .. }
                 | crate::exomonad::RunPhase::Recovering { .. } => {
                     unreachable!("not exercised by these tests")
                 }

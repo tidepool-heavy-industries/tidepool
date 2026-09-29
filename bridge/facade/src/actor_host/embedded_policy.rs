@@ -35,6 +35,7 @@ impl EmbeddedPolicyInstallation {
 
     pub(super) fn request_snapshot(&self) -> Result<EmbeddedPolicySnapshot, ResidentToolError> {
         Ok(EmbeddedPolicySnapshot {
+            #[cfg(test)]
             actor: self.actor,
             policy: self.policy.snapshot_for_request()?,
             tools: self.tools.clone(),
@@ -45,12 +46,14 @@ impl EmbeddedPolicyInstallation {
 /// One issued request keeps the manifest and exact actor-owned handler/source
 /// lease together. The opaque endpoint refuses unsupported snapshots.
 pub(super) struct EmbeddedPolicySnapshot {
+    #[cfg(test)]
     actor: ActorRef,
     policy: Arc<dyn ResidentToolEndpoint>,
     tools: Vec<Value>,
 }
 
 impl EmbeddedPolicySnapshot {
+    #[cfg(test)]
     pub(super) fn actor(&self) -> ActorRef {
         self.actor
     }

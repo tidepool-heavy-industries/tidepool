@@ -78,9 +78,12 @@ impl EmbeddedHarnessRuntime {
             installation,
             wakes,
         )?);
-        let conversation = Arc::new(Conversation::attach(self.store.clone(), host.clone(), parent)?);
+        let conversation = Arc::new(Conversation::attach(
+            self.store.clone(),
+            host.clone(),
+            parent,
+        )?);
         Ok(EmbeddedConversation {
-            host,
             conversation,
             incoming,
         })
@@ -96,7 +99,6 @@ impl EmbeddedHarnessRuntime {
 }
 
 pub(super) struct EmbeddedConversation {
-    pub(super) host: Arc<EmbeddedHostActor>,
     pub(super) conversation: Arc<Conversation>,
     pub(super) incoming: mpsc::UnboundedReceiver<DurableMailboxWake>,
 }
@@ -320,16 +322,19 @@ impl CancellationOwner for EmbeddedDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actor_host::embedded_service::{
+        attach_actor, drive_conversation_with_transport, submit_browser_command, EmbeddedService,
+    };
     use crate::actor_host::test_campaign::TestCampaign;
     use async_trait::async_trait;
     use harness::{
         embedding::InputObservation,
-        engine::{EngineConfig, ResponsesTransport},
+        engine::ResponsesTransport,
         item::Item,
         model::Effort,
         transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError},
     };
-    use std::{num::NonZeroU64, sync::Mutex, time::Duration};
+    use std::{sync::Mutex, time::Duration};
 
     #[derive(Clone)]
     struct Offline;
@@ -342,6 +347,7 @@ mod tests {
     #[derive(Clone)]
     struct ParkUntilInput {
         entered: Arc<tokio::sync::Notify>,
+        completed: Arc<tokio::sync::Notify>,
         requests: Arc<Mutex<Vec<ResponsesRequest>>>,
     }
 
@@ -359,6 +365,7 @@ mod tests {
                     "name":"wait_agent", "arguments":"{}"
                 }))]
             } else {
+                self.completed.notify_one();
                 vec![Item(json!({
                     "type":"message", "role":"assistant", "phase":"final_answer",
                     "content":[{"type":"output_text","text":"done"}]
@@ -373,13 +380,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_actor_bound_engine_wakes_from_durable_input() {
+    async fn production_embedded_service_authenticates_browser_and_wakes_real_actor_engine() {
         let campaign = TestCampaign::start().await;
         let actor = campaign.actor.identity();
         let installation = Arc::new(EmbeddedPolicyInstallation::from_installation(
             &campaign.root_installation,
         ));
-        let runtime = EmbeddedHarnessRuntime::open(campaign.session_root.path(), 1).unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let assets = files.path().join("assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+        let secret = "embedded-browser-offline-test-secret-32-bytes";
+        let secret_file = files.path().join("session-secret");
+        std::fs::write(&secret_file, secret).unwrap();
+        let auth_file = files.path().join("codex-auth.json");
+        std::fs::write(&auth_file, "{}").unwrap();
+        let settings = crate::exomonad::EmbeddedLaunchConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            asset_root: assets,
+            session_secret_file: secret_file,
+            codex_auth_file: auth_file,
+            context_capacity_tokens: 200_000,
+            concurrent_jobs: 1,
+        };
+        let mut service = EmbeddedService::prepare(campaign.session_root.path(), &settings)
+            .await
+            .unwrap();
         let identity = HostIdentity {
             run: super::super::runtime_namespace(campaign.session_root.path()),
             actor: AgentPath("/root".into()),
@@ -389,14 +415,16 @@ mod tests {
             incarnation: "wrong-incarnation".into(),
             ..identity.clone()
         };
-        assert!(runtime
+        assert!(service
+            .runtime
             .attach(wrong, campaign.actor.clone(), installation.clone(), None)
             .is_err());
         let wrong_run = HostIdentity {
             run: "another-run".into(),
             ..identity.clone()
         };
-        assert!(runtime
+        assert!(service
+            .runtime
             .attach(
                 wrong_run,
                 campaign.actor.clone(),
@@ -404,53 +432,82 @@ mod tests {
                 None
             )
             .is_err());
-        let binding = runtime
-            .attach(identity.clone(), campaign.actor.clone(), installation, None)
-            .unwrap();
-        assert!(!binding.host.tool_surface().unwrap().tools().is_empty());
 
         let transport = ParkUntilInput {
             entered: Arc::new(tokio::sync::Notify::new()),
+            completed: Arc::new(tokio::sync::Notify::new()),
             requests: Arc::new(Mutex::new(vec![])),
         };
-        let engine = binding
-            .conversation
-            .engine::<Offline, _>(
-                transport.clone(),
-                runtime.scheduler(),
-                EngineConfig {
-                    instructions: "resident test".into(),
-                    tools: vec![],
-                    model: "offline".into(),
-                    effort: Effort::Medium,
-                    session_id: "resident-test".into(),
-                    agent: identity.actor,
-                },
-                NonZeroU64::new(200_000).unwrap(),
-            )
-            .unwrap();
-        let (_cancel, cancellation) = tokio::sync::watch::channel(false);
+        let embedded = attach_actor(
+            &service,
+            campaign.session_root.path(),
+            AgentPath("/root".into()),
+            None,
+            campaign.root_installation.clone(),
+            Some("start".into()),
+        )
+        .await
+        .unwrap();
+        let conversation = Arc::clone(&embedded.conversation);
+        let cancellation = embedded.cancellation;
+        let settings_for_engine = settings.clone();
+        let runtime = Arc::clone(&service.runtime);
+        let transport_for_engine = transport.clone();
         let running = tokio::spawn(async move {
-            engine
-                .run_embedded(
-                    None,
-                    vec![Item(json!({
-                        "type":"message", "role":"user", "content":"start"
-                    }))],
-                    cancellation,
-                    binding.incoming,
-                )
-                .await
+            drive_conversation_with_transport::<Offline, _>(
+                embedded.driver,
+                runtime,
+                &settings_for_engine,
+                "offline".into(),
+                Effort::Medium,
+                "resident test".into(),
+                embedded.cancellation_rx,
+                transport_for_engine,
+            )
+            .await
         });
         tokio::time::timeout(Duration::from_secs(5), transport.entered.notified())
             .await
             .unwrap();
-        let receipt = binding
-            .conversation
-            .input("operator-1", "operator", "wake me")
+
+        let origin = format!("https://{}", service.address);
+        let api = format!("http://{}/api", service.address);
+        let client = reqwest::Client::new();
+        let login = client
+            .post(format!("{api}/session"))
+            .header("Origin", &origin)
+            .json(&serde_json::json!({"secret": secret}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(login.status(), reqwest::StatusCode::OK);
+        let cookie = login.headers()[reqwest::header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let response = client
+            .post(format!("{api}/commands"))
+            .header("Origin", &origin)
+            .header(reqwest::header::COOKIE, cookie)
+            .json(&harness::server::ClientCommand::Submit {
+                command: "wake me".into(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+        let command = service.commands.recv().await.unwrap();
+        let receipt = submit_browser_command(command, &conversation, &service.control)
             .await
             .unwrap();
         assert!(receipt.wake_error.is_none(), "{receipt:?}");
+        tokio::time::timeout(Duration::from_secs(5), transport.completed.notified())
+            .await
+            .unwrap();
+        cancellation.send_replace(true);
         tokio::time::timeout(Duration::from_secs(5), running)
             .await
             .unwrap()
@@ -467,13 +524,11 @@ mod tests {
             1
         );
         assert!(matches!(
-            binding
-                .conversation
-                .input_observation(receipt.envelope_id)
-                .unwrap(),
+            conversation.input_observation(receipt.envelope_id).unwrap(),
             InputObservation::Included(_)
         ));
         drop(requests);
+        service.shutdown().await.unwrap();
         campaign.forest.shutdown().await;
         campaign.hosted.await.unwrap();
     }

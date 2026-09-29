@@ -617,6 +617,10 @@ pub enum RunPhase {
         root_actor: ActorRef,
         root_thread: BackendThreadId,
     },
+    EmbeddedReady {
+        root_actor: ActorRef,
+        browser_address: std::net::SocketAddr,
+    },
     Failed {
         error: String,
     },
@@ -1023,6 +1027,9 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         } => println!(
             "Exomonad ready in tmux session {session_name:?}: actor {root_actor:?}, thread {}",
             root_thread.0
+        ),
+        RunPhase::EmbeddedReady { root_actor, browser_address } => println!(
+            "Exomonad embedded service ready in tmux session {session_name:?}: actor {root_actor:?}, browser listener {browser_address}"
         ),
         RunPhase::Starting | RunPhase::Recovering { .. } | RunPhase::Failed { .. } | RunPhase::Exited => {
             unreachable!("wait_until_interactive returns only interactive phases")
@@ -1588,6 +1595,27 @@ async fn run_host(
                         "root interactive application ready"
                     );
                 }
+                Some(crate::actor_host::ActorHostReadiness::EmbeddedReady { root, address }) => {
+                    let status = observe_run_runtime(RunStatus::new(
+                        &options.run_id,
+                        &options.workspace,
+                        &options.session,
+                        options.agent.clone(),
+                        RunPhase::EmbeddedReady {
+                            root_actor: root,
+                            browser_address: address,
+                        },
+                    ).at_generation(host_generation).with_unavailable_actors(unavailable_actors.clone()),
+                        &command_resources,
+                        &recovered_actors,
+                        &lost_state,
+                    ).await;
+                    if let Err(error) = write_status(&options.status_path, &status) {
+                        tracing::error!(%error, "could not publish embedded readiness; host remains active");
+                    }
+                    tracing::info!(run_id = %options.run_id, actor = ?root, %address,
+                        "Exomonad embedded browser service is ready");
+                }
                 Some(crate::actor_host::ActorHostReadiness::ActorRecovered { predecessor, actor }) => {
                     let observation = RecoveredActorObservation { predecessor, actor };
                     if !recovered_actors.contains(&observation) {
@@ -1889,9 +1917,9 @@ async fn wait_until_interactive(
                 let status = decode_run_status(&bytes)?;
                 if status.run_id == run_id {
                     match &status.phase {
-                        RunPhase::AwaitingBinding { .. } | RunPhase::Ready { .. } => {
-                            return Ok(status)
-                        }
+                        RunPhase::AwaitingBinding { .. }
+                        | RunPhase::Ready { .. }
+                        | RunPhase::EmbeddedReady { .. } => return Ok(status),
                         RunPhase::Failed { error } => {
                             return Err(runtime_error(format!("Exomonad host failed: {error}")))
                         }

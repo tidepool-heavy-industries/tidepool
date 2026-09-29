@@ -1207,6 +1207,12 @@ pub enum ActorHostReadiness {
         root: ActorRef,
         thread: QueueReadyThread,
     },
+    /// The embedded browser listener is bound and its root conversation is
+    /// attached to the admitted resident actor.
+    EmbeddedReady {
+        root: ActorRef,
+        address: std::net::SocketAddr,
+    },
     /// One predecessor conversation was independently verified and its
     /// replacement native application was admitted for the same logical actor.
     ActorRecovered {
@@ -2319,6 +2325,21 @@ pub(crate) async fn run(
                 .chain(recovered_root.map(|(_, actor)| actor.id)),
         )
         .map_err(runtime_error)?;
+    // Bind the embedded browser and run Store before the resident root exists.
+    // A run that cannot establish both cannot truthfully report readiness.
+    let embedded_service = if config.backend == crate::exomonad::ExomonadBackend::Embedded {
+        let settings = config
+            .embedded
+            .as_ref()
+            .ok_or_else(|| runtime_error("embedded backend requires [launch.embedded]"))?;
+        Some(
+            embedded_service::EmbeddedService::prepare(&run_root, settings)
+                .await
+                .map_err(runtime_error)?,
+        )
+    } else {
+        None
+    };
     let (mut root_actor, mut root_task) = match recovered_root {
         Some((_, identity)) => {
             forest
@@ -2543,6 +2564,7 @@ pub(crate) async fn run(
         },
         shutdown_rx,
         root_config_rx,
+        embedded_service,
     ));
     let mut recovery = 0_u64;
     let mut applications_finished = false;
@@ -3787,6 +3809,7 @@ async fn run_interactive_applications(
     fleet: InteractiveFleet,
     shutdown: watch::Receiver<Option<NativeRetirement>>,
     mut root_config: watch::Receiver<ActorHostConfig>,
+    mut embedded_service: Option<embedded_service::EmbeddedService>,
 ) -> Result<(), String> {
     let InteractiveFleet {
         root,
@@ -3832,6 +3855,17 @@ async fn run_interactive_applications(
     };
     let mut deployments: Vec<InteractiveDeployment> = Vec::new();
     let mut launches = JoinSet::new();
+    let mut embedded_tasks: JoinSet<(ActorRef, LocalActorRef, Result<(), String>)> = JoinSet::new();
+    let mut embedded_cancellations = HashMap::new();
+    let mut embedded_live = BTreeSet::new();
+    let mut embedded_conversations: HashMap<
+        ActorRef,
+        (
+            harness::model::AgentPath,
+            Arc<harness::embedding::Conversation>,
+        ),
+    > = HashMap::new();
+    let mut embedded_root: Option<Arc<harness::embedding::Conversation>> = None;
     let mut binding_discoveries = JoinSet::new();
     let mut retirements = JoinSet::new();
     // Supervisors waiting for a stopped actor's release receipt. Served from
@@ -3842,7 +3876,8 @@ async fn run_interactive_applications(
     let mut publication_retries = JoinSet::new();
     let mut process_observations = JoinSet::new();
     let mut health = tokio::time::interval(Duration::from_secs(1));
-    let failure = loop {
+    let failure = AssertUnwindSafe(async {
+        let failure = loop {
         tokio::select! {
             biased;
             _ = wait_for_shutdown(shutdown.clone()) => break None,
@@ -3850,6 +3885,15 @@ async fn run_interactive_applications(
                 if changed.is_ok() { launch_context.config = root_config.borrow_and_update().clone(); }
             }
             _ = health.tick() => {
+                if let Some(service) = embedded_service.as_mut() {
+                    if service.server_finished() {
+                        let detail = match service.shutdown().await {
+                            Ok(()) => "stopped unexpectedly".to_owned(),
+                            Err(error) => error,
+                        };
+                        break Some(format!("embedded browser server failed: {detail}"));
+                    }
+                }
                 if process_observations.is_empty() {
                     let rows = application_owners.lock();
                     for deployment in deployments.iter().filter(|deployment| {
@@ -3968,6 +4012,71 @@ async fn run_interactive_applications(
                     break Some(error);
                 }
             }
+            command = async {
+                match (embedded_service.as_mut(), embedded_root.as_ref()) {
+                    (Some(service), Some(_)) => service.commands.recv().await,
+                    _ => std::future::pending().await,
+                }
+            } => {
+                let Some(command) = command else {
+                    break Some("embedded browser command channel closed".into());
+                };
+                let root = embedded_root.as_ref().expect("branch requires attached root").clone();
+                let control = &embedded_service.as_ref().expect("branch requires service").control;
+                let command_id = command.command_id.clone();
+                if let Err(error) = embedded_service::submit_browser_command(command, &root, control).await {
+                    tracing::warn!(%error, command_id = %command_id, "embedded browser input was not admitted");
+                    control.publish("command.rejected", serde_json::json!({
+                        "commandId": command_id,
+                        "error": error,
+                    }));
+                }
+            }
+            Some(result) = embedded_tasks.join_next(), if !embedded_tasks.is_empty() => {
+                let (actor, local_actor, outcome) = match result {
+                    Ok(joined) => joined,
+                    Err(error) => break Some(format!("embedded Engine task failed: {error}")),
+                };
+                embedded_live.remove(&actor);
+                embedded_cancellations.remove(&actor);
+                embedded_conversations.remove(&actor);
+                if actor == root_identity {
+                    embedded_root = None;
+                }
+                if let Some(waiters) = release_waiters.remove(&actor) {
+                    for waiter in waiters {
+                        waiter.answer(exomonad_actor::ResourceRelease::Released);
+                    }
+                }
+                match outcome {
+                    Ok(()) if local_actor.terminal().get().is_none() => {
+                        if let Err(error) = apply_application_failure(
+                            local_actor,
+                            ExternalApplicationFailure {
+                                class: ExternalApplicationFailureClass::UnexpectedExit,
+                                detail: "embedded Engine exited before actor settlement".into(),
+                            },
+                        ).await {
+                            break Some(error);
+                        }
+                    }
+                    Ok(()) => {}
+                    Err(detail) => {
+                        tracing::error!(?actor, %detail, "embedded Engine failed");
+                        if local_actor.terminal().get().is_none() {
+                            if let Err(error) = apply_application_failure(
+                                local_actor,
+                                ExternalApplicationFailure {
+                                    class: ExternalApplicationFailureClass::UnexpectedExit,
+                                    detail,
+                                },
+                            ).await {
+                                break Some(error);
+                            }
+                        }
+                    }
+                }
+            }
             event = lifecycle.recv() => {
                 let Some(event) = event else { break None };
                 match event {
@@ -3984,6 +4093,130 @@ async fn run_interactive_applications(
                             installation.actor.identity().into(),
                             worktree_grant(installation.effective_role.role()),
                         );
+                        if launch_context.config.backend == crate::exomonad::ExomonadBackend::Embedded {
+                            let Some(service) = embedded_service.as_ref() else {
+                                break Some("embedded backend has no prepared service".into());
+                            };
+                            let Some(settings) = launch_context.config.embedded.clone() else {
+                                break Some("embedded backend has no launch settings".into());
+                            };
+                            let actor = installation.actor.identity();
+                            let is_root = actor == root_identity;
+                            let mode = InteractiveLaunchMode::Fresh;
+                            let model = match installation
+                                .model
+                                .as_ref()
+                                .map(|model| resolve_model(&launch_context.config, model))
+                                .transpose()
+                            {
+                                Ok(Some(model)) => model,
+                                Ok(None) => launch_context.config.model.clone(),
+                                Err(error) => break Some(error),
+                            };
+                            let effort = match launch_effort(
+                                &mode,
+                                launch_context.config.effort,
+                                installation.fork_effort,
+                            ) {
+                                ReasoningEffort::Low => harness::model::Effort::Low,
+                                ReasoningEffort::Medium => harness::model::Effort::Medium,
+                                ReasoningEffort::High => harness::model::Effort::High,
+                            };
+                            let mut instructions = developer_instructions_selected(
+                                &installation.effective_role,
+                                &mode,
+                                launch_context.config.workspace_inputs.as_ref(),
+                                installation.instructions.as_deref(),
+                            );
+                            append_inheritance_authority(&mut instructions);
+                            instructions = format!("{}\n\n{instructions}", launch_context.base_prompt.body());
+                            let instructions = orient_launch_instructions(
+                                &instructions,
+                                &installation.runtime_observation.snapshot(),
+                            );
+                            installation.runtime_observation.publish_launch_pending(
+                                "attaching the embedded conversation",
+                            );
+                            installation.runtime_observation.publish_backend_provenance(
+                                "embedded-engine".into(),
+                                "harness".into(),
+                                Some(model.clone()),
+                                Some(format!("{effort:?}")),
+                            );
+                            let local_actor = installation.actor.clone();
+                            let path = if is_root {
+                                harness::model::AgentPath("/root".into())
+                            } else {
+                                let Some(parent_actor) = installation.context_parent else {
+                                    break Some(format!(
+                                        "embedded actor {actor:?} has no retained context parent; inherited launch is unavailable"
+                                    ));
+                                };
+                                let Some((parent_path, _)) = embedded_conversations.get(&parent_actor) else {
+                                    break Some(format!(
+                                        "embedded actor {actor:?} context parent {parent_actor:?} has no attached conversation"
+                                    ));
+                                };
+                                harness::model::AgentPath(format!(
+                                    "{}/actor_{}_{}",
+                                    parent_path.0, actor.id.0, actor.incarnation.0
+                                ))
+                            };
+                            let parent = (!is_root).then(|| {
+                                let parent_actor = installation.context_parent.expect("checked above");
+                                embedded_conversations
+                                    .get(&parent_actor)
+                                    .expect("checked above")
+                                    .0
+                                    .clone()
+                            });
+                            let initial_input = installation.initial_user_message.clone();
+                            let embedded = match embedded_service::attach_actor(
+                                service,
+                                &launch_context.run_root,
+                                path.clone(),
+                                parent,
+                                *installation,
+                                initial_input,
+                            )
+                            .await {
+                                Ok(embedded) => embedded,
+                                Err(error) => break Some(format!(
+                                    "embedded actor {actor:?} could not attach: {error}"
+                                )),
+                            };
+                            let root_conversation = Arc::clone(&embedded.conversation);
+                            embedded_conversations.insert(
+                                actor,
+                                (path, Arc::clone(&root_conversation)),
+                            );
+                            embedded_cancellations.insert(actor, embedded.cancellation);
+                            embedded_live.insert(actor);
+                            let runtime = Arc::clone(&service.runtime);
+                            embedded_tasks.spawn(async move {
+                                let result = embedded_service::drive_conversation(
+                                    embedded.driver,
+                                    runtime,
+                                    &settings,
+                                    model,
+                                    effort,
+                                    instructions,
+                                    embedded.cancellation_rx,
+                                )
+                                .await;
+                                (actor, local_actor, result)
+                            });
+                            if is_root {
+                                embedded_root = Some(root_conversation);
+                                readiness
+                                    .send(ActorHostReadiness::EmbeddedReady {
+                                        root: root_identity,
+                                        address: service.address,
+                                    })
+                                    .ok();
+                            }
+                            continue;
+                        }
                         let fork_parent_thread = match (
                             recovered_threads.contains_key(&installation.actor.identity()),
                             installation.checkpoint.as_ref(),
@@ -4101,6 +4334,23 @@ async fn run_interactive_applications(
                     }
                     LocalResidentDeployment::SessionReady { activation } => {
                         let actor = activation.id.actor();
+                        if launch_context.config.backend == crate::exomonad::ExomonadBackend::Embedded {
+                            let Some((_, conversation)) = embedded_conversations.get(&actor) else {
+                                break Some(format!("embedded actor {actor:?} received an activation before conversation attachment"));
+                            };
+                            let sequence = activation.id.sequence();
+                            if let Err(error) = conversation
+                                .input(
+                                    &format!("session:{}:{sequence}", activation.request.0),
+                                    "resident",
+                                    &activation.message,
+                                )
+                                .await
+                            {
+                                break Some(format!("embedded activation for {actor:?} was not admitted: {error}"));
+                            }
+                            continue;
+                        }
                         let Some(application) = deployments.iter_mut().find(|app| app.actor == actor) else {
                             let mut owners = application_owners.lock();
                             if let Some(owner) = owners.get_mut(&actor) {
@@ -4123,6 +4373,13 @@ async fn run_interactive_applications(
 
                     LocalResidentDeployment::Retired { actor, terminal } => {
                         worktree_authority.remove_grant(actor.into());
+                        if let Some(cancel) = embedded_cancellations.remove(&actor) {
+                            cancel.send_replace(true);
+                        }
+                        embedded_conversations.remove(&actor);
+                        if actor == root_identity {
+                            embedded_root = None;
+                        }
                         if let Some(resources) = &launch_context.config.command_resources {
                             let producer = format!("{}-{}", actor.id.0, actor.incarnation.0);
                             if let Err(error) = resources.seal_producer(&producer).await {
@@ -4150,9 +4407,17 @@ async fn run_interactive_applications(
                         // retirement in flight. An actor without a row never
                         // held interactive resources.
                         let actor = request.actor;
-                        let settled = match application_owners.lock().get(&actor) {
-                            None => Some(exomonad_actor::ResourceRelease::Released),
-                            Some(owner) => owner.retirement.lock().as_ref().map(InteractiveCleanupReceipt::release),
+                        let settled = if embedded_live.contains(&actor) {
+                            None
+                        } else {
+                            match application_owners.lock().get(&actor) {
+                                None => Some(exomonad_actor::ResourceRelease::Released),
+                                Some(owner) => owner
+                                    .retirement
+                                    .lock()
+                                    .as_ref()
+                                    .map(InteractiveCleanupReceipt::release),
+                            }
                         };
                         match settled {
                             Some(release) => { request.answer(release); }
@@ -4704,7 +4969,12 @@ async fn run_interactive_applications(
                 }
             }
         }
-    };
+        };
+        failure
+    })
+    .catch_unwind()
+    .await
+    .unwrap_or_else(|_| Some("interactive application supervisor panicked".into()));
 
     let native_retirement = if failure.is_some() {
         NativeRetirement::Preserve
@@ -4715,6 +4985,40 @@ async fn run_interactive_applications(
         owner.native_retirement = native_retirement;
         owner.cancel();
     }
+    for cancellation in embedded_cancellations.values() {
+        cancellation.send_replace(true);
+    }
+    let embedded_cleanup = match tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
+        let mut failure = None;
+        while let Some(result) = embedded_tasks.join_next().await {
+            match result {
+                Ok((_actor, _local_actor, Ok(()))) => {}
+                Ok((actor, _local_actor, Err(error))) => {
+                    tracing::warn!(?actor, %error, "embedded Engine stopped with an error during host shutdown");
+                }
+                Err(error) => {
+                    failure.get_or_insert_with(|| format!("embedded Engine task: {error}"));
+                }
+            }
+        }
+        failure
+    })
+    .await
+    {
+        Ok(failure) => failure,
+        Err(_) => {
+            embedded_tasks.shutdown().await;
+            Some("embedded Engine cleanup timed out after cancellation".into())
+        }
+    };
+    let embedded_service_cleanup = match embedded_service.as_mut() {
+        Some(service) => service
+            .shutdown()
+            .await
+            .err()
+            .map(|error| format!("embedded browser shutdown: {error}")),
+        None => None,
+    };
     let launch_cleanup =
         drain_launches_for_shutdown(&mut launches, APPLICATION_SHUTDOWN_TIMEOUT).await;
     deployments.extend(
@@ -4813,6 +5117,8 @@ async fn run_interactive_applications(
     .unwrap_or_else(|_| Some("interactive application cleanup timed out".into()));
     let cleanup_failures = [
         launch_failure,
+        embedded_cleanup,
+        embedded_service_cleanup,
         publication_cleanup,
         notification_cleanup,
         cleanup_failure,
