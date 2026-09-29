@@ -35,6 +35,7 @@ library tidepool-extract-internal
     Tidepool.ExtractRequest
     Tidepool.FatIface
     Tidepool.GhcPipeline
+    Tidepool.ExactHydration
     Tidepool.HostBindingAuthority
     Tidepool.Identity
     Tidepool.Introspection

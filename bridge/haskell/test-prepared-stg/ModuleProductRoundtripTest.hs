@@ -10,42 +10,38 @@ import Data.ByteString qualified as BS
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import GHC
-  ( backend, getSession, getSessionDynFlags, ms_mod
+  ( backend, getSession, getSessionDynFlags, ms_mod, ms_textual_imps, unLoc
   , noBackend
   , parseModule, runGhc, setSession, setSessionDynFlags, typecheckModule )
 import GHC.Driver.Env
-  ( hsc_FC, hsc_HPT, hsc_NC, hsc_dflags, hsc_home_unit, hsc_mod_graph, hscUpdateHPT )
+  ( hsc_HPT, hsc_dflags, hsc_mod_graph )
 import GHC.Driver.Session (GhcLink(..), ghcLink, importPaths, targetProfile)
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
-import GHC.Iface.Load (readIface)
-import GHC.IfaceToCore (typecheckIface)
-import GHC.Tc.Utils.Monad (initIfaceCheck)
-import GHC.Unit.Finder (addHomeModuleToFinder)
-import GHC.Unit.Home (homeUnitAsUnit)
-import GHC.Unit.Home.ModInfo
-  ( HomeModInfo(..), addHomeModInfoToHpt, emptyHomeModInfoLinkable, lookupHpt )
-import GHC.Unit.Module (mkModuleName, moduleNameString)
-import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries')
-import GHC.Unit.Module.Location
-  ( ModLocation, pattern ModLocation
-  , ml_dyn_hi_file, ml_dyn_obj_file, ml_hi_file, ml_hie_file, ml_hs_file, ml_obj_file )
-import GHC.Unit.Module.ModIface (mi_extra_decls)
-import GHC.Unit.Types (GenWithIsBoot(..), ModuleNameWithIsBoot, mkModule, moduleName)
-import GHC.Utils.Outputable (text)
-import qualified GHC.Data.Maybe as MErr
+import GHC.Iface.Recomp.Flags (fingerprintDynFlags, fingerprintOptFlags)
+import GHC.Iface.Recomp.Binary (putNameLiterally)
+import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), lookupHpt)
+import GHC.Unit.Module (mkModuleName, moduleNameString, moduleUnit)
+import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries', mkModuleGraph)
+import GHC.Unit.Module.ModIface (mi_extra_decls, mi_final_exts, mi_flag_hash, mi_opt_hash)
+import GHC.Unit.Types (moduleName, unitString)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import System.Directory (copyFile, getFileSize, renameFile)
 import System.FilePath ((</>))
-import System.IO (hPutStrLn, stderr)
+import Numeric (showHex)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), ProjectedGroup(..), ProjectedGroupBody(..)
   , projectPreparedModuleGroups, projectPreparedModuleGroupsSelected, topBinders )
 import Tidepool.ExecutionSchema qualified as Schema
+import Tidepool.ExactHydration
+  ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope
+  , installExactLexicalGraph )
 import Tidepool.GhcPipeline
   ( PipelineResult(..), PipelineSelection(..), PreparedPipelineResult(..), runPipelineSelected )
 import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.PreparedStg (PreparedModule(..))
+import Tidepool.RetainedUnfoldings (scopeRetainedHscEnv)
 
 -- Exercise the skinny interface retained for a prepared defining module,
 -- then import it from a new GHC session with its source absent.
@@ -125,6 +121,21 @@ verifyModuleProductInterfaceRoundtrip work = do
   iface <- case Map.lookup name (pprProductInterfaces result) of
     Just value -> pure value
     Nothing -> ioError (userError "prepared product omitted ModuleProductA interface")
+  let sourceSummaries = [summary | ModuleNode _ summary <- mgModSummaries' (hsc_mod_graph producer)
+                                 , moduleNameString (moduleName (ms_mod summary)) == "ModuleProductA"]
+  case sourceSummaries of
+    [summary] -> do
+      unless ("Prelude" `elem` map (moduleNameString . unLoc . snd) (ms_textual_imps summary)) $
+        ioError (userError "GHC summary omitted implicit Prelude import")
+      flagHash <- fingerprintDynFlags producer (ms_mod summary) putNameLiterally
+      optHash <- fingerprintOptFlags (hsc_dflags producer) putNameLiterally
+      unless (flagHash == mi_flag_hash (mi_final_exts iface)
+        && optHash == mi_opt_hash (mi_final_exts iface)) $
+        ioError (userError "stored interface options differ from producing GHC flags")
+      checked <- checkOldIface (scopeRetainedHscEnv (ms_mod summary) producer) summary (Just iface)
+      unless (case checked of UpToDateItem _ -> True; OutOfDateItem _ _ -> False) $
+        ioError (userError "scoped recompilation rejected freshly produced interface")
+    _ -> ioError (userError "source summary absent for interface flag probe")
   unless (Map.member (mkModuleName "ModuleProductB") (pprProductInterfaces result)) $
     ioError (userError "product mode omitted the leaf module interface")
   skinny <- case lookupHpt (hsc_HPT producer) name of
@@ -137,7 +148,8 @@ verifyModuleProductInterfaceRoundtrip work = do
   writeBinIface (targetProfile (hsc_dflags producer)) QuietBinIFace
     NormalCompression hi iface
   productSize <- getFileSize hi
-  hPutStrLn stderr ("module-product-interface-bytes home=" ++ show productSize)
+  unless (productSize > 0) $
+    ioError (userError "module product interface was empty")
   digest <- SHA256.hash <$> BS.readFile hi
   copyFile hi tamperedHi
   BS.appendFile tamperedHi (BS.singleton 0)
@@ -151,25 +163,36 @@ verifyModuleProductInterfaceRoundtrip work = do
     flags <- getSessionDynFlags
     _ <- setSessionDynFlags flags
       { importPaths = [work], backend = noBackend, ghcLink = NoLink }
-    fresh <- getSession
-    let owner = mkModule (homeUnitAsUnit (hsc_home_unit fresh)) name
-    readResult <- liftIO $ readIface (hsc_dflags fresh) (hsc_NC fresh) owner hi
-    restored <- case readResult of
-      MErr.Failed _ -> liftIO $ ioError (userError "serialized product interface did not read")
-      MErr.Succeeded value -> pure value
+    fresh <- liftIO . freshExactState =<< getSession
+    let artifact = ExactIfaceArtifact
+          (unitString (moduleUnit (pmModule moduleA)))
+          "ModuleProductA" hi (concatMap (\byte ->
+            let s = showHex byte "" in replicate (2 - length s) '0' ++ s)
+            (BS.unpack digest)) []
+    readResult <- liftIO $ readExactIfaceArtifacts fresh [artifact]
+    loaded <- case readResult of
+      Right [item] -> pure item
+      Left reason -> liftIO $ ioError (userError reason)
+      _ -> liftIO $ ioError (userError "exact hydration did not return one module")
+    tamperedResult <- liftIO $ readExactIfaceArtifacts fresh
+      [artifact { exactPath = tamperedHi }]
+    unless (case tamperedResult of Left _ -> True; Right _ -> False) $
+      liftIO $ ioError (userError "tampered exact interface was admitted")
+    let restored = snd loaded
     unless (case mi_extra_decls restored of Nothing -> True; _ -> False) $
       liftIO $ ioError (userError "serialized home product retained defining Core")
-    details <- liftIO $ initIfaceCheck (text "module product rehydration") fresh
-      (typecheckIface restored)
-    let hmi = HomeModInfo restored details emptyHomeModInfoLinkable
-        location = ModLocation
-          { ml_hs_file = Nothing, ml_hi_file = hi, ml_dyn_hi_file = hi
-          , ml_obj_file = hi, ml_dyn_obj_file = hi, ml_hie_file = hi }
-        finderName = GWIB name NotBoot :: ModuleNameWithIsBoot
-    setSession ((hscUpdateHPT (addHomeModInfoToHpt hmi) fresh)
-      { hsc_mod_graph = hsc_mod_graph producer })
-    _ <- liftIO $ addHomeModuleToFinder (hsc_FC fresh) (hsc_home_unit fresh)
-      finderName (location :: ModLocation)
+    hydrated <- liftIO $ hydrateExactScope fresh [loaded]
+    let sourceGraph = mkModuleGraph
+          [node | node@(ModuleNode _ summary) <- mgModSummaries' (hsc_mod_graph producer)
+                , moduleNameString (moduleName (ms_mod summary)) == "ModuleProductB"]
+    hidden <- liftIO $ installExactLexicalGraph sourceGraph [] hydrated
+    unless (case hidden of Left _ -> True; Right _ -> False) $
+      liftIO $ ioError (userError "implementation-only module became lexically importable")
+    lexicalResult <- liftIO $ installExactLexicalGraph sourceGraph [(artifact, [])] hydrated
+    lexical <- case lexicalResult of
+      Right env -> pure env
+      Left reason -> liftIO $ ioError (userError reason)
+    setSession lexical
     summary <- case consumerSummaries of
       [value] -> pure value
       _ -> liftIO $ ioError (userError "source-less consumer summary absent")
