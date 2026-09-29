@@ -508,14 +508,15 @@ fn w5_no_success_raised_caf_retries_in_one_reusable_invocation() {
     let exception_slot = program.top_slots[&ValueId(1)];
     let original = untag(invocation.roots.snapshot()[caf_slot] as usize);
     invocation.collect(0).unwrap();
-    let descriptor = program
+    let descriptor = invocation
+        .instance
         .descriptor_registry
         .values()
         .find_map(|metadata| match metadata.meaning {
             DescriptorMeaning::Callable {
                 binding: ValueId(0),
                 ..
-            } => Some(&metadata.descriptor),
+            } => Some(Arc::clone(&metadata.descriptor)),
             _ => None,
         })
         .unwrap();

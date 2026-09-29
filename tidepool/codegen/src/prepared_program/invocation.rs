@@ -41,7 +41,7 @@ pub(super) struct PreparedInvocation<'code> {
     /// This invocation's root block for its tops, addressed through its
     /// installation environment while generated code runs.
     pub(super) roots: RootWords,
-    instance: Arc<InstanceImage>,
+    pub(super) instance: Arc<InstanceImage>,
     environment: Box<InstallationEnvironment>,
     pub(super) results: RootWords,
     pub(super) result_contract: ResultContract,
