@@ -3,7 +3,7 @@
 //! dependency witnesses remain independent inputs to this check.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ciborium::value::Value;
 use sha2::{Digest, Sha256};
@@ -22,6 +22,7 @@ const GROUP_LIMIT: usize = 4096;
 const GLOBAL_LIMIT: usize = 65536;
 const PACKAGE_LIMIT: usize = 4096;
 const PACKAGE_INTERFACE_LIMIT: u64 = 32 << 20;
+const SOURCE_LIMIT: u64 = 32 << 20;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProductOrigin {
@@ -492,6 +493,21 @@ fn sha(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
+fn read_bounded(path: &Path, limit: u64) -> CertResult<Vec<u8>> {
+    if !path.is_absolute() {
+        return Err(CertificationError::StaleEvidence);
+    }
+    let metadata = std::fs::metadata(path).map_err(|_| CertificationError::StaleEvidence)?;
+    if !metadata.is_file() || metadata.len() > limit {
+        return Err(CertificationError::StaleEvidence);
+    }
+    let bytes = std::fs::read(path).map_err(|_| CertificationError::StaleEvidence)?;
+    if bytes.len() as u64 > limit {
+        return Err(CertificationError::StaleEvidence);
+    }
+    Ok(bytes)
+}
+
 fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
     bytes.iter().fold(String::new(), |mut text, byte| {
@@ -617,13 +633,7 @@ fn resolve_receipt_owner(
             if witness.sha256 != interface_digest || !witness.selected_path.is_absolute() {
                 return Err(CertificationError::Mismatch("package interface witness"));
             }
-            let metadata = std::fs::metadata(&witness.selected_path)
-                .map_err(|_| CertificationError::StaleEvidence)?;
-            if !metadata.is_file() || metadata.len() > PACKAGE_INTERFACE_LIMIT {
-                return Err(CertificationError::StaleEvidence);
-            }
-            let bytes = std::fs::read(&witness.selected_path)
-                .map_err(|_| CertificationError::StaleEvidence)?;
+            let bytes = read_bounded(&witness.selected_path, PACKAGE_INTERFACE_LIMIT)?;
             if sha(&bytes) != interface_digest {
                 return Err(CertificationError::StaleEvidence);
             }
@@ -667,11 +677,25 @@ pub(crate) fn certify_products(
     fresh_products: &[RawModuleProduct],
     fresh_product_bytes: &[u8],
     fresh_evidence_bytes: &[u8],
+    fresh_input_path: &Path,
     final_evidence: &DependencyEvidence,
     final_target_source: &str,
     endpoint_identity: &[u8],
     include: &[PathBuf],
 ) -> CertResult<Vec<PendingCertifiedGroup>> {
+    let normalized = DependencyEvidence::from_worker(
+        fresh_evidence_bytes,
+        fresh_input_path,
+        final_target_source,
+    )
+    .ok_or(CertificationError::StaleEvidence)?;
+    if serde_json::to_vec(&normalized)
+        .map_err(|_| CertificationError::Mismatch("fresh evidence encoding"))?
+        != serde_json::to_vec(final_evidence)
+            .map_err(|_| CertificationError::Mismatch("fresh evidence encoding"))?
+    {
+        return Err(CertificationError::Mismatch("fresh evidence bytes"));
+    }
     if !final_evidence.valid(final_target_source) {
         return Err(CertificationError::StaleEvidence);
     }
@@ -728,6 +752,12 @@ pub(crate) fn certify_products(
                     || bundle.iface_sha256 != hex(&accepted.skinny_iface_sha256)
                 {
                     return Err(CertificationError::Mismatch("candidate owner/evidence"));
+                }
+                if sha(&read_bounded(&bundle.source, SOURCE_LIMIT)?) != accepted.source_sha256
+                    || sha(&read_bounded(&bundle.iface_path, PACKAGE_INTERFACE_LIMIT)?)
+                        != accepted.skinny_iface_sha256
+                {
+                    return Err(CertificationError::StaleEvidence);
                 }
                 let original = parse_module_products(
                     &bundle.product_bytes,
@@ -950,13 +980,21 @@ mod tests {
         let source = "module Fresh where";
         let bytes = sidecar();
         let evidence = evidence(source);
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("Fresh.hs");
+        std::fs::write(&input, source).unwrap();
+        let mut worker_evidence = evidence.clone();
+        worker_evidence.sources[0].path = input.clone();
+        worker_evidence.modules[0].source = input.clone();
+        let raw_evidence = serde_json::to_vec(&worker_evidence).unwrap();
         let parsed = parse_module_products(
             &bytes,
             &crate::prepared_artifact::production_requirements().unwrap(),
             DecodeLimits::default(),
         )
         .unwrap();
-        let accepted = receipt(&bytes, &evidence, source);
+        let mut accepted = receipt(&bytes, &evidence, source);
+        accepted.dependency_witness_sha256 = sha(&raw_evidence);
         assert!(certify_products(
             None,
             &CertifiedReceipt {
@@ -966,7 +1004,8 @@ mod tests {
             },
             &parsed,
             &bytes,
-            &serde_json::to_vec(&evidence).unwrap(),
+            &raw_evidence,
+            &input,
             &evidence,
             source,
             b"producer",
@@ -974,6 +1013,27 @@ mod tests {
         )
         .unwrap()
         .is_empty());
+        let mut substituted = evidence.clone();
+        substituted.packages.push("unrelated selection".into());
+        assert!(matches!(
+            certify_products(
+                None,
+                &CertifiedReceipt {
+                    modules: vec![accepted.clone()],
+                    targets: BTreeMap::new(),
+                    packages: BTreeMap::new(),
+                },
+                &parsed,
+                &bytes,
+                &raw_evidence,
+                &input,
+                &substituted,
+                source,
+                b"producer",
+                &[],
+            ),
+            Err(CertificationError::Mismatch("fresh evidence bytes"))
+        ));
         let mut changed = accepted.clone();
         changed.product_sha256 = [9; 32];
         assert!(matches!(
@@ -986,7 +1046,8 @@ mod tests {
                 },
                 &parsed,
                 &bytes,
-                &serde_json::to_vec(&evidence).unwrap(),
+                &raw_evidence,
+                &input,
                 &evidence,
                 source,
                 b"producer",
@@ -1007,7 +1068,8 @@ mod tests {
             },
             &parsed,
             &bytes,
-            &serde_json::to_vec(&evidence).unwrap(),
+            &raw_evidence,
+            &input,
             &evidence,
             source,
             b"producer",
