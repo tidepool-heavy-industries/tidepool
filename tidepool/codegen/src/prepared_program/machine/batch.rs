@@ -452,7 +452,7 @@ mod tests {
     use tidepool_repr::execution_schema::{
         testing, Atom, CachedHomeOwner, CertifiedGroup, CheckedLayout, ConstructorDecl,
         ConstructorId, ExprFrame, GlobalDecl, GlobalId, HeapRhs, ImportOwner, ModuleVersion,
-        Signature, SignatureId, ValueRef,
+        Signature, SignatureId, UpdatePolicy, ValueRef,
     };
 
     fn group(name: &str, ordinal: u32, other: &str) -> Arc<CompiledProgram> {
@@ -524,6 +524,53 @@ mod tests {
                 product_sha256: [3; 32],
             },
             testing::projected_group(wire, 11).unwrap(),
+            vec![],
+        )
+        .unwrap();
+        Arc::new(CompiledProgram::compile_certified_group(&group).unwrap())
+    }
+
+    fn caf_group() -> Arc<CompiledProgram> {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("Caf", "Value"),
+            family: testing::identity("Caf", "Value"),
+            host_id: tidepool_repr::DataConId(90_002),
+            result_rep: RuntimeRep::LiftedRef,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+            tag: 1,
+            family_size: 1,
+        });
+        wire.expressions.nodes[0] = ExprFrame::Construct {
+            constructor: ConstructorId(0),
+            fields: vec![],
+        };
+        if let tidepool_repr::execution_schema::Group::NonRecursive(top) = &mut wire.bindings[0] {
+            top.identity = testing::identity("Fixture", "caf");
+            top.binding.rhs = HeapRhs::Thunk {
+                signature: SignatureId(0),
+                update: UpdatePolicy::Memoize,
+                captures: vec![],
+                body: 0,
+            };
+        }
+        let group = CertifiedGroup::admit(
+            CachedHomeOwner {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                module_version: ModuleVersion([1; 32]),
+                skinny_iface_sha256: [2; 32],
+                product_sha256: [3; 32],
+            },
+            testing::projected_group(wire, 12).unwrap(),
             vec![],
         )
         .unwrap();
@@ -687,6 +734,59 @@ mod tests {
         let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
         assert_eq!(retired.programs.len(), 2);
         assert_eq!(machine.residency().programs, 0);
+    }
+
+    #[test]
+    fn batch_installs_independent_mutable_cafs() {
+        let image = caf_group();
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        let first = machine
+            .install_shared_batch(vec![BatchProgram {
+                image: Arc::clone(&image),
+                imports: vec![],
+            }])
+            .unwrap()[0];
+        let second = machine
+            .install_shared_batch(vec![BatchProgram {
+                image,
+                imports: vec![],
+            }])
+            .unwrap()[0];
+        let first_caf = machine.retain_top(first, ValueId(0)).unwrap();
+        let second_caf = machine.retain_top(second, ValueId(0)).unwrap();
+        assert_ne!(
+            machine.handle_current_pointer(first_caf),
+            machine.handle_current_pointer(second_caf)
+        );
+        let call = PreparedCallOptions {
+            observation_budget: 0,
+            collect_before_observation: false,
+        };
+        let first_value = machine
+            .run_entry_retained(first, ValueId(0), &[], call, RealmId::ROOT)
+            .unwrap();
+        let second_value = machine
+            .run_entry_retained(second, ValueId(0), &[], call, RealmId::ROOT)
+            .unwrap();
+        let [PreparedResult::Managed(first_result)] = first_value.values.as_slice() else {
+            panic!("first CAF must return a managed constructor");
+        };
+        let [PreparedResult::Managed(second_result)] = second_value.values.as_slice() else {
+            panic!("second CAF must return a managed constructor");
+        };
+        assert_ne!(
+            machine.handle_current_pointer(*first_result),
+            machine.handle_current_pointer(*second_result)
+        );
+        assert!(machine.release(*first_result));
+        assert!(machine.release(*second_result));
+        assert!(machine.release(first_caf));
+        assert!(machine.release(second_caf));
+        let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(retired.programs.len(), 2);
     }
 
     #[test]
