@@ -38,10 +38,10 @@ use tidepool_runtime::session::{
     CheckedBinderPin, CheckedExpressionPlan, CompiledTurn, DeclarationCandidateRender,
     DeclarationReceipt, ExpressionPresentation, HostBindingAuthority, HostBindingType, HostCarrier,
     HostPayload, InspectionQuery, InspectionRequest, OutputSink, ParsedBlock,
-    PendingPreparedInstall, PendingPreparedMode, PreparedRuntimeError, ResidentContinuationEvent,
-    ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession,
-    RootCustody, SourceImports, StagedDeclaration, TurnClassification, TurnCode, TurnKind,
-    TurnRequest, TurnResult,
+    PendingPreparedInstall, PendingPreparedMode, ResidentContinuationEvent, ResidentError,
+    ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody,
+    SourceImports, StagedDeclaration, TurnClassification, TurnCode, TurnKind, TurnRequest,
+    TurnResult,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, spawn_blocking_in_span, CompileError, FailureClass,
@@ -5013,11 +5013,8 @@ where
     }))
     .await
     .map_err(ResidentActorWorkbenchError::Join)?;
-    let program = program.map_err(|error| {
-        ResidentActorWorkbenchError::Resident(ResidentError::Prepared(
-            PreparedRuntimeError::Compile(error),
-        ))
-    })?;
+    let program = program
+        .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Prepared(error)))?;
 
     #[cfg(test)]
     split_probe::before_display_install().await;
@@ -11612,6 +11609,10 @@ mod request_tests {
         else {
             panic!("display bundle must be a bind turn");
         };
+        assert!(
+            compiled.certification.is_some(),
+            "display bundle must retain its worker-certified native owners"
+        );
         let (page, metadata, cell_display) =
             display_bundle_binders(&bound, &page_name, &metadata_name)
                 .expect("expected page/metadata/cellDisplay binder shape");
