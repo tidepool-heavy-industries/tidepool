@@ -236,3 +236,36 @@ artifact-selection failure, separate from the repaired root permission profile.
 These are component checkpoints. Neither establishes concurrent private
 execution, atomic production publication, independent capture delivery, or G3
 worker-tree acceptance.
+
+The M2 facade seam is checkpointed separately at `4e3fc0532` on
+`completion/m2-facade`: the real browser/Haskell/compaction host test passed
+1/1 (119.8s), and request-surface/reload/dispatch policy tests passed 3/3.
+Logs are in that checkout's `target/completion-evidence/` as
+`m2-compaction-observed.log` and `m2-policy-capture.log`. The fixture observes
+settlement of the exact operation before triggering compaction with another
+advertised Haskell call; it does not inject `wait_agent`. Independent review
+found no blocker. Capture is invoked directly by this test; Haskell checkpoint
+token publication and child admission still require acceptance.
+
+Next integration dependencies are explicit:
+
+1. Forward-apply the compiler's package sidecar contract, inherited witnesses,
+   and `e816fffe1b` against the joined source. Produce `.hi.owners` after
+   `certify_products`, preserving all original groups, zero-group modules and
+   the package witness map. Carry owned artifacts across the temporary worker
+   directory lifetime into run-owned materialization. Update recovery failure
+   classification and exact fixture sidecars together. Keep conflicting witness
+   publication fail-closed; owner identity does not yet prove witness stability.
+2. Give the runtime one manifest commit owner: stage outside checkout, recheck
+   the entire base checksum/high-water under checkout, preflight live promotion,
+   hold checkout through rename, then perform infallible visibility installation.
+   Restage from current winners plus exact private writes after interference;
+   never replay effects. Declaration-tip preflight still needs its owner.
+3. Continue Buck with native codegen library/C actions and explicit Cargo cfg
+   resolution; migrate its tests only after their full input closure is modeled.
+
+The M2 compiler gate also exposed early RSS rotation after only one or two
+requests at 7,283–9,199 MiB against a 7,168 MiB ceiling. Retained evidence is
+`permission-recovery/m2-compiler-rss-rotation.log`. A future fresh per-run gate
+can use the existing `TIDEPOOL_DAEMON_ARGS` knob to retain more memo state within
+the admitted aggregate budget. No global default or active daemon was changed.
