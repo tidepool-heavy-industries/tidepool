@@ -217,6 +217,14 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
     }
 
     fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+        self.dispatch_with_checkpoint_boxed(invocation, None)
+    }
+
+    fn dispatch_with_checkpoint_boxed(
+        &self,
+        invocation: ToolInvocation,
+        capture: Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
+    ) -> ResidentToolFuture {
         let client = self.client.clone();
         let tools = self.tools.clone();
         let installed_tools = self.issued_tools.clone();
@@ -242,10 +250,11 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                     ToolArguments::Structured(value) => value,
                 };
                 return client
-                    .dispatch_workbench_issued(
+                    .dispatch_workbench_issued_with_capture(
                         WorkbenchRequest::for_tool(invocation.name, arguments),
                         invocation.context,
                         installed_tools,
+                        capture,
                     )
                     .await;
             }
@@ -256,7 +265,12 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
             };
             let request = WorkbenchRequest::from_cell_input(&source);
             client
-                .dispatch_workbench_issued(request, invocation.context, installed_tools)
+                .dispatch_workbench_issued_with_capture(
+                    request,
+                    invocation.context,
+                    installed_tools,
+                    capture,
+                )
                 .await
         })
     }

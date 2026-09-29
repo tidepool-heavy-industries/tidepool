@@ -10,6 +10,7 @@ use tidepool_repr::{ActorPath, ActorPathError, ActorPathSegment};
 use tidepool_runtime::session::WorkbenchForkBoundary;
 
 use crate::ActorRef;
+use crate::HostedCheckpointAttachment;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorPathReservation {
@@ -317,7 +318,21 @@ pub struct CheckpointLease {
     pub session: SessionId,
     pub scope: ScopeId,
     pub boundary: WorkbenchForkBoundary,
+    host_attachment: Arc<Mutex<Option<HostedCheckpointAttachment>>>,
     phase: tokio::sync::watch::Sender<CheckpointPhase>,
+}
+
+impl CheckpointLease {
+    #[must_use]
+    pub fn host_attachment<T: std::any::Any + Send + Sync>(&self) -> Option<Arc<T>> {
+        if matches!(
+            *self.phase.borrow(),
+            CheckpointPhase::Pending | CheckpointPhase::Failed
+        ) {
+            return None;
+        }
+        self.host_attachment.lock().as_ref()?.downcast()
+    }
 }
 
 impl CheckpointLease {
@@ -435,6 +450,33 @@ impl ForkGroupRegistry {
         scope: ScopeId,
         boundary: WorkbenchForkBoundary,
     ) -> String {
+        self.capture_checkpoint_with_host_attachment(
+            name,
+            issuer,
+            issuer_role,
+            issuer_model,
+            issuer_effort,
+            issuer_source_layer,
+            session,
+            scope,
+            boundary,
+            None,
+        )
+    }
+
+    pub fn capture_checkpoint_with_host_attachment(
+        &self,
+        name: String,
+        issuer: ActorRef,
+        issuer_role: crate::EffectiveRole,
+        issuer_model: Option<crate::Model>,
+        issuer_effort: Option<crate::ForkEffort>,
+        issuer_source_layer: crate::CheckpointSourceLayer,
+        session: SessionId,
+        scope: ScopeId,
+        boundary: WorkbenchForkBoundary,
+        host_attachment: Option<HostedCheckpointAttachment>,
+    ) -> String {
         let token = format!("{}:{}", self.checkpoint_namespace, uuid::Uuid::new_v4());
         let (phase, _) = tokio::sync::watch::channel(CheckpointPhase::Pending);
         let mut state = self.state.lock();
@@ -464,6 +506,7 @@ impl ForkGroupRegistry {
                 session,
                 scope,
                 boundary,
+                host_attachment: Arc::new(Mutex::new(host_attachment)),
                 phase,
             },
         );
@@ -604,9 +647,10 @@ impl ForkGroupRegistry {
         boundary: &WorkbenchForkBoundary,
         success: bool,
     ) -> Vec<(SessionId, ScopeId)> {
-        let state = self.state.lock();
+        let mut state = self.state.lock();
         let mut retired = Vec::new();
-        for lease in state.checkpoints.values() {
+        let mut attachments = Vec::new();
+        for lease in state.checkpoints.values_mut() {
             if lease.issuer == issuer
                 && &lease.boundary == boundary
                 && *lease.phase.borrow() == CheckpointPhase::Pending
@@ -618,9 +662,12 @@ impl ForkGroupRegistry {
                 });
                 if !success {
                     retired.push((lease.session, lease.scope));
+                    attachments.extend(lease.host_attachment.lock().take());
                 }
             }
         }
+        drop(state);
+        drop(attachments);
         retired
     }
 
@@ -633,22 +680,26 @@ impl ForkGroupRegistry {
         session: SessionId,
         delivered: bool,
     ) -> Result<Option<ScopeId>, CheckpointRefusal> {
-        let state = self.state.lock();
+        let mut state = self.state.lock();
         let lease = state
             .checkpoints
-            .get(token)
+            .get_mut(token)
             .ok_or(CheckpointRefusal::UnavailableCheckpoint)?;
         if lease.session != session {
             return Err(CheckpointRefusal::WrongSession);
         }
         let phase = *lease.phase.borrow();
-        match phase {
+        let mut attachment = None;
+        let result = match phase {
             CheckpointPhase::Pending => {
                 lease.phase.send_replace(if delivered {
                     CheckpointPhase::Published
                 } else {
                     CheckpointPhase::Failed
                 });
+                if !delivered {
+                    attachment = lease.host_attachment.lock().take();
+                }
                 Ok((!delivered).then_some(lease.scope))
             }
             CheckpointPhase::Published if delivered => Ok(None),
@@ -657,16 +708,23 @@ impl ForkGroupRegistry {
                 Err(CheckpointRefusal::ReleasedCheckpoint)
             }
             _ => Err(CheckpointRefusal::CaptureFailed),
-        }
+        };
+        drop(state);
+        drop(attachment);
+        result
     }
 
     pub fn fail_issuer_checkpoints(&self, issuer: ActorRef) {
-        let state = self.state.lock();
-        for lease in state.checkpoints.values() {
+        let mut state = self.state.lock();
+        let mut attachments = Vec::new();
+        for lease in state.checkpoints.values_mut() {
             if lease.issuer == issuer && *lease.phase.borrow() == CheckpointPhase::Pending {
                 lease.phase.send_replace(CheckpointPhase::Failed);
+                attachments.extend(lease.host_attachment.lock().take());
             }
         }
+        drop(state);
+        drop(attachments);
     }
 
     pub fn failed_checkpoint_scopes(&self, issuer: ActorRef) -> Vec<(SessionId, ScopeId)> {
@@ -1536,6 +1594,149 @@ fn lowest_available(
 mod tests {
     use super::*;
     use crate::{ActorId, ActorRef};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct AttachmentDrop(Arc<AtomicUsize>);
+
+    impl Drop for AttachmentDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn checkpoint_with_attachment(
+        groups: &ForkGroupRegistry,
+        issuer: ActorRef,
+        boundary: WorkbenchForkBoundary,
+        scope: ScopeId,
+    ) -> (String, Arc<AtomicUsize>) {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let attachment =
+            HostedCheckpointAttachment::new(Arc::new(AttachmentDrop(Arc::clone(&drops))));
+        let caller_share = attachment.clone();
+        let token = groups.capture_checkpoint_with_host_attachment(
+            "captured".into(),
+            issuer,
+            crate::EffectiveRole::root(),
+            None,
+            None,
+            crate::CheckpointSourceLayer::default(),
+            SessionId(7),
+            scope,
+            boundary,
+            Some(attachment),
+        );
+        drop(caller_share);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        (token, drops)
+    }
+
+    #[test]
+    fn undelivered_checkpoint_drops_opaque_host_attachment() {
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let issuer = ActorRef::first(ActorId(1));
+        let (token, drops) = checkpoint_with_attachment(
+            &groups,
+            issuer,
+            WorkbenchForkBoundary {
+                thread_id: "thread".into(),
+                call_id: "call".into(),
+            },
+            ScopeId(3),
+        );
+        let retained_waiter = groups.checkpoint(&token, SessionId(7)).unwrap();
+        assert_eq!(
+            groups.settle_checkpoint(&token, SessionId(7), false),
+            Ok(Some(ScopeId(3)))
+        );
+        assert!(retained_waiter
+            .host_attachment::<AttachmentDrop>()
+            .is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            groups.settle_checkpoint(&token, SessionId(7), false),
+            Ok(None)
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            groups.checkpoint(&token, SessionId(7)),
+            Err(CheckpointRefusal::CaptureFailed)
+        ));
+    }
+
+    #[test]
+    fn failed_workbench_boundary_drops_only_its_pending_host_attachments() {
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let issuer = ActorRef::first(ActorId(1));
+        let failed_boundary = WorkbenchForkBoundary {
+            thread_id: "thread".into(),
+            call_id: "failed".into(),
+        };
+        let live_boundary = WorkbenchForkBoundary {
+            thread_id: "thread".into(),
+            call_id: "live".into(),
+        };
+        let (_, failed_drops) =
+            checkpoint_with_attachment(&groups, issuer, failed_boundary.clone(), ScopeId(3));
+        let (live, live_drops) =
+            checkpoint_with_attachment(&groups, issuer, live_boundary.clone(), ScopeId(4));
+        assert_eq!(
+            groups.settle_checkpoints(issuer, &failed_boundary, false),
+            vec![(SessionId(7), ScopeId(3))]
+        );
+        assert_eq!(failed_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(live_drops.load(Ordering::SeqCst), 0);
+        groups.settle_checkpoints(issuer, &live_boundary, true);
+        assert_eq!(live_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            groups.release_checkpoint(&live, SessionId(7)),
+            Ok(Some(ScopeId(4)))
+        );
+        assert_eq!(live_drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn issuer_failure_drops_only_pending_host_attachments() {
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let issuer = ActorRef::first(ActorId(1));
+        let other = ActorRef::first(ActorId(2));
+        let boundary = WorkbenchForkBoundary {
+            thread_id: "thread".into(),
+            call_id: "call".into(),
+        };
+        let (_, failed_drops) =
+            checkpoint_with_attachment(&groups, issuer, boundary.clone(), ScopeId(3));
+        let (published, published_drops) = checkpoint_with_attachment(
+            &groups,
+            issuer,
+            WorkbenchForkBoundary {
+                call_id: "published".into(),
+                ..boundary.clone()
+            },
+            ScopeId(4),
+        );
+        let (unrelated, unrelated_drops) =
+            checkpoint_with_attachment(&groups, other, boundary, ScopeId(5));
+        assert_eq!(
+            groups.settle_checkpoint(&published, SessionId(7), true),
+            Ok(None)
+        );
+        groups.fail_issuer_checkpoints(issuer);
+        groups.fail_issuer_checkpoints(issuer);
+        assert_eq!(failed_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(published_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(unrelated_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            groups.release_checkpoint(&published, SessionId(7)),
+            Ok(Some(ScopeId(4)))
+        );
+        assert_eq!(
+            groups.release_checkpoint(&unrelated, SessionId(7)),
+            Ok(Some(ScopeId(5)))
+        );
+        assert_eq!(published_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unrelated_drops.load(Ordering::SeqCst), 1);
+    }
 
     #[tokio::test]
     async fn checkpoint_waits_for_exact_boundary_and_survives_issuer_retirement() {

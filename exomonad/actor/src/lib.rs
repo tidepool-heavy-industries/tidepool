@@ -101,7 +101,8 @@ pub use lineage::{
 pub use local_actor::{
     spawn_local_actor, spawn_local_actor_in_incarnation, ChildExitNotice, KernelBehavior,
     KernelBehaviorError, KernelContext, KernelStep, LocalActor, LocalActorArguments,
-    LocalActorDirectory, LocalActorState,
+    LocalActorDirectory, LocalActorState, OwnedWorkbenchCompletion, OwnedWorkbenchTask,
+    WorkbenchAbandonGuard, WorkbenchDispatch,
 };
 pub use mailbox::MailboxValue;
 pub use mount::{
@@ -135,6 +136,7 @@ pub use resident_actor::{
 };
 pub use resident_interactive::{ResidentInteractivePolicy, HASKELL_TOOL};
 pub use resident_tools::{
+    HostedCheckpointAttachment, HostedCheckpointCapture, HostedCheckpointCaptureError,
     ResidentToolEndpoint, ResidentToolError, ResidentToolFuture, ResidentToolOutput,
     ResidentToolPolicy, WorkbenchBoundaryReconciliation, WorkbenchCancellationOutcome,
     WorkbenchExecutionControl,

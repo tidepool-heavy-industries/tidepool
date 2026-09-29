@@ -1063,11 +1063,30 @@ struct ActiveWorkbenchExecution {
     admitted_source: crate::CheckpointSourceLayer,
 }
 
+struct WorkbenchAdmission {
+    context: ActorSessionContext,
+    request: WorkbenchRequest,
+    installed_tools: Option<crate::InstalledToolLease>,
+    admitted_source: crate::CheckpointSourceLayer,
+    current_builtin: bool,
+    capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
+    control: Option<Arc<crate::WorkbenchExecutionControl>>,
+    invocation: Option<crate::resident_tools::WorkbenchCallKey>,
+}
+
+enum WorkbenchPreflight {
+    Retained(crate::KernelWorkbenchReply),
+    Admitted(WorkbenchAdmission),
+}
+
 // Even a raw operator notebook with no provider boundary publishes at the
 // end of its input. A resident handler has no later notebook completion.
 enum ForkPublication {
     Resident,
-    Workbench(Option<tidepool_runtime::session::WorkbenchForkBoundary>),
+    Workbench {
+        boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
+        capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
+    },
     Route(tidepool_runtime::session::WorkbenchForkBoundary),
 }
 
@@ -1075,15 +1094,25 @@ impl ForkPublication {
     fn boundary(&self) -> Option<&tidepool_runtime::session::WorkbenchForkBoundary> {
         match self {
             Self::Resident => None,
-            Self::Workbench(boundary) => boundary.as_ref(),
+            Self::Workbench { boundary, .. } => boundary.as_ref(),
             Self::Route(boundary) => Some(boundary),
         }
     }
 
     fn hosted_boundary(&self) -> Option<&tidepool_runtime::session::WorkbenchForkBoundary> {
         match self {
-            Self::Workbench(Some(boundary)) => Some(boundary),
-            Self::Resident | Self::Workbench(None) | Self::Route(_) => None,
+            Self::Workbench {
+                boundary: Some(boundary),
+                ..
+            } => Some(boundary),
+            Self::Resident | Self::Workbench { .. } | Self::Route(_) => None,
+        }
+    }
+
+    fn capture(&self) -> Option<&Arc<dyn crate::HostedCheckpointCapture>> {
+        match self {
+            Self::Workbench { capture, .. } => capture.as_ref(),
+            Self::Resident | Self::Route(_) => None,
         }
     }
 }
@@ -1239,6 +1268,97 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     }
     fn context(&self, actor: ActorRef) -> ActorSessionContext {
         self.descriptor.session_context(actor)
+    }
+
+    fn preflight_workbench(
+        &self,
+        actor: ActorRef,
+        invocation: crate::ActorWorkbenchInvocation,
+        control: Option<Arc<crate::WorkbenchExecutionControl>>,
+    ) -> Result<WorkbenchPreflight, KernelInvocationFailure>
+    where
+        H: DispatchEffect<O> + Send + 'static,
+        O: OutputSink + Sync + 'static,
+    {
+        let mut context = self.context(actor);
+        let request = invocation.request;
+        let installed_tools = match invocation.installed_tools {
+            Some(lease) if lease.actor() != context.actor => {
+                return Err(KernelInvocationFailure::Rejected {
+                    actor: context.actor,
+                    detail: "issued tool installation belongs to another actor".into(),
+                });
+            }
+            Some(lease) => Some(lease),
+            None => self.installed_tools.current(),
+        };
+        let current_builtin = request.tool_call().is_some_and(|call| {
+            matches!(
+                call.name.as_str(),
+                crate::status_tool::STATUS_TOOL
+                    | crate::reload_spec_tool::RELOAD_SPEC_TOOL
+                    | crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
+            )
+        });
+        if !self.policy_installed
+            || !matches!(
+                self.standing,
+                ResidentStanding::Interactive(_)
+                    | ResidentStanding::Receiving(_)
+                    | ResidentStanding::Workbench
+            )
+        {
+            return Err(KernelInvocationFailure::Rejected {
+                actor: context.actor,
+                detail: "actor has no active Haskell application workbench".into(),
+            });
+        }
+        let invocation_key = control
+            .as_ref()
+            .and_then(|control| control.invocation.clone());
+        if let Some(execution) = request.execution_id() {
+            match self.workbench_executions.lock().lookup(
+                execution,
+                &request,
+                invocation_key.as_ref(),
+            ) {
+                Err(failure) => {
+                    return Err(KernelInvocationFailure::Rejected {
+                        actor: context.actor,
+                        detail: match failure {
+                            WorkbenchReplayFailure::DifferentInput => "one hosted call identity was retried with different Haskell input",
+                            WorkbenchReplayFailure::Unconfirmed => "the original hosted call outcome is unconfirmed; replay cannot repeat its effects",
+                        }
+                        .into(),
+                    });
+                }
+                Ok(Some(reply)) => return Ok(WorkbenchPreflight::Retained(reply)),
+                Ok(None) => {}
+            }
+        }
+        let admitted_source = installed_tools
+            .as_ref()
+            .map_or_else(
+                || self.freeze_installed_source(context.actor),
+                |lease| Ok(lease.source().clone()),
+            )
+            .map_err(|error| KernelInvocationFailure::Rejected {
+                actor: context.actor,
+                detail: format!("cannot admit exact source layer: {error}"),
+            })?;
+        if !current_builtin {
+            context = context.with_issued_source(&admitted_source);
+        }
+        Ok(WorkbenchPreflight::Admitted(WorkbenchAdmission {
+            context,
+            request,
+            installed_tools,
+            admitted_source,
+            current_builtin,
+            capture: invocation.hosted_checkpoint_capture,
+            control,
+            invocation: invocation_key,
+        }))
     }
 
     fn active_reservation_owner(&self) -> Option<RequestReservationOwner> {
@@ -3750,17 +3870,35 @@ where
                             .map_err(|_| crate::CheckpointRefusal::CaptureFailed)?;
                         return Err(crate::CheckpointRefusal::CaptureFailed);
                     }
-                    Ok(self.environment.fork_groups.capture_checkpoint(
-                        name,
-                        context.actor,
-                        self.descriptor.effective_role().clone(),
-                        self.descriptor.model().cloned(),
-                        self.descriptor.fork_effort(),
-                        before,
-                        context.placement.session,
-                        scope,
-                        boundary,
-                    ))
+                    let attachment = match self.fork_publication.capture() {
+                        Some(capture) => match capture.capture(&name, &boundary) {
+                            Ok(attachment) => Some(attachment),
+                            Err(_) => {
+                                self.environment
+                                    .runner
+                                    .retire_fork_scopes(context.clone(), vec![scope])
+                                    .await
+                                    .map_err(|_| crate::CheckpointRefusal::CaptureFailed)?;
+                                return Err(crate::CheckpointRefusal::CaptureFailed);
+                            }
+                        },
+                        None => None,
+                    };
+                    Ok(self
+                        .environment
+                        .fork_groups
+                        .capture_checkpoint_with_host_attachment(
+                            name,
+                            context.actor,
+                            self.descriptor.effective_role().clone(),
+                            self.descriptor.model().cloned(),
+                            self.descriptor.fork_effort(),
+                            before,
+                            context.placement.session,
+                            scope,
+                            boundary,
+                            attachment,
+                        ))
                 }
                 .await;
                 let token = result.as_ref().ok().cloned();
@@ -8136,6 +8274,7 @@ where
         request: MailboxValue,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
         Box::pin(async move {
+            self.fork_publication = ForkPublication::Resident;
             let context = self.context(kernel.identity());
             self.input_origin = ActorInputOrigin::ActorMessageFrom(actor_address(sender));
             let (_, step) = self
@@ -8161,6 +8300,7 @@ where
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<MailboxValue>, KernelBehaviorError>>
     {
         Box::pin(async move {
+            self.fork_publication = ForkPublication::Resident;
             let context = self.context(kernel.identity());
             self.input_origin = ActorInputOrigin::ActorMessageFrom(actor_address(caller));
             let (reply, step) = self
@@ -8185,12 +8325,33 @@ where
         &'a mut self,
         kernel: &'a KernelContext,
         invocation: exomonad_tool::ToolInvocation,
+        hosted_checkpoint_capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<KernelStep<serde_json::Value>, KernelInvocationFailure>,
     > {
         Box::pin(async move {
             let context = self.context(kernel.identity());
+            let hosted_boundary = hosted_checkpoint_capture.as_ref().and_then(|_| {
+                let invocation_context = invocation.context.as_ref()?;
+                invocation_context.context_call_id.as_ref().map(|call_id| {
+                    tidepool_runtime::session::WorkbenchForkBoundary {
+                        thread_id: invocation_context.thread_id.clone(),
+                        call_id: call_id.clone(),
+                    }
+                })
+            });
+            if hosted_checkpoint_capture.is_some()
+                && hosted_boundary.as_ref().is_none_or(|boundary| {
+                    boundary.thread_id.is_empty() || boundary.call_id.is_empty()
+                })
+            {
+                return Err(KernelInvocationFailure::Rejected {
+                    actor: context.actor,
+                    detail: "hosted checkpoint capture requires an exact provider invocation"
+                        .into(),
+                });
+            }
             let awaiting = match std::mem::replace(&mut self.standing, ResidentStanding::Boot) {
                 ResidentStanding::Tools(awaiting) => awaiting,
                 standing => {
@@ -8214,6 +8375,10 @@ where
             let arguments = match invocation.arguments {
                 exomonad_tool::ToolArguments::Raw(text) => serde_json::Value::String(text),
                 exomonad_tool::ToolArguments::Structured(value) => value,
+            };
+            self.fork_publication = ForkPublication::Workbench {
+                boundary: hosted_boundary,
+                capture: hosted_checkpoint_capture,
             };
             let mut outcome = self
                 .environment
@@ -8254,6 +8419,7 @@ where
                             actor: context.actor,
                             detail: "actor awaited another tool invocation without replying".into(),
                         })?;
+                        self.fork_publication = ForkPublication::Resident;
                         self.set_standing(context.actor, ResidentStanding::Tools(next));
                         return Ok(KernelStep::Continue(result));
                     }
@@ -8262,6 +8428,7 @@ where
                             actor: context.actor,
                             detail: "actor completed a tool invocation without replying".into(),
                         })?;
+                        self.fork_publication = ForkPublication::Resident;
                         self.set_standing(context.actor, ResidentStanding::Terminal);
                         return Ok(KernelStep::Stop {
                             output: result,
@@ -8294,80 +8461,23 @@ where
         Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
     > {
         Box::pin(async move {
-            let mut context = self.context(kernel.identity());
-            let request = invocation.request;
-            let installed_tools = match invocation.installed_tools {
-                Some(lease) if lease.actor() != context.actor => {
-                    return Err(KernelInvocationFailure::Rejected {
-                        actor: context.actor,
-                        detail: "issued tool installation belongs to another actor".into(),
-                    });
-                }
-                Some(lease) => Some(lease),
-                None => self.installed_tools.current(),
+            let admitted = self.preflight_workbench(kernel.identity(), invocation, control)?;
+            let WorkbenchAdmission {
+                context,
+                request,
+                installed_tools,
+                admitted_source,
+                current_builtin,
+                capture,
+                control,
+                invocation,
+            } = match admitted {
+                WorkbenchPreflight::Retained(reply) => return reply.map(KernelStep::Continue),
+                WorkbenchPreflight::Admitted(admitted) => admitted,
             };
-            let current_builtin = request.tool_call().is_some_and(|call| {
-                matches!(
-                    call.name.as_str(),
-                    crate::status_tool::STATUS_TOOL
-                        | crate::reload_spec_tool::RELOAD_SPEC_TOOL
-                        | crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
-                )
-            });
-            if !self.policy_installed
-                || !matches!(
-                    self.standing,
-                    ResidentStanding::Interactive(_)
-                        | ResidentStanding::Receiving(_)
-                        | ResidentStanding::Workbench
-                )
-            {
-                return Err(KernelInvocationFailure::Rejected {
-                    actor: context.actor,
-                    detail: "actor has no active Haskell application workbench".into(),
-                });
-            }
             let execution = request.execution_id().cloned();
-            let invocation = control
-                .as_ref()
-                .and_then(|control| control.invocation.as_ref());
-            if let Some(execution) = &execution {
-                let retained = self
-                    .workbench_executions
-                    .lock()
-                    .lookup(execution, &request, invocation);
-                match retained {
-                    Err(failure) => {
-                        let result = Err(KernelInvocationFailure::Rejected {
-                            actor: context.actor,
-                            detail: match failure {
-                                WorkbenchReplayFailure::DifferentInput => "one hosted call identity was retried with different Haskell input",
-                                WorkbenchReplayFailure::Unconfirmed => "the original hosted call outcome is unconfirmed; replay cannot repeat its effects",
-                            }.into(),
-                        });
-                        return result.map(KernelStep::Continue);
-                    }
-                    Ok(Some(reply)) => {
-                        return reply.map(KernelStep::Continue);
-                    }
-                    Ok(None) => {}
-                }
-            }
             let retained_request = execution.as_ref().map(|_| request.clone());
             let checkpoint_boundary = request.fork_boundary().cloned();
-            let admitted_source = installed_tools
-                .as_ref()
-                .map_or_else(
-                    || self.freeze_installed_source(context.actor),
-                    |lease| Ok(lease.source().clone()),
-                )
-                .map_err(|error| KernelInvocationFailure::Rejected {
-                    actor: context.actor,
-                    detail: format!("cannot admit exact source layer: {error}"),
-                })?;
-            if !current_builtin {
-                context = context.with_issued_source(&admitted_source);
-            }
             let public_visibility = if current_builtin {
                 None
             } else {
@@ -8385,9 +8495,11 @@ where
             if let Some(execution) = &execution {
                 // Persist the fence in the forest-retained journal before effects
                 // can run; actor termination cannot turn uncertainty into replay.
-                self.workbench_executions
-                    .lock()
-                    .begin(execution, request.clone(), invocation);
+                self.workbench_executions.lock().begin(
+                    execution,
+                    request.clone(),
+                    invocation.as_ref(),
+                );
             }
             let local_execution_id = execution.clone().unwrap_or_else(|| {
                 WorkbenchExecutionId::from_digest(*uuid::Uuid::new_v4().as_bytes())
@@ -8403,7 +8515,10 @@ where
                         installed_tools,
                         admitted_source,
                     });
-            self.fork_publication = ForkPublication::Workbench(request.fork_boundary().cloned());
+            self.fork_publication = ForkPublication::Workbench {
+                boundary: request.fork_boundary().cloned(),
+                capture,
+            };
             // One INFO line per hosted tool call or cell, breaking down
             // where its wall time went (checkout wait/hold, compile, Jev,
             // exec) — see `crate::call_timing`. The scope wraps the whole
@@ -8595,7 +8710,7 @@ where
                     request,
                     reply,
                     cancellation,
-                    invocation,
+                    invocation.as_ref(),
                 );
             }
             result
@@ -10299,9 +10414,12 @@ mod tests {
         assert!(super::ForkPublication::Route(boundary.clone())
             .hosted_boundary()
             .is_none());
-        assert!(super::ForkPublication::Workbench(Some(boundary))
-            .hosted_boundary()
-            .is_some());
+        assert!(super::ForkPublication::Workbench {
+            boundary: Some(boundary),
+            capture: None,
+        }
+        .hosted_boundary()
+        .is_some());
     }
 
     #[tokio::test]
