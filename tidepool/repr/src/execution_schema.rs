@@ -24,19 +24,19 @@ dense_id!(OperationId);
 dense_id!(SignatureId);
 dense_id!(TypeNodeId);
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Architecture {
     X86_64,
     Aarch64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Endianness {
     Little,
     Big,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct TargetDescriptor {
     pub architecture: Architecture,
     pub endianness: Endianness,
@@ -46,7 +46,7 @@ pub struct TargetDescriptor {
     pub features: Vec<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ProgramEnvelope {
     pub schema_version: u64,
     pub projection_profile: String,
@@ -55,7 +55,7 @@ pub struct ProgramEnvelope {
     pub target: TargetDescriptor,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SymbolIdentity {
     pub unit: String,
     pub module: String,
@@ -65,7 +65,7 @@ pub struct SymbolIdentity {
     pub record_parent: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum RuntimeRep {
     Void,
     LiftedRef,
@@ -89,7 +89,7 @@ impl RuntimeRep {
 /// that saturation cannot return. `Returns([])` is a successful zero-result
 /// call, distinct from both other cases. Partial application still produces a
 /// lifted function value regardless of the saturated result contract.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ResultContract {
     Returns(Vec<RuntimeRep>),
     NoSuccess,
@@ -140,13 +140,13 @@ impl ResultContract {
     }
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Signature {
     pub arguments: Vec<RuntimeRep>,
     pub results: ResultContract,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, thiserror::Error)]
 pub enum LayoutError {
     #[error("unsupported storage representation {0:?}")]
     UnsupportedRepresentation(RuntimeRep),
@@ -156,7 +156,7 @@ pub enum LayoutError {
     Overflow,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct StorageField {
     logical_index: u32,
     rep: RuntimeRep,
@@ -192,7 +192,7 @@ impl StorageField {
 /// `Void` remains present in `logical_to_stored` but occupies no bytes. Raw
 /// addresses have pointer-sized storage but are deliberately absent from
 /// `managed_root_offsets`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct StorageLayout {
     logical_to_stored: Vec<Option<u32>>,
     fields: Vec<StorageField>,
@@ -291,13 +291,13 @@ fn align_up(value: u32, alignment: u32) -> Result<u32, LayoutError> {
         .ok_or(LayoutError::Overflow)
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct FieldLayout {
     pub rep: RuntimeRep,
     pub offset: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CheckedLayout {
     pub fields: Vec<FieldLayout>,
     pub alignment: u32,
@@ -305,7 +305,7 @@ pub struct CheckedLayout {
     pub root_mask: Vec<bool>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ConstructorDecl {
     pub identity: SymbolIdentity,
     /// Existing bridge identity minted by Tidepool.Identity.varId on GHC's
@@ -322,13 +322,13 @@ pub struct ConstructorDecl {
     pub family_size: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CtorRow {
     pub constructor: ConstructorId,
     pub fields: Vec<TypeNodeId>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum TypeNode {
     Data {
         family: SymbolIdentity,
@@ -345,7 +345,7 @@ pub enum TypeNode {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SiteDelivery {
     HostAnswer,
     LiveReentry,
@@ -359,7 +359,7 @@ pub enum SiteDelivery {
 /// site ids never set it, so the two ranges are disjoint.
 pub const SYNTHETIC_SITE_BIT: u64 = 1 << 63;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SiteRow {
     pub site: u64,
     pub origin: String,
@@ -369,7 +369,7 @@ pub struct SiteRow {
     pub inputs: Vec<TypeNodeId>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct GlobalDecl {
     pub identity: SymbolIdentity,
     pub rep: RuntimeRep,
@@ -380,13 +380,13 @@ pub struct GlobalDecl {
     pub required_generation: Option<u64>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ValueRef {
     Local(ValueId),
     Global(GlobalId),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ScalarLiteral {
     Int {
         bits: u8,
@@ -416,7 +416,7 @@ impl ScalarLiteral {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Atom {
     Ref(ValueRef),
     Scalar(ScalarLiteral),
@@ -428,13 +428,13 @@ pub enum Atom {
     Rubbish(RuntimeRep),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Group<T> {
     NonRecursive(T),
     Recursive(Vec<T>),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 /// Thunk entry policy only. GHC's `ReEntrant` is represented by
 /// `HeapRhs::Function`, not a third thunk policy; `JumpedTo` belongs to joins.
 pub enum UpdatePolicy {
@@ -442,13 +442,13 @@ pub enum UpdatePolicy {
     SingleEntry,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct HeapBinding<B = usize> {
     pub id: ValueId,
     pub rhs: HeapRhs<B>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum HeapRhs<B = usize> {
     /// Immutable module-owned bytes (GHC StgTopStringLit), not a thunk.
     Bytes(Vec<u8>),
@@ -470,7 +470,7 @@ pub enum HeapRhs<B = usize> {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct JoinBinding<B = usize> {
     pub id: JoinId,
     pub signature: SignatureId,
@@ -478,14 +478,14 @@ pub struct JoinBinding<B = usize> {
     pub body: B,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum AlternativePattern {
     Default,
     Constructor(ConstructorId),
     Literal(ScalarLiteral),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Alternative<B = usize> {
     pub pattern: AlternativePattern,
     pub binders: Vec<ValueId>,
@@ -497,7 +497,7 @@ pub struct Alternative<B = usize> {
 /// Family identity proves agreement, not exhaustiveness: declarations contain
 /// only encountered constructors. If no alternative matches, execution reports
 /// an integrity failure, including when an upstream refinement was violated.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum CaseKind {
     Algebraic(SymbolIdentity),
     Primitive(RuntimeRep),
@@ -507,7 +507,7 @@ pub enum CaseKind {
     Polymorphic,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ExprFrame<A> {
     Return(Vec<Atom>),
     Enter {
@@ -673,7 +673,7 @@ impl<A> HeapRhs<A> {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct OperationDecl {
     pub identity: OperationIdentity,
     pub signature: SignatureId,
@@ -682,7 +682,7 @@ pub struct OperationDecl {
 /// The compiler-authenticated representation of the vendored JSON value
 /// family.  The type parameter lets each boundary retain the same named roles
 /// while translating local schema IDs to runtime IDs or descriptors.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct JsonLayout<T = ConstructorId> {
     pub object: T,
     pub array: T,
@@ -780,7 +780,7 @@ impl<T> JsonLayout<T> {
 /// Primops and admitted foreign capabilities occupy distinct identity spaces.
 /// The declaration signature completes the operation's identity; the same
 /// primop may occur at more than one instantiated signature.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum OperationIdentity {
     PrimOp(String),
     Intrinsic {
@@ -809,7 +809,7 @@ pub enum OperationIdentity {
 /// Stable wire tags in declaration order (0..10). Match producer GHC keys, not
 /// user-visible occurrence strings. The impossible/absent members signal violated
 /// compiler invariants; the remaining members are recoverable language failures.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum WiredInErrorKind {
     PatternMatch = 0,
@@ -838,18 +838,18 @@ impl WiredInErrorKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ForeignConvention {
     CCall,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct TopBinding {
     pub identity: SymbolIdentity,
     pub binding: HeapBinding,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct WireProgram {
     pub envelope: ProgramEnvelope,
     pub signatures: Vec<Signature>,
@@ -871,7 +871,7 @@ pub struct WireProgram {
 
 /// Validated but not yet linked program. Its fields remain private so every
 /// executable consumer crosses the same validation boundary.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct PreparedProgram {
     wire: WireProgram,
 }
@@ -921,7 +921,7 @@ impl PreparedProgram {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ImportedValue {
     pub identity: SymbolIdentity,
     pub rep: RuntimeRep,
@@ -932,7 +932,7 @@ pub struct ImportedValue {
     pub generation: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct LinkedProgram {
     prepared: PreparedProgram,
     imports: Vec<ImportedValue>,
@@ -947,7 +947,7 @@ impl LinkedProgram {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct MachineImports {
     pub values: BTreeMap<SymbolIdentity, ImportedValue>,
 }
@@ -957,7 +957,7 @@ pub struct MachineImports {
 /// The decoder compares the artifact envelope with this value before
 /// publishing a [`PreparedProgram`]. It must not infer target facts from the
 /// decoder process.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ProgramRequirements {
     pub schema_version: u64,
     pub projection_profile: String,
@@ -966,7 +966,7 @@ pub struct ProgramRequirements {
     pub target: TargetDescriptor,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct DecodeLimits {
     pub max_bytes: usize,
     pub max_nodes: usize,
@@ -991,7 +991,7 @@ impl Default for DecodeLimits {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, thiserror::Error)]
 pub enum ParseError {
     #[error("prepared program exceeds {limit} byte limit ({actual})")]
     ByteLimit { limit: usize, actual: usize },
@@ -1021,7 +1021,7 @@ pub enum ParseError {
     Malformed(String),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, thiserror::Error)]
 pub enum LinkError {
     #[error("missing imported value {0:?}")]
     MissingImport(SymbolIdentity),
