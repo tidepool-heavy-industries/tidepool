@@ -15,6 +15,7 @@ module Tidepool.GhcPipeline
     -- * Resident session
   , withResidentPipelineSelected
   , withResidentPipelineSelectedRequests
+  , withExactInterfaceTransaction
   ) where
 
 import GHC hiding (typeKind)
@@ -688,6 +689,17 @@ data ModuleFront = ModuleFront
     -- ^ Classified once from the parsed source in 'compileFront'; see
     -- 'classifyQuasiQuoteOrigins'.
   }
+
+-- Exact artifact operations have no authored source target. They use the
+-- extractor's same target/package flags, then create their own fresh lexical
+-- scope before loading any interface.
+withExactInterfaceTransaction :: [FilePath] -> (HscEnv -> IO a) -> IO a
+withExactInterfaceTransaction includes use = do
+  libdir <- getLibdir
+  runGhc (Just libdir) $ do
+    dflags <- getSessionDynFlags
+    _ <- setSessionDynFlags (extractionDynFlags dflags includes)
+    getSession >>= liftIO . use
 
 runCompile :: PipelineSelection result -> Set.Set SymbolIdentity -> PipelineVariant -> FilePath -> [FilePath] -> Maybe FilePath -> IO result
 runCompile selection retained variant path includes buildProductsDir = do

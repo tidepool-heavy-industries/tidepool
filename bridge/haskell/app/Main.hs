@@ -48,7 +48,8 @@ import Tidepool.Binders
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
   , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..)
-  , withResidentPipelineSelectedRequests, CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances
+  , withResidentPipelineSelectedRequests, withExactInterfaceTransaction
+  , CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances
   , cellExpressionPlans
   , satisfiesCapturedConstraint, stripMonadHead )
 import Tidepool.ExecutionEncode (encodeWireProgram, encodeModuleProducts)
@@ -66,6 +67,10 @@ import Tidepool.PreparedStg
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithCached )
 import Tidepool.ModuleCandidates (ModuleCandidate(..))
+import Tidepool.DeclarationJoin
+  ( DeclarationOperation(..), readDeclarationOperation, validateDeclarationJoin
+  , renderDeclarationJoinOutcome, inspectDeclarationArtifacts
+  , renderDeclarationInventoryOutcome )
 import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson
   ( ReportOutcome(..), DiagSeverity(..), Diag(..), SourceRejection(..)
@@ -218,6 +223,12 @@ runParsedInvocation compiler caches parsedWorkerRequest = do
 dispatch
   :: Compiler -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
 dispatch compiler caches timing args =
+  case requestDeclarationJoin args of
+    Just manifest -> runDeclarationOperation args manifest
+    Nothing -> dispatchSource compiler caches timing args
+
+dispatchSource :: Compiler -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
+dispatchSource compiler caches timing args =
   case requestFiles args of
     [] -> reportDiags (Left (toException (userError "worker request contains no input")))
     (file : _)
@@ -236,6 +247,21 @@ dispatch compiler caches timing args =
         | not (null (requestTargets args))        -> timePhase timing "total" (processFile compiler caches timing args file)
         -- Normal one-shot extraction.
         | otherwise                           -> timePhase timing "total" (processFile compiler caches timing args file)
+
+runDeclarationOperation :: WorkerRequest -> FilePath -> IO ExitCode
+runDeclarationOperation args manifest = do
+  result <- trySynchronous $ do
+    out <- maybe (fail "declaration operation requires an output path") pure
+      (requestDeclarationJoinOut args)
+    operation <- readDeclarationOperation manifest
+    rendered <- withExactInterfaceTransaction (requestIncludes args) $ \env ->
+      case operation of
+        InspectInventory artifacts -> renderDeclarationInventoryOutcome
+          <$> inspectDeclarationArtifacts env artifacts
+        ValidateJoin input -> renderDeclarationJoinOutcome
+          <$> validateDeclarationJoin env input
+    writeFile out rendered
+  reportDiags result
 
 runInspectionMode :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode
 runInspectionMode compiler args _path = do
