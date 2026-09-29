@@ -311,12 +311,16 @@
             "tidepool"
             "--bin"
             "exomonad"
+            "--bin"
+            "exomonad-view-helper"
           ];
           cargoInstallFlags = [
             "-p"
             "tidepool"
             "--bin"
             "exomonad"
+            "--bin"
+            "exomonad-view-helper"
           ];
           doCheck = false;
           nativeBuildInputs = [ pkgs.pkg-config ];

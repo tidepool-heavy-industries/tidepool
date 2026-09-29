@@ -72,6 +72,16 @@ pub fn snapshot_source(
     worktree_id: &WorktreeId,
     temp_index_dir: &Path,
 ) -> Result<SnapshotReceipt, WorktreeError> {
+    let submodules = initialized_submodules(git, source)?;
+    let mut paths = vec![source];
+    paths.extend(submodules.iter().map(PathBuf::as_path));
+    let _write = git.write_scope_many(&paths)?;
+    if initialized_submodules(git, source)? != submodules {
+        return Err(crate::storage::storage_failure(
+            source,
+            "source submodule set changed while acquiring Git admission",
+        ));
+    }
     // Refuse first — before a single write happens. A refusal that happens
     // after a partial write is not a refusal.
     if let Some(kind) = inspect::in_progress(git, source)? {
@@ -173,6 +183,25 @@ pub fn snapshot_source(
     })
 }
 
+fn initialized_submodules(git: &GitCli, source: &Path) -> Result<Vec<PathBuf>, WorktreeError> {
+    let output = git.try_read(source, &["submodule", "status"])?;
+    let mut roots = Vec::new();
+    for line in output.lines() {
+        if line.starts_with('-') {
+            continue;
+        }
+        if let Some(path) = line.split_whitespace().nth(1) {
+            let root = source.join(path);
+            if git.try_exists(&root.join(".git"))? {
+                roots.push(root);
+            }
+        }
+    }
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
+}
+
 /// Refuse if any submodule has uncommitted changes of its own (staged,
 /// unstaged, or a merge conflict inside it) — a synthetic commit would then
 /// point at a gitlink whose content the snapshot never captured. Returns the
@@ -212,7 +241,7 @@ pub(crate) fn refuse_dirty_submodules(
             'U' => {
                 return Err(WorktreeError::DirtySubmoduleUnsupported(PathBuf::from(
                     path,
-                )))
+                )));
             }
             '+' | ' ' => {
                 let sub_path = source.join(&path);

@@ -21,6 +21,10 @@ name = "exomonad"
 path = "src/bin/exomonad.rs"
 
 [[bin]]
+name = "exomonad-view-helper"
+path = "src/bin/exomonad-view-helper.rs"
+
+[[bin]]
 name = "tidepool-compile-report"
 path = "src/bin/tidepool-compile-report.rs"
 

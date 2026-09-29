@@ -134,6 +134,26 @@ impl MountNamespace {
         Ok(std::fs::File::from(fd))
     }
 
+    /// Open a directory by its path inside this exact retained view. The
+    /// descriptor, not the path spelling, is the authority for later openat
+    /// operations such as Git common-directory admission.
+    pub fn open_view_directory(&self, path: &Path) -> io::Result<std::fs::File> {
+        if !path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "view directory path must be absolute",
+            ));
+        }
+        let fd = rustix::fs::openat2(
+            &self.descriptors.root,
+            path,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            rustix::fs::ResolveFlags::IN_ROOT | rustix::fs::ResolveFlags::NO_MAGICLINKS,
+        )?;
+        Ok(std::fs::File::from(fd))
+    }
+
     /// Detach covered generations after the owning lifecycle has stopped all
     /// users and preserved working files. This is not proof of process cleanup.
     pub fn detach_retired_tree(&self, target: &Path) -> io::Result<()> {

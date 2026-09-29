@@ -344,7 +344,7 @@ enum Ancestry {
 }
 
 fn is_ancestor(git: &GitCli, cwd: &Path, ancestor: &GitOid, descendant: &GitOid) -> Ancestry {
-    match git.run(
+    match git.read(
         cwd,
         &[
             "merge-base",
@@ -363,7 +363,7 @@ fn is_ancestor(git: &GitCli, cwd: &Path, ancestor: &GitOid, descendant: &GitOid)
 /// garbage-collected out from under a stale baseline).
 fn parents_of(git: &GitCli, cwd: &Path, oid: &GitOid) -> Option<Vec<GitOid>> {
     let out = git
-        .run(cwd, &["rev-list", "--parents", "-n", "1", oid.as_str()])
+        .read(cwd, &["rev-list", "--parents", "-n", "1", oid.as_str()])
         .ok()?;
     let mut parts = out.trimmed().split_whitespace();
     parts.next()?; // oid itself
@@ -380,7 +380,7 @@ fn commits_only_in(
 ) -> Option<Vec<(GitOid, String)>> {
     let range = format!("{}..{}", exclude.as_str(), tip.as_str());
     let out = git
-        .run(
+        .read(
             cwd,
             &["log", "--reverse", "--format=%H%x1f%s", range.as_str()],
         )
@@ -478,7 +478,7 @@ fn build_commit_receipt(
     worktree: WorktreeId,
     oid: &GitOid,
 ) -> Result<CommitReceipt, WorktreeError> {
-    let meta = git.try_run(
+    let meta = git.try_read(
         cwd,
         &[
             "log",
@@ -501,7 +501,7 @@ fn build_commit_receipt(
         .map(GitOid::from_raw)
         .collect();
 
-    let files_out = git.try_run(
+    let files_out = git.try_read(
         cwd,
         &[
             "diff-tree",

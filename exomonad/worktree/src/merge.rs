@@ -82,6 +82,26 @@ pub fn try_merge(
     advance: Option<&BranchName>,
     message: &str,
 ) -> Result<MergeOutcome, WorktreeError> {
+    let target_workspace = target_cwd.join(WORKSPACE_PATH);
+    let source_workspace = source_cwd.join(WORKSPACE_PATH);
+    let mut scoped = vec![target_cwd];
+    let target_initialized = git.try_exists(&target_workspace.join(".git"))?;
+    let source_initialized = git.try_exists(&source_workspace.join(".git"))?;
+    if target_initialized {
+        scoped.push(target_workspace.as_path());
+    }
+    if source_initialized {
+        scoped.push(source_workspace.as_path());
+    }
+    let _write = git.write_scope_many(&scoped)?;
+    if git.try_exists(&target_workspace.join(".git"))? != target_initialized
+        || git.try_exists(&source_workspace.join(".git"))? != source_initialized
+    {
+        return Err(crate::storage::storage_failure(
+            target_cwd,
+            "workspace repository set changed while acquiring Git admission",
+        ));
+    }
     if let Some(kind) = inspect::in_progress(git, target_cwd)? {
         return Err(WorktreeError::SourceOperationInProgress(kind));
     }

@@ -9,6 +9,8 @@ mod process_boundary;
 mod process_supervisor;
 pub mod systemd_slice;
 mod tmux;
+#[cfg(target_os = "linux")]
+pub mod view_command;
 
 pub use inbox::{
     read_checkpoint, CheckpointView, DeliveryAttempt, DeliveryPhase, DurableEnvelope, DurableInbox,

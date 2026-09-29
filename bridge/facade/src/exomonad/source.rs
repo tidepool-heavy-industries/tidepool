@@ -2463,7 +2463,7 @@ mod tests {
 
     fn init_git_repo(path: &Path) {
         let git = GitCli::new();
-        git.try_run(path, &["init", "-q"]).unwrap();
+        git.init_repository(path, &["-q"]).unwrap();
         git.try_run(path, &["config", "user.name", "Reload test"])
             .unwrap();
         git.try_run(

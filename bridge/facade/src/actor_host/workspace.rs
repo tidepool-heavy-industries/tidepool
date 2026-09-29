@@ -997,7 +997,8 @@ impl NativeForkAdmission {
                 let _admission = capture_layout
                     .worktrees
                     .git()
-                    .capture_within(SOURCE_CAPTURE_WAIT)
+                    .capture_within(&host_path, SOURCE_CAPTURE_WAIT)
+                    .map_err(io::Error::other)?
                     .ok_or_else(|| {
                         tracing::warn!(
                             phase = "git_capture_wait",

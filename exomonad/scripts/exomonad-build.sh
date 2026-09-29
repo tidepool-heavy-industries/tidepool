@@ -43,4 +43,4 @@ echo "==> validating the local extractor/compiler endpoint"
 validate_tidepool_extract_endpoint
 
 echo "==> building Exomonad"
-cargo build -p tidepool --bin exomonad
+cargo build -p tidepool --bin exomonad --bin exomonad-view-helper

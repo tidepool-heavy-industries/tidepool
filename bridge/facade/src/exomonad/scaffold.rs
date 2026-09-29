@@ -241,7 +241,7 @@ pub(super) fn scaffold(
 
     if target == Target::Fresh {
         std::fs::create_dir_all(workspace)?;
-        git.try_run(workspace, &["init", "--quiet"])?;
+        git.init_repository(workspace, &["--quiet"])?;
     }
     // Runtime state is excluded through Git metadata, so the authored package
     // beside it stays an ordinary tracked directory.

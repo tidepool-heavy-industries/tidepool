@@ -324,7 +324,7 @@ impl WorktreeManager {
         // the workspace.
         let _capture = self
             .git
-            .capture_within(RETIREMENT_GIT_WAIT)
+            .capture_within(&self.source_repository, RETIREMENT_GIT_WAIT)?
             .ok_or_else(|| {
                 failure(std::io::Error::other(
                     "Git operation still active after waiting for retirement",
@@ -515,7 +515,7 @@ impl WorktreeManager {
         .map_err(failure)?;
         let _capture = self
             .git
-            .capture_within(RETIREMENT_GIT_WAIT)
+            .capture_within(&self.source_repository, RETIREMENT_GIT_WAIT)?
             .ok_or_else(|| {
                 failure(std::io::Error::other(
                     "Git operation still active before restoration",
@@ -1170,6 +1170,9 @@ impl WorktreeManager {
         named_branch: Option<BranchName>,
         inherited_index: Option<&Path>,
     ) -> Result<WorktreeHandle, WorktreeError> {
+        let common = inspect::git_common_dir(&self.git, &resolved.git_repository)?;
+        let host_git = self.git.on_host();
+        let _write = host_git.write_scope(&common)?;
         self.prepare_worktree_root()?;
         let cwd = self.worktree_root.join(id.as_str());
         let branch = named_branch.unwrap_or_else(|| {
@@ -1206,8 +1209,6 @@ impl WorktreeManager {
             cwd.clone().into_os_string(),
             OsString::from(resolved.seed.as_str()),
         ]);
-        let common = inspect::git_common_dir(&self.git, &resolved.git_repository)?;
-        let host_git = self.git.on_host();
         host_git.try_run(&common, &args)?;
 
         if let Some(index) = inherited_index {

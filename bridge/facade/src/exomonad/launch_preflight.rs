@@ -424,7 +424,7 @@ mod tests {
                 .trimmed()
                 .to_owned()
         };
-        git.try_run(&mount, &["init", "-q"]).unwrap();
+        git.init_repository(&mount, &["-q"]).unwrap();
         let old = commit("old");
         let new = commit("new");
         git.try_run(&mount, &["checkout", "-q", "--detach", &old])

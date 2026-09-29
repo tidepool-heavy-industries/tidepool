@@ -114,7 +114,7 @@ impl Driver {
         let repository = tempfile::tempdir()?;
         let runtime = tempfile::tempdir()?;
         let git = exomonad_worktree::GitCli::new();
-        git.try_run(repository.path(), &["init", "--quiet"])?;
+        git.init_repository(repository.path(), &["--quiet"])?;
         git.try_run(
             repository.path(),
             &["config", "user.name", "Exomonad recipe check"],

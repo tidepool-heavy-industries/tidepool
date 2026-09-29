@@ -519,7 +519,7 @@ fn source_import_selects_git_working_files_and_refuses_over_budget_before_copy()
     let nested_scratch = repo.path().join(".claude/worktrees/child");
     std::fs::create_dir_all(&nested_scratch).unwrap();
     repo.git()
-        .try_run(&nested_scratch, &["init", "-q"])
+        .init_repository(&nested_scratch, &["-q"])
         .unwrap();
     std::fs::write(nested_scratch.join("scratch"), "not source").unwrap();
     let external = tempfile::tempdir().unwrap();
@@ -1135,10 +1135,14 @@ async fn live_capture_inherits_dirty_source_after_host_git_activity() {
     });
     ready.await.unwrap();
     let git = admission.manager.git().clone();
+    let capture_repository = repo.path().to_owned();
     let (held_sender, held_receiver) = std::sync::mpsc::channel();
     let (release_git_sender, release_git_receiver) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _gate = git.try_capture().expect("test Git lane must be free");
+        let _gate = git
+            .try_capture(&capture_repository)
+            .expect("test Git lane probe must succeed")
+            .expect("test Git lane must be free");
         held_sender.send(()).unwrap();
         // best-effort: the sending side may already be gone once the main thread proceeds.
         release_git_receiver.recv().ok();
@@ -1701,10 +1705,14 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     });
     ready.await.unwrap();
     let git = admission.manager.git().clone();
+    let capture_repository = repo.path().to_owned();
     let (held_sender, held_receiver) = std::sync::mpsc::channel();
     let (release_git_sender, release_git_receiver) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _gate = git.try_capture().expect("test Git lane must be free");
+        let _gate = git
+            .try_capture(&capture_repository)
+            .expect("test Git lane probe must succeed")
+            .expect("test Git lane must be free");
         held_sender.send(()).unwrap();
         release_git_receiver.recv().unwrap();
     });

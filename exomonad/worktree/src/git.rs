@@ -14,9 +14,14 @@
 use parking_lot::{RawFairMutex, RawThreadId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::io;
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
+use crate::admission::{GitAccess, GitBacking, GitPermit};
 use crate::error::{GitFailureReceipt, InProgressKind, WorktreeError};
 use crate::id::GitOid;
 
@@ -75,8 +80,104 @@ impl GitOutput {
 
 /// Runs git commands with a scrubbed environment.
 type AdmissionMutex = parking_lot::lock_api::ReentrantMutex<RawFairMutex, RawThreadId, ()>;
-pub type GitCaptureGuard<'a> =
+type LocalAdmissionGuard<'a> =
     parking_lot::lock_api::ReentrantMutexGuard<'a, RawFairMutex, RawThreadId, ()>;
+
+std::thread_local! {
+    static ACTIVE_BACKINGS: std::cell::RefCell<Vec<GitBacking>> = const { std::cell::RefCell::new(Vec::new()) };
+    static SCOPED_IDENTITIES: std::cell::RefCell<Vec<(PathBuf, GitBacking)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub struct GitScopeGuard<'a> {
+    _local: LocalAdmissionGuard<'a>,
+    _cooperative: Vec<GitPermit>,
+    backings: Vec<GitBacking>,
+    scoped: Vec<(PathBuf, GitBacking)>,
+}
+
+impl Drop for GitScopeGuard<'_> {
+    fn drop(&mut self) {
+        ACTIVE_BACKINGS.with(|active| {
+            let mut active = active.borrow_mut();
+            for backing in self.backings.iter().rev() {
+                let removed = active.pop();
+                assert_eq!(removed, Some(*backing), "Git scope stack changed");
+            }
+        });
+        SCOPED_IDENTITIES.with(|active| {
+            let mut active = active.borrow_mut();
+            for expected in self.scoped.iter().rev() {
+                let removed = active.pop();
+                assert_eq!(
+                    removed.as_ref(),
+                    Some(expected),
+                    "Git scope identity stack changed"
+                );
+            }
+        });
+    }
+}
+
+pub type GitCaptureGuard<'a> = GitScopeGuard<'a>;
+pub type GitWriteGuard<'a> = GitScopeGuard<'a>;
+
+enum GitExecutionView {
+    Host(PathBuf),
+    #[cfg(target_os = "linux")]
+    Mounted {
+        namespace: exomonad_node::MountNamespace,
+        cwd: PathBuf,
+    },
+}
+
+impl GitExecutionView {
+    fn output<S: AsRef<OsStr>>(
+        &self,
+        args: &[S],
+        environment: &[(OsString, Option<OsString>)],
+    ) -> io::Result<std::process::Output> {
+        match self {
+            Self::Host(cwd) => {
+                #[allow(clippy::disallowed_methods, reason = "the one Git CLI owner")]
+                let mut command = Command::new("git");
+                command.current_dir(cwd).args(args);
+                for (key, value) in environment {
+                    match value {
+                        Some(value) => {
+                            command.env(key, value);
+                        }
+                        None => {
+                            command.env_remove(key);
+                        }
+                    }
+                }
+                command.output()
+            }
+            #[cfg(target_os = "linux")]
+            Self::Mounted { namespace, cwd } => {
+                let arguments = args
+                    .iter()
+                    .map(|arg| arg.as_ref().to_owned())
+                    .collect::<Vec<_>>();
+                exomonad_node::view_command::output_in_view(
+                    namespace,
+                    cwd,
+                    OsStr::new("git"),
+                    &arguments,
+                    environment,
+                )
+            }
+        }
+    }
+
+    fn open_directory(&self, path: &Path) -> io::Result<File> {
+        match self {
+            Self::Host(_) => File::open(path),
+            #[cfg(target_os = "linux")]
+            Self::Mounted { namespace, .. } => namespace.open_view_directory(path),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct GitCli {
@@ -97,18 +198,244 @@ impl GitCli {
         Self::default()
     }
 
-    /// Exclude this repository owner's host Git commands while capturing source
-    /// and private Git state. The capture thread can issue nested Git commands;
-    /// other threads wait at the normal invocation entry point. Native writers
-    /// require their separate admission boundary.
-    pub fn try_capture(&self) -> Option<GitCaptureGuard<'_>> {
-        self.admission.try_lock()
+    /// Create a repository before a common Git directory exists to admit.
+    /// The caller owns the new directory's allocation; subsequent commands
+    /// enter the ordinary backing admission protocol.
+    pub fn init_repository<S: AsRef<OsStr>>(
+        &self,
+        cwd: &Path,
+        options: &[S],
+    ) -> Result<GitOutput, WorktreeError> {
+        let _local = self.admission.lock();
+        let mut args = vec![OsString::from("init")];
+        args.extend(options.iter().map(|option| option.as_ref().to_owned()));
+        let view = self
+            .execution_view(cwd)
+            .map_err(|error| crate::storage::storage_failure(cwd, error))?;
+        let output = view
+            .output(&args, &self.environment())
+            .map_err(|error| crate::storage::storage_failure(cwd, error))?;
+        if !output.status.success() {
+            return Err(WorktreeError::GitFailure(GitFailureReceipt {
+                args: args
+                    .iter()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect(),
+                cwd: cwd.to_owned(),
+                exit_code: output.status.code(),
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            }));
+        }
+        Ok(GitOutput {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
     }
 
-    /// [`Self::try_capture`], waiting up to `timeout` for running host Git
-    /// commands to finish.
-    pub fn capture_within(&self, timeout: std::time::Duration) -> Option<GitCaptureGuard<'_>> {
-        self.admission.try_lock_for(timeout)
+    /// Exclude cooperating Git operations on this repository while capturing
+    /// source and private metadata. The capture thread may read its own scope.
+    /// Native writers require their separate process admission and sampling.
+    pub fn try_capture(&self, cwd: &Path) -> Result<Option<GitCaptureGuard<'_>>, WorktreeError> {
+        self.capture_within(cwd, Duration::ZERO)
+    }
+
+    /// [`Self::try_capture`], waiting up to `timeout`. The permit covers the
+    /// whole capture transaction, not one Git invocation inside it.
+    pub fn capture_within(
+        &self,
+        cwd: &Path,
+        timeout: Duration,
+    ) -> Result<Option<GitCaptureGuard<'_>>, WorktreeError> {
+        self.scope_within(cwd, GitAccess::Capture, timeout)
+    }
+
+    /// Hold one repository's cooperative write authority through a complete
+    /// operation, including its checks, Git calls, and filesystem updates.
+    pub fn write_within(
+        &self,
+        cwd: &Path,
+        timeout: Duration,
+    ) -> Result<Option<GitWriteGuard<'_>>, WorktreeError> {
+        self.scope_within(cwd, GitAccess::Write, timeout)
+    }
+
+    pub fn write_scope(&self, cwd: &Path) -> Result<GitWriteGuard<'_>, WorktreeError> {
+        self.write_within(cwd, Duration::MAX)?
+            .ok_or_else(|| crate::storage::storage_failure(cwd, "Git write admission timed out"))
+    }
+
+    /// Acquire all existing repository backings in kernel-identity order. A
+    /// merge can mutate its superproject and initialized workspace repository;
+    /// sorting prevents opposite source/target merges from deadlocking.
+    pub fn write_scope_many(&self, paths: &[&Path]) -> Result<GitWriteGuard<'_>, WorktreeError> {
+        if paths.is_empty() {
+            return Err(crate::storage::storage_failure(
+                Path::new("/"),
+                "Git write admission requires a repository",
+            ));
+        }
+        self.scope_many_within(paths, GitAccess::Write, Duration::MAX)?
+            .ok_or_else(|| {
+                crate::storage::storage_failure(
+                    paths.first().copied().unwrap_or(Path::new("/")),
+                    "Git write admission timed out",
+                )
+            })
+    }
+
+    fn scope_within(
+        &self,
+        cwd: &Path,
+        access: GitAccess,
+        timeout: Duration,
+    ) -> Result<Option<GitScopeGuard<'_>>, WorktreeError> {
+        self.scope_many_within(&[cwd], access, timeout)
+    }
+
+    fn scope_many_within(
+        &self,
+        paths: &[&Path],
+        access: GitAccess,
+        timeout: Duration,
+    ) -> Result<Option<GitScopeGuard<'_>>, WorktreeError> {
+        let started = std::time::Instant::now();
+        let Some(local) = self.admission.try_lock_for(timeout) else {
+            return Ok(None);
+        };
+        let mut common_by_backing = BTreeMap::new();
+        let mut scoped = Vec::new();
+        for cwd in paths {
+            let view = self
+                .execution_view(cwd)
+                .map_err(|error| crate::storage::storage_failure(cwd, error))?;
+            let common = self
+                .common_directory(cwd, &view)
+                .map_err(WorktreeError::GitFailure)?;
+            let backing = GitBacking::of(&common)
+                .map_err(|error| crate::storage::storage_failure(cwd, error))?;
+            scoped.push((cwd.to_path_buf(), backing));
+            common_by_backing.entry(backing).or_insert((common, *cwd));
+        }
+        let active = ACTIVE_BACKINGS.with(|active| active.borrow().clone());
+        if let Some(highest) = active.iter().max() {
+            if common_by_backing
+                .keys()
+                .any(|backing| !active.contains(backing) && backing < highest)
+            {
+                return Err(crate::storage::storage_failure(
+                    paths[0],
+                    "nested Git admission would reverse backing order",
+                ));
+            }
+        }
+        let mut cooperative = Vec::new();
+        let mut backings = Vec::new();
+        for (backing, (common, cwd)) in common_by_backing {
+            if !active.contains(&backing) {
+                match GitPermit::acquire(&common, access, timeout.saturating_sub(started.elapsed()))
+                {
+                    Ok(permit) => cooperative.push(permit),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+                    Err(error) => return Err(crate::storage::storage_failure(cwd, error)),
+                }
+            }
+            backings.push(backing);
+        }
+        ACTIVE_BACKINGS.with(|active| active.borrow_mut().extend(&backings));
+        SCOPED_IDENTITIES.with(|active| active.borrow_mut().extend(scoped.iter().cloned()));
+        Ok(Some(GitScopeGuard {
+            _local: local,
+            _cooperative: cooperative,
+            backings,
+            scoped,
+        }))
+    }
+
+    fn execution_view(&self, cwd: &Path) -> io::Result<GitExecutionView> {
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(view) = self.views.resolve(cwd)? {
+                return Ok(GitExecutionView::Mounted {
+                    namespace: view.namespace,
+                    cwd: view.root,
+                });
+            }
+            if let Some(namespace) = &self.namespace {
+                return Ok(GitExecutionView::Mounted {
+                    namespace: namespace.clone(),
+                    cwd: cwd.to_owned(),
+                });
+            }
+        }
+        Ok(GitExecutionView::Host(cwd.to_owned()))
+    }
+
+    fn environment(&self) -> Vec<(OsString, Option<OsString>)> {
+        let mut environment: Vec<_> = [
+            "GIT_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_WORK_TREE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_COMMON_DIR",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        ]
+        .into_iter()
+        .map(|key| (OsString::from(key), None))
+        .collect();
+        environment.extend([
+            (
+                OsString::from("GIT_TERMINAL_PROMPT"),
+                Some(OsString::from("0")),
+            ),
+            (
+                OsString::from("GIT_OPTIONAL_LOCKS"),
+                Some(OsString::from("0")),
+            ),
+            (OsString::from("LC_ALL"), Some(OsString::from("C"))),
+        ]);
+        environment.extend(
+            self.env
+                .iter()
+                .map(|(key, value)| (OsString::from(key), Some(OsString::from(value)))),
+        );
+        environment
+    }
+
+    fn common_directory(
+        &self,
+        cwd: &Path,
+        view: &GitExecutionView,
+    ) -> Result<File, GitFailureReceipt> {
+        let arguments = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
+        let output = view
+            .output(&arguments, &self.environment())
+            .map_err(|error| GitFailureReceipt {
+                args: arguments.iter().map(|arg| (*arg).into()).collect(),
+                cwd: cwd.to_owned(),
+                exit_code: None,
+                stdout: String::new(),
+                stderr: format!("Git backing identity probe failed: {error}"),
+            })?;
+        if !output.status.success() {
+            return Err(GitFailureReceipt {
+                args: arguments.iter().map(|arg| (*arg).into()).collect(),
+                cwd: cwd.to_owned(),
+                exit_code: output.status.code(),
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+        let path = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+        let path = PathBuf::from(OsString::from_vec(path.to_vec()));
+        view.open_directory(&path)
+            .map_err(|error| GitFailureReceipt {
+                args: arguments.iter().map(|arg| (*arg).into()).collect(),
+                cwd: cwd.to_owned(),
+                exit_code: None,
+                stdout: String::new(),
+                stderr: format!("Git common directory unavailable: {error}"),
+            })
     }
 
     /// Bind host Git operations to the same mounted filesystem as its owner.
@@ -148,24 +475,6 @@ impl GitCli {
         let mut next = self.clone();
         next.env.insert(key.into(), value.into());
         next
-    }
-
-    fn command(&self, cwd: &Path) -> std::io::Result<Command> {
-        #[cfg(target_os = "linux")]
-        if let Some(view) = self.views.resolve(cwd)? {
-            return view.namespace.host_command(&view.root, OsStr::new("git"));
-        }
-        #[cfg(target_os = "linux")]
-        if let Some(namespace) = &self.namespace {
-            return namespace.host_command(cwd, OsStr::new("git"));
-        }
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "exomonad-worktree owns the git CLI (AGENTS.md)"
-        )]
-        let mut command = Command::new("git");
-        command.current_dir(cwd);
-        Ok(command)
     }
 
     /// Filesystem inspection uses the same view as Git, never its host alias.
@@ -235,49 +544,20 @@ impl GitCli {
         copy().map_err(|error| crate::storage::storage_failure(source, error))
     }
 
-    /// Run git in `cwd`. `Err` only for a nonzero exit or a spawn failure; a
-    /// command that succeeds with output on stderr is still `Ok`.
+    /// Run git in `cwd` under the declared backing. Nonzero exits, launch
+    /// failures, admission failures, and backing drift carry a receipt; a
+    /// successful command with output on stderr remains `Ok`.
     fn run_output<S: AsRef<OsStr>>(
         &self,
         cwd: &Path,
         args: &[S],
+        access: GitAccess,
     ) -> Result<std::process::Output, GitFailureReceipt> {
         let _admission = self.admission.lock();
         let arg_strings: Vec<String> = args
             .iter()
             .map(|a| a.as_ref().to_string_lossy().into_owned())
             .collect();
-
-        let mut cmd = self.command(cwd).map_err(|error| GitFailureReceipt {
-            args: arg_strings.clone(),
-            cwd: cwd.to_path_buf(),
-            exit_code: None,
-            stdout: String::new(),
-            stderr: error.to_string(),
-        })?;
-        cmd.args(args);
-
-        // Scrub the ambient git environment. Inheriting GIT_DIR/GIT_INDEX_FILE/
-        // GIT_WORK_TREE from whatever spawned Tidepool would silently retarget
-        // every invocation here at another repository — the exact failure the
-        // "never dirty the source" invariant cannot detect after the fact.
-        for leaked in [
-            "GIT_DIR",
-            "GIT_INDEX_FILE",
-            "GIT_WORK_TREE",
-            "GIT_OBJECT_DIRECTORY",
-            "GIT_COMMON_DIR",
-            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        ] {
-            cmd.env_remove(leaked);
-        }
-        // Deterministic, non-interactive, locale-stable output.
-        cmd.env("GIT_TERMINAL_PROMPT", "0");
-        cmd.env("GIT_OPTIONAL_LOCKS", "0");
-        cmd.env("LC_ALL", "C");
-        for (k, v) in &self.env {
-            cmd.env(k, v);
-        }
 
         let receipt = |exit_code, stdout: String, stderr: String| GitFailureReceipt {
             args: arg_strings.clone(),
@@ -287,8 +567,52 @@ impl GitCli {
             stderr,
         };
 
-        let out = cmd
-            .output()
+        let view = self
+            .execution_view(cwd)
+            .map_err(|e| receipt(None, String::new(), e.to_string()))?;
+        let common = self.common_directory(cwd, &view)?;
+        let backing =
+            GitBacking::of(&common).map_err(|e| receipt(None, String::new(), e.to_string()))?;
+        let drift = SCOPED_IDENTITIES.with(|scoped| {
+            scoped
+                .borrow()
+                .iter()
+                .rev()
+                .find(|(path, _)| path == cwd)
+                .is_some_and(|(_, expected)| *expected != backing)
+        });
+        if drift {
+            return Err(receipt(
+                None,
+                String::new(),
+                "Git backing changed during admitted operation".to_owned(),
+            ));
+        }
+        let active = ACTIVE_BACKINGS.with(|owners| owners.borrow().contains(&backing));
+        let reversed = ACTIVE_BACKINGS.with(|owners| {
+            owners
+                .borrow()
+                .iter()
+                .max()
+                .is_some_and(|highest| !active && backing < *highest)
+        });
+        if reversed {
+            return Err(receipt(
+                None,
+                String::new(),
+                "nested Git admission would reverse backing order".to_owned(),
+            ));
+        }
+        let _permit = if active {
+            None
+        } else {
+            Some(
+                GitPermit::acquire(&common, access, Duration::MAX)
+                    .map_err(|e| receipt(None, String::new(), e.to_string()))?,
+            )
+        };
+        let out = view
+            .output(args, &self.environment())
             .map_err(|e| receipt(None, String::new(), format!("spawn failed: {e}")))?;
 
         if !out.status.success() {
@@ -307,11 +631,34 @@ impl GitCli {
         cwd: &Path,
         args: &[S],
     ) -> Result<GitOutput, GitFailureReceipt> {
-        let out = self.run_output(cwd, args)?;
+        let out = self.run_output(cwd, args, GitAccess::Write)?;
         Ok(GitOutput {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         })
+    }
+
+    /// Execute a command declared to inspect Git state without writing it.
+    /// The caller chooses this typed authority; argument text is never used
+    /// to infer whether a command can mutate repository state.
+    pub fn read<S: AsRef<OsStr>>(
+        &self,
+        cwd: &Path,
+        args: &[S],
+    ) -> Result<GitOutput, GitFailureReceipt> {
+        let out = self.run_output(cwd, args, GitAccess::Read)?;
+        Ok(GitOutput {
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+
+    pub fn try_read<S: AsRef<OsStr>>(
+        &self,
+        cwd: &Path,
+        args: &[S],
+    ) -> Result<GitOutput, WorktreeError> {
+        self.read(cwd, args).map_err(WorktreeError::GitFailure)
     }
 
     fn stdout_bytes<S: AsRef<OsStr>>(
@@ -319,7 +666,7 @@ impl GitCli {
         cwd: &Path,
         args: &[S],
     ) -> Result<Vec<u8>, WorktreeError> {
-        self.run_output(cwd, args)
+        self.run_output(cwd, args, GitAccess::Read)
             .map(|output| output.stdout)
             .map_err(WorktreeError::GitFailure)
     }
@@ -372,7 +719,7 @@ impl GitCli {
     /// removes a whole-directory `/.exomonad/` line, which would hide a project's
     /// authored modules, skills, and configuration from Git.
     pub fn ensure_exomonad_local_exclude(&self, repo: &Path) -> Result<(), WorktreeError> {
-        let _admission = self.admission.lock();
+        let _admission = self.write_scope(repo)?;
         let path = inspect::git_common_dir(self, repo)?.join("info/exclude");
         let parent = path.parent().ok_or_else(|| WorktreeError::StorageFailure {
             path: path.clone(),
@@ -422,7 +769,7 @@ impl GitCli {
         repo: &Path,
         excluded: &[OsString],
     ) -> Result<GitOid, WorktreeError> {
-        let _admission = self.admission.lock();
+        let _admission = self.write_scope(repo)?;
         inspect::work_tree(self, repo)?;
         if let Some(kind) = inspect::in_progress(self, repo)? {
             return Err(WorktreeError::SourceOperationInProgress(kind));
@@ -567,7 +914,7 @@ pub mod inspect {
     /// here, so a rebase in one worktree does not look like a rebase in another.
     pub fn git_dir(git: &GitCli, cwd: &Path) -> Result<PathBuf, WorktreeError> {
         let out = git
-            .run(cwd, &["rev-parse", "--absolute-git-dir"])
+            .read(cwd, &["rev-parse", "--absolute-git-dir"])
             .map_err(|_| WorktreeError::NotARepository(cwd.to_path_buf()))?;
         Ok(PathBuf::from(out.trimmed()))
     }
@@ -582,7 +929,7 @@ pub mod inspect {
     /// so it cannot be misread the same way — see [`is_not_a_repository`].
     pub fn work_tree(git: &GitCli, cwd: &Path) -> Result<PathBuf, WorktreeError> {
         let out = git
-            .run(cwd, &["rev-parse", "--show-toplevel"])
+            .read(cwd, &["rev-parse", "--show-toplevel"])
             .map_err(|failure| {
                 if is_not_a_repository(&failure) {
                     WorktreeError::NotARepository(cwd.to_path_buf())
@@ -615,7 +962,7 @@ pub mod inspect {
     /// common directory, not assume that `<worktree>/.git` is a directory.
     pub fn git_common_dir(git: &GitCli, cwd: &Path) -> Result<PathBuf, WorktreeError> {
         let out = git
-            .run(
+            .read(
                 cwd,
                 &["rev-parse", "--path-format=absolute", "--git-common-dir"],
             )
@@ -691,7 +1038,7 @@ pub mod inspect {
     ) -> Result<crate::error::DirtySummary, WorktreeError> {
         use std::collections::BTreeSet;
 
-        let out = git.try_run(
+        let out = git.try_read(
             source,
             &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
         )?;
@@ -723,7 +1070,7 @@ pub mod inspect {
             }
         }
 
-        let ignored_out = git.try_run(
+        let ignored_out = git.try_read(
             source,
             &[
                 "status",
@@ -774,21 +1121,99 @@ pub mod inspect {
 mod admission_tests {
 
     #[test]
+    fn scoped_repository_refuses_a_retargeted_path() {
+        let first = crate::testing::TestRepo::init().unwrap();
+        let second = crate::testing::TestRepo::init().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let alias = root.path().join("source");
+        std::os::unix::fs::symlink(first.path(), &alias).unwrap();
+        let git = super::GitCli::new();
+        let capture = git.try_capture(&alias).unwrap().unwrap();
+        let replacement = root.path().join("replacement");
+        std::os::unix::fs::symlink(second.path(), &replacement).unwrap();
+        std::fs::rename(&replacement, &alias).unwrap();
+        let failure = git
+            .read(&alias, &["rev-parse", "--git-common-dir"])
+            .unwrap_err();
+        assert!(failure
+            .stderr
+            .contains("Git backing changed during admitted operation"));
+        drop(capture);
+        git.read(&alias, &["rev-parse", "--git-common-dir"])
+            .unwrap();
+    }
+
+    #[test]
+    fn independent_clients_share_linked_worktree_backing() {
+        let repo = crate::testing::TestRepo::init().unwrap();
+        repo.writer().commit_file("file", "seed", "seed").unwrap();
+        let sibling_root = tempfile::tempdir().unwrap();
+        let sibling = sibling_root.path().join("sibling");
+        repo.git()
+            .try_run(
+                repo.path(),
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "sibling",
+                    sibling.to_str().unwrap(),
+                ],
+            )
+            .unwrap();
+        let separate = super::GitCli::new();
+        let capture = repo.git().try_capture(repo.path()).unwrap().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(repo.path().join(".git/exomonad-admission"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+        );
+        assert_eq!(
+            std::fs::metadata(repo.path().join(".git/exomonad-admission/lock"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+        );
+        let (observed, receiver) = std::sync::mpsc::channel();
+        let (released, proceed) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            observed
+                .send(separate.try_capture(&sibling).unwrap().is_none())
+                .unwrap();
+            proceed.recv().unwrap();
+            separate.try_capture(&sibling).unwrap().is_some()
+        });
+        assert!(receiver.recv().unwrap());
+        drop(capture);
+        released.send(()).unwrap();
+        assert!(worker.join().unwrap());
+    }
+
+    #[test]
     fn capture_within_waits_for_a_running_capture() {
         let repo = crate::testing::TestRepo::init().unwrap();
         let git = repo.git().clone();
         let holder = git.clone();
+        let path = repo.path().to_owned();
         let (held, ready) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || {
-            let _capture = holder.try_capture().unwrap();
+            let _capture = holder.try_capture(&path).unwrap().unwrap();
             held.send(()).unwrap();
             #[allow(clippy::disallowed_methods, reason = "sync test thread, not async")]
             std::thread::sleep(std::time::Duration::from_millis(200));
         });
         ready.recv().unwrap();
-        assert!(git.try_capture().is_none());
+        assert!(git.try_capture(repo.path()).unwrap().is_none());
         assert!(git
-            .capture_within(std::time::Duration::from_secs(10))
+            .capture_within(repo.path(), std::time::Duration::from_secs(10))
+            .unwrap()
             .is_some());
         thread.join().unwrap();
     }
@@ -799,7 +1224,7 @@ mod admission_tests {
         repo.writer().commit_file("file", "seed", "seed").unwrap();
         std::fs::write(repo.path().join("file"), "changed").unwrap();
         let git = repo.git().clone();
-        let capture = git.try_capture().unwrap();
+        let capture = git.try_capture(repo.path()).unwrap().unwrap();
         assert_eq!(
             git.try_run(repo.path(), &["show", ":file"])
                 .unwrap()
@@ -811,7 +1236,7 @@ mod admission_tests {
         let (started, ready) = std::sync::mpsc::channel();
         let (finished, done) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || {
-            assert!(writer.try_capture().is_none());
+            assert!(writer.try_capture(&path).unwrap().is_none());
             started.send(()).unwrap();
             writer.try_run(&path, &["add", "file"]).unwrap();
             finished.send(()).unwrap();

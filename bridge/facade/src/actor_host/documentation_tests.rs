@@ -2957,7 +2957,7 @@ fn recipe_workspace(checks: Option<&[&str]>) -> tempfile::TempDir {
     // A candidate is a project, and a project is a Git tree: that is how `nix`
     // reads the `flake.nix` a package's pinned Haskell source is named in.
     let git = exomonad_worktree::GitCli::new();
-    git.try_run(repository.path(), &["init", "--quiet"])
+    git.init_repository(repository.path(), &["--quiet"])
         .unwrap();
     git.try_run(
         repository.path(),

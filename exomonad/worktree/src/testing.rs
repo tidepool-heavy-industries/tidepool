@@ -62,7 +62,7 @@ impl TestRepo {
         let git = GitCli::new();
         let path = dir.path().to_path_buf();
 
-        git.try_run(&path, &["init", "--initial-branch=main", "-q"])?;
+        git.init_repository(&path, &["--initial-branch=main", "-q"])?;
         git.try_run(&path, &["config", "user.name", "Scripted Writer"])?;
         git.try_run(&path, &["config", "user.email", "writer@example.invalid"])?;
         // No signing, no hooks, no gc surprises mid-test.
