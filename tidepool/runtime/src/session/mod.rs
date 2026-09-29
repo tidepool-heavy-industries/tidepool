@@ -374,6 +374,15 @@ pub struct SessionLib {
     /// the declaration were safe.
     recovery_manifest_warning: Option<String>,
     recovery_report: Option<DeclarationRecoveryReport>,
+    durable_graph: Option<DurableDeclarationGraph>,
+}
+
+struct DurableDeclarationGraph {
+    path: PathBuf,
+    graph: recovery::RecoveryGraph,
+    /// A visible rename whose directory sync still needs confirmation. The
+    /// high-water identity is already burned, even while success is withheld.
+    unconfirmed: Option<tidepool_atomic_write::PublishedWrite>,
 }
 
 /// Exact declaration module prepared for cell compilation without advancing
@@ -548,7 +557,161 @@ impl SessionLib {
             recovery_turns: Vec::new(),
             recovery_manifest_warning: None,
             recovery_report: None,
+            durable_graph: None,
         })
+    }
+
+    /// Attach a v2 manifest before any declaration is allocated. A graph with
+    /// published nodes requires typed interface hydration before it can serve
+    /// turns, so this entry admits only an empty graph or burned reservations.
+    pub fn attach_empty_recovery_graph_v2(
+        &mut self,
+        path: impl Into<PathBuf>,
+    ) -> Result<(), SessionError> {
+        let path = path.into();
+        if self.log.generation() != Generation(0)
+            || self.recovery_manifest_path.is_some()
+            || self.durable_graph.is_some()
+        {
+            return Err(SessionError::RecoveryManifest {
+                path,
+                detail: "recovery must attach before declarations are admitted".into(),
+            });
+        }
+        let root = path
+            .parent()
+            .ok_or_else(|| SessionError::RecoveryManifest {
+                path: path.clone(),
+                detail: "recovery manifest has no run-owned parent directory".into(),
+            })?;
+        let graph = match recovery::read_v2(&path, root).map_err(|error| {
+            SessionError::RecoveryManifest {
+                path: path.clone(),
+                detail: error.to_string(),
+            }
+        })? {
+            Some(read) => {
+                if read.graph.public_root.is_some() || !read.graph.nodes.is_empty() {
+                    return Err(SessionError::RecoveryManifest {
+                        path,
+                        detail: "published v2 declarations require exact interface hydration"
+                            .into(),
+                    });
+                }
+                read.graph
+            }
+            None if path.exists() => {
+                return Err(SessionError::RecoveryManifest {
+                    path,
+                    detail: "legacy recovery manifest requires explicit v1 migration".into(),
+                });
+            }
+            None => recovery::RecoveryGraph::empty(self.id.0, self.id.0).map_err(|error| {
+                SessionError::RecoveryManifest {
+                    path: path.clone(),
+                    detail: error.to_string(),
+                }
+            })?,
+        };
+        if !self.log.restore_high_water(graph.high_water) {
+            return Err(SessionError::RecoveryManifest {
+                path,
+                detail: "declaration allocator cannot restore recovery high-water".into(),
+            });
+        }
+        self.durable_graph = Some(DurableDeclarationGraph {
+            path,
+            graph,
+            unconfirmed: None,
+        });
+        Ok(())
+    }
+
+    /// Burn a unique Join module identity before exposing it to the compiler.
+    /// A failure before rename leaves the allocator untouched. After rename,
+    /// the identity stays burned even if directory durability is uncertain.
+    pub fn reserve_join_generation_durable(&mut self) -> Result<Generation, SessionError> {
+        let state = self
+            .durable_graph
+            .as_mut()
+            .ok_or_else(|| SessionError::RecoveryManifest {
+                path: self.root.clone(),
+                detail: "v2 recovery graph is not attached".into(),
+            })?;
+        if state.unconfirmed.is_some() {
+            return Err(SessionError::RecoveryManifest {
+                path: state.path.clone(),
+                detail: "previous recovery publication still needs durability confirmation".into(),
+            });
+        }
+        let next = Generation(state.graph.high_water.0.checked_add(1).ok_or_else(|| {
+            SessionError::RecoveryManifest {
+                path: state.path.clone(),
+                detail: "declaration generation space exhausted".into(),
+            }
+        })?);
+        if self.log.generation() != state.graph.high_water {
+            return Err(SessionError::RecoveryManifest {
+                path: state.path.clone(),
+                detail: "declaration allocator and durable high-water diverged".into(),
+            });
+        }
+        let staged =
+            recovery::stage_high_water_v2(&state.path, &state.graph, next).map_err(|error| {
+                SessionError::RecoveryManifest {
+                    path: state.path.clone(),
+                    detail: error.to_string(),
+                }
+            })?;
+        let outcome = staged.publish();
+        match outcome {
+            recovery::RecoveryPublishOutcome::BeforeRename { detail, .. } => {
+                Err(SessionError::RecoveryManifest {
+                    path: state.path.clone(),
+                    detail,
+                })
+            }
+            recovery::RecoveryPublishOutcome::Durable { graph, .. } => {
+                state.graph = graph;
+                assert_eq!(self.log.reserve(), next);
+                Ok(next)
+            }
+            recovery::RecoveryPublishOutcome::PublishedDurabilityUnconfirmed {
+                graph,
+                publication,
+                detail,
+            } => {
+                state.graph = graph;
+                assert_eq!(self.log.reserve(), next);
+                state.unconfirmed = Some(publication);
+                Err(SessionError::RecoveryManifest {
+                    path: state.path.clone(),
+                    detail,
+                })
+            }
+        }
+    }
+
+    /// Retry only the parent-directory sync for an already visible manifest.
+    /// Never resubmit the declaration or reuse its reserved identity.
+    pub fn confirm_recovery_durability(&mut self) -> Result<(), SessionError> {
+        let state = self
+            .durable_graph
+            .as_mut()
+            .ok_or_else(|| SessionError::RecoveryManifest {
+                path: self.root.clone(),
+                detail: "v2 recovery graph is not attached".into(),
+            })?;
+        if let Some(publication) = &state.unconfirmed {
+            publication
+                .confirm_durability()
+                .map_err(|error| SessionError::RecoveryManifest {
+                    path: state.path.clone(),
+                    detail: error.to_string(),
+                })?;
+            state.unconfirmed = None;
+        }
+        Ok(())
     }
 
     /// Reconstruct replayable root declarations from `path`, then attach that
@@ -1578,6 +1741,57 @@ mod tests {
         assert_eq!(lib.generation(), Generation(0));
         assert!(lib.current_module().is_none());
         assert!(lib.import_line().is_none());
+    }
+
+    #[test]
+    fn durable_join_reservation_burns_identity_before_compiler_visibility() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("declarations.json");
+        let mut first = SessionLib::open(
+            SessionId(72),
+            dir.path().join("first"),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        first.attach_empty_recovery_graph_v2(&manifest).unwrap();
+        assert!(!manifest.exists());
+        assert_eq!(
+            first.reserve_join_generation_durable().unwrap(),
+            Generation(1)
+        );
+        assert!(manifest.exists());
+        assert_eq!(first.scope_tip(ScopeId::ROOT), Generation(0));
+        assert!(first.log.turn(Generation(1)).is_none());
+
+        let mut second = SessionLib::open(
+            SessionId(73),
+            dir.path().join("second"),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        second.attach_empty_recovery_graph_v2(&manifest).unwrap();
+        assert_eq!(second.generation(), Generation(1));
+        assert_eq!(
+            second.reserve_join_generation_durable().unwrap(),
+            Generation(2)
+        );
+        assert_eq!(second.scope_tip(ScopeId::ROOT), Generation(0));
+    }
+
+    #[test]
+    fn failed_durable_reservation_does_not_allocate_module_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("missing-parent").join("declarations.json");
+        let mut lib = SessionLib::open(
+            SessionId(74),
+            dir.path().join("session"),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        lib.attach_empty_recovery_graph_v2(&manifest).unwrap();
+        assert!(lib.reserve_join_generation_durable().is_err());
+        assert_eq!(lib.generation(), Generation(0));
+        assert!(!manifest.exists());
     }
 
     /// An unseeded scope resolves to the EMPTY environment, never to the
