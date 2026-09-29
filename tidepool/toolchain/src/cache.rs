@@ -175,6 +175,7 @@ pub enum ProductAvailability {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleImportEvidence {
+    pub qualifier: String,
     pub module: String,
     pub boot: bool,
     pub selected: Option<PathBuf>,
@@ -190,10 +191,19 @@ pub struct SourceEvidence {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolutionEvidence {
+    pub qualifier: String,
     pub module: String,
     pub boot: bool,
     pub selected: Option<PathBuf>,
     pub candidates: Vec<PathBuf>,
+}
+
+fn valid_import_qualifier(qualifier: &str) -> bool {
+    qualifier == "none"
+        || qualifier
+            .strip_prefix("this:")
+            .or_else(|| qualifier.strip_prefix("other:"))
+            .is_some_and(|unit| !unit.is_empty())
 }
 
 const GENERATED_SOURCE: &str = "@generated-source";
@@ -231,7 +241,7 @@ impl DependencyEvidence {
     /// Validate contents and negative witnesses. IO errors are misses, including
     /// inaccessible candidates: absence must be known, not guessed.
     pub fn valid(&self, source: &str) -> bool {
-        if self.version != 3
+        if self.version != 4
             || !self.cache_safe
             || self.sources.is_empty()
             || self.modules.is_empty()
@@ -276,7 +286,9 @@ impl DependencyEvidence {
             let mut imports = std::collections::HashSet::new();
             for imported in &module.imports {
                 if imported.module.is_empty()
-                    || !imports.insert((&imported.module, imported.boot))
+                    || !valid_import_qualifier(&imported.qualifier)
+                    || (imported.qualifier.starts_with("other:") && imported.selected.is_some())
+                    || !imports.insert((&imported.qualifier, &imported.module, imported.boot))
                     || imported
                         .selected
                         .as_ref()
@@ -288,11 +300,18 @@ impl DependencyEvidence {
         }
         let mut resolutions = std::collections::HashMap::new();
         for resolution in &self.resolutions {
-            if resolution.module.is_empty() || resolution.candidates.is_empty() {
+            if resolution.module.is_empty()
+                || !valid_import_qualifier(&resolution.qualifier)
+                || (resolution.qualifier.starts_with("other:") != resolution.candidates.is_empty())
+                || (resolution.qualifier.starts_with("other:") && resolution.selected.is_some())
+            {
                 return false;
             }
             if resolutions
-                .insert((&resolution.module, resolution.boot), &resolution.selected)
+                .insert(
+                    (&resolution.qualifier, &resolution.module, resolution.boot),
+                    &resolution.selected,
+                )
                 .is_some()
             {
                 return false;
@@ -317,7 +336,9 @@ impl DependencyEvidence {
         }
         for module in &self.modules {
             for imported in &module.imports {
-                if resolutions.get(&(&imported.module, imported.boot)).copied()
+                if resolutions
+                    .get(&(&imported.qualifier, &imported.module, imported.boot))
+                    .copied()
                     != Some(&imported.selected)
                 {
                     return false;
@@ -528,7 +549,7 @@ mod tests {
         fs::create_dir_all(root.join("first")).unwrap();
         fs::write(&selected, "library = 1").unwrap();
         DependencyEvidence {
-            version: 3,
+            version: 4,
             cache_safe: true,
             selection_complete: true,
             sources: vec![
@@ -542,6 +563,7 @@ mod tests {
                 },
             ],
             resolutions: vec![ResolutionEvidence {
+                qualifier: "none".into(),
                 module: "Library".into(),
                 boot: false,
                 selected: Some(selected.clone()),
@@ -554,6 +576,7 @@ mod tests {
                 boot: false,
                 source: GENERATED_SOURCE.into(),
                 imports: vec![ModuleImportEvidence {
+                    qualifier: "none".into(),
                     module: "Library".into(),
                     boot: false,
                     selected: Some(selected),
@@ -660,6 +683,7 @@ mod tests {
         let mut evidence = evidence(root.path());
         let candidate = root.path().join("first/Package.hs");
         evidence.resolutions.push(ResolutionEvidence {
+            qualifier: "none".into(),
             module: "Package".into(),
             boot: false,
             selected: None,
@@ -683,6 +707,26 @@ mod tests {
         assert!(!evidence.reusable_without_worker("target"));
         evidence.packages.clear();
         assert!(evidence.reusable_without_worker("target"));
+    }
+
+    #[test]
+    fn package_qualifier_cannot_alias_an_unqualified_home_import() {
+        let root = tempfile::tempdir().unwrap();
+        let mut evidence = evidence(root.path());
+        evidence.modules[0].imports[0].qualifier = "other:package-unit".into();
+        assert!(!evidence.valid("target"));
+        evidence.modules[0].imports[0].selected = None;
+        evidence.resolutions.push(ResolutionEvidence {
+            qualifier: "other:package-unit".into(),
+            module: "Library".into(),
+            boot: false,
+            selected: None,
+            candidates: vec![],
+        });
+        assert!(evidence.valid("target"));
+        assert!(!evidence.reusable_without_worker("target"));
+        evidence.modules[0].imports[0].qualifier = "other:other-unit".into();
+        assert!(!evidence.valid("target"));
     }
 
     #[test]

@@ -2056,7 +2056,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                 , prTargetTcGblEnv = targetEnvironment
                 }
           capturedSources <- liftIO (captureDependencySources modGraphRaw)
-          dependencies <- liftIO (dependencyEvidenceFor capturedSources modGraphRaw moduleFacts)
+          dependencies <- liftIO (dependencyEvidenceFor hscFinal capturedSources modGraphRaw moduleFacts)
           productInterfaces <- liftIO (readIORef productInterfacesRef)
           pure (pipelineResult, preparedModules, dependencies, productInterfaces)
     case selection of
@@ -2170,10 +2170,13 @@ captureDependencySources graph = do
 -- imports have no selected home path; their ordered absent home candidates
 -- remain evidence because creating one later would introduce shadowing.
 dependencyEvidenceFor
-  :: ([DependencySource], Bool) -> ModuleGraph -> [ModuleFacts]
+  :: HscEnv -> ([DependencySource], Bool) -> ModuleGraph -> [ModuleFacts]
   -> IO DependencyEvidence
-dependencyEvidenceFor (sources, sourcesComplete) graph moduleFacts = do
+dependencyEvidenceFor env (sources, sourcesComplete) graph moduleFacts = do
   let graphSummaries = [summary | ModuleNode _ summary <- mgModSummaries' graph]
+      qualifierKey NoPkgQual = "none"
+      qualifierKey (ThisPkg unit) = "this:" ++ unitString unit
+      qualifierKey (OtherPkg unit) = "other:" ++ unitString unit
   selectedPairs <- forM
     graphSummaries $ \summary ->
       case ml_hs_file (ms_location summary) of
@@ -2182,14 +2185,18 @@ dependencyEvidenceFor (sources, sourcesComplete) graph moduleFacts = do
           absolute <- makeAbsolute source
           pure (Just ((ms_mod_name summary, ms_hsc_src summary == HsBootFile), normalise absolute))
   let selected = Map.fromList [pair | Just pair <- selectedPairs]
+      homeSelection NoPkgQual name boot = Map.lookup (name, boot) selected
+      homeSelection (ThisPkg unit) name boot
+        | unit == homeUnitId (hsc_home_unit env) = Map.lookup (name, boot) selected
+      homeSelection _ _ _ = Nothing
       allImports = sort . Set.toList . Set.fromList $
-        [ (unLoc imported, False)
+        [ (qualifier, unLoc imported, False)
         | summary <- graphSummaries
-        , (_, imported) <- ms_textual_imps summary
+        , (qualifier, imported) <- ms_textual_imps summary
         ] ++
-        [ (unLoc imported, True)
+        [ (qualifier, unLoc imported, True)
         | summary <- graphSummaries
-        , (_, imported) <- ms_srcimps summary
+        , (qualifier, imported) <- ms_srcimps summary
         ]
       roots = nub (concatMap (importPaths . ms_hspp_opts) graphSummaries)
       moduleRelative name =
@@ -2200,16 +2207,19 @@ dependencyEvidenceFor (sources, sourcesComplete) graph moduleFacts = do
         , extension <- if isBoot then [".hs-boot", ".lhs-boot"]
             else [".hs", ".lhs", ".hsig", ".lhsig"]
         ]
-  absoluteCandidates <- forM allImports $ \(imported, isBoot) -> do
-    candidates <- mapM (fmap normalise . makeAbsolute) (rawCandidates imported isBoot)
-    let chosen = Map.lookup (imported, isBoot) selected
+  absoluteCandidates <- forM allImports $ \(qualifier, imported, isBoot) -> do
+    candidates <- case qualifier of
+      OtherPkg _ -> pure []
+      _ -> mapM (fmap normalise . makeAbsolute) (rawCandidates imported isBoot)
+    let chosen = homeSelection qualifier imported isBoot
         throughSelected = case chosen of
           Nothing -> candidates
           Just path -> case break (== path) candidates of
             (higher, _ : _) -> higher ++ [path]
             _ -> candidates ++ [path]
     pure DependencyResolution
-      { dependencyResolutionModule = moduleNameString imported
+      { dependencyResolutionQualifier = qualifierKey qualifier
+      , dependencyResolutionModule = moduleNameString imported
       , dependencyResolutionBoot = isBoot
       , dependencyResolutionSelected = chosen
       , dependencyResolutionCandidates = nub throughSelected
@@ -2218,8 +2228,8 @@ dependencyEvidenceFor (sources, sourcesComplete) graph moduleFacts = do
     let name = ms_mod_name summary
         isBoot = ms_hsc_src summary == HsBootFile
         directImports = sort . Set.toList . Set.fromList $
-          [ (unLoc imported, False) | (_, imported) <- ms_textual_imps summary ] ++
-          [ (unLoc imported, True) | (_, imported) <- ms_srcimps summary ]
+          [ (qualifier, unLoc imported, False) | (qualifier, imported) <- ms_textual_imps summary ] ++
+          [ (qualifier, unLoc imported, True) | (qualifier, imported) <- ms_srcimps summary ]
     source <- case ml_hs_file (ms_location summary) of
       Nothing -> pure ""
       Just path -> normalise <$> makeAbsolute path
@@ -2229,9 +2239,9 @@ dependencyEvidenceFor (sources, sourcesComplete) graph moduleFacts = do
       , dependencyModuleBoot = isBoot
       , dependencyModuleSource = source
       , dependencyModuleImports =
-          [ DependencyImport (moduleNameString imported) boot
-              (Map.lookup (imported, boot) selected)
-          | (imported, boot) <- directImports
+          [ DependencyImport (qualifierKey qualifier) (moduleNameString imported) boot
+              (homeSelection qualifier imported boot)
+          | (qualifier, imported, boot) <- directImports
           ]
       , dependencyModuleProduct = if isBoot then ProductBoot else ProductInterfaceOnly
       }
@@ -2239,12 +2249,14 @@ dependencyEvidenceFor (sources, sourcesComplete) graph moduleFacts = do
         any (hasUntrackedCompileTimeExecution . ms_hspp_opts) graphSummaries
       complete = sourcesComplete && not (any moduleFactHasDependentFiles moduleFacts)
         && not hasUntrackedExecution
-        && all (not . null . dependencyResolutionCandidates) absoluteCandidates
+        && all (\resolution -> not (null (dependencyResolutionCandidates resolution))
+              || "other:" `isPrefixOf` dependencyResolutionQualifier resolution)
+             absoluteCandidates
       packages = sort
         [ moduleNameString imported
-        | (imported, isBoot) <- allImports
+        | (qualifier, imported, isBoot) <- allImports
         , not isBoot
-        , isNothing (Map.lookup (imported, False) selected)
+        , isNothing (homeSelection qualifier imported False)
         ]
   pure DependencyEvidence
     { dependencyCacheSafe = complete

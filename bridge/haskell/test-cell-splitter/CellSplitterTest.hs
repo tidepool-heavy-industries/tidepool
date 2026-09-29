@@ -392,10 +392,12 @@ dependencyEvidenceCompilation = bracket temporary removeDirectoryRecursive $ \ro
     , "helper = value"
     ]
   writeFile target $ unlines
-    [ "module WitnessTarget where"
+    [ "{-# LANGUAGE PackageImports #-}"
+    , "module WitnessTarget where"
     , "import qualified Data.Text as Text"
+    , "import qualified \"containers\" Data.Map as Map"
     , "import WitnessA (value)"
-    , "result = (Text.length (Text.pack \"x\"), value)"
+    , "result = (Text.length (Text.pack \"x\"), value, Map.size Map.empty)"
     ]
   prepared <- runPipelineSelected PreparedStg target [root]
   let evidence = pprDependencies prepared
@@ -404,6 +406,8 @@ dependencyEvidenceCompilation = bracket temporary removeDirectoryRecursive $ \ro
                             , Just path <- [dependencyResolutionSelected resolution]]
       packageWitnesses = [resolution | resolution <- resolutions
         , dependencyResolutionModule resolution == "Data.Text"]
+      qualifiedWitnesses = [resolution | resolution <- resolutions
+        , dependencyResolutionModule resolution == "Data.Map"]
   unless (any (isSuffixOf "WitnessA.hs-boot") selectedPaths) $
     fail "SOURCE import did not retain its selected boot-interface witness"
   unless (any (isSuffixOf "WitnessA.hs") selectedPaths) $
@@ -416,6 +420,12 @@ dependencyEvidenceCompilation = bracket temporary removeDirectoryRecursive $ \ro
     fail "package import did not retain absent higher-priority home candidates"
   unless ("Data.Text" `elem` dependencyPackages evidence) $
     fail "package import was not recorded in dependency evidence"
+  unless (case qualifiedWitnesses of
+      [resolution] -> "other:" `isPrefixOf` dependencyResolutionQualifier resolution
+        && dependencyResolutionSelected resolution == Nothing
+        && null (dependencyResolutionCandidates resolution)
+      _ -> False) $
+    fail "qualified package import was not distinguished from home lookup"
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
   setEnv "TIDEPOOL_TIMING" "1"
   (withResidentPipelineSelected [root] $ \compile -> do

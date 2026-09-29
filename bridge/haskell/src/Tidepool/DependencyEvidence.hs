@@ -54,7 +54,8 @@ data ProductAvailability
   deriving (Eq, Show)
 
 data DependencyImport = DependencyImport
-  { dependencyImportName :: String
+  { dependencyImportQualifier :: String
+  , dependencyImportName :: String
   , dependencyImportBoot :: Bool
   , dependencyImportSelected :: Maybe FilePath
   }
@@ -65,7 +66,8 @@ data DependencySource = DependencySource
   }
 
 data DependencyResolution = DependencyResolution
-  { dependencyResolutionModule :: String
+  { dependencyResolutionQualifier :: String
+  , dependencyResolutionModule :: String
   , dependencyResolutionBoot :: Bool
   , dependencyResolutionSelected :: Maybe FilePath
   , dependencyResolutionCandidates :: [FilePath]
@@ -97,7 +99,7 @@ revalidateDependencyEvidence evidence = and <$> forM (dependencySources evidence
 
 renderDependencyEvidence :: DependencyEvidence -> String
 renderDependencyEvidence evidence =
-  "{\"version\":3"
+  "{\"version\":4"
     ++ ",\"cache_safe\":" ++ bool (dependencyCacheSafe evidence)
     ++ ",\"selection_complete\":" ++ bool (dependencySelectionComplete evidence)
     ++ ",\"sources\":[" ++ comma (map source (dependencySources evidence)) ++ "]"
@@ -112,7 +114,8 @@ renderDependencyEvidence evidence =
       "{\"path\":" ++ jsonString (dependencySourcePath item)
         ++ ",\"sha256\":" ++ jsonString (dependencySourceSha256 item) ++ "}"
     resolution item =
-      "{\"module\":" ++ jsonString (dependencyResolutionModule item)
+      "{\"qualifier\":" ++ jsonString (dependencyResolutionQualifier item)
+        ++ ",\"module\":" ++ jsonString (dependencyResolutionModule item)
         ++ ",\"boot\":" ++ bool (dependencyResolutionBoot item)
         ++ ",\"selected\":" ++ maybe "null" jsonString (dependencyResolutionSelected item)
         ++ ",\"candidates\":["
@@ -125,7 +128,8 @@ renderDependencyEvidence evidence =
         ++ ",\"imports\":[" ++ comma (map importNode (dependencyModuleImports item)) ++ "]"
         ++ ",\"product\":" ++ jsonString (productAvailability (dependencyModuleProduct item)) ++ "}"
     importNode item =
-      "{\"module\":" ++ jsonString (dependencyImportName item)
+      "{\"qualifier\":" ++ jsonString (dependencyImportQualifier item)
+        ++ ",\"module\":" ++ jsonString (dependencyImportName item)
         ++ ",\"boot\":" ++ bool (dependencyImportBoot item)
         ++ ",\"selected\":" ++ maybe "null" jsonString (dependencyImportSelected item) ++ "}"
     productAvailability ProductReady = "ready"
