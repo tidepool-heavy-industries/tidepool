@@ -90,6 +90,73 @@ pub struct HostOptions {
     pub interactive_agent: InteractiveAgentInstallation,
     pub resume_root: bool,
     pub agent: ExomonadAgentDefaults,
+    pub backend: ExomonadBackend,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExomonadBackend {
+    #[default]
+    Codex,
+    Embedded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunBackendRecord {
+    version: u32,
+    run_id: String,
+    backend: ExomonadBackend,
+}
+
+fn record_run_backend(
+    run_root: &Path,
+    run_id: &str,
+    backend: ExomonadBackend,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = run_root.join("backend.json");
+    let selected = RunBackendRecord {
+        version: 1,
+        run_id: run_id.to_owned(),
+        backend,
+    };
+    if path.exists() {
+        let existing: RunBackendRecord = serde_json::from_slice(&std::fs::read(&path)?)?;
+        if existing != selected {
+            return Err(runtime_error(format!(
+                "run backend record disagrees with selected {backend} backend: {}",
+                path.display()
+            )));
+        }
+    } else {
+        tidepool_atomic_write::write_durable(&path, &serde_json::to_vec_pretty(&selected)?)?;
+    }
+    Ok(())
+}
+
+fn verify_run_backend(
+    run_root: &Path,
+    run_id: &str,
+    backend: ExomonadBackend,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = run_root.join("backend.json");
+    let existing: RunBackendRecord = serde_json::from_slice(&std::fs::read(&path)?)?;
+    if existing.version != 1 || existing.run_id != run_id || existing.backend != backend {
+        return Err(runtime_error(format!(
+            "host backend {backend} does not match the immutable run record at {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+impl std::fmt::Display for ExomonadBackend {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Codex => "codex",
+            Self::Embedded => "embedded",
+        })
+    }
 }
 
 /// Early CLI boundary for the private per-launch process supervisor.
@@ -172,6 +239,7 @@ pub(crate) struct LaunchConfig {
     pub(crate) systemd_slice: exomonad_node::systemd_slice::SystemdSlice,
     pub(crate) source_exclude: Vec<String>,
     pub(crate) source: SourceImportPolicy,
+    pub(crate) backend: ExomonadBackend,
 }
 
 /// Disk admission for a private source import. Values are conservative
@@ -589,6 +657,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     // A run starts nothing before its workspace is known to exist: no build,
     // no tmux session, no scaffolding.
     let configuration = read_project_config(&workspace)?.0;
+    let selected_backend = configuration.launch.backend;
     let slice = configuration.launch.systemd_slice;
     let limits = slice.inspect().await?;
     if slice.current_membership().is_err() {
@@ -661,6 +730,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         .join("runs")
         .join(&run_id);
     ensure_private_run_root(&run_root)?;
+    record_run_backend(&run_root, &run_id, selected_backend)?;
     let selected = workspace::FrozenWorkspace::load(&workspace, &run_root)?;
     crate::actor_host::validate_workspace_program(&selected, &run_root)?;
     if options.recreate {
@@ -824,6 +894,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     }
     args.extend(["--model".into(), agent.model.clone()]);
     args.extend(["--effort".into(), agent.effort.to_string()]);
+    args.extend(["--backend".into(), selected_backend.to_string()]);
     let mut host_environment = host_environment(&compiler_socket);
     host_environment.extend(selected_environment);
     let host_launch = slice.supervised_service(
@@ -1179,6 +1250,7 @@ async fn read_bounded_diagnostics(
 
 pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>> {
     ensure_private_run_root(&options.run_root)?;
+    verify_run_backend(&options.run_root, &options.run_id, options.backend)?;
     let host_incarnation = crate::actor_host::HostIncarnationLease::claim(&options.run_root)?;
     let generation = host_incarnation.incarnation().0;
     if generation > 1 {
@@ -1298,6 +1370,11 @@ async fn run_host(
         );
     }
     let configuration = workspace_inputs.config()?;
+    if configuration.launch.backend != options.backend {
+        return Err(runtime_error(
+            "workspace backend differs from the admitted run backend",
+        ));
+    }
     let slice = configuration.launch.systemd_slice;
     slice.current_membership()?;
     let limits = slice.inspect().await?;
@@ -1360,6 +1437,7 @@ async fn run_host(
             run_root: options.run_root.clone(),
             root_binding_path: options.run_root.join("root-binding.json"),
             interactive_agent: options.interactive_agent.clone(),
+            backend: options.backend,
             tmux_session: options.session.clone(),
             model: options.agent.model.clone(),
             effort: options.agent.effort.into(),
@@ -3238,6 +3316,16 @@ mod tests {
     }
 
     #[test]
+    fn run_backend_is_immutable_across_host_resume() {
+        let root = tempfile::tempdir().unwrap();
+        record_run_backend(root.path(), "run-1", ExomonadBackend::Embedded).unwrap();
+        verify_run_backend(root.path(), "run-1", ExomonadBackend::Embedded).unwrap();
+        assert!(verify_run_backend(root.path(), "run-1", ExomonadBackend::Codex).is_err());
+        assert!(verify_run_backend(root.path(), "run-2", ExomonadBackend::Embedded).is_err());
+        assert!(record_run_backend(root.path(), "run-1", ExomonadBackend::Codex).is_err());
+    }
+
+    #[test]
     fn host_failure_publishes_its_exact_terminal_diagnostic() {
         let root = tempfile::tempdir().unwrap();
         let status_path = root.path().join("status.json");
@@ -3255,6 +3343,7 @@ mod tests {
             .unwrap(),
             resume_root: false,
             agent: test_agent_defaults(),
+            backend: ExomonadBackend::Codex,
         };
         let mut recovering = RunStatus::new(
             "run-failed",

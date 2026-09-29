@@ -46,9 +46,12 @@ pub(super) struct EmbeddedHarnessRuntime {
 
 impl EmbeddedHarnessRuntime {
     pub(super) fn open(run_root: &Path, concurrent_jobs: usize) -> Result<Self, EmbeddedError> {
+        let harness_root = run_root.join("harness");
+        std::fs::create_dir_all(&harness_root)
+            .map_err(|error| EmbeddedError::Binding(error.to_string()))?;
         Ok(Self {
             run: super::runtime_namespace(run_root),
-            store: Arc::new(Store::open(run_root.join("harness.sqlite"))?),
+            store: Arc::new(Store::open(harness_root.join("store.sqlite"))?),
             scheduler: Arc::new(
                 JobScheduler::new(concurrent_jobs)
                     .map_err(|error| EmbeddedError::Binding(error.to_string()))?,

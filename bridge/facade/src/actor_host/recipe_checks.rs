@@ -162,6 +162,7 @@ impl Driver {
                 std::env::current_exe()?,
                 "model-free recipe check".into(),
             )?,
+            backend: crate::exomonad::ExomonadBackend::Codex,
             tmux_session: "unused-in-recipe-check".into(),
             model: defaults.defaults.model,
             effort: defaults.defaults.effort.into(),

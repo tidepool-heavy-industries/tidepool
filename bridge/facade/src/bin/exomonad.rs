@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use tidepool::exomonad::{ExomonadAgentDefaults, ExomonadEffort};
+use tidepool::exomonad::{ExomonadAgentDefaults, ExomonadBackend, ExomonadEffort};
 
 #[derive(Debug, Parser)]
 #[command(name = "exomonad", about = "Run typed Tidepool actor ensembles")]
@@ -170,6 +170,8 @@ enum Command {
         model: String,
         #[arg(long, value_enum, hide = true)]
         effort: Effort,
+        #[arg(long, value_enum, hide = true, default_value_t = Backend::Codex)]
+        backend: Backend,
     },
 }
 
@@ -202,6 +204,22 @@ impl From<Effort> for ExomonadEffort {
             Effort::Low => Self::Low,
             Effort::Medium => Self::Medium,
             Effort::High => Self::High,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+enum Backend {
+    #[default]
+    Codex,
+    Embedded,
+}
+
+impl From<Backend> for ExomonadBackend {
+    fn from(value: Backend) -> Self {
+        match value {
+            Backend::Codex => Self::Codex,
+            Backend::Embedded => Self::Embedded,
         }
     }
 }
@@ -404,6 +422,7 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             resume_root,
             model,
             effort,
+            backend,
         } => {
             // `_trace_guard` must stay a named binding: dropping it closes the
             // trace appender's flush channel and the JSONL file stops growing.
@@ -426,6 +445,7 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                     model,
                     effort: effort.into(),
                 },
+                backend: backend.into(),
             })
             .await
         }

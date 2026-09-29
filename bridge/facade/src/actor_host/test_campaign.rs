@@ -250,6 +250,7 @@ impl TestCampaign {
                 "test installation".into(),
             )
             .unwrap(),
+            backend: crate::exomonad::ExomonadBackend::Codex,
             tmux_session: "unused-in-resident-test".into(),
             model: "test-model".into(),
             effort: ReasoningEffort::Low,

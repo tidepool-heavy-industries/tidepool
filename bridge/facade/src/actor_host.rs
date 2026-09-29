@@ -506,6 +506,7 @@ pub struct ActorHostConfig {
     pub run_root: PathBuf,
     pub root_binding_path: PathBuf,
     pub interactive_agent: InteractiveAgentInstallation,
+    pub backend: crate::exomonad::ExomonadBackend,
     pub tmux_session: String,
     pub model: String,
     pub effort: ReasoningEffort,
