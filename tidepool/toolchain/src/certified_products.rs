@@ -8,9 +8,8 @@ use std::path::{Path, PathBuf};
 use ciborium::value::Value;
 use sha2::{Digest, Sha256};
 use tidepool_repr::execution_schema::{
-    parse_module_products, CachedHomeOwner, DecodeLimits, GlobalDecl, ModuleVersion,
-    PreparedProgram, ProjectedGroup, RawModuleProduct, ResultContract, RuntimeRep, Signature,
-    SymbolIdentity,
+    CachedHomeOwner, DecodeLimits, GlobalDecl, ModuleVersion, PreparedProgram, ProjectedGroup,
+    RawModuleProduct, ResultContract, RuntimeRep, Signature, SymbolIdentity, parse_module_products,
 };
 
 use crate::cache::{DependencyEvidence, ProductAvailability};
@@ -18,7 +17,9 @@ use crate::module_candidates::CandidateSet;
 
 const RECEIPT_LIMIT: usize = 4 << 20;
 const MODULE_LIMIT: usize = 128;
-const GROUP_LIMIT: usize = 4096;
+// Tidepool.Effects.Core alone produces 5,930 neutral groups in a normal
+// resident turn. The separate 4 MiB receipt bound limits aggregate memory.
+const GROUP_LIMIT: usize = 8192;
 const GLOBAL_LIMIT: usize = 65536;
 const PACKAGE_LIMIT: usize = 4096;
 const PACKAGE_INTERFACE_LIMIT: u64 = 32 << 20;
@@ -995,24 +996,26 @@ mod tests {
         .unwrap();
         let mut accepted = receipt(&bytes, &evidence, source);
         accepted.dependency_witness_sha256 = sha(&raw_evidence);
-        assert!(certify_products(
-            None,
-            &CertifiedReceipt {
-                modules: vec![accepted.clone()],
-                targets: BTreeMap::new(),
-                packages: BTreeMap::new()
-            },
-            &parsed,
-            &bytes,
-            &raw_evidence,
-            &input,
-            &evidence,
-            source,
-            b"producer",
-            &[],
-        )
-        .unwrap()
-        .is_empty());
+        assert!(
+            certify_products(
+                None,
+                &CertifiedReceipt {
+                    modules: vec![accepted.clone()],
+                    targets: BTreeMap::new(),
+                    packages: BTreeMap::new()
+                },
+                &parsed,
+                &bytes,
+                &raw_evidence,
+                &input,
+                &evidence,
+                source,
+                b"producer",
+                &[],
+            )
+            .unwrap()
+            .is_empty()
+        );
         let mut substituted = evidence.clone();
         substituted.packages.push("unrelated selection".into());
         assert!(matches!(
@@ -1059,23 +1062,25 @@ mod tests {
         ));
         let mut changed = accepted;
         changed.dependency_witness_sha256 = [7; 32];
-        assert!(certify_products(
-            None,
-            &CertifiedReceipt {
-                modules: vec![changed],
-                targets: BTreeMap::new(),
-                packages: BTreeMap::new()
-            },
-            &parsed,
-            &bytes,
-            &raw_evidence,
-            &input,
-            &evidence,
-            source,
-            b"producer",
-            &[],
-        )
-        .is_err());
+        assert!(
+            certify_products(
+                None,
+                &CertifiedReceipt {
+                    modules: vec![changed],
+                    targets: BTreeMap::new(),
+                    packages: BTreeMap::new()
+                },
+                &parsed,
+                &bytes,
+                &raw_evidence,
+                &input,
+                &evidence,
+                source,
+                b"producer",
+                &[],
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1129,6 +1134,43 @@ mod tests {
         assert!(matches!(
             decode_receipt(&encoded),
             Err(CertificationError::Receipt("receipt size"))
+        ));
+
+        let large_groups = |count: usize| {
+            let mut receipt = value.clone();
+            let Value::Array(header) = &mut receipt else {
+                unreachable!()
+            };
+            let Value::Array(modules) = &mut header[2] else {
+                unreachable!()
+            };
+            let Value::Array(module) = &mut modules[0] else {
+                unreachable!()
+            };
+            module[8] = Value::Array(
+                (0..count)
+                    .map(|ordinal| {
+                        Value::Array(vec![
+                            Value::Integer((ordinal as u64).into()),
+                            Value::Array(vec![]),
+                        ])
+                    })
+                    .collect(),
+            );
+            let mut encoded = Vec::new();
+            ciborium::ser::into_writer(&receipt, &mut encoded).unwrap();
+            encoded
+        };
+        // A real resident Tidepool.Effects.Core product has 5,930 groups.
+        assert_eq!(
+            decode_receipt(&large_groups(5_930)).unwrap().modules[0]
+                .groups
+                .len(),
+            5_930
+        );
+        assert!(matches!(
+            decode_receipt(&large_groups(GROUP_LIMIT + 1)),
+            Err(CertificationError::Receipt("group count"))
         ));
     }
 
