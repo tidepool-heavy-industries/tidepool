@@ -10,26 +10,15 @@
 //! on another thread sound.
 //!
 //! The key is content equality on the linked program itself: a
-//! [`LinkedProgram`] already carries its target ([`TargetDescriptor`], via
-//! `PreparedProgram`'s envelope) and its full resolved-import shape, and it
-//! derives `Eq`, so two calls that would compile byte-identical code compare
-//! equal here with no extra fingerprint to keep in sync. This deliberately
-//! costs a linear scan and a full structural comparison per lookup rather
-//! than hashing -- correct and small; a session installs at most a handful
-//! of distinct images, not thousands. A future caller with a hot path
-//! through many distinct images should add a real content hash instead of
-//! widening this scan, not the other way around.
-//!
-//! No eviction in this parcel: an entry lives as long as the registry
-//! itself. An image with no machine still holding it and no registry
-//! reference is dropped when the registry is (see the module's own doc for
-//! why sharing needs no eviction sooner than that -- this cache never
-//! outlives the run it belongs to). Retiring an image from every machine
-//! that installed it, while the registry itself stays alive across many
-//! more installs than any one image should be charged for, is future work.
+//! [`LinkedProgram`] already carries its target and full resolved-import
+//! shape, and it derives `Eq`. There is no canonical hash for this linked
+//! shape, so lookup compares live keys structurally. The registry owns no
+//! image: installed machines, parcels, and active compiles hold the strong
+//! references. Each lookup or insert removes entries whose image has died,
+//! including their linked-program keys.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use tidepool_repr::execution_schema::LinkedProgram;
 
@@ -39,7 +28,7 @@ use super::CompiledProgram;
 /// clone the `Arc` around; the registry itself owns a lock, not a checkout.
 #[derive(Default)]
 pub struct ImageRegistry {
-    entries: Mutex<Vec<(Arc<LinkedProgram>, Arc<CompiledProgram>)>>,
+    entries: Mutex<Vec<(LinkedProgram, Weak<CompiledProgram>)>>,
     /// Lifetime lookups that found an existing image. Never decremented.
     hits: AtomicU64,
     /// Lifetime lookups that found nothing (the caller then compiles and
@@ -53,15 +42,18 @@ impl ImageRegistry {
         Self::default()
     }
 
-    /// An existing image compiled for exactly `key`'s content and target, if
-    /// any machine of this run has already compiled or inserted one.
+    /// An existing live image compiled for exactly `key`'s content and target.
     #[must_use]
     pub fn lookup(&self, key: &LinkedProgram) -> Option<Arc<CompiledProgram>> {
-        let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        let found = entries
-            .iter()
-            .find(|(existing, _)| existing.as_ref() == key)
-            .map(|(_, image)| Arc::clone(image));
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        entries.retain(|(_, image)| image.strong_count() != 0);
+        let found = entries.iter().find_map(|(existing, image)| {
+            if existing == key {
+                image.upgrade()
+            } else {
+                None
+            }
+        });
         if found.is_some() {
             self.hits.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -79,10 +71,17 @@ impl ImageRegistry {
     #[must_use]
     pub fn insert(&self, key: LinkedProgram, image: Arc<CompiledProgram>) -> Arc<CompiledProgram> {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some((_, existing)) = entries.iter().find(|(existing, _)| **existing == key) {
-            return Arc::clone(existing);
+        entries.retain(|(_, image)| image.strong_count() != 0);
+        if let Some(existing) = entries.iter().find_map(|(existing, candidate)| {
+            if existing == &key {
+                candidate.upgrade()
+            } else {
+                None
+            }
+        }) {
+            return existing;
         }
-        entries.push((Arc::new(key), Arc::clone(&image)));
+        entries.push((key, Arc::downgrade(&image)));
         image
     }
 
@@ -101,6 +100,7 @@ impl ImageRegistry {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{PreparedMachine, PreparedMachineOptions, RunOptions};
     use super::*;
     use tidepool_repr::execution_schema::{link_program, testing, MachineImports};
 
@@ -157,5 +157,46 @@ mod tests {
             "first writer wins the race"
         );
         assert!(!Arc::ptr_eq(&kept_second, &second));
+    }
+
+    #[test]
+    fn dead_image_and_key_are_reclaimed_while_registry_lives() {
+        let registry = ImageRegistry::new();
+        let key = program();
+        let image = compiled();
+        let weak = Arc::downgrade(&image);
+        let registered = registry.insert(key.clone(), image);
+        let (machine, _) = PreparedMachine::new_shared(
+            registered,
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("machine installs image");
+        assert_eq!(registry.entries.lock().unwrap().len(), 1);
+        assert!(weak.upgrade().is_some(), "machine owns the live image");
+
+        drop(machine);
+        assert!(weak.upgrade().is_none(), "the registry owns no image");
+        assert!(registry.lookup(&key).is_none());
+        assert!(
+            registry.entries.lock().unwrap().is_empty(),
+            "dead key pruned"
+        );
+    }
+
+    #[test]
+    fn insert_prunes_dead_key_and_accepts_a_new_image() {
+        let registry = ImageRegistry::new();
+        let key = program();
+        let old = registry.insert(key.clone(), compiled());
+        drop(old);
+
+        let replacement = compiled();
+        let inserted = registry.insert(key.clone(), Arc::clone(&replacement));
+        assert!(Arc::ptr_eq(&inserted, &replacement));
+        assert_eq!(registry.entries.lock().unwrap().len(), 1);
+        let hit = registry.lookup(&key).expect("replacement remains live");
+        assert!(Arc::ptr_eq(&hit, &replacement));
     }
 }
