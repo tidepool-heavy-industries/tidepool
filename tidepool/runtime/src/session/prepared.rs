@@ -4428,7 +4428,7 @@ mod tests {
             Err(PreparedRuntimeError::UnreachableCertifiedGroup)
         ));
         assert_eq!(engine.residency(), before);
-        let installed = engine
+        let mut installed = engine
             .install_certified_turn(
                 target,
                 &[owner],
@@ -4475,7 +4475,7 @@ mod tests {
         let inherited = BTreeMap::from([(root.clone(), selected.clone())]);
         let reused = engine
             .install_certified_turn(
-                CertifiedTargetImage::compile(target_prepared, &registry).unwrap(),
+                CertifiedTargetImage::compile(target_prepared.clone(), &registry).unwrap(),
                 &[ImportOwner::Source {
                     version: root.version.clone(),
                     binder: root.binder.clone(),
@@ -4490,13 +4490,84 @@ mod tests {
         assert!(reused.leases.is_empty());
         assert_ne!(reused.target, installed.target);
         assert!(engine.unpin(reused.target));
-        for lease in &installed.leases {
-            assert!(engine.machine.release(lease.handle()));
-        }
-        for group in installed.groups {
-            assert!(engine.unpin(group));
+        let mut scopes = tidepool_codegen::scope::ScopeTree::new();
+        let source_scope = scopes.mint_isolated();
+        let capture_scope = scopes.mint_isolated();
+        let mut bindings = BindingTable::new();
+        let keys = bindings
+            .register_source_instances_in(
+                &scopes,
+                source_scope,
+                std::mem::take(&mut installed.leases),
+            )
+            .unwrap();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(bindings.source_instances_in(&scopes, source_scope).len(), 2);
+        bindings.seed_detached_scope(&scopes, source_scope, capture_scope);
+        assert_eq!(
+            bindings.source_instances_in(&scopes, capture_scope).len(),
+            2
+        );
+        for group in &installed.groups {
+            assert!(engine.unpin(*group));
         }
         assert!(engine.unpin(installed.target));
+        assert_eq!(scopes.retire(source_scope), vec![source_scope]);
+        assert!(bindings
+            .drain_scope_with_sources(source_scope)
+            .source_instances
+            .is_empty());
+        engine.quiesce_and_collect_now().unwrap();
+        assert_eq!(engine.residency().programs, 3);
+        assert_eq!(
+            bindings.source_instances_in(&scopes, capture_scope).len(),
+            2
+        );
+        assert_eq!(scopes.retire(capture_scope), vec![capture_scope]);
+        let retired = bindings
+            .drain_scope_with_sources(capture_scope)
+            .source_instances;
+        assert_eq!(retired.len(), 2);
+        for lease in retired {
+            assert!(engine.release(lease.handle()));
+        }
+        engine.quiesce_and_collect_now().unwrap();
+        assert_eq!(engine.residency().programs, 1);
+
+        let rejected = engine
+            .install_certified_turn(
+                CertifiedTargetImage::compile(target_prepared, &registry).unwrap(),
+                &[ImportOwner::Source {
+                    version: root.version.clone(),
+                    binder: root.binder.clone(),
+                }],
+                demand.compile(&registry).unwrap(),
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &bindings,
+            )
+            .unwrap();
+        let dead_scope = scopes.mint_isolated();
+        assert_eq!(scopes.retire(dead_scope), vec![dead_scope]);
+        let returned = bindings
+            .register_source_instances_in(&scopes, dead_scope, rejected.leases)
+            .unwrap_err();
+        assert_eq!(returned.len(), 2);
+        assert!(bindings
+            .source_instances_in(&scopes, source_scope)
+            .is_empty());
+        assert!(bindings
+            .source_instances_in(&scopes, capture_scope)
+            .is_empty());
+        for lease in returned {
+            assert!(engine.release(lease.handle()));
+        }
+        for group in rejected.groups {
+            assert!(engine.unpin(group));
+        }
+        assert!(engine.unpin(rejected.target));
+        engine.quiesce_and_collect_now().unwrap();
+        assert_eq!(engine.residency().programs, 1);
         assert!(engine.unpin(bootstrap));
     }
 
