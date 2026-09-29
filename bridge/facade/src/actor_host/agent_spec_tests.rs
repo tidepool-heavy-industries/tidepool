@@ -412,6 +412,44 @@ async fn a_rebuilt_record_with_the_same_surface_swaps_and_later_calls_run_new_co
 }
 
 #[tokio::test]
+async fn issued_tool_snapshot_keeps_old_handler_after_spec_reload() {
+    let campaign = start_with_slot("old-handler", "pure (Annotated (T.pack \"old slot\"))").await;
+    let workspace = campaign._repository.path().to_path_buf();
+    let policy = campaign.root_installation.policy.clone();
+    let old_request = policy
+        .snapshot_for_request()
+        .expect("initial installed spec");
+
+    std::fs::write(
+        workspace.join(".exomonad/Project/Tools.hs"),
+        tools_module(DESCRIPTION, "new-handler"),
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.join(".exomonad/AgentSpec.hs"),
+        spec_module("pure (Annotated (T.pack \"new slot\"))"),
+    )
+    .unwrap();
+    let receipt = reload(old_request.as_ref()).await;
+    assert!(receipt.contains("swapped"), "{receipt}");
+    let new_request = policy
+        .snapshot_for_request()
+        .expect("reloaded installed spec");
+
+    let old_result = probe(old_request.as_ref()).await;
+    assert!(old_result.contains("old-handler"), "{old_result}");
+    assert!(old_result.contains("old slot"), "{old_result}");
+    assert!(!old_result.contains("new-handler"), "{old_result}");
+    assert!(!old_result.contains("new slot"), "{old_result}");
+    let new_result = probe(new_request.as_ref()).await;
+    assert!(new_result.contains("new-handler"), "{new_result}");
+    assert!(new_result.contains("new slot"), "{new_result}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() {
     let campaign = TestCampaign::start_with_config(
         exomonad_actor::ResearchPolicy::default(),

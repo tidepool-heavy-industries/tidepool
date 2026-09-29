@@ -399,7 +399,7 @@ async fn submit(
     if actor
         .address()
         .send_message(KernelMessage::Workbench {
-            request,
+            invocation: exomonad_actor::ActorWorkbenchInvocation::unbound(request),
             control: None,
             reply: reply.into(),
         })

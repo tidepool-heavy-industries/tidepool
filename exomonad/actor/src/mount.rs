@@ -383,6 +383,15 @@ pub struct ActorSessionContext {
 }
 
 impl ActorSessionContext {
+    /// Select the immutable revision paths captured for an issued workbench
+    /// request. Actor authority and lexical placement remain unchanged.
+    pub(crate) fn with_issued_source(mut self, source: &CheckpointSourceLayer) -> Self {
+        if !source.include_paths.is_empty() {
+            self.source_layer = source.include_paths.clone().into();
+        }
+        self
+    }
+
     #[must_use]
     pub fn run_context(&self) -> SessionRunContext {
         SessionRunContext::new(

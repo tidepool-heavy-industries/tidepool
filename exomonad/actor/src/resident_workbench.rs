@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use parking_lot::Mutex;
+
 mod structured_introspection;
 pub(crate) mod to_haskell;
 
@@ -420,6 +422,96 @@ pub(crate) struct ResidentWorkbenchTools {
     /// reachable through the call belongs to one revision, which would be a
     /// different and possibly false claim.
     pub(crate) revision: Option<String>,
+}
+
+/// Authority over one actor's installed handler and immutable source revision.
+/// The handler root remains live while an issued request retains this value.
+#[derive(Clone)]
+pub struct InstalledToolLease {
+    actor: crate::ActorRef,
+    source: crate::CheckpointSourceLayer,
+    tools: Option<Arc<ResidentWorkbenchTools>>,
+}
+
+impl InstalledToolLease {
+    pub(crate) fn new(
+        actor: crate::ActorRef,
+        source: crate::CheckpointSourceLayer,
+        tools: Option<Arc<ResidentWorkbenchTools>>,
+    ) -> Self {
+        Self {
+            actor,
+            source,
+            tools,
+        }
+    }
+
+    pub(crate) fn actor(&self) -> crate::ActorRef {
+        self.actor
+    }
+
+    pub(crate) fn source(&self) -> &crate::CheckpointSourceLayer {
+        &self.source
+    }
+
+    pub(crate) fn tools(&self) -> Option<&ResidentWorkbenchTools> {
+        self.tools.as_deref()
+    }
+
+    pub(crate) fn tools_arc(&self) -> Option<Arc<ResidentWorkbenchTools>> {
+        self.tools.clone()
+    }
+
+    pub(crate) fn with_source(&self, source: crate::CheckpointSourceLayer) -> Self {
+        Self {
+            source,
+            ..self.clone()
+        }
+    }
+
+    pub(crate) fn with_tools(&self, tools: Option<Arc<ResidentWorkbenchTools>>) -> Self {
+        Self {
+            tools,
+            ..self.clone()
+        }
+    }
+}
+
+/// The actor's single current installation. Requests clone an immutable lease;
+/// reload replaces only this pointer after publishing source or handler state.
+#[derive(Default)]
+pub(crate) struct InstalledToolsState(Mutex<Option<InstalledToolLease>>);
+
+impl InstalledToolsState {
+    pub(crate) fn current(&self) -> Option<InstalledToolLease> {
+        self.0.lock().clone()
+    }
+
+    pub(crate) fn publish(&self, lease: InstalledToolLease) {
+        *self.0.lock() = Some(lease);
+    }
+
+    pub(crate) fn current_tools(&self) -> Option<Arc<ResidentWorkbenchTools>> {
+        self.current()?.tools_arc()
+    }
+
+    pub(crate) fn publish_source(&self, source: crate::CheckpointSourceLayer) {
+        let mut current = self.0.lock();
+        if let Some(lease) = current.as_ref() {
+            *current = Some(lease.with_source(source));
+        }
+    }
+
+    pub(crate) fn publish_tools(&self, tools: Option<Arc<ResidentWorkbenchTools>>) {
+        let mut current = self.0.lock();
+        if let Some(lease) = current.as_ref() {
+            *current = Some(lease.with_tools(tools));
+        }
+    }
+
+    pub(crate) fn clear(&self) {
+        *self.0.lock() = None;
+    }
 }
 
 /// What one `installSpec` publishes: the declared surface, and which slots the

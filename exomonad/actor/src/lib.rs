@@ -89,9 +89,9 @@ pub use interactive_session::{
     ResidentInteractiveSession, SiblingPreview,
 };
 pub use kernel::{
-    ActorAdmissionLease, CallAncestry, KernelCallFailure, KernelCallReply, KernelInvocationFailure,
-    KernelInvocationReply, KernelMessage, KernelWorkbenchFailure, KernelWorkbenchReply,
-    LocalActorRef,
+    ActorAdmissionLease, ActorWorkbenchInvocation, CallAncestry, KernelCallFailure,
+    KernelCallReply, KernelInvocationFailure, KernelInvocationReply, KernelMessage,
+    KernelWorkbenchFailure, KernelWorkbenchReply, LocalActorRef,
 };
 pub use lineage::{
     ActorLineageRegistry, ActorPathReservation, CheckpointLease, CheckpointRefusal,
@@ -140,8 +140,9 @@ pub use resident_tools::{
     WorkbenchExecutionControl,
 };
 pub use resident_workbench::{
-    ActorMachineRegistry, ActorWorkbenchSource, ChildSessionFactory, ResidentActorRunner,
-    ResidentActorWorkbench, ResidentActorWorkbenchError, ResidentMachineMeasurement,
+    ActorMachineRegistry, ActorWorkbenchSource, ChildSessionFactory, InstalledToolLease,
+    ResidentActorRunner, ResidentActorWorkbench, ResidentActorWorkbenchError,
+    ResidentMachineMeasurement,
 };
 pub use role::{
     render_child_budget, ActorEffectKey, ActorRole, DescendantBudget, EffectiveRole,

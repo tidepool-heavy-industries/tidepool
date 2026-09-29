@@ -129,6 +129,32 @@ impl std::error::Error for KernelWorkbenchFailure {}
 pub type KernelInvocationReply = Result<serde_json::Value, KernelInvocationFailure>;
 pub type KernelWorkbenchReply = Result<WorkbenchResponse, KernelInvocationFailure>;
 
+/// Actor-owned authority beside the transport-neutral workbench request.
+/// The runtime request and its exact execution journal never contain a handler.
+pub struct ActorWorkbenchInvocation {
+    pub request: WorkbenchRequest,
+    pub(crate) installed_tools: Option<crate::resident_workbench::InstalledToolLease>,
+}
+
+impl ActorWorkbenchInvocation {
+    pub fn unbound(request: WorkbenchRequest) -> Self {
+        Self {
+            request,
+            installed_tools: None,
+        }
+    }
+
+    pub(crate) fn issued(
+        request: WorkbenchRequest,
+        installed_tools: Option<crate::resident_workbench::InstalledToolLease>,
+    ) -> Self {
+        Self {
+            request,
+            installed_tools,
+        }
+    }
+}
+
 /// Every ordinary operation serialized through one local actor.
 ///
 /// Actor creation is intentionally absent: the owning actor calls
@@ -175,7 +201,7 @@ pub enum KernelMessage {
         reply: RpcReplyPort<KernelInvocationReply>,
     },
     Workbench {
-        request: WorkbenchRequest,
+        invocation: ActorWorkbenchInvocation,
         control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
         reply: RpcReplyPort<KernelWorkbenchReply>,
     },
@@ -282,9 +308,9 @@ impl std::fmt::Debug for KernelMessage {
                 .debug_struct("Tool")
                 .field("invocation", invocation)
                 .finish_non_exhaustive(),
-            Self::Workbench { request, .. } => formatter
+            Self::Workbench { invocation, .. } => formatter
                 .debug_struct("Workbench")
-                .field("request", request)
+                .field("request", &invocation.request)
                 .finish_non_exhaustive(),
             Self::WorkbenchCompleted { token } => formatter
                 .debug_tuple("WorkbenchCompleted")

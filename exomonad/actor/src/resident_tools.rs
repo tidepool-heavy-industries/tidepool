@@ -321,6 +321,26 @@ pub enum ResidentToolError {
     CancellationUnsupported,
 }
 
+fn hosted_admission_failure(
+    actor: crate::ActorRef,
+    failure: crate::KernelCallFailure,
+) -> crate::KernelInvocationFailure {
+    match failure {
+        crate::KernelCallFailure::MailboxClosed(_) => crate::KernelInvocationFailure::Rejected {
+            actor,
+            detail: "actor mailbox admission is closed".into(),
+        },
+        crate::KernelCallFailure::TargetExited(_)
+        | crate::KernelCallFailure::TargetUnavailable(_) => {
+            crate::KernelInvocationFailure::ActorExited(actor)
+        }
+        failure => crate::KernelInvocationFailure::Failed {
+            actor,
+            detail: failure.to_string(),
+        },
+    }
+}
+
 /// A cloneable request handle for one exact actor incarnation.
 ///
 /// Calls are serialized because a resident actor has one turn at a time. The
@@ -347,6 +367,13 @@ pub enum ResidentToolOutput {
 /// their dispatcher; a concrete host sees only declarations and typed
 /// invocations.
 pub trait ResidentToolEndpoint: Send + Sync {
+    /// Pin the actor-issued handler/source installation for one model request.
+    /// An unsupported endpoint must fail rather than silently dispatch live state.
+    fn snapshot_for_request(&self) -> Result<Arc<dyn ResidentToolEndpoint>, ResidentToolError> {
+        Err(ResidentToolError::Unavailable(
+            "request-scoped installed tools are unavailable".into(),
+        ))
+    }
     /// Unsupported implementations cannot fabricate an admission barrier.
     fn seal_hosted_work_boxed(
         &self,
@@ -556,12 +583,16 @@ impl ResidentToolClient {
         let _turn = self.dispatch_gate.lock().await;
         let (response, receive) = oneshot::channel();
         self.actor
-            .address()
-            .send_message(crate::KernelMessage::Tool {
+            .admit_mailbox(crate::KernelMessage::Tool {
                 invocation,
                 reply: response.into(),
             })
-            .map_err(|_| ResidentToolError::Unavailable("the owning actor has stopped".into()))?;
+            .map_err(|failure| {
+                ResidentToolError::Invocation(hosted_admission_failure(
+                    self.actor.identity(),
+                    failure,
+                ))
+            })?;
         receive
             .await
             .map_err(|_| {
@@ -624,16 +655,27 @@ impl ResidentToolClient {
         Ok(result)
     }
 
+    #[cfg(test)]
     pub(crate) async fn dispatch_workbench(
+        &self,
+        request: WorkbenchRequest,
+        invocation: Option<ToolInvocationContext>,
+    ) -> Result<serde_json::Value, ResidentToolError> {
+        self.dispatch_workbench_issued(request, invocation, None)
+            .await
+    }
+
+    pub(crate) async fn dispatch_workbench_issued(
         &self,
         mut request: WorkbenchRequest,
         invocation: Option<ToolInvocationContext>,
+        installed_tools: Option<crate::InstalledToolLease>,
     ) -> Result<serde_json::Value, ResidentToolError> {
         let Some(invocation) = invocation else {
             let _turn = self.dispatch_gate.lock().await;
             let control = WorkbenchExecutionControl::untracked();
             return self
-                .dispatch_registered_workbench(request, control, None)
+                .dispatch_registered_workbench(request, control, None, installed_tools)
                 .await;
         };
         if let Some(context_call_id) = &invocation.context_call_id {
@@ -668,7 +710,7 @@ impl ResidentToolClient {
                 "workbench cell dispatched to its actor"
             );
         }
-        self.dispatch_registered_workbench(request, control, Some(&published))
+        self.dispatch_registered_workbench(request, control, Some(&published), installed_tools)
             .await
     }
 
@@ -677,19 +719,18 @@ impl ResidentToolClient {
         request: WorkbenchRequest,
         control: Arc<WorkbenchExecutionControl>,
         publication: Option<&HostedCellPublication>,
+        installed_tools: Option<crate::InstalledToolLease>,
     ) -> Result<serde_json::Value, ResidentToolError> {
         let (response, receive) = oneshot::channel();
-        if self
+        if let Err(error) = self
             .actor
-            .address()
-            .send_message(crate::KernelMessage::Workbench {
-                request,
+            .admit_mailbox(crate::KernelMessage::Workbench {
+                invocation: crate::ActorWorkbenchInvocation::issued(request, installed_tools),
                 control: Some(Arc::clone(&control)),
                 reply: response.into(),
             })
-            .is_err()
+            .map_err(|failure| hosted_admission_failure(self.actor.identity(), failure))
         {
-            let error = crate::KernelInvocationFailure::ActorExited(self.actor.identity());
             control.settle(Err(error.clone()));
             return Err(ResidentToolError::Invocation(error));
         }

@@ -834,7 +834,9 @@ async fn forest_operator_survives_model_root_recovery() {
         actor
             .address()
             .send_message(exomonad_actor::KernelMessage::Workbench {
-                request: tidepool_runtime::session::WorkbenchRequest::from_cell_input(source),
+                invocation: exomonad_actor::ActorWorkbenchInvocation::unbound(
+                    tidepool_runtime::session::WorkbenchRequest::from_cell_input(source),
+                ),
                 control: None,
                 reply: reply.into(),
             })
