@@ -1,4 +1,4 @@
-//! Cooperative Git admission for one physical common metadata directory.
+//! Cooperative Git admission for one persistent lock inside Git common metadata.
 //!
 //! The lock lives *inside* Git's common directory, so linked worktrees and
 //! separate Exomonad processes open the same inode. A different mounted view
@@ -18,33 +18,38 @@ const LOCK_NAME: &std::ffi::CStr = c"lock";
 /// The transaction's declared relationship to shared Git state. Read permits
 /// coexist; write and capture permits exclude all cooperating readers/writers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GitAccess {
+pub(crate) enum GitAccess {
     Read,
     Write,
     Capture,
 }
 
-/// Kernel identity of the actual opened common directory, independent of its
-/// path spelling in a host or mounted worktree.
+/// Kernel identity of the opened lock file, independent of its path spelling
+/// in a host or mounted worktree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct GitBacking {
+pub(crate) struct GitBacking {
     pub device: u64,
     pub inode: u64,
 }
 
-pub struct GitPermit {
+pub(crate) struct GitPermit {
     _file: File,
+}
+
+/// The exact lock inode selected through an opened common directory. A view's
+/// directory stat alone cannot prove two commands would flock the same inode.
+pub(crate) struct GitCandidate {
+    file: File,
     pub backing: GitBacking,
-    pub access: GitAccess,
 }
 
 impl GitBacking {
-    pub fn of(file: &File) -> io::Result<Self> {
+    fn of_lock(file: &File) -> io::Result<Self> {
         let metadata = file.metadata()?;
-        if !metadata.is_dir() {
+        if !metadata.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Git common directory is not a directory",
+                "Git admission lock is not a file",
             ));
         }
         Ok(Self {
@@ -55,7 +60,12 @@ impl GitBacking {
 }
 
 fn open_lock(common: &File) -> io::Result<File> {
-    let _ = GitBacking::of(common)?;
+    if !common.metadata()?.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Git common directory is not a directory",
+        ));
+    }
     // SAFETY: both names are fixed NUL-terminated constants, and `common`
     // pins the exact metadata directory selected by the caller's view.
     let created = unsafe { libc::mkdirat(common.as_raw_fd(), ADMISSION_DIR.as_ptr(), 0o700) };
@@ -113,13 +123,24 @@ fn open_lock(common: &File) -> io::Result<File> {
     Ok(file)
 }
 
+impl GitCandidate {
+    pub(crate) fn open(common: &File) -> io::Result<Self> {
+        let file = open_lock(common)?;
+        let backing = GitBacking::of_lock(&file)?;
+        Ok(Self { file, backing })
+    }
+}
+
 impl GitPermit {
     /// Acquire a permit against the actual opened Git backing. `timeout=ZERO`
     /// refuses contention immediately. Call bounded waits only on blocking
     /// workers; this method never borrows a VM, worktree registry, or async lock.
-    pub fn acquire(common: &File, access: GitAccess, timeout: Duration) -> io::Result<Self> {
-        let backing = GitBacking::of(common)?;
-        let file = open_lock(common)?;
+    pub(crate) fn acquire(
+        candidate: GitCandidate,
+        access: GitAccess,
+        timeout: Duration,
+    ) -> io::Result<Self> {
+        let GitCandidate { file, backing } = candidate;
         let operation = match access {
             GitAccess::Read => libc::LOCK_SH | libc::LOCK_NB,
             GitAccess::Write | GitAccess::Capture => libc::LOCK_EX | libc::LOCK_NB,
@@ -128,11 +149,7 @@ impl GitPermit {
         loop {
             // SAFETY: flock acts on the owned persistent lock descriptor.
             if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
-                return Ok(Self {
-                    _file: file,
-                    backing,
-                    access,
-                });
+                return Ok(Self { _file: file });
             }
             let error = io::Error::last_os_error();
             if error.kind() != io::ErrorKind::WouldBlock {

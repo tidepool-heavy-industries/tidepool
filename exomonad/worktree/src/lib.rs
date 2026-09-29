@@ -25,7 +25,7 @@
 //! v1. A checkout a human removed by hand becomes
 //! [`WorktreeError::WorktreeLost`]; it is never silently recreated.
 
-pub mod admission;
+mod admission;
 pub mod binding;
 pub mod create;
 pub mod error;

@@ -1210,6 +1210,10 @@ impl WorktreeManager {
             OsString::from(resolved.seed.as_str()),
         ]);
         host_git.try_run(&common, &args)?;
+        // The new checkout shares the common lock, but its working tree and
+        // private Git directory have distinct identities. Admit that view
+        // explicitly before operating on its index or initializing it.
+        let _new_worktree = host_git.write_scope(&cwd)?;
 
         if let Some(index) = inherited_index {
             let directory = inspect::git_dir(&host_git, &cwd)?;

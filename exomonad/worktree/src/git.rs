@@ -17,11 +17,13 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
 use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
-use crate::admission::{GitAccess, GitBacking, GitPermit};
+use crate::admission::{GitAccess, GitBacking, GitCandidate, GitPermit};
 use crate::error::{GitFailureReceipt, InProgressKind, WorktreeError};
 use crate::id::GitOid;
 
@@ -84,36 +86,56 @@ type LocalAdmissionGuard<'a> =
     parking_lot::lock_api::ReentrantMutexGuard<'a, RawFairMutex, RawThreadId, ()>;
 
 std::thread_local! {
-    static ACTIVE_BACKINGS: std::cell::RefCell<Vec<GitBacking>> = const { std::cell::RefCell::new(Vec::new()) };
-    static SCOPED_IDENTITIES: std::cell::RefCell<Vec<(PathBuf, GitBacking)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static ACTIVE_BACKINGS: std::cell::RefCell<Vec<ScopeBacking>> = const { std::cell::RefCell::new(Vec::new()) };
+    static SCOPED_IDENTITIES: std::cell::RefCell<Vec<ScopedIdentity>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[derive(Clone)]
+struct ScopeBacking {
+    owner: Arc<()>,
+    backing: GitBacking,
+    permit: Arc<GitPermit>,
+}
+
+#[derive(Clone)]
+struct ScopedIdentity {
+    owner: Arc<()>,
+    requested: PathBuf,
+    backing: GitBacking,
+    worktree: (u64, u64),
+    git_dir: (u64, u64),
+    view: GitExecutionView,
 }
 
 pub struct GitScopeGuard<'a> {
     _local: LocalAdmissionGuard<'a>,
-    _cooperative: Vec<GitPermit>,
-    backings: Vec<GitBacking>,
-    scoped: Vec<(PathBuf, GitBacking)>,
+    owner: Arc<()>,
+    backing_count: usize,
+    identity_count: usize,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 impl Drop for GitScopeGuard<'_> {
     fn drop(&mut self) {
         ACTIVE_BACKINGS.with(|active| {
             let mut active = active.borrow_mut();
-            for backing in self.backings.iter().rev() {
-                let removed = active.pop();
-                assert_eq!(removed, Some(*backing), "Git scope stack changed");
-            }
+            let before = active.len();
+            active.retain(|scope| !Arc::ptr_eq(&scope.owner, &self.owner));
+            assert_eq!(
+                before - active.len(),
+                self.backing_count,
+                "Git scope backing changed"
+            );
         });
         SCOPED_IDENTITIES.with(|active| {
             let mut active = active.borrow_mut();
-            for expected in self.scoped.iter().rev() {
-                let removed = active.pop();
-                assert_eq!(
-                    removed.as_ref(),
-                    Some(expected),
-                    "Git scope identity stack changed"
-                );
-            }
+            let before = active.len();
+            active.retain(|scope| !Arc::ptr_eq(&scope.owner, &self.owner));
+            assert_eq!(
+                before - active.len(),
+                self.identity_count,
+                "Git scope identity changed"
+            );
         });
     }
 }
@@ -121,6 +143,7 @@ impl Drop for GitScopeGuard<'_> {
 pub type GitCaptureGuard<'a> = GitScopeGuard<'a>;
 pub type GitWriteGuard<'a> = GitScopeGuard<'a>;
 
+#[derive(Clone)]
 enum GitExecutionView {
     Host(PathBuf),
     #[cfg(target_os = "linux")]
@@ -131,6 +154,36 @@ enum GitExecutionView {
 }
 
 impl GitExecutionView {
+    fn directory(&self) -> &Path {
+        match self {
+            Self::Host(cwd) => cwd,
+            #[cfg(target_os = "linux")]
+            Self::Mounted { cwd, .. } => cwd,
+        }
+    }
+
+    fn worktree_identity(&self) -> io::Result<(u64, u64)> {
+        let metadata = self.open_directory(self.directory())?.metadata()?;
+        Ok((metadata.dev(), metadata.ino()))
+    }
+
+    fn same_view_as(&self, other: &Self) -> io::Result<bool> {
+        match (self, other) {
+            (Self::Host(_), Self::Host(_)) => Ok(true),
+            #[cfg(target_os = "linux")]
+            (
+                Self::Mounted {
+                    namespace: left, ..
+                },
+                Self::Mounted {
+                    namespace: right, ..
+                },
+            ) => left.same_view_as(right),
+            #[cfg(target_os = "linux")]
+            _ => Ok(false),
+        }
+    }
+
     fn output<S: AsRef<OsStr>>(
         &self,
         args: &[S],
@@ -303,6 +356,7 @@ impl GitCli {
         let Some(local) = self.admission.try_lock_for(timeout) else {
             return Ok(None);
         };
+        let owner = Arc::new(());
         let mut common_by_backing = BTreeMap::new();
         let mut scoped = Vec::new();
         for cwd in paths {
@@ -312,43 +366,130 @@ impl GitCli {
             let common = self
                 .common_directory(cwd, &view)
                 .map_err(WorktreeError::GitFailure)?;
-            let backing = GitBacking::of(&common)
+            let candidate = GitCandidate::open(&common)
                 .map_err(|error| crate::storage::storage_failure(cwd, error))?;
-            scoped.push((cwd.to_path_buf(), backing));
-            common_by_backing.entry(backing).or_insert((common, *cwd));
+            let backing = candidate.backing;
+            let git_dir = self
+                .git_directory(cwd, &view)
+                .map_err(WorktreeError::GitFailure)?
+                .metadata()
+                .map_err(|error| crate::storage::storage_failure(cwd, error))?;
+            scoped.push(ScopedIdentity {
+                owner: owner.clone(),
+                requested: cwd.to_path_buf(),
+                backing,
+                worktree: view
+                    .worktree_identity()
+                    .map_err(|error| crate::storage::storage_failure(cwd, error))?,
+                git_dir: (git_dir.dev(), git_dir.ino()),
+                view,
+            });
+            common_by_backing
+                .entry(backing)
+                .or_insert((candidate, *cwd));
+        }
+        let existing = SCOPED_IDENTITIES.with(|active| active.borrow().clone());
+        for scope in &scoped {
+            if let Some(previous) = existing
+                .iter()
+                .rev()
+                .find(|previous| previous.requested == scope.requested)
+            {
+                let same_view = previous
+                    .view
+                    .same_view_as(&scope.view)
+                    .map_err(|error| crate::storage::storage_failure(&scope.requested, error))?;
+                if !same_view
+                    || previous.backing != scope.backing
+                    || previous.worktree != scope.worktree
+                    || previous.git_dir != scope.git_dir
+                {
+                    return Err(crate::storage::storage_failure(
+                        &scope.requested,
+                        "Git backing or worktree view changed during admitted operation",
+                    ));
+                }
+            }
         }
         let active = ACTIVE_BACKINGS.with(|active| active.borrow().clone());
-        if let Some(highest) = active.iter().max() {
-            if common_by_backing
-                .keys()
-                .any(|backing| !active.contains(backing) && backing < highest)
-            {
+        if let Some(highest) = active.iter().map(|scope| scope.backing).max() {
+            if common_by_backing.keys().any(|backing| {
+                !active.iter().any(|scope| scope.backing == *backing) && backing < &highest
+            }) {
                 return Err(crate::storage::storage_failure(
                     paths[0],
                     "nested Git admission would reverse backing order",
                 ));
             }
         }
-        let mut cooperative = Vec::new();
         let mut backings = Vec::new();
-        for (backing, (common, cwd)) in common_by_backing {
-            if !active.contains(&backing) {
-                match GitPermit::acquire(&common, access, timeout.saturating_sub(started.elapsed()))
-                {
-                    Ok(permit) => cooperative.push(permit),
+        for (backing, (candidate, cwd)) in common_by_backing {
+            let permit = if let Some(existing) =
+                active.iter().rev().find(|scope| scope.backing == backing)
+            {
+                existing.permit.clone()
+            } else {
+                match GitPermit::acquire(
+                    candidate,
+                    access,
+                    timeout.saturating_sub(started.elapsed()),
+                ) {
+                    Ok(permit) => Arc::new(permit),
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
                     Err(error) => return Err(crate::storage::storage_failure(cwd, error)),
                 }
-            }
-            backings.push(backing);
+            };
+            backings.push(ScopeBacking {
+                owner: owner.clone(),
+                backing,
+                permit,
+            });
         }
-        ACTIVE_BACKINGS.with(|active| active.borrow_mut().extend(&backings));
+        // A view or Git pointer can move while flock waits. Recheck every
+        // selected identity before publishing the scope to the caller, whose
+        // transaction may inspect files directly as well as invoke Git.
+        for expected in &scoped {
+            let cwd = &expected.requested;
+            let view = self
+                .execution_view(cwd)
+                .map_err(|error| crate::storage::storage_failure(cwd, error))?;
+            let same_view = expected
+                .view
+                .same_view_as(&view)
+                .map_err(|error| crate::storage::storage_failure(cwd, error))?;
+            let worktree = view
+                .worktree_identity()
+                .map_err(|error| crate::storage::storage_failure(cwd, error))?;
+            let common = self
+                .common_directory(cwd, &view)
+                .map_err(WorktreeError::GitFailure)?;
+            let backing = GitCandidate::open(&common)
+                .map_err(|error| crate::storage::storage_failure(cwd, error))?
+                .backing;
+            let git_dir = self
+                .git_directory(cwd, &view)
+                .map_err(WorktreeError::GitFailure)?
+                .metadata()
+                .map_err(|error| crate::storage::storage_failure(cwd, error))?;
+            if !same_view
+                || expected.worktree != worktree
+                || expected.backing != backing
+                || expected.git_dir != (git_dir.dev(), git_dir.ino())
+            {
+                return Err(crate::storage::storage_failure(
+                    cwd,
+                    "Git backing or worktree view changed while acquiring admission",
+                ));
+            }
+        }
+        ACTIVE_BACKINGS.with(|active| active.borrow_mut().extend(backings.iter().cloned()));
         SCOPED_IDENTITIES.with(|active| active.borrow_mut().extend(scoped.iter().cloned()));
         Ok(Some(GitScopeGuard {
             _local: local,
-            _cooperative: cooperative,
-            backings,
-            scoped,
+            owner,
+            backing_count: backings.len(),
+            identity_count: scoped.len(),
+            _thread_bound: std::marker::PhantomData,
         }))
     }
 
@@ -407,15 +548,35 @@ impl GitCli {
         cwd: &Path,
         view: &GitExecutionView,
     ) -> Result<File, GitFailureReceipt> {
-        let arguments = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
+        self.probed_directory(
+            cwd,
+            view,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )
+    }
+
+    fn git_directory(
+        &self,
+        cwd: &Path,
+        view: &GitExecutionView,
+    ) -> Result<File, GitFailureReceipt> {
+        self.probed_directory(cwd, view, &["rev-parse", "--absolute-git-dir"])
+    }
+
+    fn probed_directory(
+        &self,
+        cwd: &Path,
+        view: &GitExecutionView,
+        arguments: &[&str],
+    ) -> Result<File, GitFailureReceipt> {
         let output = view
-            .output(&arguments, &self.environment())
+            .output(arguments, &self.environment())
             .map_err(|error| GitFailureReceipt {
                 args: arguments.iter().map(|arg| (*arg).into()).collect(),
                 cwd: cwd.to_owned(),
                 exit_code: None,
                 stdout: String::new(),
-                stderr: format!("Git backing identity probe failed: {error}"),
+                stderr: format!("Git directory identity probe failed: {error}"),
             })?;
         if !output.status.success() {
             return Err(GitFailureReceipt {
@@ -434,7 +595,7 @@ impl GitCli {
                 cwd: cwd.to_owned(),
                 exit_code: None,
                 stdout: String::new(),
-                stderr: format!("Git common directory unavailable: {error}"),
+                stderr: format!("Git directory unavailable: {error}"),
             })
     }
 
@@ -571,30 +732,57 @@ impl GitCli {
             .execution_view(cwd)
             .map_err(|e| receipt(None, String::new(), e.to_string()))?;
         let common = self.common_directory(cwd, &view)?;
-        let backing =
-            GitBacking::of(&common).map_err(|e| receipt(None, String::new(), e.to_string()))?;
-        let drift = SCOPED_IDENTITIES.with(|scoped| {
+        let candidate =
+            GitCandidate::open(&common).map_err(|e| receipt(None, String::new(), e.to_string()))?;
+        let backing = candidate.backing;
+        let scoped = SCOPED_IDENTITIES.with(|scoped| {
             scoped
                 .borrow()
                 .iter()
                 .rev()
-                .find(|(path, _)| path == cwd)
-                .is_some_and(|(_, expected)| *expected != backing)
+                .find(|scope| scope.requested == cwd)
+                .cloned()
         });
-        if drift {
+        if let Some(expected) = scoped.as_ref() {
+            let same_view = expected
+                .view
+                .same_view_as(&view)
+                .map_err(|e| receipt(None, String::new(), e.to_string()))?;
+            let worktree = view
+                .worktree_identity()
+                .map_err(|e| receipt(None, String::new(), e.to_string()))?;
+            let git_dir = self
+                .git_directory(cwd, &view)?
+                .metadata()
+                .map_err(|e| receipt(None, String::new(), e.to_string()))?;
+            if !same_view
+                || expected.worktree != worktree
+                || expected.git_dir != (git_dir.dev(), git_dir.ino())
+                || expected.backing != backing
+            {
+                return Err(receipt(
+                    None,
+                    String::new(),
+                    "Git backing or worktree view changed during admitted operation".to_owned(),
+                ));
+            }
+        }
+        let active = ACTIVE_BACKINGS
+            .with(|owners| owners.borrow().iter().any(|owner| owner.backing == backing));
+        if active && scoped.is_none() {
             return Err(receipt(
                 None,
                 String::new(),
-                "Git backing changed during admitted operation".to_owned(),
+                "Git worktree was not included in the active admission scope".to_owned(),
             ));
         }
-        let active = ACTIVE_BACKINGS.with(|owners| owners.borrow().contains(&backing));
         let reversed = ACTIVE_BACKINGS.with(|owners| {
             owners
                 .borrow()
                 .iter()
+                .map(|owner| owner.backing)
                 .max()
-                .is_some_and(|highest| !active && backing < *highest)
+                .is_some_and(|highest| !active && backing < highest)
         });
         if reversed {
             return Err(receipt(
@@ -607,7 +795,7 @@ impl GitCli {
             None
         } else {
             Some(
-                GitPermit::acquire(&common, access, Duration::MAX)
+                GitPermit::acquire(candidate, access, Duration::MAX)
                     .map_err(|e| receipt(None, String::new(), e.to_string()))?,
             )
         };
@@ -1119,6 +1307,144 @@ pub mod inspect {
 
 #[cfg(test)]
 mod admission_tests {
+    #[test]
+    fn nested_scope_retains_flock_when_outer_guard_drops_first() {
+        let repo = crate::testing::TestRepo::init().unwrap();
+        let git = super::GitCli::new();
+        let outer = git.write_scope(repo.path()).unwrap();
+        let inner = git.write_scope(repo.path()).unwrap();
+        drop(outer);
+        git.read(repo.path(), &["rev-parse", "--git-common-dir"])
+            .unwrap();
+        let path = repo.path().to_path_buf();
+        assert!(std::thread::spawn(move || super::GitCli::new()
+            .try_capture(&path)
+            .unwrap()
+            .is_none())
+        .join()
+        .unwrap());
+        drop(inner);
+        assert!(git.try_capture(repo.path()).unwrap().is_some());
+    }
+
+    #[test]
+    fn active_capture_does_not_implicitly_admit_a_linked_worktree() {
+        let repo = crate::testing::TestRepo::init().unwrap();
+        repo.writer().commit_file("file", "seed", "seed").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let sibling = root.path().join("sibling");
+        repo.git()
+            .try_run(
+                repo.path(),
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "sibling",
+                    sibling.to_str().unwrap(),
+                ],
+            )
+            .unwrap();
+        let git = super::GitCli::new();
+        let capture = git.try_capture(repo.path()).unwrap().unwrap();
+        let failure = git.read(&sibling, &["rev-parse", "HEAD"]).unwrap_err();
+        assert!(failure
+            .stderr
+            .contains("not included in the active admission scope"));
+        drop(capture);
+        git.read(&sibling, &["rev-parse", "HEAD"]).unwrap();
+    }
+
+    #[test]
+    fn scoped_repository_refuses_a_rewritten_linked_gitfile() {
+        let repo = crate::testing::TestRepo::init().unwrap();
+        repo.writer().commit_file("file", "seed", "seed").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        for (branch, path) in [("first", &first), ("second", &second)] {
+            repo.git()
+                .try_run(
+                    repo.path(),
+                    &[
+                        "worktree",
+                        "add",
+                        "-q",
+                        "-b",
+                        branch,
+                        path.to_str().unwrap(),
+                    ],
+                )
+                .unwrap();
+        }
+        let git = super::GitCli::new();
+        let capture = git.try_capture(&first).unwrap().unwrap();
+        let original = std::fs::read(first.join(".git")).unwrap();
+        std::fs::write(
+            first.join(".git"),
+            std::fs::read(second.join(".git")).unwrap(),
+        )
+        .unwrap();
+        let failure = git.read(&first, &["rev-parse", "HEAD"]).unwrap_err();
+        assert!(failure
+            .stderr
+            .contains("Git backing or worktree view changed"));
+        std::fs::write(first.join(".git"), original).unwrap();
+        drop(capture);
+    }
+
+    #[test]
+    fn scoped_repository_refuses_another_worktree_on_the_same_backing() {
+        let repo = crate::testing::TestRepo::init().unwrap();
+        repo.writer().commit_file("file", "seed", "seed").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let sibling = root.path().join("sibling");
+        repo.git()
+            .try_run(
+                repo.path(),
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "sibling",
+                    sibling.to_str().unwrap(),
+                ],
+            )
+            .unwrap();
+        let alias = root.path().join("source");
+        std::os::unix::fs::symlink(repo.path(), &alias).unwrap();
+        let git = super::GitCli::new();
+        let capture = git.try_capture(&alias).unwrap().unwrap();
+        let replacement = root.path().join("replacement");
+        std::os::unix::fs::symlink(&sibling, &replacement).unwrap();
+        std::fs::rename(&replacement, &alias).unwrap();
+        let failure = git.read(&alias, &["rev-parse", "HEAD"]).unwrap_err();
+        assert!(failure
+            .stderr
+            .contains("Git backing or worktree view changed"));
+        drop(capture);
+    }
+
+    #[test]
+    fn scoped_repository_refuses_a_changed_lock_inode() {
+        let repo = crate::testing::TestRepo::init().unwrap();
+        let git = super::GitCli::new();
+        let capture = git.try_capture(repo.path()).unwrap().unwrap();
+        let directory = repo.path().join(".git/exomonad-admission");
+        let replacement = directory.join("replacement");
+        let file = std::fs::File::create(&replacement).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        std::fs::rename(&replacement, directory.join("lock")).unwrap();
+        let failure = git.read(repo.path(), &["rev-parse", "HEAD"]).unwrap_err();
+        assert!(failure
+            .stderr
+            .contains("Git backing or worktree view changed"));
+        drop(capture);
+    }
 
     #[test]
     fn scoped_repository_refuses_a_retargeted_path() {
@@ -1137,7 +1463,7 @@ mod admission_tests {
             .unwrap_err();
         assert!(failure
             .stderr
-            .contains("Git backing changed during admitted operation"));
+            .contains("Git backing or worktree view changed"));
         drop(capture);
         git.read(&alias, &["rev-parse", "--git-common-dir"])
             .unwrap();
