@@ -1,4 +1,4 @@
-use std::{num::NonZeroU64, path::Path};
+use std::{num::NonZeroU64, path::Path, sync::Arc};
 
 use harness::{
     engine::EngineConfig,
@@ -16,7 +16,7 @@ use super::embedded_harness::{EmbeddedConversation, EmbeddedHarnessRuntime};
 use crate::exomonad::EmbeddedLaunchConfig;
 
 pub(super) struct EmbeddedService {
-    pub(super) runtime: EmbeddedHarnessRuntime,
+    pub(super) runtime: Arc<EmbeddedHarnessRuntime>,
     pub(super) commands: mpsc::Receiver<QueuedCommand>,
     pub(super) control: ServerControl,
     pub(super) server: JoinHandle<Result<(), String>>,
@@ -30,8 +30,10 @@ impl EmbeddedService {
         settings: &EmbeddedLaunchConfig,
     ) -> Result<Self, String> {
         settings.validate().map_err(|error| error.to_string())?;
-        let runtime = EmbeddedHarnessRuntime::open(run_root, settings.concurrent_jobs)
-            .map_err(|error| error.to_string())?;
+        let runtime = Arc::new(
+            EmbeddedHarnessRuntime::open(run_root, settings.concurrent_jobs)
+                .map_err(|error| error.to_string())?,
+        );
         let secret = std::fs::read_to_string(&settings.session_secret_file)
             .map_err(|error| error.to_string())?;
         let secret = SessionSecret::new(secret.trim_end_matches(['\r', '\n']).to_owned())
@@ -62,9 +64,15 @@ impl EmbeddedService {
     }
 }
 
+impl Drop for EmbeddedService {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
 pub(super) async fn drive_conversation(
     embedded: EmbeddedConversation,
-    runtime: &EmbeddedHarnessRuntime,
+    runtime: Arc<EmbeddedHarnessRuntime>,
     settings: &EmbeddedLaunchConfig,
     model: String,
     effort: Effort,
@@ -100,13 +108,21 @@ pub(super) async fn drive_conversation(
     let store = runtime.store();
     let mut recovering = true;
     loop {
-        let first = tokio::select! {
-            biased;
-            changed = cancellation.changed() => {
-                if changed.is_err() || *cancellation.borrow() { return Ok(()); }
-                continue;
-            }
-            wake = incoming.recv() => match wake { Some(wake) => wake, None => return Ok(()) },
+        if *cancellation.borrow() {
+            return Ok(());
+        }
+        // Wakes are hints. A prior Engine round may have returned while a
+        // forwarded hint remained in its receiver; the Store is authoritative.
+        let first = match store.unread(&actor.0).map_err(|error| error.to_string())?.first() {
+            Some(envelope) => harness::mailbox::DurableMailboxWake { envelope_id: envelope.id },
+            None => tokio::select! {
+                biased;
+                changed = cancellation.changed() => {
+                    if changed.is_err() || *cancellation.borrow() { return Ok(()); }
+                    continue;
+                }
+                wake = incoming.recv() => match wake { Some(wake) => wake, None => return Ok(()) },
+            },
         };
         let head = store
             .agent(&actor)
@@ -135,13 +151,14 @@ pub(super) async fn drive_conversation(
             }
         };
         tokio::pin!(run);
+        let mut incoming_closed = false;
         let completion = loop {
             tokio::select! {
                 biased;
                 result = &mut run => break result.map_err(|error| error.to_string())?,
-                wake = incoming.recv() => match wake {
-                    Some(wake) => { forward.send(wake).map_err(|_| "embedded Engine wake receiver closed")?; }
-                    None => return Ok(()),
+                wake = incoming.recv(), if !incoming_closed => match wake {
+                    Some(wake) => { forward.send(wake).ok(); }
+                    None => { incoming_closed = true; }
                 },
             }
         };

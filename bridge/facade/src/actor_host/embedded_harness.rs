@@ -78,7 +78,7 @@ impl EmbeddedHarnessRuntime {
             installation,
             wakes,
         )?);
-        let conversation = Conversation::attach(self.store.clone(), host.clone(), parent)?;
+        let conversation = Arc::new(Conversation::attach(self.store.clone(), host.clone(), parent)?);
         Ok(EmbeddedConversation {
             host,
             conversation,
@@ -97,7 +97,7 @@ impl EmbeddedHarnessRuntime {
 
 pub(super) struct EmbeddedConversation {
     pub(super) host: Arc<EmbeddedHostActor>,
-    pub(super) conversation: Conversation,
+    pub(super) conversation: Arc<Conversation>,
     pub(super) incoming: mpsc::UnboundedReceiver<DurableMailboxWake>,
 }
 
