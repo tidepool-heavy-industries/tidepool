@@ -21,7 +21,9 @@ use crate::{
 use tidepool_runtime::session::WorkbenchResponse;
 
 mod workbench_step;
-pub use workbench_step::{OwnedWorkbenchCompletion, OwnedWorkbenchTask, WorkbenchDispatch};
+pub use workbench_step::{
+    OwnedWorkbenchCompletion, OwnedWorkbenchTask, WorkbenchAbandonGuard, WorkbenchDispatch,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{detail}")]
@@ -2645,6 +2647,8 @@ mod tests {
             let panics = self.workbench_panics;
             let cleanup = self.owned_cleanup.clone();
             WorkbenchDispatch::Owned(OwnedWorkbenchTask::new(Box::pin(async move {
+                let guard =
+                    cleanup.map(|cleanup| WorkbenchAbandonGuard::new(move || cleanup.notify_one()));
                 calls.lock().push("workbench-start");
                 if let Some((entered, release)) = gate {
                     entered.notify_one();
@@ -2663,8 +2667,8 @@ mod tests {
                         total: 0,
                     }))
                 });
-                match cleanup {
-                    Some(cleanup) => completion.on_abandoned(move || cleanup.notify_one()),
+                match guard {
+                    Some(guard) => completion.with_abandon_guard(guard),
                     None => completion,
                 }
             })))
@@ -3378,6 +3382,8 @@ mod tests {
         let mut fixture = behavior(false);
         fixture.behavior.owned_workbench = true;
         fixture.behavior.workbench_panics = true;
+        let cleaned = Arc::new(Notify::new());
+        fixture.behavior.owned_cleanup = Some(Arc::clone(&cleaned));
         let (actor, task) = spawn_local_actor(None, fixture.behavior)
             .await
             .expect("spawn");
@@ -3400,6 +3406,9 @@ mod tests {
         ));
         assert_eq!(actor.terminal().wait().await.kind, ActorExitKind::Failed);
         task.await.expect("actor task");
+        tokio::time::timeout(Duration::from_secs(2), cleaned.notified())
+            .await
+            .expect("panicked worker's execution guard cleaned up");
         assert!(matches!(
             actor.terminal().cleanup().expect("cleanup evidence").hook,
             crate::CleanupComponentOutcome::Unconfirmed(_)
