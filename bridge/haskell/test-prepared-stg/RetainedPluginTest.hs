@@ -1,23 +1,35 @@
-module RetainedPluginTest (verifyCompilerReuse) where
+module RetainedPluginTest (verifyCompilerReuse, verifyPreparedScope) where
 
 import Control.Monad (forM_, unless)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
+import Data.Text qualified as Text
 import GHC
+import GHC.Driver.Env (hsc_HPT, hsc_home_unit)
 import GHC.Driver.Env.Types (HscEnv(..))
 import GHC.Driver.Make (load', newIfaceCache)
 import GHC.Driver.Plugins
 import GHC.Driver.Session (updOptLevel)
 import GHC.Core.Opt.Pipeline.Types (CoreToDo(..))
+import GHC.Unit.Home (homeUnitAsUnit)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), lookupHpt)
+import GHC.Unit.Module (mkModule)
+import GHC.Unit.Module.ModIface (mi_final_exts, mi_plugin_hash)
 import GHC.Types.Error (mkUnknownDiagnostic)
 import GHC.Unit.Module.ModGuts (ModGuts(..))
-import System.Directory (copyFile)
+import System.Directory (copyFile, renameFile)
 import System.FilePath ((</>))
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.ExtractUtil (getLibdir)
-import Tidepool.RetainedUnfoldings (installRetainedUnfoldingsPlugin, scopeRetainedModuleGraph)
+import Tidepool.RetainedUnfoldings
+  ( installRetainedUnfoldingsPlugin, scopeRetainedModuleGraph
+  , scopeRetainedHscEnv, retainedContext, emptyRetainedContext )
+import Tidepool.GhcPipeline
+  ( PipelineSelection(..), PreparedPipelineResult(..), CompilePurpose(..)
+  , PipelineResult(..), withResidentPipelineSelected )
+import Tidepool.PreparedStg (PreparedModule(..))
 
 -- Count actual compiler passes per module, independently of Tidepool's
 -- separate Core memo, through the resident daemon's warm interface cache.
@@ -29,7 +41,7 @@ verifyCompilerReuse :: FilePath -> IO ()
 verifyCompilerReuse dir = do
   forM_ ["ImportProducerExposed.hs", "ImportConsumerExposed.hs", "RetainedUnrelatedLibrary.hs"] $ \name ->
     copyFile ("test-prepared-stg" </> name) (dir </> name)
-  retainedRef <- newIORef Set.empty
+  retainedRef <- newIORef emptyRetainedContext
   compiledRef <- newIORef (Map.empty :: Map.Map String Int)
   libdir <- getLibdir
   let a = Set.fromList [identity "producerValue", identity "producerFn"]
@@ -68,7 +80,7 @@ verifyCompilerReuse dir = do
       { staticPlugins = counting : staticPlugins plugins } })
     forM_ steps $ \(retained, expected) -> do
       liftIO (writeIORef compiledRef Map.empty)
-      liftIO (writeIORef retainedRef retained)
+      liftIO (writeIORef retainedRef (retainedContext retained))
       targets <- mapM (\name -> guessTarget (dir </> name ++ ".hs") Nothing Nothing)
         [consumer, library]
       setTargets targets
@@ -84,3 +96,83 @@ verifyCompilerReuse dir = do
   where
     succeeded Succeeded = True
     succeeded Failed = False
+
+-- The custom prepared path rebuilds an interface after GHC's load phase.
+-- Its saved HscEnv must have the same module scope as load's compileOne path.
+-- A large unrelated retained set must not perturb that interface's plugin
+-- fingerprint or the prepared result on a warm resident compiler.
+verifyPreparedScope :: FilePath -> IO ()
+verifyPreparedScope dir = do
+  let target = dir </> "RetainedTarget.hs"
+      producerFile = dir </> "ImportProducerExposed.hs"
+      replacementFile = dir </> "ImportProducerExposed.next"
+      relevant = SymbolIdentity "main" "ImportProducerExposed" "value" "producerFn" Nothing
+      unrelated = Set.fromList
+        [ SymbolIdentity "main" "Unrelated" "value" ("symbol" <> Text.pack (show n)) Nothing
+        | n <- [1 .. 1000 :: Int] ]
+      shape result =
+        [ (moduleNameString (moduleName (pmModule prepared)), length (pmBindings prepared))
+        | prepared <- pprModules result ]
+      preparedPluginHash result = case lookupHpt
+          (hsc_HPT (prHscEnv (pprPipelineResult result)))
+          (mkModuleName "ImportProducerExposed") of
+        Just info -> mi_plugin_hash (mi_final_exts (hm_iface info))
+        Nothing -> error "prepared producer interface was not registered"
+  writeFile target $ unlines
+    [ "{-# LANGUAGE QuasiQuotes #-}"
+    , "module RetainedTarget where"
+    , "import ImportConsumerExposed (consumerResult)"
+    , "result :: Int"
+    , "result = consumerResult"
+    ]
+  originalProducer <- readFile producerFile
+  let producerSource = "{-# LANGUAGE QuasiQuotes #-}\n" ++ originalProducer
+  let replaceProducer contents = do
+        writeFile replacementFile contents
+        renameFile replacementFile producerFile
+  replaceProducer producerSource
+  withResidentPipelineSelected [dir] $ \compile -> do
+    base <- compile PreparedStg (Set.singleton relevant) GeneralCompile Nothing target [] Nothing
+    warm <- compile PreparedStg (Set.insert relevant unrelated) GeneralCompile Nothing target [] Nothing
+    replaceProducer (producerSource ++ "\n-- force fresh prepared interface\n")
+    crowded <- compile PreparedStg (Set.insert relevant unrelated) GeneralCompile Nothing target [] Nothing
+    replaceProducer producerSource
+    recovered <- compile PreparedStg (Set.singleton relevant) GeneralCompile Nothing target [] Nothing
+    changed <- compile PreparedStg Set.empty GeneralCompile Nothing target [] Nothing
+    unless (shape base == shape warm && shape warm == shape crowded
+        && shape crowded == shape recovered)
+      (ioError (userError "unrelated retained identities changed prepared module shape"))
+    unless (preparedPluginHash base == preparedPluginHash warm
+        && preparedPluginHash warm == preparedPluginHash crowded
+        && preparedPluginHash crowded == preparedPluginHash recovered
+        && preparedPluginHash base /= preparedPluginHash changed)
+      (ioError (userError "prepared interface used an unscoped retained fingerprint"))
+  libdir <- getLibdir
+  contextRef <- newIORef emptyRetainedContext
+  runGhc (Just libdir) $ do
+    flags <- getSessionDynFlags
+    _ <- setSessionDynFlags flags
+    env <- getSession
+    let installed = installRetainedUnfoldingsPlugin contextRef env
+        moduleId = mkModule (homeUnitAsUnit (hsc_home_unit installed))
+          (mkModuleName "ImportProducerExposed")
+        pluginFor scoped = case staticPlugins (hsc_plugins scoped) of
+          plugin : _ -> spPlugin plugin
+          [] -> error "retained plugin was not installed"
+        fingerprint retained = do
+          liftIO (writeIORef contextRef (retainedContext retained))
+          let plugin = pluginFor (scopeRetainedHscEnv moduleId installed)
+          result <- liftIO (pluginRecompile (paPlugin plugin) (paArguments plugin))
+          case result of
+            MaybeRecompile hash -> pure hash
+            _ -> error "custom module environment was not scoped"
+    baseline <- fingerprint (Set.singleton relevant)
+    withUnrelated <- fingerprint (Set.insert relevant unrelated)
+    changed <- fingerprint Set.empty
+    let unscoped = pluginFor installed
+    unscopedResult <- liftIO (pluginRecompile (paPlugin unscoped) (paArguments unscoped))
+    liftIO $ case unscopedResult of
+      ForceRecompile -> pure ()
+      _ -> ioError (userError "unscoped retained plugin accepted an interface fingerprint")
+    liftIO $ unless (baseline == withUnrelated && baseline /= changed)
+      (ioError (userError "scoped interface fingerprint changed with unrelated retained identities"))

@@ -143,7 +143,9 @@ import Tidepool.PreparedSites
   , siteAuthorityEffectRequestTypeIds )
 import Tidepool.ExecutionSchema (SymbolIdentity)
 import Tidepool.RetainedUnfoldings
-  (installRetainedUnfoldingsPlugin, retainedDefinedBy, scopeRetainedModuleGraph)
+  ( RetainedContext, retainedContext, emptyRetainedContext
+  , installRetainedUnfoldingsPlugin, retainedDefinedBy
+  , scopeRetainedModuleGraph, scopeRetainedHscEnv )
 import Tidepool.TurnSource (extractModuleName)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..)
@@ -704,17 +706,18 @@ runCompile selection retained variant path includes buildProductsDir = do
     -- plugin must already be registered on the session's 'HscEnv' by now.
     -- See 'Tidepool.RetainedUnfoldings' for why a Core plugin is the seam
     -- that reaches both 'load'' and 'core2core' uniformly. The plugin reads
-    -- this request's retained set from an 'IORef' at run time, so a
-    -- 'Set.null' retained set costs nothing on the compiled bytes (see
+    -- this request's retained context from an 'IORef' at run time, so an
+    -- empty retained set costs nothing on the compiled bytes (see
     -- 'withholdRetainedUnfoldings').
-    retainedRef <- liftIO (newIORef retained)
+    let context = retainedContext retained
+    retainedRef <- liftIO (newIORef context)
     hscForRetained <- getSession
     setSession (installRetainedUnfoldingsPlugin retainedRef hscForRetained)
     -- One cycle, no cache, no memo — 'sessionT0' is captured BEFORE this
     -- DynFlags bootstrap (above) so the default-on per-compile summary's
     -- wall-clock figure covers it too, exactly as it always has. See
     -- 'runCompileCycle''s haddock for what each argument controls.
-    runCompileCycle selection Nothing Nothing retained Nothing timing requestIdentity sessionT0 variant path
+    runCompileCycle selection Nothing Nothing context Nothing timing requestIdentity sessionT0 variant path
 
 -- | Like 'runPipelineSelected'/'runPipelineSessionSelected', but also taking a
 -- retained-generation set (see 'Tidepool.RetainedUnfoldings') to withhold
@@ -1142,14 +1145,11 @@ type GutsMemo = Map.Map ModuleName GutsMemoEntry
 --   * 'summaryT0' — the caller's compile start. Direct callers capture it
 --     before session bootstrap; resident callers capture it per request.
 --
--- 'retained' is the current request's retained-generation set (see
--- 'Tidepool.RetainedUnfoldings'/'GutsMemoEntry'): read ONCE here, at cycle
--- start, from the same 'IORef' the caller already wrote it into before the
--- installed withholding pass ran -- never re-read per module, since it is
--- constant for the whole cycle.
+-- 'retained' is the immutable per-request index used by both the plugin's
+-- recompilation fingerprint and the prepared memo's module validity check.
 runCompileCycle
   :: PipelineSelection result -> Maybe ModIfaceCache -> Maybe (IORef GutsMemo)
-  -> Set.Set SymbolIdentity -> Maybe String -> Bool -> Word64 -> Double -> PipelineVariant -> FilePath -> Ghc result
+  -> RetainedContext -> Maybe String -> Bool -> Word64 -> Double -> PipelineVariant -> FilePath -> Ghc result
 runCompileCycle selection mCache mMemoRef retained incarnation timing requestIdentity sessionT0 variant path = do
     memoTrace <- liftIO readMemoTraceEnabled
     let preparation = selectionKind selection
@@ -1331,7 +1331,8 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                   pure (typed, origins)
                 liftIO (modifyIORef' tcMsRef (+ tcMs))
                 hscEnv0 <- getSession
-                let hscEnv   = hscUpdateFlags canonicalizeDFlags hscEnv0
+                let hscEnv   = scopeRetainedHscEnv (ms_mod modSum)
+                                 (hscUpdateFlags canonicalizeDFlags hscEnv0)
                     tcGblEnv = fst (tm_internals_ typechecked)
                     -- Capture the inferred type of the eval's top expression NOW,
                     -- before optimization can inline/rename @__user@ away. Types
@@ -1618,6 +1619,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                               -- same ones, with no need to re-parse here.
                               quasiQuotesPureOnRecord = case moduleFactQuasiQuoteOrigins (gmeFacts entry) of
                                 AllPureQuasiQuotes _ -> True
+                                NoQuasiQuotes -> True
                                 _ -> False
                               compileTimeExecutionTracked =
                                 not (hasUntrackedCompileTimeExecution (ms_hspp_opts modSum))
@@ -2039,7 +2041,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                     -- without importing it from source. SOURCE imports keep using
                     -- the boot iface installed by GHC's load phase, and no returned
                     -- metadata consumer reads the target back through HPT.
-                    env <- getSession
+                    env <- scopeRetainedHscEnv (ms_mod summary) <$> getSession
                     details <- liftIO (mkBootModDetailsTc (hsc_logger env) tcg)
                     (iface, _ifaceMs) <- liftIO $ measureModuleInterface timing requestIdentity
                       (moduleNameString (ms_mod_name summary)) CheckedEnvironmentInterface HptMiss $
@@ -2218,7 +2220,7 @@ withResidentPipelineSelectedRequests baseIncludes evictRecovery useRequests = do
     dflags <- getSessionDynFlags
     let dflags' = extractionDynFlags dflags baseIncludes
     _ <- setSessionDynFlags dflags'
-    retainedRef <- liftIO (newIORef Set.empty)
+    retainedRef <- liftIO (newIORef emptyRetainedContext)
     hscForRetained <- getSession
     setSession (installRetainedUnfoldingsPlugin retainedRef hscForRetained)
     cache   <- liftIO newIfaceCache
@@ -2241,12 +2243,12 @@ withResidentPipelineSelectedRequests baseIncludes evictRecovery useRequests = do
             -- reuse a target entry across internal compiles. Session
             -- dependencies remain warm until the compiler transaction ends.
             evictTargetMemo targetModName' memoRef
-            (writeIORef retainedRef retained >>
+            (writeIORef retainedRef (retainedContext retained) >>
               reflectGhc
                 (residentCompileOne selection cache memoRef retainedRef dflags' baseImportPaths
                   timing requestIdentity purpose mscope path extraIncludes buildProductsDir)
                 session)
-              `finally` writeIORef retainedRef Set.empty
+              `finally` writeIORef retainedRef emptyRetainedContext
           runRequest :: RequestRunner
           runRequest action = do
             requestIdentity <- newTimingRequestIdentity
@@ -2278,13 +2280,10 @@ type RequestRunner = forall requestResult.
 -- output contract: optimization tier affects validation-only dependency Core
 -- and therefore can affect merged metadata.
 --
--- Reads 'retainedRef' -- the same cell 'withResidentPipelineSelected' just
--- wrote this request's retained-generation set into, immediately before
--- calling here -- ONCE, at cycle start, and threads the plain value into
--- 'runCompileCycle'/the 'GutsMemo' validity check; it is never re-read
--- per module.
+-- Reads the context that the request runner wrote into the plugin's cell
+-- once at cycle start, then shares that value with memo validation.
 residentCompileOne
-  :: PipelineSelection result -> ModIfaceCache -> IORef GutsMemo -> IORef (Set.Set SymbolIdentity) -> DynFlags -> [FilePath]
+  :: PipelineSelection result -> ModIfaceCache -> IORef GutsMemo -> IORef RetainedContext -> DynFlags -> [FilePath]
   -> Bool -> Word64 -> CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath
   -> Ghc result
 residentCompileOne selection cache memoRef retainedRef baseDFlags baseImportPaths timing requestIdentity purpose mscope path extraIncludes buildProductsDir = do

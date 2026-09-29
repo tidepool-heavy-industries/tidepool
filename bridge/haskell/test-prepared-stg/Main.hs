@@ -27,6 +27,7 @@ import GHC.Unit.Types (moduleName)
 import System.Directory
   ( createDirectoryIfMissing, getTemporaryDirectory, removePathForcibly )
 import System.FilePath ((</>))
+import System.Environment (getArgs)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CompilePurpose(..)
   , PipelineResult(..), runPipelineSelected, withResidentPipelineSelected )
@@ -43,7 +44,7 @@ import Tidepool.ExecutionIR
   , renderPreparedInventory )
 import Tidepool.PreparedSites
   ( PreparedSite(..), SiteRejection(..), buildYieldSite, lookupPreparedVerb, resolvePreparedSiblings )
-import RetainedPluginTest (verifyCompilerReuse)
+import RetainedPluginTest (verifyCompilerReuse, verifyPreparedScope)
 import TypeEvidenceChecks (runTypeEvidenceChecks)
 import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthority)
 
@@ -502,6 +503,20 @@ expectFailureContaining label needle action = do
 
 main :: IO ()
 main = do
+  args <- getArgs
+  case args of
+    ["--retained-scope"] -> do
+      tmp <- getTemporaryDirectory
+      let work = tmp </> "tidepool-retained-scope-test"
+      bracket
+        (removePathForcibly work >> createDirectoryIfMissing True work >> pure work)
+        removePathForcibly
+        $ \dir -> verifyCompilerReuse dir >> verifyPreparedScope dir
+    [] -> fullMain
+    _ -> ioError (userError ("unknown test arguments: " ++ show args))
+
+fullMain :: IO ()
+fullMain = do
   let expectedSites =
         [ ("runLLMTurnFork", DeliverHostAnswer, InvocationAnswer)
         , ("runLLMTurnFanout", DeliverHostAnswer, InvocationAnswers)
@@ -529,6 +544,7 @@ main = do
     removePathForcibly
     $ \dir -> do
       verifyCompilerReuse dir
+      verifyPreparedScope dir
       let dep = dir </> "Dep.hs"
           effectsDir = dir </> "Tidepool" </> "Effects"
           effects = effectsDir </> "Core.hs"

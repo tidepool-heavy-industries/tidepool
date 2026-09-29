@@ -65,19 +65,21 @@
 -- static plugin's @driverPlugin@. 'scopeRetainedModuleGraph' records each
 -- summary's module identity as a plugin option in those flags; the driver
 -- action copies it into the plugin's own arguments and leaves the plugin
--- uninitialised so the next module re-scopes it. Plugin options are not part
--- of GHC's flag fingerprint. A check without a recorded module (a session
--- 'HscEnv', or a graph that was not scoped) fingerprints the full retained
--- set, which is conservative.
+-- uninitialised so the next module re-scopes it. The custom compiler path
+-- explicitly scopes its saved environment before building an interface.
+-- An unscoped environment must never fingerprint the entire retained set.
 module Tidepool.RetainedUnfoldings
-  ( installRetainedUnfoldingsPlugin
+  ( RetainedContext, retainedContext, emptyRetainedContext
+  , installRetainedUnfoldingsPlugin
   , scopeRetainedModuleGraph
-  , retainedDefinedBy
+  , scopeRetainedHscEnv, retainedDefinedBy
   , withholdRetainedUnfoldings
   ) where
 
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (IORef, readIORef)
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
@@ -92,6 +94,7 @@ import GHC.Driver.Plugins
   ( Plugin(..), PluginWithArgs(..), Plugins(..), StaticPlugin(..)
   , PluginRecompile(..), defaultPlugin )
 import GHC.Utils.Fingerprint (fingerprintString)
+import GHC.Fingerprint.Type (Fingerprint)
 import GHC.Types.Basic (neverInlinePragma)
 import GHC.Types.Id (Id, idName, setIdUnfolding, setInlinePragma)
 import GHC.Types.Name (isExternalName, nameModule_maybe, nameOccName)
@@ -115,7 +118,27 @@ import Tidepool.ExecutionSchema (SymbolIdentity(..))
 -- instead of installing one pass per request and accumulating them. A
 -- one-shot caller that only ever compiles once may still pass a fresh
 -- 'IORef' seeded with its one request's set.
-installRetainedUnfoldingsPlugin :: IORef (Set SymbolIdentity) -> HscEnv -> HscEnv
+data RetainedContext = RetainedContext
+  { contextAll :: !(Set SymbolIdentity)
+  , contextByModule :: !(Map (Text.Text, Text.Text) (Set SymbolIdentity, Fingerprint))
+  , contextEmptyFingerprint :: !Fingerprint
+  }
+
+retainedContext :: Set SymbolIdentity -> RetainedContext
+retainedContext identities = RetainedContext identities scopes (scopeFingerprint Set.empty)
+  where
+    groups = Map.fromListWith Set.union
+      [ ((symbolUnit i, symbolModule i), Set.singleton i) | i <- Set.toList identities ]
+    scopes = Map.map (\group -> (group, scopeFingerprint group)) groups
+
+emptyRetainedContext :: RetainedContext
+emptyRetainedContext = retainedContext Set.empty
+
+scopeFingerprint :: Set SymbolIdentity -> Fingerprint
+scopeFingerprint identities = fingerprintString
+  ("tidepool-retained-unfoldings-v3:" ++ show (Set.toAscList identities))
+
+installRetainedUnfoldingsPlugin :: IORef RetainedContext -> HscEnv -> HscEnv
 installRetainedUnfoldingsPlugin retainedRef hscEnv =
   hscEnv { hsc_plugins = plugins { staticPlugins = staticPlugin : staticPlugins plugins } }
   where
@@ -136,20 +159,25 @@ scopeRetainedModuleGraph :: ModuleGraph -> ModuleGraph
 scopeRetainedModuleGraph = mapMG scope
   where
     scope ms = ms { ms_hspp_opts = tag (ms_mod ms) (ms_hspp_opts ms) }
-    tag m flags = flags
-      { pluginModNameOpts =
-          (pluginModule, show (moduleKey m))
-            : [ opt | opt@(owner, _) <- pluginModNameOpts flags, owner /= pluginModule ]
-      }
+
+tag :: Module -> DynFlags -> DynFlags
+tag m flags = flags
+  { pluginModNameOpts =
+      (pluginModule, show (moduleKey m))
+        : [ opt | opt@(owner, _) <- pluginModNameOpts flags, owner /= pluginModule ]
+  }
+
+-- | The custom typecheck/desugar path does not pass through compileOne's
+-- initializePlugins. Scope its saved environment before optimization and
+-- interface construction, using the same module key as the load graph.
+scopeRetainedHscEnv :: Module -> HscEnv -> HscEnv
+scopeRetainedHscEnv m env = scopeToModule env { hsc_dflags = tag m (hsc_dflags env) }
 
 -- | The retained identities a module defines: the only part of the retained
 -- set that can change the module's own compilation (see VALIDITY above).
-retainedDefinedBy :: Module -> Set SymbolIdentity -> Set SymbolIdentity
-retainedDefinedBy m = definedIn (moduleKey m)
-
-definedIn :: (Text.Text, Text.Text) -> Set SymbolIdentity -> Set SymbolIdentity
-definedIn (unit, modName) =
-  Set.filter (\i -> symbolUnit i == unit && symbolModule i == modName)
+retainedDefinedBy :: Module -> RetainedContext -> Set SymbolIdentity
+retainedDefinedBy m context = maybe Set.empty fst
+  (Map.lookup (moduleKey m) (contextByModule context))
 
 moduleKey :: Module -> (Text.Text, Text.Text)
 moduleKey m =
@@ -176,28 +204,23 @@ scopeToModule env = env { hsc_plugins = plugins { staticPlugins = map rescope (s
           }
       | otherwise = sp
 
-withholdingPlugin :: IORef (Set SymbolIdentity) -> Plugin
+withholdingPlugin :: IORef RetainedContext -> Plugin
 withholdingPlugin retainedRef = defaultPlugin
   { installCoreToDos = \_args todos ->
       pure (CoreDoPluginPass "WithholdRetainedUnfoldings" pass : todos)
   , driverPlugin = \_args env -> pure (scopeToModule env)
   , pluginRecompile = \args -> do
-      retained <- readIORef retainedRef
-      -- Show's escaped, delimited representation preserves every identity
-      -- field; Set ordering makes the encoding independent of insertion order.
-      -- Bump the version when the withholding transformation changes.
-      let (scopeLabel, relevant) = case args of
-            [_, recorded] | Just key <- readMaybe recorded ->
-              ("module " ++ show key, definedIn key retained)
-            _ -> ("unscoped", retained)
-      pure (MaybeRecompile (fingerprintString
-        ("tidepool-retained-unfoldings-v2:" ++ scopeLabel ++ ":"
-          ++ show (Set.toAscList relevant))))
+      context <- readIORef retainedRef
+      pure $ case args of
+        [_, recorded] | Just key <- readMaybe recorded ->
+          MaybeRecompile (maybe (contextEmptyFingerprint context) snd
+            (Map.lookup key (contextByModule context)))
+        _ -> ForceRecompile
   }
   where
     pass = bindsOnlyPass $ \binds -> do
-      retained <- liftIO (readIORef retainedRef)
-      pure (withholdRetainedUnfoldings retained binds)
+      context <- liftIO (readIORef retainedRef)
+      pure (withholdRetainedUnfoldings (contextAll context) binds)
 
 -- | The pure Core-to-Core rewrite: every top-level binder whose
 -- 'SymbolIdentity' is a member of the retained set, and every occurrence of
