@@ -2420,7 +2420,7 @@ impl PreparedEngine {
     /// Every returned program is pinned across the install-to-bind gap.
     pub fn install_certified_demand(
         &mut self,
-        demanded: Vec<DemandedImage<'_>>,
+        demanded: Vec<DemandedImage>,
         exact_external: &HashMap<ImportOwner, PreparedHandle>,
         bindings: &BindingTable,
     ) -> Result<Vec<ProgramId>, PreparedRuntimeError> {
@@ -2564,8 +2564,8 @@ impl PreparedEngine {
         target: CertifiedTargetImage,
         target_owners: &[ImportOwner],
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-        demanded: Vec<DemandedImage<'_>>,
-        inherited_needed: &[InheritedSourceDemand<'_>],
+        demanded: Vec<DemandedImage>,
+        inherited_needed: &[InheritedSourceDemand],
         inherited: &BTreeMap<SourceBinder, SourceInstanceLease>,
         exact_external: &HashMap<ImportOwner, PreparedHandle>,
         bindings: &BindingTable,
@@ -2700,10 +2700,7 @@ impl PreparedEngine {
             } else if let Some(lease) = inherited.get(&key) {
                 (lease.owner(), lease.original_ordinal())
             } else if let Some(requested) = late_sources.get(&key) {
-                (
-                    requested.group().owner(),
-                    requested.group().original_ordinal(),
-                )
+                (requested.owner(), requested.original_ordinal())
             } else {
                 return Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(key));
             };
@@ -2714,11 +2711,7 @@ impl PreparedEngine {
 
         let mut late_leases = BTreeMap::new();
         for (key, requested) in late_sources {
-            match self.machine.retain_certified_source_top(
-                requested.anchor(),
-                requested.group(),
-                &key,
-            ) {
+            match self.machine.retain_certified_source_top(requested) {
                 Ok(lease) => {
                     late_leases.insert(key, lease);
                 }
@@ -5164,7 +5157,7 @@ mod tests {
             PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
         let handle = engine.code_exports[&package].handle;
         let exact = HashMap::from([(owner.clone(), handle)]);
-        fn selected<'a>(groups: &'a [CertifiedGroup]) -> Vec<DemandedImage<'a>> {
+        fn selected(groups: &[CertifiedGroup]) -> Vec<DemandedImage> {
             GroupInventory::new(groups)
                 .unwrap()
                 .seal([SourceBinder {
