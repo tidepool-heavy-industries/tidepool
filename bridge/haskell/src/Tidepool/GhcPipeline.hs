@@ -1075,9 +1075,9 @@ data ModuleOutput = ModuleOutput
   , moduleOutputResultType :: Maybe Type
   }
 
--- | A completed executable compile keeps its prepared body and the exact
--- fat interface built from the same tidy result together. Only its HPT view
--- is elided when no later source module imports it.
+-- | A completed executable compile keeps its prepared body and, when needed,
+-- the interface built from the same tidy result together. Ordinary leaf
+-- interfaces can be elided; product mode retains them for later importers.
 data ProductInterface
   = InterfaceElided
   | InterfaceRetained HomeModInfo
@@ -1563,7 +1563,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
               interfaceReady interfaceUse modSum entry =
                 case cachedInterface modSum entry of
                   Nothing -> not captureProducts && not (needsPreparedInterface interfaceUse)
-                  Just hmi -> not captureProducts || isJust (mi_extra_decls (hm_iface hmi))
+                  Just _ -> True
           -- Under TIDEPOOL_TIMING, name why a memoized module was recompiled.
           let memoMiss modSum reason = when timing $ liftIO $ hPutStrLn stderr $
                 "tidepool-memo-miss module=" ++ moduleNameString (ms_mod_name modSum)
@@ -2524,10 +2524,7 @@ registerPreparedInterface timing requestId interfaceReuse captureProducts interf
         "module_interface" "tidy" tidyMs
       (iface, ifaceMs) <- liftIO $ measureModuleInterface timing requestId
         (moduleNameString (ms_mod_name modSum)) SessionRegistrationInterface interfaceReuse $
-          mkIfaceTc (if captureProducts
-              then hscUpdateFlags (`gopt_set` Opt_WriteIfSimplifiedCore) hscEnv
-              else hscEnv)
-            Sf_None modDetails modSum (Just (cg_binds cgGuts)) tcGblEnv
+          mkIfaceTc hscEnv Sf_None modDetails modSum (Just (cg_binds cgGuts)) tcGblEnv
       let hmi = HomeModInfo iface modDetails emptyHomeModInfoLinkable
       when (needsPreparedInterface interfaceUse) $
         installPreparedInterface (ms_mod_name modSum) hmi
