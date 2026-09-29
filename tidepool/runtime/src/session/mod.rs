@@ -503,6 +503,7 @@ struct DurableDeclarationGraph {
 #[derive(Clone, Debug)]
 pub struct StagedDeclaration {
     generation: Generation,
+    reserved: bool,
     module: SessionModule,
     receipt: DeclarationReceipt,
     session_id: SessionId,
@@ -577,6 +578,7 @@ pub struct DeclarationCandidateRender {
     base_generation: Generation,
     base_tip: Generation,
     generation: Generation,
+    reserved: bool,
     rendered: RenderedModule,
     turn: DeclTurn,
     receipt: DeclarationReceipt,
@@ -859,10 +861,10 @@ impl SessionLib {
         }
     }
 
-    /// Burn a unique Join module identity before exposing it to the compiler.
+    /// Burn a unique authored or Join module identity before exposing it to the compiler.
     /// A failure before rename leaves the allocator untouched. After rename,
     /// the identity stays burned even if directory durability is uncertain.
-    pub fn reserve_join_generation_durable(&mut self) -> Result<Generation, SessionError> {
+    pub fn reserve_declaration_generation_durable(&mut self) -> Result<Generation, SessionError> {
         let state = self
             .durable_graph
             .as_mut()
@@ -922,6 +924,12 @@ impl SessionLib {
                 })
             }
         }
+    }
+
+    /// Reserve a Join through the same durable allocator used by authored
+    /// declarations. A Join consumes its reserved slot only after publication.
+    pub fn reserve_join_generation_durable(&mut self) -> Result<Generation, SessionError> {
+        self.reserve_declaration_generation_durable()
     }
 
     /// Retry only the parent-directory sync for an already visible manifest.
@@ -1461,7 +1469,7 @@ impl SessionLib {
                 retracts: Vec::new(),
                 parent: None, // set inside push_turn_in from scope's tip
             },
-        );
+        )?;
         let rendered = render::render_module_with_vals(&self.log, gen, &self.env, import_modules);
         // Roll the just-pushed turn back on a write failure, exactly as the
         // validation-failure path below does — a bare `?` here would bump the
@@ -1544,6 +1552,7 @@ impl SessionLib {
             base_generation: self.log.generation(),
             base_tip: self.scope_tip(scope),
             generation,
+            reserved: false,
             rendered,
             turn,
             receipt: receipt.clone(),
@@ -1552,17 +1561,48 @@ impl SessionLib {
         }
     }
 
+    /// In attached v2, burn the rendered candidate's identity durably before
+    /// it leaves the checkout for compiler validation. Unattached sessions
+    /// keep the existing sequential candidate path.
+    pub(crate) fn render_admitted_candidate_in(
+        &mut self,
+        scope: ScopeId,
+        external: &SourceImports,
+        receipt: &DeclarationReceipt,
+        import_modules: &[String],
+        inject_modules: &[String],
+    ) -> Result<DeclarationCandidateRender, SessionError> {
+        let mut candidate =
+            self.render_candidate_in(scope, external, receipt, import_modules, inject_modules);
+        if self.durable_graph.is_some() {
+            let reserved = self.reserve_declaration_generation_durable()?;
+            assert_eq!(candidate.generation, reserved);
+            candidate.base_generation = reserved;
+            candidate.reserved = true;
+        }
+        Ok(candidate)
+    }
+
     pub(crate) fn adopt_staged_batch_with_receipt_and_vals_in(
         &mut self,
         staged: StagedDeclaration,
         visible_values: &[(SessionVarId, String)],
     ) -> Result<Generation, SessionError> {
+        let slot_matches = if staged.reserved {
+            self.durable_graph.is_some()
+                && staged.generation == self.log.generation()
+                && self.log.is_reserved(staged.generation)
+                && staged.module == SessionModule::lib(staged.generation)
+        } else {
+            self.durable_graph.is_none()
+                && staged.generation == self.log.generation().next()
+                && staged.module == self.next_module()
+        };
         if staged.session_id != self.id
             || staged.root != self.root
             || staged.base_generation != self.log.generation()
             || staged.base_tip != self.scope_tip(staged.scope)
-            || staged.generation != self.log.generation().next()
-            || staged.module != self.next_module()
+            || !slot_matches
             || staged.visible_values != visible_values
         {
             return Err(SessionError::StaleStagedDeclaration);
@@ -1574,7 +1614,15 @@ impl SessionLib {
         // candidate touches the shared root, moving it out of the private
         // directory it was validated against.
         self.write_module(&staged.rendered)?;
-        let generation = self.push_turn_in(staged.scope, staged.turn.clone());
+        let generation = if staged.reserved {
+            assert!(self
+                .log
+                .commit_reserved_authored(staged.generation, staged.turn.clone()));
+            self.tips.insert(staged.scope, staged.generation);
+            staged.generation
+        } else {
+            self.push_turn_in(staged.scope, staged.turn.clone())?
+        };
         if staged.scope == ScopeId::ROOT {
             self.record_recovery_turn(recovery::RecoveryTurn::new(
                 self.id.0,
@@ -1591,7 +1639,11 @@ impl SessionLib {
         if staged.session_id == self.id
             && staged.root == self.root
             && staged.base_generation == self.log.generation()
-            && staged.generation == self.log.generation().next()
+            && if staged.reserved {
+                self.log.is_reserved(staged.generation)
+            } else {
+                staged.generation == self.log.generation().next()
+            }
         {
             // A no-op when the candidate was validated off-checkout, against
             // a private directory this session root never received — there
@@ -1604,12 +1656,22 @@ impl SessionLib {
     /// Append `turn` as `scope`'s next turn: chains its `parent` from
     /// [`Self::scope_tip`], pushes it to the shared log, and advances
     /// `scope`'s tip to the new generation. Returns the new generation.
-    fn push_turn_in(&mut self, scope: ScopeId, mut turn: DeclTurn) -> Generation {
+    fn push_turn_in(
+        &mut self,
+        scope: ScopeId,
+        mut turn: DeclTurn,
+    ) -> Result<Generation, SessionError> {
         let tip = self.scope_tip(scope);
         turn.parent = (tip.0 > 0).then_some(tip);
-        let gen = self.log.push(turn);
+        let gen = if self.durable_graph.is_some() {
+            let generation = self.reserve_declaration_generation_durable()?;
+            assert!(self.log.commit_reserved_authored(generation, turn));
+            generation
+        } else {
+            self.log.push(turn)
+        };
         self.tips.insert(scope, gen);
-        gen
+        Ok(gen)
     }
 
     /// Undo [`Self::push_turn_in`]'s tip bump for `scope` — restores it to
@@ -1687,7 +1749,7 @@ impl SessionLib {
                 retracts: retracts.clone(),
                 parent: None, // set inside push_turn_in from scope's tip
             },
-        );
+        )?;
         let rendered = render::render_module(&self.log, gen, &self.env);
         if let Err(e) = self.write_module(&rendered) {
             assert!(self.log.pop_latest_committed(gen)); // keep the log consistent with disk
@@ -1946,6 +2008,7 @@ pub fn validate_declaration_candidate(
     turn.value_types = value_types;
     Ok(StagedDeclaration {
         generation: candidate.generation,
+        reserved: candidate.reserved,
         module: candidate.rendered.module,
         receipt: candidate.receipt,
         session_id: candidate.session_id,
@@ -2075,19 +2138,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut lib =
             SessionLib::open(SessionId(1), dir.path(), ModuleEnv::standalone_default()).unwrap();
-        let root = lib.push_turn_in(
-            ScopeId::ROOT,
-            DeclTurn {
-                normalized: Default::default(),
-                external_imports: SourceImports::new(),
-                sources: vec!["import qualified Data.Set as Set".into()],
-                workbench_imports: SourceImports::from_specs(["qualified Data.Set as Set"]),
-                items: Vec::new(),
-                value_types: BTreeMap::new(),
-                retracts: Vec::new(),
-                parent: None,
-            },
-        );
+        let root = lib
+            .push_turn_in(
+                ScopeId::ROOT,
+                DeclTurn {
+                    normalized: Default::default(),
+                    external_imports: SourceImports::new(),
+                    sources: vec!["import qualified Data.Set as Set".into()],
+                    workbench_imports: SourceImports::from_specs(["qualified Data.Set as Set"]),
+                    items: Vec::new(),
+                    value_types: BTreeMap::new(),
+                    retracts: Vec::new(),
+                    parent: None,
+                },
+            )
+            .unwrap();
         let child = ScopeId(1);
         lib.seed_scope(child, root);
         lib.push_turn_in(
@@ -2102,7 +2167,8 @@ mod tests {
                 retracts: Vec::new(),
                 parent: None,
             },
-        );
+        )
+        .unwrap();
         lib.push_turn_in(
             ScopeId::ROOT,
             DeclTurn {
@@ -2115,7 +2181,8 @@ mod tests {
                 retracts: Vec::new(),
                 parent: None,
             },
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             lib.workbench_imports_in(child).source_lines(),
@@ -2181,6 +2248,94 @@ mod tests {
         SessionLib::open(SessionId(991), root.path(), ModuleEnv::standalone_default())
             .expect("open declaration library")
             .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()])
+    }
+
+    #[test]
+    fn attached_v2_private_authored_commit_can_reserve_join_and_restart_without_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("declarations.json");
+        let mut lib = staged_test_lib(&root);
+        lib.attach_empty_recovery_graph_v2(&manifest).unwrap();
+        let private = ScopeId(2);
+        lib.seed_scope(private, Generation(0));
+        let receipt = lib
+            .declaration_receipt(&["data PrivateFlag = PrivateFlag"])
+            .unwrap()
+            .unwrap();
+        let candidate = lib
+            .render_admitted_candidate_in(private, &SourceImports::new(), &receipt, &[], &[])
+            .unwrap();
+        assert_eq!(candidate.generation, Generation(1));
+        assert!(lib.log.is_reserved(Generation(1)));
+        assert_eq!(lib.scope_tip(private), Generation(0));
+        assert_eq!(
+            recovery::read_v2(&manifest, root.path())
+                .unwrap()
+                .unwrap()
+                .graph
+                .high_water,
+            Generation(1)
+        );
+        let staged = validate_declaration_candidate(candidate, lib.include_dir()).unwrap();
+        assert_eq!(
+            lib.adopt_staged_batch_with_receipt_and_vals_in(staged, &[])
+                .unwrap(),
+            Generation(1)
+        );
+        assert_eq!(lib.scope_tip(private), Generation(1));
+        assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
+        assert_eq!(
+            lib.reserve_join_generation_durable().unwrap(),
+            Generation(2)
+        );
+        drop(lib);
+
+        let mut restarted = staged_test_lib(&root);
+        restarted.attach_empty_recovery_graph_v2(&manifest).unwrap();
+        assert_eq!(restarted.generation(), Generation(2));
+        assert_eq!(
+            restarted.reserve_join_generation_durable().unwrap(),
+            Generation(3)
+        );
+    }
+
+    #[test]
+    fn attached_v2_failed_validation_and_reservation_keep_burned_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("declarations.json");
+        let mut lib = staged_test_lib(&root);
+        lib.attach_empty_recovery_graph_v2(&manifest).unwrap();
+        let receipt = lib
+            .declaration_receipt(&["answer :: Int\nanswer = missingHelper"])
+            .unwrap()
+            .unwrap();
+        let candidate = lib
+            .render_admitted_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[])
+            .unwrap();
+        assert!(validate_declaration_candidate(candidate, lib.include_dir()).is_err());
+        assert!(lib.log.is_reserved(Generation(1)));
+        assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
+        drop(lib);
+        let mut restarted = staged_test_lib(&root);
+        restarted.attach_empty_recovery_graph_v2(&manifest).unwrap();
+        assert_eq!(restarted.generation(), Generation(1));
+        assert_eq!(
+            restarted.reserve_join_generation_durable().unwrap(),
+            Generation(2)
+        );
+
+        let separate = tempfile::tempdir().unwrap();
+        let path = separate.path().join("declarations.json");
+        let mut failed = SessionLib::open(
+            SessionId(992),
+            separate.path().join("session"),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        failed.attach_empty_recovery_graph_v2(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(failed.reserve_declaration_generation_durable().is_err());
+        assert_eq!(failed.generation(), Generation(0));
     }
 
     #[test]
