@@ -21,6 +21,22 @@ fn fault_child() {
     let operation = std::env::var("FAULT_OPERATION").unwrap();
     let result = match operation.as_str() {
         "durable" => tidepool_atomic_write::write_durable(&root.join("value"), b"new"),
+        "staged" => {
+            let staged = tidepool_atomic_write::stage_durable(&root.join("value"), b"new").unwrap();
+            match staged.publish() {
+                Err(tidepool_atomic_write::PublishError::PublishedDurabilityUnconfirmed {
+                    publication,
+                    ..
+                }) => {
+                    assert_eq!(fs::read(publication.path()).unwrap(), b"new");
+                    publication.confirm_durability().unwrap();
+                    Ok(())
+                }
+                other => {
+                    panic!("expected visible publication with uncertain durability, got {other:?}")
+                }
+            }
+        }
         "best" => tidepool_atomic_write::write_best_effort(&root.join("value"), b"new"),
         "mkdir" => tidepool_atomic_write::create_dir_all_durable(&root.join("new/deep")),
         _ => panic!("unknown operation"),
@@ -54,6 +70,7 @@ fn strict_directory_faults_are_reported_after_visible_publication() {
     for (index, (operation, kind, ok, hits)) in [
         ("durable", "open", false, true),
         ("durable", "sync", false, true),
+        ("staged", "sync-once", true, true),
         ("best", "sync", true, false),
         ("mkdir", "sync", false, true),
         ("mkdir", "trace", true, true),

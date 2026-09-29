@@ -19,6 +19,12 @@ Two functions, two durability tiers (`src/lib.rs`):
 - `write_best_effort(path, bytes)` — no fsync at all; only the rename's
   atomicity (never a torn read) is kept. Use for regenerable caches, where a
   lost write on a crash is just a future cache miss, not data loss.
+- `stage_durable(path, bytes)` — write and fsync a same-directory temporary
+  file without changing the target. Its `StagedDurableWrite::publish` reports
+  `BeforeRename` separately from `PublishedDurabilityUnconfirmed`; the latter
+  includes a `PublishedWrite` receipt whose `confirm_durability` retries only
+  the parent-directory sync. Callers must serialize writes to that target
+  through confirmation. Existing `write_durable` callers keep their API.
 
 Both use `tempfile::NamedTempFile` for the temp file itself, which picks a
 unique name per call — no caller needs to invent its own, and no caller can
