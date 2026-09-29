@@ -2088,7 +2088,7 @@ struct InteractiveFleet {
     open_request: OpenRequestCheck,
     /// `None` when the run has no frozen workspace to compare against, in
     /// which case source drift is never observed (see
-    /// `run_delivery_pump`'s usage poll).
+    /// `run_delivery_pump`'s source observation loop).
     source_layers: Option<Arc<crate::exomonad::source::ExomonadSourceReload>>,
     actor_recovery: Arc<exomonad_actor::ActorRecoveryJournal>,
     recovered_threads: Arc<BTreeMap<ActorRef, (ActorRef, QueueReadyThread)>>,
@@ -6815,93 +6815,233 @@ async fn run_delivery_pump(
     open_request: Option<OpenRequestCheck>,
     source_layers: Option<Arc<crate::exomonad::source::ExomonadSourceReload>>,
     worktrees: WorktreeManager,
-    mut shutdown: oneshot::Receiver<()>,
+    shutdown: oneshot::Receiver<()>,
 ) {
     let mut health = tokio::time::interval(Duration::from_secs(1));
-    let mut usage_poll = tokio::time::interval(PROVIDER_POLL_INTERVAL);
-    let mut reminded_request = None;
+    health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let provider_backend = Arc::clone(&backend);
+    let provider_thread = thread.clone();
+    let provider_workspace = workspace.clone();
+    let provider_observation = runtime_observation.clone();
+    let provider = move |provider_open: Arc<Mutex<bool>>,
+                         mut stop_provider: oneshot::Receiver<()>| async move {
+        let mut reminded_request = None;
+        let mut interval = tokio::time::interval(PROVIDER_POLL_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut stop_provider => break,
+                _ = interval.tick() => {}
+            }
+            if !*provider_open.lock() {
+                break;
+            }
+            provider_observation.mark_provider_observation_stale();
+            match provider_backend.observe(&provider_thread).await {
+                Ok(Some(observation)) => {
+                    provider_observation.publish_provider_observation(observation)
+                }
+                Ok(None) => provider_observation.mark_provider_observation_stale(),
+                Err(error) => {
+                    provider_observation.mark_provider_observation_stale();
+                    tracing::debug!(actor = ?actor, %error, "provider observation unavailable");
+                }
+            }
+            if let Some(open_request) = &open_request {
+                let now = u64::try_from(current_time_ms()).unwrap_or_default();
+                if let Err(error) = remind_turn_ended_without_respond(
+                    actor,
+                    &provider_thread,
+                    provider_backend.as_ref(),
+                    &provider_workspace.to_string_lossy(),
+                    &provider_observation.snapshot(),
+                    || open_request(actor),
+                    &mut reminded_request,
+                    now,
+                )
+                .await
+                {
+                    tracing::warn!(actor = ?actor, %error, "turn-end reminder was not delivered");
+                }
+            }
+        }
+        ActorObservation::Provider
+    };
+    let source_observation = runtime_observation.clone();
+    let source = move |source_open: Arc<Mutex<bool>>, stop_source: oneshot::Receiver<()>| async move {
+        run_periodic_observation(stop_source, PROVIDER_POLL_INTERVAL, || {
+            let runtime_observation = source_observation.clone();
+            let source_layers = source_layers.clone();
+            let worktrees = worktrees.clone();
+            let admitted = *source_open.lock();
+            async move {
+                if admitted {
+                    poll_source_drift(
+                        actor,
+                        &runtime_observation,
+                        source_layers.as_ref(),
+                        &worktrees,
+                    )
+                    .await;
+                }
+            }
+        })
+        .await;
+        ActorObservation::Source
+    };
     let hosted_cell_computing = move || local_actor.hosted_cell_computing();
     let without_evidence = Mutex::new(BTreeMap::new());
     let mut pending: Option<PendingDeliveryWarning> = None;
     let mut last_message = None;
+    let delivery = async {
+        loop {
+            health.tick().await;
+            let result = deliver_pending_checked(
+                actor,
+                &inbox,
+                &thread,
+                backend.as_ref(),
+                &producer,
+                &reconciliations,
+                &workspace,
+                &runtime_observation,
+                watch_retained.as_ref(),
+                watch_observed_since.as_ref(),
+                &hosted_cell_computing,
+                &without_evidence,
+            )
+            .await;
+            match result {
+                Ok(()) => {
+                    if let Some(pending) = pending.take() {
+                        tracing::info!(
+                            actor = ?actor,
+                            pending_secs = pending.since.elapsed().as_secs(),
+                            "actor inbox delivery recovered"
+                        );
+                    }
+                }
+                Err(error) => PendingDeliveryWarning::observe(&mut pending, actor, error),
+            }
+            runtime_observation.publish_inbound_delivery(observe_inbound_delivery(
+                &inbox,
+                &producer,
+                hosted_cell_computing(),
+                &without_evidence,
+                &mut last_message,
+            ));
+        }
+    };
+    supervise_delivery(
+        actor,
+        &runtime_observation,
+        shutdown,
+        delivery,
+        provider,
+        source,
+    )
+    .await;
+}
+
+/// Own the single inbox future and both background observers through the same
+/// retirement boundary. An admitted observation finishes or makes delivery
+/// cleanup forced, which retains the checkout it might still be reading.
+async fn supervise_delivery<D, PF, P, SF, S>(
+    actor: ActorRef,
+    runtime_observation: &exomonad_actor::ActorRuntimeObservationHandle,
+    mut shutdown: oneshot::Receiver<()>,
+    delivery: D,
+    provider: PF,
+    source: SF,
+) where
+    D: std::future::Future<Output = ()>,
+    PF: FnOnce(Arc<Mutex<bool>>, oneshot::Receiver<()>) -> P,
+    P: std::future::Future<Output = ActorObservation> + Send + 'static,
+    SF: FnOnce(Arc<Mutex<bool>>, oneshot::Receiver<()>) -> S,
+    S: std::future::Future<Output = ActorObservation> + Send + 'static,
+{
+    let mut observations = JoinSet::new();
+    let (provider_shutdown, stop_provider) = oneshot::channel();
+    let (source_shutdown, stop_source) = oneshot::channel();
+    // Closing admission orders new work against retirement. Previously
+    // admitted work may still start, so shutdown also joins both observers.
+    let observation_open = Arc::new(Mutex::new(true));
+    observations.spawn(provider(Arc::clone(&observation_open), stop_provider));
+    observations.spawn(source(Arc::clone(&observation_open), stop_source));
+    let mut observation_failed = false;
+    tokio::pin!(delivery);
     until_shutdown(&mut shutdown, async {
         loop {
             tokio::select! {
-                _ = health.tick() => {
-                    let result = deliver_pending_checked(
-                        actor,
-                        &inbox,
-                        &thread,
-                        backend.as_ref(),
-                        &producer,
-                        &reconciliations,
-                        &workspace,
-                        &runtime_observation,
-                        watch_retained.as_ref(),
-                        watch_observed_since.as_ref(),
-                        &hosted_cell_computing,
-                        &without_evidence,
-                    ).await;
-                    match result {
-                        Ok(()) => {
-                            if let Some(pending) = pending.take() {
-                                tracing::info!(
-                                    actor = ?actor,
-                                    pending_secs = pending.since.elapsed().as_secs(),
-                                    "actor inbox delivery recovered"
-                                );
+                _ = &mut delivery => break,
+                joined = observations.join_next(), if !observations.is_empty() => {
+                    match joined {
+                        Some(Ok(kind)) => {
+                            tracing::error!(actor = ?actor, ?kind, "actor observation task stopped before retirement");
+                            observation_failed = true;
+                            if matches!(kind, ActorObservation::Provider) {
+                                runtime_observation.mark_provider_observation_stale();
                             }
                         }
-                        Err(error) => PendingDeliveryWarning::observe(&mut pending, actor, error),
-                    }
-                    runtime_observation.publish_inbound_delivery(observe_inbound_delivery(
-                        &inbox,
-                        &producer,
-                        hosted_cell_computing(),
-                        &without_evidence,
-                        &mut last_message,
-                    ));
-                }
-                _ = usage_poll.tick() => {
-                    match backend.observe(&thread).await {
-                        Ok(Some(observation)) => runtime_observation.publish_provider_observation(observation),
-                        Ok(None) => runtime_observation.mark_provider_observation_stale(),
-                        Err(error) => {
+                        Some(Err(error)) => {
+                            tracing::error!(actor = ?actor, %error, "actor observation task failed before retirement");
+                            observation_failed = true;
                             runtime_observation.mark_provider_observation_stale();
-                            tracing::debug!(actor = ?actor, %error, "provider observation unavailable");
                         }
+                        None => unreachable!("nonempty observation task set returned no task"),
                     }
-                    if let Some(open_request) = &open_request {
-                        let now = u64::try_from(current_time_ms()).unwrap_or_default();
-                        if let Err(error) = remind_turn_ended_without_respond(
-                            actor,
-                            &thread,
-                            backend.as_ref(),
-                            &workspace.to_string_lossy(),
-                            &runtime_observation.snapshot(),
-                            || open_request(actor),
-                            &mut reminded_request,
-                            now,
-                        ).await {
-                            tracing::warn!(actor = ?actor, %error, "turn-end reminder was not delivered");
-                        }
-                    }
-                    poll_source_drift(actor, &runtime_observation, source_layers.as_ref(), &worktrees).await;
                 }
             }
         }
     })
     .await;
+    *observation_open.lock() = false;
+    provider_shutdown.send(()).ok();
+    source_shutdown.send(()).ok();
+    while let Some(result) = observations.join_next().await {
+        if let Err(error) = result {
+            panic!("actor {actor:?} observation task failed: {error}");
+        }
+    }
+    assert!(
+        !observation_failed,
+        "actor {actor:?} observation task failed before retirement"
+    );
+}
+
+#[derive(Debug)]
+enum ActorObservation {
+    Provider,
+    Source,
+}
+
+/// One observation at a time. A shutdown requested during a probe waits for
+/// that probe to finish, so retirement can retain its workspace if it exceeds
+/// the delivery grace period. Dropping the owning JoinSet aborts async tasks;
+/// a detached blocking Git read is then covered by the forced retirement.
+async fn run_periodic_observation<F, Fut>(
+    mut shutdown: oneshot::Receiver<()>,
+    period: Duration,
+    mut observe: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut interval = tokio::time::interval(period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => break,
+            _ = interval.tick() => observe().await,
+        }
+    }
 }
 
 /// Run `work` until `shutdown` fires, dropping it at whatever await it is
-/// parked on. Shutdown is sent only by retirement, which then stops the
-/// process and joins the pump within `APPLICATION_TASK_GRACE_TIMEOUT`; an
-/// in-flight submit, rollout read or drift probe serves no one, and a pump
-/// that outlasts the grace is forced, which retains the socket directory,
-/// workspace and worktree binding. Blocking reads a dropped await detaches
-/// stay outside those resources: host Git is captured by workspace
-/// retirement itself.
+/// parked on. Shutdown is sent only by retirement, which joins the pump and
+/// its observation tasks within `APPLICATION_TASK_GRACE_TIMEOUT`.
 async fn until_shutdown(shutdown: &mut oneshot::Receiver<()>, work: impl std::future::Future) {
     tokio::select! {
         biased;
@@ -7152,9 +7292,8 @@ impl PendingDeliveryWarning {
     }
 }
 
-/// Observe source drift for `actor` on the same 10-second cadence
-/// `usage_poll` already pays for provider observation, rather than a new
-/// timer: reading a source layer's disk revision or a checkout's dirty
+/// Observe source drift for `actor` on a 10-second cadence. Reading a source
+/// layer's disk revision or a checkout's dirty
 /// files is real filesystem and Git work, and the status view this feeds
 /// (`ResidentKernelBehavior::live_status_text`) must stay cheap on every
 /// call.

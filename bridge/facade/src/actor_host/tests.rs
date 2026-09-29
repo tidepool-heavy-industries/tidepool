@@ -5513,6 +5513,126 @@ async fn retired_delivery_settles_while_pump_work_is_parked() {
 }
 
 #[tokio::test]
+async fn blocked_source_observation_keeps_delivery_ticks_live_and_shutdown_waits() {
+    let actor = ActorRef::first(exomonad_actor::ActorId(7));
+    let (probe_started_tx, probe_started_rx) = oneshot::channel();
+    let (release_probe_tx, release_probe_rx) = std::sync::mpsc::channel();
+    let mut probe_started_tx = Some(probe_started_tx);
+    let mut release_probe_rx = Some(release_probe_rx);
+    let source = move |_open, stop| async move {
+        run_periodic_observation(stop, Duration::from_millis(10), || {
+            let started = probe_started_tx.take();
+            let release = release_probe_rx.take();
+            async move {
+                if let Some(started) = started {
+                    tokio::task::spawn_blocking(move || {
+                        started.send(()).ok();
+                        release.unwrap().recv().unwrap();
+                    })
+                    .await
+                    .unwrap();
+                }
+            }
+        })
+        .await;
+        ActorObservation::Source
+    };
+    let provider = |_open, stop| async move {
+        run_periodic_observation(stop, Duration::from_millis(10), || async {}).await;
+        ActorObservation::Provider
+    };
+    let (delivery_tx, mut delivery_rx) = tokio::sync::mpsc::unbounded_channel();
+    let delivery = async move {
+        let mut tick = tokio::time::interval(Duration::from_millis(10));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            delivery_tx.send(()).ok();
+        }
+    };
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let pump = tokio::spawn(async move {
+        let runtime = exomonad_actor::ActorRuntimeObservationHandle::default();
+        supervise_delivery(actor, &runtime, shutdown_rx, delivery, provider, source).await;
+    });
+    probe_started_rx.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), delivery_rx.recv())
+        .await
+        .expect("inbox delivery must run while observation is blocked")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), delivery_rx.recv())
+        .await
+        .expect("later delivery tick must run while observation is blocked")
+        .unwrap();
+    assert!(!pump.is_finished());
+    shutdown_tx.send(()).unwrap();
+    assert!(
+        !pump.is_finished(),
+        "shutdown must wait for the in-flight probe"
+    );
+    release_probe_tx.send(()).unwrap();
+    pump.await.unwrap();
+}
+
+#[tokio::test]
+async fn forced_delivery_reports_a_still_running_blocking_probe() {
+    let actor = ActorRef::first(exomonad_actor::ActorId(7));
+    let (started_tx, started_rx) = oneshot::channel();
+    let (finished_tx, finished_rx) = oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let mut started_tx = Some(started_tx);
+    let mut release_rx = Some(release_rx);
+    let mut finished_tx = Some(finished_tx);
+    let provider = move |_open, stop| async move {
+        run_periodic_observation(stop, Duration::from_millis(10), || {
+            let started = started_tx.take();
+            let release = release_rx.take();
+            let finished = finished_tx.take();
+            async move {
+                if let Some(started) = started {
+                    tokio::task::spawn_blocking(move || {
+                        started.send(()).ok();
+                        release.unwrap().recv().unwrap();
+                        finished.unwrap().send(()).ok();
+                    })
+                    .await
+                    .unwrap();
+                }
+            }
+        })
+        .await;
+        ActorObservation::Provider
+    };
+    let source = |_open, stop| async move {
+        run_periodic_observation(stop, Duration::from_millis(10), || async {}).await;
+        ActorObservation::Source
+    };
+    let mut delivery = tokio::spawn(async move {
+        let runtime = exomonad_actor::ActorRuntimeObservationHandle::default();
+        supervise_delivery(
+            actor,
+            &runtime,
+            shutdown_rx,
+            std::future::pending::<()>(),
+            provider,
+            source,
+        )
+        .await;
+    });
+    started_rx.await.unwrap();
+    shutdown_tx.send(()).unwrap();
+    let outcome = stop_retired_delivery(actor, &mut delivery, Duration::ZERO).await;
+    assert_eq!(outcome, CleanupComponentOutcome::Forced);
+    assert!(delivery.is_finished());
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), finished_rx)
+        .await
+        .expect("detached blocking probe must eventually finish")
+        .unwrap();
+}
+
+#[tokio::test]
 async fn retired_delivery_is_forced_without_claiming_tool_service_cleanup() {
     let actor = ActorRef::first(exomonad_actor::ActorId(7));
     let mut delivery = tokio::spawn(std::future::pending::<()>());
