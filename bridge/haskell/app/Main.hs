@@ -465,7 +465,16 @@ processFile compiler caches timing args path = do
       else timePhase timing "prepared_sidecars" $ writePreparedSidecars SeparateYieldSites outDir binds tycons mCapturedTy warnTexts preparedArtifacts
 
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
-    (availability, freshProducts) <- timePhase timing "module_products" $ writeModuleProducts outDir hscEnv
+    timePhase timing "module_products" $
+      writeCertifiedProducts outDir hscEnv prepared productContext preparedArtifacts
+
+  reportDiags res
+
+writeCertifiedProducts
+  :: FilePath -> HscEnv -> PreparedPipelineResult -> Maybe ProjectionContext
+  -> [PreparedArtifact] -> IO ()
+writeCertifiedProducts outDir hscEnv prepared productContext preparedArtifacts = do
+    (availability, freshProducts) <- writeModuleProducts outDir hscEnv
       productContext (pprModules prepared) (pprProductInterfaces prepared)
     let dependencies = pprDependencies prepared
         withCertified = foldr (\candidate -> Map.insert
@@ -490,8 +499,6 @@ processFile compiler caches timing args path = do
       Left reason -> do
         hPutStrLn stderr ("product certification unavailable: " ++ reason)
         BS.writeFile (outDir </> "certified-products.cbor") BS.empty
-
-  reportDiags res
 
 trySynchronous :: IO a -> IO (Either SomeException a)
 trySynchronous action = do
@@ -837,15 +844,17 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
         -- A prepared turn uses one compiler pass for the checked metadata
         -- and the prepared modules.
         compileTurn modulePath = do
-          prepared <- compiler PreparedStg (Map.keysSet (requestRetainedGenerations args)) GeneralCompile (Just scope) modulePath (requestIncludes args) (requestBuildProductsDir args)
-          return (pprPipelineResult prepared, pprModules prepared, pprDependencies prepared)
+          compiler (PreparedProducts (requestModuleCandidates args))
+            (Map.keysSet (requestRetainedGenerations args)) GeneralCompile
+            (Just scope) modulePath (requestIncludes args)
+            (requestBuildProductsDir args)
         compileVariants _ [] = error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
         compileVariants index (tmplFile:rest) = do
           (spliced, _modName, modulePath) <- spliceInto tmplFile
           attempted <- try (compileTurn modulePath)
           case attempted of
-            Right (result, preparedModules, dependencies) ->
-              return (index, spliced, modulePath, result, preparedModules, dependencies)
+            Right prepared ->
+              return (index, spliced, modulePath, prepared)
             Left err@(_ :: SomeException) -> case (fromException err :: Maybe SourceError, rest) of
               (Just _, _ : _) -> compileVariants (index + 1) rest
               _               -> throwIO err
@@ -853,22 +862,29 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
         && (selector /= SBind || length (sbBinders sb) /= 1 || length matching /= 1)
       then fail "activation requires one prepared bind template"
       else pure ()
-    (variant, spliced, compiledPath, result, preparedModules, dependencies) <- compileVariants (0 :: Int) matching
-    let binds       = prBinds result
+    (variant, spliced, compiledPath, prepared) <- compileVariants (0 :: Int) matching
+    let result      = pprPipelineResult prepared
+        preparedModules = pprModules prepared
+        binds       = prBinds result
         hscEnv      = prHscEnv result
         mCapturedTy = fmap T.pack (prCapturedType result)
         warnTexts   = map T.pack (prWarnings result)
     -- Projection remains outside compileVariants. Its entry is the settled
     -- scaffold, and its constructors join the shared metadata before write.
-    (preparedArtifacts, _) <- prepareArtifacts caches compiledPath hscEnv preparedModules
+    let certifiedHomes = Set.fromList
+          [(candidateUnit candidate, candidateModule candidate)
+          | candidate <- pprAcceptedCandidates prepared]
+    (preparedArtifacts, productContext) <- prepareArtifacts caches compiledPath hscEnv preparedModules
       [preparedScaffoldTargetName] (standardAuxiliaryRoots binds)
-      (requestRetainedGenerations args) Set.empty
+      (requestRetainedGenerations args) certifiedHomes
     let asksSites = concatMap paYieldSites preparedArtifacts
     timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
+    timePhase timing "module_products" $
+      writeCertifiedProducts outDir hscEnv prepared productContext preparedArtifacts
     -- Mutable turns never enter the artifact cache, but publication must
     -- still reject source changes observed during this compilation.
-    validateDependencyEvidence dependencies
+    validateDependencyEvidence (pprDependencies prepared)
     let wrapped = T.pack spliced
     case selector of
       SBind -> do

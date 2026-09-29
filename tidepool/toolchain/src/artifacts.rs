@@ -16,7 +16,7 @@ use serde::Deserialize;
 use tempfile::TempDir;
 use tidepool_extract_cmd::ExtractCmd;
 use tidepool_repr::execution_schema::DecodeLimits;
-use tidepool_repr::execution_schema::RawModuleProduct;
+use tidepool_repr::execution_schema::{PreparedProgram, RawModuleProduct};
 use tidepool_repr::serial::{read_metadata, MetaWarnings};
 use tidepool_repr::DataConTable;
 
@@ -244,6 +244,149 @@ pub struct CompiledArtifacts {
     /// supplied complete, revalidated cache evidence. A later compiler
     /// request still needs its own precompile graph check before reuse.
     pub module_inventory: Option<Vec<cache::ModuleEvidence>>,
+}
+
+/// Candidate suggestions for a worker compile whose source is rendered by the
+/// worker after the request starts (the resident turn and folded-turn lanes).
+/// The same offer must be passed to final sealing; a manifest path alone is
+/// never authority for a cached product.
+pub struct ModuleCandidateOffer {
+    selected: Option<module_candidates::CandidateSet>,
+    producer: Vec<u8>,
+    include: Vec<PathBuf>,
+}
+
+impl ModuleCandidateOffer {
+    pub fn select(producer: &[u8], include: &[PathBuf], scratch: &Path) -> Self {
+        Self {
+            selected: module_candidates::select(producer, include, scratch)
+                .filter(|set| !set.by_owner.is_empty()),
+            producer: producer.to_vec(),
+            include: include.to_vec(),
+        }
+    }
+
+    pub fn manifest_path(&self) -> Option<&Path> {
+        self.selected
+            .as_ref()
+            .map(|set| set.manifest_path.as_path())
+    }
+
+    pub fn has_candidates(&self) -> bool {
+        self.selected.is_some()
+    }
+}
+
+pub struct SealedTurnProducts {
+    pub certified_groups: Vec<certified_products::PendingCertifiedGroup>,
+    pub pending_imports: Vec<certified_products::PendingImportOwner>,
+}
+
+/// Seal the exact worker-authored source and product sidecars of a successful
+/// resident turn. The runtime supplies the selected template's source path
+/// and the source text echoed by TurnOut, not the unspliced cell text.
+pub fn seal_turn_outputs(
+    offer: &ModuleCandidateOffer,
+    output_dir: &Path,
+    source_path: &Path,
+    source: &str,
+    prepared: &PreparedProgram,
+    target: &str,
+) -> Result<SealedTurnProducts, CompileError> {
+    if std::fs::read_to_string(source_path)? != source {
+        return Err(CompileError::ExtractFailed(
+            "turn source changed after worker compile".into(),
+        ));
+    }
+    let product_bytes = std::fs::read(output_dir.join("module-products.cbor"))?;
+    let evidence_bytes = std::fs::read(output_dir.join("dependencies.json"))?;
+    let receipt_bytes = std::fs::read(output_dir.join("certified-products.cbor"))?;
+    if receipt_bytes.is_empty() {
+        if offer.has_candidates() {
+            return Err(CompileError::ExtractFailed(
+                "turn candidate product certificate unavailable".into(),
+            ));
+        }
+        return Ok(SealedTurnProducts {
+            certified_groups: Vec::new(),
+            pending_imports: Vec::new(),
+        });
+    }
+    let receipt = certified_products::decode_receipt(&receipt_bytes)
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    let fresh_products = tidepool_repr::execution_schema::parse_module_products(
+        &product_bytes,
+        &crate::prepared_artifact::production_requirements()?,
+        DecodeLimits::default(),
+    )?;
+    let evidence = cache::DependencyEvidence::from_worker(&evidence_bytes, source_path, source);
+    let Some(valid) = evidence.as_ref().filter(|evidence| evidence.valid(source)) else {
+        if receipt
+            .modules
+            .iter()
+            .any(|module| module.origin == certified_products::ProductOrigin::Cached)
+        {
+            return Err(CompileError::ExtractFailed(
+                "turn cached module lacks valid final dependency evidence".into(),
+            ));
+        }
+        return Ok(SealedTurnProducts {
+            certified_groups: Vec::new(),
+            pending_imports: Vec::new(),
+        });
+    };
+    let groups = certified_products::certify_products(
+        offer.selected.as_ref(),
+        &receipt,
+        &fresh_products,
+        &product_bytes,
+        &evidence_bytes,
+        source_path,
+        valid,
+        source,
+        &offer.producer,
+        &offer.include,
+    )
+    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    let mut seen = std::collections::HashSet::new();
+    for module in &receipt.modules {
+        seen.insert((module.unit.as_str(), module.module.as_str()));
+    }
+    for module in &valid.modules {
+        if module.product == cache::ProductAvailability::Ready
+            && !module.boot
+            && !seen.contains(&(module.unit.as_str(), module.module.as_str()))
+        {
+            return Err(CompileError::ExtractFailed(format!(
+                "turn ready module {}:{} lacks certified product",
+                module.unit, module.module,
+            )));
+        }
+    }
+    let accepted = receipt
+        .targets
+        .get(target)
+        .ok_or_else(|| CompileError::ExtractFailed("turn target product receipt missing".into()))?;
+    if receipt.targets.len() != 1 {
+        return Err(CompileError::ExtractFailed(
+            "turn target product receipt count".into(),
+        ));
+    }
+    let pending_imports =
+        certified_products::certify_target_owners(prepared, accepted, &groups, &receipt.packages)
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    module_candidates::publish(
+        &offer.producer,
+        &offer.include,
+        valid,
+        &fresh_products,
+        &product_bytes,
+        source,
+    );
+    Ok(SealedTurnProducts {
+        certified_groups: groups,
+        pending_imports,
+    })
 }
 
 // ---------------------------------------------------------------------------
