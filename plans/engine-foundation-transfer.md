@@ -2,13 +2,15 @@
 
 Working checkpoint, 2026-09-29. This is not a completed handoff or launch approval.
 The user wants the next xhigh ownership/publication review on the new 128 GiB
-build server. Finish the current bounded candidates and joined checks here;
-do not enable concurrent private executions before that review.
+build server. Latest steering prioritizes transfer soon: finish a bounded repair
+checkpoint here and move expensive joined checks to the destination. Do not
+enable concurrent private executions before that review.
 
 ## Source and integration
 
 - Main planning baseline: `a2e98636b`.
-- Integration branch: `foundation/integration`, currently `591d3c04c`.
+- Integration branch: `foundation/integration`, currently
+  `24516ebb5f29a7e9a5f3245c485b578f31f1658f`.
 - The integration branch contains the native code/installation split, responsive
   actor control and settlement, typed source freshness, deferred external effects,
   runtime code reuse, ABI primitive repairs, admission leases, real Event
@@ -27,14 +29,48 @@ do not enable concurrent private executions before that review.
 | Short host admission | `3ed5ff603`; two admission/retirement tests passed | Embedded Store guard integration; no guard across dispatch/wake await |
 | Real Event retirement | `1edde59c3`, integrated as `db9323057`; facade test 1/1 | Joined regression |
 | Frozen installed tools | `af91337af`, integrated as `591d3c04c`; three focused checks passed | Embedded consumer and joined regression |
-| Git admission/helper | `25f0579fc`; 4 admission tests, 6 focused worktree runs, helper build, facade 1/1 | Review repairs: lockfile/view/private-Git-dir identity, scope lifetime, joined checks, measured spawn behavior |
-| Compiler producer proof | `c7dac8efd` then `6a98eab469`; module roundtrip 1/1, retained-scope 1/1, extractor build | Exact review; durable encoding/versioned imports/cache/demand consumers are not implemented |
-| Client settlement | `foundation/client-settlement`, uncommitted | Last run 12/13; remaining test stopped server before mock inference request. Added wait needs rerun and final commit |
-| Sequential embedding | Actor lane plus separate harness companions | Wake/snapshot/cancel API checks, real HostActor composition, portable Git pin/Cargo lock/Nix hash |
+| Git admission/helper | Repairs `479a801bb`, measurement `85139acf6`, integrated; 9 admission and 4 integration checks passed after repair | Joined checks; synthetic spawn results in `foundation-view-spawn-measurement.md` |
+| Compiler producer proof | `fbcfb02027632e2a53199c0a6ef6843f5cc2a577` on `foundation/module-product`; hidden-source fat/skinny comparison passed, final roundtrip 1/1, retained-scope 1/1, worker built | Final skinny simplification not joined; durable encoding/versioned imports/cache/demand consumers are not implemented |
+| Client settlement | `c09c2b067774be4104fad878ee271a6a14f12690` on `foundation/client-settlement`; final focused run 13/13 passed | Commit must be transferred and pinned; broad client suite not run |
+| Sequential embedding | Adapter `fc916b091cf4367ae79588d3695ed7696aa05867`: real resident/Engine wake 1/1, lib compiled; harness companion `0fa0caf410667e35ab34d11c231a71ba2b0d246d`: 5 focused tests passed | Review found cancellation outcome loss; bounded repair in progress. Request-start/retirement admission needs checking. Public Git pin/Nix hash and full M1 gates remain |
 
-The module fixture's fat interface is 2,747 bytes, skinny HPT form 2,402 bytes.
+The final home-product fixture's skinny interface is 2,336 bytes versus the
+earlier fat 2,747 bytes. Both forms passed source-hidden typechecking; home
+products now omit redundant Core. External package Core recovery is unchanged.
 This is one fixture's size measurement, not an aggregate memory or speed claim.
 The producer proof has no durable neutral-group codec or cache consumer yet.
+
+The portable retained-symbol probe is committed at integration HEAD: 1/1 passed.
+G3 interface construction took 178,481 / 175,808 / 200,776 ns with 0 / 1,000 /
+10,000 unrelated retained symbols; allocations were below counter resolution.
+Whole requests still grew to about 309 ms. Fixture differences prevent an
+absolute before/after speed claim; see `engine-foundation.md`.
+
+## Destination verification queue
+
+All seven registered embedded CBOR artifacts still contain execution ABI 7;
+current sources require ABI 8. The existing embedded checker only checks schema
+and therefore cannot certify this migration. Regenerate via the registered
+producers; never edit ABI bytes by hand. No broad gate has passed on this join.
+
+After reviewing/joining final candidates and resolving companion dependencies:
+
+1. Use the destination's real pinned submodule checkouts, not source-box symlinks.
+2. Run `env -u TIDEPOOL_EXTRACT -u TIDEPOOL_EXTRACT_WORKER bash scripts/dev-shell.sh scripts/embedded-fixtures-update.sh`.
+3. Check all seven envelopes and their focused consumers: repr
+   `execution_schema_contract` Haskell fixtures, toolchain exact artifact linking,
+   codegen freer continuation/collection, runtime freer/import/direct-global
+   prepared execution and the prepared resident composite lifecycle.
+4. Run full `just fixtures-check` (no cohort restriction). If corpus metadata
+   needs regeneration, use its producer and review the resulting diff.
+5. Finish joined codegen/runtime coverage and portable Cargo/Nix pins. Treat
+   local Git URL redirects used for candidate tests as temporary evidence only.
+
+Adapter review: mapping `WorkbenchCancellationOutcome::Expired { reply }` to
+`Stopped` can overwrite a completed success with `Cancelled` in the harness
+scheduler. Preserve the actual completed outcome. Request snapshot admission
+also needs a defined ordering against actor retirement. Neither concern is
+resolved merely by the earlier happy-path wake test.
 
 ## Next xhigh review
 
