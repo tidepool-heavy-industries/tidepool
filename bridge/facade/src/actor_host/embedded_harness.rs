@@ -378,11 +378,31 @@ mod tests {
         completed: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
         requests: Arc<Mutex<Vec<ResponsesRequest>>>,
+        compactions: Arc<AtomicU64>,
     }
 
     #[async_trait]
     impl ResponsesTransport for ParkUntilInput {
         async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+            if request.tools_allowed.as_ref().is_some_and(Vec::is_empty) {
+                assert!(request.tools.is_empty());
+                assert!(
+                    request.input.iter().any(|item| {
+                        item.0["type"] == "custom_tool_call_output"
+                            && item.0.to_string().contains("42")
+                    }),
+                    "compaction must receive the actual settled Haskell result"
+                );
+                self.compactions.fetch_add(1, Ordering::Relaxed);
+                return Ok(ResponsesTurn {
+                    response_id: "offline-compaction".into(),
+                    items: vec![Item(json!({
+                        "type":"message", "role":"assistant",
+                        "content":[{"type":"output_text","text":"The Haskell cell completed with result 42."}]
+                    }))],
+                    usage: Default::default(),
+                });
+            }
             let round = {
                 let mut requests = self.requests.lock().unwrap();
                 requests.push(request);
@@ -416,7 +436,10 @@ mod tests {
             Ok(ResponsesTurn {
                 response_id: format!("park-{round}"),
                 items,
-                usage: Default::default(),
+                usage: harness::transport::Usage {
+                    input_tokens: if round == 1 { 100_001 } else { 0 },
+                    ..Default::default()
+                },
             })
         }
     }
@@ -480,6 +503,7 @@ mod tests {
             completed: Arc::new(tokio::sync::Notify::new()),
             release: Arc::new(tokio::sync::Notify::new()),
             requests: Arc::new(Mutex::new(vec![])),
+            compactions: Arc::new(AtomicU64::new(0)),
         };
         let embedded = attach_actor(
             &service,
@@ -565,6 +589,7 @@ mod tests {
         }
         let requests = transport.requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
+        assert_eq!(transport.compactions.load(Ordering::Relaxed), 1);
         assert_eq!(
             requests[2]
                 .input
