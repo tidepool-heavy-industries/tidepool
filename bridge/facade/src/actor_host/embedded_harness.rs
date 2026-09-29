@@ -7,7 +7,8 @@ use std::{
 };
 
 use exomonad_actor::{
-    ActorAdmissionLease, ActorExitKind, ActorTerminal, LocalActorRef, WorkbenchCancellationOutcome,
+    ActorAdmissionLease, ActorExitKind, ActorTerminal, LocalActorRef, ResidentToolError,
+    WorkbenchCancellationOutcome,
 };
 use exomonad_tool::{ToolArguments, ToolInvocationContext};
 use harness::{
@@ -144,6 +145,12 @@ impl HostActor for EmbeddedHostActor {
     }
 
     fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+        // A request must pin its handler before retirement closes admission.
+        // The short lease also prevents cleanup from overtaking snapshot capture.
+        let _admission = self
+            .actor
+            .admit_transaction()
+            .map_err(|error| EmbeddedError::Host(error.to_string()))?;
         let snapshot = Arc::new(
             self.installation
                 .request_snapshot()
@@ -285,10 +292,18 @@ impl CancellationOwner for EmbeddedDispatcher {
             Err(error) => return CancellationAcknowledgment::Unconfirmed(error.to_string()),
         };
         match self.snapshot.cancel(context).await {
-            Ok(
-                WorkbenchCancellationOutcome::Cancelled { .. }
-                | WorkbenchCancellationOutcome::Expired { .. },
-            ) => CancellationAcknowledgment::Stopped,
+            Ok(WorkbenchCancellationOutcome::Cancelled { .. }) => {
+                CancellationAcknowledgment::Stopped
+            }
+            Ok(WorkbenchCancellationOutcome::Expired { reply, .. }) => {
+                let result = reply
+                    .map_err(ResidentToolError::Invocation)
+                    .and_then(|response| {
+                        serde_json::to_value(response).map_err(ResidentToolError::Encoding)
+                    })
+                    .map_err(|error| ProviderError::Tool(error.to_string()).to_string());
+                CancellationAcknowledgment::Completed(result)
+            }
             Ok(outcome) => CancellationAcknowledgment::Unconfirmed(format!("{outcome:?}")),
             Err(error) => CancellationAcknowledgment::Unconfirmed(error.to_string()),
         }
@@ -452,6 +467,60 @@ mod tests {
             InputObservation::Included(_)
         ));
         drop(requests);
+        campaign.forest.shutdown().await;
+        campaign.hosted.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn request_snapshot_rejects_closed_actor_before_installation_clears() {
+        let campaign = TestCampaign::start().await;
+        let actor = campaign.actor.identity();
+        let installation = Arc::new(EmbeddedPolicyInstallation::from_installation(
+            &campaign.root_installation,
+        ));
+        let identity = HostIdentity {
+            run: super::super::runtime_namespace(campaign.session_root.path()),
+            actor: AgentPath("/root".into()),
+            incarnation: actor.incarnation.0.to_string(),
+        };
+        let (wakes, _incoming) = mpsc::unbounded_channel();
+        let host = EmbeddedHostActor::new(
+            identity,
+            campaign.actor.clone(),
+            installation.clone(),
+            wakes,
+        )
+        .unwrap();
+        let held_store_transaction = campaign.actor.admit_transaction().unwrap();
+        let retiring_actor = campaign.actor.clone();
+        let retiring = tokio::spawn(async move {
+            retiring_actor
+                .shutdown(ActorTerminal {
+                    kind: ActorExitKind::Cancelled,
+                    summary: "request snapshot retirement race".into(),
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if campaign.actor.admit_transaction().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            installation.request_snapshot().is_ok(),
+            "the old installation remains published"
+        );
+        assert!(
+            host.tool_surface().is_err(),
+            "closed admission must reject a new request"
+        );
+        drop(held_store_transaction);
+        retiring.await.unwrap().unwrap();
         campaign.forest.shutdown().await;
         campaign.hosted.await.unwrap();
     }
