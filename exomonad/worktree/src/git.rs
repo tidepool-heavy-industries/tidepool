@@ -1747,6 +1747,40 @@ mod admission_tests {
     }
 
     #[test]
+    fn capture_within_returns_none_when_its_finite_deadline_expires() {
+        let repo = crate::testing::TestRepo::init().unwrap();
+        let git = repo.git().clone();
+        let capture = git.try_capture(repo.path()).unwrap().unwrap();
+        let path = repo.path().to_owned();
+        let timeout = std::time::Duration::from_millis(180);
+        let outer_deadline = std::time::Duration::from_secs(5);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let waiter_git = git.clone();
+        let waiter_path = path.clone();
+        let waiter = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            started_tx.send(()).unwrap();
+            let permit = waiter_git.capture_within(&waiter_path, timeout).unwrap();
+            finished_tx
+                .send((started.elapsed(), permit.is_some()))
+                .unwrap();
+        });
+
+        started_rx.recv_timeout(outer_deadline).unwrap();
+        let (elapsed, acquired) = finished_rx.recv_timeout(outer_deadline).unwrap();
+        waiter.join().unwrap();
+        assert!(!acquired, "a held capture must make the waiter time out");
+        assert!(
+            elapsed >= timeout,
+            "finite admission returned before its deadline: {elapsed:?}"
+        );
+
+        drop(capture);
+        assert!(git.try_capture(&path).unwrap().is_some());
+    }
+
+    #[test]
     fn source_capture_excludes_host_git_mutation_and_allows_its_own_reads() {
         let repo = crate::testing::TestRepo::init().unwrap();
         repo.writer().commit_file("file", "seed", "seed").unwrap();
