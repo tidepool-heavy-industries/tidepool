@@ -677,9 +677,9 @@ impl SessionLib {
         })
     }
 
-    /// Attach a v2 manifest before any declaration is allocated. A graph with
-    /// published nodes requires typed interface hydration before it can serve
-    /// turns, so this entry admits only an empty graph or burned reservations.
+    /// Attach a v2 manifest before any declaration is allocated. Private-only
+    /// nodes stay inaccessible after restart; a published root requires exact
+    /// interface hydration before it can serve turns.
     pub fn attach_empty_recovery_graph_v2(
         &mut self,
         path: impl Into<PathBuf>,
@@ -712,7 +712,6 @@ impl SessionLib {
                     .public_surfaces
                     .iter()
                     .any(|surface| surface.declaration_root.is_some())
-                    || !read.graph.nodes.is_empty()
                 {
                     return Err(SessionError::RecoveryManifest {
                         path,
