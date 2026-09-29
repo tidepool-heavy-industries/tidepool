@@ -30,7 +30,21 @@ import Tidepool.ExactHydration
 main :: IO ()
 main = getArgs >>= \case
   ["--consumer", root] -> recoveredConsumer root
+  ["--wire-fixture", root] -> do
+    let input = emptyWireInput
+    BS.writeFile (root </> "join-v2.cbor") (encodeDeclarationJoin input)
+    writeFile (root </> "join-v2.json") (renderDeclarationJoinOutcome
+      (DeclarationJoinOutcome input (Just (ModuleSnapshot "Join" "/scratch/Join.hi" (replicate 64 '0'))) JoinAccepted))
+    BS.writeFile (root </> "inventory-v2.cbor") (encodeDeclarationInventory [])
+    writeFile (root </> "inventory-v2.json") (renderDeclarationInventoryOutcome
+      (DeclarationInventoryOutcome [] (Right [])))
   [] -> bracket temporary removeDirectoryRecursive $ \root -> do
+    golden <- BS.readFile "test-cell-splitter/fixtures/declaration-join/join-v2.cbor"
+    unless (golden == encodeDeclarationJoin emptyWireInput) (fail "join CBOR differs from cross-language fixture")
+    expectedReceipt <- readFile "test-cell-splitter/fixtures/declaration-join/join-v2.json"
+    unless (expectedReceipt == renderDeclarationJoinOutcome (DeclarationJoinOutcome emptyWireInput
+      (Just (ModuleSnapshot "Join" "/scratch/Join.hi" (replicate 64 '0'))) JoinAccepted))
+      (fail "join receipt differs from cross-language fixture")
     let fixture = "test-cell-splitter/fixtures/declaration-join/exact-isolation"
     forM_ sourceFiles $ \file -> copyFile (fixture </> file) (root </> file)
     libdir <- ghcLibdir
@@ -64,12 +78,41 @@ main = getArgs >>= \case
             (map (exportIdentity . ifFamInstAxiom) (mi_fam_insts publicIface))
           fullFamilies = [exportIdentity (ifFamInstAxiom i) | iface <- ifaces, i <- mi_fam_insts iface]
           joined = mkModule (stringToUnit "main") (mkModuleName "Joined")
+      let declarationArtifacts = [DeclarationArtifact a Nothing | a <- artifacts]
+          inventoryManifest = root </> "inventory.cbor"
+      liftIO $ BS.writeFile inventoryManifest (encodeDeclarationInventory declarationArtifacts)
+      operation <- liftIO (readDeclarationOperation inventoryManifest)
+      liftIO $ unless (operation == InspectInventory declarationArtifacts)
+        (fail "inventory manifest changed across transport")
+      inspected <- liftIO (inspectDeclarationArtifacts initial declarationArtifacts)
+      liftIO $ case inspectionResult inspected of
+        Right inventories | map inventoryArtifact inventories == declarationArtifacts
+          , map inventoryInstances inventories == map (interfaceInventory . snd) loaded -> pure ()
+        other -> fail ("original interface inventory was not retained: " ++ show other)
+      liftIO $ writeFile (root </> "inventory-receipt.json") (renderDeclarationInventoryOutcome inspected)
       exports <- liftIO $ (++) <$> interfaceExports hydrated commonIface <*> interfaceExports hydrated oldIface
-      outcome <- liftIO $ buildJoinedInterface hydrated joined (root </> "Joined.hi")
-        ifaces exports selected fullFamilies
-      liftIO $ case outcome of
-        Left rejected -> fail ("sound isolation join rejected: " ++ show rejected)
-        Right _ -> pure ()
+      let input = DeclarationJoinInput "paired-public-snapshot" Nothing Nothing Nothing []
+            (ReservedJoin "main" "Joined" (root </> "Joined.hi")) exports selected
+            [DeclarationArtifact a Nothing | a <- artifacts] fullFamilies
+          manifest = root </> "join.cbor"
+      liftIO $ BS.writeFile manifest (encodeDeclarationJoin input)
+      decoded <- liftIO (readDeclarationJoin manifest)
+      liftIO $ unless (decoded == input) (fail "exact join manifest changed across transport")
+      outcome <- liftIO (validateDeclarationJoin initial decoded)
+      liftIO $ case outcomeDecision outcome of
+        JoinAccepted | outcomeInput outcome == input, Just _ <- outcomeArtifact outcome -> pure ()
+        rejected -> fail ("sound isolation join rejected: " ++ show rejected)
+      liftIO $ writeFile (root </> "join-receipt.json") (renderDeclarationJoinOutcome outcome)
+      -- Rejection echoes the same paired version and exact request provenance.
+      rejectedInput <- case implementationArtifacts input of
+        entry : rest -> pure input { implementationArtifacts = entry
+          { artifactInterface = (artifactInterface entry) { exactSha256 = replicate 64 '0' } } : rest }
+        [] -> liftIO (fail "fixture implementation artifacts unexpectedly empty")
+      rejected <- liftIO (validateDeclarationJoin initial rejectedInput)
+      liftIO $ case outcomeDecision rejected of
+        JoinRejected ArtifactChanged _ | outcomeInput rejected == rejectedInput
+          , outcomeArtifact rejected == Nothing -> pure ()
+        other -> fail ("changed artifact did not produce bound rejection: " ++ show other)
       -- Retrying an already published reservation cannot overwrite its bytes.
       before <- liftIO (BS.readFile (root </> "Joined.hi"))
       collision <- liftIO (try (buildJoinedInterface hydrated joined (root </> "Joined.hi")
@@ -196,3 +239,7 @@ temporary = do
   removeFile path
   createDirectory path
   pure path
+
+emptyWireInput :: DeclarationJoinInput
+emptyWireInput = DeclarationJoinInput "paired-snapshot" Nothing Nothing Nothing []
+  (ReservedJoin "main" "Join" "/scratch/Join.hi") [] (InstanceInventory [] []) [] []

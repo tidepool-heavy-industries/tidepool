@@ -5,14 +5,27 @@ module Tidepool.DeclarationJoin
   , InstanceInventory(..), JoinDecision(..), JoinRejection(..)
   , buildJoinedInterface, validateRetainedFamilyInstances
   , exportIdentity, interfaceExports, interfaceInventory
+  , ReservedJoin(..), DeclarationArtifact(..), DeclarationWrite(..)
+  , DeclarationJoinInput(..), DeclarationJoinOutcome(..)
+  , readDeclarationJoin, encodeDeclarationJoin, validateDeclarationJoin, renderDeclarationJoinOutcome
+  , DeclarationInventory(..), DeclarationOperation(..), DeclarationInventoryOutcome(..)
+  , readDeclarationOperation, encodeDeclarationInventory, inspectDeclarationArtifacts
+  , renderDeclarationInventoryOutcome
   ) where
 
+import Codec.CBOR.Decoding
+import Codec.CBOR.Encoding
+import Codec.CBOR.Read (deserialiseFromBytes)
+import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (bracket)
-import Control.Monad (forM)
+import Control.Monad (forM, replicateM, unless, when)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
-import Data.List (nubBy, sort, sortBy, tails)
-import Data.Maybe (isJust)
+import Data.ByteString.Lazy qualified as BL
+import Data.List (intercalate, nubBy, sort, sortBy, tails)
+import Data.Maybe (catMaybes, isJust)
+import Data.Text qualified as T
+import Data.Word (Word64)
 import GHC.Core.FamInstEnv
 import GHC.Core.InstEnv
 import GHC.Core.TyCon (isClassTyCon, tyConInjectivityInfo, Injectivity(..))
@@ -31,7 +44,7 @@ import GHC.Tc.Utils.Monad (initIfaceCheck)
 import GHC.Types.Avail (AvailInfo(..), availName, availNames)
 import GHC.Types.Name
 import GHC.Types.TyThing (TyThing(..))
-import GHC.Unit.Module (Module, moduleName, moduleNameString, moduleUnit, stableModuleCmp)
+import GHC.Unit.Module (Module, moduleName, moduleNameString, moduleUnit, stableModuleCmp, mkModule, mkModuleName)
 import GHC.Unit.Module.Env (mkModuleSet, emptyModuleSet)
 import GHC.Unit.Module.Deps (Dependencies(..), noDependencies)
 import GHC.Unit.Module.ModIface
@@ -39,13 +52,15 @@ import GHC.Unit.External (ExternalPackageState(..))
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), eltsHpt)
 import GHC.Unit.Env (unitEnv_hpts)
 import GHC.Unit.Module.ModDetails (ModDetails(..))
-import GHC.Unit.Types (unitString)
+import GHC.Unit.Types (unitString, stringToUnit)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Numeric (showHex)
-import System.Directory (removeFile)
-import System.FilePath (takeDirectory)
+import System.Directory (getFileSize, removeFile)
+import System.FilePath (isAbsolute, takeDirectory)
 import System.IO (openBinaryTempFile, hClose)
 import System.Posix.Files (createLink)
+import Tidepool.ExactHydration
+import Tidepool.Json (jsonString)
 
 data ModuleSnapshot = ModuleSnapshot
   { snapshotModule :: String, snapshotPath :: FilePath, snapshotSha256 :: String
@@ -264,3 +279,335 @@ validateInstances classes families
       , let others = extendFamInstEnvList emptyFamInstEnv
               (filter (\b -> fi_axiom a /= fi_axiom b) allFamilies)
       , branch <- lookupFamInstEnvInjectivityConflicts flags (emptyFamInstEnv, others) a]
+
+-- | The runtime owns the ordered merge and opaque public snapshot. Compiler
+-- validation certifies that manifest without deriving a second merge policy.
+data ReservedJoin = ReservedJoin
+  { reservedUnit :: String, reservedModule :: String, reservedPath :: FilePath
+  } deriving (Eq, Show)
+data DeclarationArtifact = DeclarationArtifact
+  { artifactInterface :: ExactIfaceArtifact, artifactProduct :: Maybe ModuleSnapshot
+  } deriving (Eq, Show)
+data DeclarationWrite = DeclarationWrite
+  { writeGeneration :: Word64, writeModule :: ModuleSnapshot
+  , writeExports :: [DeclarationExport], writeRetractions :: [ExportIdentity]
+  } deriving (Eq, Show)
+data DeclarationJoinInput = DeclarationJoinInput
+  { expectedPublicVersion :: String, publicModule :: Maybe ModuleSnapshot
+  , privateBase :: Maybe ModuleSnapshot, privateTip :: Maybe ModuleSnapshot
+  , declarationWrites :: [DeclarationWrite], joinReservation :: ReservedJoin
+  , expectedExports :: [DeclarationExport], expectedInstances :: InstanceInventory
+  , implementationArtifacts :: [DeclarationArtifact], retainedFamilyClosure :: [ExportIdentity]
+  } deriving (Eq, Show)
+data DeclarationJoinOutcome = DeclarationJoinOutcome
+  { outcomeInput :: DeclarationJoinInput, outcomeArtifact :: Maybe ModuleSnapshot
+  , outcomeDecision :: JoinDecision
+  } deriving (Eq, Show)
+
+readDeclarationJoin :: FilePath -> IO DeclarationJoinInput
+readDeclarationJoin path = do
+  size <- getFileSize path
+  when (size > 4 * 1024 * 1024) (fail "declaration join exceeds four MiB")
+  bytes <- BS.readFile path
+  case deserialiseFromBytes decodeDeclarationJoin (BL.fromStrict bytes) of
+    Left failure -> fail (show failure)
+    Right (remaining, input) -> do
+      unless (BL.null remaining && encodeDeclarationJoin input == bytes)
+        (fail "declaration join must be canonical CBOR with no trailing bytes")
+      pure input
+
+decodeDeclarationJoin :: Decoder s DeclarationJoinInput
+decodeDeclarationJoin = do
+  array 12
+  magic <- text
+  version <- text
+  unless (magic == "TPDJOIN" && version == "2") (fail "unsupported declaration join")
+  DeclarationJoinInput <$> text <*> optional snapshot <*> optional snapshot
+    <*> optional snapshot <*> vector write <*> reservation <*> vector declarationExport
+    <*> inventory <*> vector artifact <*> vector identity
+  where
+    snapshot = do
+      array 3
+      value <- ModuleSnapshot <$> nonempty <*> absolutePath <*> digest
+      pure value
+    reservation = array 3 >> ReservedJoin <$> nonempty <*> nonempty <*> absolutePath
+    write = array 4 >> DeclarationWrite <$> decodeWord64 <*> snapshot
+      <*> vector declarationExport <*> vector identity
+    declarationExport = array 3 >> DeclarationExport <$> kind <*> identity <*> vector identity
+    inventory = array 2 >> InstanceInventory <$> vector identity <*> vector identity
+    identity = array 5 >> ExportIdentity <$> nonempty <*> nonempty <*> namespace
+      <*> nonempty <*> optional text
+    namespace = text >>= \case
+      "value" -> pure ValueNamespace
+      "type" -> pure TypeNamespace
+      "constructor" -> pure ConstructorNamespace
+      "field" -> pure FieldNamespace
+      _ -> fail "invalid declaration export namespace"
+    kind = text >>= \case
+      "value" -> pure ValueDeclaration
+      "type" -> pure TypeDeclaration
+      "class" -> pure ClassDeclaration
+      _ -> fail "invalid declaration export kind"
+    artifact = array 2 >> DeclarationArtifact <$> exact <*> optional snapshot
+    exact = array 5 >> ExactIfaceArtifact <$> nonempty <*> nonempty <*> absolutePath
+      <*> digest <*> vector (array 2 >> (,) <$> nonempty <*> nonempty)
+    nonempty = text >>= \value -> if null value then fail "empty declaration identity" else pure value
+    absolutePath = text >>= \value -> if isAbsolute value then pure value else fail "relative declaration artifact path"
+    digest = text >>= \value -> if length value == 64 && all (`elem` ['0'..'9'] ++ ['a'..'f']) value
+      then pure value else fail "invalid declaration artifact SHA256"
+
+array :: Int -> Decoder s ()
+array expected = decodeListLen >>= \count -> unless (count == expected) (fail "invalid join field count")
+text :: Decoder s String
+text = T.unpack <$> decodeString
+vector :: Decoder s a -> Decoder s [a]
+vector item = do
+  count <- decodeListLen
+  when (count > 16384) (fail "too many declaration join items")
+  replicateM count item
+optional :: Decoder s a -> Decoder s (Maybe a)
+optional item = peekTokenType >>= \case
+  TypeNull -> decodeNull >> pure Nothing
+  _ -> Just <$> item
+
+encodeDeclarationJoin :: DeclarationJoinInput -> BS.ByteString
+encodeDeclarationJoin input = toStrictByteString $
+  encodeListLen 12 <> wireText "TPDJOIN" <> wireText "2" <> wireText (expectedPublicVersion input)
+  <> wireOptional wireSnapshot (publicModule input) <> wireOptional wireSnapshot (privateBase input)
+  <> wireOptional wireSnapshot (privateTip input) <> wireList wireWrite (declarationWrites input)
+  <> wireReservation (joinReservation input) <> wireList wireExport (expectedExports input)
+  <> wireInventory (expectedInstances input) <> wireList wireArtifact (implementationArtifacts input)
+  <> wireList wireIdentity (retainedFamilyClosure input)
+
+wireText :: String -> Encoding
+wireText = encodeString . T.pack
+wireList :: (a -> Encoding) -> [a] -> Encoding
+wireList f values = encodeListLen (fromIntegral (length values)) <> foldMap f values
+wireOptional :: (a -> Encoding) -> Maybe a -> Encoding
+wireOptional = maybe encodeNull
+wireSnapshot :: ModuleSnapshot -> Encoding
+wireSnapshot value = encodeListLen 3 <> foldMap wireText
+  [snapshotModule value, snapshotPath value, snapshotSha256 value]
+wireReservation :: ReservedJoin -> Encoding
+wireReservation value = encodeListLen 3 <> foldMap wireText
+  [reservedUnit value, reservedModule value, reservedPath value]
+wireIdentity :: ExportIdentity -> Encoding
+wireIdentity value = encodeListLen 5 <> foldMap wireText
+  [exportUnit value, exportModule value, namespaceWire (exportNamespace value), exportOccurrence value]
+  <> wireOptional wireText (exportRecordParent value)
+wireExport :: DeclarationExport -> Encoding
+wireExport value = encodeListLen 3 <> wireText (kindWire (exportKind value))
+  <> wireIdentity (exportHead value) <> wireList wireIdentity (exportChildren value)
+wireInventory :: InstanceInventory -> Encoding
+wireInventory value = encodeListLen 2 <> wireList wireIdentity (inventoryClasses value)
+  <> wireList wireIdentity (inventoryFamilies value)
+wireWrite :: DeclarationWrite -> Encoding
+wireWrite value = encodeListLen 4 <> encodeWord64 (writeGeneration value)
+  <> wireSnapshot (writeModule value) <> wireList wireExport (writeExports value)
+  <> wireList wireIdentity (writeRetractions value)
+wireArtifact :: DeclarationArtifact -> Encoding
+wireArtifact value = encodeListLen 2 <> exact (artifactInterface value)
+  <> wireOptional wireSnapshot (artifactProduct value)
+  where
+    exact iface = encodeListLen 5 <> foldMap wireText
+      [exactUnit iface, exactModule iface, exactPath iface, exactSha256 iface]
+      <> wireList (\(unit, name) -> encodeListLen 2 <> wireText unit <> wireText name) (exactRequirements iface)
+namespaceWire :: ExportNamespace -> String
+namespaceWire = \case
+  ValueNamespace -> "value"
+  TypeNamespace -> "type"
+  ConstructorNamespace -> "constructor"
+  FieldNamespace -> "field"
+kindWire :: DeclarationKind -> String
+kindWire = \case
+  ValueDeclaration -> "value"
+  TypeDeclaration -> "type"
+  ClassDeclaration -> "class"
+
+-- | Use a fresh compiler transaction and exact home interfaces. Package
+-- evidence follows the ordinary pinned package policy. Infrastructure failures
+-- propagate to the worker handler; semantic rejection is a successful receipt.
+validateDeclarationJoin :: HscEnv -> DeclarationJoinInput -> IO DeclarationJoinOutcome
+validateDeclarationJoin initial input = do
+  let reject reason diagnostic = pure (DeclarationJoinOutcome input Nothing (JoinRejected reason diagnostic))
+      artifacts = implementationArtifacts input
+      exacts = map artifactInterface artifacts
+      reservation = joinReservation input
+      anchors = catMaybes [publicModule input, privateBase input, privateTip input]
+        ++ map writeModule (declarationWrites input)
+      anchorPresent anchor = any (\iface -> snapshotModule anchor == exactModule iface
+          && snapshotPath anchor == exactPath iface && snapshotSha256 anchor == exactSha256 iface) exacts
+  if not (all anchorPresent anchors)
+    then reject ArtifactChanged "a provenance anchor is absent from the exact interface closure"
+    else do
+      unchanged <- artifactsUnchanged artifacts
+      if not unchanged then reject ArtifactChanged "implementation artifact bytes changed" else do
+        fresh <- freshExactState initial
+        loaded <- readExactIfaceArtifacts fresh exacts
+        case loaded of
+          Left diagnostic -> reject ArtifactChanged diagnostic
+          Right verified -> do
+            hydrated <- hydrateExactScope fresh verified
+            let joined = mkModule (stringToUnit (reservedUnit reservation)) (mkModuleName (reservedModule reservation))
+            result <- buildJoinedInterface hydrated joined (reservedPath reservation)
+              (map snd verified) (expectedExports input) (expectedInstances input) (retainedFamilyClosure input)
+            case result of
+              Left (reason, diagnostic) -> reject reason diagnostic
+              Right output -> do
+                unchangedAfter <- artifactsUnchanged artifacts
+                if not unchangedAfter then reject ArtifactChanged "implementation artifacts changed during validation"
+                  else pure (DeclarationJoinOutcome input (Just output) JoinAccepted)
+
+artifactsUnchanged :: [DeclarationArtifact] -> IO Bool
+artifactsUnchanged artifacts = and <$> forM artifacts (\artifact -> do
+  let iface = artifactInterface artifact
+  interfaceHash <- sha256 <$> BS.readFile (exactPath iface)
+  productMatches <- case artifactProduct artifact of
+    Nothing -> pure True
+    Just compiledProduct -> do
+      hash <- sha256 <$> BS.readFile (snapshotPath compiledProduct)
+      pure (snapshotModule compiledProduct == exactModule iface && hash == snapshotSha256 compiledProduct)
+  pure (interfaceHash == exactSha256 iface && productMatches))
+
+-- | Every outcome is bound to the same exact request, including semantic
+-- rejection. Runtime alone compares the echoed paired snapshot for staleness.
+renderDeclarationJoinOutcome :: DeclarationJoinOutcome -> String
+renderDeclarationJoinOutcome outcome = object
+  [ ("version", "2"), ("expected_public_version", jsonString (expectedPublicVersion input))
+  , ("request_sha256", jsonString (sha256 (encodeDeclarationJoin input)))
+  , ("reserved", object [("unit", jsonString (reservedUnit reserved)), ("module", jsonString (reservedModule reserved))
+      , ("path", jsonString (reservedPath reserved))])
+  , ("implementation_sha256", proof (wireList wireArtifact (implementationArtifacts input)))
+  , ("exports_sha256", proof (wireList wireExport (expectedExports input)))
+  , ("instances_sha256", proof (wireInventory (expectedInstances input)))
+  , ("family_closure_sha256", proof (wireList wireIdentity (retainedFamilyClosure input)))
+  , ("artifact", maybe "null" snapshotJson (outcomeArtifact outcome))
+  , ("decision", case outcomeDecision outcome of
+      JoinAccepted -> object [("status", jsonString "accepted")]
+      JoinRejected reason diagnostic -> object [("status", jsonString "rejected")
+        , ("reason", jsonString (reasonWire reason)), ("diagnostic", jsonString diagnostic)])
+  ]
+  where
+    input = outcomeInput outcome
+    reserved = joinReservation input
+    proof = jsonString . sha256 . toStrictByteString
+    object pairs = "{" ++ intercalate "," [jsonString key ++ ":" ++ value | (key, value) <- pairs] ++ "}"
+    snapshotJson snapshot = object [("module", jsonString (snapshotModule snapshot))
+      , ("path", jsonString (snapshotPath snapshot)), ("sha256", jsonString (snapshotSha256 snapshot))]
+    reasonWire = \case
+      ArtifactChanged -> "artifact_changed"
+      ExportMismatch -> "export_mismatch"
+      ClassInstanceConflict -> "class_instance_conflict"
+      FamilyInstanceConflict -> "family_instance_conflict"
+      InstanceMismatch -> "instance_mismatch"
+      Unprovable -> "unprovable"
+
+-- | The inventory query is the sole bridge from original GHC Names into the
+-- runtime merge. Authored text and unqualified export names are insufficient.
+data DeclarationInventory = DeclarationInventory
+  { inventoryArtifact :: DeclarationArtifact, inventoryExports :: [DeclarationExport]
+  , inventoryInstances :: InstanceInventory
+  } deriving (Eq, Show)
+data DeclarationOperation = InspectInventory [DeclarationArtifact] | ValidateJoin DeclarationJoinInput
+  deriving (Eq, Show)
+data DeclarationInventoryOutcome = DeclarationInventoryOutcome
+  { inspectedArtifacts :: [DeclarationArtifact]
+  , inspectionResult :: Either (JoinRejection, String) [DeclarationInventory]
+  } deriving (Eq, Show)
+
+readDeclarationOperation :: FilePath -> IO DeclarationOperation
+readDeclarationOperation path = do
+  size <- getFileSize path
+  when (size > 4 * 1024 * 1024) (fail "declaration operation exceeds four MiB")
+  bytes <- BS.readFile path
+  case deserialiseFromBytes (decodeListLen >> text) (BL.fromStrict bytes) of
+    Left failure -> fail (show failure)
+    Right (_, "TPDJOIN") -> ValidateJoin <$> readDeclarationJoin path
+    Right (_, "TPDINVENTORY") -> case deserialiseFromBytes decodeInventory (BL.fromStrict bytes) of
+      Left failure -> fail (show failure)
+      Right (remaining, artifacts) -> do
+        unless (BL.null remaining && encodeDeclarationInventory artifacts == bytes)
+          (fail "inventory must be canonical CBOR with no trailing bytes")
+        pure (InspectInventory artifacts)
+    _ -> fail "unsupported declaration operation"
+  where
+    decodeInventory = do
+      array 3
+      magic <- text
+      version <- text
+      unless (magic == "TPDINVENTORY" && version == "2") (fail "unsupported declaration inventory")
+      vector artifact
+    artifact = array 2 >> DeclarationArtifact <$> exact <*> optional snapshot
+    exact = array 5 >> ExactIfaceArtifact <$> nonempty <*> nonempty <*> absolutePath
+      <*> digest <*> vector (array 2 >> (,) <$> nonempty <*> nonempty)
+    snapshot = array 3 >> ModuleSnapshot <$> nonempty <*> absolutePath <*> digest
+    nonempty = text >>= \value -> if null value then fail "empty declaration identity" else pure value
+    absolutePath = text >>= \value -> if isAbsolute value then pure value else fail "relative declaration artifact path"
+    digest = text >>= \value -> if length value == 64 && all (`elem` ['0'..'9'] ++ ['a'..'f']) value
+      then pure value else fail "invalid declaration artifact SHA256"
+
+encodeDeclarationInventory :: [DeclarationArtifact] -> BS.ByteString
+encodeDeclarationInventory artifacts = toStrictByteString $
+  encodeListLen 3 <> wireText "TPDINVENTORY" <> wireText "2" <> wireList wireArtifact artifacts
+
+inspectDeclarationArtifacts :: HscEnv -> [DeclarationArtifact] -> IO DeclarationInventoryOutcome
+inspectDeclarationArtifacts initial artifacts = do
+  let rejected diagnostic = pure (DeclarationInventoryOutcome artifacts (Left (ArtifactChanged, diagnostic)))
+  unchanged <- artifactsUnchanged artifacts
+  if not unchanged then rejected "implementation artifact bytes changed" else do
+    fresh <- freshExactState initial
+    loaded <- readExactIfaceArtifacts fresh (map artifactInterface artifacts)
+    case loaded of
+      Left diagnostic -> rejected diagnostic
+      Right verified -> do
+        hydrated <- hydrateExactScope fresh verified
+        inventories <- forM (zip artifacts verified) $ \(artifact, (_, iface)) ->
+          DeclarationInventory artifact <$> interfaceExports hydrated iface <*> pure (interfaceInventory iface)
+        unchangedAfter <- artifactsUnchanged artifacts
+        if not unchangedAfter then rejected "implementation artifacts changed during inspection"
+          else pure (DeclarationInventoryOutcome artifacts (Right inventories))
+
+renderDeclarationInventoryOutcome :: DeclarationInventoryOutcome -> String
+renderDeclarationInventoryOutcome outcome = jsonObject
+  [ ("version", "2")
+  , ("request_sha256", jsonString (sha256 (encodeDeclarationInventory artifacts)))
+  , ("implementation_sha256", jsonString (sha256 (toStrictByteString (wireList wireArtifact artifacts))))
+  , ("inventories", either (const "null") (jsonArray . map inventoryJson) result)
+  , ("family_closure", either (const "null") (jsonArray . map identityJson . familyInventory) result)
+  , ("decision", case result of
+      Right _ -> jsonObject [("status", jsonString "accepted")]
+      Left (reason, diagnostic) -> jsonObject [("status", jsonString "rejected")
+        , ("reason", jsonString (case reason of ArtifactChanged -> "artifact_changed"; _ -> "unprovable"))
+        , ("diagnostic", jsonString diagnostic)])
+  ]
+  where
+    artifacts = inspectedArtifacts outcome
+    result = inspectionResult outcome
+    familyInventory = sort . nubBy (==) . concatMap (inventoryFamilies . inventoryInstances)
+    inventoryJson inventory = jsonObject
+      [ ("artifact", artifactJson (inventoryArtifact inventory))
+      , ("exports", jsonArray (map exportJson (inventoryExports inventory)))
+      , ("instances", instancesJson (inventoryInstances inventory)) ]
+
+jsonObject :: [(String, String)] -> String
+jsonObject pairs = "{" ++ intercalate "," [jsonString key ++ ":" ++ value | (key, value) <- pairs] ++ "}"
+jsonArray :: [String] -> String
+jsonArray values = "[" ++ intercalate "," values ++ "]"
+identityJson :: ExportIdentity -> String
+identityJson identity = jsonObject [("unit", jsonString (exportUnit identity)), ("module", jsonString (exportModule identity))
+  , ("namespace", jsonString (namespaceWire (exportNamespace identity))), ("occurrence", jsonString (exportOccurrence identity))
+  , ("record_parent", maybe "null" jsonString (exportRecordParent identity))]
+exportJson :: DeclarationExport -> String
+exportJson value = jsonObject [("kind", jsonString (kindWire (exportKind value))), ("head", identityJson (exportHead value))
+  , ("children", jsonArray (map identityJson (exportChildren value)))]
+instancesJson :: InstanceInventory -> String
+instancesJson value = jsonObject [("classes", jsonArray (map identityJson (inventoryClasses value)))
+  , ("families", jsonArray (map identityJson (inventoryFamilies value)))]
+artifactJson :: DeclarationArtifact -> String
+artifactJson artifact = jsonObject [("interface", jsonObject
+  [("unit", jsonString (exactUnit iface)), ("module", jsonString (exactModule iface)), ("path", jsonString (exactPath iface))
+  , ("sha256", jsonString (exactSha256 iface)), ("requirements", jsonArray
+      [jsonArray [jsonString unit, jsonString name] | (unit, name) <- exactRequirements iface])])
+  , ("product", maybe "null" (\value -> jsonObject [("module", jsonString (snapshotModule value))
+      , ("path", jsonString (snapshotPath value)), ("sha256", jsonString (snapshotSha256 value))]) (artifactProduct artifact))]
+  where iface = artifactInterface artifact
