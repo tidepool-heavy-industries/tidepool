@@ -64,7 +64,8 @@ import Tidepool.PreparedStg
   ( PreparedModule(..), PreparedBodyCache, newPreparedBodyCache
   , evictPreparedBodyMatching )
 import Tidepool.PreparedRecovery
-  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecovery )
+  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithCached )
+import Tidepool.ModuleCandidates (ModuleCandidate(..))
 import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson
   ( ReportOutcome(..), DiagSeverity(..), Diag(..), SourceRejection(..)
@@ -427,8 +428,11 @@ processFile compiler caches timing args path = do
     let preparedTargets = case requestTargets args of
           targets@(_ : _) -> targets
           [] -> maybe [] pure mTarget
+    let certifiedHomes = Set.fromList
+          [(candidateUnit candidate, candidateModule candidate)
+          | candidate <- pprAcceptedCandidates prepared]
     (preparedArtifacts, productContext) <- prepareArtifacts caches path hscEnv (pprModules prepared) preparedTargets
-      (standardAuxiliaryRoots binds) (requestRetainedGenerations args)
+      (standardAuxiliaryRoots binds) (requestRetainedGenerations args) certifiedHomes
     if null preparedArtifacts
       then ioError (userError "prepared extraction requires --target or --targets")
       else timePhase timing "prepared_sidecars" $ writePreparedSidecars SeparateYieldSites outDir binds tycons mCapturedTy warnTexts preparedArtifacts
@@ -437,11 +441,14 @@ processFile compiler caches timing args path = do
     availability <- timePhase timing "module_products" $ writeModuleProducts outDir hscEnv
       productContext (pprModules prepared) (pprProductInterfaces prepared)
     let dependencies = pprDependencies prepared
+        withCertified = foldr (\candidate -> Map.insert
+          (candidateUnit candidate, candidateModule candidate) ProductReady)
+          availability (pprAcceptedCandidates prepared)
         withAvailability node = node
           { dependencyModuleProduct = Map.findWithDefault
               (dependencyModuleProduct node)
               (dependencyModuleUnit node, dependencyModuleName node)
-              availability
+              withCertified
           }
     writeDependencyEvidence outDir (dependencies
       { dependencyModules = map withAvailability (dependencyModules dependencies) })
@@ -467,9 +474,10 @@ data PreparedArtifact = PreparedArtifact
 -- Project before writing artifacts so the shared constructor
 -- table includes exactly the GHC constructors admitted by prepared execution.
 prepareArtifacts :: RecoveryCaches -> FilePath -> HscEnv -> [PreparedModule] -> [String] -> [String]
-  -> Map.Map SymbolIdentity Word64 -> IO ([PreparedArtifact], Maybe ProjectionContext)
-prepareArtifacts _ _ _ _ [] _ _ = pure ([], Nothing)
-prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliaryRoots retainedGenerations = do
+  -> Map.Map SymbolIdentity Word64 -> Set.Set (String, String)
+  -> IO ([PreparedArtifact], Maybe ProjectionContext)
+prepareArtifacts _ _ _ _ [] _ _ _ = pure ([], Nothing)
+prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliaryRoots retainedGenerations certifiedHomes = do
   timing <- readTimingEnabled
   formattingAuthority <- timePhase timing "formatting_authority" $ resolveFormattingAuthority hscEnv
   timeAuthority <- timePhase timing "time_authority" $ resolveTimeAuthority hscEnv
@@ -505,8 +513,8 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
           , projectionJsonAuthority = jsonAuthority
           , projectionTextUnit = textAuthority
           }
-  recover <- newPreparedRecovery hscEnv (rcFatIface caches) (rcOwnerIface caches)
-    (rcPreparedBodies caches) (contextFor firstTarget) modules
+  recover <- newPreparedRecoveryWithCached hscEnv (rcFatIface caches) (rcOwnerIface caches)
+    (rcPreparedBodies caches) certifiedHomes (contextFor firstTarget) modules
   artifacts <- forM targets $ \target -> do
     let context = contextFor target
     -- Three flat phases, one row each per target (see Tidepool.Timing).
@@ -562,7 +570,7 @@ writeModuleProducts outDir hscEnv (Just context) modules interfaces = do
           pure (key, ProductReady, Just (T.pack (fst key),
             T.pack (snd key), bytes, groups))
   BS.writeFile (outDir </> "module-products.cbor")
-    (encodeModuleProducts [product | (_, _, Just product) <- outcomes])
+    (encodeModuleProducts [moduleProduct | (_, _, Just moduleProduct) <- outcomes])
   pure (Map.fromList [(key, status) | (key, status, _) <- outcomes])
 
 requireProjection :: Either ProjectionError a -> IO a
@@ -813,7 +821,8 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
     -- Projection remains outside compileVariants. Its entry is the settled
     -- scaffold, and its constructors join the shared metadata before write.
     (preparedArtifacts, _) <- prepareArtifacts caches compiledPath hscEnv preparedModules
-      [preparedScaffoldTargetName] (standardAuxiliaryRoots binds) (requestRetainedGenerations args)
+      [preparedScaffoldTargetName] (standardAuxiliaryRoots binds)
+      (requestRetainedGenerations args) Set.empty
     let asksSites = concatMap paYieldSites preparedArtifacts
     timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts

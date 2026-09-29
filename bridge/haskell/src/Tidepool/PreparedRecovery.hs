@@ -2,7 +2,8 @@
 -- remains a separate owner: this path never loads missing source-home bodies
 -- from an interface left by an earlier edit.
 module Tidepool.PreparedRecovery
-  ( RecoveryFailure(..), RecoveredClosure(..), recoverPreparedClosure, newPreparedRecovery
+  ( RecoveryFailure(..), RecoveredClosure(..), recoverPreparedClosure
+  , newPreparedRecovery, newPreparedRecoveryWithCached
   , insertGroup
   ) where
 
@@ -123,7 +124,16 @@ recoverPreparedClosure env cache ownerCache bodyCache context home = do
 newPreparedRecovery :: HscEnv -> FatIfaceCache -> OwnerInterfaceCache
   -> PreparedBodyCache -> ProjectionContext -> [PreparedModule]
   -> IO (SymbolIdentity -> IO RecoveredClosure)
-newPreparedRecovery env cache ownerCache bodyCache baseContext home = do
+newPreparedRecovery env cache ownerCache bodyCache baseContext home =
+  newPreparedRecoveryWithCached env cache ownerCache bodyCache Set.empty baseContext home
+
+-- Certified cached homes supply their original binder definitions through
+-- exact neutral products. They are external references for this projection;
+-- only the worker's accepted candidate set may populate this parameter.
+newPreparedRecoveryWithCached :: HscEnv -> FatIfaceCache -> OwnerInterfaceCache
+  -> PreparedBodyCache -> Set.Set (String, String) -> ProjectionContext
+  -> [PreparedModule] -> IO (SymbolIdentity -> IO RecoveredClosure)
+newPreparedRecoveryWithCached env cache ownerCache bodyCache certifiedHomes baseContext home = do
   timing <- readTimingEnabled
   checking <- isJust <$> lookupEnv "TIDEPOOL_RECOVERY_CHECK"
   let factsOf prepared =
@@ -225,6 +235,9 @@ newPreparedRecovery env cache ownerCache bodyCache baseContext home = do
         lookupOne _cacheRef homeOwnersRef (groups, dirty, failures) binder
           | Just _ <- wiredInErrorKind binder = pure (groups, dirty, failures)
           | Just _ <- deferredFunction binder = pure (groups, dirty, failures)
+          | Just owner <- nameModule_maybe (varName binder)
+          , (unitString (moduleUnit owner), moduleNameString (moduleName owner))
+              `Set.member` certifiedHomes = pure (groups, dirty, failures)
           | maybe False (`Set.member` homeOwnersRef) (nameModule_maybe (varName binder)) =
               pure (groups, dirty, failures ++ [MissingHomeImplementation (varName binder)])
           | otherwise = do

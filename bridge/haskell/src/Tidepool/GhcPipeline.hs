@@ -23,9 +23,11 @@ import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit)
 import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger))
 import GHC.Driver.Monad (reflectGhc, reifyGhc)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, addToHpt, lookupHpt)
+import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Types.Avail (availNames)
 import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache)
 import GHC.Iface.Make (mkIfaceTc)
+import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
 import GHC.Unit.Module.ModIface (set_mi_extra_decls)
 import GHC.Iface.Tidy (mkBootModDetailsTc)
 import GHC.Types.SourceFile (HscSource(..))
@@ -110,7 +112,7 @@ import Control.Applicative ((<|>))
 import Control.Exception
   ( finally, try, throwIO, IOException, SomeException, SomeAsyncException
   , fromException, displayException )
-import Data.Maybe (fromMaybe, isJust, isNothing)
+import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes)
 import Data.List (find, isPrefixOf, isInfixOf, nub, nubBy, sort, sortOn, intercalate)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef, writeIORef)
 import Numeric (showHex)
@@ -153,6 +155,11 @@ import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..)
   , DependencyModule(..), DependencyImport(..), ProductAvailability(..)
   , sourceEvidenceWithFingerprint )
+import Tidepool.ExactHydration
+  ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope )
+import Tidepool.ModuleCandidates
+  ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..)
+  , readModuleCandidates )
 
 -- | Selects the compiler representation produced at the internal GHC API
 -- boundary. Metadata consumers stop at the checked environment.
@@ -209,6 +216,7 @@ data PreparedPipelineResult = PreparedPipelineResult
   , pprModules :: [PreparedModule]
   , pprDependencies :: DependencyEvidence
   , pprProductInterfaces :: Map.Map ModuleName ModIface
+  , pprAcceptedCandidates :: [ModuleCandidate]
   }
 
 -- | Metadata has no executable projection. The environment
@@ -1116,14 +1124,22 @@ data GutsMemoEntry = GutsMemoEntry
 data ModuleObservation
   = CachedObservation ModSummary GutsMemoEntry
   | FreshObservation ModuleFront
+  | HydratedObservation ModSummary HomeModInfo
 
 observationSummary :: ModuleObservation -> ModSummary
 observationSummary (CachedObservation summary _) = summary
 observationSummary (FreshObservation front) = mfSummary front
+observationSummary (HydratedObservation summary _) = summary
 
 observationFacts :: ModuleObservation -> IO ModuleFacts
 observationFacts (CachedObservation _ entry) = pure (payloadFacts (gmePayload entry))
 observationFacts (FreshObservation front) = frontFacts front
+observationFacts (HydratedObservation _ hmi) = pure ModuleFacts
+  { moduleFactTyCons = typeEnvTyCons (md_types (hm_details hmi))
+  , moduleFactReferences = Set.empty
+  , moduleFactHasDependentFiles = False
+  , moduleFactQuasiQuoteOrigins = NoQuasiQuotes
+  }
 
 -- | Whether this observation still lacks an executable body for the memo.
 observationLacksBody :: ModuleObservation -> Bool
@@ -1131,6 +1147,7 @@ observationLacksBody (CachedObservation _ entry) = case gmePayload entry of
   ValidationOnly _ -> True
   ExecutableProduct _ -> False
 observationLacksBody (FreshObservation _) = True
+observationLacksBody (HydratedObservation _ _) = False
 
 payloadFacts :: MemoPayload -> ModuleFacts
 payloadFacts (ValidationOnly facts) = facts
@@ -1159,6 +1176,7 @@ requireProduct _ _ Nothing _ = liftIO $ ioError $ userError
 observationFront :: ModuleObservation -> Maybe ModuleFront
 observationFront (CachedObservation _ _) = Nothing
 observationFront (FreshObservation front) = Just front
+observationFront (HydratedObservation _ _) = Nothing
 
 frontFacts :: ModuleFront -> IO ModuleFacts
 frontFacts front = do
@@ -1197,10 +1215,22 @@ type GutsMemo = Map.Map ModuleName GutsMemoEntry
 runCompileCycle
   :: PipelineSelection result -> Maybe ModIfaceCache -> Maybe (IORef GutsMemo)
   -> RetainedContext -> Maybe String -> Bool -> Word64 -> Double -> PipelineVariant -> FilePath -> Ghc result
-runCompileCycle selection mCache mMemoRef retained incarnation timing requestIdentity sessionT0 variant path = do
+runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing requestIdentity sessionT0 variant path = do
     memoTrace <- liftIO readMemoTraceEnabled
     let preparation = selectionKind selection
         captureProducts = capturesProductInterfaces selection
+        candidateManifest = case selection of
+          PreparedProducts candidatePath -> candidatePath
+          _ -> Nothing
+        exactCycle = isJust candidateManifest
+        -- An exact hydration transaction cannot borrow mutable interface or
+        -- Core memo state from a preceding lexical environment.
+        mCache = if exactCycle then Nothing else mCacheInput
+        mMemoRef = if exactCycle then Nothing else mMemoRefInput
+    when exactCycle $ do
+      current <- getSession
+      fresh <- liftIO (freshExactState current)
+      setSession fresh
     target <- guessTarget path Nothing Nothing
     setTargets [target]
     -- Install target-diagnostic capture before load/typecheck. Warnings become
@@ -1239,6 +1269,9 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
     setSession previous {hsc_mod_graph = mkModuleGraph
       (filter keepSummary (mgModSummaries' (hsc_mod_graph previous)))}
     modGraphRaw <- depanal (pvDownsweepExcludes variant) False
+    acceptedCandidates <- case candidateManifest of
+      Nothing -> pure Map.empty
+      Just manifest -> certifyModuleCandidates manifest modGraphRaw path
     -- 'ghc_setup' phase (TIDEPOOL_TIMING): 'guessTarget'/'setTargets' + this
     -- 'depanal' call, nothing else, on EVERY caller — a lone compile also
     -- includes its session bootstrap because 'runCompile' captures
@@ -1246,7 +1279,37 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
     -- This phase is flat and non-overlapping with 'ghc_load'.
     setupT1 <- monotonicTime
     liftIO (emitPhase timing "ghc_setup" (elapsedMs sessionT0 setupT1))
-    plan <- pvPlan variant timing modGraphRaw
+    originalPlan <- pvPlan variant timing modGraphRaw
+    certifiedEnv <- getSession
+    let acceptedNames = Map.keysSet acceptedCandidates
+        sourceSummaries = [summary | ModuleNode _ summary <- mgModSummaries' modGraphRaw]
+        importedNames summary =
+          [ unLoc name | (_, name) <- ms_textual_imps summary ++ ms_srcimps summary ]
+        importerClosure seed =
+          let grown = Set.union seed (Set.fromList
+                [ ms_mod_name summary
+                | summary <- sourceSummaries
+                , any (`Set.member` seed) (importedNames summary) ])
+          in if grown == seed then seed else importerClosure grown
+        deferred = importerClosure acceptedNames
+        candidateLoadGraph = mkModuleGraph
+          [ node | node <- mgModSummaries' (cpLoadGraph originalPlan)
+          , case node of
+              ModuleNode _ summary -> ms_mod_name summary `Set.notMember` deferred
+              _ -> True ]
+        plan | Set.null acceptedNames = originalPlan
+             | otherwise = originalPlan
+                 { cpLoadGraph = candidateLoadGraph
+                 , cpAfterLoad = \flag -> do
+                     cpAfterLoad originalPlan flag
+                     current <- getSession
+                     setSession current { hsc_mod_graph = modGraphRaw }
+                     forM_ (Set.toAscList acceptedNames) $ \name ->
+                       case lookupHpt (hsc_HPT certifiedEnv) name of
+                         Nothing -> liftIO $ ioError $ userError
+                           "certified candidate disappeared before HPT installation"
+                         Just hmi -> installPreparedInterface name hmi
+                 , cpTier = OptimizeEveryModule }
     -- Restore the representation-affecting extraction flags before 'load''
     -- touches a home module. Its TH/QQ downgrade sets
     -- Opt_OmitInterfacePragmas, which disables automatic field unboxing, and
@@ -1728,53 +1791,61 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
               pairs <- forM (zip summaries interfaceUses) $ \(modSum, interfaceUse) -> do
                 cpBeforeModule plan modSum
                 let mn = ms_mod_name modSum
-                cached <- lookupValidMemo modSum
-                case cached of
-                  -- A memo hit reuses the prepared body and its exact interface.
-                  -- Reinstall it after load's HPT rebuild before any importer runs.
-                  Just entry
-                    | Just moduleProduct <- payloadProduct (gmePayload entry)
-                    , interfaceReady interfaceUse modSum entry -> do
+                case Map.lookup mn acceptedCandidates of
+                  Just _ -> do
+                    hmi <- case lookupHpt (hsc_HPT certifiedEnv) mn of
+                      Just value -> pure value
+                      Nothing -> liftIO $ ioError $ userError
+                        "certified candidate interface absent during module loop"
                     recordValidity modSum True
                     recordExecutableValidity modSum True
-                    rememberPreparedSiblings (productPrepared moduleProduct)
-                    when captureProducts $ forM_ (retainedInterface moduleProduct) $ \hmi -> liftIO $
+                    when captureProducts $ liftIO $
                       modifyIORef' productInterfacesRef (Map.insert mn (hm_iface hmi))
-                    when (needsPreparedInterface interfaceUse) $
-                      forM_ (cachedInterface modSum entry) (installPreparedInterface mn)
-                    pure (CachedObservation modSum entry, productOutput moduleProduct, Just (productPrepared moduleProduct))
-                  _ -> do
-                    recordValidity modSum False
-                    recordExecutableValidity modSum False
-                    -- Name the missing half. A validation-only entry (no body)
-                    -- must never be reported as an interface miss: the fix for
-                    -- each cause differs.
-                    forM_ cached $ \entry -> do
-                      let reason
-                            | isNothing (payloadProduct (gmePayload entry)) =
-                                "executable-body-not-prepared"
-                            | otherwise = "required-interface-not-retained"
-                      memoMiss modSum reason
-                      memoMissTrace modSum reason (Just entry)
-                    mf <- compileFront modSum
-                    (simplified, r, mInterface, mRegisteredTidy) <- compileBack interfaceUse mf
-                    prepared <- prepareSelected mf simplified mRegisteredTidy
-                    facts <- liftIO (frontFacts mf)
-                    moduleProduct <- requireProduct facts r prepared mInterface
-                    case mMemoRef of
-                      Just ref -> liftIO (modifyIORef' ref
-                        (Map.insert mn (GutsMemoEntry
-                          (MemoValidity
-                            (ms_hs_hash modSum)
-                            (retainedFor modSum)
-                            (homeDependencyWitnesses modSum)
-                            incarnation)
-                          (ExecutableProduct moduleProduct)
-                          requestIdentity
-                          (directWitnesses modSum))))
-                      Nothing  -> pure ()
-                    pure (FreshObservation mf, r, prepared)
-              pure ([observation | (observation, _, _) <- pairs], [r | (_, r, _) <- pairs],
+                    pure (HydratedObservation modSum hmi, Nothing, Nothing)
+                  Nothing -> do
+                    cached <- lookupValidMemo modSum
+                    case cached of
+                      -- A memo hit reuses the prepared body and its exact interface.
+                      Just entry
+                        | Just moduleProduct <- payloadProduct (gmePayload entry)
+                        , interfaceReady interfaceUse modSum entry -> do
+                        recordValidity modSum True
+                        recordExecutableValidity modSum True
+                        rememberPreparedSiblings (productPrepared moduleProduct)
+                        when captureProducts $ forM_ (retainedInterface moduleProduct) $ \hmi -> liftIO $
+                          modifyIORef' productInterfacesRef (Map.insert mn (hm_iface hmi))
+                        when (needsPreparedInterface interfaceUse) $
+                          forM_ (cachedInterface modSum entry) (installPreparedInterface mn)
+                        pure (CachedObservation modSum entry, Just (productOutput moduleProduct), Just (productPrepared moduleProduct))
+                      _ -> do
+                        recordValidity modSum False
+                        recordExecutableValidity modSum False
+                        forM_ cached $ \entry -> do
+                          let reason
+                                | isNothing (payloadProduct (gmePayload entry)) =
+                                    "executable-body-not-prepared"
+                                | otherwise = "required-interface-not-retained"
+                          memoMiss modSum reason
+                          memoMissTrace modSum reason (Just entry)
+                        mf <- compileFront modSum
+                        (simplified, r, mInterface, mRegisteredTidy) <- compileBack interfaceUse mf
+                        prepared <- prepareSelected mf simplified mRegisteredTidy
+                        facts <- liftIO (frontFacts mf)
+                        moduleProduct <- requireProduct facts r prepared mInterface
+                        case mMemoRef of
+                          Just ref -> liftIO (modifyIORef' ref
+                            (Map.insert mn (GutsMemoEntry
+                              (MemoValidity
+                                (ms_hs_hash modSum)
+                                (retainedFor modSum)
+                                (homeDependencyWitnesses modSum)
+                                incarnation)
+                              (ExecutableProduct moduleProduct)
+                              requestIdentity
+                              (directWitnesses modSum))))
+                          Nothing  -> pure ()
+                        pure (FreshObservation mf, Just r, prepared)
+              pure ([observation | (observation, _, _) <- pairs], [r | (_, Just r, _) <- pairs],
                     [p | (_, _, Just p) <- pairs], Nothing)
             OptimizeCoreReachable -> do
               -- A resident-session memo hit reuses compact reference facts for
@@ -1913,6 +1984,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                       memoMissTrace modSum reason (Just entry)
                       compileReachable interfaceUse modSum moduleFacts
                     FreshObservation _ -> compileReachable interfaceUse modSum moduleFacts
+                    HydratedObservation _ _ -> compileReachable interfaceUse modSum moduleFacts
                   -- Not reachable, resident memo active: complete the entry with
                   -- a body and its interface anyway, and return nothing to this
                   -- request's output. The session tier ('OptimizeEveryModule')
@@ -1929,7 +2001,8 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                       case observation of
                         CachedObservation _ entry ->
                           not (interfaceReady interfaceUse modSum entry)
-                        FreshObservation _ -> True) then do
+                        FreshObservation _ -> True
+                        HydratedObservation _ _ -> True) then do
                     (attempt, ms) <- timeSection $ reifyGhc $ \session ->
                       try (reflectGhc (compileReachable interfaceUse modSum moduleFacts) session)
                         :: IO (Either SomeException [(ModuleOutput, Maybe PreparedModule)])
@@ -1951,6 +2024,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                       pure []
                     -- Without a memo, only dependency and type facts are needed.
                     FreshObservation _ -> validationOnly modSum moduleFacts >> pure []
+                    HydratedObservation _ _ -> validationOnly modSum moduleFacts >> pure []
               (completed, completedMs) <- liftIO (readIORef completionRef)
               -- Nested under lowering (which already counts this work), so
               -- flat-sum readers do not double count it.
@@ -2067,14 +2141,19 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
           , pprModules = modules
           , pprDependencies = dependencies
           , pprProductInterfaces = productInterfaces
+          , pprAcceptedCandidates = []
           }
       PreparedProducts _ -> do
         (result, modules, dependencies, productInterfaces) <- compileExecutable
+        valid <- liftIO $ revalidateAcceptedCandidates (Map.elems acceptedCandidates)
+        when (not valid) $ liftIO $ ioError $ userError
+          "accepted module candidate changed before artifact publication"
         pure PreparedPipelineResult
           { pprPipelineResult = result
           , pprModules = modules
           , pprDependencies = dependencies
           , pprProductInterfaces = productInterfaces
+          , pprAcceptedCandidates = Map.elems acceptedCandidates
           }
       CheckedEnvironment -> do
         -- load' may need executable dependencies for TH; it never sees the
@@ -2165,6 +2244,138 @@ captureDependencySources graph = do
         | (Just evidence, _) <- captured
         ]
   pure (map snd (Map.toAscList unique), complete)
+
+-- Candidates narrow work only. The downsweep chooses every current import;
+-- source bytes, negative home selections, GHC's own recompilation decision,
+-- and every interface in a closed home dependency set must agree in this
+-- transaction before any source module can be skipped.
+certifyModuleCandidates
+  :: FilePath -> ModuleGraph -> FilePath -> Ghc (Map.Map ModuleName ModuleCandidate)
+certifyModuleCandidates manifest graph targetPath = do
+  decoded <- liftIO (readModuleCandidates manifest)
+  case decoded of
+    Left _ -> pure Map.empty
+    Right candidates -> do
+      env <- getSession
+      targetName <- liftIO (targetModuleNameFor targetPath)
+      current <- liftIO (dependencyEvidenceFor env ([], True) graph [])
+      let summaries = Map.fromList
+            [ (ms_mod_name summary, summary)
+            | ModuleNode _ summary <- mgModSummaries' graph
+            , ms_hsc_src summary == HsSrcFile ]
+          currentModules = Map.fromList
+            [ (dependencyModuleName node, node)
+            | node <- dependencyModules current
+            , not (dependencyModuleBoot node) ]
+          candidateImportsMatch candidate node =
+            sort (map importTuple (candidateImports candidate)) ==
+              sort (map evidenceTuple (dependencyModuleImports node))
+          importTuple imported =
+            (qualifierText (candidateImportQualifier imported)
+            , candidateImportModule imported
+            , candidateImportBoot imported
+            , candidateImportSelected imported)
+          evidenceTuple imported =
+            (dependencyImportQualifier imported, dependencyImportName imported
+            , dependencyImportBoot imported, dependencyImportSelected imported)
+          qualifierText CandidateUnqualified = "none"
+          qualifierText (CandidateThisUnit unit) = "this:" ++ unit
+          qualifierText (CandidateOtherUnit unit) = "other:" ++ unit
+      preflight <- fmap catMaybes $ forM candidates $ \candidate ->
+        case (Map.lookup (mkModuleName (candidateModule candidate)) summaries,
+              Map.lookup (candidateModule candidate) currentModules) of
+          (Just summary, Just node)
+            | ms_mod_name summary /= targetName
+            , candidateUnit candidate == unitString (moduleUnit (ms_mod summary))
+            , candidateImportsMatch candidate node
+            , not (hasUntrackedCompileTimeExecution (ms_hspp_opts summary))
+            , not (gopt Opt_Pp (ms_hspp_opts summary)) -> do
+                source <- liftIO $ traverse (fmap normalise . makeAbsolute)
+                  (ml_hs_file (ms_location summary))
+                if source /= Just (candidateSource candidate)
+                  then pure Nothing
+                  else do
+                    inspected <- liftIO (try (sourceEvidenceWithFingerprint
+                      (candidateSource candidate))
+                      :: IO (Either IOException (DependencySource, Fingerprint)))
+                    pure $ case inspected of
+                      Right (evidence, fingerprint)
+                        | dependencySourceSha256 evidence == candidateSourceSha256 candidate
+                        , fingerprint == ms_hs_hash summary ->
+                            Just (ms_mod_name summary, (candidate, summary, node))
+                      _ -> Nothing
+          _ -> pure Nothing
+      let initial = Map.fromList preflight
+          requiredHome node =
+            [ mkModuleName (dependencyImportName imported)
+            | imported <- dependencyModuleImports node
+            , isJust (dependencyImportSelected imported)
+            , not (dependencyImportBoot imported) ]
+          noBootHome node = all (\imported ->
+            not (dependencyImportBoot imported && isJust (dependencyImportSelected imported)))
+            (dependencyModuleImports node)
+          shrink selected = Map.filter (\(_, _, node) ->
+            noBootHome node && all (`Map.member` selected) (requiredHome node)) selected
+          closed selected = let smaller = shrink selected in
+            if Map.keysSet smaller == Map.keysSet selected then smaller else closed smaller
+          admitted = closed initial
+          artifact (candidate, _, node) = ExactIfaceArtifact
+            (candidateUnit candidate) (candidateModule candidate)
+            (candidateInterface candidate) (candidateInterfaceSha256 candidate)
+            [ (candidateUnit candidate, moduleNameString requirement)
+            | requirement <- requiredHome node ]
+      if Map.null admitted
+        then pure Map.empty
+        else do
+          loaded <- liftIO $ readExactIfaceArtifacts env
+            (map artifact (Map.elems admitted))
+          case loaded of
+            Left _ -> pure Map.empty
+            Right interfaces
+              | any (mi_used_th . snd) interfaces -> pure Map.empty
+              | otherwise -> do
+                  hydratedResult <- liftIO $ tryCandidateIO
+                    (hydrateExactScope env interfaces)
+                  case hydratedResult of
+                    Left _ -> pure Map.empty
+                    Right hydrated -> do
+                      let byName = Map.fromList
+                            [(exactModule artifact', iface)
+                            | (artifact', iface) <- interfaces]
+                      checked <- liftIO $ tryCandidateIO $ forM
+                        (Map.toList admitted) $ \(_, (_, summary, _)) -> do
+                          case Map.lookup (moduleNameString (ms_mod_name summary)) byName of
+                            Nothing -> pure False
+                            Just interface -> do
+                              decision <- checkOldIface
+                                (scopeRetainedHscEnv (ms_mod summary) hydrated)
+                                summary (Just interface)
+                              pure $ case decision of
+                                UpToDateItem _ -> True
+                                OutOfDateItem _ _ -> False
+                      case checked of
+                        Right results | and results -> do
+                          setSession hydrated
+                          pure (Map.map (\(candidate, _, _) -> candidate) admitted)
+                        _ -> pure Map.empty
+
+tryCandidateIO :: IO a -> IO (Either SomeException a)
+tryCandidateIO action = do
+  result <- try action
+  case result of
+    Left failure | Just (_ :: SomeAsyncException) <- fromException failure ->
+      throwIO failure
+    _ -> pure result
+
+revalidateAcceptedCandidates :: [ModuleCandidate] -> IO Bool
+revalidateAcceptedCandidates candidates = and <$> forM candidates (\candidate -> do
+  readBack <- try $ do
+    (source, _) <- sourceEvidenceWithFingerprint (candidateSource candidate)
+    interface <- BS.readFile (candidateInterface candidate)
+    pure (dependencySourceSha256 source == candidateSourceSha256 candidate
+      && hexBytes (SHA256.hash interface) == candidateInterfaceSha256 candidate)
+    :: IO (Either IOException Bool)
+  pure (either (const False) id readBack))
 
 -- | Capture import-resolution witnesses from the exact module graph. Package
 -- imports have no selected home path; their ordered absent home candidates

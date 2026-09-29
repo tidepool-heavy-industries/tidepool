@@ -6,9 +6,13 @@ module ModuleProductRoundtripTest (verifyModuleProductInterfaceRoundtrip) where
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash.SHA256 qualified as SHA256
+import Codec.CBOR.Encoding (encodeBool, encodeListLen, encodeString)
+import Codec.CBOR.Write (toLazyByteString)
 import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as BL
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
+import Data.Text qualified as T
 import GHC
   ( backend, getSession, getSessionDynFlags, ms_mod, ms_textual_imps, unLoc
   , noBackend
@@ -42,6 +46,8 @@ import Tidepool.GhcPipeline
 import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.PreparedStg (PreparedModule(..))
 import Tidepool.RetainedUnfoldings (scopeRetainedHscEnv)
+import Tidepool.DependencyEvidence (DependencySource(..), sourceEvidence)
+import Tidepool.ModuleCandidates (ModuleCandidate(..))
 
 -- Exercise the skinny interface retained for a prepared defining module,
 -- then import it from a new GHC session with its source absent.
@@ -156,6 +162,39 @@ verifyModuleProductInterfaceRoundtrip work = do
   tampered <- SHA256.hash <$> BS.readFile tamperedHi
   unless (tampered /= digest) $
     ioError (userError "paired interface digest did not change with bytes")
+  originalSource <- sourceEvidence a
+  let hex = concatMap (\byte -> let s = showHex byte "" in replicate (2 - length s) '0' ++ s)
+      manifest = work </> "module-candidates.cbor"
+      candidate = encodeListLen 10
+        <> encodeString (T.pack (unitString (moduleUnit (pmModule moduleA))))
+        <> encodeString "ModuleProductA"
+        <> encodeString (T.pack a)
+        <> encodeString (T.pack (dependencySourceSha256 originalSource))
+        <> encodeString (T.pack hi)
+        <> encodeString (T.pack (hex (BS.unpack digest)))
+        <> encodeString (T.replicate 64 "0")
+        <> encodeString (T.replicate 64 "0")
+        <> encodeString (T.replicate 64 "0")
+        <> encodeListLen 1
+        <> encodeListLen 4 <> encodeString "none" <> encodeString "Prelude"
+        <> encodeBool False <> encodeString ""
+      manifestBytes = toLazyByteString
+        (encodeListLen 3 <> encodeString "TPMCAN" <> encodeString "3"
+          <> encodeListLen 1 <> candidate)
+  BS.writeFile manifest (BL.toStrict manifestBytes)
+  hydratedCompile <- runPipelineSelected (PreparedProducts (Just manifest)) b [work]
+  unless (map candidateModule (pprAcceptedCandidates hydratedCompile) == ["ModuleProductA"]
+    && all ((/= "ModuleProductA") . moduleNameString . moduleName . pmModule)
+       (pprModules hydratedCompile)) $
+    ioError (userError "same-transaction candidate was not reused without source preparation")
+  originalA <- BS.readFile a
+  BS.appendFile a "\n-- changed source invalidates candidate\n"
+  changedCompile <- runPipelineSelected (PreparedProducts (Just manifest)) b [work]
+  unless (null (pprAcceptedCandidates changedCompile)
+    && any ((== "ModuleProductA") . moduleNameString . moduleName . pmModule)
+       (pprModules changedCompile)) $
+    ioError (userError "changed candidate source did not compile afresh")
+  BS.writeFile a originalA
   renameFile a (work </> "ModuleProductA.hidden")
 
   libdir <- getLibdir
