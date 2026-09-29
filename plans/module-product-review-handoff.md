@@ -27,14 +27,17 @@ consumer across this boundary.
   result. The source-less consumer reuses the producer's already discovered
   module graph and summary; it does not prove fresh `depanal` can discover an
   absent home source.
-- A subsequent narrow fix in this handoff makes group projection reject a
-  typed-site failure owned by the demanded group. Its new failure-path test
-  and the Haskell target have **not** been compiled or executed since that fix;
-  the shared compiler slot was not available. The same unverified patch adds
-  explicit product mode and restores ordinary leaf interface elision after
-  review found that `6a98eab` always paid tidy and interface construction.
-  Rerun the exact roundtrip command above first. That gate now requests both
-  ordinary and product modes and checks product mode includes a leaf interface.
+- `39db835d45d9de1ace82b9a3d98d2954439f4cb9` makes group projection
+  reject a typed-site failure owned by the demanded group. It adds explicit
+  product mode and restores ordinary leaf interface elision after review found
+  that `6a98eab` always paid tidy and interface construction. After removing
+  one redundant import, the exact roundtrip command above passed one suite/one
+  case on this repair, including ordinary and product modes, a product leaf
+  interface, and rejected-site failure. Its ordinary compile summary listed
+  interface work for `ModuleProductA` only; the product summary listed both
+  `ModuleProductA` and leaf `ModuleProductB`. The exact `--retained-scope`
+  command above passed one suite/one case, and the exact worker build command
+  above succeeded. These runs cover the import cleanup made after the commit.
 
 ## Producer contract now present
 
@@ -113,9 +116,9 @@ the 0/1,000/10,000-symbol cost gate remains to run on the target host.
 
 ## Review packet for the next host
 
-- Validate the opt-in product mode, ordinary leaf elision and narrow typed-site
-  rejection fix, then review exact symbol
-  mapping for internal floated tops and the group-local synthetic declarations.
+- Review exact symbol mapping for internal floated tops and the group-local
+  synthetic declarations; the focused product/ordinary/rejection gate above
+  passed on this branch.
 - Decide the typed `SourceModule(ModuleVersion)` versus retained binding import
   representation and the batch table remap before publishing any neutral
   bytes. A version digest alone must not replace the underlying dependency
