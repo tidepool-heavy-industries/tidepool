@@ -261,3 +261,28 @@ Evidence under `/srv/swarm/checkouts/tidepool-completion-git/target/completion-e
 `view-contract.log`, `view-measure.log`, `view-trace.log`, and `view-spawn.trace`.
 Holder/lease cleanup and other process-scope/terminal paths still need their
 remaining acceptance checks; these tests do not close the entire process track.
+
+### Module graph evidence gate
+
+Integrated `1e6934f4c` from compiler `8607712ce`: versioned post-downsweep home
+module graph evidence is paired with products in the existing atomic cache
+bundle. Each direct ordinary/boot import must match its unique resolution
+witness; each emitted product must name a recorded graph node.
+
+Exact-source gates passed: 11 cache tests, two matched-worker tests, and full
+`just fixtures-check` (261 targets, 692 Suite passes, seven embedded artifacts).
+Logs in `/srv/swarm/checkouts/tidepool-completion-compiler/target/`:
+`engine-completion-inventory-v2-fixtures.log`,
+`engine-completion-cache-suite.log`, `engine-completion-inventory-v2-tests.log`,
+and `engine-completion-worker-inventory-v2.log`. The worker was built in an
+isolated build directory after incremental artifact inconsistency; source and
+command details are retained by the compiler owner.
+
+Independent cache hits remain disabled pending precompile evidence and worker
+hydration. Product availability and exact package owners remain required.
+See `engine-completion-findings.md` for tracked structural findings.
+
+The additional helper acquisition regression in `aafac64d1` passed alongside
+the previous two helper tests (3/3, log `view-lease.log` in the Git checkout's
+completion evidence). It proves independently acquired descriptor retention and
+rejection of an expired reference, not exporter-process-death coverage.
