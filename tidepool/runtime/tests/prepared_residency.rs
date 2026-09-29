@@ -752,6 +752,111 @@ fn rust_session_var_id_matches_extract_minted_bound_binder_var_id() {
 }
 
 #[test]
+fn resident_turn_carries_worker_certified_import_owners() {
+    let mut notebook = Notebook::new();
+    let TurnResult::Bind {
+        bound,
+        compiled: first,
+        ..
+    } = notebook.compile("source <- pure (1 :: Int)")
+    else {
+        panic!("expected a compiled first bind turn");
+    };
+    assert!(
+        first.certification.is_some(),
+        "first turn must be certified"
+    );
+    let [binder] = bound.as_slice() else {
+        panic!("first turn must bind one value");
+    };
+    assert!(matches!(
+        notebook
+            .session
+            .run_bind_with_sites(
+                "certified_first_turn",
+                first.into_code(),
+                binder,
+                Generation(notebook.generation),
+            )
+            .expect("first certified turn runs"),
+        ResidentOutcome::Completed { .. }
+    ));
+    notebook.injected.push(binder.module.clone());
+    let result = notebook.compile("certified <- pure (source + 1)");
+    let TurnResult::Bind {
+        bound, compiled, ..
+    } = result
+    else {
+        panic!("expected a compiled bind turn");
+    };
+    assert!(!compiled.prepared.globals().is_empty());
+    assert_eq!(
+        compiled
+            .certification
+            .as_ref()
+            .expect("resident turn requires a certified product")
+            .target_owners
+            .len(),
+        compiled.prepared.globals().len(),
+        "every prepared global has a sealed worker owner"
+    );
+    let [binder] = bound.as_slice() else {
+        panic!("second turn must bind one value");
+    };
+    assert!(matches!(
+        notebook
+            .session
+            .run_bind_with_sites(
+                "certified_second_turn",
+                compiled.into_code(),
+                binder,
+                Generation(notebook.generation),
+            )
+            .expect("second certified turn runs"),
+        ResidentOutcome::Completed { .. }
+    ));
+}
+
+#[test]
+fn certified_resident_turn_compiles_off_checkout_then_installs() {
+    use tidepool_runtime::session::PendingPreparedMode;
+
+    let mut notebook = Notebook::new();
+    notebook.bind("source <- pure (1 :: Int)");
+    let TurnResult::Bind {
+        bound, compiled, ..
+    } = notebook.compile("splitValue <- pure (source + 2)")
+    else {
+        panic!("expected a compiled bind turn");
+    };
+    assert!(compiled.certification.is_some());
+    let [binder] = bound.as_slice() else {
+        panic!("split turn must bind one value");
+    };
+    let mut pending = notebook
+        .session
+        .snapshot_run_prepared(
+            compiled.into_code(),
+            PendingPreparedMode::Binding {
+                binder: binder.clone(),
+                generation: Generation(notebook.generation),
+                observation: None,
+            },
+            None,
+        )
+        .expect("certified split snapshot");
+    let compiled = pending
+        .compile_off_checkout()
+        .expect("off-checkout compile");
+    let outcome = notebook
+        .session
+        .revalidate_and_run_prepared(pending, compiled)
+        .expect("certified split install")
+        .expect("unchanged public view");
+    assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+}
+
+#[test]
 fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
     use tidepool_codegen::scope::ScopeId;
     use tidepool_runtime::session::{HostBindingType, HostCarrier, HostPayload};
@@ -828,6 +933,7 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
     let [json_anchor_binder] = bound.as_slice() else {
         panic!("json anchor must produce exactly one binder");
     };
+    assert!(compiled.certification.is_some());
     let json_carrier = HostCarrier::from_compiled(
         json_anchor_binder,
         compiled.code(),
@@ -848,6 +954,7 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
     let [text_anchor_binder] = bound.as_slice() else {
         panic!("text anchor must produce exactly one binder");
     };
+    assert!(compiled.certification.is_some());
     let text_carrier =
         HostCarrier::from_compiled(text_anchor_binder, compiled.code(), HostBindingType::TEXT);
 
@@ -864,6 +971,7 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
     let [job_anchor_binder] = bound.as_slice() else {
         panic!("job anchor must produce exactly one binder");
     };
+    assert!(compiled.certification.is_some());
     let job_carrier = HostCarrier::from_compiled(
         job_anchor_binder,
         compiled.code(),

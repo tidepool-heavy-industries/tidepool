@@ -608,6 +608,42 @@ impl BindingTable {
             .collect())
     }
 
+    /// Retire only the newly registered roots of one failed turn. All keys
+    /// must still belong to that lexical owner; a shared capture keeps its
+    /// exact instance rooted until the last share releases.
+    pub fn retire_source_instances_in(
+        &mut self,
+        scope: ScopeId,
+        keys: &[SourceLeaseKey],
+    ) -> Option<Vec<SourceInstanceLease>> {
+        let mut seen = HashSet::new();
+        if keys.iter().any(|key| {
+            !seen.insert(key.clone()) ||
+            self.source_instances
+                .get(key)
+                .is_none_or(|lease| lease.owner != scope || lease.owner_retired)
+        }) {
+            return None;
+        }
+        let mut released = Vec::new();
+        for key in keys {
+            let lease = self
+                .source_instances
+                .get_mut(key)
+                .expect("source owner batch was prevalidated");
+            lease.owner_retired = true;
+            if lease.shares == 0 {
+                released.push(
+                    self.source_instances
+                        .remove(key)
+                        .expect("unshared source owner was prevalidated")
+                        .token,
+                );
+            }
+        }
+        Some(released)
+    }
+
     /// Exact materialized source instances available to this lexical scope.
     /// Returned descriptors share machine handles; callers never release them.
     #[must_use]

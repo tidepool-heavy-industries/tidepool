@@ -17,7 +17,66 @@ use crate::cache::{DependencyEvidence, ProductAvailability};
 const RECORD_LIMIT: usize = 32 << 20;
 const MANIFEST_LIMIT: usize = 4 << 20;
 const CANDIDATE_LIMIT: usize = 128;
-const RECORD_DIR: &str = "module-candidates-v4";
+const RECORD_DIR: &str = "module-candidates-v5";
+// A measured 33,955,557-byte ordinary resident display graph exceeds 32 MiB.
+// This is the aggregate worker sidecar limit; each durable module record
+// remains independently capped by RECORD_LIMIT after exact row splitting.
+pub(crate) const PRODUCT_MAX_BYTES: usize = 64 << 20;
+
+pub(crate) fn product_decode_limits() -> DecodeLimits {
+    DecodeLimits {
+        max_bytes: PRODUCT_MAX_BYTES,
+        ..DecodeLimits::default()
+    }
+}
+
+/// Preserve each original TPMOD row in its own bounded sidecar. A module's
+/// product identity must not change when an unrelated module is compiled in
+/// the same worker request.
+pub(crate) fn split_module_product_bytes(
+    bytes: &[u8],
+    products: &[RawModuleProduct],
+) -> Option<Vec<Vec<u8>>> {
+    if bytes.len() > PRODUCT_MAX_BYTES {
+        return None;
+    }
+    let Value::Array(header) = ciborium::de::from_reader::<Value, _>(bytes).ok()? else {
+        return None;
+    };
+    let [
+        Value::Text(magic),
+        Value::Integer(version),
+        Value::Array(rows),
+    ] = <[Value; 3]>::try_from(header).ok()?
+    else {
+        return None;
+    };
+    if magic != "TPMOD" || version != 1.into() || rows.len() != products.len() {
+        return None;
+    }
+    rows.into_iter()
+        .zip(products)
+        .map(|(row, product)| {
+            let Value::Array(fields) = &row else {
+                return None;
+            };
+            if !matches!(fields.as_slice(),
+                [Value::Text(unit), Value::Text(module), Value::Bytes(_), Value::Array(_)]
+                if unit == &product.unit && module == &product.module)
+            {
+                return None;
+            }
+            let sidecar = Value::Array(vec![
+                Value::Text("TPMOD".into()),
+                Value::Integer(1.into()),
+                Value::Array(vec![row]),
+            ]);
+            let mut encoded = Vec::new();
+            ciborium::ser::into_writer(&sidecar, &mut encoded).ok()?;
+            (encoded.len() <= RECORD_LIMIT).then_some(encoded)
+        })
+        .collect()
+}
 
 fn identity_value(identity: &SymbolIdentity) -> Value {
     Value::Array(vec![
@@ -157,7 +216,7 @@ pub(crate) fn publish(
     };
     if endpoint_identity.is_empty()
         || endpoint_identity.len() > 4096
-        || product_bytes.len() > RECORD_LIMIT / 2
+        || product_bytes.len() > PRODUCT_MAX_BYTES
         || !evidence.valid(target_source)
         || !evidence.selection_complete
     {
@@ -169,18 +228,21 @@ pub(crate) fn publish(
     let Ok(parsed) = tidepool_repr::execution_schema::parse_module_products(
         product_bytes,
         &requirements,
-        DecodeLimits::default(),
+        product_decode_limits(),
     ) else {
         return;
     };
     if parsed != products {
         return;
     }
+    let Some(per_module_bytes) = split_module_product_bytes(product_bytes, products) else {
+        return;
+    };
     let dir = record_dir(endpoint_identity, &include);
     if fs::create_dir_all(&dir).is_err() {
         return;
     }
-    for product in products {
+    for (product, module_bytes) in products.iter().zip(per_module_bytes) {
         if product.unit.is_empty()
             || product.module.is_empty()
             || product.interface.is_empty()
@@ -224,11 +286,11 @@ pub(crate) fn publish(
         }
         let record = Record {
             tag: "TPMCAN".into(),
-            version: 4,
+            version: 5,
             endpoint: endpoint_identity.to_vec(),
             include: include.clone(),
             evidence: evidence.clone(),
-            products: product_bytes.to_vec(),
+            products: module_bytes,
             unit: product.unit.clone(),
             module: product.module.clone(),
             source,
@@ -263,7 +325,6 @@ fn version_hash(record: &Record) -> [u8; 32] {
         &record.source_sha256,
         &record.interface,
         &record.products,
-        &record.evidence,
     )
     .0
 }
@@ -275,10 +336,9 @@ pub(crate) fn module_version_for_product(
     source_sha256: &str,
     interface: &[u8],
     products: &[u8],
-    evidence: &DependencyEvidence,
 ) -> ModuleVersion {
     let mut h = Sha256::new();
-    h.update(b"tidepool-module-candidate-v4\0");
+    h.update(b"tidepool-module-candidate-v5\0");
     h.update(endpoint_identity);
     for path in include {
         h.update(path.as_os_str().as_encoded_bytes());
@@ -287,9 +347,6 @@ pub(crate) fn module_version_for_product(
     h.update(source_sha256);
     h.update(interface);
     h.update(products);
-    if let Ok(encoded) = serde_json::to_vec(evidence) {
-        h.update(encoded);
-    }
     ModuleVersion(h.finalize().into())
 }
 
@@ -323,7 +380,7 @@ pub(crate) fn select(
             continue;
         };
         if record.tag != "TPMCAN"
-            || record.version != 4
+            || record.version != 5
             || record.endpoint != endpoint_identity
             || record.include != include
             || record.source.is_relative()
@@ -342,7 +399,7 @@ pub(crate) fn select(
         let Ok(parsed) = tidepool_repr::execution_schema::parse_module_products(
             &record.products,
             &requirements,
-            DecodeLimits::default(),
+            product_decode_limits(),
         ) else {
             continue;
         };
@@ -505,6 +562,58 @@ mod tests {
         bytes
     }
 
+    #[test]
+    fn unrelated_module_does_not_change_product_owner() {
+        let first = product_bytes("u", "Library", &[0x42]);
+        let second = product_bytes("u", "Unrelated", &[0x43]);
+        let Value::Array(one) = ciborium::de::from_reader::<Value, _>(first.as_slice()).unwrap()
+        else {
+            unreachable!()
+        };
+        let Value::Array(two) = ciborium::de::from_reader::<Value, _>(second.as_slice()).unwrap()
+        else {
+            unreachable!()
+        };
+        let Value::Array(mut first_rows) = one[2].clone() else {
+            unreachable!()
+        };
+        let Value::Array(second_rows) = two[2].clone() else {
+            unreachable!()
+        };
+        first_rows.extend(second_rows);
+        let mut combined = Vec::new();
+        ciborium::ser::into_writer(
+            &Value::Array(vec![
+                Value::Text("TPMOD".into()),
+                Value::Integer(1.into()),
+                Value::Array(first_rows),
+            ]),
+            &mut combined,
+        )
+        .unwrap();
+        let requirements = crate::prepared_artifact::production_requirements().unwrap();
+        let parsed = tidepool_repr::execution_schema::parse_module_products(
+            &combined,
+            &requirements,
+            product_decode_limits(),
+        )
+        .unwrap();
+        let split = split_module_product_bytes(&combined, &parsed).unwrap();
+        assert_eq!(split[0], first);
+        assert_eq!(split[1], second);
+        assert_eq!(
+            module_version_for_product(b"compiler", &[], "source-sha", &[0x42], &split[0]),
+            module_version_for_product(b"compiler", &[], "source-sha", &[0x42], &first),
+        );
+    }
+
+    #[test]
+    fn aggregate_product_bound_admits_measured_display_graph_but_rejects_over_limit() {
+        assert!(product_decode_limits().max_bytes >= 33_955_557);
+        assert!(split_module_product_bytes(&vec![0; PRODUCT_MAX_BYTES + 1], &[]).is_none());
+        assert_eq!(RECORD_LIMIT, 32 << 20);
+    }
+
     fn write_record(root: &Path, source: &Path, unit: &str, module: &str, products: Vec<u8>) {
         let source = fs::canonicalize(source).unwrap();
         let source_bytes = fs::read(&source).unwrap();
@@ -536,7 +645,7 @@ mod tests {
         };
         let record = Record {
             tag: "TPMCAN".into(),
-            version: 4,
+            version: 5,
             endpoint: b"endpoint".to_vec(),
             include: vec![],
             evidence,
@@ -582,10 +691,12 @@ mod tests {
             product_bytes("u", "Library", &[0x42]),
         );
         fs::write(&source, "module Library where\nchanged").unwrap();
-        assert!(select_in(root.path(), scratch.path())
-            .unwrap()
-            .by_owner
-            .is_empty());
+        assert!(
+            select_in(root.path(), scratch.path())
+                .unwrap()
+                .by_owner
+                .is_empty()
+        );
 
         fs::write(&source, "module Library where").unwrap();
         let dir = root.path().join(RECORD_DIR).join(sha(b"endpoint"));
@@ -600,10 +711,12 @@ mod tests {
             "Library",
             b"broken cbor".to_vec(),
         );
-        assert!(select_in(root.path(), scratch.path())
-            .unwrap()
-            .by_owner
-            .is_empty());
+        assert!(
+            select_in(root.path(), scratch.path())
+                .unwrap()
+                .by_owner
+                .is_empty()
+        );
     }
 
     #[test]
@@ -632,7 +745,7 @@ mod tests {
         let products = tidepool_repr::execution_schema::parse_module_products(
             &record.products,
             &requirements,
-            DecodeLimits::default(),
+            product_decode_limits(),
         )
         .unwrap();
         unsafe {
@@ -647,9 +760,11 @@ mod tests {
             &record.target_source,
         );
         let selected = select_in(root.path(), scratch.path()).unwrap();
-        assert!(selected
-            .by_owner
-            .contains_key(&("u".into(), "Library".into())));
+        assert!(
+            selected
+                .by_owner
+                .contains_key(&("u".into(), "Library".into()))
+        );
     }
 
     #[test]

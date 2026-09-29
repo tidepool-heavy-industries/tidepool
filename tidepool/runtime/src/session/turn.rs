@@ -25,6 +25,8 @@ use std::path::Path;
 use ciborium::value::Value as CborValue;
 use tempfile::TempDir;
 use tidepool_extract_cmd::{ExtractCmd, SpawnError};
+use tidepool_toolchain::artifacts::{seal_turn_outputs, ModuleCandidateOffer};
+use tidepool_toolchain::certified_products::{PendingCertifiedGroup, PendingImportOwner};
 use tidepool_toolchain::extract_module_name;
 
 use tidepool_repr::execution_schema::{
@@ -1566,6 +1568,15 @@ pub struct CompiledTurn {
     pub asks: Vec<YieldSite>,
     /// The turn's prepared-STG program.
     pub prepared: PreparedProgram,
+    /// Worker-certified original source groups and the target's exact owner
+    /// rows. Retained imports still require lexical resolution at admission.
+    pub certification: Option<TurnCertification>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TurnCertification {
+    pub groups: Vec<PendingCertifiedGroup>,
+    pub target_owners: Vec<PendingImportOwner>,
 }
 
 impl CompiledTurn {
@@ -1576,6 +1587,7 @@ impl CompiledTurn {
             table: std::borrow::Cow::Borrowed(&self.table),
             sites: std::borrow::Cow::Borrowed(&self.asks),
             prepared: std::borrow::Cow::Borrowed(&self.prepared),
+            certification: std::borrow::Cow::Borrowed(&self.certification),
         }
     }
 
@@ -1586,6 +1598,7 @@ impl CompiledTurn {
             table: std::borrow::Cow::Owned(self.table),
             sites: std::borrow::Cow::Owned(self.asks),
             prepared: std::borrow::Cow::Owned(self.prepared),
+            certification: std::borrow::Cow::Owned(self.certification),
         }
     }
 }
@@ -1597,6 +1610,7 @@ pub struct TurnCode<'a> {
     pub table: std::borrow::Cow<'a, DataConTable>,
     pub sites: std::borrow::Cow<'a, [YieldSite]>,
     pub prepared: std::borrow::Cow<'a, PreparedProgram>,
+    pub certification: std::borrow::Cow<'a, Option<TurnCertification>>,
 }
 
 /// The result of [`run_turn`] — one variant per verdict, each carrying only
@@ -2207,6 +2221,12 @@ fn check_cell_impl(
         }
     }
     let endpoint = cmd.bind().map_err(map_notfound)?;
+    let include: Vec<_> = req.include.iter().map(|path| path.to_path_buf()).collect();
+    let offer =
+        ModuleCandidateOffer::select(endpoint.identity().producer_bytes(), &include, temp.path());
+    if let (Some(_), Some(manifest)) = (&fold, offer.manifest_path()) {
+        cmd.module_candidates(manifest);
+    }
     crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
     let run = endpoint.execute(&cmd).map_err(map_notfound)?;
     let output = &run.output;
@@ -2244,7 +2264,7 @@ fn check_cell_impl(
     // bug, not a fold rejection, so it is a hard decode error rather than a
     // silent fall back.
     let folded = if fold.is_some() && turn_out_path.exists() {
-        Some(decode_turn_output_dir(temp.path())?)
+        Some(decode_turn_output_dir(temp.path(), &offer)?)
     } else {
         None
     };
@@ -2469,6 +2489,12 @@ fn run_turn_with_pin(
     }
 
     let endpoint = cmd.bind().map_err(map_notfound)?;
+    let include: Vec<_> = req.include.iter().map(|path| path.to_path_buf()).collect();
+    let offer =
+        ModuleCandidateOffer::select(endpoint.identity().producer_bytes(), &include, temp.path());
+    if let Some(manifest) = offer.manifest_path() {
+        cmd.module_candidates(manifest);
+    }
     crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
     let run = endpoint.execute(&cmd).map_err(map_notfound)?;
     timing::record_stage(
@@ -2507,13 +2533,16 @@ fn run_turn_with_pin(
         });
     }
 
-    decode_turn_output_dir(temp.path()).map_err(Into::into)
+    decode_turn_output_dir(temp.path(), &offer).map_err(Into::into)
 }
 
 /// Decode one item's full output directory into a [`TurnResult`]: the
 /// `TurnOut` CBOR sidecar (`turn.cbor`) plus, for a `Bind`/`Expr` verdict,
 /// `result.cbor`/`meta.cbor` off the SAME directory.
-fn decode_turn_output_dir(dir: &Path) -> Result<TurnResult, CompileError> {
+fn decode_turn_output_dir(
+    dir: &Path,
+    offer: &ModuleCandidateOffer,
+) -> Result<TurnResult, CompileError> {
     let turn_out_path = dir.join("turn.cbor");
     if !turn_out_path.exists() {
         return Err(CompileError::MissingOutput(turn_out_path));
@@ -2538,7 +2567,7 @@ fn decode_turn_output_dir(dir: &Path) -> Result<TurnResult, CompileError> {
             asks,
             wrapped_source,
         } => {
-            let compiled = read_compiled_turn(dir, asks)?;
+            let compiled = read_compiled_turn(dir, asks, &wrapped_source, offer)?;
             Ok(TurnResult::Bind {
                 binders,
                 bound,
@@ -2552,7 +2581,7 @@ fn decode_turn_output_dir(dir: &Path) -> Result<TurnResult, CompileError> {
             asks,
             wrapped_source,
         } => {
-            let compiled = read_compiled_turn(dir, asks)?;
+            let compiled = read_compiled_turn(dir, asks, &wrapped_source, offer)?;
             Ok(TurnResult::Expr {
                 variant,
                 compiled,
@@ -2567,6 +2596,8 @@ fn decode_turn_output_dir(dir: &Path) -> Result<TurnResult, CompileError> {
 fn read_compiled_turn(
     output_dir: &Path,
     asks: Vec<YieldSite>,
+    wrapped_source: &str,
+    offer: &ModuleCandidateOffer,
 ) -> Result<CompiledTurn, CompileError> {
     let meta_path = output_dir.join("meta.cbor");
     if !meta_path.exists() {
@@ -2595,12 +2626,26 @@ fn read_compiled_turn(
     // Runtime unresolved-error naming — see lib.rs twin sites.
 
     let prepared = read_prepared_program(output_dir)?;
+    let module = extract_module_name(wrapped_source).unwrap_or_else(|| "Input".into());
+    let source_path = output_dir.join(format!("{module}.hs"));
+    let sealed = seal_turn_outputs(
+        offer,
+        output_dir,
+        &source_path,
+        wrapped_source,
+        &prepared,
+        PREPARED_SCAFFOLD_TARGET,
+    )?;
 
     Ok(CompiledTurn {
         table,
         warnings,
         asks,
         prepared,
+        certification: sealed.map(|sealed| TurnCertification {
+            groups: sealed.certified_groups,
+            target_owners: sealed.pending_imports,
+        }),
     })
 }
 

@@ -215,6 +215,7 @@ impl HostCarrier {
             table: std::borrow::Cow::Borrowed(&self.table),
             sites: std::borrow::Cow::Borrowed(&[]),
             prepared: std::borrow::Cow::Borrowed(&self.prepared),
+            certification: std::borrow::Cow::Owned(None),
         }
     }
 
@@ -932,7 +933,7 @@ impl PendingPreparedMode {
 /// [`Self::compile_off_checkout`] then
 /// [`ResidentSession::revalidate_and_run_prepared`].
 pub struct PendingPreparedInstall {
-    snapshot: super::prepared::InstallSnapshot,
+    snapshot: PendingPreparedSource,
     mode: PendingPreparedMode,
     argument: Option<PreparedHandle>,
     provenance: Arc<ProgramProvenance>,
@@ -941,17 +942,68 @@ pub struct PendingPreparedInstall {
     park: ParkPolicy,
 }
 
+enum PendingPreparedSource {
+    Legacy(super::prepared::InstallSnapshot),
+    Certified {
+        prepared: PreparedProgram,
+        resolved: super::persistent::ResolvedCertifiedTurn,
+        registry: Arc<ImageRegistry>,
+        admitted_public: super::PublicVisibilitySnapshot,
+    },
+}
+
+impl PendingPreparedSource {
+    fn compile_off_checkout(&mut self) -> Result<CompiledPreparedInstall, PreparedRuntimeError> {
+        let kind = match self {
+            Self::Legacy(snapshot) => CompiledPreparedKind::Legacy(
+                super::prepared::PreparedEngine::compile_off_checkout(snapshot)
+                    .map_err(PreparedRuntimeError::Compile)?,
+            ),
+            Self::Certified {
+                prepared,
+                resolved,
+                registry,
+                ..
+            } => {
+                let target =
+                    super::prepared::CertifiedTargetImage::compile(prepared.clone(), registry)
+                        .map_err(PreparedRuntimeError::Compile)?;
+                let demanded = resolved
+                    .groups
+                    .iter()
+                    .cloned()
+                    .map(|group| DemandedImage::compile(group, registry))
+                    .collect::<Result<Vec<_>, _>>()?;
+                CompiledPreparedKind::Certified { target, demanded }
+            }
+        };
+        Ok(CompiledPreparedInstall { kind })
+    }
+}
+
+/// Native code compiled for one pending install without holding the session
+/// checkout. Its exact source owner rows stay paired with the pending scope
+/// snapshot until final revalidation.
+pub struct CompiledPreparedInstall {
+    kind: CompiledPreparedKind,
+}
+
+enum CompiledPreparedKind {
+    Legacy(Arc<tidepool_codegen::prepared_program::CompiledProgram>),
+    Certified {
+        target: super::prepared::CertifiedTargetImage,
+        demanded: Vec<DemandedImage>,
+    },
+}
+
 impl PendingPreparedInstall {
     /// Step (b): compile this pending install's linked program off any
     /// checkout. No machine access; safe to run on a blocking thread while
     /// other turns hold the checkout this snapshot was taken under.
     pub fn compile_off_checkout(
         &mut self,
-    ) -> Result<
-        std::sync::Arc<tidepool_codegen::prepared_program::CompiledProgram>,
-        tidepool_codegen::prepared_program::CompileError,
-    > {
-        super::prepared::PreparedEngine::compile_off_checkout(&mut self.snapshot)
+    ) -> Result<CompiledPreparedInstall, PreparedRuntimeError> {
+        self.snapshot.compile_off_checkout()
     }
 }
 
@@ -959,20 +1011,18 @@ impl PendingPreparedInstall {
 /// machine checkout for a display bundle's off-checkout Cranelift compile;
 /// the display counterpart of [`PendingPreparedInstall`].
 pub struct PendingDisplayInstall {
-    snapshot: super::prepared::InstallSnapshot,
+    snapshot: PendingPreparedSource,
     provenance: Arc<ProgramProvenance>,
     generation: Generation,
+    lexical_scope: ScopeId,
 }
 
 impl PendingDisplayInstall {
     /// Step (b): compile the bundle's linked program off any checkout.
     pub fn compile_off_checkout(
         &mut self,
-    ) -> Result<
-        std::sync::Arc<tidepool_codegen::prepared_program::CompiledProgram>,
-        tidepool_codegen::prepared_program::CompileError,
-    > {
-        super::prepared::PreparedEngine::compile_off_checkout(&mut self.snapshot)
+    ) -> Result<CompiledPreparedInstall, PreparedRuntimeError> {
+        self.snapshot.compile_off_checkout()
     }
 }
 
@@ -1894,21 +1944,39 @@ where
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
         demanded: Vec<DemandedImage>,
         inherited_needed: &[InheritedSourceDemand],
-        package_external: &HashMap<ImportOwner, PreparedHandle>,
-    ) -> Result<ProgramId, PreparedRuntimeError> {
-        let (program, source_visible) = self.state.install_certified_turn_in(
+    ) -> Result<
+        (
+            ProgramId,
+            Vec<tidepool_codegen::binding_table::SourceLeaseKey>,
+        ),
+        PreparedRuntimeError,
+    > {
+        let (program, source_keys) = self.state.install_certified_turn_in(
             scope,
             target,
             target_owners,
             source_evidence,
             demanded,
             inherited_needed,
-            package_external,
         )?;
-        if source_visible {
+        if !source_keys.is_empty() {
             self.advance_public_visibility(scope);
         }
-        Ok(program)
+        Ok((program, source_keys))
+    }
+
+    fn retire_failed_turn_source_instances(
+        &mut self,
+        scope: ScopeId,
+        keys: &[tidepool_codegen::binding_table::SourceLeaseKey],
+    ) {
+        if !keys.is_empty() {
+            assert!(
+                self.state.retire_failed_turn_source_instances(scope, keys),
+                "failed turn retains its exact newly registered source roots"
+            );
+            self.advance_public_visibility(scope);
+        }
     }
 
     /// Observe only the continuation events caused by this checkout's host
@@ -3256,7 +3324,31 @@ where
         self.state
             .merge_table(&table)
             .map_err(ResidentError::TableCollision)?;
-        let program = self.state.install_prepared(code.prepared.into_owned())?;
+        let prepared = code.prepared.into_owned();
+        let (program, source_keys) = if let Some(certification) = code.certification.as_ref() {
+            let resolved = self
+                .state
+                .resolve_certification_in(scope, &prepared, certification)?;
+            let registry = self.state.certified_image_registry();
+            let target = super::prepared::CertifiedTargetImage::compile(prepared, &registry)
+                .map_err(PreparedRuntimeError::Compile)?;
+            let demanded = resolved
+                .groups
+                .into_iter()
+                .map(|group| DemandedImage::compile(group, &registry))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(PreparedRuntimeError::from)?;
+            self.install_certified_turn_in(
+                scope,
+                target,
+                &resolved.target_owners,
+                &resolved.source_evidence,
+                demanded,
+                &resolved.inherited_needed,
+            )?
+        } else {
+            (self.state.install_prepared(prepared)?, Vec::new())
+        };
         let realm = self.run_context.resource_scope;
         let mounted = (|| {
             let handle = {
@@ -3267,6 +3359,9 @@ where
         })();
         if let Some(engine) = self.state.prepared_mut() {
             engine.unpin(program);
+        }
+        if mounted.is_err() {
+            self.retire_failed_turn_source_instances(scope, &source_keys);
         }
         mounted
     }
@@ -3733,7 +3828,7 @@ where
         mode: PreparedTurnMode<'_>,
         argument: Option<PreparedHandle>,
     ) -> Result<ResidentOutcome, ResidentError> {
-        let prepared = code.prepared;
+        let prepared = code.prepared.into_owned();
         let provenance = self.provenance_for(&code.sites)?;
         self.state
             .merge_table(&code.table)
@@ -3744,8 +3839,32 @@ where
             // Claim the value-module identity before the turn runs.
             self.state.set_val_gen(*generation);
         }
+        let lexical_scope = self.run_context.lexical_scope;
         let install_prepared_started = std::time::Instant::now();
-        let program = self.state.install_prepared(prepared.into_owned())?;
+        let (program, source_keys) = if let Some(certification) = code.certification.as_ref() {
+            let resolved =
+                self.state
+                    .resolve_certification_in(lexical_scope, &prepared, certification)?;
+            let registry = self.state.certified_image_registry();
+            let target = super::prepared::CertifiedTargetImage::compile(prepared, &registry)
+                .map_err(PreparedRuntimeError::Compile)?;
+            let demanded = resolved
+                .groups
+                .into_iter()
+                .map(|group| DemandedImage::compile(group, &registry))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(PreparedRuntimeError::from)?;
+            self.install_certified_turn_in(
+                lexical_scope,
+                target,
+                &resolved.target_owners,
+                &resolved.source_evidence,
+                demanded,
+                &resolved.inherited_needed,
+            )?
+        } else {
+            (self.state.install_prepared(prepared)?, Vec::new())
+        };
         timing::record_stage(
             timing::NO_NODE,
             timing::NO_ROUND,
@@ -3754,7 +3873,6 @@ where
             0,
         );
         let realm = self.run_context.resource_scope;
-        let lexical_scope = self.run_context.lexical_scope;
         let plan = settle_plan_of(&mode);
         let park = ParkPolicy {
             principal: self.run_context.principal,
@@ -3782,7 +3900,18 @@ where
         if let Some(engine) = self.state.prepared_mut() {
             engine.unpin(program);
         }
-        self.complete_prepared(ran??, mode, program, lexical_scope, provenance, None)
+        let run = match ran {
+            Ok(Ok(run)) => run,
+            Ok(Err(error)) => {
+                self.retire_failed_turn_source_instances(lexical_scope, &source_keys);
+                return Err(error.into());
+            }
+            Err(error) => {
+                self.retire_failed_turn_source_instances(lexical_scope, &source_keys);
+                return Err(error);
+            }
+        };
+        self.complete_prepared(run, mode, program, lexical_scope, provenance, None)
     }
 
     /// Whether this session already has a resident machine to snapshot an
@@ -3808,16 +3937,16 @@ where
     /// and finishes the turn through [`Self::revalidate_and_run_prepared`]
     /// under a fresh checkout.
     ///
-    /// The caller must check [`Self::prepared_machine_ready`] first: this
-    /// panics if the session has no machine yet, since bootstrap has
-    /// nothing to snapshot (see that method's doc).
+    /// The caller checks [`Self::prepared_machine_ready`] first. A legacy
+    /// turn cannot snapshot before machine bootstrap and gets a typed error;
+    /// certified bootstrap uses the single-checkout path.
     pub fn snapshot_run_prepared(
         &mut self,
         code: TurnCode<'static>,
         mode: PendingPreparedMode,
         argument: Option<PreparedHandle>,
     ) -> Result<PendingPreparedInstall, ResidentError> {
-        let prepared = code.prepared;
+        let prepared = code.prepared.into_owned();
         let provenance = self.provenance_for(&code.sites)?;
         self.state
             .merge_table(&code.table)
@@ -3830,12 +3959,28 @@ where
         // this typed refusal (rather than a panic) is the fallback if that
         // contract is not honored, since `PreparedRuntimeError` already has
         // a variant for exactly this precondition.
-        let snapshot = self
-            .state
-            .snapshot_install_prepared(prepared.into_owned())?
-            .ok_or(PreparedRuntimeError::MachineNotInstalled)?;
-        let realm = self.run_context.resource_scope;
         let lexical_scope = self.run_context.lexical_scope;
+        let snapshot = if let Some(certification) = code.certification.as_ref() {
+            let admitted_public = self
+                .public_visibility_snapshot_in(lexical_scope)
+                .ok_or(PreparedRuntimeError::SourceScopeAdmission)?;
+            let resolved =
+                self.state
+                    .resolve_certification_in(lexical_scope, &prepared, certification)?;
+            PendingPreparedSource::Certified {
+                prepared,
+                resolved,
+                registry: self.state.certified_image_registry(),
+                admitted_public,
+            }
+        } else {
+            PendingPreparedSource::Legacy(
+                self.state
+                    .snapshot_install_prepared(prepared)?
+                    .ok_or(PreparedRuntimeError::MachineNotInstalled)?,
+            )
+        };
+        let realm = self.run_context.resource_scope;
         let park = ParkPolicy {
             principal: self.run_context.principal,
             effect_policy: self.state.effect_policy(),
@@ -3863,7 +4008,7 @@ where
     pub fn revalidate_and_run_prepared(
         &mut self,
         pending: PendingPreparedInstall,
-        compiled: std::sync::Arc<tidepool_codegen::prepared_program::CompiledProgram>,
+        compiled: CompiledPreparedInstall,
     ) -> Result<Option<ResidentOutcome>, ResidentError> {
         let PendingPreparedInstall {
             snapshot,
@@ -3875,12 +4020,43 @@ where
             park,
         } = pending;
         let install_started = std::time::Instant::now();
-        let program = match self
-            .state
-            .revalidate_and_install_prepared(snapshot, compiled)?
-        {
-            Some(program) => program,
-            None => return Ok(None),
+        let (program, source_keys) = match (snapshot, compiled.kind) {
+            (PendingPreparedSource::Legacy(snapshot), CompiledPreparedKind::Legacy(compiled)) => {
+                match self
+                    .state
+                    .revalidate_and_install_prepared(snapshot, compiled)?
+                {
+                    Some(program) => (program, Vec::new()),
+                    None => return Ok(None),
+                }
+            }
+            (
+                PendingPreparedSource::Certified {
+                    resolved,
+                    admitted_public,
+                    ..
+                },
+                CompiledPreparedKind::Certified { target, demanded },
+            ) => {
+                if self.public_visibility_snapshot_in(lexical_scope).as_ref()
+                    != Some(&admitted_public)
+                {
+                    return Ok(None);
+                }
+                self.install_certified_turn_in(
+                    lexical_scope,
+                    target,
+                    &resolved.target_owners,
+                    &resolved.source_evidence,
+                    demanded,
+                    &resolved.inherited_needed,
+                )?
+            }
+            _ => {
+                return Err(ResidentError::Prepared(
+                    PreparedRuntimeError::CertifiedTargetOwners,
+                ));
+            }
         };
         timing::record_stage(
             timing::NO_NODE,
@@ -3907,8 +4083,19 @@ where
         if let Some(engine) = self.state.prepared_mut() {
             engine.unpin(program);
         }
+        let run = match ran {
+            Ok(Ok(run)) => run,
+            Ok(Err(error)) => {
+                self.retire_failed_turn_source_instances(lexical_scope, &source_keys);
+                return Err(error.into());
+            }
+            Err(error) => {
+                self.retire_failed_turn_source_instances(lexical_scope, &source_keys);
+                return Err(error);
+            }
+        };
         Ok(Some(self.complete_prepared(
-            ran??,
+            run,
             mode.as_mode(),
             program,
             lexical_scope,
@@ -4171,14 +4358,38 @@ where
         generation: Generation,
     ) -> Result<ResidentDisplayBundle, ResidentError> {
         check_display_bundle_binders(page, metadata, alias)?;
-        let prepared = code.prepared;
+        let prepared = code.prepared.into_owned();
         let provenance = self.provenance_for(&code.sites)?;
         self.state
             .merge_table(&code.table)
             .map_err(ResidentError::TableCollision)?;
         self.state.set_val_gen(generation);
         let install_prepared_started = std::time::Instant::now();
-        let program = self.state.install_prepared(prepared.into_owned())?;
+        let lexical_scope = self.run_context.lexical_scope;
+        let (program, source_keys) = if let Some(certification) = code.certification.as_ref() {
+            let resolved =
+                self.state
+                    .resolve_certification_in(lexical_scope, &prepared, certification)?;
+            let registry = self.state.certified_image_registry();
+            let target = super::prepared::CertifiedTargetImage::compile(prepared, &registry)
+                .map_err(PreparedRuntimeError::Compile)?;
+            let demanded = resolved
+                .groups
+                .into_iter()
+                .map(|group| DemandedImage::compile(group, &registry))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(PreparedRuntimeError::from)?;
+            self.install_certified_turn_in(
+                lexical_scope,
+                target,
+                &resolved.target_owners,
+                &resolved.source_evidence,
+                demanded,
+                &resolved.inherited_needed,
+            )?
+        } else {
+            (self.state.install_prepared(prepared)?, Vec::new())
+        };
         timing::record_stage(
             timing::NO_NODE,
             timing::NO_ROUND,
@@ -4186,7 +4397,7 @@ where
             install_prepared_started.elapsed(),
             0,
         );
-        self.run_installed_display_bundle(program, provenance, page, alias, generation)
+        self.run_installed_display_bundle(program, source_keys, provenance, page, alias, generation)
     }
 
     /// Step (a) of the off-checkout split for a display bundle, the
@@ -4206,20 +4417,38 @@ where
         generation: Generation,
     ) -> Result<PendingDisplayInstall, ResidentError> {
         check_display_bundle_binders(page, metadata, alias)?;
-        let prepared = code.prepared;
+        let prepared = code.prepared.into_owned();
         let provenance = self.provenance_for(&code.sites)?;
         self.state
             .merge_table(&code.table)
             .map_err(ResidentError::TableCollision)?;
         self.state.set_val_gen(generation);
-        let snapshot = self
-            .state
-            .snapshot_install_prepared(prepared.into_owned())?
-            .ok_or(PreparedRuntimeError::MachineNotInstalled)?;
+        let lexical_scope = self.run_context.lexical_scope;
+        let snapshot = if let Some(certification) = code.certification.as_ref() {
+            let admitted_public = self
+                .public_visibility_snapshot_in(lexical_scope)
+                .ok_or(PreparedRuntimeError::SourceScopeAdmission)?;
+            let resolved =
+                self.state
+                    .resolve_certification_in(lexical_scope, &prepared, certification)?;
+            PendingPreparedSource::Certified {
+                prepared,
+                resolved,
+                registry: self.state.certified_image_registry(),
+                admitted_public,
+            }
+        } else {
+            PendingPreparedSource::Legacy(
+                self.state
+                    .snapshot_install_prepared(prepared)?
+                    .ok_or(PreparedRuntimeError::MachineNotInstalled)?,
+            )
+        };
         Ok(PendingDisplayInstall {
             snapshot,
             provenance,
             generation,
+            lexical_scope,
         })
     }
 
@@ -4231,7 +4460,7 @@ where
     pub fn revalidate_and_run_display_bundle(
         &mut self,
         pending: PendingDisplayInstall,
-        compiled: std::sync::Arc<tidepool_codegen::prepared_program::CompiledProgram>,
+        compiled: CompiledPreparedInstall,
         page: &BoundBinder,
         alias: &BoundBinder,
     ) -> Result<Option<ResidentDisplayBundle>, ResidentError> {
@@ -4239,13 +4468,42 @@ where
             snapshot,
             provenance,
             generation,
+            lexical_scope,
         } = pending;
         let install_started = std::time::Instant::now();
-        let Some(program) = self
-            .state
-            .revalidate_and_install_prepared(snapshot, compiled)?
-        else {
-            return Ok(None);
+        let (program, source_keys) = match (snapshot, compiled.kind) {
+            (PendingPreparedSource::Legacy(snapshot), CompiledPreparedKind::Legacy(compiled)) => {
+                let Some(program) = self
+                    .state
+                    .revalidate_and_install_prepared(snapshot, compiled)?
+                else {
+                    return Ok(None);
+                };
+                (program, Vec::new())
+            }
+            (
+                PendingPreparedSource::Certified {
+                    resolved,
+                    admitted_public,
+                    ..
+                },
+                CompiledPreparedKind::Certified { target, demanded },
+            ) => {
+                if self.public_visibility_snapshot_in(lexical_scope).as_ref()
+                    != Some(&admitted_public)
+                {
+                    return Ok(None);
+                }
+                self.install_certified_turn_in(
+                    lexical_scope,
+                    target,
+                    &resolved.target_owners,
+                    &resolved.source_evidence,
+                    demanded,
+                    &resolved.inherited_needed,
+                )?
+            }
+            _ => return Err(PreparedRuntimeError::CertifiedTargetOwners.into()),
         };
         timing::record_stage(
             timing::NO_NODE,
@@ -4254,7 +4512,7 @@ where
             install_started.elapsed(),
             0,
         );
-        self.run_installed_display_bundle(program, provenance, page, alias, generation)
+        self.run_installed_display_bundle(program, source_keys, provenance, page, alias, generation)
             .map(Some)
     }
 
@@ -4264,6 +4522,7 @@ where
     fn run_installed_display_bundle(
         &mut self,
         program: ProgramId,
+        source_keys: Vec<tidepool_codegen::binding_table::SourceLeaseKey>,
         provenance: Arc<ProgramProvenance>,
         page: &BoundBinder,
         alias: &BoundBinder,
@@ -4300,67 +4559,77 @@ where
         if let Some(engine) = self.state.prepared_mut() {
             engine.unpin(program);
         }
-        let (page_handle, metadata_handle, alias_handle) = match ran?? {
-            PreparedRun::Display {
-                page,
-                metadata,
-                alias,
-            } => (page, metadata, alias),
-            PreparedRun::Done { handle, .. } => {
-                self.on_eval_thread(move |engine, _, _, _| {
-                    engine.release(handle);
-                    Ok(())
-                })?;
-                return Err(PreparedRuntimeError::UnsettledEntry {
-                    program,
-                    detail: "display bundle settled as a whole value",
+        let prebind = (|| -> Result<(PreparedHandle, PreparedHandle), ResidentError> {
+            let (page_handle, metadata_handle, alias_handle) = match ran?? {
+                PreparedRun::Display {
+                    page,
+                    metadata,
+                    alias,
+                } => (page, metadata, alias),
+                PreparedRun::Done { handle, .. } => {
+                    self.on_eval_thread(move |engine, _, _, _| {
+                        engine.release(handle);
+                        Ok(())
+                    })?;
+                    return Err(PreparedRuntimeError::UnsettledEntry {
+                        program,
+                        detail: "display bundle settled as a whole value",
+                    }
+                    .into());
                 }
-                .into());
+                PreparedRun::Projected { fields } => {
+                    self.on_eval_thread(move |engine, _, _, _| {
+                        engine.release_all(fields);
+                        Ok(())
+                    })?;
+                    return Err(PreparedRuntimeError::UnsettledEntry {
+                        program,
+                        detail: "display bundle settled as an ordinary projected bind",
+                    }
+                    .into());
+                }
+                PreparedRun::Suspended { id, .. } => {
+                    self.on_eval_thread(move |engine, _, _, _| {
+                        engine
+                            .abort_parked(id)
+                            .map_err(|error| EffectError::Handler(error.to_string()))?;
+                        Ok(())
+                    })?;
+                    return Err(PreparedRuntimeError::UnsettledEntry {
+                        program,
+                        detail: "display bundle suspended while constructing a pure page",
+                    }
+                    .into());
+                }
+                PreparedRun::Deferred { id, .. } => {
+                    self.on_eval_thread(move |engine, _, _, _| {
+                        engine
+                            .abort_parked(id)
+                            .map_err(|error| EffectError::Handler(error.to_string()))?;
+                        Ok(())
+                    })?;
+                    return Err(PreparedRuntimeError::UnsettledEntry {
+                        program,
+                        detail: "display bundle deferred while constructing a pure page",
+                    }
+                    .into());
+                }
+            };
+            if let Err(error) =
+                self.bind_prepared(program, lexical_scope, generation, &[(page, page_handle)])
+            {
+                self.release_display_fields(metadata_handle, alias_handle)?;
+                return Err(error);
             }
-            PreparedRun::Projected { fields } => {
-                self.on_eval_thread(move |engine, _, _, _| {
-                    engine.release_all(fields);
-                    Ok(())
-                })?;
-                return Err(PreparedRuntimeError::UnsettledEntry {
-                    program,
-                    detail: "display bundle settled as an ordinary projected bind",
-                }
-                .into());
-            }
-            PreparedRun::Suspended { id, .. } => {
-                self.on_eval_thread(move |engine, _, _, _| {
-                    engine
-                        .abort_parked(id)
-                        .map_err(|error| EffectError::Handler(error.to_string()))?;
-                    Ok(())
-                })?;
-                return Err(PreparedRuntimeError::UnsettledEntry {
-                    program,
-                    detail: "display bundle suspended while constructing a pure page",
-                }
-                .into());
-            }
-            PreparedRun::Deferred { id, .. } => {
-                self.on_eval_thread(move |engine, _, _, _| {
-                    engine
-                        .abort_parked(id)
-                        .map_err(|error| EffectError::Handler(error.to_string()))?;
-                    Ok(())
-                })?;
-                return Err(PreparedRuntimeError::UnsettledEntry {
-                    program,
-                    detail: "display bundle deferred while constructing a pure page",
-                }
-                .into());
+            Ok((metadata_handle, alias_handle))
+        })();
+        let (metadata_handle, alias_handle) = match prebind {
+            Ok(fields) => fields,
+            Err(error) => {
+                self.retire_failed_turn_source_instances(lexical_scope, &source_keys);
+                return Err(error);
             }
         };
-        if let Err(error) =
-            self.bind_prepared(program, lexical_scope, generation, &[(page, page_handle)])
-        {
-            self.release_display_fields(metadata_handle, alias_handle)?;
-            return Err(error);
-        }
         self.binding_provenance
             .insert(page.var_id, Arc::clone(&provenance));
         self.finish_observation(page, &[]);

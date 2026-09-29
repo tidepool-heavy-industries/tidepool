@@ -64,8 +64,17 @@ pub enum PreparedRuntimeError {
     Demand(#[from] DemandError),
     #[error("no exact live owner for certified import {0:?}")]
     MissingCertifiedOwner(ImportOwner),
+    #[error(
+        "no exact live owner for certified retained import {identity:?} at generation {generation}"
+    )]
+    MissingRetainedCertifiedOwner {
+        identity: SymbolIdentity,
+        generation: u64,
+    },
     #[error("certified target import owners do not match its declared globals")]
     CertifiedTargetOwners,
+    #[error("certified programs disagree on the resident Settled constructor identities")]
+    ConflictingSettledConstructors,
     #[error("certified install includes a source group unreachable from its target")]
     UnreachableCertifiedGroup,
     #[error("certified source installation targeted a closed or conflicting lexical scope")]
@@ -226,7 +235,9 @@ impl PreparedRuntimeError {
             | Self::Link(_)
             | Self::Demand(_)
             | Self::MissingCertifiedOwner(_)
+            | Self::MissingRetainedCertifiedOwner { .. }
             | Self::CertifiedTargetOwners
+            | Self::ConflictingSettledConstructors
             | Self::UnreachableCertifiedGroup
             | Self::SourceScopeAdmission
             | Self::AmbiguousSourceInstance(_)
@@ -451,9 +462,10 @@ impl TypeGraph for SiteTypeEvidence {
     }
 }
 
-/// The two constructors a turn's settled layer is read by, as this program's
-/// own declarations name them (`host_id` is the bridge `DataConId`).
-#[derive(Clone, Copy, Debug)]
+/// The two constructors a turn's settled layer is read by (`host_id` is the
+/// bridge `DataConId`). A reduced target may inherit these exact identities
+/// from an already installed source program.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SettledIds {
     done: tidepool_repr::DataConId,
     suspended: tidepool_repr::DataConId,
@@ -2052,18 +2064,7 @@ impl PreparedEngine {
         let (machine, program) =
             PreparedMachine::new_shared(image, PreparedMachineOptions { nursery_bytes })
                 .map_err(PreparedRuntimeError::Run)?;
-        let mut engine = Self {
-            machine,
-            programs: BTreeMap::new(),
-            sites: BTreeMap::new(),
-            verb_sites: BTreeMap::new(),
-            old_bytes: 0,
-            installs_since_major: 0,
-            old_bytes_at_last_major: 0,
-            major_collections: 0,
-            code_exports: BTreeMap::new(),
-            registry,
-        };
+        let mut engine = Self::from_machine(machine, registry);
         // The first program can conflict only with itself.
         let plan = engine.plan_evidence(&facts)?;
         engine.programs.insert(program, facts);
@@ -2078,6 +2079,36 @@ impl PreparedEngine {
             .map_err(PreparedRuntimeError::Run)?;
         engine.installs_since_major += 1;
         Ok((engine, program))
+    }
+
+    fn from_machine(
+        machine: PreparedMachine<'static>,
+        registry: Option<Arc<ImageRegistry>>,
+    ) -> Self {
+        Self {
+            machine,
+            programs: BTreeMap::new(),
+            sites: BTreeMap::new(),
+            verb_sites: BTreeMap::new(),
+            old_bytes: 0,
+            installs_since_major: 0,
+            old_bytes_at_last_major: 0,
+            major_collections: 0,
+            code_exports: BTreeMap::new(),
+            registry,
+        }
+    }
+
+    /// Bootstrap an empty native machine for a certified target plus its
+    /// demanded source groups. The batch installer publishes them together;
+    /// no provisional legacy program or metadata becomes visible first.
+    pub(crate) fn empty_certified(
+        nursery_bytes: usize,
+        registry: Option<Arc<ImageRegistry>>,
+    ) -> Result<Self, PreparedRuntimeError> {
+        let machine = PreparedMachine::empty(PreparedMachineOptions { nursery_bytes })
+            .map_err(PreparedRuntimeError::Run)?;
+        Ok(Self::from_machine(machine, registry))
     }
 
     /// The rows of `facts` that installing it would make canonical: every
@@ -2733,6 +2764,26 @@ impl PreparedEngine {
                 .map(|selected| ProgramFacts::of_definitions(selected.group().definitions(), None))
                 .collect();
             facts.push(ProgramFacts::of(&target.prepared));
+            // A reduced target need not redeclare the Settled constructors:
+            // it may reuse the exact original definitions already installed
+            // by an earlier target or one of this batch's source groups.
+            // ProgramFacts still carries the constructor identities used by
+            // the decoder, and a conflicting host-id pair is never accepted.
+            let mut settled = None;
+            for ids in self
+                .programs
+                .values()
+                .chain(facts.iter())
+                .filter_map(|facts| facts.settled)
+            {
+                if settled.is_some_and(|known| known != ids) {
+                    return Err(PreparedRuntimeError::ConflictingSettledConstructors);
+                }
+                settled = Some(ids);
+            }
+            if let Some(target_facts) = facts.last_mut() {
+                target_facts.settled = settled;
+            }
             let plans = self.plan_batch_evidence(&facts)?;
             let exports = exportable_code_tops(&target.prepared);
             let mut programs = Vec::with_capacity(demanded.len() + 1);
@@ -2800,15 +2851,11 @@ impl PreparedEngine {
                             binder,
                             interface_digest,
                         } => {
-                            let handle = exact_external.get(owner).copied().ok_or_else(|| {
-                                PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
-                            })?;
                             let export = self
                                 .code_exports
                                 .get(binder)
                                 .filter(|export| {
-                                    export.handle == handle
-                                        && declaration.identity == *binder
+                                    declaration.identity == *binder
                                         && binder.unit == *unit
                                         && binder.module == *module
                                         && export
@@ -2818,6 +2865,7 @@ impl PreparedEngine {
                                 .ok_or_else(|| {
                                     PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
                                 })?;
+                            let handle = export.handle;
                             if package_updates
                                 .insert(binder.clone(), *interface_digest)
                                 .is_some_and(|previous| previous != *interface_digest)
@@ -4814,6 +4862,10 @@ mod tests {
             .seal([root.clone()])
             .unwrap();
         let mut wire = testing::wire_program();
+        let Group::NonRecursive(entry) = &mut wire.bindings[0] else {
+            unreachable!("fixture has one entry")
+        };
+        entry.identity.unit = "main".into();
         wire.globals.push(GlobalDecl {
             identity: root.binder.clone(),
             rep: RuntimeRep::LiftedRef,
@@ -4828,7 +4880,10 @@ mod tests {
             binder: root.binder.clone(),
         };
         let source_evidence = BTreeMap::from([
-            (root, (groups[0].owner().clone(), groups[0].original_ordinal())),
+            (
+                root,
+                (groups[0].owner().clone(), groups[0].original_ordinal()),
+            ),
             (
                 SourceBinder {
                     version: ModuleVersion([1; 32]),
@@ -4838,11 +4893,8 @@ mod tests {
             ),
         ]);
         let mut session = super::super::persistent::PersistentSession::new(None, 1024 * 1024);
-        session
-            .install_prepared(testing::prepare(testing::wire_program()).unwrap())
-            .unwrap();
         let scope = session.mint_isolated_scope();
-        session
+        let (installed, source_keys) = session
             .install_certified_turn_in(
                 scope,
                 target,
@@ -4850,7 +4902,6 @@ mod tests {
                 &source_evidence,
                 demand.compile(&registry).unwrap(),
                 &[],
-                &HashMap::new(),
             )
             .unwrap();
         assert_eq!(
@@ -4860,7 +4911,8 @@ mod tests {
                 .len(),
             2
         );
-        assert!(session.residency().unwrap().programs >= 4);
+        assert_eq!(session.residency().unwrap().programs, 3);
+        assert_eq!(session.prepared_mut().unwrap().code_export_count(), 0);
         assert!(matches!(
             session.install_certified_turn_in(
                 tidepool_codegen::scope::ScopeId(u64::MAX),
@@ -4873,11 +4925,28 @@ mod tests {
                 &BTreeMap::new(),
                 Vec::new(),
                 &[],
-                &HashMap::new(),
             ),
             Err(PreparedRuntimeError::SourceScopeAdmission)
         ));
-        assert!(session.residency().unwrap().programs >= 4);
+        assert_eq!(session.residency().unwrap().programs, 3);
+        let newly_rooted = session
+            .bindings()
+            .source_instances_in(session.scope_tree(), scope);
+        assert!(session.retire_failed_turn_source_instances(scope, &source_keys));
+        assert!(session
+            .bindings()
+            .source_instances_in(session.scope_tree(), scope)
+            .is_empty());
+        assert!(session.prepared_mut().unwrap().unpin(installed));
+        session
+            .prepared_mut()
+            .unwrap()
+            .quiesce_and_collect_now()
+            .unwrap();
+        assert_eq!(session.residency().unwrap().programs, 0);
+        for lease in newly_rooted {
+            assert!(!session.prepared_mut().unwrap().release(lease.handle()));
+        }
     }
 
     #[test]

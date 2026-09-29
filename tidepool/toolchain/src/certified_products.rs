@@ -8,9 +8,8 @@ use std::path::{Path, PathBuf};
 use ciborium::value::Value;
 use sha2::{Digest, Sha256};
 use tidepool_repr::execution_schema::{
-    parse_module_products, CachedHomeOwner, DecodeLimits, GlobalDecl, ModuleVersion,
-    PreparedProgram, ProjectedGroup, RawModuleProduct, ResultContract, RuntimeRep, Signature,
-    SymbolIdentity,
+    CachedHomeOwner, DecodeLimits, GlobalDecl, ModuleVersion, PreparedProgram, ProjectedGroup,
+    RawModuleProduct, ResultContract, RuntimeRep, Signature, SymbolIdentity, parse_module_products,
 };
 
 use crate::cache::{DependencyEvidence, ProductAvailability};
@@ -18,7 +17,9 @@ use crate::module_candidates::CandidateSet;
 
 const RECEIPT_LIMIT: usize = 4 << 20;
 const MODULE_LIMIT: usize = 128;
-const GROUP_LIMIT: usize = 4096;
+// Tidepool.Effects.Core alone produces 5,930 neutral groups in a normal
+// resident turn. The separate 4 MiB receipt bound limits aggregate memory.
+const GROUP_LIMIT: usize = 8192;
 const GLOBAL_LIMIT: usize = 65536;
 const PACKAGE_LIMIT: usize = 4096;
 const PACKAGE_INTERFACE_LIMIT: u64 = 32 << 20;
@@ -564,7 +565,6 @@ fn fresh_module_version(
     source_sha: &[u8; 32],
     interface: &[u8],
     product_bytes: &[u8],
-    evidence: &DependencyEvidence,
 ) -> CertResult<ModuleVersion> {
     let include = crate::module_candidates::context_paths(include)
         .ok_or(CertificationError::Mismatch("include context"))?;
@@ -574,7 +574,6 @@ fn fresh_module_version(
         &hex(source_sha),
         interface,
         product_bytes,
-        evidence,
     ))
 }
 
@@ -701,11 +700,22 @@ pub(crate) fn certify_products(
     }
     let requirements = crate::prepared_artifact::production_requirements()
         .map_err(|_| CertificationError::Mismatch("production requirements"))?;
-    let parsed_fresh =
-        parse_module_products(fresh_product_bytes, &requirements, DecodeLimits::default())?;
+    let parsed_fresh = parse_module_products(
+        fresh_product_bytes,
+        &requirements,
+        crate::module_candidates::product_decode_limits(),
+    )?;
     if parsed_fresh != fresh_products {
         return Err(CertificationError::Mismatch("fresh product bytes"));
     }
+    let fresh_sidecars =
+        crate::module_candidates::split_module_product_bytes(fresh_product_bytes, &parsed_fresh)
+            .ok_or(CertificationError::Mismatch("fresh module product framing"))?;
+    let fresh_sidecars: BTreeMap<_, _> = parsed_fresh
+        .iter()
+        .zip(fresh_sidecars)
+        .map(|(product, bytes)| ((product.unit.clone(), product.module.clone()), bytes))
+        .collect();
     let mut seen_modules = BTreeSet::new();
     let mut fresh_modules = BTreeSet::new();
     let mut groups = Vec::new();
@@ -714,105 +724,110 @@ pub(crate) fn certify_products(
         if !seen_modules.insert(key.clone()) {
             return Err(CertificationError::Mismatch("duplicate receipt module"));
         }
-        let (product, bytes, evidence, source_sha, version) = match accepted.origin {
-            ProductOrigin::Fresh => {
-                fresh_modules.insert(key.clone());
-                if accepted.module_version.is_some() {
-                    return Err(CertificationError::Mismatch(
-                        "fresh version must be derived",
-                    ));
+        let (product, receipt_bytes, module_bytes, evidence, source_sha, version) =
+            match accepted.origin {
+                ProductOrigin::Fresh => {
+                    fresh_modules.insert(key.clone());
+                    if accepted.module_version.is_some() {
+                        return Err(CertificationError::Mismatch(
+                            "fresh version must be derived",
+                        ));
+                    }
+                    let product = matching_product(&parsed_fresh, &key.0, &key.1)?;
+                    let module_bytes = fresh_sidecars
+                        .get(&key)
+                        .ok_or(CertificationError::Mismatch("fresh module product"))?;
+                    let source_sha = ready_source_sha(final_evidence, &key.0, &key.1)?;
+                    let version = fresh_module_version(
+                        endpoint_identity,
+                        include,
+                        &source_sha,
+                        &product.interface,
+                        module_bytes,
+                    )?;
+                    (
+                        product,
+                        fresh_product_bytes,
+                        module_bytes.as_slice(),
+                        final_evidence,
+                        source_sha,
+                        version,
+                    )
                 }
-                let product = matching_product(&parsed_fresh, &key.0, &key.1)?;
-                let source_sha = ready_source_sha(final_evidence, &key.0, &key.1)?;
-                let version = fresh_module_version(
-                    endpoint_identity,
-                    include,
-                    &source_sha,
-                    &product.interface,
-                    fresh_product_bytes,
-                    final_evidence,
-                )?;
-                (
-                    product,
-                    fresh_product_bytes,
-                    final_evidence,
-                    source_sha,
-                    version,
-                )
-            }
-            ProductOrigin::Cached => {
-                let bundle = candidates
-                    .and_then(|set| set.by_owner.get(&key))
-                    .ok_or(CertificationError::Mismatch("selected candidate"))?;
-                if accepted.module_version.as_ref() != Some(&bundle.owner.module_version)
-                    || bundle.owner.skinny_iface_sha256 != accepted.skinny_iface_sha256
-                    || bundle.owner.product_sha256 != accepted.product_sha256
-                    || !bundle.evidence.valid(&bundle.target_source)
-                    || bundle.source_sha256 != hex(&accepted.source_sha256)
-                    || bundle.iface_sha256 != hex(&accepted.skinny_iface_sha256)
-                {
-                    return Err(CertificationError::Mismatch("candidate owner/evidence"));
-                }
-                if sha(&read_bounded(&bundle.source, SOURCE_LIMIT)?) != accepted.source_sha256
-                    || sha(&read_bounded(&bundle.iface_path, PACKAGE_INTERFACE_LIMIT)?)
-                        != accepted.skinny_iface_sha256
-                {
-                    return Err(CertificationError::StaleEvidence);
-                }
-                let original = parse_module_products(
-                    &bundle.product_bytes,
-                    &requirements,
-                    DecodeLimits::default(),
-                )?;
-                if matching_product(&original, &key.0, &key.1)? != &bundle.product {
-                    return Err(CertificationError::Mismatch("original product bytes"));
-                }
-                if ready_source_sha(final_evidence, &key.0, &key.1)? != accepted.source_sha256 {
-                    return Err(CertificationError::Mismatch("candidate current source"));
-                }
-                let original_imports = bundle
-                    .evidence
-                    .modules
-                    .iter()
-                    .find(|row| row.unit == key.0 && row.module == key.1 && !row.boot)
-                    .map(|row| &row.imports);
-                let current_imports = final_evidence
-                    .modules
-                    .iter()
-                    .find(|row| row.unit == key.0 && row.module == key.1 && !row.boot)
-                    .map(|row| &row.imports);
-                if original_imports.is_none()
-                    || original_imports.map(|rows| rows.len())
-                        != current_imports.map(|rows| rows.len())
-                    || original_imports
-                        .unwrap()
+                ProductOrigin::Cached => {
+                    let bundle = candidates
+                        .and_then(|set| set.by_owner.get(&key))
+                        .ok_or(CertificationError::Mismatch("selected candidate"))?;
+                    if accepted.module_version.as_ref() != Some(&bundle.owner.module_version)
+                        || bundle.owner.skinny_iface_sha256 != accepted.skinny_iface_sha256
+                        || bundle.owner.product_sha256 != accepted.product_sha256
+                        || !bundle.evidence.valid(&bundle.target_source)
+                        || bundle.source_sha256 != hex(&accepted.source_sha256)
+                        || bundle.iface_sha256 != hex(&accepted.skinny_iface_sha256)
+                    {
+                        return Err(CertificationError::Mismatch("candidate owner/evidence"));
+                    }
+                    if sha(&read_bounded(&bundle.source, SOURCE_LIMIT)?) != accepted.source_sha256
+                        || sha(&read_bounded(&bundle.iface_path, PACKAGE_INTERFACE_LIMIT)?)
+                            != accepted.skinny_iface_sha256
+                    {
+                        return Err(CertificationError::StaleEvidence);
+                    }
+                    let original = parse_module_products(
+                        &bundle.product_bytes,
+                        &requirements,
+                        crate::module_candidates::product_decode_limits(),
+                    )?;
+                    if matching_product(&original, &key.0, &key.1)? != &bundle.product {
+                        return Err(CertificationError::Mismatch("original product bytes"));
+                    }
+                    if ready_source_sha(final_evidence, &key.0, &key.1)? != accepted.source_sha256 {
+                        return Err(CertificationError::Mismatch("candidate current source"));
+                    }
+                    let original_imports = bundle
+                        .evidence
+                        .modules
                         .iter()
-                        .zip(current_imports.unwrap())
-                        .any(|(old, new)| {
-                            old.qualifier != new.qualifier
-                                || old.module != new.module
-                                || old.boot != new.boot
-                                || old.selected != new.selected
-                        })
-                {
-                    return Err(CertificationError::Mismatch("candidate direct imports"));
+                        .find(|row| row.unit == key.0 && row.module == key.1 && !row.boot)
+                        .map(|row| &row.imports);
+                    let current_imports = final_evidence
+                        .modules
+                        .iter()
+                        .find(|row| row.unit == key.0 && row.module == key.1 && !row.boot)
+                        .map(|row| &row.imports);
+                    if original_imports.is_none()
+                        || original_imports.map(|rows| rows.len())
+                            != current_imports.map(|rows| rows.len())
+                        || original_imports
+                            .unwrap()
+                            .iter()
+                            .zip(current_imports.unwrap())
+                            .any(|(old, new)| {
+                                old.qualifier != new.qualifier
+                                    || old.module != new.module
+                                    || old.boot != new.boot
+                                    || old.selected != new.selected
+                            })
+                    {
+                        return Err(CertificationError::Mismatch("candidate direct imports"));
+                    }
+                    // `bundle.product` is a clone of the exact parsed original.
+                    (
+                        &bundle.product,
+                        bundle.product_bytes.as_slice(),
+                        bundle.product_bytes.as_slice(),
+                        &bundle.evidence,
+                        ready_source_sha(&bundle.evidence, &key.0, &key.1)?,
+                        bundle.owner.module_version.clone(),
+                    )
                 }
-                // `bundle.product` is a clone of the exact parsed original.
-                (
-                    &bundle.product,
-                    bundle.product_bytes.as_slice(),
-                    &bundle.evidence,
-                    ready_source_sha(&bundle.evidence, &key.0, &key.1)?,
-                    bundle.owner.module_version.clone(),
-                )
-            }
-        };
+            };
         let owner = CachedHomeOwner {
             unit: key.0.clone(),
             module: key.1.clone(),
             module_version: version,
             skinny_iface_sha256: accepted.skinny_iface_sha256,
-            product_sha256: accepted.product_sha256,
+            product_sha256: sha(module_bytes),
         };
         let evidence_digest = match accepted.origin {
             ProductOrigin::Fresh => sha(fresh_evidence_bytes),
@@ -820,7 +835,7 @@ pub(crate) fn certify_products(
                 .map_err(|_| CertificationError::Mismatch("dependency witness encoding"))?),
         };
         if source_sha != accepted.source_sha256
-            || sha(bytes) != owner.product_sha256
+            || sha(receipt_bytes) != accepted.product_sha256
             || sha(&product.interface) != owner.skinny_iface_sha256
             || evidence_digest != accepted.dependency_witness_sha256
         {
@@ -995,24 +1010,26 @@ mod tests {
         .unwrap();
         let mut accepted = receipt(&bytes, &evidence, source);
         accepted.dependency_witness_sha256 = sha(&raw_evidence);
-        assert!(certify_products(
-            None,
-            &CertifiedReceipt {
-                modules: vec![accepted.clone()],
-                targets: BTreeMap::new(),
-                packages: BTreeMap::new()
-            },
-            &parsed,
-            &bytes,
-            &raw_evidence,
-            &input,
-            &evidence,
-            source,
-            b"producer",
-            &[],
-        )
-        .unwrap()
-        .is_empty());
+        assert!(
+            certify_products(
+                None,
+                &CertifiedReceipt {
+                    modules: vec![accepted.clone()],
+                    targets: BTreeMap::new(),
+                    packages: BTreeMap::new()
+                },
+                &parsed,
+                &bytes,
+                &raw_evidence,
+                &input,
+                &evidence,
+                source,
+                b"producer",
+                &[],
+            )
+            .unwrap()
+            .is_empty()
+        );
         let mut substituted = evidence.clone();
         substituted.packages.push("unrelated selection".into());
         assert!(matches!(
@@ -1059,23 +1076,25 @@ mod tests {
         ));
         let mut changed = accepted;
         changed.dependency_witness_sha256 = [7; 32];
-        assert!(certify_products(
-            None,
-            &CertifiedReceipt {
-                modules: vec![changed],
-                targets: BTreeMap::new(),
-                packages: BTreeMap::new()
-            },
-            &parsed,
-            &bytes,
-            &raw_evidence,
-            &input,
-            &evidence,
-            source,
-            b"producer",
-            &[],
-        )
-        .is_err());
+        assert!(
+            certify_products(
+                None,
+                &CertifiedReceipt {
+                    modules: vec![changed],
+                    targets: BTreeMap::new(),
+                    packages: BTreeMap::new()
+                },
+                &parsed,
+                &bytes,
+                &raw_evidence,
+                &input,
+                &evidence,
+                source,
+                b"producer",
+                &[],
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1129,6 +1148,43 @@ mod tests {
         assert!(matches!(
             decode_receipt(&encoded),
             Err(CertificationError::Receipt("receipt size"))
+        ));
+
+        let large_groups = |count: usize| {
+            let mut receipt = value.clone();
+            let Value::Array(header) = &mut receipt else {
+                unreachable!()
+            };
+            let Value::Array(modules) = &mut header[2] else {
+                unreachable!()
+            };
+            let Value::Array(module) = &mut modules[0] else {
+                unreachable!()
+            };
+            module[8] = Value::Array(
+                (0..count)
+                    .map(|ordinal| {
+                        Value::Array(vec![
+                            Value::Integer((ordinal as u64).into()),
+                            Value::Array(vec![]),
+                        ])
+                    })
+                    .collect(),
+            );
+            let mut encoded = Vec::new();
+            ciborium::ser::into_writer(&receipt, &mut encoded).unwrap();
+            encoded
+        };
+        // A real resident Tidepool.Effects.Core product has 5,930 groups.
+        assert_eq!(
+            decode_receipt(&large_groups(5_930)).unwrap().modules[0]
+                .groups
+                .len(),
+            5_930
+        );
+        assert!(matches!(
+            decode_receipt(&large_groups(GROUP_LIMIT + 1)),
+            Err(CertificationError::Receipt("group count"))
         ));
     }
 
