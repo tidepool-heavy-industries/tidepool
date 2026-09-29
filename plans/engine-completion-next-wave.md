@@ -136,3 +136,13 @@ scheduling/recovery/M1/review leaves. Exclusive file ownership and reviewed join
 Builds use admitted 104 GiB slice; expensive Nix realizations serialize with
 --cores 2 because the daemon separately has an 8 GiB cap. The matched shell
 realization passed with that setting; final matched package remains required.
+
+## First joined checkpoint
+
+Joined native repr/group/batch fixes and actual M1 host/lifecycle fencing through
+`bef801b6c`. Admitted pinned command selected codegen batch/demand, runtime
+certified demand and actual host tests across three libraries: 11 executed,
+11 passed, 1,280 skipped, exit zero. Log:
+`target/completion-evidence/joined-native-host-wave2.log`. This proves the joined
+substrate, not compiler product production wiring, concurrent publication,
+full declaration isolation, or pending-call compaction.
