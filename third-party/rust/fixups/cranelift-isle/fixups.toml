@@ -1,0 +1,2 @@
+# This script only generates Rust test cases; the imported library does not use OUT_DIR.
+buildscript.run = false

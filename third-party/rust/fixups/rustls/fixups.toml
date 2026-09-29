@@ -1,0 +1,2 @@
+# The resolved feature set does not include read_buf.
+buildscript.run = false

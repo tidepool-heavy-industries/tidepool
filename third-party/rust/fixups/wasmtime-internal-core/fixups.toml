@@ -1,0 +1,2 @@
+# Its script only registers a rustc-check-cfg lint name.
+buildscript.run = false

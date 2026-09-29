@@ -1,0 +1,2 @@
+# First-party MD5 C library is owned by //tidepool/codegen:prepared_md5.
+buildscript.run = false

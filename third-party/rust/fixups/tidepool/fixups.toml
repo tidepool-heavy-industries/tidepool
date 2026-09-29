@@ -1,0 +1,2 @@
+# First-party facade build script is owned by //bridge/facade:facade_generated.
+buildscript.run = false

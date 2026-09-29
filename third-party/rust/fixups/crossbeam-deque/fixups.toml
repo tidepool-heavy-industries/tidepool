@@ -1,0 +1,2 @@
+# The Linux build has no ThreadSanitizer cfg.
+buildscript.run = false

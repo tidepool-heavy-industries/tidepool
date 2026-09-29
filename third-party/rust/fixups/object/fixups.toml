@@ -1,0 +1,3 @@
+# Rust 1.93 has core::error::Error.
+cfgs = ["core_error"]
+buildscript.run = false

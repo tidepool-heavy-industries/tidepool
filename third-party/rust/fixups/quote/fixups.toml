@@ -1,0 +1,2 @@
+# The pinned Rust compiler has diagnostic namespaces.
+buildscript.run = false

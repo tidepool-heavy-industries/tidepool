@@ -134,6 +134,36 @@
           # version + components; the flake reads it rather than pinning
           # `stable.latest` (which drifts silently on every flake.lock update).
           rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          # Buck2 and Reindeer are pinned orchestration tools. The Rust/GHC/C
+          # toolchains below remain the declared inputs to native actions.
+          buck2Release =
+            pkgs.runCommand "buck2-snapshot-20260926-200119"
+              {
+                nativeBuildInputs = [ pkgs.zstd ];
+                source = pkgs.fetchurl {
+                  url = "https://github.com/thoughtpolice/buck2/releases/download/snapshot-20260926-200119/buck2-x86_64-unknown-linux-gnu.zst";
+                  hash = "sha256-hCos2M7wxjrYKXaQdCouhaWvoK6XM5urBtKJTm2tkfQ=";
+                };
+              }
+              ''
+                mkdir -p "$out/bin"
+                zstd -d -c "$source" > "$out/bin/buck2"
+                chmod +x "$out/bin/buck2"
+              '';
+          buckReindeer =
+            pkgs.runCommand "reindeer-2026.09.14.00"
+              {
+                nativeBuildInputs = [ pkgs.zstd ];
+                source = pkgs.fetchurl {
+                  url = "https://github.com/facebookincubator/reindeer/releases/download/v2026.09.14.00/reindeer-x86_64-unknown-linux-musl.zst";
+                  hash = "sha256-YWqPwwLD2yuJ5yKGz3pTlpkRY7CI8BWHyb+c/css2qw=";
+                };
+              }
+              ''
+                mkdir -p "$out/bin"
+                zstd -d -c "$source" > "$out/bin/reindeer"
+                chmod +x "$out/bin/reindeer"
+              '';
           tidepoolRustPlatform = pkgs.makeRustPlatform {
             cargo = rust;
             rustc = rust;
@@ -218,6 +248,8 @@
           devShells.default = pkgs.mkShell {
             nativeBuildInputs = [
               pkgs.pkg-config
+              buck2Release
+              buckReindeer
             ];
             buildInputs = [
               rust
@@ -409,6 +441,41 @@
           };
 
           packages.default = self.packages.${system}.tidepool-extract;
+
+          packages.buck-rust = rust;
+          packages.buck-buck2 = buck2Release;
+          packages.buck-ghc = ghcEnv;
+          packages.buck-cc = pkgs.stdenv.cc;
+          packages.buck-binutils = pkgs.binutils;
+          packages.buck-node = pkgs.nodejs_24;
+          packages.buck-bash = pkgs.bash;
+          packages.buck-coreutils = pkgs.coreutils;
+          packages.buck-tar = pkgs.gnutar;
+          packages.buck-gzip = pkgs.gzip;
+          packages.buck-python = pkgs.python3;
+          packages.buck-cmake = pkgs.cmake;
+          packages.buck-perl = pkgs.perl;
+          packages.buck-pkg-config = pkgs.pkg-config;
+          packages.buck-openssl = pkgs.openssl;
+          packages.buck-reindeer = buckReindeer;
+          packages.buck-toolchain-closure = pkgs.closureInfo {
+            rootPaths = [
+              rust
+              ghcEnv
+              pkgs.stdenv.cc
+              pkgs.binutils
+              pkgs.nodejs_24
+              pkgs.bash
+              pkgs.coreutils
+              pkgs.gnutar
+              pkgs.gzip
+              pkgs.python3
+              pkgs.cmake
+              pkgs.perl
+              pkgs.pkg-config
+              pkgs.openssl
+            ];
+          };
 
           formatter = pkgs.nixfmt;
 

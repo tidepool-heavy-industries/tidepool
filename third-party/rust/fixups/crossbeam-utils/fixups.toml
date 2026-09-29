@@ -1,0 +1,2 @@
+# x86_64 has pointer atomics; this build has no ThreadSanitizer.
+buildscript.run = false

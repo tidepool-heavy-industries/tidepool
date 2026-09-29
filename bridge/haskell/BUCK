@@ -1,0 +1,12 @@
+# Exact compile-time resources consumed by the native repr targets.
+filegroup(
+    name = "m3_vertical_fixture",
+    srcs = ["test-prepared-stg/fixtures/m3-vertical.cbor"],
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
+    name = "schema6_intrinsic_fixture",
+    srcs = ["test-execution-schema-encode/fixtures/schema6-intrinsic.cbor"],
+    visibility = ["PUBLIC"],
+)

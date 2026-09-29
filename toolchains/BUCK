@@ -1,0 +1,50 @@
+load("@prelude//toolchains:cxx.bzl", "system_cxx_toolchain")
+load("@prelude//toolchains:genrule.bzl", "system_genrule_toolchain")
+load("@prelude//toolchains:python.bzl", "system_python_bootstrap_toolchain")
+load("@prelude//toolchains:remote_test_execution.bzl", "remote_test_execution_toolchain")
+load("@prelude//tests:test_toolchain.bzl", "noop_test_toolchain")
+load(":tidepool.bzl", "nix_haskell_toolchain", "nix_rust_toolchain", "nix_tool")
+
+nix_rust_toolchain(
+    name = "rust",
+    rustc = read_root_config("nix", "rustc"),
+    rustdoc = read_root_config("nix", "rustdoc"),
+    clippy = read_root_config("nix", "clippy"),
+    linker = read_root_config("nix", "cc"),
+    visibility = ["PUBLIC"],
+)
+
+nix_haskell_toolchain(
+    name = "haskell",
+    ghc = read_root_config("nix", "ghc"),
+    ghc_pkg = read_root_config("nix", "ghc_pkg"),
+    haddock = read_root_config("nix", "haddock"),
+    visibility = ["PUBLIC"],
+)
+
+system_cxx_toolchain(
+    name = "cxx",
+    compiler = read_root_config("nix", "cc"),
+    cxx_compiler = read_root_config("nix", "cxx"),
+    linker = read_root_config("nix", "cxx"),
+    archiver = read_root_config("nix", "ar"),
+    compiler_type = "gcc",
+    c_flags = ["-fno-omit-frame-pointer"],
+    cxx_flags = ["-fno-omit-frame-pointer"],
+    visibility = ["PUBLIC"],
+)
+
+system_genrule_toolchain(name = "genrule", visibility = ["PUBLIC"])
+noop_test_toolchain(name = "test", visibility = ["PUBLIC"])
+remote_test_execution_toolchain(name = "remote_test_execution", visibility = ["PUBLIC"])
+
+system_python_bootstrap_toolchain(
+    name = "python_bootstrap",
+    interpreter = read_root_config("nix", "python"),
+    visibility = ["PUBLIC"],
+)
+
+nix_tool(name = "node", executable = read_root_config("nix", "node"), visibility = ["PUBLIC"])
+nix_tool(name = "npm", executable = read_root_config("nix", "npm"), visibility = ["PUBLIC"])
+nix_tool(name = "bash", executable = read_root_config("nix", "bash"), visibility = ["PUBLIC"])
+nix_tool(name = "coreutils", executable = read_root_config("nix", "coreutils"), visibility = ["PUBLIC"])

@@ -1,0 +1,3 @@
+# The compiler is newer than stable_arm_crc32_intrinsics' 1.80 gate.
+cfgs = ["stable_arm_crc32_intrinsics"]
+buildscript.run = false

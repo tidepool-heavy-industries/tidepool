@@ -1,0 +1,3 @@
+# f64::total_cmp is available with the pinned Rust compiler.
+cfgs = ["has_total_cmp"]
+buildscript.run = false

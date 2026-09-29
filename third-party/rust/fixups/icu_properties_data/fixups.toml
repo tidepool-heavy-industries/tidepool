@@ -1,0 +1,2 @@
+# ICU4X_DATA_DIR is unset; the crate uses its bundled generated data.
+buildscript.run = false

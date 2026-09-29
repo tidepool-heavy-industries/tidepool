@@ -1,0 +1,3 @@
+# The pinned Rust compiler supports relaxed coherence.
+cfgs = ["relaxed_coherence"]
+buildscript.run = false
