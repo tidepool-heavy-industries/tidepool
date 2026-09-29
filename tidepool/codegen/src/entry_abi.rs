@@ -163,6 +163,7 @@ impl EntryAbi {
         let pointer = profile.pointer_type();
         let mut signature = ir::Signature::new(call_conv);
         signature.params.push(AbiParam::new(pointer)); // vmctx
+        signature.params.push(AbiParam::new(pointer)); // installation environment
         if self.environment == EnvironmentMode::Captured {
             signature.params.push(AbiParam::new(pointer));
         }
@@ -198,6 +199,7 @@ impl EntryAbi {
         let pointer = profile.pointer_type();
         let mut signature = ir::Signature::new(call_conv);
         signature.params.push(AbiParam::new(pointer)); // vmctx
+        signature.params.push(AbiParam::new(pointer)); // installation environment
         if self.environment == EnvironmentMode::Captured {
             signature.params.push(AbiParam::new(pointer));
         }
@@ -329,7 +331,7 @@ mod tests {
             ResultTransport::CallerArea(_)
         ));
         let clif = abi.cranelift_signature(&profile, CallConv::Tail).unwrap();
-        assert_eq!(clif.params.len(), 8); // vmctx + env + area + five stored args
+        assert_eq!(clif.params.len(), 9); // vmctx + installation + closure + area + five args
         assert_eq!(clif.returns.len(), 1); // status only for caller-area transport
     }
 
@@ -360,7 +362,7 @@ mod tests {
             builder.seal_block(block);
             let params = builder.block_params(block).to_vec();
             let status = builder.ins().iconst(types::I32, 0);
-            builder.ins().return_(&[status, params[1], params[2]]);
+            builder.ins().return_(&[status, params[2], params[3]]);
             builder.finalize();
         }
         pipeline.define_function(tail, &mut tail_context).unwrap();
@@ -389,16 +391,17 @@ mod tests {
             builder.switch_to_block(block);
             builder.seal_block(block);
             let params = builder.block_params(block).to_vec();
-            let call = builder
-                .ins()
-                .call(tail_reference, &[params[0], params[2], params[3]]);
+            let call = builder.ins().call(
+                tail_reference,
+                &[params[0], params[1], params[3], params[4]],
+            );
             let results = builder.inst_results(call).to_vec();
             builder
                 .ins()
-                .store(MemFlags::trusted(), results[1], params[1], 0);
+                .store(MemFlags::trusted(), results[1], params[2], 0);
             builder
                 .ins()
-                .store(MemFlags::trusted(), results[2], params[1], 8);
+                .store(MemFlags::trusted(), results[2], params[2], 8);
             builder.ins().return_(&[results[0]]);
             builder.finalize();
         }
@@ -407,12 +410,12 @@ mod tests {
             .unwrap();
         pipeline.finalize().unwrap();
 
-        type Adapter = unsafe extern "C" fn(u64, *mut u8, i64, f64) -> i32;
+        type Adapter = unsafe extern "C" fn(u64, u64, *mut u8, i64, f64) -> i32;
         // SAFETY: `platform_adapter_signature` is the matching platform-C
         // signature, and the module owner remains alive for this invocation.
         let invoke: Adapter = unsafe { std::mem::transmute(pipeline.get_function_ptr(adapter)) };
         let mut area = [0_u64; 2];
-        let status = unsafe { invoke(0, area.as_mut_ptr().cast(), -17, 3.25) };
+        let status = unsafe { invoke(0, 0, area.as_mut_ptr().cast(), -17, 3.25) };
         assert_eq!(status, 0);
         assert_eq!(area[0] as i64, -17);
         assert_eq!(f64::from_bits(area[1]), 3.25);
@@ -428,7 +431,7 @@ mod tests {
         let abi = EntryAbi::lower(&profile, &signature, EnvironmentMode::Absent).unwrap();
         assert!(matches!(abi.result_transport(), ResultTransport::Registers));
         let clif = abi.cranelift_signature(&profile, CallConv::Tail).unwrap();
-        assert_eq!(clif.params.len(), 2); // vmctx + one i64 component
+        assert_eq!(clif.params.len(), 3); // vmctx + installation + one i64 component
         assert_eq!(clif.returns.len(), 2); // status + one i64 component
     }
 

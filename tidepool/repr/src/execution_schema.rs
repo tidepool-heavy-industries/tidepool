@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 pub const SCHEMA_VERSION: u64 = 14;
-pub const EXECUTION_ABI_VERSION: u64 = 7;
+pub const EXECUTION_ABI_VERSION: u64 = 8;
 
 macro_rules! dense_id {
     ($name:ident) => {

@@ -7,23 +7,17 @@
 //! What crosses: every object reachable from the handle that lives in this
 //! machine's nursery or old space, copied; external payloads, copied into
 //! parcel storage and re-registered on import; the images the copied
-//! objects and static references belong to, named in the parcel and
-//! installed on the importer if it lacks them; and the values those
-//! images' import slots hold, copied in the same pass so the imported
-//! copies share structure with the value (an image installs on the
-//! importer bound to the copies, so a closure over an earlier binding sees
-//! the sender's snapshot of that binding). An image the importer already
-//! installed keeps its root block and import bindings, whether those slots
-//! hold package tops or earlier notebook bindings: transferred code runs in
-//! the importer's existing import environment, which the first parcel that
-//! installed the image seeded, and a later parcel's copies of those slots
-//! are released. Two closures from one image on one machine therefore
-//! always share one environment. Static references and code are
-//! shared by address with any machine that installed the same image
-//! (`CompiledProgram::shared_statics`). What never crosses: a continuation
+//! objects and static references belong to, named by instance identity in
+//! the parcel and installed on the importer if it lacks them; and the values
+//! those instances' import slots hold, copied in the same pass. An instance
+//! already installed on the importer keeps its machine-local roots and
+//! bindings. Static references and descriptors retain instance identity
+//! across machines, while native dispatch selects the importer's local
+//! environment. What never crosses: a continuation
 //! or an object under evaluation (typed refusals), and identity: a MutVar
 //! or an imported binding arrives as its own copy.
 
+use super::instance::InstanceImage;
 use super::machine::{PreparedHandle, PreparedMachine, ProgramId};
 use super::run::runtime_error;
 use super::{CompiledProgram, ExecutionError, ImportBindings};
@@ -41,10 +35,11 @@ use tidepool_repr::DataConId;
 /// (into the parcel's roots) of the copied value the importer binds it to.
 pub type ParcelImports = Vec<(SymbolIdentity, usize)>;
 
-/// One image a parcel depends on: the compiled image itself and its
+/// One installation instance a parcel depends on, its shared code, and its
 /// import slots as [`ParcelImports`].
 pub struct ParcelImage {
     pub image: Arc<CompiledProgram>,
+    instance: Arc<InstanceImage>,
     pub imports: ParcelImports,
 }
 
@@ -110,7 +105,12 @@ impl PreparedMachine<'_> {
             unsafe { entry.slot.current() }
         } as usize;
         let mut roots = vec![value];
-        let mut images: Vec<(ProgramId, Arc<CompiledProgram>, ParcelImports)> = Vec::new();
+        let mut images: Vec<(
+            ProgramId,
+            Arc<CompiledProgram>,
+            Arc<InstanceImage>,
+            ParcelImports,
+        )> = Vec::new();
         for _ in 0..MANIFEST_ROUNDS {
             let heap = self.export_roots(&roots)?;
             // Owners of every copied object and every static reference.
@@ -175,13 +175,11 @@ impl PreparedMachine<'_> {
             }
             let mut grew = false;
             for id in owners {
-                if images.iter().any(|(known, _, _)| *known == id) {
+                if images.iter().any(|(known, _, _, _)| *known == id) {
                     continue;
                 }
-                // A borrowed image (test harness custody) cannot be named
-                // in a parcel; both machines must hold it already.
-                let Some((image, slots)) = self.image_with_imports(id) else {
-                    continue;
+                let Some((image, instance, slots)) = self.image_with_imports(id) else {
+                    return Err(ExecutionError::BorrowedParcelCode);
                 };
                 let mut imports = Vec::with_capacity(slots.len());
                 for (identity, word) in slots {
@@ -195,14 +193,18 @@ impl PreparedMachine<'_> {
                     };
                     imports.push((identity, index));
                 }
-                images.push((id, image, imports));
+                images.push((id, image, instance, imports));
             }
             if !grew {
                 return Ok(Parcel {
                     heap,
                     images: images
                         .into_iter()
-                        .map(|(_, image, imports)| ParcelImage { image, imports })
+                        .map(|(_, image, instance, imports)| ParcelImage {
+                            image,
+                            instance,
+                            imports,
+                        })
                         .collect(),
                     constructors,
                 });
@@ -298,7 +300,7 @@ impl PreparedMachine<'_> {
         }
         let missing: Vec<&ParcelImage> = images
             .iter()
-            .filter(|entry| !self.has_image(&entry.image))
+            .filter(|entry| !self.has_instance(&entry.instance))
             .collect();
         let new_constructors: Vec<&ParcelConstructor> = constructors
             .iter()
@@ -321,7 +323,7 @@ impl PreparedMachine<'_> {
                     .any(|entry| entry.descriptor.initial_header_word() == header)
                 || missing.iter().any(|entry| {
                     entry
-                        .image
+                        .instance
                         .descriptors
                         .iter()
                         .any(|descriptor| descriptor.initial_header_word() == header)
@@ -414,13 +416,13 @@ impl PreparedMachine<'_> {
                 for entry in &missing {
                     prepared
                         .space
-                        .extend_descriptors(entry.image.descriptors.iter().cloned())
+                        .extend_descriptors(entry.instance.descriptors.iter().cloned())
                         .map_err(ExecutionError::Evacuation)?;
                     prepared
                         .space
-                        .extend_static_region(entry.image.shared_statics()?)
+                        .extend_static_region(Arc::clone(&entry.instance.statics))
                         .map_err(ExecutionError::Evacuation)?;
-                    arena_descriptors.extend(entry.image.descriptors.iter().cloned());
+                    arena_descriptors.extend(entry.instance.descriptors.iter().cloned());
                 }
                 let mut arena = DescriptorArena::reserve(parcel.bytes(), arena_descriptors)
                     .map_err(ExecutionError::Evacuation)?;
@@ -480,7 +482,7 @@ impl PreparedMachine<'_> {
         // image's descriptors join the registry first. Shared `Arc`s; an
         // install's own extension of the registry skips what is present.
         for entry in &missing {
-            for (&header, metadata) in &entry.image.descriptor_registry {
+            for (&header, metadata) in &entry.instance.descriptor_registry {
                 if self.descriptor_registry.contains_key(&header) {
                     continue;
                 }
@@ -492,9 +494,15 @@ impl PreparedMachine<'_> {
                 }
             }
         }
-        let missing: Vec<(Arc<CompiledProgram>, ParcelImports)> = missing
+        let missing: Vec<(Arc<CompiledProgram>, Arc<InstanceImage>, ParcelImports)> = missing
             .into_iter()
-            .map(|entry| (Arc::clone(&entry.image), entry.imports.clone()))
+            .map(|entry| {
+                (
+                    Arc::clone(&entry.image),
+                    Arc::clone(&entry.instance),
+                    entry.imports.clone(),
+                )
+            })
             .collect();
         // Kept, not released: the caller (session layer) roots these in the
         // persistent binding store, so a later compiled program's import
@@ -505,7 +513,7 @@ impl PreparedMachine<'_> {
         let mut kept_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let mut seen_identities: std::collections::BTreeSet<SymbolIdentity> =
             std::collections::BTreeSet::new();
-        for (image, imports) in missing {
+        for (image, instance, imports) in missing {
             let mut bindings = ImportBindings::new();
             for (identity, index) in imports {
                 let handle = handles
@@ -520,7 +528,7 @@ impl PreparedMachine<'_> {
                     kept_indices.insert(index);
                 }
             }
-            self.install_shared(image, bindings)?;
+            self.install_instance(image, instance, bindings)?;
         }
         for (index, handle) in handles.iter().copied().enumerate().skip(1) {
             if !kept_indices.contains(&index) {

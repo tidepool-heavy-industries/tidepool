@@ -87,6 +87,7 @@ fn enter_serves_zero_argument_lift(
 pub(super) struct PapLayout {
     pub function: ValueId,
     pub descriptor: Arc<ObjectDescriptor>,
+    pub descriptor_slot: usize,
 }
 
 /// The only arity split used by dispatch admission and code emission. A failed
@@ -188,6 +189,7 @@ pub(super) fn layouts<'a>(
                 PapLayout {
                     function,
                     descriptor,
+                    descriptor_slot: 0,
                 },
             );
         }
@@ -325,21 +327,27 @@ fn emit_function_owner_adapter(
     builder.seal_block(start);
     let params = builder.block_params(start).to_vec();
     let vmctx = params[0];
-    let callee = params[1];
+    let installation = params[1];
+    let callee = params[2];
     builder.declare_value_needs_stack_map(callee);
-    for (&value, rep) in params[2..].iter().zip(abi.physical_arguments()) {
+    for (&value, rep) in params[3..].iter().zip(abi.physical_arguments()) {
         if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
             builder.declare_value_needs_stack_map(value);
         }
     }
-    let arguments = logical_arguments(signature, &params[2..]);
+    let arguments = logical_arguments(signature, &params[3..]);
     match application {
         Application::Exact => unreachable!("exact functions export their body directly"),
         Application::NoSuccess { consumed } => {
             let target = pipeline
                 .module
                 .declare_func_in_func(callee_function, builder.func);
-            let args = call_arguments(vmctx, callee, arguments.iter().take(*consumed));
+            let args = call_arguments(
+                vmctx,
+                installation,
+                callee,
+                arguments.iter().take(*consumed),
+            );
             let _ = super::emit_direct_call(
                 &mut builder,
                 pipeline,
@@ -432,14 +440,15 @@ fn emit_pap_owner_adapter(
     builder.seal_block(start);
     let params = builder.block_params(start).to_vec();
     let vmctx = params[0];
-    let callee = params[1];
+    let installation = params[1];
+    let callee = params[2];
     builder.declare_value_needs_stack_map(callee);
-    for (&value, rep) in params[2..].iter().zip(abi.physical_arguments()) {
+    for (&value, rep) in params[3..].iter().zip(abi.physical_arguments()) {
         if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
             builder.declare_value_needs_stack_map(value);
         }
     }
-    let arguments = logical_arguments(signature, &params[2..]);
+    let arguments = logical_arguments(signature, &params[3..]);
     let object = builder.ins().band_imm(callee, !7_i64);
     let pap_function = load_pap_field(&mut builder, object, source_layout, 0)?;
     let mut flattened = Vec::with_capacity(pending + arguments.len());
@@ -461,7 +470,7 @@ fn emit_pap_owner_adapter(
             let target = pipeline
                 .module
                 .declare_func_in_func(callee_function, builder.func);
-            let args = call_arguments(vmctx, pap_function, &flattened);
+            let args = call_arguments(vmctx, installation, pap_function, &flattened);
             let call = builder.ins().call(target, &args);
             let returned = builder.inst_results(call).to_vec();
             builder.ins().return_(&returned);
@@ -472,6 +481,7 @@ fn emit_pap_owner_adapter(
                 .declare_func_in_func(callee_function, builder.func);
             let args = call_arguments(
                 vmctx,
+                installation,
                 pap_function,
                 flattened.iter().take(pending + consumed),
             );
@@ -565,7 +575,7 @@ fn emit_resolution_loop(
     let result_area = builder.ins().stack_addr(types::I64, result_slot, 0);
     let plan_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
         ir::StackSlotKind::ExplicitSlot,
-        3 * 8,
+        4 * 8,
         3,
     ));
     let plan_area = builder.ins().stack_addr(types::I64, plan_slot, 0);
@@ -631,12 +641,17 @@ fn emit_resolution_loop(
     builder.switch_to_block(call_block);
     builder.seal_block(call_block);
     let mut native = ir::Signature::new(pipeline.isa.default_call_conv());
-    native.params = vec![ir::AbiParam::new(types::I64); 3];
+    native.params = vec![ir::AbiParam::new(types::I64); 4];
     native.returns = vec![ir::AbiParam::new(types::I32)];
     let sig_ref = builder.import_signature(native);
-    let call = builder
+    let callee_environment = builder
         .ins()
-        .call_indirect(sig_ref, code, &[vmctx, result_area, argument_area]);
+        .load(types::I64, MemFlags::trusted(), plan_area, 24);
+    let call = builder.ins().call_indirect(
+        sig_ref,
+        code,
+        &[vmctx, callee_environment, result_area, argument_area],
+    );
     let status = builder.inst_results(call)[0];
     super::emit::emit_status_guard(builder, status);
     let kind = builder
@@ -689,7 +704,10 @@ fn emit_resolution_loop(
     let enter = pipeline
         .module
         .declare_func_in_func(prepared_enter, builder.func);
-    let entered = builder.ins().call(enter, &[vmctx, intermediate]);
+    let installation = super::emit::installation_environment(builder);
+    let entered = builder
+        .ins()
+        .call(enter, &[vmctx, installation, intermediate]);
     let entered_values = builder.inst_results(entered).to_vec();
     super::emit::emit_status_guard(builder, entered_values[0]);
     builder.declare_value_needs_stack_map(entered_values[1]);
@@ -938,9 +956,10 @@ fn emit_dispatch_entry(
     builder.seal_block(start);
     let params = builder.block_params(start).to_vec();
     let vmctx = params[0];
-    let original_callee = params[1];
+    let installation = params[1];
+    let original_callee = params[2];
     builder.declare_value_needs_stack_map(original_callee);
-    for (&value, rep) in params[2..].iter().zip(abi.physical_arguments()) {
+    for (&value, rep) in params[3..].iter().zip(abi.physical_arguments()) {
         if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
             builder.declare_value_needs_stack_map(value);
         }
@@ -962,7 +981,9 @@ fn emit_dispatch_entry(
     let enter = pipeline
         .module
         .declare_func_in_func(prepared_enter, builder.func);
-    let forced = builder.ins().call(enter, &[vmctx, original_callee]);
+    let forced = builder
+        .ins()
+        .call(enter, &[vmctx, installation, original_callee]);
     let forced_values = builder.inst_results(forced).to_vec();
     let forced_ok = builder.ins().icmp_imm(
         ir::condcodes::IntCC::Equal,
@@ -982,7 +1003,7 @@ fn emit_dispatch_entry(
     DispatchInput {
         vmctx,
         callee,
-        arguments: logical_arguments(signature, &params[2..]),
+        arguments: logical_arguments(signature, &params[3..]),
     }
 }
 
@@ -991,10 +1012,11 @@ fn emit_dispatch_entry(
 /// arguments (logical `Void` positions carry no value and are skipped).
 fn call_arguments<'a>(
     vmctx: ir::Value,
+    installation: ir::Value,
     environment: ir::Value,
     arguments: impl IntoIterator<Item = &'a Option<ir::Value>>,
 ) -> Vec<ir::Value> {
-    let mut native = vec![vmctx, environment];
+    let mut native = vec![vmctx, installation, environment];
     native.extend(arguments.into_iter().flatten().copied());
     native
 }
@@ -1034,9 +1056,7 @@ pub(super) fn emit_partial(
     let object =
         crate::alloc::emit_prepared_alloc_fast_path(builder, vmctx, &layout.descriptor, gc);
     let flags = MemFlags::trusted();
-    let header = builder
-        .ins()
-        .iconst(types::I64, layout.descriptor.initial_header_word() as i64);
+    let header = super::emit::descriptor_header_value(builder, layout.descriptor_slot);
     builder.ins().store(flags, header, object, 0);
     store_pap_field(builder, object, &layout.descriptor, 0, callee)?;
     for (logical, value) in arguments.iter().enumerate() {
@@ -1070,7 +1090,13 @@ fn emit_excess(
 ) -> Result<(), super::CompileError> {
     // The first call is saturated against the original function. Its lifted
     // result is then treated as a fresh callee for the suffix dispatcher.
-    let first_args = call_arguments(vmctx, function, arguments.iter().take(pending + consumed));
+    let installation = super::emit::installation_environment(builder);
+    let first_args = call_arguments(
+        vmctx,
+        installation,
+        function,
+        arguments.iter().take(pending + consumed),
+    );
     let target = pipeline
         .module
         .declare_func_in_func(target_id, builder.func);
@@ -1096,7 +1122,7 @@ fn emit_excess(
         let target = pipeline
             .module
             .declare_func_in_func(suffix_dispatcher, builder.func);
-        let call_args = call_arguments(vmctx, result, suffix);
+        let call_args = call_arguments(vmctx, installation, result, suffix);
         let call = builder.ins().call(target, &call_args);
         let returned = builder.inst_results(call).to_vec();
         builder.ins().return_(&returned);
@@ -1361,7 +1387,11 @@ mod tests {
             ]),
         };
         let code = std::ptr::dangling::<u8>();
-        machine.register_prepared_entries([(0x1000, signature.clone(), code)], std::iter::empty());
+        machine.register_prepared_entries(
+            std::ptr::null(),
+            [(0x1000, signature.clone(), code)],
+            std::iter::empty(),
+        );
         let resolved = machine
             .resolve_prepared_application(0x1000, &signature, 0)
             .expect("the exact dynamic slot signature resolves");

@@ -44,7 +44,8 @@
 //! publish leaves every already-installed program's roots, root blocks and
 //! running state untouched (T3).
 
-use super::roots::{OldSpaceScope, RootTables, RootWords};
+use super::instance::InstanceImage;
+use super::roots::{InstallationEnvironment, OldSpaceScope, RootWords};
 use super::run::{
     heap_top_extent, initialize_heap_tops, register_result_roots, runtime_error,
     runtime_error_for_status, runtime_error_from_machine,
@@ -84,13 +85,9 @@ use tidepool_repr::{DataConId, PrincipalId};
 /// its existing single-owner protocol; it must not split these fields into
 /// independent registries.
 ///
-/// `Shared` is the same image installed on more than one machine (an
-/// `ImageRegistry` hit, or any other caller that already holds an `Arc` to
-/// an image another machine installed): the `Arc` may have been minted on a
-/// different thread, which is exactly what `CompiledProgram: Send + Sync`
-/// (see its own `unsafe impl`) makes sound to move here. This machine still
-/// owns nothing about it but its own root block and the descriptor/static
-/// bookkeeping `install` folds in -- the same as `Owned`.
+/// `Shared` retains immutable native code supplied by an `Arc`, potentially
+/// from another thread. Each installation owns a separate instance and
+/// machine-local roots even when its code is shared.
 enum ProgramCustody<'code> {
     Borrowed(&'code CompiledProgram),
     Shared(Arc<CompiledProgram>),
@@ -123,17 +120,14 @@ impl ProgramCustody<'_> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ProgramId(u32);
 
-/// One installed program's code custody, root block included (the block is
-/// a field of the `CompiledProgram`), plus what retirement needs to undo
-/// its install: its static region, the descriptor headers only it owns (its
-/// thunk, function, PAP and external layouts; interned constructors are
-/// shared and ownerless), and its call/enter rows.
+/// One installation's code custody, instance identity, machine-local roots,
+/// and the descriptor/dispatch rows retirement must remove.
 struct InstalledProgram<'code> {
     program: ProgramCustody<'code>,
-    /// This machine's own root block for the image: one collector-updated
-    /// word per top and import slot, published in the machine's root-block
-    /// table at the image's slot for as long as the program is installed.
+    instance: Arc<InstanceImage>,
+    /// Collector-updated words for this machine's tops and imports.
     roots: RootWords,
+    environment: Box<InstallationEnvironment>,
     statics: Arc<StaticRegion>,
     owned_headers: Vec<usize>,
 }
@@ -249,9 +243,6 @@ pub struct PreparedMachine<'code> {
     /// delta every time.
     compiled_functions: u64,
     compiled_code_bytes: u64,
-    /// Root blocks of every installed image by image slot, published to
-    /// generated code through `vmctx.root_tables`.
-    root_tables: RootTables,
     /// Static allocation starts mapped to their installed program. The
     /// catalog owns the regions; this is only the reverse owner lookup for a
     /// validated observation hit.
@@ -744,16 +735,19 @@ impl PreparedMachine<'static> {
         Self::new_shared(Arc::new(program), options)
     }
 
-    /// As [`Self::new`], from an image another machine may already have
-    /// installed: the first program on this machine is that same `Arc`, so
-    /// its descriptors, code and static region are the ones every other
-    /// holder of the image shares.
+    /// As [`Self::new`], reusing immutable code while creating a fresh
+    /// installation identity, descriptors, statics, and machine-local roots.
     pub fn new_shared(
         program: Arc<CompiledProgram>,
         options: PreparedMachineOptions,
     ) -> Result<(Self, ProgramId), ExecutionError> {
         let mut machine = Self::empty(options)?;
-        let id = machine.install(ProgramCustody::Shared(program), &ImportBindings::new())?;
+        let instance = InstanceImage::new(&program)?;
+        let id = machine.install(
+            ProgramCustody::Shared(program),
+            instance,
+            &ImportBindings::new(),
+        )?;
         Ok((machine, id))
     }
 }
@@ -767,7 +761,12 @@ impl<'code> PreparedMachine<'code> {
         options: PreparedMachineOptions,
     ) -> Result<(Self, ProgramId), ExecutionError> {
         let mut machine = Self::empty(options)?;
-        let id = machine.install(ProgramCustody::Borrowed(program), &ImportBindings::new())?;
+        let instance = InstanceImage::new(program)?;
+        let id = machine.install(
+            ProgramCustody::Borrowed(program),
+            instance,
+            &ImportBindings::new(),
+        )?;
         Ok((machine, id))
     }
 
@@ -796,7 +795,6 @@ impl<'code> PreparedMachine<'code> {
             region_owners: HashMap::new(),
             compiled_functions: 0,
             compiled_code_bytes: 0,
-            root_tables: RootTables::default(),
         })
     }
 
@@ -882,7 +880,7 @@ impl<'code> PreparedMachine<'code> {
         program: CompiledProgram,
         imports: ImportBindings,
     ) -> Result<ProgramId, ExecutionError> {
-        self.install(ProgramCustody::Shared(Arc::new(program)), &imports)
+        self.install_shared(Arc::new(program), imports)
     }
 
     /// Install an image this machine did not necessarily compile: an
@@ -894,27 +892,35 @@ impl<'code> PreparedMachine<'code> {
     /// see [`CompiledProgram::charge_codegen_once`] and the `install` call
     /// site that consults it.
     ///
-    /// An image installs at most once per machine: its root-table slot and
-    /// owned descriptors belong to that one install. A second install of the
-    /// same `Arc` is refused; the caller compiles a private copy instead.
+    /// Each call creates a distinct instance, even when this machine already
+    /// runs the same code with another set of imports.
     pub fn install_shared(
         &mut self,
         image: Arc<CompiledProgram>,
         imports: ImportBindings,
     ) -> Result<ProgramId, ExecutionError> {
-        if self.has_image(&image) {
-            return Err(ExecutionError::Invariant(
-                "install_shared: this machine already installed the image",
-            ));
-        }
-        self.install(ProgramCustody::Shared(image), &imports)
+        let instance = InstanceImage::new(&image)?;
+        self.install(ProgramCustody::Shared(image), instance, &imports)
     }
 
-    /// Whether `image` (by identity, not content) is installed here.
-    pub fn has_image(&self, image: &Arc<CompiledProgram>) -> bool {
-        self.programs.values().any(|installed| {
-            matches!(&installed.program, ProgramCustody::Shared(own) if Arc::ptr_eq(own, image))
-        })
+    pub(crate) fn install_instance(
+        &mut self,
+        image: Arc<CompiledProgram>,
+        instance: Arc<InstanceImage>,
+        imports: ImportBindings,
+    ) -> Result<ProgramId, ExecutionError> {
+        if self.has_instance(&instance) {
+            return Err(ExecutionError::Invariant(
+                "instance already installed on machine",
+            ));
+        }
+        self.install(ProgramCustody::Shared(image), instance, &imports)
+    }
+
+    pub(crate) fn has_instance(&self, instance: &Arc<InstanceImage>) -> bool {
+        self.programs
+            .values()
+            .any(|installed| Arc::ptr_eq(&installed.instance, instance))
     }
 
     /// The program whose objects carry `header`, if any program owns it
@@ -937,7 +943,11 @@ impl<'code> PreparedMachine<'code> {
     pub(super) fn image_with_imports(
         &self,
         id: ProgramId,
-    ) -> Option<(Arc<CompiledProgram>, super::evacuation::ParcelImports)> {
+    ) -> Option<(
+        Arc<CompiledProgram>,
+        Arc<InstanceImage>,
+        super::evacuation::ParcelImports,
+    )> {
         let installed = self.programs.get(&id)?;
         let image = installed.program.shared()?;
         let compiled = installed.program.get();
@@ -946,12 +956,13 @@ impl<'code> PreparedMachine<'code> {
             let word = installed.roots.read(slot.slot).ok()?;
             imports.push((slot.identity.clone(), word as usize));
         }
-        Some((image, imports))
+        Some((image, Arc::clone(&installed.instance), imports))
     }
 
     fn install(
         &mut self,
         program: ProgramCustody<'code>,
+        instance: Arc<InstanceImage>,
         imports: &ImportBindings,
     ) -> Result<ProgramId, ExecutionError> {
         self.machine
@@ -960,6 +971,10 @@ impl<'code> PreparedMachine<'code> {
         let owners = self.machine.mark_prepared_descriptor_owners();
         let stack_maps = self.machine.stack_map_link_count();
         let roots = RootWords::new(program.get().root_words)?;
+        let environment = Box::new(InstallationEnvironment {
+            roots: roots.as_mut_ptr(),
+            descriptors: instance.descriptor_words.as_ptr(),
+        });
         let block = (roots.as_mut_ptr(), roots.len());
         let mut transaction = InstallTransaction {
             machine: self,
@@ -968,9 +983,13 @@ impl<'code> PreparedMachine<'code> {
             stack_maps,
             committed: false,
         };
-        let staged = transaction
-            .machine
-            .install_staged(program.get(), imports, &roots);
+        let staged = transaction.machine.install_staged(
+            program.get(),
+            &instance,
+            &environment,
+            imports,
+            &roots,
+        );
         // Acquire the shared owner while the install transaction can still
         // roll descriptors and the candidate static region back. A failed
         // borrow must never commit metadata whose program custody will drop.
@@ -1001,7 +1020,7 @@ impl<'code> PreparedMachine<'code> {
             .map(|(_, descriptor)| descriptor.initial_header_word())
             .chain(compiled.externals.headers())
             .collect();
-        let owned_headers: Vec<usize> = compiled
+        let owned_headers: Vec<usize> = instance
             .descriptors
             .iter()
             .map(|descriptor| descriptor.initial_header_word())
@@ -1025,19 +1044,13 @@ impl<'code> PreparedMachine<'code> {
         if !statics.is_empty() {
             self.region_owners.insert(statics.address_range().start, id);
         }
-        // The block is reachable from generated code only through the
-        // machine's table; publish it last, once nothing can roll back.
-        // No generated frame is live during an install, so replacing the
-        // table base here is safe.
-        let table = self
-            .root_tables
-            .publish(compiled.image_slot, roots.as_mut_ptr())?;
-        self.vmctx.root_tables = table;
         self.programs.insert(
             id,
             InstalledProgram {
                 program,
+                instance,
                 roots,
+                environment,
                 statics,
                 owned_headers,
             },
@@ -1048,6 +1061,8 @@ impl<'code> PreparedMachine<'code> {
     fn install_staged(
         &mut self,
         compiled: &CompiledProgram,
+        instance: &InstanceImage,
+        environment: &InstallationEnvironment,
         imports: &ImportBindings,
         block: &RootWords,
     ) -> Result<Arc<StaticRegion>, ExecutionError> {
@@ -1145,8 +1160,8 @@ impl<'code> PreparedMachine<'code> {
             }
         }
 
-        let statics = compiled.shared_statics()?;
-        let heap_tops: HashSet<_> = compiled.heap_top_specs.iter().map(|spec| spec.id).collect();
+        let statics = Arc::clone(&instance.statics);
+        let heap_tops: HashSet<_> = instance.heap_top_specs.iter().map(|spec| spec.id).collect();
         for (&id, &slot) in &compiled.top_slots {
             if heap_tops.contains(&id) {
                 continue;
@@ -1163,7 +1178,7 @@ impl<'code> PreparedMachine<'code> {
             block.write(slot, value as u64)?;
         }
 
-        let heap_reserve = heap_top_extent(&compiled.heap_top_specs)?;
+        let heap_reserve = heap_top_extent(&instance.heap_top_specs)?;
         // The heap, not the program table, says whether this is the first
         // install: retirement can empty the table while the heap (handles,
         // old space, nursery) lives on.
@@ -1181,7 +1196,7 @@ impl<'code> PreparedMachine<'code> {
                 .set_stack_map_registry(&compiled.pipeline.stack_maps);
             if let Err(error) = self.machine.install_prepared_buffer_with_static_region(
                 nursery,
-                compiled.descriptors.clone(),
+                instance.descriptors.clone(),
                 Some(Arc::clone(&statics)),
             ) {
                 return Err(runtime_error(&self.machine, error));
@@ -1213,7 +1228,7 @@ impl<'code> PreparedMachine<'code> {
             let heap_used = match initialize_heap_tops(
                 start,
                 size,
-                &compiled.heap_top_specs,
+                &instance.heap_top_specs,
                 &compiled.top_slots,
                 block,
                 &statics,
@@ -1242,7 +1257,7 @@ impl<'code> PreparedMachine<'code> {
                 .push_stack_map_registry(&compiled.pipeline.stack_maps);
             if let Err(error) = self
                 .machine
-                .extend_prepared_descriptors(compiled.descriptors.clone(), Arc::clone(&statics))
+                .extend_prepared_descriptors(instance.descriptors.clone(), Arc::clone(&statics))
             {
                 return Err(runtime_error(&self.machine, error));
             }
@@ -1294,7 +1309,7 @@ impl<'code> PreparedMachine<'code> {
             let heap_used = match initialize_heap_tops(
                 self.vmctx.alloc_ptr,
                 remaining,
-                &compiled.heap_top_specs,
+                &instance.heap_top_specs,
                 &compiled.top_slots,
                 block,
                 &statics,
@@ -1312,7 +1327,7 @@ impl<'code> PreparedMachine<'code> {
 
         // Heap tops persist with the machine. They must not share the
         // run-scoped registry that a call frame truncates on native unwind.
-        for spec in &compiled.heap_top_specs {
+        for spec in &instance.heap_top_specs {
             if let Some(root) = compiled
                 .top_slots
                 .get(&spec.id)
@@ -1337,21 +1352,21 @@ impl<'code> PreparedMachine<'code> {
         debug_assert_eq!(self.descriptors.len(), self.descriptor_registry.len());
         let registry = &self.descriptor_registry;
         self.descriptors.extend(
-            compiled
+            instance
                 .descriptors
                 .iter()
                 .filter(|descriptor| !registry.contains_key(&descriptor.initial_header_word()))
                 .cloned(),
         );
         self.descriptor_registry.extend(
-            compiled
+            instance
                 .descriptor_registry
                 .iter()
                 .map(|(&k, v)| (k, v.clone())),
         );
 
         self.machine.register_prepared_constructors(
-            compiled
+            instance
                 .descriptor_registry
                 .iter()
                 .filter_map(|(&header, metadata)| match &metadata.meaning {
@@ -1365,17 +1380,20 @@ impl<'code> PreparedMachine<'code> {
         // resolution entries. Nothing after this point can fail, so no
         // rollback path needs to touch these registrations.
         self.machine.register_prepared_entries(
+            (environment as *const InstallationEnvironment).cast(),
             compiled.callables.iter().map(|c| {
                 (
-                    c.header,
+                    instance.header(c.header),
                     c.signature.clone(),
                     compiled.pipeline.get_function_ptr(c.function),
                 )
             }),
-            compiled
-                .thunk_entries
-                .iter()
-                .map(|&(header, function)| (header, compiled.pipeline.get_function_ptr(function))),
+            compiled.thunk_entries.iter().map(|&(header, function)| {
+                (
+                    instance.header(header),
+                    compiled.pipeline.get_function_ptr(function),
+                )
+            }),
         );
 
         self.interner.commit_absorb(&compiled.interned_constructors);
@@ -1714,10 +1732,9 @@ impl<'code> PreparedMachine<'code> {
         self.pins.remove(&id);
         let compiled = installed.program.get();
         let block = &installed.roots;
-        self.root_tables.clear(compiled.image_slot);
         // 2. Call and enter rows.
         self.machine
-            .retire_prepared_entries(&compiled.dispatch_owned_headers);
+            .retire_prepared_entries(&installed.owned_headers);
         // 3. Descriptor rows and the descriptor space: only what this program
         //    owned; interned constructors stay shared.
         let owned: HashSet<usize> = installed.owned_headers.iter().copied().collect();
@@ -2991,9 +3008,18 @@ impl<'code> InstalledProgram<'code> {
             )?;
             let _scope = OldSpaceScope::new(machine, old_space)?;
             unsafe {
-                let adapter: extern "C" fn(*mut VMContext, *mut u64, *const u64) -> i32 =
-                    std::mem::transmute(pointer);
-                adapter(vmctx, results.as_mut_ptr(), argument_area.as_mut_ptr())
+                let adapter: extern "C" fn(
+                    *mut VMContext,
+                    *const InstallationEnvironment,
+                    *mut u64,
+                    *const u64,
+                ) -> i32 = std::mem::transmute(pointer);
+                adapter(
+                    vmctx,
+                    &*self.environment,
+                    results.as_mut_ptr(),
+                    argument_area.as_mut_ptr(),
+                )
             }
         };
         let status = CallStatus::from_raw(i64::from(raw))
@@ -3167,9 +3193,18 @@ impl<'code> InstalledProgram<'code> {
             )?;
             let _scope = OldSpaceScope::new(machine, old_space)?;
             unsafe {
-                let adapter: extern "C" fn(*mut VMContext, *mut u64, *const u64) -> i32 =
-                    std::mem::transmute(pointer);
-                adapter(vmctx, results.as_mut_ptr(), argument_area.as_ptr())
+                let adapter: extern "C" fn(
+                    *mut VMContext,
+                    *const InstallationEnvironment,
+                    *mut u64,
+                    *const u64,
+                ) -> i32 = std::mem::transmute(pointer);
+                adapter(
+                    vmctx,
+                    &*self.environment,
+                    results.as_mut_ptr(),
+                    argument_area.as_ptr(),
+                )
             }
         };
         let status = match CallStatus::from_raw(i64::from(raw_status)) {
@@ -4122,8 +4157,8 @@ mod tests {
 
     #[test]
     fn one_image_installs_on_two_machines_with_their_own_root_blocks() {
-        // The same compiled image (one root-block layout, one image slot)
-        // runs on two machines: each allocates its own block, each block is
+        // The same compiled code runs on two machines: each allocates its own
+        // instance and root block, and each block is
         // its own machine's persistent root, and a forced collection on
         // either machine leaves the other's tops untouched.
         let compiled = CompiledProgram::compile(&base_program(952)).expect("image compiles");
@@ -4174,7 +4209,7 @@ mod tests {
         drop(left);
         let right_again = right
             .run_entry(right_id, ValueId(0), &[], call, RealmId::ROOT)
-            .expect("the right machine outlives the left one on the same image");
+            .expect("the right machine outlives the left one with shared code");
         expect_952(&right_again.values);
     }
 
@@ -4271,13 +4306,26 @@ mod tests {
 
     #[test]
     fn exported_static_root_is_shared_by_address() {
-        // The fixture's second top is a function: a static-image object every
-        // machine that installed the image holds at the same address.
-        let compiled = managed_roundtrip_program();
-        let ((mut left, left_id), (mut right, right_id)) = evacuation_pair(&compiled);
+        // The fixture's second top is a static function. A parcel retains
+        // its source instance and the receiver installs that instance beside
+        // its independently created instance of the same code.
+        let compiled = Arc::new(managed_roundtrip_program());
+        let options = PreparedMachineOptions {
+            nursery_bytes: RunOptions::default().nursery_bytes,
+        };
+        let (mut left, left_id) =
+            PreparedMachine::new_shared(Arc::clone(&compiled), options).expect("left installs");
+        let (mut right, right_id) =
+            PreparedMachine::new_shared(compiled, options).expect("right installs");
         let handle = left
             .retain_top(left_id, ValueId(1))
             .expect("left retains its static function top");
+        let source_address = left.handle_current_pointer(handle).unwrap();
+        assert_ne!(
+            left.top_words(left_id)[1],
+            right.top_words(right_id)[1],
+            "independent installs own different static functions"
+        );
         let budget = RunOptions::default().observation_budget;
         let before = left
             .observe_handle(left_id, handle, budget)
@@ -4292,6 +4340,7 @@ mod tests {
         let (arrived, _imports) = right
             .import_parcel(parcel, RealmId::ROOT)
             .expect("right imports a static reference");
+        assert_eq!(right.handle_current_pointer(arrived), Some(source_address));
         assert_eq!(
             format!(
                 "{:?}",
@@ -4786,7 +4835,7 @@ mod tests {
     }
 
     #[test]
-    fn import_refuses_a_parcel_whose_borrowed_image_this_machine_lacks() {
+    fn export_refuses_borrowed_code_whose_instance_cannot_be_retained() {
         // A constructor's descriptor is no longer the right fixture here:
         // constructors now travel in the parcel as `ParcelConstructor`
         // (unowned by design -- an image that declares one shares the
@@ -4794,26 +4843,27 @@ mod tests {
         // regardless of whether the image itself installs. An unforced
         // CAF's header, by contrast, is owned by its compiled image alone
         // and never travels except by that image installing -- and a
-        // BORROWED install (no `Arc<CompiledProgram>` behind it) can never
-        // be named in a parcel's manifest, so this stays a real refusal.
+        // BORROWED install (no `Arc<CompiledProgram>` behind it) cannot
+        // furnish the parcel a code owner, so export refuses it.
         let compiled = thunk_to_closure_program();
-        let other = CompiledProgram::compile(&base_program(955)).expect("other compiles");
         let options = PreparedMachineOptions {
             nursery_bytes: RunOptions::default().nursery_bytes,
         };
         let (mut left, left_id) = PreparedMachine::from_borrowed(&compiled, options).expect("left");
-        let (mut right, _) = PreparedMachine::from_borrowed(&other, options).expect("right");
         let handle = left
             .retain_top(left_id, ValueId(0))
             .expect("left retains its unforced CAF, never running it");
-        let parcel = left.export_parcel(handle).expect("export");
         assert!(matches!(
-            right.import_parcel(parcel, RealmId::ROOT),
-            Err(ExecutionError::Evacuation(
-                tidepool_heap::execution_descriptor::DescriptorTraceError::UnknownDescriptor { .. }
-            ))
+            left.export_parcel(handle),
+            Err(ExecutionError::BorrowedParcelCode)
         ));
-        assert_eq!(right.handle_count(), 0, "a refused import retains nothing");
+        assert_eq!(
+            left.handle_count(),
+            1,
+            "a refused export keeps its source handle"
+        );
+        assert!(left.release(handle));
+        assert_eq!(left.disposition(), MachineDisposition::Reusable);
     }
 
     #[test]
@@ -6752,6 +6802,84 @@ mod tests {
             .expect("the second outstanding compile installs on its own root block");
         assert_ne!(first, second, "every install mints a fresh program id");
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    #[test]
+    fn same_code_installs_twice_with_distinct_imports_and_instances() {
+        let producer_code = Arc::new(s3_field_producer_program());
+        let (mut machine, first_producer) = PreparedMachine::new_shared(
+            Arc::clone(&producer_code),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("first producer installs");
+        let second_producer = machine
+            .install_shared(producer_code, ImportBindings::new())
+            .expect("same producer code installs again");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        let first = machine
+            .run_entry_retained(first_producer, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("first producer runs");
+        let second = machine
+            .run_entry_retained(second_producer, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("second producer runs");
+        let ([PreparedResult::Managed(first_handle)], [PreparedResult::Managed(second_handle)]) =
+            (first.values.as_slice(), second.values.as_slice())
+        else {
+            panic!("producers must each return a managed value");
+        };
+        assert_ne!(
+            machine.handle_current_pointer(*first_handle),
+            machine.handle_current_pointer(*second_handle)
+        );
+
+        let linked =
+            s3_import_consumer_program(s3_field_producer_identity(), RuntimeRep::LiftedRef, true);
+        let consumer_code = Arc::new(CompiledProgram::compile(&linked).expect("consumer compiles"));
+        let mut first_imports = ImportBindings::new();
+        first_imports.insert(s3_field_producer_identity(), *first_handle);
+        let first_consumer = machine
+            .install_shared(Arc::clone(&consumer_code), first_imports)
+            .expect("first consumer installs");
+        let mut second_imports = ImportBindings::new();
+        second_imports.insert(s3_field_producer_identity(), *second_handle);
+        let second_consumer = machine
+            .install_shared(consumer_code, second_imports)
+            .expect("same consumer code installs with another import");
+        let first_install = &machine.programs[&first_consumer];
+        let second_install = &machine.programs[&second_consumer];
+        assert!(!Arc::ptr_eq(
+            &first_install.instance,
+            &second_install.instance
+        ));
+        assert_ne!(
+            first_install.environment.as_ref() as *const InstallationEnvironment,
+            second_install.environment.as_ref() as *const InstallationEnvironment
+        );
+        assert_ne!(
+            first_install.instance.descriptor_words,
+            second_install.instance.descriptor_words
+        );
+        for (id, expected) in [
+            (first_consumer, *first_handle),
+            (second_consumer, *second_handle),
+        ] {
+            let result = machine
+                .run_entry_retained(id, ValueId(0), &[], call, RealmId::ROOT)
+                .expect("consumer reads its own import");
+            let [PreparedResult::Managed(actual)] = result.values.as_slice() else {
+                panic!("consumer must return its import");
+            };
+            assert_eq!(
+                machine.handle_current_pointer(*actual),
+                machine.handle_current_pointer(expected)
+            );
+            assert!(machine.release(*actual));
+        }
     }
 
     fn s3_closure_producer_identity() -> SymbolIdentity {

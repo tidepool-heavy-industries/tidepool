@@ -12,7 +12,8 @@
 //! through shared access even when this owner moves. There is no self-borrowed
 //! cleanup guard: Drop removes registries before releasing their allocations.
 
-use super::roots::{OldSpaceScope, RootTables, RootWords};
+use super::instance::InstanceImage;
+use super::roots::{InstallationEnvironment, OldSpaceScope, RootWords};
 use super::run::{
     heap_top_extent, initialize_heap_tops, runtime_error, runtime_error_for_status,
     runtime_error_from_machine, runtime_error_from_machine_or_observation,
@@ -37,12 +38,11 @@ pub(super) struct PreparedInvocation<'code> {
     pub(super) machine: Rc<MachineState>,
     pub(super) vmctx: VMContext,
     static_catalog: tidepool_heap::static_region::StaticRegionCatalog,
-    /// This invocation's own root block for the program's tops, published
-    /// through `root_tables` exactly as an installed machine publishes it.
+    /// This invocation's root block for its tops, addressed through its
+    /// installation environment while generated code runs.
     pub(super) roots: RootWords,
-    /// Owns the table `vmctx.root_tables` points at for the invocation's
-    /// life; never read from Rust.
-    _root_tables: RootTables,
+    instance: Arc<InstanceImage>,
+    environment: Box<InstallationEnvironment>,
     pub(super) results: RootWords,
     pub(super) result_contract: ResultContract,
     pub(super) result_layout: StorageLayout,
@@ -129,14 +129,15 @@ impl<'code> PreparedInvocation<'code> {
             .limit_with_frame_reserve(max_native_frame)
             .map_err(runtime_error_without_machine)?;
 
-        let statics = program.shared_statics()?;
+        let instance = InstanceImage::new(program)?;
+        let statics = Arc::clone(&instance.statics);
         let static_catalog = static_catalog(&statics).map_err(runtime_error_without_machine)?;
         // This invocation's own root block carries the program's tops,
         // exactly as an installed machine's block does.
         let roots = RootWords::new(program.root_words)?;
         let top_table = &roots;
         for (&id, &slot) in &program.top_slots {
-            if program.heap_top_specs.iter().any(|spec| spec.id == id) {
+            if instance.heap_top_specs.iter().any(|spec| spec.id == id) {
                 continue;
             }
             let value = statics
@@ -151,7 +152,7 @@ impl<'code> PreparedInvocation<'code> {
             top_table.write(slot, value as u64)?;
         }
 
-        let heap_reserve = heap_top_extent(&program.heap_top_specs)?;
+        let heap_reserve = heap_top_extent(&instance.heap_top_specs)?;
         let nursery_bytes = options.nursery_bytes.max(heap_reserve);
         let nursery = try_words(nursery_bytes.div_ceil(std::mem::size_of::<u64>()))?;
         let mut argument_area = try_words(arguments.len())?;
@@ -161,25 +162,32 @@ impl<'code> PreparedInvocation<'code> {
         let results = super::run::try_root_words(result_words.max(1))?;
 
         let machine = Rc::new(MachineState::new());
+        let environment = Box::new(InstallationEnvironment {
+            roots: roots.as_mut_ptr(),
+            descriptors: instance.descriptor_words.as_ptr(),
+        });
         machine.register_prepared_entries(
+            (&*environment as *const InstallationEnvironment).cast(),
             program.callables.iter().map(|callable| {
                 (
-                    callable.header,
+                    instance.header(callable.header),
                     callable.signature.clone(),
                     program.pipeline.get_function_ptr(callable.function),
                 )
             }),
-            program
-                .thunk_entries
-                .iter()
-                .map(|&(header, function)| (header, program.pipeline.get_function_ptr(function))),
+            program.thunk_entries.iter().map(|&(header, function)| {
+                (
+                    instance.header(header),
+                    program.pipeline.get_function_ptr(function),
+                )
+            }),
         );
         machine.absorb_interned_bytes(&program.bytes);
         machine.set_cancel_flag(Arc::clone(&cancel));
         machine.set_stack_map_registry(&program.pipeline.stack_maps);
         if let Err(error) = machine.install_prepared_buffer_with_static_region(
             nursery,
-            program.descriptors.clone(),
+            instance.descriptors.clone(),
             Some(Arc::clone(&statics)),
         ) {
             machine.clear_stack_map_registry();
@@ -198,7 +206,7 @@ impl<'code> PreparedInvocation<'code> {
         let heap_used = match initialize_heap_tops(
             start,
             size,
-            &program.heap_top_specs,
+            &instance.heap_top_specs,
             &program.top_slots,
             top_table,
             &statics,
@@ -219,8 +227,6 @@ impl<'code> PreparedInvocation<'code> {
         vmctx.alloc_ptr = unsafe { start.add(heap_used) };
         vmctx.machine_state = Rc::as_ptr(&machine).cast_mut();
         vmctx.prepared_stack_limit = prepared_stack_limit;
-        let mut root_tables = RootTables::default();
-        vmctx.root_tables = root_tables.publish(program.image_slot, roots.as_mut_ptr())?;
 
         let mut invocation = Self {
             program,
@@ -228,14 +234,15 @@ impl<'code> PreparedInvocation<'code> {
             vmctx,
             static_catalog,
             roots,
-            _root_tables: root_tables,
+            instance,
+            environment,
             results,
             result_contract: compiled.abi.semantic_results().clone(),
             result_layout: compiled.abi.result_layout().clone(),
             collections_before: 0,
             old_space: Box::new(OldSpace::new()),
         };
-        for spec in &invocation.program.heap_top_specs {
+        for spec in &invocation.instance.heap_top_specs {
             if let Some(root) = invocation
                 .program
                 .top_slots
@@ -264,14 +271,19 @@ impl<'code> PreparedInvocation<'code> {
                 &invocation.machine,
                 invocation.program,
                 &invocation.static_catalog,
-                &invocation.program.descriptor_registry,
+                &invocation.instance.descriptor_registry,
             )?;
             let _scope = OldSpaceScope::new(&invocation.machine, &invocation.old_space)?;
             unsafe {
-                let adapter: extern "C" fn(*mut VMContext, *mut u64, *const u64) -> i32 =
-                    std::mem::transmute(pointer);
+                let adapter: extern "C" fn(
+                    *mut VMContext,
+                    *const InstallationEnvironment,
+                    *mut u64,
+                    *const u64,
+                ) -> i32 = std::mem::transmute(pointer);
                 adapter(
                     &mut invocation.vmctx,
+                    &*invocation.environment,
                     invocation.results.as_mut_ptr(),
                     argument_area.as_ptr(),
                 )
@@ -299,7 +311,7 @@ impl<'code> PreparedInvocation<'code> {
                 invocation.program,
                 &mut invocation.vmctx,
                 &invocation.static_catalog,
-                &invocation.program.descriptor_registry,
+                &invocation.instance.descriptor_registry,
                 &invocation.old_space,
             );
             return Err(runtime_error_for_status(&invocation.machine, status));
@@ -353,7 +365,7 @@ impl<'code> PreparedInvocation<'code> {
             self.program,
             &mut self.vmctx,
             &self.static_catalog,
-            &self.program.descriptor_registry,
+            &self.instance.descriptor_registry,
             &self.old_space,
             &result_seeds,
             budget,
@@ -438,7 +450,7 @@ impl<'code> PreparedInvocation<'code> {
                 &self.machine,
                 &mut self.vmctx,
                 &[slot],
-                &self.program.descriptors,
+                &self.instance.descriptors,
             )
         };
         result.map_err(|cause| runtime_error(&self.machine, cause))
