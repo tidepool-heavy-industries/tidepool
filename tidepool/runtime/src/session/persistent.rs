@@ -262,8 +262,8 @@ impl PersistentSession {
         target: CertifiedTargetImage,
         target_owners: &[ImportOwner],
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-        demanded: Vec<DemandedImage<'_>>,
-        inherited_needed: &[InheritedSourceDemand<'_>],
+        demanded: Vec<DemandedImage>,
+        inherited_needed: &[InheritedSourceDemand],
         package_external: &HashMap<ImportOwner, PreparedHandle>,
     ) -> Result<(ProgramId, bool), PreparedRuntimeError> {
         if !self.scopes.is_live(scope) {

@@ -1892,8 +1892,8 @@ where
         target: super::prepared::CertifiedTargetImage,
         target_owners: &[ImportOwner],
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-        demanded: Vec<DemandedImage<'_>>,
-        inherited_needed: &[InheritedSourceDemand<'_>],
+        demanded: Vec<DemandedImage>,
+        inherited_needed: &[InheritedSourceDemand],
         package_external: &HashMap<ImportOwner, PreparedHandle>,
     ) -> Result<ProgramId, PreparedRuntimeError> {
         let (program, source_visible) = self.state.install_certified_turn_in(
