@@ -59,6 +59,8 @@ unconsumed proposals are removed; Git retains their history.
 - [Embedded harness integration](harness-integration.md): accepted host/library
   contracts, Codex compatibility, implementation parcels and acceptance gates.
   Compiler/runtime implementation is held pending the engine investigation.
+- [First embedded Haskell worker tree](harness-first-tree-prd.md): handoff to
+  the engine owner, remaining resident integration, and connected release gates.
 - [Harness adoption](harness-adoption.md): how Exomonad moves from the forked
   Codex backend to the standalone model harness (`~/dev/exomonad-harness`):
   adapter, `spawnAgent`, hook placement, compaction, deletions, order.
