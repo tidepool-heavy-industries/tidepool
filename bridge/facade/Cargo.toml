@@ -29,6 +29,7 @@ name = "tidepool-compile-report"
 path = "src/bin/tidepool-compile-report.rs"
 
 [dependencies]
+async-trait = "0.1"
 tempfile.workspace = true
 tidepool-repr.workspace = true
 tidepool-heap.workspace = true

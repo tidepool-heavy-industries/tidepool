@@ -1,54 +1,62 @@
 # Sequential bound adapter handoff
 
-The Tidepool facade captures each `LocalResidentInstallation` transport policy
-and its Responses tool projection together when `PolicyInstalled` reaches the
-host. `EmbeddedPolicyInstallation::request_snapshot` calls the actor endpoint's
-opaque `snapshot_for_request` hook. The resulting `EmbeddedPolicySnapshot`
-retains the exact actor incarnation, manifest and installed handler/source lease;
-raw custom input stays raw, while structured function input stays JSON. An
-endpoint without a supported snapshot returns an error.
+The Tidepool facade retains `LocalResidentInstallation.policy` when
+`PolicyInstalled` reaches the host. That is the actor's
+`ResidentInteractivePolicy::local_with_installation` endpoint, backed by its
+single `InstalledToolsState`; a reconstructed endpoint does not carry that
+state. Each model request calls the endpoint's fallible
+`snapshot_for_request`. Its immutable manifest, handler and source lease stay
+together through later calls and cancellation. Raw custom input stays raw;
+function input stays structured JSON. Unsupported snapshots fail before model
+transport, with no live-endpoint fallback.
 
-The full `HostActor` binding awaits these owning contracts:
+The harness companion is
+`0fa0caf410667e35ab34d11c231a71ba2b0d246d` on
+`integration/actor-admission-companion`, based on the operation-identity
+candidate. Tidepool `Cargo.toml` and `Cargo.lock` name that exact commit at the
+public Git origin. It is not published there yet. The local adapter check used
+an environment-only Git URL redirect to the clean companion worktree; this
+does not establish remote reproducibility. After review and publication,
+verify the remote commit and add its Git source hash to both `cargoLock`
+users in `flake.nix` before a Nix distribution build.
 
-Tidepool now names the public harness origin with exact candidate revision
-`87d59967f471dc757a7cc7e156bfa9eeabc34774` in `Cargo.toml`; this commit
-is not yet published, so remote builds remain unreproducible. Local checks may
-use an untracked Cargo path patch to the clean companion worktree, never a
-tracked absolute path. Once published, regenerate `Cargo.lock` from that exact
-revision and add its Git source hash to both `cargoLock` users in `flake.nix`.
-The companion is based on operation-identity candidate `2948eaa`; it narrows
-admission leases and gives cancellation owners the scheduler's exact
-`OperationId` alongside the opaque job handle.
+The facade's `EmbeddedHarnessRuntime` opens one Store and one configured
+`JobScheduler` under the existing run directory. `EmbeddedHostActor` holds the
+exact actor, installation and a durable-envelope wake sender. A counted
+`ActorAdmissionLease` protects only synchronous Store admission; the actor
+endpoint fences tool enqueue separately and owns execution after acceptance.
+The run ID comes from the existing `runtime_namespace(run_root)` owner.
+The composition owner must supply the actor path from its descriptor or owner
+registry; the adapter invents no child path. Attach rejects another run or
+actor incarnation before Store binding. Retirement delegates to actor
+shutdown. Interrupt remains unsupported pending exact operation semantics.
 
-1. The actor lifecycle owner provides a scoped synchronous admission lease for
-   the exact incarnation, fenced against retirement. `HostedWorkSeal` closes
-   admission and cannot serve as that lease. A terminal-state precheck alone
-   races retirement. The harness currently holds its `HostActor::admit` guard
-   across dispatcher `.await` in `PinnedProvider::call_with_context` and
-   `call_custom_with_context`, and across `wake().await` in
-   `Conversation::input`. Narrow that guard to the synchronous Store binding
-   or input transaction and drop it before awaiting. The existing actor
-   endpoint must atomically accept/fence the actual tool message and own its
-   execution after admission; a long-held guard can deadlock self-retirement.
-2. The harness scheduler must pass its qualified `OperationId` to
-   `CancellationOwner::cancel`. Its opaque random `JobHandle` cannot be
-   converted to `ToolInvocationContext` without a duplicate handle registry.
-   Embedded dispatch must require the origin conversation/incarnation, issuing
-   request and original provider call ID. Bare `CallId` compatibility may remain
-   only in standalone test paths; embedded scheduling, replay and inherited
-   claims must never use it as a fallback key.
-3. The host composes the actor's existing input delivery pump with
-   `Conversation::input`: Store commits the idempotent envelope before wake,
-   and the pump includes that exact envelope in a request or retains an
-   admitted, retryable receipt. Wake acknowledgment alone is not inclusion.
-4. The actor now issues an opaque handler/source lease at request snapshot and
-   carries it beside the runtime `WorkbenchRequest`. The adapter must call
-   `EmbeddedPolicyInstallation::request_snapshot` for each model request and
-   retain its result with that request's published tool surface. The version
-   string is evidence for the harness Store, never model-supplied authority.
+The harness uses its Store as the mailbox authority. `Conversation::input`
+commits before it sends an envelope-ID hint and drops the admission guard
+before waiting on wake. The Engine rereads the Store, so duplicate hints and
+reconnection do not duplicate content or claim delivery without a request.
+`OperationId` carries the embedded run, actor, incarnation, issuing request
+and original call ID through dispatch and cancellation; no job-handle lookup
+registry or bare-call-ID fallback is introduced. The bound provider exposes
+only the harness's mailbox wait verb plus the host's pinned tool manifest.
 
-The real M1 gate uses the public `Conversation::attach`/`engine` path and a
-deterministic model transport against a resident actor. It must cover a raw
-notebook cell, a structured tool, retained result, exact cancellation,
-envelope retry/inclusion, reload snapshot, reconnect without effect replay and
-the Codex default path. No live launch follows the gate.
+Reload has an intentional mixed outcome: source publication can succeed while
+spec compilation or surface comparison fails, leaving the previous handler
+active. A request snapshot captures the actual installed source and handler
+at issue time; an earlier snapshot keeps its prior lease. The adapter does
+not treat source and handler publication as one atomic reload.
+
+## Evidence and remaining gate
+
+- Harness `embedded_host` target: five exact tests passed, covering pinned
+  request dispatch, parked durable input with duplicate hints, reconnect,
+  cancellation while parked and unavailable-snapshot failure before model
+  transport. The same target compiled four other tests without executing them.
+- Tidepool `tidepool` library target compiled with the exact companion commit;
+  its real resident actor bound to an offline embedded Engine parked, received
+  one durable input and resumed. The exact nextest selection passed 1/1
+  (548 skipped), with the per-run compiler daemon torn down.
+- The default Codex backend was not switched. Remote publication, Nix Git
+  source hashes, bound actor-path composition from the owner registry, and
+  complete M1 raw/structured/retained/cancellation/reload/reconnect/Codex
+  integration gates remain for review. Concurrent execution remains disabled.

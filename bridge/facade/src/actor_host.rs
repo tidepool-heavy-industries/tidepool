@@ -19,6 +19,7 @@ mod commands;
 mod custody_tests;
 #[cfg(test)]
 mod documentation_tests;
+mod embedded_harness;
 mod embedded_policy;
 mod host_incarnation;
 mod hosted_retirement;
