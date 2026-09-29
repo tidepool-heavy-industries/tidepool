@@ -59,7 +59,7 @@ import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedJson (resolveJsonAuthority)
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..)
-  , WireProgram(..), SiteRow(..) )
+  , WireProgram(..), ProjectedGroup(..), SiteRow(..) )
 import qualified Tidepool.EffectSchema
 import Tidepool.PreparedStg
   ( PreparedModule(..), PreparedBodyCache, newPreparedBodyCache
@@ -67,6 +67,7 @@ import Tidepool.PreparedStg
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithCached )
 import Tidepool.ModuleCandidates (ModuleCandidate(..))
+import Tidepool.CertifiedProducts (encodeCertifiedProducts)
 import Tidepool.DeclarationJoin
   ( DeclarationOperation(..), readDeclarationOperation, validateDeclarationJoin
   , renderDeclarationJoinOutcome, inspectDeclarationArtifacts
@@ -464,7 +465,7 @@ processFile compiler caches timing args path = do
       else timePhase timing "prepared_sidecars" $ writePreparedSidecars SeparateYieldSites outDir binds tycons mCapturedTy warnTexts preparedArtifacts
 
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
-    availability <- timePhase timing "module_products" $ writeModuleProducts outDir hscEnv
+    (availability, freshProducts) <- timePhase timing "module_products" $ writeModuleProducts outDir hscEnv
       productContext (pprModules prepared) (pprProductInterfaces prepared)
     let dependencies = pprDependencies prepared
         withCertified = foldr (\candidate -> Map.insert
@@ -476,8 +477,19 @@ processFile compiler caches timing args path = do
               (dependencyModuleUnit node, dependencyModuleName node)
               withCertified
           }
-    writeDependencyEvidence outDir (dependencies
-      { dependencyModules = map withAvailability (dependencyModules dependencies) })
+        finalDependencies = dependencies
+          { dependencyModules = map withAvailability (dependencyModules dependencies) }
+    writeDependencyEvidence outDir finalDependencies
+    productBytes <- BS.readFile (outDir </> "module-products.cbor")
+    evidenceBytes <- BS.readFile (outDir </> "dependencies.json")
+    certified <- encodeCertifiedProducts hscEnv (pprAcceptedCandidates prepared)
+      freshProducts [(paTarget artifact, paProgram artifact) | artifact <- preparedArtifacts]
+      finalDependencies productBytes evidenceBytes
+    case certified of
+      Right bytes -> BS.writeFile (outDir </> "certified-products.cbor") bytes
+      Left reason -> do
+        hPutStrLn stderr ("product certification unavailable: " ++ reason)
+        BS.writeFile (outDir </> "certified-products.cbor") BS.empty
 
   reportDiags res
 
@@ -492,6 +504,7 @@ trySynchronous action = do
 
 data PreparedArtifact = PreparedArtifact
   { paTarget :: String
+  , paProgram :: WireProgram
   , paBytes :: BS.ByteString
   , paConstructors :: [DataCon]
   , paYieldSites :: [Tidepool.EffectSchema.YieldSite]
@@ -563,7 +576,7 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
           , site <- pmYieldSites preparedModule'
           , Tidepool.EffectSchema.ysSite site `Set.member` admitted
           ]
-    pure (PreparedArtifact target bytes constructors yieldSites)
+    pure (PreparedArtifact target program bytes constructors yieldSites)
   pure (artifacts, Just (contextFor firstTarget))
 
 -- A failed unrelated group is an explicit product miss, never a newly fatal
@@ -571,8 +584,9 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
 -- skinny interface emitted by the same GHC transaction.
 writeModuleProducts :: FilePath -> HscEnv -> Maybe ProjectionContext
   -> [PreparedModule] -> Map.Map ModuleName ModIface
-  -> IO (Map.Map (String, String) ProductAvailability)
-writeModuleProducts _ _ Nothing _ _ = pure Map.empty
+  -> IO (Map.Map (String, String) ProductAvailability,
+         [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])])
+writeModuleProducts _ _ Nothing _ _ = pure (Map.empty, [])
 writeModuleProducts outDir hscEnv (Just context) modules interfaces = do
   outcomes <- forM modules $ \prepared -> do
     let name = moduleName (pmModule prepared)
@@ -595,9 +609,9 @@ writeModuleProducts outDir hscEnv (Just context) modules interfaces = do
             BS.readFile path) `finally` removeFile path
           pure (key, ProductReady, Just (T.pack (fst key),
             T.pack (snd key), bytes, groups))
-  BS.writeFile (outDir </> "module-products.cbor")
-    (encodeModuleProducts [moduleProduct | (_, _, Just moduleProduct) <- outcomes])
-  pure (Map.fromList [(key, status) | (key, status, _) <- outcomes])
+  let products = [moduleProduct | (_, _, Just moduleProduct) <- outcomes]
+  BS.writeFile (outDir </> "module-products.cbor") (encodeModuleProducts products)
+  pure (Map.fromList [(key, status) | (key, status, _) <- outcomes], products)
 
 requireProjection :: Either ProjectionError a -> IO a
 requireProjection = \case

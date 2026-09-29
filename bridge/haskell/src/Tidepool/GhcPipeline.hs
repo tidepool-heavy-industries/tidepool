@@ -119,7 +119,7 @@ import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef,
 import Numeric (showHex)
 import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName, takeFileName, normalise, pathSeparator, (</>))
-import System.Directory (makeAbsolute)
+import System.Directory (canonicalizePath, makeAbsolute)
 import System.IO (hPutStrLn, stderr, readFile')
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, forM_, when)
@@ -2302,7 +2302,7 @@ certifyModuleCandidates manifest graph targetPath = do
             , candidateImportsMatch candidate node
             , not (hasUntrackedCompileTimeExecution (ms_hspp_opts summary))
             , not (gopt Opt_Pp (ms_hspp_opts summary)) -> do
-                source <- liftIO $ traverse (fmap normalise . makeAbsolute)
+                source <- liftIO $ traverse canonicalizePath
                   (ml_hs_file (ms_location summary))
                 if source /= Just (candidateSource candidate)
                   then pure Nothing

@@ -42,6 +42,7 @@ library tidepool-extract-internal
     Tidepool.Introspection
     Tidepool.Metadata
     Tidepool.ModuleCandidates
+    Tidepool.CertifiedProducts
     Tidepool.PrimOps
     Tidepool.PreparedStg
     Tidepool.PreparedRecovery
