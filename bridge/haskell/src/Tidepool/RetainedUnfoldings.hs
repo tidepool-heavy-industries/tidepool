@@ -198,7 +198,8 @@ scopeToModule env = env { hsc_plugins = plugins { staticPlugins = map rescope (s
     plugins = hsc_plugins env
     recorded = [ opt | (owner, opt) <- pluginModNameOpts (hsc_dflags env), owner == pluginModule ]
     rescope sp
-      | (pluginMarker : _) <- paArguments (spPlugin sp) = sp
+      | (marker : _) <- paArguments (spPlugin sp)
+      , marker == pluginMarker = sp
           { spPlugin = (spPlugin sp) { paArguments = pluginMarker : take 1 recorded }
           , spInitialised = False
           }

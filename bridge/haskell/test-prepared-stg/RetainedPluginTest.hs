@@ -174,5 +174,14 @@ verifyPreparedScope dir = do
     liftIO $ case unscopedResult of
       ForceRecompile -> pure ()
       _ -> ioError (userError "unscoped retained plugin accepted an interface fingerprint")
+    let other = StaticPlugin (PluginWithArgs defaultPlugin ["other-plugin", "argument"]) True
+        installedPlugins = hsc_plugins installed
+        withOther = installed { hsc_plugins = installedPlugins
+          { staticPlugins = other : staticPlugins installedPlugins } }
+        scopedOthers = staticPlugins (hsc_plugins (scopeRetainedHscEnv moduleId withOther))
+    liftIO $ case scopedOthers of
+      first : _ | paArguments (spPlugin first) == ["other-plugin", "argument"]
+                  && spInitialised first -> pure ()
+      _ -> ioError (userError "retained scope changed another static plugin")
     liftIO $ unless (baseline == withUnrelated && baseline /= changed)
       (ioError (userError "scoped interface fingerprint changed with unrelated retained identities"))
