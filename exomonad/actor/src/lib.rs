@@ -101,7 +101,8 @@ pub use lineage::{
 pub use local_actor::{
     spawn_local_actor, spawn_local_actor_in_incarnation, ChildExitNotice, KernelBehavior,
     KernelBehaviorError, KernelContext, KernelStep, LocalActor, LocalActorArguments,
-    LocalActorDirectory, LocalActorState,
+    LocalActorDirectory, LocalActorState, OwnedWorkbenchCompletion, OwnedWorkbenchTask,
+    WorkbenchDispatch,
 };
 pub use mailbox::MailboxValue;
 pub use mount::{
