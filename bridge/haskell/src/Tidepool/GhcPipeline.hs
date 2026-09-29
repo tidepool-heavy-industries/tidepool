@@ -2489,7 +2489,8 @@ registerPreparedInterface timing requestId interfaceReuse interfaceUse modSum tc
         "module_interface" "tidy" tidyMs
       (iface, ifaceMs) <- liftIO $ measureModuleInterface timing requestId
         (moduleNameString (ms_mod_name modSum)) SessionRegistrationInterface interfaceReuse $
-          mkIfaceTc hscEnv Sf_None modDetails modSum (Just (cg_binds cgGuts)) tcGblEnv
+          mkIfaceTc (hscUpdateFlags (`gopt_set` Opt_WriteIfSimplifiedCore) hscEnv)
+            Sf_None modDetails modSum (Just (cg_binds cgGuts)) tcGblEnv
       let hmi = HomeModInfo iface modDetails emptyHomeModInfoLinkable
       installPreparedInterface (ms_mod_name modSum) hmi
       pure (Just (tidyMs + ifaceMs), Just (RegisteredInterface hmi cgGuts))

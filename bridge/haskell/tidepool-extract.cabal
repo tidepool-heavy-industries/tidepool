@@ -11,6 +11,8 @@ extra-source-files:
   test-prepared-stg/site-fixtures/*.hs
   test-prepared-stg/RepPoly.hs
   test-prepared-stg/RepPolyImport.hs
+  test-prepared-stg/ModuleProductA.hs
+  test-prepared-stg/ModuleProductB.hs
 
 -- Internal (unexposed) sub-library: the genuinely shared extractor
 -- implementation, compiled ONCE per configuration instead of once per
@@ -235,6 +237,7 @@ test-suite prepared-stg-pipeline-test
   other-modules:
     RetainedPluginTest
     TypeEvidenceChecks
+    ModuleProductRoundtripTest
   build-depends:
     base         >= 4.20 && < 5,
     ghc          >= 9.12 && < 9.13,
