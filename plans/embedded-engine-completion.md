@@ -269,3 +269,43 @@ requests at 7,283–9,199 MiB against a 7,168 MiB ceiling. Retained evidence is
 `permission-recovery/m2-compiler-rss-rotation.log`. A future fresh per-run gate
 can use the existing `TIDEPOOL_DAEMON_ARGS` knob to retain more memo state within
 the admitted aggregate budget. No global default or active daemon was changed.
+
+## Native codegen and runtime checkpoints (2026-09-29)
+
+Native Buck checkpoint `dcda1c3fe` includes the bignum, bridge, effect and
+codegen libraries. Codegen's MD5 build script is represented by a native `cxx_library`
+action with declared C/header inputs. The dependency bundle includes normal
+library dependencies for these four packages; their broader test dependencies
+remain outside this slice. Codex is not part of the migration.
+
+All four library targets built. The native MD5 smoke exercised the public
+`session_var_id` API against a fixed independently derived value, forcing the
+Rust library and C archive to link. The expanded gate executed 311 tests across
+eight native Buck test targets, with no failures. Final generator checks passed 15 tests, including rejection
+of new unmodeled codegen build dependencies.
+Logs: `target/completion-evidence/buck/codegen-gate.log`,
+`md5-smoke-gate2.log`, and `expanded-regression-gate.log` in the same directory.
+Final generator evidence is in `final-generators-gate.log` beside those logs.
+These are local actions with remote execution disabled; this is not acceptance
+of codegen's full test suite or a remote-cache gate.
+
+Runtime binding publication is checkpointed at `df3e1b7df`, joined as
+`31e490bf1d`. Five focused tests passed, including promotion of real retained
+values, stale-stage rejection and retry, and cancellation before publication.
+This remains binding-only: paired declaration publication and actor transport
+are pending. Durable authored-generation allocation is the next prerequisite.
+
+Facade checkpoint `cacd0ccf9e` executes the checkpoint effect through a real raw
+Haskell call and observes its exact committed operation and successful result.
+The focused test passed 1/1; the facade checkout retains
+`target/completion-evidence/m2-checkpoint-effect-r2.log`. Checkpoint-backed child
+attachment and independent child execution after parent execution failure are
+still being implemented and have not passed G3 acceptance.
+
+The compiler candidate passed 24 focused Rust tests, downstream runtime
+compilation, the Haskell worker build, and the execution-schema encoder test.
+Its full fixture gate compiled 261 Suite targets but stopped at a stale oracle
+comparison. Pinned native GHC regeneration confirmed only the fingerprint changed; values
+and refusal expectations were identical. The refreshed oracle and full fixture
+rerun are pending acceptance; the retained run is
+`/tmp/tidepool-compiler-owner/target/prepared-corpus/run.32RorB`.
