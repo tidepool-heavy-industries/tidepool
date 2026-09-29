@@ -68,6 +68,14 @@ pub enum BindingPromotionError {
     DuplicateName,
 }
 
+/// Exact binding writes and dependency leases checked before a publication
+/// decision. The caller holds the owning machine checkout through commit.
+pub struct PreparedBindingPromotion {
+    target: ScopeId,
+    writes: Vec<(BindingName, SessionVarId)>,
+    retained: HashSet<SessionVarId>,
+}
+
 #[derive(Debug)]
 struct BindingTip {
     id: BindingTipId,
@@ -510,6 +518,20 @@ impl BindingTable {
         target: ScopeId,
         ids: &[SessionVarId],
     ) -> Result<(), BindingPromotionError> {
+        let prepared = self.prepare_exact_binding_promotion_in(source, target, ids)?;
+        self.commit_exact_binding_promotion(prepared);
+        Ok(())
+    }
+
+    /// Check every source owner and final name without changing visibility or
+    /// acquiring a lease. Publication can then perform its durable work before
+    /// the infallible commit, while retaining the same machine checkout.
+    pub fn prepare_exact_binding_promotion_in(
+        &self,
+        source: ScopeId,
+        target: ScopeId,
+        ids: &[SessionVarId],
+    ) -> Result<PreparedBindingPromotion, BindingPromotionError> {
         let mut names = HashSet::new();
         let mut writes = Vec::with_capacity(ids.len());
         for &id in ids {
@@ -532,6 +554,21 @@ impl BindingTable {
             writes.push((entry.name.clone(), id));
         }
         let retained = self.dependency_closure(ids.iter().copied());
+        Ok(PreparedBindingPromotion {
+            target,
+            writes,
+            retained,
+        })
+    }
+
+    /// The checkout that prepared this promotion must still own the table;
+    /// there is no fallible operation after the public durability boundary.
+    pub fn commit_exact_binding_promotion(&mut self, prepared: PreparedBindingPromotion) {
+        let PreparedBindingPromotion {
+            target,
+            writes,
+            retained,
+        } = prepared;
         let existing = self.promoted.entry(target).or_default();
         let added: HashSet<_> = retained.difference(existing).copied().collect();
         existing.extend(added.iter().copied());
@@ -543,7 +580,6 @@ impl BindingTable {
             }
             frame.insert(name, id);
         }
-        Ok(())
     }
 
     /// Publish an alias of an existing root through the ordinary scoped name
