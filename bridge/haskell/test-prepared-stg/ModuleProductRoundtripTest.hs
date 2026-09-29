@@ -39,11 +39,12 @@ import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.ExecutionProjection
-  ( ProjectionContext(..), ProjectedGroup(..), ProjectedGroupBody(..)
-  , projectPreparedModuleGroups, projectPreparedModuleGroupsSelected )
+  ( ProjectionContext(..), ProjectionError(..), ProjectedGroup(..), ProjectedGroupBody(..)
+  , projectPreparedModuleGroups, projectPreparedModuleGroupsSelected, topBinders )
 import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.GhcPipeline
   ( PipelineResult(..), PipelineSelection(..), PreparedPipelineResult(..), runPipelineSelected )
+import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.PreparedStg (PreparedModule(..))
 
 -- Exercise the exact fat interface retained for a prepared defining module,
@@ -58,7 +59,10 @@ verifyModuleProductInterfaceRoundtrip work = do
       name = mkModuleName "ModuleProductA"
   copyFile "test-prepared-stg/ModuleProductA.hs" a
   copyFile "test-prepared-stg/ModuleProductB.hs" b
-  result <- runPipelineSelected PreparedStg b [work]
+  ordinary <- runPipelineSelected PreparedStg b [work]
+  unless (Map.null (pprProductInterfaces ordinary)) $
+    ioError (userError "ordinary prepared compilation retained product interfaces")
+  result <- runPipelineSelected PreparedProducts b [work]
   let prepared = [module_ | module_ <- pprModules result
                           , moduleNameString (moduleName (pmModule module_))
                               == "ModuleProductA"]
@@ -84,6 +88,15 @@ verifyModuleProductInterfaceRoundtrip work = do
         }
   groups <- either (ioError . userError . show) pure
     (projectPreparedModuleGroups context moduleA)
+  case [ binder | (binding, _) <- pmBindings moduleA
+                , binder <- topBinders binding ] of
+    binder : _ -> case projectPreparedModuleGroups context (moduleA
+      { pmSiteRejections = SiteRejection binder "rejected group site"
+          : pmSiteRejections moduleA }) of
+      Left (RejectedTypedSite "rejected group site") -> pure ()
+      outcome -> ioError (userError ("group projection admitted rejected site: "
+        ++ show outcome))
+    [] -> ioError (userError "module product has no top binder for rejection test")
   unless (length groups >= 2) $
     ioError (userError "module product omitted second STG group")
   unless (any ((>= 2) . length . projectedBinders) groups) $
@@ -113,6 +126,8 @@ verifyModuleProductInterfaceRoundtrip work = do
   iface <- case Map.lookup name (pprProductInterfaces result) of
     Just value -> pure value
     Nothing -> ioError (userError "prepared product omitted ModuleProductA interface")
+  unless (Map.member (mkModuleName "ModuleProductB") (pprProductInterfaces result)) $
+    ioError (userError "product mode omitted the leaf module interface")
   skinny <- case lookupHpt (hsc_HPT producer) name of
     Just hmi -> pure (hm_iface hmi)
     Nothing -> ioError (userError "prepared HPT omitted ModuleProductA interface")

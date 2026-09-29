@@ -231,6 +231,12 @@ projectPreparedModuleGroupsSelected context prepared selection = traverse projec
     owner = (Text.pack (unitString (moduleUnit (pmModule prepared))),
              Text.pack (moduleNameString (moduleName (pmModule prepared))))
     projectOne item@(binding, _) = do
+      case [ srMessage rejection
+           | rejection <- pmSiteRejections prepared
+           , varUnique (srBinder rejection) `elem` map varUnique (topBinders binding)
+           , not (skippedFromRecovery context (srBinder rejection)) ] of
+        message : _ -> Left (RejectedTypedSite (Text.pack message))
+        [] -> pure ()
       first <- case topBinders binding of
         value : _ -> Right value
         [] -> Left (UnsupportedPreparedShape "prepared group has no binder")

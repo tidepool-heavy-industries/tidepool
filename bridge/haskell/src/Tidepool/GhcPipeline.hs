@@ -26,7 +26,7 @@ import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeMod
 import GHC.Types.Avail (availNames)
 import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache)
 import GHC.Iface.Make (mkIfaceTc)
-import GHC.Unit.Module.ModIface (set_mi_extra_decls)
+import GHC.Unit.Module.ModIface (mi_extra_decls, set_mi_extra_decls)
 import GHC.Iface.Tidy (mkBootModDetailsTc)
 import GHC.Types.SourceFile (HscSource(..))
 import GHC.Types.Error (mkUnknownDiagnostic, MessageClass(..), mkLocMessage, getMessages, errMsgDiagnostic)
@@ -156,6 +156,7 @@ import Tidepool.DependencyEvidence
 -- boundary. Metadata consumers stop at the checked environment.
 data PipelineSelection result where
   PreparedStg :: PipelineSelection PreparedPipelineResult
+  PreparedProducts :: PipelineSelection PreparedPipelineResult
   CheckedEnvironment :: PipelineSelection CheckedEnvironmentResult
 
 data PreparationKind = CheckOnly | PrepareStg
@@ -222,7 +223,12 @@ data CheckedEnvironmentResult = CheckedEnvironmentResult
 
 selectionKind :: PipelineSelection result -> PreparationKind
 selectionKind PreparedStg = PrepareStg
+selectionKind PreparedProducts = PrepareStg
 selectionKind CheckedEnvironment = CheckOnly
+
+capturesProductInterfaces :: PipelineSelection result -> Bool
+capturesProductInterfaces PreparedProducts = True
+capturesProductInterfaces _ = False
 
 data PipelineResult = PipelineResult
   { prBinds  :: [CoreBind]
@@ -1192,6 +1198,7 @@ runCompileCycle
 runCompileCycle selection mCache mMemoRef retained incarnation timing requestIdentity sessionT0 variant path = do
     memoTrace <- liftIO readMemoTraceEnabled
     let preparation = selectionKind selection
+        captureProducts = capturesProductInterfaces selection
     target <- guessTarget path Nothing Nothing
     setTargets [target]
     -- Install target-diagnostic capture before load/typecheck. Warnings become
@@ -1416,8 +1423,8 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                           (Map.insertWith (+) (moduleNameString (ms_mod_name (mfSummary mf))) coreMs))
                 let interfaceReuse = if isJust mMemoRef then MemoMiss else MemoDisabled
                 (mInterfaceMs, mRegistration) <- registerPreparedInterface timing requestIdentity interfaceReuse
-                  interfaceUse (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
-                forM_ mRegistration $ \registration -> liftIO $
+                  captureProducts interfaceUse (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
+                when captureProducts $ forM_ mRegistration $ \registration -> liftIO $
                   modifyIORef' productInterfacesRef (Map.insert
                     (ms_mod_name (mfSummary mf)) (hm_iface (riHomeModInfo registration)))
                 liftIO $ recordInterface (mfSummary mf) mInterfaceMs
@@ -1553,6 +1560,10 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
               cachedInterface modSum entry
                 | dropMemoInterface == Just (moduleNameString (ms_mod_name modSum)) = Nothing
                 | otherwise = payloadProduct (gmePayload entry) >>= retainedInterface
+              interfaceReady interfaceUse modSum entry =
+                case cachedInterface modSum entry of
+                  Nothing -> not captureProducts && not (needsPreparedInterface interfaceUse)
+                  Just hmi -> not captureProducts || isJust (mi_extra_decls (hm_iface hmi))
           -- Under TIDEPOOL_TIMING, name why a memoized module was recompiled.
           let memoMiss modSum reason = when timing $ liftIO $ hPutStrLn stderr $
                 "tidepool-memo-miss module=" ++ moduleNameString (ms_mod_name modSum)
@@ -1721,11 +1732,11 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                   -- Reinstall it after load's HPT rebuild before any importer runs.
                   Just entry
                     | Just moduleProduct <- payloadProduct (gmePayload entry)
-                    , not (needsPreparedInterface interfaceUse) || isJust (cachedInterface modSum entry) -> do
+                    , interfaceReady interfaceUse modSum entry -> do
                     recordValidity modSum True
                     recordExecutableValidity modSum True
                     rememberPreparedSiblings (productPrepared moduleProduct)
-                    forM_ (retainedInterface moduleProduct) $ \hmi -> liftIO $
+                    when captureProducts $ forM_ (retainedInterface moduleProduct) $ \hmi -> liftIO $
                       modifyIORef' productInterfacesRef (Map.insert mn (hm_iface hmi))
                     when (needsPreparedInterface interfaceUse) $
                       forM_ (cachedInterface modSum entry) (installPreparedInterface mn)
@@ -1881,10 +1892,10 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                     CachedObservation _ entry
                       | depsExecutable
                       , Just moduleProduct <- payloadProduct (gmePayload entry)
-                      , not (needsPreparedInterface interfaceUse) || isJust (cachedInterface modSum entry) -> do
+                      , interfaceReady interfaceUse modSum entry -> do
                         recordExecutableValidity modSum True
                         rememberPreparedSiblings (productPrepared moduleProduct)
-                        forM_ (retainedInterface moduleProduct) $ \hmi -> liftIO $
+                        when captureProducts $ forM_ (retainedInterface moduleProduct) $ \hmi -> liftIO $
                           modifyIORef' productInterfacesRef (Map.insert
                             (ms_mod_name modSum) (hm_iface hmi))
                         when (needsPreparedInterface interfaceUse) $
@@ -1915,7 +1926,7 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
                     (not depsExecutable || observationLacksBody observation ||
                       case observation of
                         CachedObservation _ entry ->
-                          needsPreparedInterface interfaceUse && isNothing (cachedInterface modSum entry)
+                          not (interfaceReady interfaceUse modSum entry)
                         FreshObservation _ -> True) then do
                     (attempt, ms) <- timeSection $ reifyGhc $ \session ->
                       try (reflectGhc (compileReachable interfaceUse modSum moduleFacts) session)
@@ -2048,6 +2059,14 @@ runCompileCycle selection mCache mMemoRef retained incarnation timing requestIde
           pure (pipelineResult, preparedModules, dependencies, productInterfaces)
     case selection of
       PreparedStg -> do
+        (result, modules, dependencies, productInterfaces) <- compileExecutable
+        pure PreparedPipelineResult
+          { pprPipelineResult = result
+          , pprModules = modules
+          , pprDependencies = dependencies
+          , pprProductInterfaces = productInterfaces
+          }
+      PreparedProducts -> do
         (result, modules, dependencies, productInterfaces) <- compileExecutable
         pure PreparedPipelineResult
           { pprPipelineResult = result
@@ -2489,21 +2508,30 @@ needsPreparedInterface :: HomeInterfaceUse -> Bool
 needsPreparedInterface HomeInterfaceLeaf = False
 needsPreparedInterface _ = True
 
-registerPreparedInterface :: Bool -> Word64 -> InterfaceReuse -> HomeInterfaceUse
+registerPreparedInterface :: Bool -> Word64 -> InterfaceReuse -> Bool -> HomeInterfaceUse
   -> ModSummary -> TcGblEnv -> HscEnv -> ModGuts
   -> Ghc (Maybe Integer, Maybe RegisteredInterface)
-registerPreparedInterface timing requestId interfaceReuse interfaceUse modSum tcGblEnv hscEnv simplified = do
-  ((cgGuts, modDetails), tidyMs) <- timeSection $ liftIO $ hscTidy hscEnv simplified
-  liftIO $ emitModuleInterfaceTiming timing (moduleNameString (ms_mod_name modSum))
-    "module_interface" "tidy" tidyMs
-  (iface, ifaceMs) <- liftIO $ measureModuleInterface timing requestId
-    (moduleNameString (ms_mod_name modSum)) SessionRegistrationInterface interfaceReuse $
-      mkIfaceTc (hscUpdateFlags (`gopt_set` Opt_WriteIfSimplifiedCore) hscEnv)
-        Sf_None modDetails modSum (Just (cg_binds cgGuts)) tcGblEnv
-  let hmi = HomeModInfo iface modDetails emptyHomeModInfoLinkable
-  when (needsPreparedInterface interfaceUse) $
-    installPreparedInterface (ms_mod_name modSum) hmi
-  pure (Just (tidyMs + ifaceMs), Just (RegisteredInterface hmi cgGuts))
+registerPreparedInterface timing requestId interfaceReuse captureProducts interfaceUse modSum tcGblEnv hscEnv simplified
+  | not captureProducts && not (needsPreparedInterface interfaceUse) = do
+      when timing $ liftIO $ hPutStrLn stderr $
+        "tidepool-prepared-interface-elided module="
+          ++ moduleNameString (ms_mod_name modSum)
+          ++ " reason=no-later-home-importer"
+      pure (Nothing, Nothing)
+  | otherwise = do
+      ((cgGuts, modDetails), tidyMs) <- timeSection $ liftIO $ hscTidy hscEnv simplified
+      liftIO $ emitModuleInterfaceTiming timing (moduleNameString (ms_mod_name modSum))
+        "module_interface" "tidy" tidyMs
+      (iface, ifaceMs) <- liftIO $ measureModuleInterface timing requestId
+        (moduleNameString (ms_mod_name modSum)) SessionRegistrationInterface interfaceReuse $
+          mkIfaceTc (if captureProducts
+              then hscUpdateFlags (`gopt_set` Opt_WriteIfSimplifiedCore) hscEnv
+              else hscEnv)
+            Sf_None modDetails modSum (Just (cg_binds cgGuts)) tcGblEnv
+      let hmi = HomeModInfo iface modDetails emptyHomeModInfoLinkable
+      when (needsPreparedInterface interfaceUse) $
+        installPreparedInterface (ms_mod_name modSum) hmi
+      pure (Just (tidyMs + ifaceMs), Just (RegisteredInterface hmi cgGuts))
 
 -- Keep request-local executable state out of the reusable prepared memo.
 installPreparedInterface :: ModuleName -> HomeModInfo -> Ghc ()
