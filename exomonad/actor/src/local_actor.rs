@@ -830,11 +830,7 @@ impl<B> Drop for LocalActorState<B> {
             );
             retain_unconfirmed_exit(&self.terminal, self.context.identity, detail);
         }
-        for control in self
-            .mailbox_admission
-            .hosted_cell()
-            .take_accepted_and_clear()
-        {
+        for control in self.mailbox_admission.hosted_cell().take_all_and_clear() {
             control.mark_unconfirmed();
             control.settle(Err(KernelInvocationFailure::ActorExited(
                 self.context.identity,
@@ -2877,6 +2873,32 @@ mod tests {
             .await
             .expect("shutdown");
         task.await.expect("actor task");
+    }
+
+    #[tokio::test]
+    async fn actor_exit_settles_transport_control_before_sender_accepts() {
+        let (actor, task) = spawn_local_actor(None, behavior(false).behavior)
+            .await
+            .expect("spawn");
+        let control = crate::WorkbenchExecutionControl::untracked();
+        actor.hosted_cell().publish_transport(Arc::clone(&control));
+
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "done".into(),
+            })
+            .await
+            .expect("shutdown");
+        task.await.expect("actor task");
+
+        assert!(matches!(
+            control.terminal_reply(),
+            Some(Err(KernelInvocationFailure::ActorExited(identity)))
+                if identity == actor.identity()
+        ));
+        actor.hosted_cell().accept(&control);
+        assert!(actor.hosted_cell().find(|_| true).is_none());
     }
 
     #[tokio::test]

@@ -405,14 +405,10 @@ impl HostedCellPublications {
             .retain(|entry| !std::sync::Arc::ptr_eq(&entry.control, control));
     }
 
-    pub(crate) fn take_accepted_and_clear(
+    pub(crate) fn take_all_and_clear(
         &self,
     ) -> Vec<std::sync::Arc<crate::WorkbenchExecutionControl>> {
-        self.0
-            .lock()
-            .drain(..)
-            .filter_map(|entry| entry.accepted.then_some(entry.control))
-            .collect()
+        self.0.lock().drain(..).map(|entry| entry.control).collect()
     }
 
     pub(crate) fn find(
