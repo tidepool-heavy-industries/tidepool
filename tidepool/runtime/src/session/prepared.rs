@@ -397,6 +397,10 @@ pub(crate) struct CertifiedTurnInstall {
     pub target: ProgramId,
     pub groups: Vec<ProgramId>,
     pub leases: Vec<SourceInstanceLease>,
+    facts: Vec<ProgramFacts>,
+    plans: Vec<EvidencePlan>,
+    exports: Vec<(SymbolIdentity, ValueId, Option<Signature>)>,
+    package_updates: BTreeMap<SymbolIdentity, [u8; 32]>,
 }
 
 /// Which installed program's site table is authoritative for one site id.
@@ -2785,26 +2789,82 @@ impl PreparedEngine {
             .programs
             .last()
             .expect("target is always the final batch candidate");
-        for (binder, digest) in package_updates {
+        for id in installed.programs.iter().copied() {
+            self.machine
+                .pin(id)
+                .expect("batch returned installed program");
+        }
+        Ok(CertifiedTurnInstall {
+            target: target_id,
+            groups: installed.programs[..installed.programs.len() - 1].to_vec(),
+            leases: installed.leases,
+            facts,
+            plans,
+            exports,
+            package_updates,
+        })
+    }
+
+    /// Publish the staged native batch only after scope custody accepted all
+    /// source lease tokens. Its machine programs are pinned but invisible to
+    /// the session's facts, site and package-export ledgers until this call.
+    pub(crate) fn commit_certified_turn(&mut self, staged: CertifiedTurnInstall) -> ProgramId {
+        assert!(
+            staged.leases.is_empty(),
+            "source leases must enter scope custody"
+        );
+        for (binder, digest) in staged.package_updates {
             self.code_exports
                 .get_mut(&binder)
                 .expect("preflighted package export remains installed")
                 .interface_digest = Some(digest);
         }
-        for ((id, facts), plan) in installed.programs.iter().copied().zip(facts).zip(plans) {
-            self.machine
-                .pin(id)
-                .expect("batch returned installed program");
+        let programs = staged
+            .groups
+            .iter()
+            .copied()
+            .chain(std::iter::once(staged.target));
+        for ((id, facts), plan) in programs.zip(staged.facts).zip(staged.plans) {
             self.programs.insert(id, facts);
             self.publish_evidence(id, plan);
         }
-        self.publish_code_exports(target_id, exports);
-        self.installs_since_major += installed.programs.len();
-        Ok(CertifiedTurnInstall {
-            target: target_id,
-            groups: installed.programs[..installed.programs.len() - 1].to_vec(),
-            leases: installed.leases,
-        })
+        self.publish_code_exports(staged.target, staged.exports);
+        self.installs_since_major += staged.groups.len() + 1;
+        for group in staged.groups {
+            assert!(self.unpin(group), "scoped source root replaces install pin");
+        }
+        staged.target
+    }
+
+    /// Discard an unpublished native batch after scope admission refuses its
+    /// tokens. No session metadata or package roots were committed, so once
+    /// these exact machine handles/pins release, collection retires the batch.
+    pub(crate) fn abort_certified_turn(
+        &mut self,
+        staged: CertifiedTurnInstall,
+        tokens: Vec<SourceInstanceLease>,
+    ) -> Result<(), PreparedRuntimeError> {
+        assert!(
+            staged.leases.is_empty(),
+            "returned tokens are passed separately"
+        );
+        for token in tokens {
+            assert!(
+                self.release(token.handle()),
+                "rejected source token remains rooted"
+            );
+        }
+        for program in staged
+            .groups
+            .into_iter()
+            .chain(std::iter::once(staged.target))
+        {
+            assert!(
+                self.unpin(program),
+                "unpublished program retains its install pin"
+            );
+        }
+        self.quiesce_and_collect_now()
     }
 
     /// Step (a) of the off-checkout split install: resolve `prepared`'s
@@ -4450,20 +4510,23 @@ mod tests {
             .unwrap();
         assert_eq!(installed.groups.len(), 2);
         assert_eq!(installed.leases.len(), 2);
-        assert_eq!(engine.programs[&installed.target].entry, Some(ValueId(0)));
-        assert!(installed
-            .groups
+        assert!(!engine.programs.contains_key(&installed.target));
+        let installed_target = installed.target;
+        let installed_groups = installed.groups.clone();
+        let installed_leases = std::mem::take(&mut installed.leases);
+        assert_eq!(engine.commit_certified_turn(installed), installed_target);
+        assert_eq!(engine.programs[&installed_target].entry, Some(ValueId(0)));
+        assert!(installed_groups
             .iter()
             .all(|id| engine.programs[id].entry.is_none()));
-        let selected = installed
-            .leases
+        let selected = installed_leases
             .iter()
             .find(|lease| lease.binder() == &root)
             .unwrap();
         let result = engine
             .machine
             .run_entry_retained(
-                installed.target,
+                installed_target,
                 ValueId(0),
                 &[],
                 PreparedCallOptions {
@@ -4498,8 +4561,10 @@ mod tests {
             .unwrap();
         assert!(reused.groups.is_empty());
         assert!(reused.leases.is_empty());
-        assert_ne!(reused.target, installed.target);
-        assert!(engine.unpin(reused.target));
+        assert_ne!(reused.target, installed_target);
+        let reused_target = reused.target;
+        assert_eq!(engine.commit_certified_turn(reused), reused_target);
+        assert!(engine.unpin(reused_target));
         let mut scopes = tidepool_codegen::scope::ScopeTree::new();
         let source_scope = scopes.mint_isolated();
         let capture_scope = scopes.mint_isolated();
@@ -4508,7 +4573,7 @@ mod tests {
             .register_source_instances_in(
                 &scopes,
                 source_scope,
-                std::mem::take(&mut installed.leases),
+                installed_leases,
             )
             .unwrap();
         assert_eq!(keys.len(), 2);
@@ -4518,10 +4583,7 @@ mod tests {
             bindings.source_instances_in(&scopes, capture_scope).len(),
             2
         );
-        for group in &installed.groups {
-            assert!(engine.unpin(*group));
-        }
-        assert!(engine.unpin(installed.target));
+        assert!(engine.unpin(installed_target));
         assert_eq!(scopes.retire(source_scope), vec![source_scope]);
         assert!(bindings
             .drain_scope_with_sources(source_scope)
@@ -4544,7 +4606,15 @@ mod tests {
         engine.quiesce_and_collect_now().unwrap();
         assert_eq!(engine.residency().programs, 1);
 
-        let rejected = engine
+        assert_eq!(engine.residency().programs, 1);
+        let before_abort = (
+            engine.residency(),
+            engine.code_export_count(),
+            engine.programs.len(),
+            engine.sites.len(),
+            engine.verb_sites.len(),
+        );
+        let mut aborted = engine
             .install_certified_turn(
                 CertifiedTargetImage::compile(target_prepared, &registry).unwrap(),
                 &[ImportOwner::Source {
@@ -4559,8 +4629,9 @@ mod tests {
             .unwrap();
         let dead_scope = scopes.mint_isolated();
         assert_eq!(scopes.retire(dead_scope), vec![dead_scope]);
+        let rejected_tokens = std::mem::take(&mut aborted.leases);
         let returned = bindings
-            .register_source_instances_in(&scopes, dead_scope, rejected.leases)
+            .register_source_instances_in(&scopes, dead_scope, rejected_tokens)
             .unwrap_err();
         assert_eq!(returned.len(), 2);
         assert!(bindings
@@ -4569,15 +4640,19 @@ mod tests {
         assert!(bindings
             .source_instances_in(&scopes, capture_scope)
             .is_empty());
-        for lease in returned {
-            assert!(engine.release(lease.handle()));
-        }
-        for group in rejected.groups {
-            assert!(engine.unpin(group));
-        }
-        assert!(engine.unpin(rejected.target));
-        engine.quiesce_and_collect_now().unwrap();
-        assert_eq!(engine.residency().programs, 1);
+        assert!(!engine.programs.contains_key(&aborted.target));
+        assert_eq!(engine.code_export_count(), before_abort.1);
+        engine.abort_certified_turn(aborted, returned).unwrap();
+        assert_eq!(
+            (
+                engine.residency(),
+                engine.code_export_count(),
+                engine.programs.len(),
+                engine.sites.len(),
+                engine.verb_sites.len(),
+            ),
+            before_abort,
+        );
         assert!(engine.unpin(bootstrap));
     }
 
