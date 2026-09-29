@@ -712,7 +712,7 @@ impl SessionLib {
     pub fn workbench_imports_in(&self, scope: ScopeId) -> SourceImports {
         let mut imports = SourceImports::new();
         for generation in self.log.chain_from_root(self.scope_tip(scope)) {
-            let turn = &self.log.turns[(generation.0 - 1) as usize];
+            let turn = self.log.turn(generation).expect("scope tip is committed");
             imports.extend(&turn.workbench_imports);
         }
         imports
@@ -764,7 +764,7 @@ impl SessionLib {
         // value, so it drops out.
         let mut live: Vec<&str> = Vec::new();
         for g in self.log.chain_from_root(self.scope_tip(scope)) {
-            let turn = &self.log.turns[(g.0 - 1) as usize];
+            let turn = self.log.turn(g).expect("scope tip is committed");
             for r in &turn.retracts {
                 live.retain(|n| *n != r.as_str());
             }
@@ -1062,7 +1062,7 @@ impl SessionLib {
         // generation permanently while leaving no on-disk module, poisoning
         // every later turn that imports the (missing) gen module.
         if let Err(e) = self.write_module(&rendered) {
-            self.log.turns.pop();
+            assert!(self.log.pop_latest_committed(gen));
             self.restore_tip(scope, tip_before);
             return Err(e);
         }
@@ -1072,7 +1072,7 @@ impl SessionLib {
         let value_types = match self.validate_candidate(&rendered, &receipt.items, inject_modules) {
             Ok(types) => types,
             Err(error) => {
-                self.log.turns.pop();
+                assert!(self.log.pop_latest_committed(gen));
                 let gen_path = self.root.join(rendered.module.relative_hs_path());
                 if let Err(err) = std::fs::remove_file(&gen_path) {
                     tracing::warn!(
@@ -1085,7 +1085,10 @@ impl SessionLib {
                 return Err(error);
             }
         };
-        self.log.turns[(gen.0 - 1) as usize].value_types = value_types;
+        self.log
+            .turn_mut(gen)
+            .expect("just committed declaration")
+            .value_types = value_types;
 
         if scope == ScopeId::ROOT {
             self.record_recovery_turn(recovery::RecoveryTurn::new(
@@ -1206,8 +1209,8 @@ impl SessionLib {
     /// Undo [`Self::push_turn_in`]'s tip bump for `scope` — restores it to
     /// `tip_before` (the value read from `self.tips` immediately before the
     /// push), which may be `None` if `scope` had never been used yet. Paired
-    /// with a `self.log.turns.pop()` on every rollback path so the log and
-    /// `tips` stay consistent, and touches no other scope's tip.
+    /// with a reserved tombstone at the failed generation on every rollback
+    /// path so its identity cannot be reused, and touches no other tip.
     fn restore_tip(&mut self, scope: ScopeId, tip_before: Option<Generation>) {
         match tip_before {
             Some(g) => {
@@ -1281,7 +1284,7 @@ impl SessionLib {
         );
         let rendered = render::render_module(&self.log, gen, &self.env);
         if let Err(e) = self.write_module(&rendered) {
-            self.log.turns.pop(); // keep the log consistent with disk
+            assert!(self.log.pop_latest_committed(gen)); // keep the log consistent with disk
             self.restore_tip(scope, tip_before);
             return Err(e);
         }

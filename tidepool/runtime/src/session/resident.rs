@@ -1837,6 +1837,7 @@ where
             .bindings()
             .iter_current_in(self.state.scope_tree(), scope)
             .into_iter()
+            .filter(|(_, entry)| !self.hidden_host_bindings.contains_key(&entry.id))
             .map(|(name, entry)| (name.0.clone(), entry.id))
             .collect();
         bindings.sort_by(|left, right| left.0.cmp(&right.0));
@@ -2957,7 +2958,9 @@ where
                 "host binding identity changed before hiding".into(),
             ))));
         }
-        self.hidden_host_bindings.insert(id, ());
+        if self.hidden_host_bindings.insert(id, ()).is_none() {
+            self.advance_public_visibility(scope);
+        }
         Ok(())
     }
 
@@ -3519,8 +3522,7 @@ where
                 matches!(item, super::ExportItem::Value { name: ref declared } if declared == name)
                     && library
                         .log
-                        .turns
-                        .get(generation.saturating_sub(1) as usize)
+                        .turn(tidepool_repr::Generation(generation))
                         .is_some_and(|turn| {
                             let mut imports = turn.external_imports.clone();
                             imports.extend(&turn.normalized.prologue.workbench_imports());
