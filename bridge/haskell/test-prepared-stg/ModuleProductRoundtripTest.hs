@@ -165,7 +165,7 @@ verifyModuleProductInterfaceRoundtrip work = do
   originalSource <- sourceEvidence a
   let hex = concatMap (\byte -> let s = showHex byte "" in replicate (2 - length s) '0' ++ s)
       manifest = work </> "module-candidates.cbor"
-      candidate = encodeListLen 10
+      candidate = encodeListLen 11
         <> encodeString (T.pack (unitString (moduleUnit (pmModule moduleA))))
         <> encodeString "ModuleProductA"
         <> encodeString (T.pack a)
@@ -178,8 +178,9 @@ verifyModuleProductInterfaceRoundtrip work = do
         <> encodeListLen 1
         <> encodeListLen 4 <> encodeString "none" <> encodeString "Prelude"
         <> encodeBool False <> encodeString ""
+        <> encodeListLen 0
       manifestBytes = toLazyByteString
-        (encodeListLen 3 <> encodeString "TPMCAN" <> encodeString "3"
+        (encodeListLen 3 <> encodeString "TPMCAN" <> encodeString "4"
           <> encodeListLen 1 <> candidate)
   BS.writeFile manifest (BL.toStrict manifestBytes)
   hydratedCompile <- runPipelineSelected (PreparedProducts (Just manifest)) b [work]

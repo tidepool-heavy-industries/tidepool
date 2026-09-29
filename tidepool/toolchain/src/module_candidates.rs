@@ -8,15 +8,74 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tidepool_repr::execution_schema::{
-    CachedHomeOwner, DecodeLimits, ModuleVersion, RawModuleProduct,
+    CachedHomeOwner, DecodeLimits, ModuleVersion, ProjectedGroup, RawModuleProduct,
+    ResultContract, RuntimeRep, Signature, SymbolIdentity,
 };
 
 use crate::cache::{DependencyEvidence, ProductAvailability};
 
 const RECORD_LIMIT: usize = 32 << 20;
-const MANIFEST_LIMIT: usize = 1 << 20;
+const MANIFEST_LIMIT: usize = 4 << 20;
 const CANDIDATE_LIMIT: usize = 128;
-const RECORD_DIR: &str = "module-candidates-v3";
+const RECORD_DIR: &str = "module-candidates-v4";
+
+fn identity_value(identity: &SymbolIdentity) -> Value {
+    Value::Array(vec![
+        Value::Text(identity.unit.clone()),
+        Value::Text(identity.module.clone()),
+        Value::Text(identity.namespace.clone()),
+        Value::Text(identity.occurrence.clone()),
+        identity.record_parent.clone().map_or(Value::Null, Value::Text),
+    ])
+}
+
+fn rep_value(rep: RuntimeRep) -> Value {
+    let (tag, bits) = match rep {
+        RuntimeRep::Void => ("void", 0),
+        RuntimeRep::LiftedRef => ("lifted", 0),
+        RuntimeRep::UnliftedRef => ("unlifted", 0),
+        RuntimeRep::Address => ("address", 0),
+        RuntimeRep::Int(bits) => ("int", bits),
+        RuntimeRep::Word(bits) => ("word", bits),
+        RuntimeRep::Float(bits) => ("float", bits),
+    };
+    Value::Array(vec![Value::Text(tag.into()), Value::Integer(bits.into())])
+}
+
+fn signature_value(signature: &Signature) -> Value {
+    let (tag, results) = match &signature.results {
+        ResultContract::Returns(results) => ("returns", results.as_slice()),
+        ResultContract::NoSuccess => ("no_success", &[][..]),
+        ResultContract::CallerResult => ("caller_result", &[][..]),
+    };
+    Value::Array(vec![
+        Value::Array(signature.arguments.iter().copied().map(rep_value).collect()),
+        Value::Array(vec![
+            Value::Text(tag.into()),
+            Value::Array(results.iter().copied().map(rep_value).collect()),
+        ]),
+    ])
+}
+
+fn group_inventory(group: &ProjectedGroup) -> Value {
+    let signatures = group.definitions();
+    Value::Array(vec![
+        Value::Integer(group.original_ordinal().into()),
+        Value::Array(group.binders().iter().map(identity_value).collect()),
+        Value::Array(group.globals().iter().map(|global| {
+            Value::Array(vec![
+                identity_value(&global.identity),
+                rep_value(global.rep),
+                global.entry_signature
+                    .and_then(|id| signatures.signatures().get(id.0 as usize))
+                    .map_or(Value::Null, signature_value),
+                Value::Bool(global.required_evaluated),
+                global.required_generation
+                    .map_or(Value::Null, |generation| Value::Integer(generation.into())),
+            ])
+        }).collect()),
+    ])
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct CandidateBundle {
@@ -165,7 +224,7 @@ pub(crate) fn publish(
         }
         let record = Record {
             tag: "TPMCAN".into(),
-            version: 3,
+            version: 4,
             endpoint: endpoint_identity.to_vec(),
             include: include.clone(),
             evidence: evidence.clone(),
@@ -219,7 +278,7 @@ pub(crate) fn module_version_for_product(
     evidence: &DependencyEvidence,
 ) -> ModuleVersion {
     let mut h = Sha256::new();
-    h.update(b"tidepool-module-candidate-v3\0");
+    h.update(b"tidepool-module-candidate-v4\0");
     h.update(endpoint_identity);
     for path in include {
         h.update(path.as_os_str().as_encoded_bytes());
@@ -264,7 +323,7 @@ pub(crate) fn select(
             continue;
         };
         if record.tag != "TPMCAN"
-            || record.version != 3
+            || record.version != 4
             || record.endpoint != endpoint_identity
             || record.include != include
             || record.source.is_relative()
@@ -381,6 +440,7 @@ pub(crate) fn select(
         {
             return None;
         }
+        let selected_product = &by_owner[&(record.unit.clone(), record.module.clone())].product;
         manifest.push(Value::Array(vec![
             Value::Text(owner.unit),
             Value::Text(owner.module),
@@ -392,11 +452,12 @@ pub(crate) fn select(
             Value::Text(hex(&product_sha)),
             Value::Text(evidence_sha),
             Value::Array(imports),
+            Value::Array(selected_product.groups.iter().map(group_inventory).collect()),
         ]));
     }
     let value = Value::Array(vec![
         Value::Text("TPMCAN".into()),
-        Value::Text("3".into()),
+        Value::Text("4".into()),
         Value::Array(manifest),
     ]);
     let mut encoded = Vec::new();
@@ -476,7 +537,7 @@ mod tests {
         };
         let record = Record {
             tag: "TPMCAN".into(),
-            version: 3,
+            version: 4,
             endpoint: b"endpoint".to_vec(),
             include: vec![],
             evidence,
@@ -568,12 +629,12 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn selection_refuses_manifest_over_one_mebibyte() {
+    fn selection_refuses_manifest_over_four_mebibytes() {
         let root = tempfile::tempdir().unwrap();
         let scratch = tempfile::tempdir().unwrap();
         let source = root.path().join("Library.hs");
         fs::write(&source, "module Library where").unwrap();
-        for n in 0..3 {
+        for n in 0..12 {
             let module = format!("{}{}", n, "M".repeat(390_000));
             write_record(
                 root.path(),

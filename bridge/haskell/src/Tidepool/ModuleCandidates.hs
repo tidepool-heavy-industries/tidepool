@@ -2,9 +2,12 @@
 -- against its current downsweep before a source module may be skipped.
 module Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..)
+  , CandidateGroup(..), CandidateGlobal(..)
   , readModuleCandidates ) where
 
-import Codec.CBOR.Decoding (Decoder, decodeBool, decodeListLen, decodeString)
+import Codec.CBOR.Decoding
+  ( Decoder, TokenType(..), decodeBool, decodeListLen, decodeNull
+  , decodeString, decodeWord, peekTokenType )
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Control.Exception (IOException, try)
 import Control.Monad (replicateM, unless, when)
@@ -16,6 +19,8 @@ import qualified Data.Set as Set
 import qualified Data.Text as T
 import System.Directory (getFileSize)
 import System.FilePath (isAbsolute)
+import Tidepool.ExecutionSchema
+  ( SymbolIdentity(..), RuntimeRep(..), Signature(..), ResultContract(..) )
 
 data ModuleCandidate = ModuleCandidate
   { candidateUnit :: String
@@ -28,6 +33,21 @@ data ModuleCandidate = ModuleCandidate
   , candidateProductSha256 :: String
   , candidateEvidenceSha256 :: String
   , candidateImports :: [CandidateImport]
+  , candidateGroups :: [CandidateGroup]
+  } deriving (Eq, Show)
+
+data CandidateGroup = CandidateGroup
+  { candidateGroupOrdinal :: Word
+  , candidateGroupBinders :: [SymbolIdentity]
+  , candidateGroupGlobals :: [CandidateGlobal]
+  } deriving (Eq, Show)
+
+data CandidateGlobal = CandidateGlobal
+  { candidateGlobalIdentity :: SymbolIdentity
+  , candidateGlobalRep :: RuntimeRep
+  , candidateGlobalSignature :: Maybe Signature
+  , candidateGlobalEvaluated :: Bool
+  , candidateGlobalGeneration :: Maybe Word
   } deriving (Eq, Show)
 
 data CandidateQualifier
@@ -44,7 +64,7 @@ data CandidateImport = CandidateImport
   } deriving (Eq, Ord, Show)
 
 maxManifestBytes :: Integer
-maxManifestBytes = 1024 * 1024
+maxManifestBytes = 4 * 1024 * 1024
 
 maxCandidates :: Int
 maxCandidates = 128
@@ -74,7 +94,7 @@ decodeManifest = do
   magic <- decodeString
   unless (magic == "TPMCAN") (fail "candidate manifest has wrong magic")
   version <- decodeString
-  unless (version == "3") (fail "unsupported candidate manifest version")
+  unless (version == "4") (fail "unsupported candidate manifest version")
   total <- decodeListLen
   when (total > maxCandidates) (fail "too many module candidates")
   candidates <- replicateM total decodeCandidate
@@ -85,11 +105,11 @@ decodeManifest = do
 decodeCandidate :: Decoder s ModuleCandidate
 decodeCandidate = do
   count <- decodeListLen
-  unless (count == 10) (fail "module candidate must have ten fields")
+  unless (count == 11) (fail "module candidate must have eleven fields")
   let text = T.unpack <$> decodeString
   candidate <- ModuleCandidate <$> text <*> text <*> text
     <*> text <*> text <*> text <*> text <*> text <*> text
-    <*> decodeImports
+    <*> decodeImports <*> decodeGroups
   unless (not (null (candidateUnit candidate))
       && not (null (candidateModule candidate))
       && isAbsolute (candidateSource candidate)
@@ -101,6 +121,75 @@ decodeCandidate = do
       && isDigest (candidateEvidenceSha256 candidate))
     (fail "invalid module candidate identity or digest")
   pure candidate
+
+decodeGroups :: Decoder s [CandidateGroup]
+decodeGroups = do
+  total <- decodeListLen
+  when (total > 4096) (fail "too many original groups")
+  replicateM total $ do
+    count <- decodeListLen
+    unless (count == 3) (fail "original group must have three fields")
+    ordinal <- decodeWord
+    binders <- boundedList 65536 decodeIdentity
+    globals <- boundedList 65536 decodeGlobal
+    pure (CandidateGroup ordinal binders globals)
+
+decodeGlobal :: Decoder s CandidateGlobal
+decodeGlobal = do
+  count <- decodeListLen
+  unless (count == 5) (fail "global inventory must have five fields")
+  CandidateGlobal <$> decodeIdentity <*> decodeRep <*> nullable decodeSignature
+    <*> decodeBool <*> nullable decodeWord
+
+decodeIdentity :: Decoder s SymbolIdentity
+decodeIdentity = do
+  count <- decodeListLen
+  unless (count == 5) (fail "symbol identity must have five fields")
+  SymbolIdentity <$> decodeString <*> decodeString <*> decodeString
+    <*> decodeString <*> nullable decodeString
+
+decodeRep :: Decoder s RuntimeRep
+decodeRep = do
+  count <- decodeListLen
+  unless (count == 2) (fail "representation must have two fields")
+  tag <- decodeString
+  bits <- decodeWord
+  case (tag, bits) of
+    ("void", 0) -> pure VoidRep
+    ("lifted", 0) -> pure LiftedRefRep
+    ("unlifted", 0) -> pure UnliftedRefRep
+    ("address", 0) -> pure AddressRep
+    ("int", width) | width <= 255 -> pure (IntRep (fromIntegral width))
+    ("word", width) | width <= 255 -> pure (WordRep (fromIntegral width))
+    ("float", width) | width <= 255 -> pure (FloatRep (fromIntegral width))
+    _ -> fail "invalid global representation"
+
+decodeSignature :: Decoder s Signature
+decodeSignature = do
+  count <- decodeListLen
+  unless (count == 2) (fail "signature must have two fields")
+  arguments <- boundedList 256 decodeRep
+  resultCount <- decodeListLen
+  unless (resultCount == 2) (fail "result contract must have two fields")
+  tag <- decodeString
+  returned <- boundedList 256 decodeRep
+  result <- case tag of
+    "returns" -> pure (Returns returned)
+    "no_success" | null returned -> pure NoSuccess
+    "caller_result" | null returned -> pure CallerResult
+    _ -> fail "invalid result contract"
+  pure (Signature arguments result)
+
+nullable :: Decoder s a -> Decoder s (Maybe a)
+nullable parse = do
+  kind <- peekTokenType
+  if kind == TypeNull then decodeNull *> pure Nothing else Just <$> parse
+
+boundedList :: Int -> Decoder s a -> Decoder s [a]
+boundedList limit parse = do
+  total <- decodeListLen
+  when (total > limit) (fail "candidate inventory exceeds bound")
+  replicateM total parse
 
 decodeImports :: Decoder s [CandidateImport]
 decodeImports = do
