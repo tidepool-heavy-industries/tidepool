@@ -1,9 +1,14 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 
 module ModuleProductRoundtripTest (verifyModuleProductInterfaceRoundtrip) where
 
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
+import Crypto.Hash.SHA256 qualified as SHA256
+import Data.ByteString qualified as BS
+import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import GHC
   ( backend, getSession, getSessionDynFlags, ms_mod
   , noBackend
@@ -29,9 +34,14 @@ import GHC.Unit.Types (GenWithIsBoot(..), ModuleNameWithIsBoot, mkModule, module
 import GHC.Utils.Outputable (text)
 import qualified GHC.Data.Maybe as MErr
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
-import System.Directory (copyFile, renameFile)
+import System.Directory (copyFile, getFileSize, renameFile)
 import System.FilePath ((</>))
+import System.IO (hPutStrLn, stderr)
 import Tidepool.ExtractUtil (getLibdir)
+import Tidepool.ExecutionProjection
+  ( ProjectionContext(..), ProjectedGroup(..), ProjectedGroupBody(..)
+  , projectPreparedModuleGroups, projectPreparedModuleGroupsSelected )
+import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.GhcPipeline
   ( PipelineResult(..), PipelineSelection(..), PreparedPipelineResult(..), runPipelineSelected )
 import Tidepool.PreparedStg (PreparedModule(..))
@@ -43,6 +53,8 @@ verifyModuleProductInterfaceRoundtrip work = do
   let a = work </> "ModuleProductA.hs"
       b = work </> "ModuleProductB.hs"
       hi = work </> "ModuleProductA.hi"
+      skinnyHi = work </> "ModuleProductA.skinny.hi"
+      tamperedHi = work </> "ModuleProductA.tampered.hi"
       name = mkModuleName "ModuleProductA"
   copyFile "test-prepared-stg/ModuleProductA.hs" a
   copyFile "test-prepared-stg/ModuleProductB.hs" b
@@ -53,15 +65,75 @@ verifyModuleProductInterfaceRoundtrip work = do
       producer = prHscEnv (pprPipelineResult result)
       consumerSummaries = [summary | ModuleNode _ summary <- mgModSummaries' (hsc_mod_graph producer)
                                    , moduleNameString (moduleName (ms_mod summary)) == "ModuleProductB"]
-  unless (case prepared of [module_] -> not (null (pmBindings module_)); _ -> False) $
-    ioError (userError "prepared product omitted ModuleProductA definitions")
-  iface <- case lookupHpt (hsc_HPT producer) name of
-    Just hmi -> pure (hm_iface hmi)
+  moduleA <- case prepared of
+    [value] | not (null (pmBindings value)) -> pure value
+    _ -> ioError (userError "prepared product omitted ModuleProductA definitions")
+  let context = ProjectionContext
+        { projectionProfile = "ghc-9.12-prepared-stg"
+        , projectionToolchain = "ghc-9.12.2"
+        , projectionTarget = Schema.TargetDescriptor Schema.X86_64
+            Schema.LittleEndian 64 64 "sysv64" []
+        , projectionRetainedGenerations = mempty
+        , projectionEntry = Schema.SymbolIdentity "main" "ModuleProductA"
+            "value" "produce" Nothing
+        , projectionAuxiliaryRoots = []
+        , projectionFormattingAuthority = Nothing
+        , projectionTimeAuthority = Nothing
+        , projectionJsonAuthority = Nothing
+        , projectionTextUnit = Nothing
+        }
+  groups <- either (ioError . userError . show) pure
+    (projectPreparedModuleGroups context moduleA)
+  unless (length groups >= 2) $
+    ioError (userError "module product omitted second STG group")
+  unless (any ((>= 2) . length . projectedBinders) groups) $
+    ioError (userError "module product split a recursive STG group")
+  let selectedOrdinal = projectedOriginalOrdinal (groups !! 1)
+  selected <- either (ioError . userError . show) pure
+    (projectPreparedModuleGroupsSelected context moduleA
+      (Just (Set.singleton selectedOrdinal)))
+  unless (selected == [groups !! 1]) $
+    ioError (userError "demand selection renumbered an original STG group")
+  let produceGroups =
+        [ group | group <- groups
+        , any ((== "produce") . Schema.symbolOccurrence) (projectedBinders group) ]
+      otherBinders = Set.fromList
+        [ binder | group <- groups
+        , not (any ((== "produce") . Schema.symbolOccurrence) (projectedBinders group))
+        , binder <- projectedBinders group ]
+  unless (case produceGroups of
+      [group] -> any ((`Set.member` otherBinders) . Schema.globalIdentity)
+        (projectedGlobals (projectedBody group))
+      _ -> False) $
+    ioError (userError ("cross-group dependency was not projected as a global: "
+      ++ show [ (map Schema.symbolOccurrence (projectedBinders group),
+                   map (Schema.symbolOccurrence . Schema.globalIdentity)
+                     (projectedGlobals (projectedBody group)))
+              | group <- groups ]))
+  iface <- case Map.lookup name (pprProductInterfaces result) of
+    Just value -> pure value
     Nothing -> ioError (userError "prepared product omitted ModuleProductA interface")
+  skinny <- case lookupHpt (hsc_HPT producer) name of
+    Just hmi -> pure (hm_iface hmi)
+    Nothing -> ioError (userError "prepared HPT omitted ModuleProductA interface")
   unless (case mi_extra_decls iface of Just (_ : _) -> True; _ -> False) $
     ioError (userError "prepared interface lost its defining Core")
+  unless (case mi_extra_decls skinny of Nothing -> True; _ -> False) $
+    ioError (userError "prepared HPT retained defining Core")
   writeBinIface (targetProfile (hsc_dflags producer)) QuietBinIFace
     NormalCompression hi iface
+  writeBinIface (targetProfile (hsc_dflags producer)) QuietBinIFace
+    NormalCompression skinnyHi skinny
+  fatSize <- getFileSize hi
+  skinnySize <- getFileSize skinnyHi
+  hPutStrLn stderr ("module-product-interface-bytes fat=" ++ show fatSize
+    ++ " skinny=" ++ show skinnySize)
+  digest <- SHA256.hash <$> BS.readFile hi
+  copyFile hi tamperedHi
+  BS.appendFile tamperedHi (BS.singleton 0)
+  tampered <- SHA256.hash <$> BS.readFile tamperedHi
+  unless (tampered /= digest) $
+    ioError (userError "paired interface digest accepted changed bytes")
   renameFile a (work </> "ModuleProductA.hidden")
 
   libdir <- getLibdir

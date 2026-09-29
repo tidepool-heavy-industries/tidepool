@@ -242,6 +242,8 @@ test-suite prepared-stg-pipeline-test
     base         >= 4.20 && < 5,
     ghc          >= 9.12 && < 9.13,
     containers,
+    bytestring,
+    cryptohash-sha256,
     mtl,
     text,
     tidepool-extract-internal,

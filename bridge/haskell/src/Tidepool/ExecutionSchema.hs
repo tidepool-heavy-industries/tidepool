@@ -14,6 +14,7 @@ module Tidepool.ExecutionSchema
   , CheckedLayout(..), ConstructorDecl(..), GlobalDecl(..), OperationDecl(..)
   , OperationIdentity(..), JsonLayout(..), WiredInErrorKind(..), ForeignConvention(..)
   , TopBinding(..), WireProgram(..), schemaVersion, executionAbiVersion
+  , ProjectedGroup(..), ProjectedGroupBody(..)
   , TypeNodeId(..), CtorRow(..), TypeNode(..), SiteDelivery(..), SiteRow(..)
   ) where
 
@@ -187,4 +188,26 @@ data WireProgram = WireProgram
   -- | Compiler-authenticated JSON constructor roles. Kept independently of
   -- intrinsic operations because typed host mounts and answers also need it.
   , programJsonLayout :: Maybe (JsonLayout ConstructorId)
+  } deriving stock (Eq, Show, Generic)
+
+-- One original STG group projected with its own complete expression and
+-- declaration arena. Product identity and versioned imports are attached by
+-- the module-product owner before this becomes a durable artifact.
+data ProjectedGroupBody = ProjectedGroupBody
+  { projectedEnvelope :: ProgramEnvelope
+  , projectedSignatures :: [Signature]
+  , projectedGlobals :: [GlobalDecl]
+  , projectedConstructors :: [ConstructorDecl]
+  , projectedOperations :: [OperationDecl]
+  , projectedBindings :: [Group TopBinding]
+  , projectedTypes :: [TypeNode]
+  , projectedSites :: [SiteRow]
+  , projectedVerbSites :: [(ConstructorId, Word64)]
+  , projectedJsonLayout :: Maybe (JsonLayout ConstructorId)
+  } deriving stock (Eq, Show, Generic)
+
+data ProjectedGroup = ProjectedGroup
+  { projectedOriginalOrdinal :: Word32
+  , projectedBinders :: [SymbolIdentity]
+  , projectedBody :: ProjectedGroupBody
   } deriving stock (Eq, Show, Generic)
