@@ -10963,7 +10963,10 @@ mod request_tests {
         use tidepool_runtime::session::{ModuleEnv, SessionLib};
 
         tidepool_testing::eval_harness::require_extract();
-        let declarations = [tidepool_mcp::notifications_decl()];
+        let declarations = [
+            tidepool_mcp::notifications_decl(),
+            tidepool_mcp::sleep_decl(),
+        ];
         let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
         let mut include = effects.include_paths().to_vec();
         include.push(tidepool_testing::eval_harness::prelude_path());
@@ -10972,7 +10975,7 @@ mod request_tests {
             &tidepool_mcp::build_preamble(&declarations, false),
             "qualified Tidepool.Actors.Exomonad as Exomonad",
         );
-        let effects_alias = "'[Exomonad.Notifications]";
+        let effects_alias = "'[Exomonad.Notifications, Sleep]";
         let session_id = tidepool_repr::SessionId((u64::from(std::process::id()) << 16) | 4_244);
         let session_root = tempfile::tempdir().expect("session root");
         let lib = SessionLib::open(
@@ -14914,6 +14917,178 @@ mod request_tests {
                 items: Vec::new(),
             },
         )
+    }
+
+    #[tokio::test]
+    async fn answered_haskell_effect_reports_later_continuation_failure_as_delivered() {
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let workbench =
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
+        let runner = ResidentActorRunner::new(machines, source.clone());
+        let step = workbench
+            .begin_fragment_split(
+                context.clone(),
+                source,
+                Vec::new(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: "sleep (minutes 0) >> error \"failure after answer\"".into(),
+                },
+                None,
+            )
+            .await
+            .expect("Haskell fragment suspends at sleep");
+        let ResidentWorkbenchStep::Running { outcome, .. } = step else {
+            panic!("expected a running fragment: {}", describe_step(&step));
+        };
+        let ResidentOutcome::Suspended { hole, .. } = *outcome else {
+            panic!("sleep effect must suspend");
+        };
+        let failure = runner
+            .resume_unit(context, hole)
+            .await
+            .expect_err("resumed Haskell continuation must fail");
+        assert!(
+            matches!(failure, ResidentActorWorkbenchError::Delivered(_)),
+            "{failure}"
+        );
+    }
+
+    #[tokio::test]
+    async fn captured_haskell_binding_outlives_failed_parent_and_released_token_for_admitted_child()
+    {
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let workbench =
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
+        let runner = ResidentActorRunner::new(Arc::clone(&machines), source.clone());
+        let parent = workbench
+            .begin_fragment_split(
+                context.clone(),
+                source.clone(),
+                Vec::new(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: "capturedValue <- pure (41 :: Int)".into(),
+                },
+                None,
+            )
+            .await
+            .expect("parent Haskell binding compiles");
+        if let ResidentWorkbenchStep::Running { fragment, outcome } = parent {
+            workbench
+                .settle_item(context.clone(), *fragment, *outcome)
+                .await
+                .expect("parent binding commits");
+        }
+
+        let captured_scope = runner
+            .capture_context_scope(context.clone())
+            .await
+            .expect("capture exact parent Haskell environment");
+        let groups = crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default());
+        let token = groups.capture_checkpoint(
+            "real Haskell context".into(),
+            context.actor,
+            crate::EffectiveRole::root(),
+            None,
+            None,
+            crate::CheckpointSourceLayer::default(),
+            context.placement.session,
+            captured_scope,
+            tidepool_runtime::session::WorkbenchForkBoundary {
+                thread_id: "thread".into(),
+                call_id: "call".into(),
+            },
+        );
+        groups
+            .settle_checkpoint(&token, context.placement.session, true)
+            .expect("Haskell checkpoint answer delivered");
+
+        let failed = workbench
+            .begin_fragment_split(
+                context.clone(),
+                source.clone(),
+                Vec::new(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: "sleep (minutes 0) >> error \"parent failed\"".into(),
+                },
+                None,
+            )
+            .await
+            .expect("parent failing continuation compiles");
+        let ResidentWorkbenchStep::Running { outcome, .. } = failed else {
+            panic!("parent failing continuation runs");
+        };
+        let ResidentOutcome::Suspended { hole, .. } = *outcome else {
+            panic!("parent suspends before failure");
+        };
+        assert!(matches!(
+            runner.resume_unit(context.clone(), hole).await,
+            Err(ResidentActorWorkbenchError::Delivered(_))
+        ));
+        groups.retire_actor(context.actor);
+        assert!(groups.retains_session(context.placement.session));
+
+        let provisional = workbench
+            .access
+            .with_machine(context.clone(), |session, _, _| {
+                Ok(session.mint_isolated_scope())
+            })
+            .await
+            .expect("child provisional scope");
+        let mut child = context.clone();
+        child.actor = crate::ActorRef::first(crate::ActorId(2));
+        child.placement.lexical_scope = provisional;
+        let child_scope = runner
+            .remint_checkpoint_child_scope(child.clone(), captured_scope, provisional)
+            .await
+            .expect("child owns independent inherited scope");
+        child.placement.lexical_scope = child_scope;
+        let retired = groups
+            .release_checkpoint(&token, context.placement.session)
+            .expect("release token after child admission");
+        runner
+            .retire_checkpoint_scopes(context.placement.session, retired.into_iter().collect())
+            .await
+            .expect("release captured scope by session owner");
+        assert!(!groups.retains_session(context.placement.session));
+        assert!(matches!(
+            groups.checkpoint(&token, context.placement.session),
+            Err(crate::CheckpointRefusal::ReleasedCheckpoint)
+        ));
+
+        let child_step = workbench
+            .begin_fragment_split(
+                child.clone(),
+                source,
+                Vec::new(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: "childValue <- pure (capturedValue + 1)".into(),
+                },
+                None,
+            )
+            .await
+            .expect("admitted child compiles against captured Haskell binding");
+        if let ResidentWorkbenchStep::Running { fragment, outcome } = child_step {
+            workbench
+                .settle_item(child.clone(), *fragment, *outcome)
+                .await
+                .expect("child uses captured binding after token release");
+        }
+        let names = workbench
+            .access
+            .with_machine(child, move |session, context, _| {
+                Ok(session.binding_names_in(context.placement.lexical_scope))
+            })
+            .await
+            .expect("inspect child scope");
+        assert!(names.contains(&"childValue".to_owned()));
     }
 
     #[tokio::test]

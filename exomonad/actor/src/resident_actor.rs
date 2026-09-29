@@ -8304,11 +8304,6 @@ where
                         | crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
                 )
             });
-            if !current_builtin {
-                if let Some(lease) = &installed_tools {
-                    context = context.with_issued_source(lease.source());
-                }
-            }
             if !self.policy_installed
                 || !matches!(
                     self.standing,
