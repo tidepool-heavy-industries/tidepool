@@ -15,6 +15,30 @@ single hosted visibility slot described below has already been replaced.
 
 ## Baseline execution and the blocking seams
 
+### Foundation reconciliation — preparation at `4a8088c93`
+
+The first-tree PRD now separates sequential embedding (M1) from concurrent
+private executions and reusable captures (M2). This inventory is design input,
+not authorization to enable concurrency before foundation acceptance and the
+per-execution ownership review. The source descriptions below predate active
+foundation candidates; reconcile them against the accepted integration revision.
+
+| Seam | Preparation / required decision |
+| --- | --- |
+| `LocalActor` and hosted-call visibility | The in-flight foundation candidate moves one owned behavior into an active task and retains accepted controls independently of caller futures. This makes control responsive; it does not make the behavior available to a second execution. Preserve its settlement owner when introducing execution-local state. |
+| `ResidentKernelBehavior` | Classify `active_workbench_control`, `fork_publication`, after-tool activity, pending replies/cancellations and route state by their actual consumers. Some describe model/request turns rather than notebook executions. Do not mechanically clone the whole behavior or move every field into a cell record. |
+| After-tool cleanup | `run_after_tool` callers snapshot `parked_continuations` and use `abort_parked_since` on timeout. Replace session-wide subtraction with exact owned continuation cleanup before concurrent handlers can run. |
+| External operations | Reuse the foundation's deferred work and parked continuation. Cancellation must signal supported operations and retain actual completion/cleanup evidence; removing the caller's waiter cannot settle the operation. |
+| Admission identity | `WorkbenchCallKey` and `execution_id` already qualify invocation context with actor/incarnation. M1 must map the harness owner's agreed origin-operation identity to this boundary, including inherited claims; do not mint a fresh child operation for a replay. |
+| Publication | Design one owner transition for staged declaration/binding changes and cancellation ordering. Invalid declaration joins must fail before visibility changes. Retain original binding identities and dependency leases. |
+| Captures | Separate retained lexical meaning from mutable resource state. An independently retained successful capture must outlive later parent failure; this changes current boundary settlement behavior. |
+
+Before M1 implementation, agree the bound endpoint/authority, immutable tool
+manifest, origin-operation identity, retained result and cancellation contracts
+with the harness owner. Before M2 implementation, review the field classification,
+publication transition and capture lifetime together. Neither milestone requires
+a second scheduler, completion registry or durable copy of live Haskell values.
+
 - A raw `WorkbenchRequest` retains source and a transport-minted
   `WorkbenchExecutionId`; the authenticated `WorkbenchCallKey` includes actor
   incarnation, thread, turn, call and optional context-call/namespace identity.
