@@ -912,7 +912,7 @@ impl ProgramDefinitions {
 /// validator receives the entry separately, so neutral definitions never
 /// carry a fabricated root.
 #[derive(Clone, Copy)]
-pub(super) struct DefinitionsView<'a> {
+pub struct DefinitionsView<'a> {
     envelope: &'a ProgramEnvelope,
     signatures: &'a Vec<Signature>,
     globals: &'a Vec<GlobalDecl>,
@@ -924,6 +924,42 @@ pub(super) struct DefinitionsView<'a> {
     sites: &'a Vec<SiteRow>,
     verb_sites: &'a Vec<(ConstructorId, u64)>,
     json_layout: &'a Option<JsonLayout>,
+}
+
+impl<'a> DefinitionsView<'a> {
+    pub fn envelope(self) -> &'a ProgramEnvelope {
+        self.envelope
+    }
+    pub fn signatures(self) -> &'a [Signature] {
+        self.signatures
+    }
+    pub fn globals(self) -> &'a [GlobalDecl] {
+        self.globals
+    }
+    pub fn constructors(self) -> &'a [ConstructorDecl] {
+        self.constructors
+    }
+    pub fn operations(self) -> &'a [OperationDecl] {
+        self.operations
+    }
+    pub fn expressions(self) -> &'a Expr {
+        self.expressions
+    }
+    pub fn bindings(self) -> &'a [Group<TopBinding>] {
+        self.bindings
+    }
+    pub fn types(self) -> &'a [TypeNode] {
+        self.types
+    }
+    pub fn sites(self) -> &'a [SiteRow] {
+        self.sites
+    }
+    pub fn verb_sites(self) -> &'a [(ConstructorId, u64)] {
+        self.verb_sites
+    }
+    pub fn json_layout(self) -> Option<&'a JsonLayout> {
+        self.json_layout.as_ref()
+    }
 }
 
 macro_rules! definitions_view {
@@ -964,6 +1000,10 @@ pub struct PreparedProgram {
 }
 
 impl PreparedProgram {
+    pub fn definitions(&self) -> DefinitionsView<'_> {
+        DefinitionsView::from(&self.wire)
+    }
+
     pub fn envelope(&self) -> &ProgramEnvelope {
         &self.wire.envelope
     }
@@ -1076,6 +1116,10 @@ pub struct ProjectedGroup {
 }
 
 impl ProjectedGroup {
+    pub fn definitions(&self) -> DefinitionsView<'_> {
+        DefinitionsView::from(&self.definitions)
+    }
+
     #[must_use]
     pub fn original_ordinal(&self) -> u32 {
         self.original_ordinal
@@ -1089,6 +1133,116 @@ impl ProjectedGroup {
     #[must_use]
     pub fn globals(&self) -> &[GlobalDecl] {
         &self.definitions.globals
+    }
+}
+
+/// Immutable provenance of one reusable source module product. Every digest
+/// is filled from worker-certified bytes before native compilation.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct CachedHomeOwner {
+    pub unit: String,
+    pub module: String,
+    pub module_version: ModuleVersion,
+    pub skinny_iface_sha256: [u8; 32],
+    pub product_sha256: [u8; 32],
+}
+
+/// One neutral recursive group with its original owner and an exact owner for
+/// each global in the group's local declaration order.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct CertifiedGroup {
+    owner: CachedHomeOwner,
+    group: ProjectedGroup,
+    imports: Vec<ImportOwner>,
+}
+
+impl CertifiedGroup {
+    pub fn admit(
+        owner: CachedHomeOwner,
+        group: ProjectedGroup,
+        imports: Vec<ImportOwner>,
+    ) -> Result<Self, ParseError> {
+        if owner.unit.is_empty() || owner.module.is_empty() {
+            return Err(ParseError::InvalidReference(
+                "empty cached home owner".into(),
+            ));
+        }
+        let tops: Vec<_> = group
+            .definitions
+            .bindings
+            .iter()
+            .flat_map(|binding| match binding {
+                Group::NonRecursive(top) => std::slice::from_ref(top),
+                Group::Recursive(tops) => tops.as_slice(),
+            })
+            .map(|top| &top.identity)
+            .collect();
+        let unique: std::collections::BTreeSet<_> = tops.iter().copied().collect();
+        if unique.len() != tops.len()
+            || tops.len() < group.binders.len()
+            || tops[tops.len() - group.binders.len()..] != group.binders.iter().collect::<Vec<_>>()
+            || group
+                .binders
+                .iter()
+                .any(|binder| binder.unit != owner.unit || binder.module != owner.module)
+        {
+            return Err(ParseError::InvalidReference(
+                "cached group binder inventory differs from its definitions".into(),
+            ));
+        }
+        if imports.len() != group.globals().len() {
+            return Err(ParseError::InvalidReference(
+                "cached group import count differs from its globals".into(),
+            ));
+        }
+        for (declaration, origin) in group.globals().iter().zip(&imports) {
+            let consistent = match origin {
+                ImportOwner::Source { binder, .. } => {
+                    binder == &declaration.identity && declaration.required_generation.is_none()
+                }
+                ImportOwner::Retained { generation, .. } => {
+                    declaration.required_generation == Some(*generation)
+                }
+                ImportOwner::Package {
+                    unit,
+                    module,
+                    binder,
+                    ..
+                } => {
+                    binder == &declaration.identity
+                        && &binder.unit == unit
+                        && &binder.module == module
+                        && declaration.required_generation.is_none()
+                }
+            };
+            if !consistent {
+                return Err(ParseError::InvalidReference(format!(
+                    "cached group import owner differs from {:?}",
+                    declaration.identity
+                )));
+            }
+        }
+        Ok(Self {
+            owner,
+            group,
+            imports,
+        })
+    }
+
+    pub fn owner(&self) -> &CachedHomeOwner {
+        &self.owner
+    }
+    pub fn original_ordinal(&self) -> u32 {
+        self.group.original_ordinal()
+    }
+    pub fn binders(&self) -> &[SymbolIdentity] {
+        self.group.binders()
+    }
+    pub fn imports(&self) -> &[ImportOwner] {
+        &self.imports
+    }
+    pub fn definitions(&self) -> DefinitionsView<'_> {
+        self.group.definitions()
     }
 }
 
@@ -1398,6 +1552,43 @@ mod projected_group_tests {
         assert_eq!(group.original_ordinal(), 7);
         assert_eq!(group.binders(), &[entry.clone()]);
         assert!(!group.definitions.bindings.is_empty());
+    }
+
+    #[test]
+    fn certified_group_requires_exact_binder_owner_and_aligned_imports() {
+        let group = testing::projected_group(testing::wire_program(), 3).unwrap();
+        let owner = CachedHomeOwner {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            module_version: ModuleVersion([1; 32]),
+            skinny_iface_sha256: [2; 32],
+            product_sha256: [3; 32],
+        };
+        let certified = CertifiedGroup::admit(owner.clone(), group.clone(), vec![]).unwrap();
+        assert_eq!(certified.original_ordinal(), 3);
+        assert_eq!(certified.binders(), group.binders());
+        assert_eq!(certified.definitions().bindings().len(), 1);
+        assert!(CertifiedGroup::admit(
+            CachedHomeOwner {
+                module: "Other".into(),
+                ..owner.clone()
+            },
+            group.clone(),
+            vec![],
+        )
+        .is_err());
+        assert!(CertifiedGroup::admit(
+            owner.clone(),
+            group.clone(),
+            vec![ImportOwner::Source {
+                version: ModuleVersion([4; 32]),
+                binder: testing::identity("Fixture", "entry"),
+            }],
+        )
+        .is_err());
+        let mut changed = group;
+        changed.binders[0] = testing::identity("Fixture", "other");
+        assert!(CertifiedGroup::admit(owner, changed, vec![]).is_err());
     }
 
     #[test]

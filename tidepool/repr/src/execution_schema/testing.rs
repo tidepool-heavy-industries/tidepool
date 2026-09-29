@@ -5,9 +5,10 @@
 
 use super::{
     Architecture, Atom, DecodeLimits, Endianness, ExprFrame, Group, HeapBinding, HeapRhs,
-    ParseError, PreparedProgram, ProgramEnvelope, ProgramRequirements, ResultContract, RuntimeRep,
-    ScalarLiteral, Signature, SignatureId, SymbolIdentity, TargetDescriptor, TopBinding, ValueId,
-    WireProgram, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
+    ParseError, PreparedProgram, ProgramDefinitions, ProgramEnvelope, ProgramRequirements,
+    ProjectedGroup, ResultContract, RuntimeRep, ScalarLiteral, Signature, SignatureId,
+    SymbolIdentity, TargetDescriptor, TopBinding, ValueId, WireProgram, EXECUTION_ABI_VERSION,
+    SCHEMA_VERSION,
 };
 
 /// A stable identity for authored execution-schema fixtures.
@@ -94,6 +95,50 @@ pub fn prepare(wire: WireProgram) -> Result<PreparedProgram, ParseError> {
     };
     super::validation::validate_program(&wire, &requirements, DecodeLimits::default())?;
     Ok(super::prepared_from_validated(wire))
+}
+
+/// Construct a neutral group from an authored test program, checking the same
+/// entry-free invariants as the CBOR group decoder. The test helper deliberately
+/// does not select or smuggle in an executable entry.
+pub fn projected_group(
+    wire: WireProgram,
+    original_ordinal: u32,
+) -> Result<ProjectedGroup, ParseError> {
+    let requirements = ProgramRequirements {
+        schema_version: wire.envelope.schema_version,
+        projection_profile: wire.envelope.projection_profile.clone(),
+        toolchain: wire.envelope.toolchain.clone(),
+        execution_abi_version: wire.envelope.execution_abi_version,
+        target: wire.envelope.target.clone(),
+    };
+    let binders = wire
+        .bindings
+        .iter()
+        .flat_map(|group| match group {
+            Group::NonRecursive(top) => std::slice::from_ref(top),
+            Group::Recursive(tops) => tops.as_slice(),
+        })
+        .map(|top| top.identity.clone())
+        .collect();
+    let definitions = ProgramDefinitions {
+        envelope: wire.envelope,
+        signatures: wire.signatures,
+        globals: wire.globals,
+        constructors: wire.constructors,
+        operations: wire.operations,
+        expressions: wire.expressions,
+        bindings: wire.bindings,
+        types: wire.types,
+        sites: wire.sites,
+        verb_sites: wire.verb_sites,
+        json_layout: wire.json_layout,
+    };
+    super::validation::validate_group(&definitions, &requirements, DecodeLimits::default())?;
+    Ok(ProjectedGroup {
+        original_ordinal,
+        binders,
+        definitions,
+    })
 }
 
 #[cfg(test)]
