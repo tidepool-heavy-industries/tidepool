@@ -933,6 +933,7 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
     let [json_anchor_binder] = bound.as_slice() else {
         panic!("json anchor must produce exactly one binder");
     };
+    assert!(compiled.certification.is_some());
     let json_carrier = HostCarrier::from_compiled(
         json_anchor_binder,
         compiled.code(),
@@ -953,6 +954,7 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
     let [text_anchor_binder] = bound.as_slice() else {
         panic!("text anchor must produce exactly one binder");
     };
+    assert!(compiled.certification.is_some());
     let text_carrier =
         HostCarrier::from_compiled(text_anchor_binder, compiled.code(), HostBindingType::TEXT);
 
@@ -969,6 +971,7 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
     let [job_anchor_binder] = bound.as_slice() else {
         panic!("job anchor must produce exactly one binder");
     };
+    assert!(compiled.certification.is_some());
     let job_carrier = HostCarrier::from_compiled(
         job_anchor_binder,
         compiled.code(),

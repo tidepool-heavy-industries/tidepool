@@ -3324,7 +3324,31 @@ where
         self.state
             .merge_table(&table)
             .map_err(ResidentError::TableCollision)?;
-        let program = self.state.install_prepared(code.prepared.into_owned())?;
+        let prepared = code.prepared.into_owned();
+        let (program, source_keys) = if let Some(certification) = code.certification.as_ref() {
+            let resolved = self
+                .state
+                .resolve_certification_in(scope, &prepared, certification)?;
+            let registry = self.state.certified_image_registry();
+            let target = super::prepared::CertifiedTargetImage::compile(prepared, &registry)
+                .map_err(PreparedRuntimeError::Compile)?;
+            let demanded = resolved
+                .groups
+                .into_iter()
+                .map(|group| DemandedImage::compile(group, &registry))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(PreparedRuntimeError::from)?;
+            self.install_certified_turn_in(
+                scope,
+                target,
+                &resolved.target_owners,
+                &resolved.source_evidence,
+                demanded,
+                &resolved.inherited_needed,
+            )?
+        } else {
+            (self.state.install_prepared(prepared)?, Vec::new())
+        };
         let realm = self.run_context.resource_scope;
         let mounted = (|| {
             let handle = {
@@ -3335,6 +3359,9 @@ where
         })();
         if let Some(engine) = self.state.prepared_mut() {
             engine.unpin(program);
+        }
+        if mounted.is_err() {
+            self.retire_failed_turn_source_instances(scope, &source_keys);
         }
         mounted
     }
