@@ -144,6 +144,7 @@ pub enum ResidentSessionState {
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
+use tidepool_codegen::binding_table::SourceLeaseKey;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::{Generation, SessionId, SessionModule, SessionVarId};
 
@@ -312,6 +313,19 @@ pub enum SessionError {
     /// may be replayed without repeating effects.
     #[error("declaration recovery manifest {}: {detail}", path.display())]
     RecoveryManifest { path: PathBuf, detail: String },
+}
+
+/// Exact public lexical view captured under one resident-machine checkout.
+/// The epoch is resident-session owned and distinct from compiler allocation
+/// generations; the declaration tip and full binding identities also permit
+/// exact stale checks while concurrent publication is being introduced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicVisibilitySnapshot {
+    pub scope: ScopeId,
+    pub epoch: u64,
+    pub declaration_tip: Generation,
+    pub bindings: Vec<(String, SessionVarId)>,
+    pub source_instances: Vec<SourceLeaseKey>,
 }
 
 /// A resident session's declaration library. Owns the ordered decl log, the
@@ -556,53 +570,62 @@ impl SessionLib {
         };
 
         if let Some(manifest) = manifest {
-            for turn in &manifest.turns {
-                if !turn.replayable {
+            if self.log.generation() != Generation(0) {
+                return Err(SessionError::RecoveryManifest {
+                    path,
+                    detail: "recovery must attach before declarations are admitted".into(),
+                });
+            }
+            let migration = recovery::migrate_v1(&manifest);
+            if migration.high_water.0 == u64::MAX {
+                return Err(SessionError::RecoveryManifest {
+                    path,
+                    detail: "legacy declaration generation space exhausted".into(),
+                });
+            }
+            self.log.restore_high_water(migration.high_water);
+            report.lost = migration.lost;
+            let mut replay_failed = false;
+            for turn in migration.replay_safe {
+                if replay_failed {
                     report.lost.push(LostDeclaration {
                         origin_session: turn.origin_session,
                         source_generation: turn.generation,
-                        source_hash: turn.source_hash.clone(),
-                        sources: turn.sources.clone(),
-                        reason: "declaration depended on resident values from the lost machine"
-                            .into(),
+                        source_hash: turn.source_hash,
+                        sources: turn.sources,
+                        reason: "an earlier legacy declaration could not be recovered".into(),
                     });
                     continue;
                 }
-
-                if !turn.sources.is_empty() {
-                    let sources: Vec<_> = turn.sources.iter().map(String::as_str).collect();
-                    match self.define_batch(&sources) {
-                        Ok(generation) => report.replayed.push(ReplayedDeclaration {
+                let sources: Vec<_> = turn.sources.iter().map(String::as_str).collect();
+                match self.define_batch(&sources) {
+                    Ok(generation) => {
+                        report.replayed.push(ReplayedDeclaration {
                             origin_session: turn.origin_session,
                             source_generation: turn.generation,
                             successor_generation: generation.0,
-                            source_hash: turn.source_hash.clone(),
-                        }),
-                        Err(error) => {
-                            report.lost.push(LostDeclaration {
-                                origin_session: turn.origin_session,
-                                source_generation: turn.generation,
-                                source_hash: turn.source_hash.clone(),
-                                sources: turn.sources.clone(),
-                                reason: error.to_string(),
-                            });
-                            continue;
-                        }
+                            source_hash: turn.source_hash,
+                        });
+                        self.recovery_turns.push(recovery::RecoveryTurn::new(
+                            self.id.0,
+                            generation.0,
+                            turn.sources,
+                            Vec::new(),
+                            true,
+                        ));
                     }
-                }
-                if !turn.retracts.is_empty() {
-                    if let Err(error) = self.retract_many_in(ScopeId::ROOT, &turn.retracts) {
+                    Err(error) => {
+                        replay_failed = true;
                         report.lost.push(LostDeclaration {
                             origin_session: turn.origin_session,
                             source_generation: turn.generation,
-                            source_hash: turn.source_hash.clone(),
-                            sources: Vec::new(),
+                            source_hash: turn.source_hash,
+                            sources: turn.sources,
                             reason: error.to_string(),
                         });
                     }
                 }
             }
-            self.recovery_turns = manifest.turns;
         }
         self.recovery_manifest_path = Some(path);
         self.recovery_report = Some(report.clone());
@@ -700,7 +723,7 @@ impl SessionLib {
     pub fn workbench_imports_in(&self, scope: ScopeId) -> SourceImports {
         let mut imports = SourceImports::new();
         for generation in self.log.chain_from_root(self.scope_tip(scope)) {
-            let turn = &self.log.turns[(generation.0 - 1) as usize];
+            let turn = self.log.turn(generation).expect("scope tip is committed");
             imports.extend(&turn.workbench_imports);
         }
         imports
@@ -752,7 +775,7 @@ impl SessionLib {
         // value, so it drops out.
         let mut live: Vec<&str> = Vec::new();
         for g in self.log.chain_from_root(self.scope_tip(scope)) {
-            let turn = &self.log.turns[(g.0 - 1) as usize];
+            let turn = self.log.turn(g).expect("scope tip is committed");
             for r in &turn.retracts {
                 live.retain(|n| *n != r.as_str());
             }
@@ -1050,7 +1073,7 @@ impl SessionLib {
         // generation permanently while leaving no on-disk module, poisoning
         // every later turn that imports the (missing) gen module.
         if let Err(e) = self.write_module(&rendered) {
-            self.log.turns.pop();
+            assert!(self.log.pop_latest_committed(gen));
             self.restore_tip(scope, tip_before);
             return Err(e);
         }
@@ -1060,7 +1083,7 @@ impl SessionLib {
         let value_types = match self.validate_candidate(&rendered, &receipt.items, inject_modules) {
             Ok(types) => types,
             Err(error) => {
-                self.log.turns.pop();
+                assert!(self.log.pop_latest_committed(gen));
                 let gen_path = self.root.join(rendered.module.relative_hs_path());
                 if let Err(err) = std::fs::remove_file(&gen_path) {
                     tracing::warn!(
@@ -1073,7 +1096,10 @@ impl SessionLib {
                 return Err(error);
             }
         };
-        self.log.turns[(gen.0 - 1) as usize].value_types = value_types;
+        self.log
+            .turn_mut(gen)
+            .expect("just committed declaration")
+            .value_types = value_types;
 
         if scope == ScopeId::ROOT {
             self.record_recovery_turn(recovery::RecoveryTurn::new(
@@ -1194,8 +1220,8 @@ impl SessionLib {
     /// Undo [`Self::push_turn_in`]'s tip bump for `scope` — restores it to
     /// `tip_before` (the value read from `self.tips` immediately before the
     /// push), which may be `None` if `scope` had never been used yet. Paired
-    /// with a `self.log.turns.pop()` on every rollback path so the log and
-    /// `tips` stay consistent, and touches no other scope's tip.
+    /// with a reserved tombstone at the failed generation on every rollback
+    /// path so its identity cannot be reused, and touches no other tip.
     fn restore_tip(&mut self, scope: ScopeId, tip_before: Option<Generation>) {
         match tip_before {
             Some(g) => {
@@ -1269,7 +1295,7 @@ impl SessionLib {
         );
         let rendered = render::render_module(&self.log, gen, &self.env);
         if let Err(e) = self.write_module(&rendered) {
-            self.log.turns.pop(); // keep the log consistent with disk
+            assert!(self.log.pop_latest_committed(gen)); // keep the log consistent with disk
             self.restore_tip(scope, tip_before);
             return Err(e);
         }
@@ -1709,6 +1735,75 @@ mod tests {
         SessionLib::open(SessionId(991), root.path(), ModuleEnv::standalone_default())
             .expect("open declaration library")
             .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()])
+    }
+
+    #[test]
+    fn legacy_recovery_does_not_replay_past_an_ambiguous_turn_or_reuse_its_modules() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("recovery.json");
+        recovery::write(
+            &manifest,
+            41,
+            &[
+                recovery::RecoveryTurn::new(41, 1, vec!["data Old = Old".into()], Vec::new(), true),
+                recovery::RecoveryTurn::new(41, 2, Vec::new(), vec!["Old".into()], true),
+                recovery::RecoveryTurn::new(
+                    41,
+                    3,
+                    vec!["later :: Int\nlater = 3".into()],
+                    Vec::new(),
+                    true,
+                ),
+            ],
+        )
+        .unwrap();
+        let mut lib = staged_test_lib(&root);
+        let report = lib.attach_recovery_manifest(&manifest).unwrap();
+        assert!(report.replayed.is_empty());
+        assert_eq!(report.lost.len(), 3);
+        assert_eq!(lib.generation(), Generation(3));
+        assert!(lib.declaration_value_type(3, "later").is_none());
+        assert_eq!(
+            lib.define_batch(&["fresh :: Int\nfresh = 4"]).unwrap(),
+            Generation(4)
+        );
+        assert_eq!(lib.declaration_value_type(4, "fresh"), Some("Int"));
+    }
+
+    #[test]
+    fn safe_legacy_replay_renumbers_and_rebinds_future_manifest_to_successor() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("recovery.json");
+        recovery::write(
+            &manifest,
+            41,
+            &[recovery::RecoveryTurn::new(
+                41,
+                3,
+                vec!["answer :: Int\nanswer = 42".into()],
+                Vec::new(),
+                true,
+            )],
+        )
+        .unwrap();
+        let mut lib = staged_test_lib(&root);
+        let report = lib.attach_recovery_manifest(&manifest).unwrap();
+        assert_eq!(report.replayed.len(), 1);
+        assert_eq!(report.replayed[0].source_generation, 3);
+        assert_eq!(report.replayed[0].successor_generation, 4);
+        assert_eq!(lib.declaration_value_type(4, "answer"), Some("Int"));
+        assert_eq!(
+            lib.define_batch(&["next :: Int\nnext = answer + 1"])
+                .unwrap(),
+            Generation(5)
+        );
+        let successor = recovery::read(&manifest).unwrap().unwrap();
+        assert_eq!(successor.source_session, lib.id.0);
+        assert_eq!(successor.turns.len(), 2);
+        assert!(successor
+            .turns
+            .iter()
+            .all(|turn| turn.origin_session == lib.id.0));
     }
 
     #[test]

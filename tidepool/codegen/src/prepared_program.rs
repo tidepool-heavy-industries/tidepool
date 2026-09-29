@@ -21,7 +21,7 @@ use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_heap::static_region::{StaticImage, StaticImageError};
 use tidepool_repr::execution_schema::{
     Architecture, CertifiedGroup, DefinitionsView, Endianness, GlobalId, LinkedProgram,
-    ResultContract, RuntimeRep, Signature, TargetDescriptor, ValueId,
+    PreparedProgram, ResultContract, RuntimeRep, Signature, TargetDescriptor, ValueId,
 };
 use tidepool_repr::DataConId;
 
@@ -86,10 +86,11 @@ impl Drop for ActiveIntrinsicScope<'_> {
     }
 }
 pub use machine::{
-    BatchImport, BatchProgram, ImportBindings, ManagedBuilder, ManagedField, ManagedNode,
-    ParkRequest, PreparedCallOptions, PreparedCompileSnapshot, PreparedHandle, PreparedInput,
-    PreparedMachine, PreparedMachineOptions, PreparedOuter, PreparedResult, PreparedResultBatch,
-    ProgramId, Quiescent, ResidencyCounts, RetirementReceipt,
+    BatchImport, BatchInstallReceipt, BatchLeaseRequest, BatchProgram, GroupInstanceId,
+    ImportBindings, ManagedBuilder, ManagedField, ManagedNode, ParkRequest, PreparedCallOptions,
+    PreparedCompileSnapshot, PreparedHandle, PreparedInput, PreparedMachine,
+    PreparedMachineOptions, PreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
+    Quiescent, ResidencyCounts, RetirementReceipt,
 };
 pub use run::{ExecutionError, ImportShapeFact, RunOptions, RunResult};
 #[cfg(test)]
@@ -100,7 +101,10 @@ mod byte_arrays;
 mod bytes_tests;
 mod data_tag;
 mod demand;
-pub use demand::{DemandError, DemandedImage, GroupInventory, SealedDemand, SourceBinder};
+pub use demand::{
+    DemandError, DemandedImage, GroupInventory, InheritedSourceDemand, SealedDemand, SourceBinder,
+    SourceInstanceLease,
+};
 #[cfg(test)]
 mod double_to_int_tests;
 mod entry;
@@ -385,6 +389,9 @@ pub struct CompiledProgram {
     /// installation uses this to authenticate exact inter-group imports
     /// before allocating any mutable installation state.
     pub(crate) top_exports: BTreeMap<ValueId, TopExport>,
+    /// Original owner of a worker-certified group image. A target/ordinary
+    /// prepared image has no source certificate and cannot mint source leases.
+    pub(crate) certified_source: Option<(tidepool_repr::execution_schema::CachedHomeOwner, u32)>,
     /// Admitted imports' slots -- see [`plan::ImportSlot`]. Indexed by
     /// `GlobalId`, occupying the block range right after `top_slots`.
     pub(crate) import_slots: Vec<plan::ImportSlot>,
@@ -500,8 +507,21 @@ impl CompiledProgram {
     /// owner and import provenance were sealed before native compilation;
     /// machine-local import handles are supplied only when the image installs.
     pub fn compile_certified_group(group: &CertifiedGroup) -> Result<Self, CompileError> {
-        Self::compile_definitions(
+        let mut image = Self::compile_definitions(
             group.definitions(),
+            &mut DescriptorInterner::default(),
+            &Arc::new(static_bytes::PinnedBytes::empty()),
+        )?;
+        image.certified_source = Some((group.owner().clone(), group.original_ordinal()));
+        Ok(image)
+    }
+
+    /// Compile a target's validated definitions off machine checkout. Its
+    /// exact global owners and live handles are checked when the target and
+    /// its reachable source groups install as one batch.
+    pub fn compile_prepared_definitions(prepared: &PreparedProgram) -> Result<Self, CompileError> {
+        Self::compile_definitions(
+            prepared.definitions(),
             &mut DescriptorInterner::default(),
             &Arc::new(static_bytes::PinnedBytes::empty()),
         )
@@ -1311,6 +1331,7 @@ impl CompiledProgram {
                     )
                 })
                 .collect(),
+            certified_source: None,
             import_slots: plan.import_slots,
             root_words: plan.root_words,
             interned_constructors: plan.interned_constructors,

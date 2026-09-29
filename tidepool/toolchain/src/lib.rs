@@ -16,11 +16,15 @@ use tidepool_repr::serial::ReadError;
 
 pub mod artifacts;
 pub mod cache;
+pub mod certified_products;
+pub mod declaration_join;
 pub mod diag;
 pub mod digest;
 pub mod failclass;
+pub(crate) mod module_candidates;
 pub mod paths;
 pub mod prepared_artifact;
+pub mod recovery_artifacts;
 pub mod timing;
 pub mod toolchain;
 

@@ -1,20 +1,92 @@
 //! Exact source-owner demand for independently compiled recursive groups.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
 use tidepool_repr::execution_schema::{
-    CachedHomeOwner, CertifiedGroup, ImportOwner, ModuleVersion, SymbolIdentity,
+    CachedHomeOwner, CertifiedGroup, ImportOwner, ModuleVersion, Signature, SymbolIdentity, ValueId,
 };
 
-use super::{CompileError, CompiledProgram, ImageRegistry};
+use super::{CompileError, CompiledProgram, GroupInstanceId, ImageRegistry, PreparedHandle};
 
 /// A source binder names one implementation at one compiler-assigned module
 /// version. Textual identity alone is insufficient when a module changes.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SourceBinder {
     pub version: ModuleVersion,
     pub binder: SymbolIdentity,
+}
+
+/// Machine-owned root for one materialized source binder in one original
+/// group installation. Cloning this descriptor does not mint another root:
+/// scope custody shares one handle and releases it exactly once when the last
+/// lexical/capture owner closes.
+#[derive(Clone, Debug)]
+pub struct SourceInstanceLease {
+    instance: GroupInstanceId,
+    owner: CachedHomeOwner,
+    original_ordinal: u32,
+    binder: SourceBinder,
+    value: ValueId,
+    handle: PreparedHandle,
+    entry_signature: Option<Signature>,
+}
+
+impl SourceInstanceLease {
+    pub(crate) fn new(
+        instance: GroupInstanceId,
+        owner: CachedHomeOwner,
+        original_ordinal: u32,
+        binder: SourceBinder,
+        value: ValueId,
+        handle: PreparedHandle,
+        entry_signature: Option<Signature>,
+    ) -> Self {
+        Self {
+            instance,
+            owner,
+            original_ordinal,
+            binder,
+            value,
+            handle,
+            entry_signature,
+        }
+    }
+
+    #[must_use]
+    pub fn instance(&self) -> GroupInstanceId {
+        self.instance
+    }
+
+    #[must_use]
+    pub fn owner(&self) -> &CachedHomeOwner {
+        &self.owner
+    }
+
+    #[must_use]
+    pub fn original_ordinal(&self) -> u32 {
+        self.original_ordinal
+    }
+
+    #[must_use]
+    pub fn binder(&self) -> &SourceBinder {
+        &self.binder
+    }
+
+    #[must_use]
+    pub fn value(&self) -> ValueId {
+        self.value
+    }
+
+    #[must_use]
+    pub fn handle(&self) -> PreparedHandle {
+        self.handle
+    }
+
+    #[must_use]
+    pub fn entry_signature(&self) -> Option<&Signature> {
+        self.entry_signature.as_ref()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +107,8 @@ pub enum DemandError {
     DuplicateBinder(SourceBinder),
     #[error("no certified implementation for source binder {0:?}")]
     MissingSource(SourceBinder),
+    #[error("scoped source instance does not match certified group for {0:?}")]
+    InvalidInheritedInstance(SourceBinder),
     #[error(transparent)]
     Compile(#[from] CompileError),
 }
@@ -50,6 +124,28 @@ pub struct SealedDemand<'a> {
     groups: &'a [CertifiedGroup],
     /// Closure order is stable in the supplied inventory's original order.
     indices: Vec<usize>,
+    inherited: Vec<InheritedSourceDemand<'a>>,
+}
+
+/// A new binder requested from a previously installed group in the same
+/// lexical instance domain. The anchor is a live scoped root for that exact
+/// installation; no second group image or CAF instance is compiled.
+pub struct InheritedSourceDemand<'a> {
+    group: &'a CertifiedGroup,
+    binder: SourceBinder,
+    anchor: SourceInstanceLease,
+}
+
+impl<'a> InheritedSourceDemand<'a> {
+    pub fn group(&self) -> &'a CertifiedGroup {
+        self.group
+    }
+    pub fn binder(&self) -> &SourceBinder {
+        &self.binder
+    }
+    pub fn anchor(&self) -> &SourceInstanceLease {
+        &self.anchor
+    }
 }
 
 pub struct DemandedImage<'a> {
@@ -115,16 +211,56 @@ impl<'a> GroupInventory<'a> {
         &self,
         roots: impl IntoIterator<Item = SourceBinder>,
     ) -> Result<SealedDemand<'a>, DemandError> {
+        self.seal_with_inherited(roots, &BTreeMap::new(), &HashMap::new())
+    }
+
+    /// Stop closure at exact live lexical instances. A later demand for an
+    /// unrooted sibling binder reuses that same group installation; it is
+    /// recorded separately for native root acquisition under checkout.
+    pub fn seal_with_inherited(
+        &self,
+        roots: impl IntoIterator<Item = SourceBinder>,
+        existing: &BTreeMap<SourceBinder, SourceInstanceLease>,
+        anchors: &HashMap<(CachedHomeOwner, u32), SourceInstanceLease>,
+    ) -> Result<SealedDemand<'a>, DemandError> {
         let mut pending = VecDeque::new();
         for root in roots {
             pending.push_back(root);
         }
         let mut reachable = BTreeSet::new();
+        let mut inherited = BTreeMap::new();
         while let Some(binder) = pending.pop_front() {
             let &index = self
                 .binders
                 .get(&binder)
-                .ok_or(DemandError::MissingSource(binder))?;
+                .ok_or_else(|| DemandError::MissingSource(binder.clone()))?;
+            let group = &self.groups[index];
+            if let Some(lease) = existing.get(&binder) {
+                if lease.binder() != &binder
+                    || lease.owner() != group.owner()
+                    || lease.original_ordinal() != group.original_ordinal()
+                {
+                    return Err(DemandError::InvalidInheritedInstance(binder));
+                }
+                continue;
+            }
+            if let Some(anchor) = anchors.get(&(group.owner().clone(), group.original_ordinal())) {
+                if anchor.owner() != group.owner()
+                    || anchor.original_ordinal() != group.original_ordinal()
+                    || anchor.binder().version != group.owner().module_version
+                    || !group.binders().contains(&anchor.binder().binder)
+                {
+                    return Err(DemandError::InvalidInheritedInstance(binder));
+                }
+                inherited
+                    .entry(binder.clone())
+                    .or_insert_with(|| InheritedSourceDemand {
+                        group,
+                        binder,
+                        anchor: anchor.clone(),
+                    });
+                continue;
+            }
             if !reachable.insert(index) {
                 continue;
             }
@@ -140,6 +276,7 @@ impl<'a> GroupInventory<'a> {
         Ok(SealedDemand {
             groups: self.groups,
             indices: reachable.into_iter().collect(),
+            inherited: inherited.into_values().collect(),
         })
     }
 }
@@ -147,6 +284,10 @@ impl<'a> GroupInventory<'a> {
 impl<'a> SealedDemand<'a> {
     pub fn groups(&self) -> impl ExactSizeIterator<Item = &'a CertifiedGroup> + '_ {
         self.indices.iter().map(|&index| &self.groups[index])
+    }
+
+    pub fn inherited_demands(&self) -> &[InheritedSourceDemand<'a>] {
+        &self.inherited
     }
 
     /// Compile only demanded images. The registry owns weak references and

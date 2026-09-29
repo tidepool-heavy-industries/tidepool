@@ -48,7 +48,8 @@ import Tidepool.Binders
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
   , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..)
-  , withResidentPipelineSelectedRequests, CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances
+  , withResidentPipelineSelectedRequests, withExactInterfaceTransaction
+  , CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances
   , cellExpressionPlans
   , satisfiesCapturedConstraint, stripMonadHead )
 import Tidepool.ExecutionEncode (encodeWireProgram, encodeModuleProducts)
@@ -58,13 +59,19 @@ import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedJson (resolveJsonAuthority)
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..)
-  , WireProgram(..), SiteRow(..) )
+  , WireProgram(..), ProjectedGroup(..), SiteRow(..) )
 import qualified Tidepool.EffectSchema
 import Tidepool.PreparedStg
   ( PreparedModule(..), PreparedBodyCache, newPreparedBodyCache
   , evictPreparedBodyMatching )
 import Tidepool.PreparedRecovery
-  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecovery )
+  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithCached )
+import Tidepool.ModuleCandidates (ModuleCandidate(..))
+import Tidepool.CertifiedProducts (encodeCertifiedProducts)
+import Tidepool.DeclarationJoin
+  ( DeclarationOperation(..), readDeclarationOperation, validateDeclarationJoin
+  , renderDeclarationJoinOutcome, inspectDeclarationArtifacts
+  , renderDeclarationInventoryOutcome )
 import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson
   ( ReportOutcome(..), DiagSeverity(..), Diag(..), SourceRejection(..)
@@ -217,6 +224,12 @@ runParsedInvocation compiler caches parsedWorkerRequest = do
 dispatch
   :: Compiler -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
 dispatch compiler caches timing args =
+  case requestDeclarationJoin args of
+    Just manifest -> runDeclarationOperation args manifest
+    Nothing -> dispatchSource compiler caches timing args
+
+dispatchSource :: Compiler -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
+dispatchSource compiler caches timing args =
   case requestFiles args of
     [] -> reportDiags (Left (toException (userError "worker request contains no input")))
     (file : _)
@@ -235,6 +248,21 @@ dispatch compiler caches timing args =
         | not (null (requestTargets args))        -> timePhase timing "total" (processFile compiler caches timing args file)
         -- Normal one-shot extraction.
         | otherwise                           -> timePhase timing "total" (processFile compiler caches timing args file)
+
+runDeclarationOperation :: WorkerRequest -> FilePath -> IO ExitCode
+runDeclarationOperation args manifest = do
+  result <- trySynchronous $ do
+    out <- maybe (fail "declaration operation requires an output path") pure
+      (requestDeclarationJoinOut args)
+    operation <- readDeclarationOperation manifest
+    rendered <- withExactInterfaceTransaction (requestIncludes args) $ \env ->
+      case operation of
+        InspectInventory artifacts -> renderDeclarationInventoryOutcome
+          <$> inspectDeclarationArtifacts env artifacts
+        ValidateJoin input -> renderDeclarationJoinOutcome
+          <$> validateDeclarationJoin env input
+    writeFile out rendered
+  reportDiags result
 
 runInspectionMode :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode
 runInspectionMode compiler args _path = do
@@ -405,7 +433,7 @@ processFile compiler caches timing args path = do
     -- Multi-target extraction can inject stable session values without
     -- becoming a session bind/reference operation.
     let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
-    prepared <- compiler PreparedProducts (Map.keysSet (requestRetainedGenerations args)) GeneralCompile scope path (requestIncludes args) (requestBuildProductsDir args)
+    prepared <- compiler (PreparedProducts (requestModuleCandidates args)) (Map.keysSet (requestRetainedGenerations args)) GeneralCompile scope path (requestIncludes args) (requestBuildProductsDir args)
     let result = pprPipelineResult prepared
     let binds = prBinds result
         tycons = prTyCons result
@@ -427,26 +455,50 @@ processFile compiler caches timing args path = do
     let preparedTargets = case requestTargets args of
           targets@(_ : _) -> targets
           [] -> maybe [] pure mTarget
+    let certifiedHomes = Set.fromList
+          [(candidateUnit candidate, candidateModule candidate)
+          | candidate <- pprAcceptedCandidates prepared]
     (preparedArtifacts, productContext) <- prepareArtifacts caches path hscEnv (pprModules prepared) preparedTargets
-      (standardAuxiliaryRoots binds) (requestRetainedGenerations args)
+      (standardAuxiliaryRoots binds) (requestRetainedGenerations args) certifiedHomes
     if null preparedArtifacts
       then ioError (userError "prepared extraction requires --target or --targets")
       else timePhase timing "prepared_sidecars" $ writePreparedSidecars SeparateYieldSites outDir binds tycons mCapturedTy warnTexts preparedArtifacts
 
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
-    availability <- timePhase timing "module_products" $ writeModuleProducts outDir hscEnv
+    timePhase timing "module_products" $
+      writeCertifiedProducts outDir hscEnv prepared productContext preparedArtifacts
+
+  reportDiags res
+
+writeCertifiedProducts
+  :: FilePath -> HscEnv -> PreparedPipelineResult -> Maybe ProjectionContext
+  -> [PreparedArtifact] -> IO ()
+writeCertifiedProducts outDir hscEnv prepared productContext preparedArtifacts = do
+    (availability, freshProducts) <- writeModuleProducts outDir hscEnv
       productContext (pprModules prepared) (pprProductInterfaces prepared)
     let dependencies = pprDependencies prepared
+        withCertified = foldr (\candidate -> Map.insert
+          (candidateUnit candidate, candidateModule candidate) ProductReady)
+          availability (pprAcceptedCandidates prepared)
         withAvailability node = node
           { dependencyModuleProduct = Map.findWithDefault
               (dependencyModuleProduct node)
               (dependencyModuleUnit node, dependencyModuleName node)
-              availability
+              withCertified
           }
-    writeDependencyEvidence outDir (dependencies
-      { dependencyModules = map withAvailability (dependencyModules dependencies) })
-
-  reportDiags res
+        finalDependencies = dependencies
+          { dependencyModules = map withAvailability (dependencyModules dependencies) }
+    writeDependencyEvidence outDir finalDependencies
+    productBytes <- BS.readFile (outDir </> "module-products.cbor")
+    evidenceBytes <- BS.readFile (outDir </> "dependencies.json")
+    certified <- encodeCertifiedProducts hscEnv (pprAcceptedCandidates prepared)
+      freshProducts [(paTarget artifact, paProgram artifact) | artifact <- preparedArtifacts]
+      finalDependencies productBytes evidenceBytes
+    case certified of
+      Right bytes -> BS.writeFile (outDir </> "certified-products.cbor") bytes
+      Left reason -> do
+        hPutStrLn stderr ("product certification unavailable: " ++ reason)
+        BS.writeFile (outDir </> "certified-products.cbor") BS.empty
 
 trySynchronous :: IO a -> IO (Either SomeException a)
 trySynchronous action = do
@@ -459,6 +511,7 @@ trySynchronous action = do
 
 data PreparedArtifact = PreparedArtifact
   { paTarget :: String
+  , paProgram :: WireProgram
   , paBytes :: BS.ByteString
   , paConstructors :: [DataCon]
   , paYieldSites :: [Tidepool.EffectSchema.YieldSite]
@@ -467,9 +520,10 @@ data PreparedArtifact = PreparedArtifact
 -- Project before writing artifacts so the shared constructor
 -- table includes exactly the GHC constructors admitted by prepared execution.
 prepareArtifacts :: RecoveryCaches -> FilePath -> HscEnv -> [PreparedModule] -> [String] -> [String]
-  -> Map.Map SymbolIdentity Word64 -> IO ([PreparedArtifact], Maybe ProjectionContext)
-prepareArtifacts _ _ _ _ [] _ _ = pure ([], Nothing)
-prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliaryRoots retainedGenerations = do
+  -> Map.Map SymbolIdentity Word64 -> Set.Set (String, String)
+  -> IO ([PreparedArtifact], Maybe ProjectionContext)
+prepareArtifacts _ _ _ _ [] _ _ _ = pure ([], Nothing)
+prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliaryRoots retainedGenerations certifiedHomes = do
   timing <- readTimingEnabled
   formattingAuthority <- timePhase timing "formatting_authority" $ resolveFormattingAuthority hscEnv
   timeAuthority <- timePhase timing "time_authority" $ resolveTimeAuthority hscEnv
@@ -505,8 +559,8 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
           , projectionJsonAuthority = jsonAuthority
           , projectionTextUnit = textAuthority
           }
-  recover <- newPreparedRecovery hscEnv (rcFatIface caches) (rcOwnerIface caches)
-    (rcPreparedBodies caches) (contextFor firstTarget) modules
+  recover <- newPreparedRecoveryWithCached hscEnv (rcFatIface caches) (rcOwnerIface caches)
+    (rcPreparedBodies caches) certifiedHomes (contextFor firstTarget) modules
   artifacts <- forM targets $ \target -> do
     let context = contextFor target
     -- Three flat phases, one row each per target (see Tidepool.Timing).
@@ -529,7 +583,7 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
           , site <- pmYieldSites preparedModule'
           , Tidepool.EffectSchema.ysSite site `Set.member` admitted
           ]
-    pure (PreparedArtifact target bytes constructors yieldSites)
+    pure (PreparedArtifact target program bytes constructors yieldSites)
   pure (artifacts, Just (contextFor firstTarget))
 
 -- A failed unrelated group is an explicit product miss, never a newly fatal
@@ -537,8 +591,9 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
 -- skinny interface emitted by the same GHC transaction.
 writeModuleProducts :: FilePath -> HscEnv -> Maybe ProjectionContext
   -> [PreparedModule] -> Map.Map ModuleName ModIface
-  -> IO (Map.Map (String, String) ProductAvailability)
-writeModuleProducts _ _ Nothing _ _ = pure Map.empty
+  -> IO (Map.Map (String, String) ProductAvailability,
+         [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])])
+writeModuleProducts _ _ Nothing _ _ = pure (Map.empty, [])
 writeModuleProducts outDir hscEnv (Just context) modules interfaces = do
   outcomes <- forM modules $ \prepared -> do
     let name = moduleName (pmModule prepared)
@@ -561,9 +616,9 @@ writeModuleProducts outDir hscEnv (Just context) modules interfaces = do
             BS.readFile path) `finally` removeFile path
           pure (key, ProductReady, Just (T.pack (fst key),
             T.pack (snd key), bytes, groups))
-  BS.writeFile (outDir </> "module-products.cbor")
-    (encodeModuleProducts [product | (_, _, Just product) <- outcomes])
-  pure (Map.fromList [(key, status) | (key, status, _) <- outcomes])
+  let products = [moduleProduct | (_, _, Just moduleProduct) <- outcomes]
+  BS.writeFile (outDir </> "module-products.cbor") (encodeModuleProducts products)
+  pure (Map.fromList [(key, status) | (key, status, _) <- outcomes], products)
 
 requireProjection :: Either ProjectionError a -> IO a
 requireProjection = \case
@@ -789,15 +844,17 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
         -- A prepared turn uses one compiler pass for the checked metadata
         -- and the prepared modules.
         compileTurn modulePath = do
-          prepared <- compiler PreparedStg (Map.keysSet (requestRetainedGenerations args)) GeneralCompile (Just scope) modulePath (requestIncludes args) (requestBuildProductsDir args)
-          return (pprPipelineResult prepared, pprModules prepared, pprDependencies prepared)
+          compiler (PreparedProducts (requestModuleCandidates args))
+            (Map.keysSet (requestRetainedGenerations args)) GeneralCompile
+            (Just scope) modulePath (requestIncludes args)
+            (requestBuildProductsDir args)
         compileVariants _ [] = error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
         compileVariants index (tmplFile:rest) = do
           (spliced, _modName, modulePath) <- spliceInto tmplFile
           attempted <- try (compileTurn modulePath)
           case attempted of
-            Right (result, preparedModules, dependencies) ->
-              return (index, spliced, modulePath, result, preparedModules, dependencies)
+            Right prepared ->
+              return (index, spliced, modulePath, prepared)
             Left err@(_ :: SomeException) -> case (fromException err :: Maybe SourceError, rest) of
               (Just _, _ : _) -> compileVariants (index + 1) rest
               _               -> throwIO err
@@ -805,21 +862,29 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
         && (selector /= SBind || length (sbBinders sb) /= 1 || length matching /= 1)
       then fail "activation requires one prepared bind template"
       else pure ()
-    (variant, spliced, compiledPath, result, preparedModules, dependencies) <- compileVariants (0 :: Int) matching
-    let binds       = prBinds result
+    (variant, spliced, compiledPath, prepared) <- compileVariants (0 :: Int) matching
+    let result      = pprPipelineResult prepared
+        preparedModules = pprModules prepared
+        binds       = prBinds result
         hscEnv      = prHscEnv result
         mCapturedTy = fmap T.pack (prCapturedType result)
         warnTexts   = map T.pack (prWarnings result)
     -- Projection remains outside compileVariants. Its entry is the settled
     -- scaffold, and its constructors join the shared metadata before write.
-    (preparedArtifacts, _) <- prepareArtifacts caches compiledPath hscEnv preparedModules
-      [preparedScaffoldTargetName] (standardAuxiliaryRoots binds) (requestRetainedGenerations args)
+    let certifiedHomes = Set.fromList
+          [(candidateUnit candidate, candidateModule candidate)
+          | candidate <- pprAcceptedCandidates prepared]
+    (preparedArtifacts, productContext) <- prepareArtifacts caches compiledPath hscEnv preparedModules
+      [preparedScaffoldTargetName] (standardAuxiliaryRoots binds)
+      (requestRetainedGenerations args) certifiedHomes
     let asksSites = concatMap paYieldSites preparedArtifacts
     timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
+    timePhase timing "module_products" $
+      writeCertifiedProducts outDir hscEnv prepared productContext preparedArtifacts
     -- Mutable turns never enter the artifact cache, but publication must
     -- still reject source changes observed during this compilation.
-    validateDependencyEvidence dependencies
+    validateDependencyEvidence (pprDependencies prepared)
     let wrapped = T.pack spliced
     case selector of
       SBind -> do

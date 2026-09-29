@@ -217,6 +217,16 @@ impl ImageRegistry {
         self.get_or_compile_key(ImageKey::Program(key.prepared().clone()), compile)
     }
 
+    /// Share target code compiled from validated definitions before live
+    /// imports are selected. Installation still checks every owner and handle.
+    pub fn get_or_compile_prepared<E>(
+        &self,
+        prepared: &PreparedProgram,
+        compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
+    ) -> Result<Arc<CompiledProgram>, E> {
+        self.get_or_compile_key(ImageKey::Program(prepared.clone()), compile)
+    }
+
     /// Share an exact worker-certified source group across concurrent native
     /// demand. Failed or panicked compiles release their flight for retry.
     pub fn get_or_compile_group<E>(

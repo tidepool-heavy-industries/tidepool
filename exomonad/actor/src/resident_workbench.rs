@@ -6356,6 +6356,24 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    pub(crate) async fn public_visibility_snapshot(
+        &self,
+        context: crate::ActorSessionContext,
+    ) -> Result<tidepool_runtime::session::PublicVisibilitySnapshot, ResidentActorWorkbenchError>
+    {
+        self.access
+            .with_machine(context, |session, context, _| {
+                session
+                    .public_visibility_snapshot_in(context.placement.lexical_scope)
+                    .ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "workbench public lexical scope is unavailable".into(),
+                        )
+                    })
+            })
+            .await
+    }
+
     pub(crate) async fn capture_context_scope(
         &self,
         context: crate::ActorSessionContext,
@@ -14917,6 +14935,73 @@ mod request_tests {
                 items: Vec::new(),
             },
         )
+    }
+
+    #[tokio::test]
+    async fn public_visibility_snapshot_pairs_declaration_and_exact_binding_identities() {
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let workbench =
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
+        let runner = ResidentActorRunner::new(machines, source.clone());
+        let before = runner
+            .public_visibility_snapshot(context.clone())
+            .await
+            .expect("initial public view");
+        let step = workbench
+            .begin_fragment_split(
+                context.clone(),
+                source,
+                Vec::new(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: "snapshotValue <- pure (42 :: Int)".into(),
+                },
+                None,
+            )
+            .await
+            .expect("Haskell binding compiles");
+        if let ResidentWorkbenchStep::Running { fragment, outcome } = step {
+            workbench
+                .settle_item(context.clone(), *fragment, *outcome)
+                .await
+                .expect("Haskell binding settles");
+        }
+        let bound = runner
+            .public_visibility_snapshot(context.clone())
+            .await
+            .expect("bound public view");
+        assert!(bound.epoch > before.epoch);
+        assert_eq!(bound.declaration_tip, before.declaration_tip);
+        assert!(before
+            .bindings
+            .iter()
+            .all(|(name, _)| name != "snapshotValue"));
+        assert!(bound
+            .bindings
+            .iter()
+            .any(|(name, _)| name == "snapshotValue"));
+
+        runner
+            .access
+            .with_machine(context.clone(), |session, context, _| {
+                session
+                    .define_scoped_in(
+                        context.placement.lexical_scope,
+                        &["data SnapshotTag = SnapshotTag"],
+                    )
+                    .expect("declaration commits");
+                Ok(())
+            })
+            .await
+            .expect("declaration checkout");
+        let declared = runner
+            .public_visibility_snapshot(context)
+            .await
+            .expect("declaration public view");
+        assert!(declared.epoch > bound.epoch);
+        assert!(declared.declaration_tip.0 > bound.declaration_tip.0);
+        assert_eq!(declared.bindings, bound.bindings);
     }
 
     #[tokio::test]

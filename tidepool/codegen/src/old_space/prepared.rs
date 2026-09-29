@@ -371,9 +371,12 @@ impl super::OldSpace {
         Ok(retained)
     }
 
-    /// Give an already-stable reference (an old-space object, a static
-    /// address) its own persistently registered root slot, as
-    /// [`Self::retain_prepared`] does after promotion. No copying.
+    /// Give an initialized managed reference its own persistently registered
+    /// root slot, without copying. Normally the reference is already in old
+    /// space or a static region. During a non-collecting installation it may
+    /// name a staged nursery object, provided its descriptor owner is
+    /// committed before the next collection or the root is deregistered on
+    /// rollback.
     pub(crate) fn adopt_root(
         &mut self,
         machine: &MachineState,

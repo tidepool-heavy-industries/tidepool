@@ -5,22 +5,28 @@
 //! Suspension is threadless: a continuation is rooted as data and a later
 //! entry may resume it from a fresh evaluation thread.
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BindingTipId};
+use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BindingTipId, SourceLeaseKey};
 use tidepool_codegen::machine::{CancelHandle, MachineDisposition};
-use tidepool_codegen::prepared_program::ResidencyCounts;
+use tidepool_codegen::prepared_program::{
+    DemandedImage, InheritedSourceDemand, PreparedHandle, ProgramId, ResidencyCounts,
+    SourceBinder, SourceInstanceLease,
+};
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
 use tidepool_codegen::suspension::{ContinuationId, RealmId};
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::{DataCon, DataConTable, Generation, SessionModule, SessionVarId, VarId};
 
 use tidepool_codegen::binding_table::BoundValue;
-use tidepool_repr::execution_schema::{PreparedProgram, SymbolIdentity};
+use tidepool_repr::execution_schema::{CachedHomeOwner, ImportOwner, PreparedProgram, SymbolIdentity};
 
 use super::binding_table::{BindRecord, BindingIndex};
-use super::prepared::{InstallSnapshot, PreparedEngine, PreparedRuntimeError};
+use super::prepared::{
+    CertifiedTargetImage, InstallSnapshot, PreparedEngine, PreparedRuntimeError,
+};
 use super::{
     DeclarationCandidateRender, ExactExportError, ExactExportSurface, SessionCompileView,
     SessionError, SessionLib, SourceImports,
@@ -233,6 +239,122 @@ impl PersistentSession {
         &mut self.bindings
     }
 
+    /// Transfer the exact machine-created source roots from one native batch
+    /// into this lexical scope. Rejection returns every original token so the
+    /// installing checkout can release all roots and retire its unpublished
+    /// candidates without a partially visible source instance.
+    pub fn register_source_instances_in(
+        &mut self,
+        scope: ScopeId,
+        tokens: Vec<SourceInstanceLease>,
+    ) -> Result<Vec<SourceLeaseKey>, Vec<SourceInstanceLease>> {
+        self.bindings
+            .register_source_instances_in(&self.scopes, scope, tokens)
+    }
+
+    /// Install a certified target against this exact lexical view and place
+    /// every newly materialized source root under its scope before returning
+    /// the executable target. The machine batch is unpublished until the
+    /// registrar accepts all roots; rejection releases its handles and pins.
+    pub(crate) fn install_certified_turn_in(
+        &mut self,
+        scope: ScopeId,
+        target: CertifiedTargetImage,
+        target_owners: &[ImportOwner],
+        source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
+        demanded: Vec<DemandedImage<'_>>,
+        inherited_needed: &[InheritedSourceDemand<'_>],
+        package_external: &HashMap<ImportOwner, PreparedHandle>,
+    ) -> Result<(ProgramId, bool), PreparedRuntimeError> {
+        if !self.scopes.is_live(scope) {
+            return Err(PreparedRuntimeError::SourceScopeAdmission);
+        }
+        let mut inherited = BTreeMap::<SourceBinder, SourceInstanceLease>::new();
+        let mut inherited_groups = HashMap::new();
+        for lease in self.bindings.source_instances_in(&self.scopes, scope) {
+            let group = (lease.owner().clone(), lease.original_ordinal());
+            if inherited_groups
+                .insert(group.clone(), lease.instance())
+                .is_some_and(|previous| previous != lease.instance())
+            {
+                return Err(PreparedRuntimeError::AmbiguousSourceGroup {
+                    owner: group.0,
+                    ordinal: group.1,
+                });
+            }
+            let binder = lease.binder().clone();
+            if inherited
+                .insert(binder.clone(), lease.clone())
+                .is_some_and(|previous| {
+                    previous.instance() != lease.instance() || previous.handle() != lease.handle()
+                })
+            {
+                return Err(PreparedRuntimeError::AmbiguousSourceInstance(binder));
+            }
+        }
+        let mut exact_external = package_external
+            .iter()
+            .filter(|(owner, _)| matches!(owner, ImportOwner::Package { .. }))
+            .map(|(owner, handle)| (owner.clone(), *handle))
+            .collect::<HashMap<_, _>>();
+        for (globals, owners) in std::iter::once((target.globals(), target_owners)).chain(
+            demanded.iter().map(|selected| {
+                (
+                    selected.group().definitions().globals(),
+                    selected.group().imports(),
+                )
+            }),
+        ) {
+            if globals.len() != owners.len() {
+                return Err(PreparedRuntimeError::CertifiedTargetOwners);
+            }
+            for (global, owner) in globals.iter().zip(owners) {
+                let ImportOwner::Retained { id, generation } = owner else {
+                    continue;
+                };
+                let entry = self
+                    .bindings
+                    .resolve_exact_prepared_in(&self.scopes, scope, &global.identity, *generation)
+                    .filter(|entry| entry.id == *id)
+                    .ok_or_else(|| PreparedRuntimeError::MissingCertifiedOwner(owner.clone()))?;
+                exact_external.insert(owner.clone(), entry.value.handle);
+            }
+        }
+        let engine = self
+            .machine
+            .as_mut()
+            .ok_or(PreparedRuntimeError::MachineNotInstalled)?;
+        let mut staged = engine.install_certified_turn(
+            target,
+            target_owners,
+            source_evidence,
+            demanded,
+            inherited_needed,
+            &inherited,
+            &exact_external,
+            &self.bindings,
+        )?;
+        let tokens = std::mem::take(&mut staged.leases);
+        match self.register_source_instances_in(scope, tokens) {
+            Ok(keys) => {
+                let engine = self
+                    .machine
+                    .as_mut()
+                    .expect("certified machine remains installed");
+                let target = engine.commit_certified_turn(staged);
+                Ok((target, !keys.is_empty()))
+            }
+            Err(tokens) => {
+                let engine = self
+                    .machine
+                    .as_mut()
+                    .expect("certified machine remains installed");
+                engine.abort_certified_turn(staged, tokens)?;
+                Err(PreparedRuntimeError::SourceScopeAdmission)
+            }
+        }
+    }
+
     /// Keep eight automatic observations per scope. Explicit persistent code
     /// and fork tips retain their dependencies under the normal binding rules.
     pub fn save_observation(&mut self, id: SessionVarId, dependencies: &[VarId]) {
@@ -275,6 +397,25 @@ impl PersistentSession {
                 if engine.release(*handle) {
                     released += 1;
                 }
+            }
+        }
+        released
+    }
+
+    fn release_source_instance_roots(
+        &mut self,
+        leases: Vec<tidepool_codegen::prepared_program::SourceInstanceLease>,
+    ) -> usize {
+        let mut released = 0;
+        for lease in leases {
+            if self
+                .machine
+                .as_mut()
+                .is_some_and(|engine| engine.release(lease.handle()))
+            {
+                released += 1;
+            } else {
+                panic!("retired source instance has no registered machine root");
             }
         }
         released
@@ -1460,12 +1601,16 @@ impl PersistentSession {
             roots_released: 0,
         };
         let mut retired = Vec::new();
+        let mut source_instances = Vec::new();
         for dead in &doomed {
-            retired.extend(self.bindings.drain_scope(*dead));
+            let drained = self.bindings.drain_scope_with_sources(*dead);
+            retired.extend(drained.bindings);
+            source_instances.extend(drained.source_instances);
         }
         retired.extend(self.bindings.collect_observations());
         receipt.bindings_retired = retired.len();
-        receipt.roots_released = self.release_binding_roots(retired);
+        receipt.roots_released = self.release_binding_roots(retired)
+            + self.release_source_instance_roots(source_instances);
         debug_assert_eq!(
             roots_before - self.persistent_roots_count(),
             receipt.roots_released,

@@ -28,6 +28,7 @@ library tidepool-extract-internal
     Tidepool.Binders
     Tidepool.CborEncode
     Tidepool.DependencyEvidence
+    Tidepool.DeclarationJoin
     Tidepool.WorkerServer
     Tidepool.DiagJson
     Tidepool.EffectSchema
@@ -35,10 +36,13 @@ library tidepool-extract-internal
     Tidepool.ExtractRequest
     Tidepool.FatIface
     Tidepool.GhcPipeline
+    Tidepool.ExactHydration
     Tidepool.HostBindingAuthority
     Tidepool.Identity
     Tidepool.Introspection
     Tidepool.Metadata
+    Tidepool.ModuleCandidates
+    Tidepool.CertifiedProducts
     Tidepool.PrimOps
     Tidepool.PreparedStg
     Tidepool.PreparedRecovery
@@ -74,6 +78,7 @@ library tidepool-extract-internal
     text,
     cborg,
     cryptohash-sha256,
+    unix,
     mtl,
     syb,
     lens,
@@ -111,6 +116,22 @@ test-suite cell-splitter-test
     filepath,
     text,
     assignment-internal,
+    tidepool-extract-internal
+  default-language: GHC2024
+  ghc-options:      -Wall
+
+test-suite declaration-join-test
+  type:             exitcode-stdio-1.0
+  main-is:          DeclarationJoinTest.hs
+  hs-source-dirs:   test-cell-splitter
+  build-depends:
+    base >= 4.20 && < 5,
+    bytestring,
+    cryptohash-sha256,
+    directory,
+    filepath,
+    ghc >= 9.12 && < 9.13,
+    process,
     tidepool-extract-internal
   default-language: GHC2024
   ghc-options:      -Wall
@@ -199,6 +220,8 @@ test-suite execution-schema-encode
     base >= 4.20 && < 5,
     bytestring,
     cborg,
+    directory,
+    text,
     tidepool-extract-internal
   default-language: GHC2024
   default-extensions: OverloadedStrings
@@ -257,6 +280,7 @@ test-suite prepared-stg-pipeline-test
     ghc          >= 9.12 && < 9.13,
     containers,
     bytestring,
+    cborg,
     cryptohash-sha256,
     mtl,
     text,

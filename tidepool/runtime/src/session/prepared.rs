@@ -15,11 +15,12 @@ use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
 use super::binding_table::BindingIndex;
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
-    BatchImport, BatchProgram, CompileError, CompiledProgram, DemandError, DemandedImage,
-    ExecutionError, ImageRegistry, ImportBindings, ManagedBuilder, ManagedField, ManagedNode,
-    Parcel, ParkRequest, PreparedCallOptions, PreparedFrameEvidence, PreparedHandle, PreparedInput,
-    PreparedMachine, PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter, PreparedResult,
-    PreparedResultBatch, ProgramId, RunOptions, SourceBinder, MAX_ANSWER_DEPTH,
+    BatchImport, BatchLeaseRequest, BatchProgram, CompileError, CompiledProgram, DemandError,
+    DemandedImage, ExecutionError, ImageRegistry, ImportBindings, InheritedSourceDemand,
+    ManagedBuilder, ManagedField, ManagedNode, Parcel, ParkRequest, PreparedCallOptions,
+    PreparedFrameEvidence, PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions,
+    PreparedOuter as CodegenPreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
+    RunOptions, SourceBinder, SourceInstanceLease, MAX_ANSWER_DEPTH,
 };
 // Re-exported: callers of this module's resource-scope cancellation API
 // (`open_realm`/`cancel_handle`/`close_realm`) need both types without a
@@ -29,9 +30,9 @@ pub use tidepool_codegen::machine::MachineDisposition;
 use tidepool_codegen::suspension::ContinuationId;
 pub use tidepool_codegen::suspension::{RealmId, ValueHandle};
 use tidepool_repr::execution_schema::{
-    link_program, CtorRow, DefinitionsView, Group, HeapRhs, ImportOwner, ImportedValue, JsonLayout,
-    LinkError, MachineImports, ParseError, PreparedProgram, RuntimeRep, Signature, SiteDelivery,
-    SiteRow, SymbolIdentity, TypeNode, TypeNodeId, ValueId,
+    link_program, CachedHomeOwner, CtorRow, DefinitionsView, Group, HeapRhs, ImportOwner,
+    ImportedValue, JsonLayout, LinkError, MachineImports, ParseError, PreparedProgram, RuntimeRep,
+    Signature, SiteDelivery, SiteRow, SymbolIdentity, TypeNode, TypeNodeId, ValueId,
 };
 use tidepool_repr::{DataConId, DataConTable, Literal, PrincipalId, SessionVarId};
 
@@ -63,6 +64,21 @@ pub enum PreparedRuntimeError {
     Demand(#[from] DemandError),
     #[error("no exact live owner for certified import {0:?}")]
     MissingCertifiedOwner(ImportOwner),
+    #[error("certified target import owners do not match its declared globals")]
+    CertifiedTargetOwners,
+    #[error("certified install includes a source group unreachable from its target")]
+    UnreachableCertifiedGroup,
+    #[error("certified source installation targeted a closed or conflicting lexical scope")]
+    SourceScopeAdmission,
+    #[error("lexical scope has multiple mutable instances for certified source {0:?}")]
+    AmbiguousSourceInstance(SourceBinder),
+    #[error("lexical scope has multiple mutable instances for certified group {owner:?} ordinal {ordinal}")]
+    AmbiguousSourceGroup {
+        owner: tidepool_repr::execution_schema::CachedHomeOwner,
+        ordinal: u32,
+    },
+    #[error("certified source owner differs from the selected original group for {0:?}")]
+    InvalidCertifiedSourceOwner(SourceBinder),
     #[error("prepared execution failed: {0}")]
     Run(ExecutionError),
     #[error("session binding {0:?} is not a live prepared binding")]
@@ -210,6 +226,12 @@ impl PreparedRuntimeError {
             | Self::Link(_)
             | Self::Demand(_)
             | Self::MissingCertifiedOwner(_)
+            | Self::CertifiedTargetOwners
+            | Self::UnreachableCertifiedGroup
+            | Self::SourceScopeAdmission
+            | Self::AmbiguousSourceInstance(_)
+            | Self::AmbiguousSourceGroup { .. }
+            | Self::InvalidCertifiedSourceOwner(_)
             | Self::UnknownBinding(_)
             | Self::UnsettledEntry { .. }
             | Self::MachineNotInstalled
@@ -354,6 +376,40 @@ pub(crate) struct InstallSnapshot {
     /// content in the registry: [`PreparedEngine::compile_off_checkout`]
     /// then compiles nothing and just returns this `Arc`.
     precompiled: Option<Arc<CompiledProgram>>,
+}
+
+/// Exact target definitions and their shared native image, paired off
+/// checkout. The target's declared entry is preserved when its source-group
+/// closure installs in the same machine transaction.
+pub(crate) struct CertifiedTargetImage {
+    prepared: PreparedProgram,
+    image: Arc<CompiledProgram>,
+}
+
+impl CertifiedTargetImage {
+    pub(crate) fn compile(
+        prepared: PreparedProgram,
+        registry: &ImageRegistry,
+    ) -> Result<Self, CompileError> {
+        let image = registry.get_or_compile_prepared(&prepared, || {
+            CompiledProgram::compile_prepared_definitions(&prepared).map(Arc::new)
+        })?;
+        Ok(Self { prepared, image })
+    }
+
+    pub(crate) fn globals(&self) -> &[tidepool_repr::execution_schema::GlobalDecl] {
+        self.prepared.globals()
+    }
+}
+
+pub(crate) struct CertifiedTurnInstall {
+    pub target: ProgramId,
+    pub groups: Vec<ProgramId>,
+    pub leases: Vec<SourceInstanceLease>,
+    facts: Vec<ProgramFacts>,
+    plans: Vec<EvidencePlan>,
+    exports: Vec<(SymbolIdentity, ValueId, Option<Signature>)>,
+    package_updates: BTreeMap<SymbolIdentity, [u8; 32]>,
 }
 
 /// Which installed program's site table is authoritative for one site id.
@@ -1589,6 +1645,10 @@ pub struct PreparedEngine {
 struct CodeExport {
     handle: PreparedHandle,
     entry: Option<Signature>,
+    /// The exact GHC-loaded package interface selected for this exported
+    /// binder. First certified use attaches it only after the atomic native
+    /// install commits; later selections must match this same digest.
+    interface_digest: Option<[u8; 32]>,
 }
 
 /// The generation every code export is offered at. Package code is fixed for
@@ -2182,8 +2242,14 @@ impl PreparedEngine {
             let Ok(handle) = self.machine.retain_export_top(program, value) else {
                 continue;
             };
-            self.code_exports
-                .insert(identity, CodeExport { handle, entry });
+            self.code_exports.insert(
+                identity,
+                CodeExport {
+                    handle,
+                    entry,
+                    interface_digest: None,
+                },
+            );
         }
     }
 
@@ -2383,13 +2449,13 @@ impl PreparedEngine {
                 }
             }
         }
-
         let facts: Vec<_> = demanded
             .iter()
             .map(|selected| ProgramFacts::of_definitions(selected.group().definitions(), None))
             .collect();
         let plans = self.plan_batch_evidence(&facts)?;
         let mut programs = Vec::with_capacity(demanded.len());
+        let mut package_updates = BTreeMap::new();
         for selected in &demanded {
             let group = selected.group();
             let mut imports = Vec::with_capacity(group.imports().len());
@@ -2423,18 +2489,39 @@ impl PreparedEngine {
                             entry_signature: None,
                         });
                     }
-                    ImportOwner::Package { .. } => {
+                    ImportOwner::Package {
+                        unit,
+                        module,
+                        binder,
+                        interface_digest,
+                    } => {
                         let handle = exact_external.get(owner).copied().ok_or_else(|| {
                             PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
                         })?;
-                        let entry_signature = self
+                        let export = self
                             .code_exports
-                            .get(&declaration.identity)
-                            .filter(|export| export.handle == handle)
-                            .and_then(|export| export.entry.clone());
+                            .get(binder)
+                            .filter(|export| {
+                                export.handle == handle
+                                    && declaration.identity == *binder
+                                    && binder.unit == *unit
+                                    && binder.module == *module
+                                    && export
+                                        .interface_digest
+                                        .is_none_or(|known| known == *interface_digest)
+                            })
+                            .ok_or_else(|| {
+                                PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
+                            })?;
+                        if package_updates
+                            .insert(binder.clone(), *interface_digest)
+                            .is_some_and(|previous| previous != *interface_digest)
+                        {
+                            return Err(PreparedRuntimeError::MissingCertifiedOwner(owner.clone()));
+                        }
                         imports.push(BatchImport::Existing {
                             handle,
-                            entry_signature,
+                            entry_signature: export.entry.clone(),
                         });
                     }
                 }
@@ -2449,6 +2536,12 @@ impl PreparedEngine {
             .machine
             .install_shared_batch(programs)
             .map_err(PreparedRuntimeError::Run)?;
+        for (binder, digest) in package_updates {
+            self.code_exports
+                .get_mut(&binder)
+                .expect("preflighted package export remains installed")
+                .interface_digest = Some(digest);
+        }
         for ((id, facts), plan) in ids.iter().copied().zip(facts).zip(plans) {
             self.machine
                 .pin(id)
@@ -2458,6 +2551,422 @@ impl PreparedEngine {
         }
         self.installs_since_major += ids.len();
         Ok(ids)
+    }
+
+    /// Install one executable target and only its newly demanded certified
+    /// source groups in a single native transaction. Existing source imports
+    /// are selected by exact lexical instance leases supplied by the caller;
+    /// this method never searches a machine-global mutable-instance cache.
+    /// The returned source tokens must be admitted to scoped custody before
+    /// the pins on `groups` are released.
+    pub(crate) fn install_certified_turn(
+        &mut self,
+        target: CertifiedTargetImage,
+        target_owners: &[ImportOwner],
+        source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
+        demanded: Vec<DemandedImage<'_>>,
+        inherited_needed: &[InheritedSourceDemand<'_>],
+        inherited: &BTreeMap<SourceBinder, SourceInstanceLease>,
+        exact_external: &HashMap<ImportOwner, PreparedHandle>,
+        bindings: &BindingTable,
+    ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
+        if target.prepared.globals().len() != target_owners.len() {
+            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+        }
+        for (declaration, owner) in target.prepared.globals().iter().zip(target_owners) {
+            let aligned = match owner {
+                ImportOwner::Source { binder, .. } => {
+                    binder == &declaration.identity && declaration.required_generation.is_none()
+                }
+                ImportOwner::Retained { generation, .. } => {
+                    declaration.required_generation == Some(*generation)
+                }
+                ImportOwner::Package {
+                    unit,
+                    module,
+                    binder,
+                    ..
+                } => {
+                    binder == &declaration.identity
+                        && &binder.unit == unit
+                        && &binder.module == module
+                        && declaration.required_generation.is_none()
+                }
+            };
+            if !aligned {
+                return Err(PreparedRuntimeError::CertifiedTargetOwners);
+            }
+        }
+
+        let mut source = BTreeMap::<SourceBinder, (usize, ValueId)>::new();
+        for (index, selected) in demanded.iter().enumerate() {
+            let group = selected.group();
+            for binder in group.binders() {
+                let id = group
+                    .definitions()
+                    .bindings()
+                    .iter()
+                    .flat_map(|binding| match binding {
+                        Group::NonRecursive(top) => std::slice::from_ref(top),
+                        Group::Recursive(tops) => tops.as_slice(),
+                    })
+                    .find(|top| &top.identity == binder)
+                    .map(|top| top.binding.id)
+                    .ok_or_else(|| {
+                        DemandError::MissingSource(SourceBinder {
+                            version: group.owner().module_version.clone(),
+                            binder: binder.clone(),
+                        })
+                    })?;
+                let key = SourceBinder {
+                    version: group.owner().module_version.clone(),
+                    binder: binder.clone(),
+                };
+                if inherited.contains_key(&key) || source.insert(key.clone(), (index, id)).is_some()
+                {
+                    return Err(DemandError::DuplicateBinder(key).into());
+                }
+            }
+        }
+
+        let mut late_sources = BTreeMap::new();
+        for requested in inherited_needed {
+            let key = requested.binder().clone();
+            if inherited.contains_key(&key)
+                || source.contains_key(&key)
+                || late_sources.insert(key.clone(), requested).is_some()
+            {
+                return Err(DemandError::DuplicateBinder(key).into());
+            }
+        }
+
+        let mut pending = target_owners
+            .iter()
+            .filter_map(|owner| match owner {
+                ImportOwner::Source { version, binder } => Some(SourceBinder {
+                    version: version.clone(),
+                    binder: binder.clone(),
+                }),
+                ImportOwner::Retained { .. } | ImportOwner::Package { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let mut reachable = BTreeSet::new();
+        let mut needed_late = BTreeSet::new();
+        while let Some(binder) = pending.pop() {
+            if let Some(&(index, _)) = source.get(&binder) {
+                if reachable.insert(index) {
+                    pending.extend(
+                        demanded[index]
+                            .group()
+                            .imports()
+                            .iter()
+                            .filter_map(|owner| match owner {
+                                ImportOwner::Source { version, binder } => Some(SourceBinder {
+                                    version: version.clone(),
+                                    binder: binder.clone(),
+                                }),
+                                ImportOwner::Retained { .. } | ImportOwner::Package { .. } => None,
+                            }),
+                    );
+                }
+            } else if late_sources.contains_key(&binder) {
+                needed_late.insert(binder);
+            } else if !inherited.contains_key(&binder) {
+                return Err(DemandError::MissingSource(binder).into());
+            }
+        }
+        if reachable.len() != demanded.len() || needed_late.len() != late_sources.len() {
+            return Err(PreparedRuntimeError::UnreachableCertifiedGroup);
+        }
+
+        for owner in target_owners.iter().chain(
+            demanded
+                .iter()
+                .flat_map(|selected| selected.group().imports()),
+        ) {
+            let ImportOwner::Source { version, binder } = owner else {
+                continue;
+            };
+            let key = SourceBinder {
+                version: version.clone(),
+                binder: binder.clone(),
+            };
+            let expected = source_evidence
+                .get(&key)
+                .ok_or_else(|| PreparedRuntimeError::InvalidCertifiedSourceOwner(key.clone()))?;
+            let actual = if let Some(&(index, _)) = source.get(&key) {
+                let group = demanded[index].group();
+                (group.owner(), group.original_ordinal())
+            } else if let Some(lease) = inherited.get(&key) {
+                (lease.owner(), lease.original_ordinal())
+            } else if let Some(requested) = late_sources.get(&key) {
+                (
+                    requested.group().owner(),
+                    requested.group().original_ordinal(),
+                )
+            } else {
+                return Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(key));
+            };
+            if actual.0 != &expected.0 || actual.1 != expected.1 {
+                return Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(key));
+            }
+        }
+
+        let mut late_leases = BTreeMap::new();
+        for (key, requested) in late_sources {
+            match self.machine.retain_certified_source_top(
+                requested.anchor(),
+                requested.group(),
+                &key,
+            ) {
+                Ok(lease) => {
+                    late_leases.insert(key, lease);
+                }
+                Err(error) => {
+                    for lease in late_leases.into_values() {
+                        assert!(
+                            self.release(lease.handle()),
+                            "staged sibling source root remains live"
+                        );
+                    }
+                    return Err(PreparedRuntimeError::Run(error));
+                }
+            }
+        }
+
+        let result = (|| -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
+            let mut facts: Vec<_> = demanded
+                .iter()
+                .map(|selected| ProgramFacts::of_definitions(selected.group().definitions(), None))
+                .collect();
+            facts.push(ProgramFacts::of(&target.prepared));
+            let plans = self.plan_batch_evidence(&facts)?;
+            let exports = exportable_code_tops(&target.prepared);
+            let mut programs = Vec::with_capacity(demanded.len() + 1);
+            let mut package_updates = BTreeMap::<SymbolIdentity, [u8; 32]>::new();
+            let mut source_needed = BTreeSet::<SourceBinder>::new();
+
+            let mut append = |image: Arc<CompiledProgram>,
+                              globals: &[tidepool_repr::execution_schema::GlobalDecl],
+                              owners: &[ImportOwner]|
+             -> Result<(), PreparedRuntimeError> {
+                let mut imports = Vec::with_capacity(owners.len());
+                for (declaration, owner) in globals.iter().zip(owners) {
+                    let import = match owner {
+                        ImportOwner::Source { version, binder } => {
+                            let key = SourceBinder {
+                                version: version.clone(),
+                                binder: binder.clone(),
+                            };
+                            if let Some(&(group, binding)) = source.get(&key) {
+                                source_needed.insert(key);
+                                BatchImport::Source { group, binding }
+                            } else {
+                                let lease = inherited
+                                    .get(&key)
+                                    .or_else(|| late_leases.get(&key))
+                                    .filter(|lease| {
+                                        lease.binder() == &key
+                                            && lease.owner().module_version == *version
+                                            && lease.owner().unit == binder.unit
+                                            && lease.owner().module == binder.module
+                                    })
+                                    .ok_or_else(|| DemandError::MissingSource(key.clone()))?;
+                                self.machine
+                                    .handle_is_evaluated(lease.handle())
+                                    .map_err(PreparedRuntimeError::Run)?;
+                                BatchImport::Existing {
+                                    handle: lease.handle(),
+                                    entry_signature: lease.entry_signature().cloned(),
+                                }
+                            }
+                        }
+                        ImportOwner::Retained { id, generation } => {
+                            let entry = bindings.get(*id).ok_or_else(|| {
+                                PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
+                            })?;
+                            let handle = exact_external.get(owner).copied().ok_or_else(|| {
+                                PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
+                            })?;
+                            if entry.module.gen().0 != *generation
+                                || entry.value.identity != declaration.identity
+                                || entry.value.handle != handle
+                            {
+                                return Err(PreparedRuntimeError::MissingCertifiedOwner(
+                                    owner.clone(),
+                                ));
+                            }
+                            BatchImport::Existing {
+                                handle,
+                                entry_signature: None,
+                            }
+                        }
+                        ImportOwner::Package {
+                            unit,
+                            module,
+                            binder,
+                            interface_digest,
+                        } => {
+                            let handle = exact_external.get(owner).copied().ok_or_else(|| {
+                                PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
+                            })?;
+                            let export = self
+                                .code_exports
+                                .get(binder)
+                                .filter(|export| {
+                                    export.handle == handle
+                                        && declaration.identity == *binder
+                                        && binder.unit == *unit
+                                        && binder.module == *module
+                                        && export
+                                            .interface_digest
+                                            .is_none_or(|known| known == *interface_digest)
+                                })
+                                .ok_or_else(|| {
+                                    PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
+                                })?;
+                            if package_updates
+                                .insert(binder.clone(), *interface_digest)
+                                .is_some_and(|previous| previous != *interface_digest)
+                            {
+                                return Err(PreparedRuntimeError::MissingCertifiedOwner(
+                                    owner.clone(),
+                                ));
+                            }
+                            BatchImport::Existing {
+                                handle,
+                                entry_signature: export.entry.clone(),
+                            }
+                        }
+                    };
+                    imports.push(import);
+                }
+                programs.push(BatchProgram { image, imports });
+                Ok(())
+            };
+            for selected in &demanded {
+                append(
+                    Arc::clone(selected.image()),
+                    selected.group().definitions().globals(),
+                    selected.group().imports(),
+                )?;
+            }
+            append(
+                Arc::clone(&target.image),
+                target.prepared.globals(),
+                target_owners,
+            )?;
+            drop(append);
+            let requests = source_needed
+                .iter()
+                .map(|binder| {
+                    let &(group, _) = source
+                        .get(binder)
+                        .expect("source edge selected an in-batch binder");
+                    BatchLeaseRequest::for_demanded(group, &demanded[group], binder)
+                        .map_err(PreparedRuntimeError::Run)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let installed = self
+                .machine
+                .install_shared_batch_with_leases(programs, requests)
+                .map_err(PreparedRuntimeError::Run)?;
+            let target_id = *installed
+                .programs
+                .last()
+                .expect("target is always the final batch candidate");
+            for id in installed.programs.iter().copied() {
+                self.machine
+                    .pin(id)
+                    .expect("batch returned installed program");
+            }
+            Ok(CertifiedTurnInstall {
+                target: target_id,
+                groups: installed.programs[..installed.programs.len() - 1].to_vec(),
+                leases: installed.leases,
+                facts,
+                plans,
+                exports,
+                package_updates,
+            })
+        })();
+        match result {
+            Ok(mut staged) => {
+                staged.leases.extend(late_leases.into_values());
+                Ok(staged)
+            }
+            Err(error) => {
+                for lease in late_leases.into_values() {
+                    assert!(
+                        self.release(lease.handle()),
+                        "failed install retains sibling source root"
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Publish the staged native batch only after scope custody accepted all
+    /// source lease tokens. Its machine programs are pinned but invisible to
+    /// the session's facts, site and package-export ledgers until this call.
+    pub(crate) fn commit_certified_turn(&mut self, staged: CertifiedTurnInstall) -> ProgramId {
+        assert!(
+            staged.leases.is_empty(),
+            "source leases must enter scope custody"
+        );
+        for (binder, digest) in staged.package_updates {
+            self.code_exports
+                .get_mut(&binder)
+                .expect("preflighted package export remains installed")
+                .interface_digest = Some(digest);
+        }
+        let programs = staged
+            .groups
+            .iter()
+            .copied()
+            .chain(std::iter::once(staged.target));
+        for ((id, facts), plan) in programs.zip(staged.facts).zip(staged.plans) {
+            self.programs.insert(id, facts);
+            self.publish_evidence(id, plan);
+        }
+        self.publish_code_exports(staged.target, staged.exports);
+        self.installs_since_major += staged.groups.len() + 1;
+        for group in staged.groups {
+            assert!(self.unpin(group), "scoped source root replaces install pin");
+        }
+        staged.target
+    }
+
+    /// Discard an unpublished native batch after scope admission refuses its
+    /// tokens. No session metadata or package roots were committed, so once
+    /// these exact machine handles/pins release, collection retires the batch.
+    pub(crate) fn abort_certified_turn(
+        &mut self,
+        staged: CertifiedTurnInstall,
+        tokens: Vec<SourceInstanceLease>,
+    ) -> Result<(), PreparedRuntimeError> {
+        assert!(
+            staged.leases.is_empty(),
+            "returned tokens are passed separately"
+        );
+        for token in tokens {
+            assert!(
+                self.release(token.handle()),
+                "rejected source token remains rooted"
+            );
+        }
+        for program in staged
+            .groups
+            .into_iter()
+            .chain(std::iter::once(staged.target))
+        {
+            assert!(
+                self.unpin(program),
+                "unpublished program retains its install pin"
+            );
+        }
+        self.quiesce_and_collect_now()
     }
 
     /// Step (a) of the off-checkout split install: resolve `prepared`'s
@@ -3969,6 +4478,25 @@ mod tests {
         .unwrap()
     }
 
+    fn certified_source_evidence(
+        groups: &[tidepool_repr::execution_schema::CertifiedGroup],
+    ) -> BTreeMap<SourceBinder, (CachedHomeOwner, u32)> {
+        groups
+            .iter()
+            .flat_map(|group| {
+                group.binders().iter().map(move |binder| {
+                    (
+                        SourceBinder {
+                            version: group.owner().module_version.clone(),
+                            binder: binder.clone(),
+                        },
+                        (group.owner().clone(), group.original_ordinal()),
+                    )
+                })
+            })
+            .collect()
+    }
+
     #[test]
     fn certified_demand_installs_cyclic_groups_with_distinct_instances() {
         use tidepool_codegen::prepared_program::GroupInventory;
@@ -4016,6 +4544,524 @@ mod tests {
         assert_eq!(engine.residency().programs, 1);
         assert_eq!(engine.programs.len(), 1);
         assert!(engine.programs.contains_key(&base));
+    }
+
+    #[test]
+    fn certified_target_and_reachable_groups_install_with_source_leases() {
+        use tidepool_codegen::prepared_program::GroupInventory;
+        use tidepool_repr::execution_schema::{ImportOwner, ModuleVersion};
+        let groups = [
+            certified_source_group("a", 2, "b"),
+            certified_source_group("b", 7, "a"),
+            certified_source_group("unused", 12, "unused"),
+        ];
+        let source_evidence = certified_source_evidence(&groups);
+        let root = SourceBinder {
+            version: ModuleVersion([1; 32]),
+            binder: testing::identity("Fixture", "a"),
+        };
+        let registry = ImageRegistry::new();
+        let demand = GroupInventory::new(&groups)
+            .unwrap()
+            .seal([root.clone()])
+            .unwrap();
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.expressions.nodes[0] =
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
+        wire.globals.push(GlobalDecl {
+            identity: root.binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        });
+        let target =
+            CertifiedTargetImage::compile(testing::prepare(wire).unwrap(), &registry).unwrap();
+        let target_prepared = target.prepared.clone();
+        let owner = ImportOwner::Source {
+            version: root.version.clone(),
+            binder: root.binder.clone(),
+        };
+        let (mut engine, bootstrap) =
+            PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
+        let before = engine.residency();
+        let mut wrong_source_evidence = source_evidence.clone();
+        wrong_source_evidence
+            .get_mut(&root)
+            .unwrap()
+            .0
+            .product_sha256 = [99; 32];
+        assert!(matches!(
+            engine.install_certified_turn(
+                CertifiedTargetImage::compile(target.prepared.clone(), &registry).unwrap(),
+                &[owner.clone()],
+                &wrong_source_evidence,
+                demand.compile(&registry).unwrap(),
+                &[],
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &BindingTable::new(),
+            ),
+            Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(_))
+        ));
+        assert_eq!(engine.residency(), before);
+        assert!(matches!(
+            engine.install_certified_turn(
+                CertifiedTargetImage::compile(target.prepared.clone(), &registry).unwrap(),
+                &[],
+                &source_evidence,
+                demand.compile(&registry).unwrap(),
+                &[],
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &BindingTable::new(),
+            ),
+            Err(PreparedRuntimeError::CertifiedTargetOwners)
+        ));
+        assert_eq!(engine.residency(), before);
+        let with_unused = GroupInventory::new(&groups)
+            .unwrap()
+            .seal([
+                root.clone(),
+                SourceBinder {
+                    version: ModuleVersion([1; 32]),
+                    binder: testing::identity("Fixture", "unused"),
+                },
+            ])
+            .unwrap();
+        assert!(matches!(
+            engine.install_certified_turn(
+                CertifiedTargetImage::compile(target.prepared.clone(), &registry).unwrap(),
+                &[owner.clone()],
+                &source_evidence,
+                with_unused.compile(&registry).unwrap(),
+                &[],
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &BindingTable::new(),
+            ),
+            Err(PreparedRuntimeError::UnreachableCertifiedGroup)
+        ));
+        assert_eq!(engine.residency(), before);
+        let mut installed = engine
+            .install_certified_turn(
+                target,
+                &[owner],
+                &source_evidence,
+                demand.compile(&registry).unwrap(),
+                &[],
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &BindingTable::new(),
+            )
+            .unwrap();
+        assert_eq!(installed.groups.len(), 2);
+        assert_eq!(installed.leases.len(), 2);
+        assert!(!engine.programs.contains_key(&installed.target));
+        let installed_target = installed.target;
+        let installed_groups = installed.groups.clone();
+        let installed_leases = std::mem::take(&mut installed.leases);
+        assert_eq!(engine.commit_certified_turn(installed), installed_target);
+        assert_eq!(engine.programs[&installed_target].entry, Some(ValueId(0)));
+        assert!(installed_groups
+            .iter()
+            .all(|id| engine.programs[id].entry.is_none()));
+        let selected = installed_leases
+            .iter()
+            .find(|lease| lease.binder() == &root)
+            .unwrap();
+        let result = engine
+            .machine
+            .run_entry_retained(
+                installed_target,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 0,
+                    collect_before_observation: false,
+                },
+                tidepool_codegen::suspension::RealmId::ROOT,
+            )
+            .unwrap();
+        let [PreparedResult::Managed(returned)] = result.values.as_slice() else {
+            panic!("target must return a certified source closure");
+        };
+        assert_eq!(returned.rep(), selected.handle().rep());
+        assert!(engine
+            .machine
+            .handle_is_evaluated(selected.handle())
+            .is_ok());
+        assert!(engine.machine.release(*returned));
+        let inherited = BTreeMap::from([(root.clone(), selected.clone())]);
+        let reused = engine
+            .install_certified_turn(
+                CertifiedTargetImage::compile(target_prepared.clone(), &registry).unwrap(),
+                &[ImportOwner::Source {
+                    version: root.version.clone(),
+                    binder: root.binder.clone(),
+                }],
+                &source_evidence,
+                vec![],
+                &[],
+                &inherited,
+                &HashMap::new(),
+                &BindingTable::new(),
+            )
+            .unwrap();
+        assert!(reused.groups.is_empty());
+        assert!(reused.leases.is_empty());
+        assert_ne!(reused.target, installed_target);
+        let reused_target = reused.target;
+        assert_eq!(engine.commit_certified_turn(reused), reused_target);
+        assert!(engine.unpin(reused_target));
+        let mut scopes = tidepool_codegen::scope::ScopeTree::new();
+        let source_scope = scopes.mint_isolated();
+        let capture_scope = scopes.mint_isolated();
+        let mut bindings = BindingTable::new();
+        let keys = bindings
+            .register_source_instances_in(&scopes, source_scope, installed_leases)
+            .unwrap();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(bindings.source_instances_in(&scopes, source_scope).len(), 2);
+        bindings.seed_detached_scope(&scopes, source_scope, capture_scope);
+        assert_eq!(
+            bindings.source_instances_in(&scopes, capture_scope).len(),
+            2
+        );
+        assert!(engine.unpin(installed_target));
+        assert_eq!(scopes.retire(source_scope), vec![source_scope]);
+        assert!(bindings
+            .drain_scope_with_sources(source_scope)
+            .source_instances
+            .is_empty());
+        engine.quiesce_and_collect_now().unwrap();
+        assert_eq!(engine.residency().programs, 3);
+        assert_eq!(
+            bindings.source_instances_in(&scopes, capture_scope).len(),
+            2
+        );
+        assert_eq!(scopes.retire(capture_scope), vec![capture_scope]);
+        let retired = bindings
+            .drain_scope_with_sources(capture_scope)
+            .source_instances;
+        assert_eq!(retired.len(), 2);
+        for lease in retired {
+            assert!(engine.release(lease.handle()));
+        }
+        engine.quiesce_and_collect_now().unwrap();
+        assert_eq!(engine.residency().programs, 1);
+        let before_abort = (
+            engine.residency(),
+            engine.code_export_count(),
+            engine.programs.len(),
+            engine.sites.len(),
+            engine.verb_sites.len(),
+        );
+        let mut aborted = engine
+            .install_certified_turn(
+                CertifiedTargetImage::compile(target_prepared, &registry).unwrap(),
+                &[ImportOwner::Source {
+                    version: root.version.clone(),
+                    binder: root.binder.clone(),
+                }],
+                &source_evidence,
+                demand.compile(&registry).unwrap(),
+                &[],
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &bindings,
+            )
+            .unwrap();
+        let dead_scope = scopes.mint_isolated();
+        assert_eq!(scopes.retire(dead_scope), vec![dead_scope]);
+        let rejected_tokens = std::mem::take(&mut aborted.leases);
+        let returned = bindings
+            .register_source_instances_in(&scopes, dead_scope, rejected_tokens)
+            .unwrap_err();
+        assert_eq!(returned.len(), 2);
+        assert!(bindings
+            .source_instances_in(&scopes, source_scope)
+            .is_empty());
+        assert!(bindings
+            .source_instances_in(&scopes, capture_scope)
+            .is_empty());
+        assert!(!engine.programs.contains_key(&aborted.target));
+        assert_eq!(engine.code_export_count(), before_abort.1);
+        engine.abort_certified_turn(aborted, returned).unwrap();
+        assert_eq!(
+            (
+                engine.residency(),
+                engine.code_export_count(),
+                engine.programs.len(),
+                engine.sites.len(),
+                engine.verb_sites.len(),
+            ),
+            before_abort,
+        );
+        assert!(engine.unpin(bootstrap));
+    }
+
+    #[test]
+    fn certified_target_registration_uses_exact_persistent_scope_custody() {
+        use tidepool_codegen::prepared_program::GroupInventory;
+        use tidepool_repr::execution_schema::{ImportOwner, ModuleVersion};
+
+        let groups = [
+            certified_source_group("a", 2, "b"),
+            certified_source_group("b", 7, "a"),
+        ];
+        let root = SourceBinder {
+            version: ModuleVersion([1; 32]),
+            binder: testing::identity("Fixture", "a"),
+        };
+        let registry = ImageRegistry::new();
+        let demand = GroupInventory::new(&groups)
+            .unwrap()
+            .seal([root.clone()])
+            .unwrap();
+        let mut wire = testing::wire_program();
+        wire.globals.push(GlobalDecl {
+            identity: root.binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        });
+        let target =
+            CertifiedTargetImage::compile(testing::prepare(wire).unwrap(), &registry).unwrap();
+        let owner = ImportOwner::Source {
+            version: root.version.clone(),
+            binder: root.binder.clone(),
+        };
+        let source_evidence = BTreeMap::from([
+            (root, (groups[0].owner().clone(), groups[0].original_ordinal())),
+            (
+                SourceBinder {
+                    version: ModuleVersion([1; 32]),
+                    binder: testing::identity("Fixture", "b"),
+                },
+                (groups[1].owner().clone(), groups[1].original_ordinal()),
+            ),
+        ]);
+        let mut session = super::super::persistent::PersistentSession::new(None, 1024 * 1024);
+        session
+            .install_prepared(testing::prepare(testing::wire_program()).unwrap())
+            .unwrap();
+        let scope = session.mint_isolated_scope();
+        session
+            .install_certified_turn_in(
+                scope,
+                target,
+                &[owner],
+                &source_evidence,
+                demand.compile(&registry).unwrap(),
+                &[],
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            session
+                .bindings()
+                .source_instances_in(session.scope_tree(), scope)
+                .len(),
+            2
+        );
+        assert!(session.residency().unwrap().programs >= 4);
+        assert!(matches!(
+            session.install_certified_turn_in(
+                tidepool_codegen::scope::ScopeId(u64::MAX),
+                CertifiedTargetImage::compile(
+                    testing::prepare(testing::wire_program()).unwrap(),
+                    &registry,
+                )
+                .unwrap(),
+                &[],
+                &BTreeMap::new(),
+                Vec::new(),
+                &[],
+                &HashMap::new(),
+            ),
+            Err(PreparedRuntimeError::SourceScopeAdmission)
+        ));
+        assert!(session.residency().unwrap().programs >= 4);
+    }
+
+    #[test]
+    fn later_sibling_binder_reuses_exact_scoped_group_instance() {
+        use tidepool_codegen::prepared_program::GroupInventory;
+        use tidepool_repr::execution_schema::{
+            CachedHomeOwner, CertifiedGroup, ImportOwner, ModuleVersion,
+        };
+
+        let mut group_wire = testing::wire_program();
+        let Group::NonRecursive(mut first) = group_wire.bindings[0].clone() else {
+            unreachable!()
+        };
+        first.identity = testing::identity("Fixture", "a");
+        let mut sibling = first.clone();
+        sibling.identity = testing::identity("Fixture", "b");
+        sibling.binding.id = ValueId(1);
+        group_wire
+            .expressions
+            .nodes
+            .push(group_wire.expressions.nodes[0].clone());
+        if let tidepool_repr::execution_schema::HeapRhs::Function { body, .. } =
+            &mut sibling.binding.rhs
+        {
+            *body = 1;
+        }
+        group_wire.bindings = vec![Group::Recursive(vec![first, sibling])];
+        let projected = testing::projected_group(group_wire, 11).unwrap();
+        let group = CertifiedGroup::admit(
+            CachedHomeOwner {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                module_version: ModuleVersion([1; 32]),
+                skinny_iface_sha256: [2; 32],
+                product_sha256: [3; 32],
+            },
+            projected.clone(),
+            vec![],
+        )
+        .unwrap();
+        let groups = [group];
+        let source_evidence = certified_source_evidence(&groups);
+        let inventory = GroupInventory::new(&groups).unwrap();
+        let binder = |name| SourceBinder {
+            version: ModuleVersion([1; 32]),
+            binder: testing::identity("Fixture", name),
+        };
+        let target = |name: &str, registry: &ImageRegistry| {
+            let mut wire = testing::wire_program();
+            wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+            wire.expressions.nodes[0] =
+                ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
+            wire.globals.push(GlobalDecl {
+                identity: testing::identity("Fixture", name),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                required_generation: None,
+            });
+            CertifiedTargetImage::compile(testing::prepare(wire).unwrap(), registry).unwrap()
+        };
+        let registry = ImageRegistry::new();
+        let (mut engine, bootstrap) =
+            PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
+        let first_demand = inventory.seal([binder("a")]).unwrap();
+        let mut first = engine
+            .install_certified_turn(
+                target("a", &registry),
+                &[ImportOwner::Source {
+                    version: ModuleVersion([1; 32]),
+                    binder: binder("a").binder,
+                }],
+                &source_evidence,
+                first_demand.compile(&registry).unwrap(),
+                &[],
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &BindingTable::new(),
+            )
+            .unwrap();
+        assert_eq!(first.groups.len(), 1);
+        let first_target = first.target;
+        let mut first_leases = std::mem::take(&mut first.leases);
+        assert_eq!(first_leases.len(), 1);
+        assert_eq!(engine.commit_certified_turn(first), first_target);
+        assert!(engine.unpin(first_target));
+        let anchor = first_leases.pop().unwrap();
+        let existing = BTreeMap::from([(binder("a"), anchor.clone())]);
+        let anchors = HashMap::from([((groups[0].owner().clone(), 11), anchor.clone())]);
+        let mut wrong_owner = groups[0].owner().clone();
+        wrong_owner.product_sha256 = [9; 32];
+        let wrong_groups = [CertifiedGroup::admit(wrong_owner, projected, vec![]).unwrap()];
+        assert!(matches!(
+            GroupInventory::new(&wrong_groups)
+                .unwrap()
+                .seal_with_inherited([binder("a")], &existing, &anchors),
+            Err(DemandError::InvalidInheritedInstance(_))
+        ));
+        let already_rooted = inventory
+            .seal_with_inherited([binder("a")], &existing, &anchors)
+            .unwrap();
+        assert_eq!(already_rooted.groups().len(), 0);
+        assert!(already_rooted.inherited_demands().is_empty());
+        let sibling_demand = inventory
+            .seal_with_inherited([binder("b")], &existing, &anchors)
+            .unwrap();
+        assert_eq!(sibling_demand.groups().len(), 0);
+        assert_eq!(sibling_demand.inherited_demands().len(), 1);
+        let group_misses = registry.misses();
+        assert!(sibling_demand.compile(&registry).unwrap().is_empty());
+        assert_eq!(registry.misses(), group_misses);
+        let mut bad_wire = testing::wire_program();
+        bad_wire.signatures.push(Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        });
+        bad_wire.globals.push(GlobalDecl {
+            identity: binder("b").binder,
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: Some(SignatureId(1)),
+            required_evaluated: false,
+            required_generation: None,
+        });
+        let before_bad = engine.residency();
+        let bad_result = engine.install_certified_turn(
+            CertifiedTargetImage::compile(testing::prepare(bad_wire).unwrap(), &registry).unwrap(),
+            &[ImportOwner::Source {
+                version: ModuleVersion([1; 32]),
+                binder: binder("b").binder,
+            }],
+            &source_evidence,
+            vec![],
+            sibling_demand.inherited_demands(),
+            &existing,
+            &HashMap::new(),
+            &BindingTable::new(),
+        );
+        assert!(
+            matches!(
+                &bad_result,
+                Err(PreparedRuntimeError::Run(
+                    ExecutionError::BatchSourceContract(_)
+                ))
+            ),
+            "unexpected result: {:?}",
+            bad_result.err().map(|error| error.to_string())
+        );
+        assert_eq!(engine.residency(), before_bad);
+        let mut second = engine
+            .install_certified_turn(
+                target("b", &registry),
+                &[ImportOwner::Source {
+                    version: ModuleVersion([1; 32]),
+                    binder: binder("b").binder,
+                }],
+                &source_evidence,
+                vec![],
+                sibling_demand.inherited_demands(),
+                &existing,
+                &HashMap::new(),
+                &BindingTable::new(),
+            )
+            .unwrap();
+        assert!(second.groups.is_empty());
+        let second_target = second.target;
+        let mut second_leases = std::mem::take(&mut second.leases);
+        assert_eq!(second_leases.len(), 1);
+        let sibling = second_leases.pop().unwrap();
+        assert_eq!(sibling.instance(), anchor.instance());
+        assert_ne!(sibling.handle(), anchor.handle());
+        assert_eq!(engine.commit_certified_turn(second), second_target);
+        assert!(engine.unpin(second_target));
+        assert!(engine.release(anchor.handle()));
+        assert!(engine.release(sibling.handle()));
+        engine.quiesce_and_collect_now().unwrap();
+        assert_eq!(engine.residency().programs, 1);
+        assert!(engine.unpin(bootstrap));
     }
 
     #[test]
@@ -4068,6 +5114,112 @@ mod tests {
             Err(PreparedRuntimeError::MissingCertifiedOwner(missing)) if missing == owner
         ));
         assert_eq!(engine.residency(), before);
+    }
+
+    #[test]
+    fn package_interface_provenance_commits_only_after_native_install() {
+        use tidepool_codegen::prepared_program::GroupInventory;
+        use tidepool_repr::execution_schema::{
+            CachedHomeOwner, CertifiedGroup, ImportOwner, ModuleVersion,
+        };
+        let package = testing::identity("Fixture", "entry");
+        let owner = ImportOwner::Package {
+            unit: package.unit.clone(),
+            module: package.module.clone(),
+            binder: package.clone(),
+            interface_digest: [9; 32],
+        };
+        let group = |mismatched_signature: bool| {
+            let mut wire = testing::wire_program();
+            if let Group::NonRecursive(top) = &mut wire.bindings[0] {
+                top.identity = testing::identity("Fixture", "cached");
+            }
+            if mismatched_signature {
+                wire.signatures.push(Signature {
+                    arguments: vec![],
+                    results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+                });
+            }
+            wire.globals.push(GlobalDecl {
+                identity: package.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: mismatched_signature.then_some(SignatureId(1)),
+                required_evaluated: false,
+                required_generation: None,
+            });
+            CertifiedGroup::admit(
+                CachedHomeOwner {
+                    unit: "fixture".into(),
+                    module: "Fixture".into(),
+                    module_version: ModuleVersion([1; 32]),
+                    skinny_iface_sha256: [2; 32],
+                    product_sha256: [3; 32],
+                },
+                testing::projected_group(wire, 2).unwrap(),
+                vec![owner.clone()],
+            )
+            .unwrap()
+        };
+        let (mut engine, _) =
+            PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
+        let handle = engine.code_exports[&package].handle;
+        let exact = HashMap::from([(owner.clone(), handle)]);
+        fn selected<'a>(groups: &'a [CertifiedGroup]) -> Vec<DemandedImage<'a>> {
+            GroupInventory::new(groups)
+                .unwrap()
+                .seal([SourceBinder {
+                    version: ModuleVersion([1; 32]),
+                    binder: testing::identity("Fixture", "cached"),
+                }])
+                .unwrap()
+                .compile(&ImageRegistry::new())
+                .unwrap()
+        }
+        let bad = [group(true)];
+        assert!(engine
+            .install_certified_demand(selected(&bad), &exact, &BindingTable::new())
+            .is_err());
+        assert_eq!(engine.code_exports[&package].interface_digest, None);
+        let good = [group(false)];
+        let installed = engine
+            .install_certified_demand(selected(&good), &exact, &BindingTable::new())
+            .unwrap();
+        assert_eq!(installed.len(), 1);
+        assert_eq!(
+            engine.code_exports[&package].interface_digest,
+            Some([9; 32])
+        );
+        let wrong = ImportOwner::Package {
+            unit: package.unit.clone(),
+            module: package.module.clone(),
+            binder: package.clone(),
+            interface_digest: [8; 32],
+        };
+        let wrong_exact = HashMap::from([(wrong.clone(), handle)]);
+        // The native image is identical; only the newly claimed package owner
+        // differs. The already attached provenance must refuse it.
+        let mut wire = testing::wire_program();
+        if let Group::NonRecursive(top) = &mut wire.bindings[0] {
+            top.identity = testing::identity("Fixture", "cached");
+        }
+        wire.globals.push(GlobalDecl {
+            identity: package.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        });
+        let mismatched = CertifiedGroup::admit(
+            good[0].owner().clone(),
+            testing::projected_group(wire, 2).unwrap(),
+            vec![wrong.clone()],
+        )
+        .unwrap();
+        let wrong_groups = [mismatched];
+        assert!(matches!(
+            engine.install_certified_demand(selected(&wrong_groups), &wrong_exact, &BindingTable::new()),
+            Err(PreparedRuntimeError::MissingCertifiedOwner(rejected)) if rejected == wrong
+        ));
     }
 
     #[test]

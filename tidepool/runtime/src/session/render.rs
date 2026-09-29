@@ -168,34 +168,157 @@ pub struct DeclTurn {
     pub parent: Option<Generation>,
 }
 
-/// The ordered declaration log. `turns[i]` is generation `i + 1`
-/// (`Generation(0)` is the empty session, with no module).
+/// The sparse generation-addressed declaration graph. A reserved identity
+/// has no lexical meaning until a certified join commits it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DeclLog {
-    /// Turns in append order; `turns[i]` is generation `i + 1`.
-    pub turns: Vec<DeclTurn>,
+    /// Highest allocated identity, independent of public visibility.
+    high_water: Generation,
+    /// Sparse generation-addressed nodes; abandoned reservations remain
+    /// allocated without retaining empty vector slots up to high_water.
+    turns: BTreeMap<Generation, DeclarationSlot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DeclarationSlot {
+    Reserved,
+    Committed(DeclTurn),
+    Joined(JoinedDeclaration),
+}
+
+/// A compiler-certified merged declaration interface with a public lexical
+/// parent and exact private module provenance. Its interface artifact is
+/// retained by the toolchain cache; there is deliberately no source renderer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct JoinedDeclaration {
+    pub turn: DeclTurn,
+    pub original_modules: Vec<SessionModule>,
 }
 
 impl DeclLog {
     /// An empty log (`Generation(0)`, no turns).
     #[must_use]
     pub fn new() -> DeclLog {
-        DeclLog { turns: Vec::new() }
+        DeclLog {
+            high_water: Generation(0),
+            turns: BTreeMap::new(),
+        }
     }
 
-    /// The current generation = number of turns recorded. `Generation(0)` until
-    /// the first declaration.
+    /// Highest allocated generation. This includes invisible reservations and
+    /// is not a public visibility version.
     #[must_use]
     pub fn generation(&self) -> Generation {
-        Generation(self.turns.len() as u64)
+        self.high_water
     }
 
-    /// Append a turn (its `parent` must already be set by the caller —
+    /// Carry burned identities into a new incarnation before any declaration
+    /// is admitted. Recovery must not create a different module at an old G<n>.
+    pub(crate) fn restore_high_water(&mut self, high_water: Generation) -> bool {
+        if !self.turns.is_empty() || self.high_water != Generation(0) {
+            return false;
+        }
+        self.high_water = high_water;
+        true
+    }
+
+    /// Append a committed turn (its `parent` must already be set by the caller —
     /// `DeclLog` has no notion of scope and cannot infer it), returning the
     /// new (current) generation.
     pub fn push(&mut self, turn: DeclTurn) -> Generation {
-        self.turns.push(turn);
-        self.generation()
+        let generation = self.next_generation();
+        self.turns
+            .insert(generation, DeclarationSlot::Committed(turn));
+        generation
+    }
+
+    /// Allocate an immutable module identity before an off-checkout join
+    /// validation. A failed candidate leaves this slot reserved forever.
+    pub fn reserve(&mut self) -> Generation {
+        let generation = self.next_generation();
+        self.turns.insert(generation, DeclarationSlot::Reserved);
+        generation
+    }
+
+    fn next_generation(&mut self) -> Generation {
+        self.high_water = Generation(
+            self.high_water
+                .0
+                .checked_add(1)
+                .expect("declaration generation exhausted"),
+        );
+        self.high_water
+    }
+
+    pub(crate) fn commit_reserved(
+        &mut self,
+        generation: Generation,
+        joined: JoinedDeclaration,
+    ) -> bool {
+        if generation.0 == 0 {
+            return false;
+        }
+        let turn = &joined.turn;
+        if turn
+            .parent
+            .is_some_and(|parent| parent.0 >= generation.0 || self.turn(parent).is_none())
+        {
+            return false;
+        }
+        let Some(slot) = self.turns.get_mut(&generation) else {
+            return false;
+        };
+        if !matches!(slot, DeclarationSlot::Reserved) {
+            return false;
+        }
+        *slot = DeclarationSlot::Joined(joined);
+        true
+    }
+
+    pub fn turn(&self, generation: Generation) -> Option<&DeclTurn> {
+        match self.turns.get(&generation)? {
+            DeclarationSlot::Committed(turn) => Some(turn),
+            DeclarationSlot::Joined(joined) => Some(&joined.turn),
+            DeclarationSlot::Reserved => None,
+        }
+    }
+
+    pub fn turn_mut(&mut self, generation: Generation) -> Option<&mut DeclTurn> {
+        match self.turns.get_mut(&generation)? {
+            DeclarationSlot::Committed(turn) => Some(turn),
+            DeclarationSlot::Joined(joined) => Some(&mut joined.turn),
+            DeclarationSlot::Reserved => None,
+        }
+    }
+
+    pub fn pop_latest_committed(&mut self, generation: Generation) -> bool {
+        if generation != self.generation()
+            || !matches!(
+                self.turns.get(&generation),
+                Some(DeclarationSlot::Committed(_))
+            )
+        {
+            return false;
+        }
+        self.turns.insert(generation, DeclarationSlot::Reserved);
+        true
+    }
+
+    fn latest_committed(&self) -> Option<Generation> {
+        self.turns.iter().rev().find_map(|(generation, slot)| {
+            matches!(
+                slot,
+                DeclarationSlot::Committed(_) | DeclarationSlot::Joined(_)
+            )
+            .then_some(*generation)
+        })
+    }
+
+    fn is_joined(&self, generation: Generation) -> bool {
+        matches!(
+            self.turns.get(&generation),
+            Some(DeclarationSlot::Joined(_))
+        )
     }
 
     /// `tip`'s parent chain, oldest first, INCLUSIVE of `tip` itself — the
@@ -209,7 +332,10 @@ impl DeclLog {
         let mut cur = (tip.0 > 0).then_some(tip);
         while let Some(g) = cur {
             chain.push(g);
-            cur = self.turns[(g.0 - 1) as usize].parent;
+            cur = self
+                .turn(g)
+                .expect("scope tip must reference a committed declaration")
+                .parent;
         }
         chain.reverse();
         chain
@@ -237,7 +363,9 @@ impl DeclLog {
         let mut map: std::collections::BTreeMap<String, (ExportItem, u64)> =
             std::collections::BTreeMap::new();
         for g in self.chain_from_root(tip) {
-            let turn = &self.turns[(g.0 - 1) as usize];
+            let turn = self
+                .turn(g)
+                .expect("scope chain contains only committed nodes");
             for r in &turn.retracts {
                 map.remove(r);
             }
@@ -253,7 +381,7 @@ impl DeclLog {
     /// attached to a same-named declaration that shadowed it meanwhile.
     #[must_use]
     pub fn value_type_at(&self, generation: Generation, name: &str) -> Option<&str> {
-        let turn = self.turns.get((generation.0.checked_sub(1)?) as usize)?;
+        let turn = self.turn(generation)?;
         turn.value_types.get(name).map(String::as_str)
     }
 
@@ -272,7 +400,7 @@ impl DeclLog {
             if current.get(name) != Some(generation) || *generation == 0 {
                 continue;
             }
-            if let Some(turn) = self.turns.get_mut((*generation - 1) as usize) {
+            if let Some(turn) = self.turn_mut(Generation(*generation)) {
                 turn.value_types
                     .entry(name.clone())
                     .or_insert_with(|| ty.clone());
@@ -286,7 +414,9 @@ impl DeclLog {
     pub(crate) fn exports_at(&self, tip: Generation) -> Vec<ExportItem> {
         let mut exports = Vec::new();
         for g in self.chain_from_root(tip) {
-            let turn = &self.turns[(g.0 - 1) as usize];
+            let turn = self
+                .turn(g)
+                .expect("scope chain contains only committed nodes");
             for retracted in &turn.retracts {
                 exports.retain(|item: &ExportItem| item.head_name() != retracted);
             }
@@ -327,10 +457,12 @@ impl DeclLog {
     /// documented norm) never hit this.
     #[must_use]
     pub fn replayable_sources(&self) -> Vec<&str> {
-        let chain = self.chain_from_root(self.generation());
+        let chain = self.chain_from_root(self.latest_committed().unwrap_or(Generation(0)));
         let mut out: Vec<&str> = Vec::new();
         for (pos, &g) in chain.iter().enumerate() {
-            let turn = &self.turns[(g.0 - 1) as usize];
+            let turn = self
+                .turn(g)
+                .expect("scope chain contains only committed nodes");
             let heads: Vec<&str> = turn.items.iter().map(ExportItem::head_name).collect();
             // A turn's source is dropped once every head it introduced is later
             // redefined OR retracted (later IN THIS CHAIN) — the
@@ -339,7 +471,9 @@ impl DeclLog {
             let fully_superseded = !heads.is_empty()
                 && heads.iter().all(|h| {
                     chain[pos + 1..].iter().any(|&later_g| {
-                        let later = &self.turns[(later_g.0 - 1) as usize];
+                        let later = self
+                            .turn(later_g)
+                            .expect("scope chain contains only committed nodes");
                         later.items.iter().any(|it| it.head_name() == *h)
                             || later.retracts.iter().any(|r| r == h)
                     })
@@ -548,10 +682,12 @@ fn cumulative_exports_before(log: &DeclLog, gen_one_based: usize) -> Vec<ExportI
     // one-past-the-end query, e.g. "what would the next flat turn inherit")
     // fall back to the log's current tip — the pre-tree, positional meaning of
     // "everything defined so far".
-    let parent = if gen_one_based >= 1 && gen_one_based <= log.turns.len() {
-        log.turns[gen_one_based - 1].parent
+    let parent = if log.turn(Generation(gen_one_based as u64)).is_some() {
+        log.turn(Generation(gen_one_based as u64))
+            .expect("only committed declarations can be rendered")
+            .parent
     } else {
-        (log.generation().0 > 0).then_some(log.generation())
+        log.latest_committed()
     };
     let chain = match parent {
         Some(p) => log.chain_from_root(p),
@@ -559,7 +695,9 @@ fn cumulative_exports_before(log: &DeclLog, gen_one_based: usize) -> Vec<ExportI
     };
     let mut acc: Vec<ExportItem> = Vec::new();
     for g in chain {
-        let turn = &log.turns[(g.0 - 1) as usize];
+        let turn = log
+            .turn(g)
+            .expect("scope chain contains only committed nodes");
         let new_heads: Vec<&str> = turn.items.iter().map(ExportItem::head_name).collect();
         // A turn removes prior exports it either redefines OR retracts; then
         // re-adds its own. (A retraction adds nothing.)
@@ -572,9 +710,8 @@ fn cumulative_exports_before(log: &DeclLog, gen_one_based: usize) -> Vec<ExportI
     acc
 }
 
-/// Render generation `gen` (1-based; must be `1..=log.turns.len()`) as a
-/// `Tidepool.Session.Lib.G<gen>` module. Panics on an out-of-range generation
-/// (a caller bug — generations only ever count existing turns).
+/// Render a committed generation as a `Tidepool.Session.Lib.G<gen>` module.
+/// A reserved identity has no source to render.
 ///
 /// This turn's (and prior turns') decl heads are always hidden from every
 /// unqualified `env.imports` line (`Library`, `Tidepool.Prelude`, …) so a decl
@@ -607,12 +744,17 @@ pub fn render_module_with_vals(
 ) -> RenderedModule {
     let g = gen.0 as usize;
     assert!(
-        g >= 1 && g <= log.turns.len(),
-        "render_module: generation {g} out of range 1..={}",
-        log.turns.len()
+        log.turn(gen).is_some(),
+        "render_module: generation {g} is not committed"
     );
     let module = SessionModule::lib(gen);
-    let this = &log.turns[g - 1];
+    assert!(
+        !log.is_joined(gen),
+        "certified join interfaces have no source renderer"
+    );
+    let this = log
+        .turn(gen)
+        .expect("only committed declarations can be rendered");
     let prior = cumulative_exports_before(log, g);
 
     let mut hoisted_imports = this.external_imports.source_lines();
@@ -1262,7 +1404,7 @@ mod tests {
         push_chained(&mut log, turn("keep t = t", vec![val("keep")]));
         // Before retraction: both are live in every view.
         assert_eq!(heads(&log), vec!["findings", "keep"]);
-        let before = cumulative_exports_before(&log, log.turns.len() + 1);
+        let before = cumulative_exports_before(&log, log.generation().0 as usize + 1);
         assert!(before.iter().any(|e| e.head_name() == "findings"));
 
         // findings migrate to the persistent binding store → retract them.
@@ -1271,7 +1413,7 @@ mod tests {
         // current_heads, cumulative exports, and decl replay all drop it;
         // `keep` is untouched.
         assert_eq!(heads(&log), vec!["keep"]);
-        let after = cumulative_exports_before(&log, log.turns.len() + 1);
+        let after = cumulative_exports_before(&log, log.generation().0 as usize + 1);
         assert!(!after.iter().any(|e| e.head_name() == "findings"));
         assert!(after.iter().any(|e| e.head_name() == "keep"));
         // The migrated decl's source is dropped from a flat replay.
@@ -1310,7 +1452,7 @@ mod tests {
         // Re-defining the name brings it back (a later value→decl rebind).
         push_chained(&mut log, turn("findings = [1]", vec![val("findings")]));
         assert!(heads(&log).contains(&"findings".to_string()));
-        let exports = cumulative_exports_before(&log, log.turns.len() + 1);
+        let exports = cumulative_exports_before(&log, log.generation().0 as usize + 1);
         assert!(exports.iter().any(|e| e.head_name() == "findings"));
         assert!(log
             .replayable_sources()
@@ -1322,9 +1464,9 @@ mod tests {
     fn retracting_absent_name_leaves_exports_unchanged() {
         let mut log = DeclLog::new();
         push_chained(&mut log, turn("keep t = t", vec![val("keep")]));
-        let before = cumulative_exports_before(&log, log.turns.len() + 1);
+        let before = cumulative_exports_before(&log, log.generation().0 as usize + 1);
         push_chained(&mut log, retract_turn(&["never_defined"]));
-        let after = cumulative_exports_before(&log, log.turns.len() + 1);
+        let after = cumulative_exports_before(&log, log.generation().0 as usize + 1);
         assert_eq!(before, after, "retracting an absent name is a no-op fold");
     }
 
@@ -1340,13 +1482,53 @@ mod tests {
         push_chained(&mut log, turn("a = 1", vec![val("a")]));
         push_chained(&mut log, turn("b = 2", vec![val("b")]));
         push_chained(&mut log, turn("c = 3", vec![val("c")]));
-        assert_eq!(log.turns[0].parent, None);
-        assert_eq!(log.turns[1].parent, Some(Generation(1)));
-        assert_eq!(log.turns[2].parent, Some(Generation(2)));
+        assert_eq!(log.turn(Generation(1)).unwrap().parent, None);
+        assert_eq!(log.turn(Generation(2)).unwrap().parent, Some(Generation(1)));
+        assert_eq!(log.turn(Generation(3)).unwrap().parent, Some(Generation(2)));
 
         let r = render_module(&log, Generation(3), &ModuleEnv::standalone_default());
         assert!(r.source.contains("import Tidepool.Session.Lib.G2\n"));
         assert!(r.source.contains("module Tidepool.Session.Lib.G2,"));
+    }
+
+    #[test]
+    fn reserved_join_identity_does_not_enter_lexical_chain_or_get_reused() {
+        let mut log = DeclLog::new();
+        push_chained(&mut log, turn("public = 1", vec![val("public")]));
+        let reserved = log.reserve();
+        assert_eq!(reserved, Generation(2));
+        assert!(log.turn(reserved).is_none());
+        assert_eq!(log.replayable_sources(), vec!["public = 1"]);
+
+        let mut private = turn("private = 2", vec![val("private")]);
+        private.parent = Some(Generation(1));
+        let private_generation = log.push(private);
+        assert_eq!(private_generation, Generation(3));
+        assert_eq!(
+            log.chain_from_root(private_generation),
+            vec![Generation(1), Generation(3)]
+        );
+        let join = |turn| JoinedDeclaration {
+            turn,
+            original_modules: vec![SessionModule::lib(private_generation)],
+        };
+        assert!(!log.commit_reserved(private_generation, join(turn("bad = 3", vec![val("bad")]))));
+
+        let mut joined = turn("", vec![val("private")]);
+        joined.parent = Some(Generation(1));
+        assert!(log.commit_reserved(reserved, join(joined)));
+        assert!(!log.commit_reserved(reserved, join(turn("bad = 3", vec![val("bad")]))));
+        assert_eq!(
+            log.chain_from_root(reserved),
+            vec![Generation(1), Generation(2)]
+        );
+        assert_eq!(log.current_heads_at(reserved).len(), 2);
+        assert!(std::panic::catch_unwind(|| render_module(
+            &log,
+            reserved,
+            &ModuleEnv::standalone_default()
+        ))
+        .is_err());
     }
 
     #[test]

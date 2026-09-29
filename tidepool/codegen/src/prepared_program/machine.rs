@@ -80,7 +80,7 @@ use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, SymbolIdentity
 use tidepool_repr::{DataConId, PrincipalId};
 
 mod batch;
-pub use batch::{BatchImport, BatchProgram};
+pub use batch::{BatchImport, BatchInstallReceipt, BatchLeaseRequest, BatchProgram};
 
 /// A compiled program and its custody. Deliberately !Send: code custody, its
 /// VM context, and every live heap root stay on the thread that enters
@@ -122,6 +122,24 @@ impl ProgramCustody<'_> {
 /// `UnknownProgram` rather than aliasing a later install.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ProgramId(u32);
+
+/// One mutable installation of a certified original group. The same image
+/// can have several instances in one machine, each with separate CAFs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct GroupInstanceId(ProgramId);
+
+impl From<ProgramId> for GroupInstanceId {
+    fn from(program: ProgramId) -> Self {
+        Self(program)
+    }
+}
+
+impl GroupInstanceId {
+    #[must_use]
+    pub fn program(self) -> ProgramId {
+        self.0
+    }
+}
 
 /// One installation's code custody, instance identity, machine-local roots,
 /// and the descriptor/dispatch rows retirement must remove.
@@ -275,7 +293,7 @@ pub struct PreparedHandle {
 }
 
 impl PreparedHandle {
-    pub(super) fn new(raw: ValueHandle, rep: RuntimeRep) -> Self {
+    pub(crate) fn new(raw: ValueHandle, rep: RuntimeRep) -> Self {
         Self { raw, rep }
     }
 }
@@ -692,12 +710,22 @@ struct InstallTransaction<'a, 'code> {
     /// Nursery cursor after any capacity collection and before candidate
     /// objects. Rollback must not leave unregistered objects in the scan range.
     candidate_alloc_start: Option<*mut u8>,
+    /// Slots adopted for provisional handles after staging. No other slot
+    /// allocation interleaves before this transaction commits or rolls back.
+    adopted_slots_start: Option<usize>,
+    provisional_handles: Vec<PreparedHandle>,
     committed: bool,
 }
 
 impl Drop for InstallTransaction<'_, '_> {
     fn drop(&mut self) {
         if !self.committed {
+            for handle in self.provisional_handles.drain(..) {
+                self.machine.release(handle);
+            }
+            if let Some(mark) = self.adopted_slots_start {
+                self.machine.old_space.slots.truncate(mark);
+            }
             if let Some(start) = self.candidate_alloc_start {
                 self.machine.vmctx.alloc_ptr = start;
             }
@@ -999,6 +1027,8 @@ impl<'code> PreparedMachine<'code> {
             owners,
             stack_maps,
             candidate_alloc_start: None,
+            adopted_slots_start: None,
+            provisional_handles: Vec::new(),
             committed: false,
         };
         let staged = transaction.machine.install_staged(

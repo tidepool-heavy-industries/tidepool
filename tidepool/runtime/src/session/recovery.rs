@@ -1,17 +1,18 @@
-//! Durable source-only declaration recovery for a resident session.
-//!
-//! The manifest deliberately contains no evaluated values, closures, effect
-//! handles, or heap identities. A successor session may replay ordinary root
-//! declaration source through GHC; everything resident stays tied to the
-//! machine incarnation that created it.
+//! Durable declaration recovery for resident sessions. Legacy v1 records can
+//! replay only when their whole source surface passes the explicit safe policy;
+//! v2 records retain exact artifacts and declaration graph metadata.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tidepool_repr::version_ladder;
+use tidepool_repr::{version_ladder, Generation};
 
 use super::SessionError;
+
+#[path = "newrecovery_v2.rs"]
+mod newrecovery_v2;
+pub(crate) use newrecovery_v2::*;
 
 const FLOOR: u32 = 1;
 const CURRENT: u32 = 1;
@@ -31,6 +32,80 @@ pub(crate) struct RecoveryTurn {
     pub retracts: Vec<String>,
     pub replayable: bool,
     pub source_hash: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LegacyV1Migration {
+    pub high_water: Generation,
+    pub replay_safe: Vec<RecoveryTurn>,
+    pub lost: Vec<LostDeclaration>,
+}
+
+/// Convert the old source-only format explicitly. It has no exact export or
+/// artifact identities, so non-replayable turns and head-only retractions are
+/// reported lost and cannot erase or reveal graph winners by guesswork.
+pub(crate) fn migrate_v1(manifest: &RecoveryManifest) -> LegacyV1Migration {
+    let high_water = manifest
+        .turns
+        .iter()
+        .map(|turn| turn.generation)
+        .max()
+        .unwrap_or(0);
+    let mut migration = LegacyV1Migration {
+        high_water: Generation(high_water),
+        replay_safe: Vec::new(),
+        lost: Vec::new(),
+    };
+    let mut prior_generation = 0;
+    let mut manifest_reason = None;
+    for turn in &manifest.turns {
+        let reason = if turn.origin_session != manifest.source_session {
+            Some("legacy turn belongs to a different source session")
+        } else if !turn.has_valid_hash() {
+            Some("legacy turn checksum is invalid")
+        } else if turn.generation <= prior_generation {
+            Some("legacy generations are not strictly increasing")
+        } else if !turn.replayable {
+            Some("legacy turn depended on unavailable resident state")
+        } else if !turn.retracts.is_empty() {
+            Some("legacy retraction lacks exact GHC export identities")
+        } else if turn.sources.is_empty() {
+            Some("legacy turn has no source to migrate")
+        } else {
+            None
+        };
+        if manifest_reason.is_none() {
+            manifest_reason = reason;
+        }
+        prior_generation = prior_generation.max(turn.generation);
+    }
+    if manifest_reason.is_none() {
+        migration.replay_safe.extend(manifest.turns.iter().cloned());
+        return migration;
+    }
+    for turn in &manifest.turns {
+        let reason = if turn.origin_session != manifest.source_session {
+            "legacy turn belongs to a different source session"
+        } else if !turn.has_valid_hash() {
+            "legacy turn checksum is invalid"
+        } else if !turn.replayable {
+            "legacy turn depended on unavailable resident state"
+        } else if !turn.retracts.is_empty() {
+            "legacy retraction lacks exact GHC export identities"
+        } else if turn.sources.is_empty() {
+            "legacy turn has no source to migrate"
+        } else {
+            "the v1 manifest contains another ambiguous turn; preserve the whole surface as lost"
+        };
+        migration.lost.push(LostDeclaration {
+            origin_session: turn.origin_session,
+            source_generation: turn.generation,
+            source_hash: turn.source_hash.clone(),
+            sources: turn.sources.clone(),
+            reason: reason.into(),
+        });
+    }
+    migration
 }
 
 impl RecoveryTurn {
@@ -225,5 +300,38 @@ mod tests {
             Err(SessionError::RecoveryManifest { detail, .. })
                 if detail.contains("newer than this build")
         ));
+    }
+
+    #[test]
+    fn v1_migration_requires_the_complete_surface_to_be_unambiguous() {
+        let manifest = RecoveryManifest {
+            version: 1,
+            source_session: 41,
+            turns: vec![
+                RecoveryTurn::new(41, 1, vec!["data A = A".into()], vec![], true),
+                RecoveryTurn::new(41, 2, vec![], vec!["A".into()], true),
+                RecoveryTurn::new(41, 3, vec!["x = 1".into()], vec![], false),
+            ],
+        };
+        let migrated = migrate_v1(&manifest);
+        assert_eq!(migrated.high_water, Generation(3));
+        assert!(migrated.replay_safe.is_empty());
+        assert_eq!(migrated.lost.len(), 3);
+        assert!(migrated
+            .lost
+            .iter()
+            .any(|lost| lost.reason.contains("exact GHC export identities")));
+
+        let safe = RecoveryManifest {
+            version: 1,
+            source_session: 41,
+            turns: vec![
+                RecoveryTurn::new(41, 1, vec!["data A = A".into()], vec![], true),
+                RecoveryTurn::new(41, 2, vec!["x = A".into()], vec![], true),
+            ],
+        };
+        let migrated = migrate_v1(&safe);
+        assert_eq!(migrated.replay_safe.len(), 2);
+        assert!(migrated.lost.is_empty());
     }
 }

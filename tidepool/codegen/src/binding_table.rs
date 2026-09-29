@@ -52,6 +52,7 @@ use std::collections::{HashMap, HashSet};
 use tidepool_repr::{BindingName, SessionModule, SessionVarId, VarId};
 
 use crate::old_space::RootSlot;
+use crate::prepared_program::{GroupInstanceId, SourceBinder, SourceInstanceLease};
 use crate::scope::{ScopeId, ScopeTree};
 
 /// Identity of one immutable value-binding view captured for a child scope.
@@ -61,11 +62,62 @@ use crate::scope::{ScopeId, ScopeTree};
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BindingTipId(pub u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingPromotionError {
+    MissingOrForeignBinding,
+    NotCurrentInSource,
+    DuplicateName,
+    MissingOrForeignSourceInstance,
+}
+
+/// Exact binding writes and dependency leases checked before a publication
+/// decision. The caller holds the owning machine checkout through commit.
+pub struct PreparedBindingPromotion {
+    target: ScopeId,
+    writes: Vec<(BindingName, SessionVarId)>,
+    retained: HashSet<SessionVarId>,
+    source_instances: HashSet<SourceLeaseKey>,
+}
+
+/// One machine-owned materialized source binder. `GroupInstanceId` prevents a
+/// second installation of the same immutable group from sharing mutable CAFs.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SourceLeaseKey {
+    pub instance: GroupInstanceId,
+    pub binder: SourceBinder,
+}
+
+impl SourceLeaseKey {
+    #[must_use]
+    pub fn of(lease: &SourceInstanceLease) -> Self {
+        Self {
+            instance: lease.instance(),
+            binder: lease.binder().clone(),
+        }
+    }
+}
+
+struct ScopedSourceLease {
+    owner: ScopeId,
+    token: SourceInstanceLease,
+    shares: usize,
+    owner_retired: bool,
+}
+
+pub struct ScopeDrain {
+    pub bindings: Vec<BindingEntry>,
+    pub source_instances: Vec<SourceInstanceLease>,
+}
+
 #[derive(Debug)]
 struct BindingTip {
     id: BindingTipId,
     visible: HashMap<BindingName, SessionVarId>,
+    /// Frozen exact ancestor values, including shadowed generations needed by
+    /// inherited declaration code. Leasing them keeps observations alive if
+    /// their original owner later stops naming them.
     retained: HashSet<SessionVarId>,
+    source_instances: HashSet<SourceLeaseKey>,
 }
 
 /// A value retained by a prepared-STG `PreparedMachine`: tenured as-is (never
@@ -141,6 +193,192 @@ pub struct BindingTable {
     observations: HashMap<SessionVarId, ObservationBinding>,
     next_observation_order: u64,
     scope_local_aliases: HashSet<SessionVarId>,
+    /// Exact private owners and their dependency closure retained by a
+    /// public scope after promotion. The original ids, interfaces and roots
+    /// remain in `live`; retiring the private scope cannot evict them.
+    promoted: HashMap<ScopeId, HashSet<SessionVarId>>,
+    /// Machine-owned source roots share this table's scope/tip lifetime.
+    source_instances: HashMap<SourceLeaseKey, ScopedSourceLease>,
+    promoted_source_instances: HashMap<ScopeId, HashSet<SourceLeaseKey>>,
+}
+
+#[cfg(test)]
+mod promotion_tests {
+    use super::*;
+    use crate::old_space::RootSlot;
+    use crate::prepared_program::PreparedHandle;
+    use crate::suspension::ValueHandle;
+    use tidepool_repr::execution_schema::{RuntimeRep, SymbolIdentity};
+    use tidepool_repr::{Generation, SessionModule};
+
+    fn entry(name: &str, generation: u64, slot: &mut *mut u8) -> BindingEntry {
+        // The binding table only records this stable cell address; no machine
+        // or collector dereferences it in these bookkeeping tests.
+        let root = unsafe { RootSlot::new(slot as *mut *mut u8) };
+        BindingEntry {
+            name: BindingName(name.into()),
+            id: SessionVarId::from_extract(generation),
+            module: SessionModule::val(Generation(generation)),
+            value: BoundValue {
+                root,
+                handle: PreparedHandle::new(ValueHandle(generation), RuntimeRep::LiftedRef),
+                identity: SymbolIdentity {
+                    unit: "test".into(),
+                    module: format!("Val.G{generation}"),
+                    namespace: "value".into(),
+                    occurrence: name.into(),
+                    record_parent: None,
+                },
+            },
+            type_display: None,
+            defining_expr: None,
+            scope: ScopeId::ROOT,
+        }
+    }
+
+    #[test]
+    fn promoted_private_identity_wins_by_completion_and_survives_source_retirement() {
+        let mut tree = ScopeTree::new();
+        let source = tree.mint_isolated();
+        let public = tree.mint_isolated();
+        let mut table = BindingTable::new();
+        let mut public_slot = std::ptr::null_mut();
+        let mut private_slot = std::ptr::null_mut();
+        let old = entry("answer", 9, &mut public_slot);
+        let newer_completion = entry("answer", 3, &mut private_slot);
+        let old_id = old.id;
+        let private_id = newer_completion.id;
+        table.bind_in(public, old);
+        table.bind_in(source, newer_completion);
+
+        table
+            .promote_exact_bindings_in(source, public, &[private_id])
+            .expect("exact private write publishes");
+        assert_eq!(
+            table.resolve_in(&tree, public, "answer").unwrap().id,
+            private_id
+        );
+        assert_eq!(table.lease_count(private_id), 1);
+        table
+            .promote_exact_bindings_in(source, public, &[private_id])
+            .expect("same exact promotion is idempotent");
+        assert_eq!(table.lease_count(private_id), 1);
+        assert!(table.drain_scope(source).is_empty());
+        assert_eq!(
+            table.resolve_in(&tree, public, "answer").unwrap().id,
+            private_id
+        );
+        assert!(table
+            .scope_reachable_modules(&tree, public)
+            .any(|module| module == SessionModule::val(Generation(3))));
+        let released = table.drain_scope(public);
+        assert_eq!(released.len(), 2);
+        assert!(released.iter().any(|entry| entry.id == old_id));
+        assert!(released.iter().any(|entry| entry.id == private_id));
+    }
+
+    #[test]
+    fn promoted_alias_retains_source_dependency_and_invalid_batch_changes_nothing() {
+        let mut tree = ScopeTree::new();
+        let source = tree.mint_isolated();
+        let public = tree.mint_isolated();
+        let mut table = BindingTable::new();
+        let mut source_slot = std::ptr::null_mut();
+        let root = entry("root", 4, &mut source_slot);
+        let root_id = root.id;
+        table.bind_in(source, root);
+        let alias = entry("alias", 5, &mut source_slot);
+        let alias_id = alias.id;
+        table
+            .bind_alias_in(source, alias, root_id)
+            .expect("same-scope alias binds");
+        let missing = SessionVarId::from_extract(99);
+        assert_eq!(
+            table.promote_exact_bindings_in(source, public, &[alias_id, missing]),
+            Err(BindingPromotionError::MissingOrForeignBinding)
+        );
+        assert_eq!(table.lease_count(alias_id), 0);
+        assert_eq!(table.lease_count(root_id), 0);
+        assert!(table.resolve_in(&tree, public, "alias").is_none());
+
+        table
+            .promote_exact_bindings_in(source, public, &[alias_id])
+            .expect("alias publishes with dependency closure");
+        assert_eq!(table.lease_count(alias_id), 1);
+        assert_eq!(table.lease_count(root_id), 1);
+        assert!(table.drain_scope(source).is_empty());
+        assert_eq!(
+            table.resolve_in(&tree, public, "alias").unwrap().id,
+            alias_id
+        );
+        let reachable: Vec<_> = table.scope_reachable_modules(&tree, public).collect();
+        assert!(reachable.contains(&SessionModule::val(Generation(4))));
+        assert!(reachable.contains(&SessionModule::val(Generation(5))));
+        let released = table.drain_scope(public);
+        assert_eq!(released.len(), 2);
+        assert!(table.is_empty());
+    }
+
+    #[test]
+    fn exact_retained_import_uses_frozen_scope_not_global_newest() {
+        let mut tree = ScopeTree::new();
+        let mut table = BindingTable::new();
+        let mut first_slot = std::ptr::null_mut();
+        let first = entry("answer", 4, &mut first_slot);
+        let first_id = first.id;
+        let first_identity = first.value.identity.clone();
+        table.bind_in(ScopeId::ROOT, first);
+        let mut shadow_slot = std::ptr::null_mut();
+        table.bind_in(ScopeId::ROOT, entry("answer", 6, &mut shadow_slot));
+
+        let captured = tree.mint_child(ScopeId::ROOT).expect("live root");
+        table.seed_scope(&tree, ScopeId::ROOT, captured);
+        let mut later_slot = std::ptr::null_mut();
+        let later = entry("later", 7, &mut later_slot);
+        let later_identity = later.value.identity.clone();
+        table.bind_in(ScopeId::ROOT, later);
+        let descendant = tree.mint_child(captured).expect("captured scope lives");
+        table.seed_scope(&tree, captured, descendant);
+        let sibling = tree.mint_isolated();
+        let mut newer_slot = std::ptr::null_mut();
+        let newer = entry("answer", 5, &mut newer_slot);
+        let newer_identity = newer.value.identity.clone();
+        table.bind_in(sibling, newer);
+
+        assert_eq!(
+            table
+                .resolve_exact_prepared_in(&tree, captured, &first_identity, 4)
+                .map(|entry| entry.id),
+            Some(first_id)
+        );
+        assert!(table
+            .resolve_exact_prepared_in(&tree, captured, &newer_identity, 5)
+            .is_none());
+        assert!(table
+            .resolve_exact_prepared_in(&tree, captured, &later_identity, 7)
+            .is_none());
+        assert_eq!(
+            table
+                .resolve_exact_prepared_in(&tree, descendant, &first_identity, 4)
+                .map(|entry| entry.id),
+            Some(first_id)
+        );
+        assert!(table
+            .resolve_exact_prepared_in(&tree, descendant, &later_identity, 7)
+            .is_none());
+        assert!(table
+            .resolve_exact_prepared_in(&tree, sibling, &first_identity, 4)
+            .is_none());
+
+        assert!(table.save_observation(first_id, &[], 0).is_empty());
+        assert!(table.lease_count(first_id) >= 2);
+        assert!(table
+            .resolve_exact_prepared_in(&tree, descendant, &first_identity, 4)
+            .is_some());
+        assert!(table.drain_scope(descendant).is_empty());
+        assert!(table.drain_scope(captured).is_empty());
+        assert_eq!(table.collect_observations().len(), 1);
+    }
 }
 
 struct ObservationBinding {
@@ -162,6 +400,9 @@ impl Default for BindingTable {
             observations: HashMap::new(),
             next_observation_order: 0,
             scope_local_aliases: HashSet::new(),
+            promoted: HashMap::new(),
+            source_instances: HashMap::new(),
+            promoted_source_instances: HashMap::new(),
         }
     }
 }
@@ -313,6 +554,155 @@ impl BindingTable {
         Self::default()
     }
 
+    /// Admit the one machine root for a newly materialized source binder.
+    /// A second lexical installation has a different GroupInstanceId even if
+    /// its immutable code key and source binder are identical.
+    pub fn register_source_instance_in(
+        &mut self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+        token: SourceInstanceLease,
+    ) -> Result<SourceLeaseKey, SourceInstanceLease> {
+        if !tree.is_live(scope) {
+            return Err(token);
+        }
+        let key = SourceLeaseKey::of(&token);
+        if self.source_instances.contains_key(&key) {
+            return Err(token);
+        }
+        self.source_instances.insert(
+            key.clone(),
+            ScopedSourceLease {
+                owner: scope,
+                token,
+                shares: 0,
+                owner_retired: false,
+            },
+        );
+        Ok(key)
+    }
+
+    /// Admit one native batch without leaving a partial lexical installation
+    /// if a scope retired or one exact group instance was already registered.
+    pub fn register_source_instances_in(
+        &mut self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+        tokens: Vec<SourceInstanceLease>,
+    ) -> Result<Vec<SourceLeaseKey>, Vec<SourceInstanceLease>> {
+        let mut seen = HashSet::new();
+        if !tree.is_live(scope)
+            || tokens.iter().any(|token| {
+                let key = SourceLeaseKey::of(token);
+                !seen.insert(key.clone()) || self.source_instances.contains_key(&key)
+            })
+        {
+            return Err(tokens);
+        }
+        Ok(tokens
+            .into_iter()
+            .map(|token| {
+                self.register_source_instance_in(tree, scope, token)
+                    .expect("source batch was prevalidated under one checkout")
+            })
+            .collect())
+    }
+
+    /// Exact materialized source instances available to this lexical scope.
+    /// Returned descriptors share machine handles; callers never release them.
+    #[must_use]
+    pub fn source_instances_in(
+        &self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+    ) -> Vec<SourceInstanceLease> {
+        let mut keys: Vec<_> = self
+            .source_instance_keys_in(tree, scope)
+            .into_iter()
+            .collect();
+        keys.sort_by(|left, right| {
+            left.instance
+                .cmp(&right.instance)
+                .then_with(|| left.binder.cmp(&right.binder))
+        });
+        keys.into_iter()
+            .map(|key| {
+                self.source_instances
+                    .get(&key)
+                    .expect("visible source instance retains its machine root")
+                    .token
+                    .clone()
+            })
+            .collect()
+    }
+
+    /// Exact materialized instances visible at one frozen lexical scope.
+    pub fn source_instance_keys_in(
+        &self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+    ) -> HashSet<SourceLeaseKey> {
+        if !tree.is_live(scope) {
+            return HashSet::new();
+        }
+        let mut keys = self
+            .tips
+            .get(&scope)
+            .map(|tip| tip.source_instances.clone())
+            .unwrap_or_default();
+        let owners = if self.tips.contains_key(&scope) {
+            vec![scope]
+        } else {
+            tree.lookup_chain(scope)
+        };
+        keys.extend(
+            self.source_instances
+                .iter()
+                .filter(|(_, lease)| owners.contains(&lease.owner) && !lease.owner_retired)
+                .map(|(key, _)| key.clone()),
+        );
+        for owner in owners {
+            if let Some(promoted) = self.promoted_source_instances.get(&owner) {
+                keys.extend(promoted.iter().cloned());
+            }
+        }
+        keys
+    }
+
+    fn acquire_source_shares(&mut self, keys: &HashSet<SourceLeaseKey>) {
+        for key in keys {
+            let lease = self
+                .source_instances
+                .get_mut(key)
+                .expect("source lease key was prevalidated");
+            lease.shares = lease
+                .shares
+                .checked_add(1)
+                .expect("source lease share count exhausted");
+        }
+    }
+
+    fn release_source_shares(&mut self, keys: HashSet<SourceLeaseKey>) -> Vec<SourceInstanceLease> {
+        let mut released = Vec::new();
+        for key in keys {
+            let lease = self
+                .source_instances
+                .get_mut(&key)
+                .expect("source lease share exists");
+            assert!(lease.shares > 0, "source lease share underflow");
+            lease.shares -= 1;
+            if lease.shares == 0 && lease.owner_retired {
+                released.push(
+                    self.source_instances
+                        .remove(&key)
+                        .expect("retired source lease exists")
+                        .token,
+                );
+            }
+        }
+        released
+    }
+
     /// Record a (re)bind. Repoints `current[name]` to the fresh id and inserts
     /// the entry into `live`; any prior entry for the same name stays in `live`
     /// under its own (older) id. Returns the bound id.
@@ -367,6 +757,117 @@ impl BindingTable {
         }
         self.live.insert(id, entry);
         id
+    }
+
+    /// Make exact completed private bindings visible in `target` without
+    /// cloning roots or selecting winners by compile-generation order. The
+    /// caller validates both live scopes and declaration compatibility before
+    /// this infallible visibility change. Every requested name is validated
+    /// first, so an invalid batch leaves the target frame untouched.
+    pub fn promote_exact_bindings_in(
+        &mut self,
+        source: ScopeId,
+        target: ScopeId,
+        ids: &[SessionVarId],
+    ) -> Result<(), BindingPromotionError> {
+        let prepared = self.prepare_exact_binding_promotion_in(source, target, ids)?;
+        self.commit_exact_binding_promotion(prepared);
+        Ok(())
+    }
+
+    /// Check every source owner and final name without changing visibility or
+    /// acquiring a lease. Publication can then perform its durable work before
+    /// the infallible commit, while retaining the same machine checkout.
+    pub fn prepare_exact_binding_promotion_in(
+        &self,
+        source: ScopeId,
+        target: ScopeId,
+        ids: &[SessionVarId],
+    ) -> Result<PreparedBindingPromotion, BindingPromotionError> {
+        let mut names = HashSet::new();
+        let mut writes = Vec::with_capacity(ids.len());
+        for &id in ids {
+            let entry = self
+                .live
+                .get(&id)
+                .filter(|entry| entry.scope == source)
+                .ok_or(BindingPromotionError::MissingOrForeignBinding)?;
+            if self
+                .current
+                .get(&source)
+                .and_then(|frame| frame.get(&entry.name))
+                != Some(&id)
+            {
+                return Err(BindingPromotionError::NotCurrentInSource);
+            }
+            if !names.insert(entry.name.clone()) {
+                return Err(BindingPromotionError::DuplicateName);
+            }
+            writes.push((entry.name.clone(), id));
+        }
+        let retained = self.dependency_closure(ids.iter().copied());
+        Ok(PreparedBindingPromotion {
+            target,
+            writes,
+            retained,
+            source_instances: HashSet::new(),
+        })
+    }
+
+    /// Check binding writes and materialized source instances against one
+    /// private lexical view before the durable publication decision.
+    pub fn prepare_exact_publication_in(
+        &self,
+        tree: &ScopeTree,
+        source: ScopeId,
+        target: ScopeId,
+        ids: &[SessionVarId],
+        instances: &[SourceLeaseKey],
+    ) -> Result<PreparedBindingPromotion, BindingPromotionError> {
+        if !tree.is_live(source) || !tree.is_live(target) {
+            return Err(BindingPromotionError::MissingOrForeignBinding);
+        }
+        let mut prepared = self.prepare_exact_binding_promotion_in(source, target, ids)?;
+        let source_keys = self.source_instance_keys_in(tree, source);
+        let target_keys = self.source_instance_keys_in(tree, target);
+        for key in instances {
+            if !source_keys.contains(key) {
+                return Err(BindingPromotionError::MissingOrForeignSourceInstance);
+            }
+            if !target_keys.contains(key) {
+                prepared.source_instances.insert(key.clone());
+            }
+        }
+        Ok(prepared)
+    }
+
+    /// The checkout that prepared this promotion must still own the table;
+    /// there is no fallible operation after the public durability boundary.
+    pub fn commit_exact_binding_promotion(&mut self, prepared: PreparedBindingPromotion) {
+        let PreparedBindingPromotion {
+            target,
+            writes,
+            retained,
+            source_instances,
+        } = prepared;
+        let existing = self.promoted.entry(target).or_default();
+        let added: HashSet<_> = retained.difference(existing).copied().collect();
+        existing.extend(added.iter().copied());
+        self.lease_exact_ids(&added);
+        let existing_source = self.promoted_source_instances.entry(target).or_default();
+        let added_source: HashSet<_> = source_instances
+            .difference(existing_source)
+            .cloned()
+            .collect();
+        existing_source.extend(added_source.iter().cloned());
+        self.acquire_source_shares(&added_source);
+        let frame = self.current.entry(target).or_default();
+        for (name, id) in writes {
+            if let Some(hidden) = self.hidden.get_mut(&target) {
+                hidden.remove(&name);
+            }
+            frame.insert(name, id);
+        }
     }
 
     /// Publish an alias of an existing root through the ordinary scoped name
@@ -490,7 +991,34 @@ impl BindingTable {
     /// untouched. Descendant frames are the caller's job, in the deepest-first
     /// order [`ScopeTree::retire`] hands back.
     pub fn drain_scope(&mut self, scope: ScopeId) -> Vec<BindingEntry> {
-        let mut released = self.release_tip(scope);
+        assert!(
+            !self
+                .source_instances
+                .values()
+                .any(|lease| lease.owner == scope)
+                && self
+                    .tips
+                    .get(&scope)
+                    .is_none_or(|tip| tip.source_instances.is_empty())
+                && self
+                    .promoted_source_instances
+                    .get(&scope)
+                    .is_none_or(HashSet::is_empty),
+            "source roots require drain_scope_with_sources"
+        );
+        self.drain_scope_with_sources(scope).bindings
+    }
+
+    /// Retire one scope's binding and materialized source ownership together.
+    /// The session owner releases returned machine handles under checkout.
+    pub fn drain_scope_with_sources(&mut self, scope: ScopeId) -> ScopeDrain {
+        let (mut released, mut source_instances) = self.release_tip(scope);
+        if let Some(promoted) = self.promoted.remove(&scope) {
+            released.extend(self.release_leases(promoted));
+        }
+        if let Some(promoted) = self.promoted_source_instances.remove(&scope) {
+            source_instances.extend(self.release_source_shares(promoted));
+        }
         let mut ids: Vec<SessionVarId> = self
             .live
             .iter()
@@ -508,8 +1036,37 @@ impl BindingTable {
                 released.push(entry);
             }
         }
+        let owned: Vec<_> = self
+            .source_instances
+            .iter()
+            .filter(|(_, lease)| lease.owner == scope)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in owned {
+            let lease = self
+                .source_instances
+                .get_mut(&key)
+                .expect("owned source lease exists");
+            lease.owner_retired = true;
+            if lease.shares == 0 {
+                source_instances.push(
+                    self.source_instances
+                        .remove(&key)
+                        .expect("retired source lease exists")
+                        .token,
+                );
+            }
+        }
         released.sort_by_key(|entry| entry.id.raw());
-        released
+        source_instances.sort_by(|left, right| {
+            left.instance()
+                .cmp(&right.instance())
+                .then_with(|| left.binder().cmp(right.binder()))
+        });
+        ScopeDrain {
+            bindings: released,
+            source_instances,
+        }
     }
 
     /// Freeze the value bindings visible from `parent` as `child`'s immutable
@@ -529,9 +1086,36 @@ impl BindingTable {
             .into_iter()
             .map(|(name, entry)| (name.clone(), entry.id))
             .collect();
+        let owners = if self.tips.contains_key(&parent) {
+            vec![parent]
+        } else {
+            tree.lookup_chain(parent)
+        };
+        let available_exact: HashSet<_> = self
+            .live
+            .values()
+            .filter(|entry| owners.contains(&entry.scope))
+            .map(|entry| entry.id)
+            .chain(
+                owners
+                    .iter()
+                    .filter_map(|scope| self.tips.get(scope))
+                    .flat_map(|tip| tip.retained.iter())
+                    .copied(),
+            )
+            .chain(
+                owners
+                    .iter()
+                    .filter_map(|scope| self.promoted.get(scope))
+                    .flat_map(HashSet::iter)
+                    .copied(),
+            )
+            .collect();
         // Keep the parent's exact value identities rooted for inherited code,
         // but do not give a fresh actor its parent's local display alias name.
-        let retained = self.acquire_leases(inherited.iter().map(|(_, id)| *id));
+        let retained = self.acquire_leases(available_exact);
+        let source_instances = self.source_instance_keys_in(tree, parent);
+        self.acquire_source_shares(&source_instances);
         let visible = inherited
             .into_iter()
             .filter(|(_, id)| !self.scope_local_aliases.contains(id))
@@ -544,6 +1128,7 @@ impl BindingTable {
                 id,
                 visible,
                 retained,
+                source_instances,
             },
         );
         id
@@ -559,9 +1144,7 @@ impl BindingTable {
         parent: ScopeId,
         child: ScopeId,
     ) -> BindingTipId {
-        let id = self.seed_scope(tree, parent, child);
-        self.retain_scope_dependencies(tree, parent, child);
-        id
+        self.seed_scope(tree, parent, child)
     }
 
     /// Retain all value generations an exact external facade from `source`
@@ -608,6 +1191,16 @@ impl BindingTable {
             .unwrap()
             .retained
             .extend(retained);
+        let source_keys = self.source_instance_keys_in(tree, source);
+        let already_source = self.source_instance_keys_in(tree, target);
+        let additional_source: HashSet<_> =
+            source_keys.difference(&already_source).cloned().collect();
+        self.acquire_source_shares(&additional_source);
+        self.tips
+            .get_mut(&target)
+            .unwrap()
+            .source_instances
+            .extend(additional_source);
         true
     }
 
@@ -617,11 +1210,14 @@ impl BindingTable {
         self.tips.get(&scope).map(|tip| tip.id)
     }
 
-    fn release_tip(&mut self, scope: ScopeId) -> Vec<BindingEntry> {
+    fn release_tip(&mut self, scope: ScopeId) -> (Vec<BindingEntry>, Vec<SourceInstanceLease>) {
         let Some(tip) = self.tips.remove(&scope) else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
-        self.release_leases(tip.retained)
+        (
+            self.release_leases(tip.retained),
+            self.release_source_shares(tip.source_instances),
+        )
     }
 
     /// Lease exact binding identities, including identities reserved for future
@@ -752,6 +1348,31 @@ impl BindingTable {
         self.live.get(&id)
     }
 
+    /// Resolve a compiler-retained import only through the exact lexical
+    /// view that admitted the turn. The compiler supplies both the original
+    /// Name and its value-interface generation; neither a spelling lookup nor
+    /// the newest globally retained binding can authorize a sibling's root.
+    #[must_use]
+    pub fn resolve_exact_prepared_in(
+        &self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+        identity: &tidepool_repr::execution_schema::SymbolIdentity,
+        generation: u64,
+    ) -> Option<&BindingEntry> {
+        if !tree.is_live(scope) {
+            return None;
+        }
+        let module = SessionModule::val(tidepool_repr::Generation(generation));
+        let entry = self
+            .live
+            .values()
+            .find(|entry| entry.module == module && entry.value.identity == *identity)?;
+        self.scope_reachable_modules(tree, scope)
+            .any(|reachable| reachable == module)
+            .then_some(entry)
+    }
+
     /// Every live binding (including shadowed older gens), unordered.
     pub fn iter_live(&self) -> impl Iterator<Item = &BindingEntry> {
         self.live.values()
@@ -876,6 +1497,7 @@ impl BindingTable {
         } else {
             tree.lookup_chain(scope)
         };
+        let promoted_frames = frames.clone();
         let owned = self
             .live
             .values()
@@ -885,7 +1507,16 @@ impl BindingTable {
             .into_iter()
             .flat_map(|tip| tip.visible.values().chain(tip.retained.iter()))
             .filter_map(|id| self.live.get(id).map(|entry| entry.module));
-        owned.chain(inherited)
+        let promoted = promoted_frames
+            .into_iter()
+            .flat_map(|scope| {
+                self.promoted
+                    .get(&scope)
+                    .into_iter()
+                    .flat_map(HashSet::iter)
+            })
+            .filter_map(|id| self.live.get(id).map(|entry| entry.module));
+        owned.chain(inherited).chain(promoted)
     }
 
     /// Number of live bindings.
@@ -897,6 +1528,6 @@ impl BindingTable {
     /// Whether no bindings are live.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.live.is_empty()
+        self.live.is_empty() && self.source_instances.is_empty()
     }
 }

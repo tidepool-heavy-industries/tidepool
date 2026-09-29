@@ -17,6 +17,7 @@ tidepool-extract-cmd.workspace = true
 tidepool-extract-report.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+ciborium.workspace = true
 schemars.workspace = true
 tempfile.workspace = true
 blake3.workspace = true
