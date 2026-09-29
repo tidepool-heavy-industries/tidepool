@@ -1,6 +1,6 @@
 //! Atomic installation of mutually importing native group images.
 
-use super::super::{SourceBinder, SourceInstanceLease};
+use super::super::{DemandedImage, SourceBinder, SourceInstanceLease};
 use super::*;
 use tidepool_repr::execution_schema::{CachedHomeOwner, Signature};
 
@@ -26,11 +26,51 @@ pub struct BatchProgram {
 /// One exact source binder to root as part of the atomic install. Only
 /// requested binders receive a handle; unused exports acquire no lease.
 pub struct BatchLeaseRequest {
-    pub group: usize,
-    pub owner: CachedHomeOwner,
-    pub original_ordinal: u32,
-    pub binder: SourceBinder,
-    pub binding: ValueId,
+    group: usize,
+    image: Arc<CompiledProgram>,
+    owner: CachedHomeOwner,
+    original_ordinal: u32,
+    binder: SourceBinder,
+    binding: ValueId,
+}
+
+impl BatchLeaseRequest {
+    /// Select a binder from the exact certified image that will be installed
+    /// at `group`. The batch preflight also verifies pointer-identical image
+    /// custody before any machine mutation.
+    pub fn for_demanded(
+        group: usize,
+        demanded: &DemandedImage<'_>,
+        binder: &SourceBinder,
+    ) -> Result<Self, ExecutionError> {
+        let source = demanded.group();
+        let definitions = source.definitions();
+        let value = definitions
+            .bindings()
+            .iter()
+            .flat_map(|group| match group {
+                tidepool_repr::execution_schema::Group::NonRecursive(top) => {
+                    std::slice::from_ref(top)
+                }
+                tidepool_repr::execution_schema::Group::Recursive(tops) => tops.as_slice(),
+            })
+            .find(|top| top.identity == binder.binder && source.binders().contains(&top.identity))
+            .map(|top| top.binding.id)
+            .ok_or_else(|| ExecutionError::BatchSourceContract(Box::new(binder.binder.clone())))?;
+        if binder.version != source.owner().module_version {
+            return Err(ExecutionError::BatchSourceContract(Box::new(
+                binder.binder.clone(),
+            )));
+        }
+        Ok(Self {
+            group,
+            image: Arc::clone(demanded.image()),
+            owner: source.owner().clone(),
+            original_ordinal: source.original_ordinal(),
+            binder: binder.clone(),
+            binding: value,
+        })
+    }
 }
 
 pub struct BatchInstallReceipt {
@@ -119,6 +159,9 @@ impl PreparedMachine<'_> {
                 .get(&request.binding)
                 .ok_or(ExecutionError::MissingEntry(request.binding))?;
             if candidate.image.byte_tops.contains_key(&request.binding)
+                || !Arc::ptr_eq(&candidate.image, &request.image)
+                || candidate.image.certified_source.as_ref()
+                    != Some(&(request.owner.clone(), request.original_ordinal))
                 || export.identity != request.binder.binder
                 || request.binder.version != request.owner.module_version
                 || request.binder.binder.unit != request.owner.unit
@@ -264,6 +307,7 @@ impl PreparedMachine<'_> {
             owners,
             stack_maps,
             candidate_alloc_start: None,
+            adopted_slots_start: None,
             provisional_handles: Vec::with_capacity(requests.len()),
             committed: false,
         };
@@ -274,6 +318,7 @@ impl PreparedMachine<'_> {
             &mut transaction.candidate_alloc_start,
         );
         let leased = if staged.is_ok() {
+            transaction.adopted_slots_start = Some(transaction.machine.old_space.slots.len());
             transaction.machine.stage_batch_leases(
                 &candidates,
                 &requests,
@@ -581,6 +626,7 @@ impl PreparedMachine<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prepared_program::{GroupInventory, ImageRegistry};
     use tidepool_repr::execution_schema::{
         testing, Atom, CachedHomeOwner, CertifiedGroup, CheckedLayout, ConstructorDecl,
         ConstructorId, ExprFrame, GlobalDecl, GlobalId, HeapRhs, ImportOwner, ModuleVersion,
@@ -663,6 +709,10 @@ mod tests {
     }
 
     fn caf_group() -> Arc<CompiledProgram> {
+        Arc::new(CompiledProgram::compile_certified_group(&certified_caf_group()).unwrap())
+    }
+
+    fn certified_caf_group() -> CertifiedGroup {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors.push(ConstructorDecl {
@@ -694,7 +744,7 @@ mod tests {
                 body: 0,
             };
         }
-        let group = CertifiedGroup::admit(
+        CertifiedGroup::admit(
             CachedHomeOwner {
                 unit: "fixture".into(),
                 module: "Fixture".into(),
@@ -705,8 +755,7 @@ mod tests {
             testing::projected_group(wire, 12).unwrap(),
             vec![],
         )
-        .unwrap();
-        Arc::new(CompiledProgram::compile_certified_group(&group).unwrap())
+        .unwrap()
     }
 
     #[test]
@@ -923,22 +972,27 @@ mod tests {
 
     #[test]
     fn late_failure_releases_provisional_source_lease() {
-        let image = caf_group();
-        let request = || BatchLeaseRequest {
-            group: 0,
-            owner: CachedHomeOwner {
-                unit: "fixture".into(),
-                module: "Fixture".into(),
-                module_version: ModuleVersion([1; 32]),
-                skinny_iface_sha256: [2; 32],
-                product_sha256: [3; 32],
-            },
-            original_ordinal: 12,
-            binder: SourceBinder {
+        let groups = [certified_caf_group()];
+        let demand = GroupInventory::new(&groups)
+            .unwrap()
+            .seal([SourceBinder {
                 version: ModuleVersion([1; 32]),
                 binder: testing::identity("Fixture", "caf"),
-            },
-            binding: ValueId(0),
+            }])
+            .unwrap();
+        let images = demand.compile(&ImageRegistry::new()).unwrap();
+        let selected = &images[0];
+        let image = Arc::clone(selected.image());
+        let request = || {
+            BatchLeaseRequest::for_demanded(
+                0,
+                selected,
+                &SourceBinder {
+                    version: ModuleVersion([1; 32]),
+                    binder: testing::identity("Fixture", "caf"),
+                },
+            )
+            .unwrap()
         };
         let batch = || {
             vec![BatchProgram {
@@ -950,12 +1004,20 @@ mod tests {
             nursery_bytes: 4096,
         })
         .unwrap();
+        let mut mislabeled = request();
+        mislabeled.owner.product_sha256 = [9; 32];
+        assert!(matches!(
+            machine.install_shared_batch_with_leases(batch(), vec![mislabeled]),
+            Err(ExecutionError::BatchSourceContract(_))
+        ));
+        assert_eq!(machine.residency(), ResidencyCounts::default());
         machine.fail_catalog_after_stage = true;
         assert!(machine
             .install_shared_batch_with_leases(batch(), vec![request()])
             .is_err());
         assert_eq!(machine.residency(), ResidencyCounts::default());
         assert_eq!(machine.handle_count(), 0);
+        assert_eq!(machine.old_space.slots.len(), 0);
         assert!(machine.descriptor_registry.is_empty());
 
         machine.fail_catalog_after_stage = false;
@@ -976,6 +1038,7 @@ mod tests {
             .install_shared_batch_with_leases(batch(), vec![request()])
             .is_err());
         assert_eq!(machine.handle_count(), 1);
+        assert_eq!(machine.old_space.slots.len(), 1);
         assert_eq!(machine.residency().programs, 1);
         machine.fail_catalog_after_stage = false;
         assert!(machine.release(installed.leases[0].handle()));

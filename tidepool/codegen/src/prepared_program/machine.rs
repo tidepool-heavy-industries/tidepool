@@ -710,6 +710,9 @@ struct InstallTransaction<'a, 'code> {
     /// Nursery cursor after any capacity collection and before candidate
     /// objects. Rollback must not leave unregistered objects in the scan range.
     candidate_alloc_start: Option<*mut u8>,
+    /// Slots adopted for provisional handles after staging. No other slot
+    /// allocation interleaves before this transaction commits or rolls back.
+    adopted_slots_start: Option<usize>,
     provisional_handles: Vec<PreparedHandle>,
     committed: bool,
 }
@@ -719,6 +722,9 @@ impl Drop for InstallTransaction<'_, '_> {
         if !self.committed {
             for handle in self.provisional_handles.drain(..) {
                 self.machine.release(handle);
+            }
+            if let Some(mark) = self.adopted_slots_start {
+                self.machine.old_space.slots.truncate(mark);
             }
             if let Some(start) = self.candidate_alloc_start {
                 self.machine.vmctx.alloc_ptr = start;
@@ -1021,6 +1027,7 @@ impl<'code> PreparedMachine<'code> {
             owners,
             stack_maps,
             candidate_alloc_start: None,
+            adopted_slots_start: None,
             provisional_handles: Vec::new(),
             committed: false,
         };
