@@ -27,8 +27,10 @@ The initial native slice is `tidepool-atomic-write` and `tidepool-repr`:
 - `//tidepool/repr:repr`
 
 These are native Rust rules with crate/test sources and compile-time fixtures
-as declared inputs. The `repr` fixture filegroups are owned by their source
-packages. A Buck test result is evidence only for its selected target; all
+mapped to repository-relative paths through `rust_filegroup`. Fixture owners
+export individual files. Fault-injection shared libraries are separate native C
+actions supplied through the test environment, without becoming Rust link inputs.
+A Buck test result is evidence only for its selected target; all
 other packages retain their existing `just` checks until migrated and accepted.
 
 ## Toolchain and output setup
@@ -58,7 +60,8 @@ bash scripts/buck2-run.sh test --print-passing-details --local-only -c remote.en
 
 Report the source OID, exact command, selected/executed test count, exit status,
 and retained log. Building a test binary is not running it. Re-run once to
-record a real action-cache hit, then change one selected source or fixture and
+measure reuse, distinguishing a warm dependency graph from action-cache hits,
+then change one selected source or fixture and
 verify only its affected dependency closure rebuilds.
 
 The exact Prelude bundled with Buck snapshot `20260926-200119` uses one

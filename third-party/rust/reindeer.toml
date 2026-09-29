@@ -1,6 +1,6 @@
 # The root Cargo workspace and Cargo.lock remain the dependency authority.
 # Regenerate BUCK with the Reindeer release exposed as .#buck-reindeer.
-manifest_path = "../../Cargo.toml"
+manifest_path = "Cargo.toml"
 third_party_dir = "."
 vendor = false
 precise_srcs = true

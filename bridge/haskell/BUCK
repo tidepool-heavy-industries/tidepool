@@ -1,12 +1,14 @@
+load("@prelude//:rules.bzl", "export_file")
+
 # Exact compile-time resources consumed by the native repr targets.
-filegroup(
+export_file(
     name = "m3_vertical_fixture",
-    srcs = ["test-prepared-stg/fixtures/m3-vertical.cbor"],
+    src = "test-prepared-stg/fixtures/m3-vertical.cbor",
     visibility = ["PUBLIC"],
 )
 
-filegroup(
+export_file(
     name = "schema6_intrinsic_fixture",
-    srcs = ["test-execution-schema-encode/fixtures/schema6-intrinsic.cbor"],
+    src = "test-execution-schema-encode/fixtures/schema6-intrinsic.cbor",
     visibility = ["PUBLIC"],
 )

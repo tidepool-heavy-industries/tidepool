@@ -151,3 +151,37 @@ Concurrent builds use the accepted completion slice; there is no blanket single
 compiler slot. Expensive Nix realizations remain serialized at cores=2/max-jobs=1
 because the daemon has its own memory cap. Do not restart shared daemons. No live
 launch, running-session migration or default-backend switch follows from tests.
+
+## Native Buck checkpoint — 2026-09-29
+
+The atomic-write/repr slice now executes through native `buck2 test`: 8 atomic
+unit tests, 2 atomic directory tests, 144 repr unit tests and 56 repr integration
+tests passed (210 total, four targets). The source baseline was `56f052612`
+plus the accompanying scoped Buck metadata changes. Evidence is retained in
+`target/completion-evidence/buck/restored-gate-r3.log`; the command was:
+
+```sh
+bash scripts/buck2-run.sh test --print-passing-details --local-only -c remote.enabled=false \
+  //bridge/atomic-write:tidepool_atomic_write_unit_tests \
+  //bridge/atomic-write:strict_directory \
+  //tidepool/repr:tidepool_repr_unit_tests //tidepool/repr:repr
+```
+
+The initial run exposed two existing schema rejection regressions, independently
+reproduced under Cargo. Commit `56f052612` checks unsupported versions before
+current-layout field counts. Both focused Cargo tests subsequently passed
+(`repr-cargo-fixed.log`). Eight generator tests pass, covering fixture mapping,
+missing inputs, determinism, check-mode nonmutation and failed generation.
+The dependency generator stages a scoped manifest/lock/BUCK set, includes dev
+inputs, and verifies package identities against the authoritative root lock.
+Codex is excluded.
+
+An unchanged four-target build passed with no compile commands
+(`restored-warm.log`). This is warm graph reuse, not proof of remote or local
+action-cache hits. Earlier controlled C fixture invalidation evidence remains in
+`cache-fixture-change.events.jsonl`; repeat that measurement as the graph expands.
+Builds and the persistent Buck daemon run in `tidepool-completion-build.slice`
+with a 104 GiB aggregate maximum. Root Git and user-systemd probes passed after
+the app-server permission repair; worker patch preparation did not require
+restarting daemons. Remaining engine, runtime, harness and Haskell migration
+gates above remain open.

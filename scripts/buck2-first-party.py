@@ -26,11 +26,17 @@ arguments.add_argument("--package", action="append", required=True, help="Cargo 
 arguments.add_argument("--check", action="store_true", help="check generated BUCK files without rewriting them")
 options = arguments.parse_args()
 selected = set(options.package)
-if any(name.startswith("codex-") for name in selected):
-    raise SystemExit("Codex is outside the Buck migration")
 unknown = selected - set(local)
 if unknown:
     raise SystemExit(f"unknown Cargo workspace package(s): {', '.join(sorted(unknown))}")
+SUPPORTED_PACKAGES = {"tidepool-atomic-write", "tidepool-repr"}
+unsupported = selected - SUPPORTED_PACKAGES
+if unsupported:
+    raise SystemExit(
+        "native Buck generation is currently supported only for "
+        f"{', '.join(sorted(SUPPORTED_PACKAGES))}; unsupported: "
+        f"{', '.join(sorted(unsupported))}"
+    )
 
 
 def package_dir(package):
@@ -48,8 +54,6 @@ def target_name(package, kind):
 def dependency_label(dependency):
     name = dependency["name"]
     if name in local:
-        if name == "codex-shoal-protocol":
-            return "//:codex_shoal_protocol"
         target = target_name(local[name], "lib")
         directory = package_dir(local[name])
         return (":" if directory == CURRENT_DIR else "//" + directory + ":") + target
@@ -61,11 +65,9 @@ def dependency_label(dependency):
 
 
 def linux_dependency(dependency):
-    target = dependency["target"] or ""
-    return not any(
-        excluded in target
-        for excluded in ("windows", "macos", "ios", "wasm32", "aarch64")
-    )
+    if dependency["target"] is not None:
+        raise SystemExit("Model Cargo-resolved target dependencies before extending this slice")
+    return True
 
 
 def dependency_sets(package, include_dev=False):
@@ -92,18 +94,19 @@ def source_inputs(package, target):
     directory = ROOT / CURRENT_DIR
     source_root = pathlib.Path(target["src_path"]).resolve()
     sources = {directory / "Cargo.toml"}
-    labels = set()
+    external = {}
     if source_root.is_relative_to(directory / "src"):
         sources.update((directory / "src").rglob("*.rs"))
     else:
         # Integration tests are one native rust_test action. Track only that
         # package's Rust tests plus literal include_* resources they consume.
         sources.update((directory / "tests").rglob("*.rs"))
-    includes = re.compile(r'include_(?:str|bytes)!\s*\(\s*"([^"]+)"')
+    includes = re.compile(r'include_(?:str|bytes)!\s*\(\s*"([^\"]+)"')
     pending = [path for path in sources if path.suffix == ".rs"]
     external_labels = {
         "bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor": "//bridge/haskell:m3_vertical_fixture",
         "bridge/haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor": "//bridge/haskell:schema6_intrinsic_fixture",
+        "bridge/atomic-write/tests/fixtures/directory_fault.c": "//bridge/atomic-write:directory_fault_fixture",
     }
     while pending:
         source = pending.pop()
@@ -117,25 +120,38 @@ def source_inputs(package, target):
                     if included.suffix == ".rs":
                         pending.append(included)
                 continue
+            if not included.is_relative_to(ROOT):
+                raise SystemExit(f"compile-time input outside repository {included} from {source}")
             repo_relative = included.relative_to(ROOT).as_posix()
-            if repo_relative == "bridge/atomic-write/tests/fixtures/directory_fault.c":
-                external_labels[repo_relative] = "//bridge/atomic-write:directory_fault_fixture"
             if repo_relative not in external_labels:
                 raise SystemExit(f"no Buck file input target for {repo_relative} (from {source})")
-            labels.add(external_labels[repo_relative])
-    local_sources = sorted(
-        source.relative_to(directory).as_posix()
+            external[external_labels[repo_relative]] = repo_relative
+    mapped = {
+        source.relative_to(directory).as_posix(): source.relative_to(ROOT).as_posix()
         for source in sources
-        if source.is_relative_to(directory)
-    )
-    return local_sources + sorted(labels)
+    }
+    mapped.update(external)
+    return dict(sorted(mapped.items(), key=lambda item: item[1]))
 
 
 def render_rule(rule, name, target, package, deps, named, extra=""):
     crate_root = target["src_path"]
-    src_root = pathlib.Path(crate_root).relative_to(ROOT / CURRENT_DIR).as_posix()
+    src_root = pathlib.Path(crate_root).relative_to(ROOT).as_posix()
     target_edition = next(t["edition"] for t in package["targets"] if t["src_path"] == crate_root)
+    source_group = name + "_sources"
     lines = [
+        "rust_filegroup(",
+        "    name = " + json.dumps(source_group) + ",",
+        "    mapped_srcs = {",
+    ]
+    lines.extend(
+        "        " + json.dumps(source) + ": " + json.dumps(mapped) + ","
+        for source, mapped in source_inputs(package, target).items()
+    )
+    lines.extend([
+        "    },",
+        ")",
+        "",
         rule + "(",
         "    name = " + json.dumps(name) + ",",
         "    package_name = " + json.dumps(package["name"]) + ",",
@@ -143,10 +159,8 @@ def render_rule(rule, name, target, package, deps, named, extra=""):
         "    version = " + json.dumps(package["version"]) + ",",
         "    crate_root = " + json.dumps(src_root) + ",",
         '    edition = "' + target_edition + '",',
-        "    srcs = [",
-        render_strings(source_inputs(package, target), 8),
-        "    ],",
-    ]
+        "    srcs_filegroup = " + json.dumps(":" + source_group) + ",",
+    ])
     if deps:
         lines.extend(["    deps = [", render_strings(deps, 8), "    ],"])
     if named:
@@ -161,23 +175,22 @@ def render_rule(rule, name, target, package, deps, named, extra=""):
 
 header = '''# @generated by scripts/buck2-first-party.py from Cargo metadata.
 load("//build/rust:defs.bzl", "tidepool_rust_binary", "tidepool_rust_library", "tidepool_rust_test")
-load("@prelude//:rules.bzl", "cxx_library")
+load("@prelude//:rules.bzl", "cxx_library", "export_file")
+load("@prelude//rust:sources.bzl", "rust_filegroup")
 '''
 
 for package_name, package in local.items():
     if package_name not in selected:
         continue
     CURRENT_DIR = package_dir(package)
-    if CURRENT_DIR.startswith("vendor/"):
-        continue  # The pinned Codex submodule is mapped from root//:codex_shoal_protocol.
+    features = package["features"]
+    if features and features != {"default": []}:
+        raise SystemExit(f"{package_name} declares unsupported Cargo features: {features}")
     if any("custom-build" in target["kind"] for target in package["targets"]):
         raise SystemExit(f"{package_name} has a build.rs target; add a native Buck action before selecting it")
     rules = [header]
     normal_deps, normal_named = dependency_sets(package)
     dev_deps, dev_named = dependency_sets(package, include_dev=True)
-    if package["name"] == "tidepool-codegen":
-        normal_deps.append(":prepared_md5")
-        dev_deps.append(":prepared_md5")
     targets = package["targets"]
     libraries = [target for target in targets if "lib" in target["kind"] or "proc-macro" in target["kind"]]
     binaries = [target for target in targets if "bin" in target["kind"]]
@@ -185,14 +198,6 @@ for package_name, package in local.items():
     for target in libraries:
         extra = "    proc_macro = True," if "proc-macro" in target["kind"] else ""
         rule = render_rule("tidepool_rust_library", target["name"], target, package, normal_deps, normal_named, extra)
-        if package["name"] == "tidepool":
-            rule = rule.replace(
-                '    ],\n    deps = [',
-                '        ":facade_generated",\n    ],\n    deps = [',
-            ).replace(
-                '    visibility = ["PUBLIC"],',
-                '    env = {"OUT_DIR": "$(location :facade_generated)"},\n    visibility = ["PUBLIC"],',
-            )
         rules.append(rule)
     for target in binaries:
         deps = normal_deps + ([":" + libraries[0]["name"]] if libraries else [])
@@ -207,14 +212,9 @@ for package_name, package in local.items():
         deps = dev_deps + ([":" + libraries[0]["name"]] if libraries else [])
         extra = ""
         if package["name"] == "tidepool-atomic-write" and target["name"] == "strict_directory":
-            deps.append(":directory_fault_shared")
-            deps.sort()
             extra = '    env = {"TIDEPOOL_DIRECTORY_FAULT_LIBRARY": "$(location :directory_fault_shared)"},'
-        if package["name"] == "tidepool" and target["name"] in (
-            "exomonad_workspace_check",
-            "exomonad_namespace_entry",
-        ):
-            extra = '    env = {"CARGO_BIN_EXE_exomonad": "$(exe :exomonad)"},'
+        if package["name"] == "tidepool-repr" and target["name"] == "repr":
+            extra = '    env = {"TIDEPOOL_DIRECTORY_FAULT_LIBRARY": "$(location //bridge/atomic-write:directory_fault_shared)"},'
         rules.append(
             render_rule(
                 "tidepool_rust_test",
@@ -226,46 +226,10 @@ for package_name, package in local.items():
                 extra,
             )
         )
-    if package["name"] == "tidepool":
-        rules.append('''load("@prelude//:rules.bzl", "genrule")
-
-# Compile and run the existing Cargo build.rs as native Buck actions. This
-# produces the embedded Haskell trees and scaffold source using its one owner.
-tidepool_rust_binary(
-    name = "facade_build_script",
-    package_name = "tidepool",
-    package_dir = "bridge/facade",
-    version = "0.1.0",
-    crate_root = "build.rs",
-    edition = "2021",
-    srcs = ["build.rs"],
-    deps = ["//tidepool/toolchain:tidepool_toolchain"],
-    visibility = ["PUBLIC"],
-)
-
-genrule(
-    name = "facade_generated",
-    srcs = ["//:facade_build_inputs"],
-    out = "generated",
-    cmd = "mkdir -p $OUT && CARGO_MANIFEST_DIR=$SRCDIR/bridge/facade OUT_DIR=$OUT TIDEPOOL_EMBED_HASKELL=1 $(exe :facade_build_script)",
-    visibility = ["PUBLIC"],
-)
-''')
-    if package["name"] == "tidepool-codegen":
-        rules.append('''load("@prelude//:rules.bzl", "cxx_library")
-
-cxx_library(
-    name = "prepared_md5",
-    srcs = ["csrc/prepared_md5/md5.c"],
-    headers = ["csrc/prepared_md5/md5.h"],
-    preferred_linkage = "static",
-    visibility = ["PUBLIC"],
-)
-''')
     if package["name"] == "tidepool-atomic-write":
-        rules.append('''filegroup(
+        rules.append('''export_file(
     name = "directory_fault_fixture",
-    srcs = ["tests/fixtures/directory_fault.c"],
+    src = "tests/fixtures/directory_fault.c",
     visibility = ["PUBLIC"],
 )
 

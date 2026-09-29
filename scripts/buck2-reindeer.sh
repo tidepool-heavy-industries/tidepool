@@ -1,67 +1,59 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-mode="${1:-}"
-if [ -n "$mode" ] && [ "$mode" != "--check" ]; then
+if [[ ${TIDEPOOL_REINDEER_SHELL:-} != ready ]]; then
+  exec bash scripts/dev-shell.sh env TIDEPOOL_REINDEER_SHELL=ready bash scripts/buck2-reindeer.sh "$@"
+fi
+if [[ $# -gt 1 || (${1:-} != '' && ${1:-} != --check) ]]; then
   echo "usage: $0 [--check]" >&2
   exit 2
 fi
-original=""
-if [ "$mode" = "--check" ]; then
-  original="$(mktemp)"
-  if [ -f third-party/rust/BUCK ]; then
-    cp third-party/rust/BUCK "$original"
-  else
-    : > "$original"
-  fi
-  restore_graph() {
-    if [ -s "$original" ]; then
-      cp "$original" third-party/rust/BUCK
-    else
-      rm -f third-party/rust/BUCK
-    fi
-    rm -f "$original"
-  }
-  trap restore_graph EXIT
-fi
-
-if [ -z "${REINDEER_BIN:-}" ]; then
-  reindeer_store="$(nix build --no-link --print-out-paths .#buck-reindeer)"
-  REINDEER_BIN="$reindeer_store/bin/reindeer"
-fi
-"$REINDEER_BIN" -c third-party/rust/reindeer.toml buckify
-python3 - <<'PY'
-from collections import Counter
+python3 - "${1:-}" <<'PY'
 from pathlib import Path
+import os
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 
-path = Path("third-party/rust/BUCK")
-source = path.read_text()
-pattern = re.compile(
-    r'^alias\(\n    name = "([^"]+)",\n    actual = ":[^"]+",\n'
-    r'    visibility = \["PUBLIC"\],\n\)\n\n',
-    re.MULTILINE,
-)
-aliases = Counter(match.group(1) for match in pattern.finditer(source))
-duplicates = {name for name, count in aliases.items() if count > 1}
-if duplicates != {"sha2"}:
-    raise SystemExit(f"unexpected Reindeer unversioned alias collisions: {sorted(duplicates)}")
-path.write_text(pattern.sub(lambda match: "" if match.group(1) in duplicates else match.group(0), source))
-source = path.read_text()
-source, count = re.subn(
-    r'(cargo\.rust_library\(\n    name = "sha2-0\.(?:10|11)",.*?    visibility = )\[\]',
-    r'\1["PUBLIC"]',
-    source,
-    flags=re.DOTALL,
-)
-if count != 2:
-    raise SystemExit(f"expected two public sha2 versioned targets, found {count}")
-path.write_text(source)
+root = Path.cwd()
+dest = root / 'third-party/rust'
+outputs = ['Cargo.toml', 'Cargo.lock', 'BUCK']
+checking = sys.argv[1] == '--check'
+with tempfile.TemporaryDirectory(prefix='tidepool-buck-deps-') as temporary:
+    stage = Path(temporary)
+    shutil.copy2(dest / 'reindeer.toml', stage / 'reindeer.toml')
+    shutil.copy2(dest / 'empty.rs', stage / 'empty.rs')
+    shutil.copytree(dest / 'fixups', stage / 'fixups')
+    subprocess.run([
+        sys.executable, 'scripts/buck2-dependencies.py', '--output-dir', str(stage)
+    ], cwd=root, check=True)
+    subprocess.run([
+        'reindeer', '-c', 'reindeer.toml', 'buckify'
+    ], cwd=stage, check=True)
+
+    names = re.findall(r'^alias\(\n    name = "([^"]+)"', (stage / 'BUCK').read_text(), re.MULTILINE)
+    if len(names) != len(set(names)):
+        raise SystemExit('Versioned dependency aliases require explicit first-party mappings')
+    staged_outputs = {name: (stage / name).read_bytes() for name in outputs}
+    stage_prefix = os.fsencode(str(stage))
+    leaked = [name for name, contents in staged_outputs.items() if stage_prefix in contents]
+    if leaked:
+        raise SystemExit('Staging path leaked into generated Buck inputs: ' + ', '.join(leaked))
+
+    if checking:
+        changed = [name for name in outputs if not (dest / name).exists() or (dest / name).read_bytes() != staged_outputs[name]]
+        if changed:
+            raise SystemExit('Stale Buck dependency inputs; regenerate: ' + ', '.join(changed))
+    else:
+        # Each replacement is atomic. If interrupted between files, the remaining
+        # generated files are visible as ordinary reviewable work and a rerun repairs them.
+        for name in outputs:
+            replacement = dest / (name + '.tmp')
+            try:
+                replacement.write_bytes(staged_outputs[name])
+                os.replace(replacement, dest / name)
+            finally:
+                replacement.unlink(missing_ok=True)
 PY
-if [ "$mode" = "--check" ]; then
-  if ! cmp -s "$original" third-party/rust/BUCK; then
-    echo "third-party/rust/BUCK is stale; run scripts/buck2-reindeer.sh to regenerate from Cargo.lock" >&2
-    diff -u "$original" third-party/rust/BUCK || true
-    exit 1
-  fi
-fi
