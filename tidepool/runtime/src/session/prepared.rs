@@ -241,6 +241,7 @@ impl PreparedRuntimeError {
                 | ExecutionError::DescriptorShape { .. }
                 | ExecutionError::HostIdConflict { .. }
                 | ExecutionError::ForeignExternals
+                | ExecutionError::BorrowedParcelCode
                 // An evacuation refusal leaves both machines as they were.
                 | ExecutionError::Evacuation(_)
                 | ExecutionError::UnknownProgram(_)
@@ -1918,19 +1919,6 @@ impl PreparedEngine {
                 .map_err(PreparedRuntimeError::Run);
         };
         let image = match registry.lookup(&linked) {
-            // One install per image per machine: an image's root block and
-            // owned descriptors belong to the install, so a machine that
-            // already holds this image compiles its own copy instead.
-            Some(image) if self.machine.has_image(&image) => {
-                let compiled = self
-                    .machine
-                    .compile_for_install(&linked)
-                    .map_err(PreparedRuntimeError::Compile)?;
-                return self
-                    .machine
-                    .install_program(compiled, imports)
-                    .map_err(PreparedRuntimeError::Run);
-            }
             Some(image) => image,
             None => {
                 let compiled = self
@@ -2317,12 +2305,7 @@ impl PreparedEngine {
             .registry
             .as_ref()
             .and_then(|registry| registry.lookup(&linked));
-        // A machine that already holds the registry's image for this program
-        // compiles a private copy, never shared: see `compile_and_install`.
-        let (precompiled, registry) = match precompiled {
-            Some(image) if self.machine.has_image(&image) => (None, None),
-            precompiled => (precompiled, self.registry.clone()),
-        };
+        let registry = self.registry.clone();
         let compile = self.machine.compile_snapshot();
         Ok(InstallSnapshot {
             linked,
@@ -2352,12 +2335,11 @@ impl PreparedEngine {
         if let Some(image) = &snapshot.precompiled {
             return Ok(Arc::clone(image));
         }
-        let compiled = snapshot.compile.compile(&snapshot.linked)?;
-        let image = match &snapshot.registry {
-            Some(registry) => registry.insert(snapshot.linked.clone(), Arc::new(compiled)),
-            None => Arc::new(compiled),
-        };
-        Ok(image)
+        let mut compile = || snapshot.compile.compile(&snapshot.linked).map(Arc::new);
+        match &snapshot.registry {
+            Some(registry) => registry.get_or_compile(&snapshot.linked, compile),
+            None => compile(),
+        }
     }
 
     /// Step (c): under the machine checkout again, re-resolve `snapshot`'s
@@ -2377,12 +2359,9 @@ impl PreparedEngine {
     ) -> Result<Option<ProgramId>, PreparedRuntimeError> {
         let (fresh_values, fresh_imports) =
             self.resolve_imports(snapshot.linked.prepared(), bindings, index)?;
-        // Stale import facts, or this machine installed the same image
-        // since the snapshot: either way the caller recompiles.
-        if fresh_values != snapshot.values
-            || fresh_imports != snapshot.imports
-            || self.machine.has_image(&compiled)
-        {
+        // Reusing code never aliases installation state. Only changes to the
+        // imported values can invalidate this compilation snapshot.
+        if fresh_values != snapshot.values || fresh_imports != snapshot.imports {
             return Ok(None);
         }
         let import_count = snapshot.imports.len();
@@ -5187,6 +5166,40 @@ mod tests {
             "expected SiteConflict, got {error:?}"
         );
         assert_eq!(engine.programs.len(), 2);
+    }
+
+    #[test]
+    fn off_checkout_install_reuses_code_already_installed_on_the_machine() {
+        use tidepool_repr::execution_schema::SYNTHETIC_SITE_BIT;
+        let registry = Arc::new(ImageRegistry::new());
+        let (mut engine, _) =
+            PreparedEngine::bootstrap(verb_program(SYNTHETIC_SITE_BIT | 40, TypeNode::Text))
+                .expect("bootstrap");
+        engine.set_image_registry(Arc::clone(&registry));
+        let bindings = BindingTable::new();
+        let index = BindingIndex::new();
+        let prepared = verb_program(SYNTHETIC_SITE_BIT | 41, TypeNode::Text);
+        let mut snapshot = engine
+            .snapshot_install(prepared.clone(), &bindings, &index)
+            .expect("capture installation");
+        let key = snapshot.linked.clone();
+        let compiled =
+            PreparedEngine::compile_off_checkout(&mut snapshot).expect("compile code off checkout");
+        let shared = Arc::clone(&compiled);
+        let first = engine
+            .install(prepared, &bindings, &index)
+            .expect("another actor installs shared code first");
+        let second = engine
+            .revalidate_and_install(snapshot, compiled, &bindings, &index)
+            .expect("imports remain current")
+            .expect("same code does not stale an installation");
+        assert_ne!(first, second, "each installation owns a separate instance");
+        assert!(Arc::ptr_eq(
+            &shared,
+            &registry
+                .lookup(&key)
+                .expect("installed code remains shared")
+        ));
     }
 
     #[test]
