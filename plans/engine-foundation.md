@@ -116,6 +116,44 @@ increased interface allocation from below the RTS counter resolution to about
 request allocated about 15.9 GB. These measurements establish the fingerprint
 defect; they do not measure the benefit of changes that have not yet run.
 
+The retained old-worker `Tidepool.Session.Val.G3` `make_iface` detail lines in
+`/tmp/tidepool-wave22-fullcore/retained-{0,1000,10000}.log` give the exact
+baseline below. These are per-module process-delta counters, not whole-request
+RSS. The W1 input and G3 source are preserved byte-for-byte in
+`tidepool/extract-cmd/tests/fixtures/retained_fingerprint/`.
+
+| Unrelated retained identities | G3 wall time | G3 allocated bytes |
+| ---: | ---: | ---: |
+| 0 | 322,328 ns | 0 (below counter resolution) |
+| 1,000 | 23,119,055 ns | 68,006,680 |
+| 10,000 | 526,178,312 ns | 679,149,432 |
+
+The historical request's `G2.hi` has no retained source (only a 291-byte
+interface tied to that old worker), and W2 imports private wave Project
+modules. The portable, ignored `retained_fingerprint` integration probe uses
+the typed `ExtractCmd` producer to make a fresh G2 thin interface, then runs
+the same W1/G3 sources against 0/1,000/10,000 unrelated identities. Its
+minimal local `Tidepool.Command.Types` and G2 binder replace missing wave
+dependencies; compare the three new rows to each other, not their absolute
+times or allocations to the historical rows. A single matched run on the
+current worker produced:
+
+| Unrelated retained identities | G3 wall time | G3 allocated bytes | Whole request elapsed |
+| ---: | ---: | ---: | ---: |
+| 0 | 178,481 ns | 0 (below counter resolution) | 101,983,457 ns |
+| 1,000 | 175,808 ns | 0 (below counter resolution) | 116,388,350 ns |
+| 10,000 | 200,776 ns | 0 (below counter resolution) | 309,163,266 ns |
+
+The G3 prepared-interface phase did not scale with these unrelated identities
+in this one run. The whole request still grows, so this does not measure a
+whole-request speedup. The probe ran in the repository Nix shell with
+`TIDEPOOL_TIMING=1`, this checkout's freshly built worker and frontend, and
+`cargo test -p tidepool-extract-cmd --test retained_fingerprint
+unrelated_retained_symbols_do_not_scale_g3_interface -- --exact --ignored
+--nocapture` (1 passed). The old and current rows use different G2/dependency
+fixtures and worker revisions; their absolute times are not a controlled
+before/after speed comparison.
+
 Long shared-machine holds, serial Git/process setup and blocked observation
 loops amplify each other. The controlled fork experiment confirms a large
 mapping/resident-memory cost, but does not attribute all production wait time
