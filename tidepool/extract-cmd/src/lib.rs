@@ -577,6 +577,11 @@ impl ExtractCmd {
         self
     }
 
+    pub fn session_artifacts(&mut self, path: &Path) -> &mut Self {
+        self.request.session_artifacts(path);
+        self
+    }
+
     pub fn declaration_join(&mut self, path: &Path) -> &mut Self {
         self.request.declaration_join(path);
         self
