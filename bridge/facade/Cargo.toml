@@ -46,6 +46,7 @@ exomonad-agent.workspace = true
 codex-shoal-protocol.workspace = true
 exomonad-actor.workspace = true
 exomonad-tool.workspace = true
+harness.workspace = true
 exomonad-node.workspace = true
 tidepool-atomic-write.workspace = true
 tidepool-extract-cmd.workspace = true
