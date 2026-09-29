@@ -337,3 +337,18 @@ completion ownership, and checkpoint-failure receipt retention.
 Concurrent execution/publication remains disabled. Next runtime parcel moves
 actual execution consumers into an execution-owned record while preserving
 sequential behavior until the publication boundary is ready.
+
+### Joined check and view-holder lifetime
+
+The joined facade library compiled successfully at `90b17c8af` with pinned
+`bash scripts/dev-shell.sh cargo check -p tidepool --lib`, admitted under the
+completion build slice. Log: integration checkout
+`target/completion-evidence/joined-runtime-products-check.log`. Existing unused
+embedded-adapter warnings remain until the production M1 wiring is integrated.
+This was compilation, not test execution.
+
+Integrated Git acceptance `6b5c8f002` as `9f021c031`. The existing descriptor
+acquisition test now exits and reaps the original view process before acquiring
+and executing through its retained namespace. It passed 1/1, eight skipped;
+log: Git checkout `target/completion-evidence/view-holder-exit.log`. This adds
+original-process-death coverage to the previous descriptor-lifetime evidence.
