@@ -239,6 +239,64 @@ pub(crate) struct LaunchConfig {
     pub(crate) source_exclude: Vec<String>,
     pub(crate) source: SourceImportPolicy,
     pub(crate) backend: ExomonadBackend,
+    pub(crate) embedded: Option<EmbeddedLaunchConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddedLaunchConfig {
+    pub(crate) listen: std::net::SocketAddr,
+    pub(crate) asset_root: PathBuf,
+    pub(crate) session_secret_file: PathBuf,
+    pub(crate) codex_auth_file: PathBuf,
+    pub(crate) context_capacity_tokens: u64,
+    #[serde(default = "default_embedded_concurrent_jobs")]
+    pub(crate) concurrent_jobs: usize,
+}
+
+fn default_embedded_concurrent_jobs() -> usize {
+    4
+}
+
+impl EmbeddedLaunchConfig {
+    pub(crate) fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.listen.ip().is_loopback() {
+            return Err(runtime_error("embedded browser listener must use loopback"));
+        }
+        if self.context_capacity_tokens == 0 || self.concurrent_jobs == 0 {
+            return Err(runtime_error(
+                "embedded context capacity and concurrent jobs must be positive",
+            ));
+        }
+        for path in [
+            &self.asset_root,
+            &self.session_secret_file,
+            &self.codex_auth_file,
+        ] {
+            if !path.is_absolute() {
+                return Err(runtime_error(format!(
+                    "embedded path must be absolute: {}",
+                    path.display()
+                )));
+            }
+        }
+        if !self.asset_root.join("index.html").is_file() {
+            return Err(runtime_error(format!(
+                "embedded browser assets missing index.html: {}",
+                self.asset_root.display()
+            )));
+        }
+        if !self.codex_auth_file.is_file() {
+            return Err(runtime_error(format!(
+                "embedded Codex credential file is missing: {}",
+                self.codex_auth_file.display()
+            )));
+        }
+        let secret = std::fs::read_to_string(&self.session_secret_file)?;
+        harness::server::SessionSecret::new(secret.trim_end_matches(['\r', '\n']).to_owned())
+            .map_err(runtime_error)?;
+        Ok(())
+    }
 }
 
 /// Disk admission for a private source import. Values are conservative
@@ -1374,6 +1432,14 @@ async fn run_host(
             "workspace backend differs from the admitted run backend",
         ));
     }
+    if options.backend == ExomonadBackend::Embedded {
+        configuration
+            .launch
+            .embedded
+            .as_ref()
+            .ok_or_else(|| runtime_error("embedded backend requires [launch.embedded]"))?
+            .validate()?;
+    }
     let slice = configuration.launch.systemd_slice;
     slice.current_membership()?;
     let limits = slice.inspect().await?;
@@ -1437,6 +1503,7 @@ async fn run_host(
             root_binding_path: options.run_root.join("root-binding.json"),
             interactive_agent: options.interactive_agent.clone(),
             backend: options.backend,
+            embedded: configuration.launch.embedded,
             tmux_session: options.session.clone(),
             model: options.agent.model.clone(),
             effort: options.agent.effort.into(),

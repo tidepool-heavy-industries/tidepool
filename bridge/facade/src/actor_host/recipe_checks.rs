@@ -163,6 +163,7 @@ impl Driver {
                 "model-free recipe check".into(),
             )?,
             backend: crate::exomonad::ExomonadBackend::Codex,
+            embedded: None,
             tmux_session: "unused-in-recipe-check".into(),
             model: defaults.defaults.model,
             effort: defaults.defaults.effort.into(),

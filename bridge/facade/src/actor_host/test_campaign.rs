@@ -251,6 +251,7 @@ impl TestCampaign {
             )
             .unwrap(),
             backend: crate::exomonad::ExomonadBackend::Codex,
+            embedded: None,
             tmux_session: "unused-in-resident-test".into(),
             model: "test-model".into(),
             effort: ReasoningEffort::Low,

@@ -21,6 +21,7 @@ mod custody_tests;
 mod documentation_tests;
 mod embedded_harness;
 mod embedded_policy;
+mod embedded_service;
 mod host_incarnation;
 mod hosted_retirement;
 #[cfg(test)]
@@ -507,6 +508,7 @@ pub struct ActorHostConfig {
     pub root_binding_path: PathBuf,
     pub interactive_agent: InteractiveAgentInstallation,
     pub backend: crate::exomonad::ExomonadBackend,
+    pub embedded: Option<crate::exomonad::EmbeddedLaunchConfig>,
     pub tmux_session: String,
     pub model: String,
     pub effort: ReasoningEffort,

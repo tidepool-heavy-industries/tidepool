@@ -89,6 +89,10 @@ impl EmbeddedHarnessRuntime {
     pub(super) fn scheduler(&self) -> Arc<JobScheduler> {
         self.scheduler.clone()
     }
+
+    pub(super) fn store(&self) -> Arc<Store> {
+        self.store.clone()
+    }
 }
 
 pub(super) struct EmbeddedConversation {
