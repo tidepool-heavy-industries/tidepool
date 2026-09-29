@@ -179,7 +179,7 @@ Codex is excluded.
 An unchanged four-target build passed with no compile commands
 (`restored-warm.log`). This is warm graph reuse, not proof of remote or local
 action-cache hits. Earlier controlled C fixture invalidation evidence remains in
-`cache-fixture-change.events.jsonl`; repeat that measurement as the graph expands.
+`cache-fixture-change-events.jsonl`; repeat that measurement as the graph expands.
 Builds and the persistent Buck daemon run in `tidepool-completion-build.slice`
 with a 104 GiB aggregate maximum. Root Git and user-systemd probes passed after
 the app-server permission repair; worker patch preparation did not require
