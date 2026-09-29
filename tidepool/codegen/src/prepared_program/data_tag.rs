@@ -51,7 +51,8 @@ pub(super) fn emit(
     let entry = pipeline
         .module
         .declare_func_in_func(prepared_enter, builder.func);
-    let call = builder.ins().call(entry, &[vmctx, argument]);
+    let installation = super::emit::installation_environment(builder);
+    let call = builder.ins().call(entry, &[vmctx, installation, argument]);
     let returned = builder.inst_results(call).to_vec();
     super::arrays::finish_checked_call(builder, returned[0]);
     let evaluated = returned[1];

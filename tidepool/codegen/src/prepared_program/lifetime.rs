@@ -79,12 +79,13 @@ pub(super) fn emit(
     let dispatcher = pipeline
         .module
         .declare_func_in_func(dispatcher, builder.func);
+    let installation = super::emit::installation_environment(builder);
     let result = super::emit_direct_call(
         builder,
         pipeline,
         vmctx,
         dispatcher,
-        &[vmctx, callback],
+        &[vmctx, installation, callback],
         &signature.results,
     )?;
     if result.is_some() {
