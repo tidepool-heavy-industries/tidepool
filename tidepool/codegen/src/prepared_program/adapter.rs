@@ -28,7 +28,7 @@ pub(super) fn emit_dynamic_adapter(
     )?;
     let mut context = Context::new();
     context.func.signature = ir::Signature::new(pipeline.isa.default_call_conv());
-    context.func.signature.params = vec![AbiParam::new(types::I64); 3];
+    context.func.signature.params = vec![AbiParam::new(types::I64); 4];
     context.func.signature.returns = vec![AbiParam::new(types::I32)];
     let adapter =
         pipeline.declare_function_with_signature(name, Linkage::Local, &context.func.signature)?;
@@ -40,13 +40,14 @@ pub(super) fn emit_dynamic_adapter(
     builder.seal_block(block);
     let parameters = builder.block_params(block).to_vec();
     let vmctx = parameters[0];
-    let result_area = parameters[1];
-    let argument_area = parameters[2];
+    let installation = parameters[1];
+    let result_area = parameters[2];
+    let argument_area = parameters[3];
     let environment = builder
         .ins()
         .load(types::I64, MemFlags::trusted(), argument_area, 0);
     builder.declare_value_needs_stack_map(environment);
-    let mut arguments = vec![vmctx, environment];
+    let mut arguments = vec![vmctx, installation, environment];
     for (index, rep) in abi.physical_arguments().iter().enumerate() {
         let value = builder.ins().load(
             scalar_type(*rep),
@@ -111,7 +112,10 @@ pub(super) fn emit_force_adapter(
     let callee = pipeline
         .module
         .declare_func_in_func(prepared_enter, builder.func);
-    let call = builder.ins().call(callee, &[vmctx, reference]);
+    let absent_installation = builder.ins().iconst(types::I64, 0);
+    let call = builder
+        .ins()
+        .call(callee, &[vmctx, absent_installation, reference]);
     let returned = builder.inst_results(call).to_vec();
     let status = returned[0];
     let success = builder.create_block();
@@ -145,12 +149,11 @@ pub(super) fn emit_adapter(
     name: &str,
     function: FuncId,
     abi: &EntryAbi,
-    image_slot: super::roots::ImageSlot,
     top_slot: usize,
 ) -> Result<FuncId, CompileError> {
     let mut context = Context::new();
     context.func.signature = ir::Signature::new(pipeline.isa.default_call_conv());
-    context.func.signature.params = vec![AbiParam::new(types::I64); 3];
+    context.func.signature.params = vec![AbiParam::new(types::I64); 4];
     context.func.signature.returns = vec![AbiParam::new(types::I32)];
     let adapter =
         pipeline.declare_function_with_signature(name, Linkage::Export, &context.func.signature)?;
@@ -162,18 +165,16 @@ pub(super) fn emit_adapter(
     builder.seal_block(block);
     let parameters = builder.block_params(block).to_vec();
     let vmctx = parameters[0];
-    let result_area = parameters[1];
-    let argument_area = parameters[2];
-    // The entry's environment is its own top, read through the running
-    // machine's root-block table (see `emit::root_slot_value`).
-    let environment = super::emit::root_slot_value(
+    let installation = parameters[1];
+    let result_area = parameters[2];
+    let argument_area = parameters[3];
+    let environment = super::emit::root_slot_from_environment(
         &mut builder,
-        vmctx,
-        image_slot,
+        installation,
         top_slot,
         RuntimeRep::LiftedRef,
     );
-    let mut arguments = vec![vmctx, environment];
+    let mut arguments = vec![vmctx, installation, environment];
     for (index, rep) in abi.physical_arguments().iter().enumerate() {
         let ty = scalar_type(*rep);
         let value = builder

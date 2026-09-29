@@ -73,6 +73,7 @@ pub use tidepool_heap::external_storage::{ExternalStorageKind, ExternalStorageVa
 /// generated calls and enters therefore observe one coherent owner record
 /// instead of consulting independently updated call and enter maps.
 struct PreparedDispatchRecord {
+    environment: *const u8,
     enter: Option<*const u8>,
     calls: std::collections::BTreeMap<tidepool_repr::execution_schema::Signature, *const u8>,
 }
@@ -86,6 +87,7 @@ pub(crate) enum PreparedCallContinuation {
 
 pub(crate) struct PreparedCallResolution {
     pub code: *const u8,
+    pub environment: *const u8,
     pub logical_consumed: usize,
     pub physical_consumed: usize,
     pub continuation: PreparedCallContinuation,
@@ -554,13 +556,19 @@ impl MachineState {
     /// chain: program retirement, which is not LIFO. `true` if it was linked.
     pub(crate) fn remove_stack_map_registry(&self, registry: &StackMapRegistry) -> bool {
         let mut chain = self.stack_map_registry.borrow_mut();
-        let before = chain.len();
-        chain.retain(|linked| !std::ptr::eq(*linked, registry));
-        let removed = chain.len() != before;
+        let position = chain
+            .iter()
+            .position(|linked| std::ptr::eq(*linked, registry));
+        let removed = if let Some(position) = position {
+            chain.remove(position);
+            true
+        } else {
+            false
+        };
         self.update_stack_map_index(&chain, |index| {
             if chain.len() < 2 {
                 index.clear();
-            } else if removed {
+            } else if removed && !chain.iter().any(|linked| std::ptr::eq(*linked, registry)) {
                 index.unlink(registry);
             }
         });
@@ -1432,6 +1440,7 @@ impl MachineState {
     /// each program emits one target per compatible header/signature pair.
     pub(crate) fn register_prepared_entries(
         &self,
+        environment: *const u8,
         callables: impl IntoIterator<
             Item = (usize, tidepool_repr::execution_schema::Signature, *const u8),
         >,
@@ -1442,6 +1451,7 @@ impl MachineState {
             staged
                 .entry(header)
                 .or_insert_with(|| PreparedDispatchRecord {
+                    environment,
                     enter: None,
                     calls: std::collections::BTreeMap::new(),
                 })
@@ -1452,6 +1462,7 @@ impl MachineState {
             staged
                 .entry(header)
                 .or_insert_with(|| PreparedDispatchRecord {
+                    environment,
                     enter: None,
                     calls: std::collections::BTreeMap::new(),
                 })
@@ -1573,7 +1584,8 @@ impl MachineState {
 
         let remaining = demand.arguments.get(logical_cursor..)?;
         let records = self.prepared_dispatch.borrow();
-        let calls = &records.get(&header)?.calls;
+        let record = records.get(&header)?;
+        let calls = &record.calls;
         let physical = |logical: &[RuntimeRep]| {
             logical
                 .iter()
@@ -1582,6 +1594,7 @@ impl MachineState {
         };
         let resolution = |code, consumed, continuation| PreparedCallResolution {
             code,
+            environment: record.environment,
             logical_consumed: consumed,
             physical_consumed: physical(&remaining[..consumed]),
             continuation,
@@ -1638,8 +1651,10 @@ impl MachineState {
             })
     }
 
-    pub(crate) fn resolve_prepared_enter(&self, header: usize) -> Option<*const u8> {
-        self.prepared_dispatch.borrow().get(&header)?.enter
+    pub(crate) fn resolve_prepared_enter(&self, header: usize) -> Option<(*const u8, *const u8)> {
+        let records = self.prepared_dispatch.borrow();
+        let record = records.get(&header)?;
+        Some((record.enter?, record.environment))
     }
 
     /// Whether some installed program owns an enter routine for `header` (a

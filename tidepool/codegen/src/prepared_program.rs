@@ -18,7 +18,6 @@ use cranelift_module::{FuncId, Module};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
-use tidepool_heap::static_region::StaticRegion;
 use tidepool_heap::static_region::{StaticImage, StaticImageError};
 use tidepool_repr::execution_schema::{
     Architecture, Endianness, GlobalId, LinkedProgram, ResultContract, RuntimeRep, Signature,
@@ -35,6 +34,7 @@ pub(crate) mod compile_phases;
 mod emit;
 mod image;
 mod image_registry;
+mod instance;
 #[cfg(test)]
 mod invocation;
 pub use image_registry::ImageRegistry;
@@ -51,7 +51,6 @@ pub(crate) mod resolve;
 mod roots;
 pub use evacuation::{Parcel, ParcelImage, ParcelImports};
 pub use observe::{AddressOrigin, ObservationFailure};
-pub use roots::ImageSlot;
 mod interner;
 pub use interner::DescriptorInterner;
 pub(crate) use interner::ExternalDescriptors;
@@ -301,6 +300,7 @@ unsafe extern "C" fn prepared_resolve_call(
         plan_out.write(resolution.logical_consumed as u64);
         plan_out.add(1).write(resolution.physical_consumed as u64);
         plan_out.add(2).write(kind);
+        plan_out.add(3).write(resolution.environment as u64);
     }
     resolution.code as u64
 }
@@ -337,10 +337,12 @@ pub(crate) const ENTER_EVALUATED: u64 = 1;
 unsafe extern "C" fn prepared_resolve_enter(
     vmctx: *mut crate::context::VMContext,
     object: u64,
+    environment_out: *mut u64,
 ) -> u64 {
     let machine = unsafe { crate::machine_state::machine_state(vmctx) };
     let header = unsafe { (object as *const usize).read() } & !7;
-    if let Some(code) = machine.resolve_prepared_enter(header) {
+    if let Some((code, environment)) = machine.resolve_prepared_enter(header) {
+        unsafe { environment_out.write(environment as u64) };
         return code as u64;
     }
     if matches!(
@@ -373,22 +375,15 @@ pub struct CompiledProgram {
     pub(crate) entries: BTreeMap<ValueId, CompiledEntry>,
     pub(crate) descriptors: Vec<Arc<ObjectDescriptor>>,
     pub(crate) descriptor_registry: BTreeMap<usize, DescriptorMetadata>,
+    pub(crate) descriptor_slots: BTreeMap<usize, usize>,
     pub(crate) statics: StaticImage,
-    /// The one instantiated static region every machine that installs this
-    /// image shares by address, so a static reference crosses machines
-    /// unchanged. Instantiated on first install.
-    static_region: std::sync::OnceLock<Arc<StaticRegion>>,
-    /// Block-local slot of every top; see `image_slot`/`root_words`.
+    /// Block-local slot of every top.
     pub(crate) top_slots: BTreeMap<ValueId, usize>,
     /// Admitted imports' slots -- see [`plan::ImportSlot`]. Indexed by
     /// `GlobalId`, occupying the block range right after `top_slots`.
     pub(crate) import_slots: Vec<plan::ImportSlot>,
-    /// This image's slot in every machine's root-block table, and the block
-    /// length (one word per top and import slot). Generated code embeds the
-    /// slot; each installing machine allocates its own block, registers the
-    /// heap-top and import words as persistent roots, and the collector
-    /// rewrites them in place. The block is freed with the retirement.
-    pub(crate) image_slot: roots::ImageSlot,
+    /// Block length (one word per top and import slot). Each installation
+    /// allocates its own block, registered and rewritten by the collector.
     pub(crate) root_words: usize,
     /// This program's constructor declarations with the descriptors they
     /// compiled against, so an installing machine can absorb them into its
@@ -420,9 +415,6 @@ pub struct CompiledProgram {
     _dispatchers: apply::Dispatchers,
     /// Exact per-thunk entry state machines, keyed by descriptor header.
     pub(crate) thunk_entries: Vec<(usize, FuncId)>,
-    /// Every descriptor header with a published call or enter record. Shared
-    /// descriptors are excluded so retirement removes only this owner.
-    pub(crate) dispatch_owned_headers: Vec<usize>,
     /// Set exactly once, by whichever install (on whichever machine, and
     /// therefore possibly whichever thread) is first to install this image:
     /// see [`crate::prepared_program::machine::PreparedMachine::install`]'s
@@ -460,14 +452,14 @@ pub struct CompiledProgram {
 //     frees.
 //   - `descriptors`, `descriptor_registry`, `statics`, `top_slots`,
 //     `import_slots`, `interned_constructors`, `byte_tops`, `externals`,
-//     `heap_top_specs`, `callables`, `thunk_entries`, `dispatch_owned_headers`:
+//     `heap_top_specs`, `callables`, `thunk_entries`:
 //     plain owned data (`Vec`/`BTreeMap`/`Arc<..>` of `Send + Sync` content,
 //     no `Cell`/`RefCell`/raw pointer), read-only after construction.
 //   - `bytes` (`Arc<static_bytes::PinnedBytes>`): content-addressed,
 //     append-only by construction; this program's own `Arc` is never
 //     mutated after `compile_with` returns (only a machine's OWN pool,
 //     a different value, is later extended by absorption).
-//   - `image_slot`, `root_words`, `force_adapter` (`FuncId`): `Copy` plain
+//   - `root_words`, `force_adapter` (`FuncId`): `Copy` plain
 //     data.
 //   - `codegen_charged`: an `AtomicBool`, synchronized by construction.
 // No field is a raw pointer, `Cell`, or non-atomic interior-mutability cell
@@ -844,6 +836,9 @@ impl CompiledProgram {
             .params
             .push(AbiParam::new(types::I64));
         prepared_resolve_enter_signature
+            .params
+            .push(AbiParam::new(types::I64));
+        prepared_resolve_enter_signature
             .returns
             .push(AbiParam::new(types::I64));
         let prepared_resolve_enter = pipeline
@@ -1037,6 +1032,7 @@ impl CompiledProgram {
             .iter()
             .map(|(&id, thunk)| entry::ThunkEntry {
                 descriptor: Arc::clone(&thunk.descriptor),
+                descriptor_slot: plan.descriptor_slots[&thunk.descriptor.initial_header_word()],
                 body: thunk_bodies[&id],
                 policy: thunk.policy,
                 results: thunk.signature.results.clone(),
@@ -1113,7 +1109,6 @@ impl CompiledProgram {
                     functions[&id][&signature.results]
                 },
                 &abi,
-                plan.image_slot,
                 slot,
             )?;
             entries.insert(
@@ -1217,20 +1212,6 @@ impl CompiledProgram {
                 },
             );
         }
-        let shared = plan
-            .constructors
-            .iter()
-            .map(|descriptor| descriptor.initial_header_word())
-            .chain(plan.externals.headers())
-            .collect::<std::collections::HashSet<_>>();
-        let dispatch_owned_headers = thunk_entries
-            .iter()
-            .map(|&(header, _)| header)
-            .chain(callables.iter().map(|callable| callable.header))
-            .filter(|header| !shared.contains(header))
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
         let byte_tops = plan
             .top_bindings
             .iter()
@@ -1266,11 +1247,10 @@ impl CompiledProgram {
             entries,
             descriptors,
             descriptor_registry,
+            descriptor_slots: plan.descriptor_slots,
             statics,
-            static_region: std::sync::OnceLock::new(),
             top_slots: plan.top_slots,
             import_slots: plan.import_slots,
-            image_slot: plan.image_slot,
             root_words: plan.root_words,
             interned_constructors: plan.interned_constructors,
             byte_tops,
@@ -1281,19 +1261,8 @@ impl CompiledProgram {
             callables,
             _dispatchers: dispatchers,
             thunk_entries,
-            dispatch_owned_headers,
             codegen_charged: std::sync::atomic::AtomicBool::new(false),
         })
-    }
-
-    /// This image's static region, instantiated once and shared by every
-    /// machine that installs the image.
-    pub(crate) fn shared_statics(&self) -> Result<Arc<StaticRegion>, ExecutionError> {
-        if let Some(region) = self.static_region.get() {
-            return Ok(Arc::clone(region));
-        }
-        let region = Arc::new(self.statics.instantiate()?);
-        Ok(Arc::clone(self.static_region.get_or_init(|| region)))
     }
 
     pub(crate) fn prepared_force_adapter(&self) -> FuncId {
@@ -1320,12 +1289,6 @@ impl CompiledProgram {
     #[must_use]
     pub fn root_block_words(&self) -> usize {
         self.root_words
-    }
-
-    /// This image's slot in every machine's root-block table.
-    #[must_use]
-    pub fn image_slot(&self) -> roots::ImageSlot {
-        self.image_slot
     }
 }
 

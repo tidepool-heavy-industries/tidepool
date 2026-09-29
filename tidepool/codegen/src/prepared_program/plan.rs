@@ -1,6 +1,5 @@
 //! Checked binder and closure layout facts used by every emitter consumer.
 
-use super::roots::ImageSlot;
 use super::static_bytes::PinnedBytes;
 use super::CompileError;
 use std::collections::{BTreeMap, BTreeSet};
@@ -34,6 +33,7 @@ pub(super) struct ThunkPlan<'a> {
 /// Invocation-owned top allocation recipe. The checked binding is cloned so
 /// run initialization can reserve the complete group after static addresses
 /// exist, without retaining the input artifact behind the compiled program.
+#[derive(Clone)]
 pub(crate) struct HeapTopSpec {
     pub id: ValueId,
     pub descriptor: Arc<ObjectDescriptor>,
@@ -160,6 +160,8 @@ pub(super) struct ProgramPlan<'a> {
     pub thunks: BTreeMap<ValueId, ThunkPlan<'a>>,
     pub top_bindings: BTreeMap<ValueId, &'a HeapBinding>,
     pub constructors: Vec<Arc<ObjectDescriptor>>,
+    /// Stable native environment offsets for every descriptor this code emits.
+    pub descriptor_slots: BTreeMap<usize, usize>,
     /// Each constructor family's descriptors in declaration order, for
     /// algebraic case dispatch.
     pub constructor_families: BTreeMap<SymbolIdentity, Vec<Arc<ObjectDescriptor>>>,
@@ -182,10 +184,6 @@ pub(super) struct ProgramPlan<'a> {
     /// lowering reads `import_slots[id.0]`. Occupies the block range
     /// immediately after `top_slots`.
     pub import_slots: Vec<ImportSlot>,
-    /// This image's slot in every machine's root-block table. Generated
-    /// code embeds the slot; the installing machine allocates the block
-    /// (`root_words` collector-updated words, one per top and import slot).
-    pub image_slot: ImageSlot,
     pub root_words: usize,
     /// Pinned literal payloads; emitters never embed a borrowed artifact buffer.
     pub bytes: Arc<PinnedBytes>,
@@ -423,7 +421,7 @@ impl<'a> ProgramPlan<'a> {
         let root_words = top_slots.len() + import_slots.len();
 
         let heap_tops = super::image::heap_top_partition(&top_bindings);
-        let pap_layouts = super::apply::layouts(
+        let mut pap_layouts = super::apply::layouts(
             target,
             functions
                 .iter()
@@ -465,6 +463,25 @@ impl<'a> ProgramPlan<'a> {
         }
 
         let externals = interner.externals(target)?;
+        let descriptor_slots: BTreeMap<usize, usize> = constructors
+            .iter()
+            .chain(functions.values().map(|function| &function.descriptor))
+            .chain(thunks.values().map(|thunk| &thunk.descriptor))
+            .chain(pap_layouts.values().map(|pap| &pap.descriptor))
+            .chain([
+                &externals.boxed_array,
+                &externals.mut_var,
+                &externals.bytes_array,
+            ])
+            .map(|descriptor| descriptor.initial_header_word())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .enumerate()
+            .map(|(slot, header)| (header, slot))
+            .collect();
+        for pap in pap_layouts.values_mut() {
+            pap.descriptor_slot = descriptor_slots[&pap.descriptor.initial_header_word()];
+        }
         Ok(Self {
             program,
             functions,
@@ -472,6 +489,7 @@ impl<'a> ProgramPlan<'a> {
             value_reps: values,
             top_bindings,
             constructors,
+            descriptor_slots,
             constructor_families,
             boxed_array: Arc::clone(&externals.boxed_array),
             bytes_array: Arc::clone(&externals.bytes_array),
@@ -479,7 +497,6 @@ impl<'a> ProgramPlan<'a> {
             externals,
             top_slots,
             import_slots,
-            image_slot: ImageSlot::fresh(),
             root_words,
             interned_constructors,
             bytes: if bytes.is_empty() {

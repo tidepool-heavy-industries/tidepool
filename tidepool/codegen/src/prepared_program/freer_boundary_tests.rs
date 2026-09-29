@@ -27,8 +27,10 @@
 //! test below pins the intended state positively instead.
 
 use super::{
-    entry_tests::caf_program, safepoint::NativeStackBounds, CompiledProgram, DescriptorMeaning,
-    RunOptions,
+    entry_tests::caf_program,
+    roots::{InstallationEnvironment, RootWords},
+    safepoint::NativeStackBounds,
+    CompiledProgram, DescriptorMeaning, RunOptions,
 };
 use crate::{
     context::VMContext,
@@ -253,6 +255,9 @@ struct RawForce<'a> {
     vmctx: VMContext,
     root: Box<usize>,
     descriptor: Arc<ObjectDescriptor>,
+    _roots: RootWords,
+    _descriptor_words: Box<[usize]>,
+    _environment: Box<InstallationEnvironment>,
 }
 
 impl<'a> RawForce<'a> {
@@ -269,7 +274,14 @@ impl<'a> RawForce<'a> {
             })
             .unwrap();
         let machine = Box::new(MachineState::new());
+        let roots = RootWords::new(program.root_words).unwrap();
+        let descriptor_words: Box<[usize]> = program.descriptor_slots.keys().copied().collect();
+        let environment = Box::new(InstallationEnvironment {
+            roots: roots.as_mut_ptr(),
+            descriptors: descriptor_words.as_ptr(),
+        });
         machine.register_prepared_entries(
+            (&*environment as *const InstallationEnvironment).cast(),
             std::iter::empty(),
             program
                 .thunk_entries
@@ -297,6 +309,9 @@ impl<'a> RawForce<'a> {
             vmctx,
             root,
             descriptor,
+            _roots: roots,
+            _descriptor_words: descriptor_words,
+            _environment: environment,
         }
     }
 

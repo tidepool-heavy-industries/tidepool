@@ -2183,7 +2183,14 @@ mod tests {
     ) {
         let program = traversal_program();
         let machine = MachineState::new();
+        let roots = super::super::roots::RootWords::new(program.root_words).unwrap();
+        let descriptor_words: Box<[usize]> = program.descriptor_slots.keys().copied().collect();
+        let environment = Box::new(super::super::roots::InstallationEnvironment {
+            roots: roots.as_mut_ptr(),
+            descriptors: descriptor_words.as_ptr(),
+        });
         machine.register_prepared_entries(
+            (&*environment as *const super::super::roots::InstallationEnvironment).cast(),
             std::iter::empty(),
             program
                 .thunk_entries

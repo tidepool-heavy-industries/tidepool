@@ -18,6 +18,7 @@ use tidepool_repr::execution_schema::{ResultContract, UpdatePolicy};
 /// emitted. Function IDs are module relocations, not cast Rust function values.
 pub(super) struct ThunkEntry {
     pub descriptor: Arc<ObjectDescriptor>,
+    pub descriptor_slot: usize,
     pub body: FuncId,
     pub policy: UpdatePolicy,
     pub results: ResultContract,
@@ -25,7 +26,7 @@ pub(super) struct ThunkEntry {
 
 pub(super) fn signature() -> ir::Signature {
     let mut signature = ir::Signature::new(CallConv::Tail);
-    signature.params = vec![AbiParam::new(types::I64); 2];
+    signature.params = vec![AbiParam::new(types::I64); 3];
     signature.returns = vec![AbiParam::new(types::I32), AbiParam::new(types::I64)];
     signature
 }
@@ -63,7 +64,8 @@ pub(super) fn emit_prepared_enter(
     builder.switch_to_block(start);
     builder.seal_block(start);
     let vmctx = builder.block_params(start)[0];
-    let original = builder.block_params(start)[1];
+    let installation = builder.block_params(start)[1];
+    let original = builder.block_params(start)[2];
     builder.declare_value_needs_stack_map(original);
     let loop_block = builder.create_block();
     builder.append_block_param(loop_block, types::I64);
@@ -133,6 +135,14 @@ pub(super) fn emit_prepared_enter(
     let header = builder
         .ins()
         .load(types::I64, MemFlags::trusted(), reference, 0);
+    let local_owner = builder.create_block();
+    let resolve_owner = builder.create_block();
+    let has_environment = builder.ins().icmp_imm(IntCC::NotEqual, installation, 0);
+    builder
+        .ins()
+        .brif(has_environment, local_owner, &[], resolve_owner, &[]);
+    builder.switch_to_block(local_owner);
+    builder.seal_block(local_owner);
     for descriptor in evaluated {
         let next = builder.create_block();
         let matches = builder.ins().icmp_imm(
@@ -149,11 +159,12 @@ pub(super) fn emit_prepared_enter(
     for thunk in thunks {
         let next = builder.create_block();
         let states = builder.create_block();
-        let descriptor_word = thunk.descriptor.initial_header_word() as i64;
+        let descriptor_word =
+            super::emit::descriptor_header_value(&mut builder, thunk.descriptor_slot);
         let descriptor = builder.ins().band_imm(header, !7_i64);
         let matches = builder
             .ins()
-            .icmp_imm(IntCC::Equal, descriptor, descriptor_word);
+            .icmp(IntCC::Equal, descriptor, descriptor_word);
         builder.ins().brif(matches, states, &[], next, &[]);
         builder.switch_to_block(states);
         builder.seal_block(states);
@@ -201,7 +212,7 @@ pub(super) fn emit_prepared_enter(
         builder.ins().brif(live, enter, &[], invalid, &[]);
         builder.switch_to_block(enter);
         builder.seal_block(enter);
-        let live_header = builder.ins().iconst(types::I64, descriptor_word);
+        let live_header = descriptor_word;
         let evaluating = builder
             .ins()
             .bor_imm(live_header, DescriptorState::Evaluating as i64);
@@ -211,7 +222,9 @@ pub(super) fn emit_prepared_enter(
         let body_ref = pipeline
             .module
             .declare_func_in_func(thunk.body, builder.func);
-        let call = builder.ins().call(body_ref, &[vmctx, reference]);
+        let call = builder
+            .ins()
+            .call(body_ref, &[vmctx, installation, reference]);
         let returned = builder.inst_results(call).to_vec();
         if thunk.results == ResultContract::NoSuccess {
             let unexpected = builder.create_block();
@@ -254,7 +267,9 @@ pub(super) fn emit_prepared_enter(
         builder.switch_to_block(body_ok);
         builder.seal_block(body_ok);
         builder.declare_value_needs_stack_map(returned[1]);
-        let forced = builder.ins().call(enter_ref, &[vmctx, returned[1]]);
+        let forced = builder
+            .ins()
+            .call(enter_ref, &[vmctx, installation, returned[1]]);
         let forced_results = builder.inst_results(forced).to_vec();
         let force_ok = builder.create_block();
         let force_succeeded =
@@ -297,7 +312,18 @@ pub(super) fn emit_prepared_enter(
         builder.switch_to_block(next);
         builder.seal_block(next);
     }
-    let call = builder.ins().call(resolve_ref, &[vmctx, reference]);
+    builder.ins().jump(resolve_owner, &[]);
+    builder.switch_to_block(resolve_owner);
+    builder.seal_block(resolve_owner);
+    let environment_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
+        ir::StackSlotKind::ExplicitSlot,
+        8,
+        3,
+    ));
+    let environment_out = builder.ins().stack_addr(types::I64, environment_slot, 0);
+    let call = builder
+        .ins()
+        .call(resolve_ref, &[vmctx, reference, environment_out]);
     let code = builder.inst_results(call)[0];
     let found = builder.ins().icmp_imm(IntCC::NotEqual, code, 0);
     let resolved_block = builder.create_block();
@@ -321,9 +347,14 @@ pub(super) fn emit_prepared_enter(
     builder.switch_to_block(foreign_block);
     builder.seal_block(foreign_block);
     let sig_ref = builder.import_signature(signature());
-    let foreign_call = builder
-        .ins()
-        .call_indirect(sig_ref, code, &[vmctx, reference]);
+    let foreign_environment =
+        builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), environment_out, 0);
+    let foreign_call =
+        builder
+            .ins()
+            .call_indirect(sig_ref, code, &[vmctx, foreign_environment, reference]);
     let foreign_returned = builder.inst_results(foreign_call).to_vec();
     builder.ins().return_(&foreign_returned);
     // The resolver recorded the cause of its miss; return that status

@@ -26,6 +26,8 @@ pub enum StaticImageError {
     Allocation,
     #[error("invalid static object at byte offset {0}")]
     Object(usize),
+    #[error("static descriptor remap changes a layout or aliases another descriptor")]
+    DescriptorRemap,
     #[error("invalid or missing managed relocation at byte offset {0}")]
     Relocation(usize),
     #[error("static entry {0:?} is not an object start")]
@@ -141,6 +143,40 @@ impl StaticImage {
     }
 
     pub fn instantiate(&self) -> Result<StaticRegion, StaticImageError> {
+        self.instantiate_with_descriptors(&BTreeMap::new())
+    }
+
+    /// Instantiate validated static objects with equivalent descriptor owners.
+    /// A code image may thereby give each installation distinct closure
+    /// headers while retaining the original layout and relocation proof.
+    /// The map may also contain descriptors absent from this static image.
+    pub fn instantiate_with_descriptors(
+        &self,
+        replacements: &BTreeMap<usize, Arc<ObjectDescriptor>>,
+    ) -> Result<StaticRegion, StaticImageError> {
+        for (&header, original) in self.descriptors.iter() {
+            if let Some(replacement) = replacements.get(&header) {
+                if original.as_ref() != replacement.as_ref() {
+                    return Err(StaticImageError::DescriptorRemap);
+                }
+            }
+        }
+        let descriptors = if replacements.is_empty() {
+            Arc::clone(&self.descriptors)
+        } else {
+            let remapped: BTreeMap<_, _> = self
+                .descriptors
+                .iter()
+                .map(|(&header, original)| {
+                    let descriptor = replacements.get(&header).unwrap_or(original);
+                    (descriptor.initial_header_word(), Arc::clone(descriptor))
+                })
+                .collect();
+            if remapped.len() != self.descriptors.len() {
+                return Err(StaticImageError::DescriptorRemap);
+            }
+            Arc::new(remapped)
+        };
         // Allocate before exposing any address. The image has already checked
         // every relocation, so these writes cannot fail after allocation.
         let mut words = Vec::new();
@@ -150,6 +186,21 @@ impl StaticImage {
         words.extend_from_slice(&self.words);
         let mut words = words.into_boxed_slice();
         let base = words.as_mut_ptr() as usize;
+
+        if !replacements.is_empty() {
+            for (index, &bits) in self.starts.iter().enumerate() {
+                let mut starts = bits;
+                while starts != 0 {
+                    let bit = starts.trailing_zeros() as usize;
+                    let offset = (index * 64 + bit) * 8;
+                    let header = self.words[offset / 8] as usize;
+                    if let Some(replacement) = replacements.get(&header) {
+                        words[offset / 8] = replacement.initial_header_word() as u64;
+                    }
+                    starts &= starts - 1;
+                }
+            }
+        }
 
         for relocation in &self.relocations {
             let target = base
@@ -166,7 +217,7 @@ impl StaticImage {
             let address = base
                 .checked_add(offset)
                 .ok_or(StaticImageError::Entry(id))?;
-            let descriptor = &self.descriptors[&(self.words[offset / 8] as usize)];
+            let descriptor = &descriptors[&(words[offset / 8] as usize)];
             let encoded = address
                 .checked_add(usize::from(descriptor.tag()))
                 .ok_or(StaticImageError::Entry(id))?;
@@ -175,7 +226,7 @@ impl StaticImage {
 
         Ok(StaticRegion {
             words,
-            descriptors: Arc::clone(&self.descriptors),
+            descriptors,
             starts: Arc::clone(&self.starts),
             entries,
         })
@@ -465,6 +516,39 @@ mod tests {
         let region = image.instantiate().unwrap();
         assert_eq!(region.entry(ValueId(0)), None);
         assert_eq!(region.admit(0).unwrap(), None);
+    }
+
+    #[test]
+    fn installation_remaps_static_closure_header_to_equivalent_owner() {
+        let template = descriptor(1, &[]);
+        let image = image_with_one_object(
+            Arc::clone(&template),
+            BTreeMap::from([(ValueId(1), 0)]),
+            vec![],
+        );
+        let replacement = Arc::new((*template).clone());
+        let region = image
+            .instantiate_with_descriptors(&BTreeMap::from([(
+                template.initial_header_word(),
+                Arc::clone(&replacement),
+            )]))
+            .unwrap();
+        assert_eq!(region.words[0] as usize, replacement.initial_header_word());
+        assert_eq!(region.descriptors.len(), 1);
+        assert!(Arc::ptr_eq(
+            &region.descriptors[&replacement.initial_header_word()],
+            &replacement
+        ));
+        assert!(region.admit(region.entry(ValueId(1)).unwrap()).is_ok());
+
+        let incompatible = descriptor(2, &[]);
+        assert!(matches!(
+            image.instantiate_with_descriptors(&BTreeMap::from([(
+                template.initial_header_word(),
+                incompatible,
+            )])),
+            Err(StaticImageError::DescriptorRemap)
+        ));
     }
 
     #[test]

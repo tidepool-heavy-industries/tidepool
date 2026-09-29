@@ -24,7 +24,7 @@ import GHC.Generics (Generic)
 
 schemaVersion, executionAbiVersion :: Word64
 schemaVersion = 14
-executionAbiVersion = 7
+executionAbiVersion = 8
 
 newtype ValueId = ValueId Word32 deriving stock (Eq, Ord, Show, Generic)
 newtype JoinId = JoinId Word32 deriving stock (Eq, Ord, Show, Generic)

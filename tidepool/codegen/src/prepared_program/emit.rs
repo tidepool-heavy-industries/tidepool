@@ -172,8 +172,8 @@ fn emit_function_at(
     builder.seal_block(start);
     let parameters = builder.block_params(start).to_vec();
     let vmctx = parameters[0];
-    let tagged_environment = parameters[1];
-    let physical_arguments = &parameters[2..];
+    let tagged_environment = parameters[2];
+    let physical_arguments = &parameters[3..];
     // Keep every managed value live across the entry safepoint, including
     // arguments that have not yet been copied into the local-value map.
     builder.declare_value_needs_stack_map(tagged_environment);
@@ -952,9 +952,10 @@ fn emit_let_group(
     // safepoint. Header and payload initialization intentionally contains no
     // calls, so recursive references cannot observe a partially published group.
     for ((binding, descriptor), object) in bindings.iter().zip(&descriptors).zip(objects) {
-        let header = builder
-            .ins()
-            .iconst(types::I64, descriptor.initial_header_word() as i64);
+        let header = descriptor_header_value(
+            builder,
+            plan.descriptor_slots[&descriptor.initial_header_word()],
+        );
         builder.ins().store(flags, header, object, 0);
         match &binding.rhs {
             HeapRhs::Constructor {
@@ -1363,7 +1364,8 @@ fn emit_enter(
     let enter = pipeline
         .module
         .declare_func_in_func(prepared_enter, builder.func);
-    let call = builder.ins().call(enter, &[vmctx, callee]);
+    let installation = installation_environment(builder);
+    let call = builder.ins().call(enter, &[vmctx, installation, callee]);
     let returned = builder.inst_results(call).to_vec();
     let valid = builder.create_block();
     let invalid = builder.create_block();
@@ -1521,7 +1523,7 @@ fn emit_exact_call(
     if arguments.len() != signature.arguments.len() {
         return Err(unsupported(owner, node));
     }
-    let mut call_arguments = vec![vmctx, environment];
+    let mut call_arguments = vec![vmctx, installation_environment(builder), environment];
     call_arguments.extend(emit_atoms(
         builder,
         vmctx,
@@ -1572,7 +1574,7 @@ fn emit_exact_call(
                     .pap_layouts
                     .get(&(*callee_id, total_pending))
                     .ok_or(CompileError::MissingRepresentation(*callee_id))?;
-                let logical = super::apply::logical_arguments(&signature, &call_arguments[2..]);
+                let logical = super::apply::logical_arguments(&signature, &call_arguments[3..]);
                 let pap = super::apply::emit_partial(
                     builder,
                     vmctx,
@@ -1602,28 +1604,34 @@ fn emit_exact_call(
     )
 }
 
-/// Load one word of this image's root block on the running machine: the
-/// table base from the context, this image's block from the table (the
-/// image slot is the compile-time immediate), then the block-local slot.
-/// The collector rewrites the block in place, so the load always observes
-/// the current pointer.
+/// The native entry's hidden installation environment is its second argument.
+pub(super) fn installation_environment(builder: &FunctionBuilder<'_>) -> Value {
+    let entry = builder
+        .func
+        .layout
+        .entry_block()
+        .expect("native entry block");
+    builder.block_params(entry)[1]
+}
+
+/// Load one collector-updated word from this installation's root block.
 pub(super) fn root_slot_value(
     builder: &mut FunctionBuilder<'_>,
-    vmctx: Value,
-    image_slot: super::roots::ImageSlot,
+    slot: usize,
+    expected: RuntimeRep,
+) -> Value {
+    let environment = installation_environment(builder);
+    root_slot_from_environment(builder, environment, slot, expected)
+}
+
+pub(super) fn root_slot_from_environment(
+    builder: &mut FunctionBuilder<'_>,
+    environment: Value,
     slot: usize,
     expected: RuntimeRep,
 ) -> Value {
     let flags = MemFlags::trusted();
-    let tables = builder.ins().load(
-        types::I64,
-        flags,
-        vmctx,
-        crate::layout::VMCTX_ROOT_TABLES_OFFSET,
-    );
-    let block = builder
-        .ins()
-        .load(types::I64, flags, tables, image_slot.table_offset());
+    let block = builder.ins().load(types::I64, flags, environment, 0);
     let value = builder.ins().load(
         types::I64,
         flags,
@@ -1636,13 +1644,26 @@ pub(super) fn root_slot_value(
     value
 }
 
+pub(super) fn descriptor_header_value(builder: &mut FunctionBuilder<'_>, slot: usize) -> Value {
+    let environment = installation_environment(builder);
+    let descriptors = builder
+        .ins()
+        .load(types::I64, MemFlags::trusted(), environment, 8);
+    builder.ins().load(
+        types::I64,
+        MemFlags::trusted(),
+        descriptors,
+        (slot * std::mem::size_of::<usize>()) as i32,
+    )
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "an atom lowering names its builder, context, scope, plan and site"
 )]
 fn atom_value(
     builder: &mut FunctionBuilder<'_>,
-    vmctx: Value,
+    _vmctx: Value,
     values: &BTreeMap<ValueId, Value>,
     plan: &ProgramPlan<'_>,
     atom: &Atom,
@@ -1671,25 +1692,13 @@ fn atom_value(
             let Some(slot) = plan.top_slots.get(id).copied() else {
                 return Err(unsupported(owner, node));
             };
-            Ok(root_slot_value(
-                builder,
-                vmctx,
-                plan.image_slot,
-                slot,
-                expected,
-            ))
+            Ok(root_slot_value(builder, slot, expected))
         }
         Atom::Ref(ValueRef::Global(id)) => {
             let Some(slot) = plan.import_slots.get(id.0 as usize) else {
                 return Err(unsupported(owner, node));
             };
-            Ok(root_slot_value(
-                builder,
-                vmctx,
-                plan.image_slot,
-                slot.slot,
-                expected,
-            ))
+            Ok(root_slot_value(builder, slot.slot, expected))
         }
         Atom::Scalar(scalar) => scalar_value(builder, scalar, expected, plan, owner, node),
         Atom::Rubbish(rep) => rubbish_value(builder, *rep, owner, node),

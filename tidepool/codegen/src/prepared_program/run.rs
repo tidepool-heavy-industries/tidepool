@@ -106,6 +106,8 @@ pub enum ExecutionError {
     },
     #[error("the program was compiled against another machine's external wrapper descriptors")]
     ForeignExternals,
+    #[error("a parcel cannot retain borrowed native code")]
+    BorrowedParcelCode,
     #[error(transparent)]
     Unsupported(#[from] Unsupported),
     #[error("{cause}", cause = .0.cause)]

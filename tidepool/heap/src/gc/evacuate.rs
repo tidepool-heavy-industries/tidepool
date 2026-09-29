@@ -8,8 +8,8 @@
 //! parcel is handed out; the destination is sized for the reachable subgraph,
 //! not the whole source; and external payloads (byte arrays, boxed arrays)
 //! are copied into parcel-owned storage so the parcel carries everything the
-//! graph needs except static regions and code, which every machine that
-//! installed the same image shares by address.
+//! graph needs except static regions and code, whose owners accompany the
+//! parcel's instance manifest at the machine boundary.
 //!
 //! A parcel never contains a continuation or an object under evaluation:
 //! [`Parcel::check_transferable`] refuses both, so a value crosses machines
