@@ -237,3 +237,27 @@ helper build; this is not an isolated fixture memory measurement.
 This validates entry-free product serialization and existing corpus behavior.
 Independent module cache hits, precompile evidence, hydration, native demand,
 and declaration joins remain open.
+
+### Production view helper acceptance
+
+Integrated `d1600316b` from `2fa40a81f`: two production helper tests passed,
+covering non-UTF-8 arguments/environment, environment removal, cwd, null stdin,
+separate stdout/stderr, missing executable/cwd, payload exit 127, SIGTERM, and
+subsequent reuse of the retained view. The exact target was
+`cargo nextest run -p exomonad-node --test overlay_rotation -E 'test(view_helper_)'`
+through the pinned dev shell and admitted user service; exit zero, 2/2 executed.
+The production `exomonad-view-helper` binary was built first.
+
+The existing ignored paired benchmark ran 100 pairs with 1,024 MiB touched host
+RSS, 20 warmup pairs and alternating order: legacy median/p95 39.107/40.913 ms;
+helper median/p95 3.930/5.089 ms. This is a local synthetic command-launch
+measurement, not end-to-end worker throughput or historical compiler evidence.
+A separate two-pair strace run passed and showed the production helper launch
+using `clone3(CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND)` followed by helper and
+payload execs in the same child. The legacy path used a separate non-CLONE_VM
+clone. Traced timings are not performance measurements.
+
+Evidence under `/srv/swarm/checkouts/tidepool-completion-git/target/completion-evidence/`:
+`view-contract.log`, `view-measure.log`, `view-trace.log`, and `view-spawn.trace`.
+Holder/lease cleanup and other process-scope/terminal paths still need their
+remaining acceptance checks; these tests do not close the entire process track.
