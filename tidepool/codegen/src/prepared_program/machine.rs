@@ -6196,32 +6196,6 @@ mod tests {
     }
 
     // ---- S3: global lowering, per-global admission, import bindings ------
-    //
-    // CORRECTION carried from the plan card: cross-program CLOSURE
-    // invocation has no mechanism this wave (S2's T2 finding). Test (2)
-    // below imports a closure, holds it live and never enters or calls it.
-    //
-    // A second, independent finding surfaced while building test (1):
-    // `CaseKind::Algebraic` dispatch (`emit.rs::emit_case_dispatch`,
-    // `emit_algebraic_dispatch`) matches a scrutinee's header word against
-    // only the COMPILING program's own `plan.constructors` descriptor
-    // addresses (`emit.rs` ~1699-1728, "Checked algebraic dispatch uses full
-    // descriptor identity, not a family-relative low-bit tag") -- the exact
-    // same per-program-baked-table shape as the apply dispatcher S2's T2
-    // hit, just for `Case` instead of `Call`. A foreign program's
-    // constructor object can never match a locally-declared descriptor's
-    // address, so a genuine generated `Case` over an imported constructor
-    // always falls through to the integrity trap, confirmed empirically
-    // below (`s3_finding_generated_case_cannot_recognize_a_foreign_constructor`,
-    // pinned `#[ignore]`d). Test (1) is therefore adapted to the same
-    // achievable shape as test (2): B reads the import through
-    // `PreparedMachine::inspect_outer` (the host-boundary, non-forcing path
-    // through the SAME machine-wide descriptor union a real `Case` would
-    // need), never through a generated `Case`. This is still real,
-    // meaningful coverage: it proves the import slot, its independent
-    // persistent root, and the shared descriptor/static union all resolve a
-    // cross-program CONSTRUCTOR correctly across collections on both sides
-    // -- the property the reviewer's root-registration mutation targets.
 
     fn s3_field_producer_identity() -> SymbolIdentity {
         testing::identity("S3Import", "producer")
@@ -6448,50 +6422,8 @@ mod tests {
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 
-    /// Pinned FINDING, not an acceptance test: a genuine generated `Case`
-    /// dispatch (`CaseKind::Algebraic`) can never recognize a constructor
-    /// produced by a DIFFERENT installed program, because
-    /// `emit_algebraic_dispatch` matches the scrutinee's header word against
-    /// the COMPILING program's own `plan.constructors` descriptor addresses
-    /// only (`emit.rs`'s `emit_case_dispatch`/`emit_algebraic_dispatch`,
-    /// doc comment at ~1674: "Checked algebraic dispatch uses full
-    /// descriptor identity, not a family-relative low-bit tag"). B below
-    /// declares its OWN, separately-allocated copy of the SAME logical
-    /// `Field` constructor (same tag/family/layout) and cases on A's
-    /// imported value; A's object's header holds A's descriptor's address,
-    /// which never equals B's descriptor's address, so the dispatch always
-    /// falls through to the integrity trap. This is why test (1) above
-    /// reads the import through `inspect_outer` instead.
-    /// X1: a generated `Case` in B over a constructor A built. B is compiled
-    /// through `compile_for_install`, so its `Field` descriptor IS A's (one
-    /// interned descriptor per constructor identity) and algebraic dispatch
-    /// matches A's cell. Before interning this exact program trapped
-    /// (`CaseTrap`, machine `Unavailable`) -- the S3 finding.
-    #[test]
-    fn x1_generated_case_reads_a_foreign_constructor_through_the_interned_descriptor() {
-        let (mut machine, program_a) = PreparedMachine::new(
-            s3_field_producer_program(),
-            PreparedMachineOptions {
-                nursery_bytes: RunOptions::default().nursery_bytes,
-            },
-        )
-        .expect("A installs");
-        let call = PreparedCallOptions {
-            observation_budget: RunOptions::default().observation_budget,
-            collect_before_observation: false,
-        };
-        let produced = machine
-            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
-            .expect("A produces its retained Field(99)");
-        let [PreparedResult::Managed(handle_a)] = produced.values.as_slice() else {
-            panic!("A must return one managed constructor");
-        };
-        let mut imports = ImportBindings::new();
-        imports.insert(s3_field_producer_identity(), *handle_a);
-
-        // B's own case-dispatching consumer: declares the SAME logical
-        // `Field` constructor as A (same tag/family/layout, but a distinct
-        // Arc<ObjectDescriptor> allocation) and cases on the import.
+    /// A generated algebraic `Case` over an imported `Field(99)`.
+    fn s3_field_case_consumer_program() -> tidepool_repr::execution_schema::LinkedProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![],
@@ -6561,6 +6493,33 @@ mod tests {
         );
         let linked =
             link_program(prepared, &machine_imports).expect("case-dispatch consumer fixture links");
+        linked
+    }
+
+    #[test]
+    fn x1_generated_case_reads_a_foreign_constructor_through_the_interned_descriptor() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            s3_field_producer_program(),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("A installs");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        let produced = machine
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("A produces its retained Field(99)");
+        let [PreparedResult::Managed(handle_a)] = produced.values.as_slice() else {
+            panic!("A must return one managed constructor");
+        };
+        let mut imports = ImportBindings::new();
+        imports.insert(s3_field_producer_identity(), *handle_a);
+
+        // B declares the same logical Field and cases on A's imported cell.
+        let linked = s3_field_case_consumer_program();
         let compiled = machine
             .compile_for_install(&linked)
             .expect("case-dispatch consumer fixture compiles against the machine's interner");
@@ -6579,6 +6538,50 @@ mod tests {
         ));
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
         assert!(machine.release(*handle_a));
+    }
+
+    #[test]
+    fn shared_case_code_recognises_a_constructor_from_an_independent_machine() {
+        let options = PreparedMachineOptions {
+            nursery_bytes: RunOptions::default().nursery_bytes,
+        };
+        let (mut compiler_machine, _) = PreparedMachine::new(s3_field_producer_program(), options)
+            .expect("compiler machine installs its producer");
+        let linked = s3_field_case_consumer_program();
+        let shared_code = Arc::new(
+            compiler_machine
+                .compile_for_install(&linked)
+                .expect("consumer compiles against the first interner"),
+        );
+
+        let (mut receiving_machine, producer) =
+            PreparedMachine::new(s3_field_producer_program(), options)
+                .expect("receiver independently installs its producer");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        let produced = receiving_machine
+            .run_entry_retained(producer, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("receiver produces Field(99)");
+        let [PreparedResult::Managed(handle)] = produced.values.as_slice() else {
+            panic!("producer must return a managed constructor");
+        };
+        let mut imports = ImportBindings::new();
+        imports.insert(s3_field_producer_identity(), *handle);
+        let consumer = receiving_machine
+            .install_shared(shared_code, imports)
+            .expect("receiver installs the shared consumer code");
+        let result = receiving_machine
+            .run_entry(consumer, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("generated Case recognises the receiver's constructor");
+        assert!(matches!(
+            result.values.as_slice(),
+            [tidepool_bridge::HaskellValue::Lit(
+                tidepool_repr::Literal::LitInt(99)
+            )]
+        ));
+        assert!(receiving_machine.release(*handle));
     }
 
     /// A case that has no alternative for an intact constructor fails its own
