@@ -218,7 +218,7 @@ pub(crate) fn publish(
         if !evidence
             .sources
             .iter()
-            .any(|s| s.path == source && s.sha256 == source_sha256)
+            .any(|s| absolute(&s.path).as_ref() == Some(&source) && s.sha256 == source_sha256)
         {
             continue;
         }
@@ -366,15 +366,14 @@ pub(crate) fn select(
                     && m.module == record.module
                     && !m.boot
                     && m.product == ProductAvailability::Ready
-                    && m.source == record.source
+                    && absolute(&m.source).as_ref() == Some(&record.source)
             })
             .count();
         if evidence_count != 1
-            || !record
-                .evidence
-                .sources
-                .iter()
-                .any(|s| s.path == record.source && s.sha256 == record.source_sha256)
+            || !record.evidence.sources.iter().any(|s| {
+                absolute(&s.path).as_ref() == Some(&record.source)
+                    && s.sha256 == record.source_sha256
+            })
         {
             continue;
         }
@@ -388,7 +387,7 @@ pub(crate) fn select(
             module.unit == record.unit
                 && module.module == record.module
                 && !module.boot
-                && module.source == record.source
+                && absolute(&module.source).as_ref() == Some(&record.source)
         }) else {
             continue;
         };
@@ -605,6 +604,52 @@ mod tests {
             .unwrap()
             .by_owner
             .is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn publish_and_select_accept_canonical_equivalent_source_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("nested")).unwrap();
+        let source = root.path().join("Library.hs");
+        fs::write(&source, "module Library where").unwrap();
+        write_record(
+            root.path(),
+            &source,
+            "u",
+            "Library",
+            product_bytes("u", "Library", &[0x42]),
+        );
+        let dir = root.path().join(RECORD_DIR).join(sha(b"endpoint"));
+        let path = fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+        let mut record: Record = ciborium::de::from_reader(fs::File::open(&path).unwrap()).unwrap();
+        fs::remove_file(path).unwrap();
+        let equivalent = root.path().join("nested/../Library.hs");
+        record.evidence.sources[1].path = equivalent.clone();
+        record.evidence.modules[0].source = equivalent;
+        let requirements = crate::prepared_artifact::production_requirements().unwrap();
+        let products = tidepool_repr::execution_schema::parse_module_products(
+            &record.products,
+            &requirements,
+            DecodeLimits::default(),
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", root.path());
+        }
+        publish(
+            b"endpoint",
+            &[],
+            &record.evidence,
+            &products,
+            &record.products,
+            &record.target_source,
+        );
+        let selected = select_in(root.path(), scratch.path()).unwrap();
+        assert!(selected
+            .by_owner
+            .contains_key(&("u".into(), "Library".into())));
     }
 
     #[test]
