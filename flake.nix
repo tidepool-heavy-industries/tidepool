@@ -288,7 +288,7 @@
                 version = "0.1.0";
                 src = exomonadSource;
                 cargoLock.lockFile = ./Cargo.lock;
-                cargoLock.outputHashes."harness-0.1.0" = "sha256-9YfMT6DrdjJcEwQbLpDqgb1vQCl8xCEHBdfuVC2B1oo=";
+                cargoLock.outputHashes."harness-0.1.0" = "sha256-gfk2stabmTx7F6rjQUndSmaBCbYmLz0xyWfk9hIojQs=";
                 cargoBuildFlags = [
                   "-p"
                   "tidepool-extract-cmd"
@@ -322,7 +322,7 @@
             version = "0.1.0";
             src = exomonadSource;
             cargoLock.lockFile = ./Cargo.lock;
-            cargoLock.outputHashes."harness-0.1.0" = "sha256-9YfMT6DrdjJcEwQbLpDqgb1vQCl8xCEHBdfuVC2B1oo=";
+            cargoLock.outputHashes."harness-0.1.0" = "sha256-gfk2stabmTx7F6rjQUndSmaBCbYmLz0xyWfk9hIojQs=";
             cargoBuildFlags = [
               "-p"
               "tidepool"
