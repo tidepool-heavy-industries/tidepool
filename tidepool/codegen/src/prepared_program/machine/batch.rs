@@ -1,7 +1,8 @@
 //! Atomic installation of mutually importing native group images.
 
+use super::super::{SourceBinder, SourceInstanceLease};
 use super::*;
-use tidepool_repr::execution_schema::Signature;
+use tidepool_repr::execution_schema::{CachedHomeOwner, Signature};
 
 /// One import slot's already admitted owner. `Source` selects a top in this
 /// sealed batch; it never accepts a spelling-only match.
@@ -20,6 +21,21 @@ pub struct BatchProgram {
     pub image: Arc<CompiledProgram>,
     /// In the image's declared GlobalId order.
     pub imports: Vec<BatchImport>,
+}
+
+/// One exact source binder to root as part of the atomic install. Only
+/// requested binders receive a handle; unused exports acquire no lease.
+pub struct BatchLeaseRequest {
+    pub group: usize,
+    pub owner: CachedHomeOwner,
+    pub original_ordinal: u32,
+    pub binder: SourceBinder,
+    pub binding: ValueId,
+}
+
+pub struct BatchInstallReceipt {
+    pub programs: Vec<ProgramId>,
+    pub leases: Vec<SourceInstanceLease>,
 }
 
 struct Candidate {
@@ -41,8 +57,26 @@ impl PreparedMachine<'_> {
         &mut self,
         batch: Vec<BatchProgram>,
     ) -> Result<Vec<ProgramId>, ExecutionError> {
+        self.install_shared_batch_with_leases(batch, Vec::new())
+            .map(|receipt| receipt.programs)
+    }
+
+    pub fn install_shared_batch_with_leases(
+        &mut self,
+        batch: Vec<BatchProgram>,
+        requests: Vec<BatchLeaseRequest>,
+    ) -> Result<BatchInstallReceipt, ExecutionError> {
         if batch.is_empty() {
-            return Ok(Vec::new());
+            return if requests.is_empty() {
+                Ok(BatchInstallReceipt {
+                    programs: Vec::new(),
+                    leases: Vec::new(),
+                })
+            } else {
+                Err(ExecutionError::Invariant(
+                    "source lease without batch group",
+                ))
+            };
         }
         let count = u32::try_from(batch.len())
             .map_err(|_| runtime_error_without_machine(RuntimeError::HeapOverflow))?;
@@ -67,6 +101,33 @@ impl PreparedMachine<'_> {
                 imports: item.imports,
                 heap_extent,
             });
+        }
+
+        let mut requested = HashSet::new();
+        for request in &requests {
+            if !requested.insert((request.group, request.binding)) {
+                return Err(ExecutionError::Invariant("duplicate source lease request"));
+            }
+            let candidate = candidates
+                .get(request.group)
+                .ok_or(ExecutionError::Invariant(
+                    "source lease selects absent batch group",
+                ))?;
+            let export = candidate
+                .image
+                .top_exports
+                .get(&request.binding)
+                .ok_or(ExecutionError::MissingEntry(request.binding))?;
+            if candidate.image.byte_tops.contains_key(&request.binding)
+                || export.identity != request.binder.binder
+                || request.binder.version != request.owner.module_version
+                || request.binder.binder.unit != request.owner.unit
+                || request.binder.binder.module != request.owner.module
+            {
+                return Err(ExecutionError::BatchSourceContract(Box::new(
+                    request.binder.binder.clone(),
+                )));
+            }
         }
 
         // Validate the entire import graph and external handle shapes while
@@ -185,6 +246,9 @@ impl PreparedMachine<'_> {
                 .checked_add(candidate.heap_extent)
                 .ok_or_else(|| runtime_error_without_machine(RuntimeError::HeapOverflow))
         })?;
+        self.handles
+            .try_reserve_handles(requests.len())
+            .map_err(|_| runtime_error_without_machine(RuntimeError::HeapOverflow))?;
         self.machine
             .begin_prepared_call()
             .map_err(ExecutionError::Runtime)?;
@@ -200,6 +264,7 @@ impl PreparedMachine<'_> {
             owners,
             stack_maps,
             candidate_alloc_start: None,
+            provisional_handles: Vec::with_capacity(requests.len()),
             committed: false,
         };
         let staged = transaction.machine.stage_batch(
@@ -208,17 +273,32 @@ impl PreparedMachine<'_> {
             heap_reserve,
             &mut transaction.candidate_alloc_start,
         );
-        let catalog = if staged.is_ok() {
+        let leased = if staged.is_ok() {
+            transaction.machine.stage_batch_leases(
+                &candidates,
+                &requests,
+                &mut transaction.provisional_handles,
+            )
+        } else {
+            Ok(())
+        };
+        let catalog = if staged.is_ok() && leased.is_ok() {
             transaction.machine.install_catalog_after_stage()
         } else {
             Ok(None)
         };
-        if staged.is_ok() && catalog.is_ok() {
+        if staged.is_ok() && leased.is_ok() && catalog.is_ok() {
             transaction.machine.commit_batch_metadata(&candidates);
         }
-        transaction.committed = staged.is_ok() && catalog.is_ok();
+        transaction.committed = staged.is_ok() && leased.is_ok() && catalog.is_ok();
+        let handles = if transaction.committed {
+            std::mem::take(&mut transaction.provisional_handles)
+        } else {
+            Vec::new()
+        };
         drop(transaction);
         staged?;
+        leased?;
         if let Some(catalog) = catalog? {
             self.static_catalog = Some(catalog);
         }
@@ -267,7 +347,59 @@ impl PreparedMachine<'_> {
             );
             ids.push(id);
         }
-        Ok(ids)
+        let leases = requests
+            .into_iter()
+            .zip(handles)
+            .map(|(request, handle)| {
+                let installed = &self.programs[&ids[request.group]];
+                let export = &installed.program.get().top_exports[&request.binding];
+                SourceInstanceLease::new(
+                    GroupInstanceId::from(ids[request.group]),
+                    request.owner,
+                    request.original_ordinal,
+                    request.binder,
+                    request.binding,
+                    handle,
+                    export.entry_signature.clone(),
+                )
+            })
+            .collect();
+        Ok(BatchInstallReceipt {
+            programs: ids,
+            leases,
+        })
+    }
+
+    fn stage_batch_leases(
+        &mut self,
+        candidates: &[Candidate],
+        requests: &[BatchLeaseRequest],
+        provisional: &mut Vec<PreparedHandle>,
+    ) -> Result<(), ExecutionError> {
+        for request in requests {
+            let candidate = &candidates[request.group];
+            let export = &candidate.image.top_exports[&request.binding];
+            let slot = candidate.image.top_slots[&request.binding];
+            let word = candidate
+                .roots
+                .read(slot)
+                .map_err(|cause| runtime_error(&self.machine, cause))?;
+            if word == 0 {
+                return Err(ExecutionError::MissingEntry(request.binding));
+            }
+            // Candidate objects are fully initialized. No collection runs
+            // before commit or rollback, and rollback releases this root.
+            let root = self
+                .old_space
+                .adopt_root(&self.machine, word as *mut u8)
+                .map_err(|cause| runtime_error(&self.machine, cause))?;
+            let raw = self.handles.insert_handle(root, RealmId::ROOT, export.rep);
+            provisional.push(PreparedHandle {
+                raw,
+                rep: export.rep,
+            });
+        }
+        Ok(())
     }
 
     fn stage_batch(
@@ -787,6 +919,68 @@ mod tests {
         assert!(machine.release(second_caf));
         let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
         assert_eq!(retired.programs.len(), 2);
+    }
+
+    #[test]
+    fn late_failure_releases_provisional_source_lease() {
+        let image = caf_group();
+        let request = || BatchLeaseRequest {
+            group: 0,
+            owner: CachedHomeOwner {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                module_version: ModuleVersion([1; 32]),
+                skinny_iface_sha256: [2; 32],
+                product_sha256: [3; 32],
+            },
+            original_ordinal: 12,
+            binder: SourceBinder {
+                version: ModuleVersion([1; 32]),
+                binder: testing::identity("Fixture", "caf"),
+            },
+            binding: ValueId(0),
+        };
+        let batch = || {
+            vec![BatchProgram {
+                image: Arc::clone(&image),
+                imports: vec![],
+            }]
+        };
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        machine.fail_catalog_after_stage = true;
+        assert!(machine
+            .install_shared_batch_with_leases(batch(), vec![request()])
+            .is_err());
+        assert_eq!(machine.residency(), ResidencyCounts::default());
+        assert_eq!(machine.handle_count(), 0);
+        assert!(machine.descriptor_registry.is_empty());
+
+        machine.fail_catalog_after_stage = false;
+        let installed = machine
+            .install_shared_batch_with_leases(batch(), vec![request()])
+            .unwrap();
+        assert_eq!(installed.programs.len(), 1);
+        assert_eq!(installed.leases.len(), 1);
+        assert_eq!(
+            installed.leases[0].instance().program(),
+            installed.programs[0]
+        );
+        assert_eq!(machine.handle_count(), 1);
+        machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(machine.residency().programs, 1);
+        machine.fail_catalog_after_stage = true;
+        assert!(machine
+            .install_shared_batch_with_leases(batch(), vec![request()])
+            .is_err());
+        assert_eq!(machine.handle_count(), 1);
+        assert_eq!(machine.residency().programs, 1);
+        machine.fail_catalog_after_stage = false;
+        assert!(machine.release(installed.leases[0].handle()));
+        let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(retired.programs, installed.programs);
     }
 
     #[test]
