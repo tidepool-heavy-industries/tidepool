@@ -12,7 +12,6 @@ use serde_json::{json, Value};
 pub(super) struct EmbeddedPolicyInstallation {
     actor: ActorRef,
     policy: Arc<dyn ResidentToolEndpoint>,
-    tools: Vec<Value>,
 }
 
 impl EmbeddedPolicyInstallation {
@@ -21,12 +20,7 @@ impl EmbeddedPolicyInstallation {
     }
 
     fn new(actor: ActorRef, policy: Arc<dyn ResidentToolEndpoint>) -> Self {
-        let tools = project_tools(policy.tools());
-        Self {
-            actor,
-            policy,
-            tools,
-        }
+        Self { actor, policy }
     }
 
     pub(super) fn actor(&self) -> ActorRef {
@@ -34,11 +28,13 @@ impl EmbeddedPolicyInstallation {
     }
 
     pub(super) fn request_snapshot(&self) -> Result<EmbeddedPolicySnapshot, ResidentToolError> {
+        let policy = self.policy.snapshot_for_request()?;
+        let tools = project_tools(policy.tools());
         Ok(EmbeddedPolicySnapshot {
             #[cfg(test)]
             actor: self.actor,
-            policy: self.policy.snapshot_for_request()?,
-            tools: self.tools.clone(),
+            policy,
+            tools,
         })
     }
 }
@@ -113,11 +109,15 @@ mod tests {
     struct ProbePolicy {
         tools: Vec<HostedTool>,
         marker: &'static str,
+        request_policy: Option<Arc<dyn ResidentToolEndpoint>>,
     }
 
     impl ResidentToolEndpoint for ProbePolicy {
         fn snapshot_for_request(&self) -> Result<Arc<dyn ResidentToolEndpoint>, ResidentToolError> {
-            Ok(policy(self.marker))
+            Ok(self
+                .request_policy
+                .clone()
+                .unwrap_or_else(|| policy(self.marker)))
         }
         fn tools(&self) -> &[HostedTool] {
             &self.tools
@@ -142,21 +142,48 @@ mod tests {
     }
 
     fn policy(marker: &'static str) -> Arc<dyn ResidentToolEndpoint> {
+        policy_with_tools(marker, declared_tools())
+    }
+
+    fn declared_tools() -> Vec<HostedTool> {
+        vec![
+            HostedTool::Custom(CustomToolDeclaration {
+                name: "haskell".into(),
+                description: "Run a notebook cell".into(),
+            }),
+            HostedTool::Function(ToolDeclaration {
+                name: "lookup".into(),
+                description: "Look up a value".into(),
+                input_schema: json!({"type": "object", "properties": {}}),
+                output_schema: None,
+                kind: ToolKind::Call,
+            }),
+        ]
+    }
+
+    fn policy_with_tools(
+        marker: &'static str,
+        tools: Vec<HostedTool>,
+    ) -> Arc<dyn ResidentToolEndpoint> {
         Arc::new(ProbePolicy {
             marker,
-            tools: vec![
-                HostedTool::Custom(CustomToolDeclaration {
-                    name: "haskell".into(),
-                    description: "Run a notebook cell".into(),
-                }),
-                HostedTool::Function(ToolDeclaration {
-                    name: "lookup".into(),
-                    description: "Look up a value".into(),
-                    input_schema: json!({"type": "object", "properties": {}}),
-                    output_schema: None,
-                    kind: ToolKind::Call,
-                }),
-            ],
+            tools,
+            request_policy: None,
+        })
+    }
+
+    fn reloading_policy() -> Arc<dyn ResidentToolEndpoint> {
+        let pinned = policy_with_tools(
+            "issued-handler",
+            vec![HostedTool::Custom(CustomToolDeclaration {
+                name: "haskell_v2".into(),
+                description: "Reloaded notebook cell".into(),
+            })],
+        );
+        Arc::new(ProbePolicy {
+            tools: declared_tools(),
+            marker: "stale-handler",
+            request_policy: Some(pinned),
         })
     }
 
@@ -201,6 +228,29 @@ mod tests {
                 "strict": true,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn request_manifest_and_handler_come_from_the_same_reloaded_endpoint() {
+        let snapshot = EmbeddedPolicyInstallation::new(
+            exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7)),
+            reloading_policy(),
+        )
+        .request_snapshot()
+        .unwrap();
+
+        assert_eq!(snapshot.tools().len(), 1);
+        assert_eq!(snapshot.tools()[0]["name"], "haskell_v2");
+        let result = snapshot
+            .dispatch(
+                "haskell_v2".into(),
+                ToolArguments::Raw("1".into()),
+                context(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["marker"], "issued-handler");
+        assert_eq!(result["name"], "haskell_v2");
     }
 
     #[tokio::test]

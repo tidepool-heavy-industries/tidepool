@@ -4282,9 +4282,44 @@ async fn run_interactive_applications(
                             embedded_cancellations.insert(actor, embedded.cancellation.clone());
                             embedded_live.insert(actor);
                             let runtime = Arc::clone(&service.runtime);
+                            #[cfg(test)]
+                            let test_transport = service.test_transport();
                             let embedded_lifecycle = embedded_lifecycle_tx.clone();
                             let embedded_actor = actor;
                             embedded_tasks.spawn(async move {
+                                #[cfg(test)]
+                                let result = if let Some(transport) = test_transport {
+                                    embedded_service::drive_conversation_with_transport::<
+                                        harness::transport::auth::CodexFileAuth,
+                                        _,
+                                    >(
+                                        embedded.driver,
+                                        runtime,
+                                        &settings,
+                                        model,
+                                        effort,
+                                        instructions,
+                                        embedded.cancellation_rx,
+                                        embedded_lifecycle,
+                                        embedded_actor,
+                                        transport,
+                                    )
+                                    .await
+                                } else {
+                                    embedded_service::drive_conversation(
+                                        embedded.driver,
+                                        runtime,
+                                        &settings,
+                                        model,
+                                        effort,
+                                        instructions,
+                                        embedded.cancellation_rx,
+                                        embedded_lifecycle,
+                                        embedded_actor,
+                                    )
+                                    .await
+                                };
+                                #[cfg(not(test))]
                                 let result = embedded_service::drive_conversation(
                                     embedded.driver,
                                     runtime,

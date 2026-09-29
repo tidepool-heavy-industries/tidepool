@@ -409,16 +409,10 @@ mod tests {
                 requests.len()
             };
             let items = if round == 1 {
-                vec![
-                    Item(json!({
-                        "type":"custom_tool_call", "call_id":"raw-cell-1",
-                        "name":"haskell", "input":"40 + 2 :: Int"
-                    })),
-                    Item(json!({
-                        "type":"function_call", "call_id":"wait-for-cell",
-                        "name":"wait_agent", "arguments":"{}"
-                    })),
-                ]
+                vec![Item(json!({
+                    "type":"custom_tool_call", "call_id":"raw-cell-1",
+                    "name":"haskell", "input":"40 + 2 :: Int"
+                }))]
             } else if round == 2 {
                 self.entered.notify_one();
                 self.release.notified().await;

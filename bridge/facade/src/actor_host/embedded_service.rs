@@ -25,6 +25,23 @@ pub(super) struct EmbeddedService {
     pub(super) control: ServerControl,
     server: Option<JoinHandle<Result<(), String>>>,
     pub(super) address: std::net::SocketAddr,
+    #[cfg(test)]
+    test_transport: Option<TestResponsesTransport>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(super) struct TestResponsesTransport(Arc<dyn harness::engine::ResponsesTransport>);
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl harness::engine::ResponsesTransport for TestResponsesTransport {
+    async fn create(
+        &self,
+        request: harness::transport::ResponsesRequest,
+    ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
+        self.0.create(request).await
+    }
 }
 
 pub(super) struct EmbeddedActor {
@@ -71,7 +88,22 @@ impl EmbeddedService {
             control,
             server: Some(server),
             address,
+            #[cfg(test)]
+            test_transport: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_test_transport(
+        &mut self,
+        transport: Arc<dyn harness::engine::ResponsesTransport>,
+    ) {
+        self.test_transport = Some(TestResponsesTransport(transport));
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_transport(&self) -> Option<TestResponsesTransport> {
+        self.test_transport.clone()
     }
 
     pub(super) fn server_finished(&self) -> bool {
