@@ -9,8 +9,11 @@
 //! its own `unsafe impl`) is what makes handing the same `Arc` to a machine
 //! on another thread sound.
 //!
-//! The key is the linked program's structural `Hash` and `Eq`: it carries
-//! target and resolved-import shape, and `HashMap` checks complete equality
+//! The key is the validated program's structural `Hash` and `Eq`: it carries
+//! target and declared import contracts, but excludes the linked snapshot's
+//! mutable evaluatedness and generation. Linking still validates each snapshot
+//! before lookup, and installation validates its machine-local handles. Native
+//! compilation consumes only the prepared definitions. `HashMap` checks equality
 //! even when hashes collide. The registry owns no image: installed machines,
 //! parcels, and active compiles hold strong references. Access removes a dead
 //! key immediately; an amortized sweep reclaims dead keys in other buckets.
@@ -21,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 
-use tidepool_repr::execution_schema::LinkedProgram;
+use tidepool_repr::execution_schema::{LinkedProgram, PreparedProgram};
 
 use super::CompiledProgram;
 
@@ -38,7 +41,7 @@ pub struct ImageRegistry {
 
 #[derive(Default)]
 struct Entries {
-    images: HashMap<LinkedProgram, Entry>,
+    images: HashMap<PreparedProgram, Entry>,
     since_sweep: usize,
 }
 
@@ -74,7 +77,7 @@ impl Flight {
 /// error or panic clears the candidate and wakes followers to retry.
 struct CompileLease<'a> {
     registry: &'a ImageRegistry,
-    key: LinkedProgram,
+    key: PreparedProgram,
     flight: Arc<Flight>,
     published: bool,
 }
@@ -150,6 +153,7 @@ impl ImageRegistry {
     /// An existing live image compiled for exactly `key`'s content and target.
     #[must_use]
     pub fn lookup(&self, key: &LinkedProgram) -> Option<Arc<CompiledProgram>> {
+        let key = key.prepared();
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         let found = match entries.images.get(key) {
             Some(Entry::Ready(image)) => image.upgrade(),
@@ -172,6 +176,7 @@ impl ImageRegistry {
     /// point is for callers that cannot wait while holding machine checkout.
     #[must_use]
     pub fn insert(&self, key: LinkedProgram, image: Arc<CompiledProgram>) -> Arc<CompiledProgram> {
+        let key = key.prepared().clone();
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(existing) = match entries.images.get(&key) {
             Some(Entry::Ready(image)) => image.upgrade(),
@@ -205,6 +210,7 @@ impl ImageRegistry {
             Wait(Arc<Flight>),
             Compile(Arc<Flight>),
         }
+        let key = key.prepared();
         let mut compile = Some(compile);
         loop {
             let admission = {
@@ -292,7 +298,7 @@ mod tests {
         loop {
             let admitted = {
                 let entries = registry.entries.lock().unwrap();
-                matches!(entries.images.get(key), Some(Entry::Compiling(flight)) if Arc::strong_count(flight) >= 3)
+                matches!(entries.images.get(key.prepared()), Some(Entry::Compiling(flight)) if Arc::strong_count(flight) >= 3)
             };
             if admitted {
                 return;
@@ -327,6 +333,64 @@ mod tests {
         );
         assert_eq!(registry.hits(), 1);
         assert_eq!(registry.misses(), 1);
+    }
+
+    #[test]
+    fn linked_import_snapshots_share_immutable_code() {
+        use tidepool_repr::execution_schema::{
+            GlobalDecl, ImportedValue, RuntimeRep, SymbolIdentity,
+        };
+
+        let identity = SymbolIdentity {
+            unit: "fixture".into(),
+            module: "Imports".into(),
+            namespace: "value".into(),
+            occurrence: "shared".into(),
+            record_parent: None,
+        };
+        let mut wire = testing::wire_program();
+        wire.globals.push(GlobalDecl {
+            identity: identity.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        });
+        let prepared = testing::prepare(wire).unwrap();
+        let link = |generation, evaluated| {
+            link_program(
+                prepared.clone(),
+                &MachineImports {
+                    values: [(
+                        identity.clone(),
+                        ImportedValue {
+                            identity: identity.clone(),
+                            rep: RuntimeRep::LiftedRef,
+                            entry_signature: None,
+                            generation,
+                            evaluated,
+                        },
+                    )]
+                    .into(),
+                },
+            )
+            .unwrap()
+        };
+        let first = link(1, false);
+        let later = link(2, true);
+        assert_ne!(first, later, "the installation snapshots remain distinct");
+        let registry = ImageRegistry::new();
+        let image = registry
+            .get_or_compile(&first, || CompiledProgram::compile(&first).map(Arc::new))
+            .unwrap();
+        let reused = registry
+            .get_or_compile(&later, || -> Result<_, super::super::CompileError> {
+                panic!("mutable import state must not recompile immutable code")
+            })
+            .unwrap();
+        assert!(Arc::ptr_eq(&image, &reused));
+        assert_eq!(registry.misses(), 1);
+        assert_eq!(registry.hits(), 1);
     }
 
     #[test]
