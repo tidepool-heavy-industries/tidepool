@@ -20,7 +20,9 @@ if [[ -n ${TIDEPOOL_DEV_FLAKE:-} ]]; then
     *) echo 'TIDEPOOL_DEV_FLAKE must name a revision-pinned Git flake or immutable store path' >&2; exit 2 ;;
   esac
 else
-  common=$(git rev-parse --path-format=absolute --git-common-dir)
+  # Nix can open a worktree root even when Git metadata is shared. Opening the
+  # .git directory directly fails under a sandbox that protects nested .git.
+  source_root=$(git rev-parse --show-toplevel)
   if [[ $shell == default ]]; then
     # default only needs the toolchain inputs, so pin a synthetic commit over
     # them instead of HEAD: unrelated commits then reuse the same revision
@@ -46,7 +48,7 @@ else
     fi
     revision=$(git rev-parse HEAD)
   fi
-  flake="git+file://$common?rev=$revision"
+  flake="git+file://$source_root?rev=$revision"
 fi
 selection="$flake#$shell"
 if [[ ${TIDEPOOL_DEV_SHELL:-} == "$selection" &&
