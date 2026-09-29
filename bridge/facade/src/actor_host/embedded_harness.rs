@@ -496,7 +496,7 @@ mod tests {
         let settings_for_engine = settings.clone();
         let runtime = Arc::clone(&service.runtime);
         let transport_for_engine = transport.clone();
-        let running = tokio::spawn(async move {
+        let mut running = tokio::spawn(async move {
             drive_conversation_with_transport::<Offline, _>(
                 embedded.driver,
                 runtime,
@@ -509,9 +509,12 @@ mod tests {
             )
             .await
         });
-        tokio::time::timeout(Duration::from_secs(5), transport.entered.notified())
-            .await
-            .unwrap();
+        tokio::select! {
+            result = &mut running => panic!("Engine stopped before completing its Haskell call: {result:?}"),
+            ready = tokio::time::timeout(Duration::from_secs(30), transport.entered.notified()) => {
+                ready.expect("resident Haskell call did not settle before the next model request");
+            }
+        }
         let origin = format!("https://{}", service.address);
         let api = format!("http://{}/api", service.address);
         let client = reqwest::Client::new();
