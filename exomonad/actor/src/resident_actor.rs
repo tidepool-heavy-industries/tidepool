@@ -1057,6 +1057,7 @@ pub struct ResidentKernelBehavior<H, O> {
 struct ActiveWorkbenchExecution {
     id: WorkbenchExecutionId,
     context: ActorSessionContext,
+    public_visibility: Option<tidepool_runtime::session::PublicVisibilitySnapshot>,
     control: Option<Arc<crate::resident_tools::WorkbenchExecutionControl>>,
     installed_tools: Option<crate::InstalledToolLease>,
     admitted_source: crate::CheckpointSourceLayer,
@@ -8367,6 +8368,20 @@ where
             if !current_builtin {
                 context = context.with_issued_source(&admitted_source);
             }
+            let public_visibility = if current_builtin {
+                None
+            } else {
+                Some(
+                    self.environment
+                        .runner
+                        .public_visibility_snapshot(context.clone())
+                        .await
+                        .map_err(|error| KernelInvocationFailure::Rejected {
+                            actor: context.actor,
+                            detail: format!("cannot capture public workbench view: {error}"),
+                        })?,
+                )
+            };
             if let Some(execution) = &execution {
                 // Persist the fence in the forest-retained journal before effects
                 // can run; actor termination cannot turn uncertainty into replay.
@@ -8383,6 +8398,7 @@ where
                     .replace(ActiveWorkbenchExecution {
                         id: local_execution_id,
                         context: context.clone(),
+                        public_visibility,
                         control: control.clone(),
                         installed_tools,
                         admitted_source,
@@ -8409,6 +8425,16 @@ where
                 .expect("workbench admission retained its execution");
             let admitted_context = admitted.context.clone();
             let admitted_tools = admitted.installed_tools.clone();
+            if let Some(public) = &admitted.public_visibility {
+                tracing::debug!(
+                    actor = ?context.actor,
+                    scope = ?public.scope,
+                    epoch = public.epoch,
+                    declaration_tip = public.declaration_tip.0,
+                    binding_count = public.bindings.len(),
+                    "workbench public view admitted"
+                );
+            }
             let result = call_scope
                 .run(self.execute_workbench(kernel, &admitted_context, request, admitted_tools))
                 .await;

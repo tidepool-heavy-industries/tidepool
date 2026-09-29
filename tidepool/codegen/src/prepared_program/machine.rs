@@ -275,7 +275,7 @@ pub struct PreparedHandle {
 }
 
 impl PreparedHandle {
-    pub(super) fn new(raw: ValueHandle, rep: RuntimeRep) -> Self {
+    pub(crate) fn new(raw: ValueHandle, rep: RuntimeRep) -> Self {
         Self { raw, rep }
     }
 }

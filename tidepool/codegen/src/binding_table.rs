@@ -154,6 +154,124 @@ pub struct BindingTable {
     promoted: HashMap<ScopeId, HashSet<SessionVarId>>,
 }
 
+#[cfg(test)]
+mod promotion_tests {
+    use super::*;
+    use crate::old_space::RootSlot;
+    use crate::prepared_program::PreparedHandle;
+    use crate::suspension::ValueHandle;
+    use tidepool_repr::execution_schema::{RuntimeRep, SymbolIdentity};
+    use tidepool_repr::{Generation, SessionModule};
+
+    fn entry(name: &str, generation: u64, slot: &mut *mut u8) -> BindingEntry {
+        // The binding table only records this stable cell address; no machine
+        // or collector dereferences it in these bookkeeping tests.
+        let root = unsafe { RootSlot::new(slot as *mut *mut u8) };
+        BindingEntry {
+            name: BindingName(name.into()),
+            id: SessionVarId::from_extract(generation),
+            module: SessionModule::val(Generation(generation)),
+            value: BoundValue {
+                root,
+                handle: PreparedHandle::new(ValueHandle(generation), RuntimeRep::LiftedRef),
+                identity: SymbolIdentity {
+                    unit: "test".into(),
+                    module: format!("Val.G{generation}"),
+                    namespace: "value".into(),
+                    occurrence: name.into(),
+                    record_parent: None,
+                },
+            },
+            type_display: None,
+            defining_expr: None,
+            scope: ScopeId::ROOT,
+        }
+    }
+
+    #[test]
+    fn promoted_private_identity_wins_by_completion_and_survives_source_retirement() {
+        let mut tree = ScopeTree::new();
+        let source = tree.mint_isolated();
+        let public = tree.mint_isolated();
+        let mut table = BindingTable::new();
+        let mut public_slot = std::ptr::null_mut();
+        let mut private_slot = std::ptr::null_mut();
+        let old = entry("answer", 9, &mut public_slot);
+        let newer_completion = entry("answer", 3, &mut private_slot);
+        let old_id = old.id;
+        let private_id = newer_completion.id;
+        table.bind_in(public, old);
+        table.bind_in(source, newer_completion);
+
+        table
+            .promote_exact_bindings_in(source, public, &[private_id])
+            .expect("exact private write publishes");
+        assert_eq!(
+            table.resolve_in(&tree, public, "answer").unwrap().id,
+            private_id
+        );
+        assert_eq!(table.lease_count(private_id), 1);
+        table
+            .promote_exact_bindings_in(source, public, &[private_id])
+            .expect("same exact promotion is idempotent");
+        assert_eq!(table.lease_count(private_id), 1);
+        assert!(table.drain_scope(source).is_empty());
+        assert_eq!(
+            table.resolve_in(&tree, public, "answer").unwrap().id,
+            private_id
+        );
+        assert!(table
+            .scope_reachable_modules(&tree, public)
+            .any(|module| module == SessionModule::val(Generation(3))));
+        let released = table.drain_scope(public);
+        assert_eq!(released.len(), 2);
+        assert!(released.iter().any(|entry| entry.id == old_id));
+        assert!(released.iter().any(|entry| entry.id == private_id));
+    }
+
+    #[test]
+    fn promoted_alias_retains_source_dependency_and_invalid_batch_changes_nothing() {
+        let mut tree = ScopeTree::new();
+        let source = tree.mint_isolated();
+        let public = tree.mint_isolated();
+        let mut table = BindingTable::new();
+        let mut source_slot = std::ptr::null_mut();
+        let root = entry("root", 4, &mut source_slot);
+        let root_id = root.id;
+        table.bind_in(source, root);
+        let alias = entry("alias", 5, &mut source_slot);
+        let alias_id = alias.id;
+        table
+            .bind_alias_in(source, alias, root_id)
+            .expect("same-scope alias binds");
+        let missing = SessionVarId::from_extract(99);
+        assert_eq!(
+            table.promote_exact_bindings_in(source, public, &[alias_id, missing]),
+            Err(BindingPromotionError::MissingOrForeignBinding)
+        );
+        assert_eq!(table.lease_count(alias_id), 0);
+        assert_eq!(table.lease_count(root_id), 0);
+        assert!(table.resolve_in(&tree, public, "alias").is_none());
+
+        table
+            .promote_exact_bindings_in(source, public, &[alias_id])
+            .expect("alias publishes with dependency closure");
+        assert_eq!(table.lease_count(alias_id), 1);
+        assert_eq!(table.lease_count(root_id), 1);
+        assert!(table.drain_scope(source).is_empty());
+        assert_eq!(
+            table.resolve_in(&tree, public, "alias").unwrap().id,
+            alias_id
+        );
+        let reachable: Vec<_> = table.scope_reachable_modules(&tree, public).collect();
+        assert!(reachable.contains(&SessionModule::val(Generation(4))));
+        assert!(reachable.contains(&SessionModule::val(Generation(5))));
+        let released = table.drain_scope(public);
+        assert_eq!(released.len(), 2);
+        assert!(table.is_empty());
+    }
+}
+
 struct ObservationBinding {
     dependencies: Vec<SessionVarId>,
     recent: Option<u64>,
@@ -400,7 +518,12 @@ impl BindingTable {
                 .get(&id)
                 .filter(|entry| entry.scope == source)
                 .ok_or(BindingPromotionError::MissingOrForeignBinding)?;
-            if self.current.get(&source).and_then(|frame| frame.get(&entry.name)) != Some(&id) {
+            if self
+                .current
+                .get(&source)
+                .and_then(|frame| frame.get(&entry.name))
+                != Some(&id)
+            {
                 return Err(BindingPromotionError::NotCurrentInSource);
             }
             if !names.insert(entry.name.clone()) {
@@ -933,6 +1056,7 @@ impl BindingTable {
         } else {
             tree.lookup_chain(scope)
         };
+        let promoted_frames = frames.clone();
         let owned = self
             .live
             .values()
@@ -942,7 +1066,16 @@ impl BindingTable {
             .into_iter()
             .flat_map(|tip| tip.visible.values().chain(tip.retained.iter()))
             .filter_map(|id| self.live.get(id).map(|entry| entry.module));
-        owned.chain(inherited)
+        let promoted = promoted_frames
+            .into_iter()
+            .flat_map(|scope| {
+                self.promoted
+                    .get(&scope)
+                    .into_iter()
+                    .flat_map(HashSet::iter)
+            })
+            .filter_map(|id| self.live.get(id).map(|entry| entry.module));
+        owned.chain(inherited).chain(promoted)
     }
 
     /// Number of live bindings.

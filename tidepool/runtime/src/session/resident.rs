@@ -5,7 +5,7 @@
 //! rooted continuation while later turns and other resumptions remain usable.
 //! The machine moves to an evaluation thread only for the duration of an entry.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -1842,7 +1842,11 @@ where
         bindings.sort_by(|left, right| left.0.cmp(&right.0));
         Some(super::PublicVisibilitySnapshot {
             scope,
-            epoch: self.public_visibility_epochs.get(&scope).copied().unwrap_or(0),
+            epoch: self
+                .public_visibility_epochs
+                .get(&scope)
+                .copied()
+                .unwrap_or(0),
             declaration_tip: self.state.lib().scope_tip(scope),
             bindings,
         })
@@ -2558,6 +2562,7 @@ where
                 defining_expr: None,
                 scope: ScopeId::ROOT,
             });
+            self.advance_public_visibility(ScopeId::ROOT);
         }
         Ok(RootCustody::new(
             handle,
@@ -4372,8 +4377,12 @@ where
     }
 
     fn finish_observation(&mut self, binder: &BoundBinder, dependencies: &[tidepool_repr::VarId]) {
-        self.state
-            .save_observation(SessionVarId::from_extract(binder.var_id), dependencies);
+        let id = SessionVarId::from_extract(binder.var_id);
+        let scope = self.state.bindings().get(id).map(|entry| entry.scope);
+        self.state.save_observation(id, dependencies);
+        if let Some(scope) = scope {
+            self.advance_public_visibility(scope);
+        }
         self.binding_provenance.retain(|id, _| {
             self.state
                 .bindings()
@@ -4865,7 +4874,11 @@ where
             released.extend(self.state.bindings_mut().release_leases(retained));
         }
         released.extend(self.state.bindings_mut().collect_observations());
+        let changed_scopes: HashSet<_> = released.iter().map(|entry| entry.scope).collect();
         let binding_count = self.state.release_binding_roots(released);
+        for scope in changed_scopes {
+            self.advance_public_visibility(scope);
+        }
         self.host_text_bindings
             .retain(|id, _| self.state.bindings().get(*id).is_some());
         self.hidden_host_bindings
