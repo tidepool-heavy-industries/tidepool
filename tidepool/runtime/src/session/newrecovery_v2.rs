@@ -1006,6 +1006,23 @@ fn artifact_error_loss(
                 RecoveryArtifactLossKind::DigestMismatch,
             )
         }
+        RecoveryArtifactError::InvalidPackageImports(path)
+        | RecoveryArtifactError::InvalidCertifiedOwners(path) => {
+            let (component, relative) = artifact_component(artifact, &path);
+            (
+                component,
+                relative,
+                RecoveryArtifactLossKind::Unreadable("invalid artifact witness".into()),
+            )
+        }
+        RecoveryArtifactError::CertifiedOwnersUnavailable(path) => {
+            let (component, relative) = artifact_component(artifact, &path);
+            (component, relative, RecoveryArtifactLossKind::Missing)
+        }
+        RecoveryArtifactError::CertifiedOwnersDigestMismatch(path) => {
+            let (component, relative) = artifact_component(artifact, &path);
+            (component, relative, RecoveryArtifactLossKind::DigestMismatch)
+        }
         RecoveryArtifactError::Io(error) => {
             let (interface, _) = artifact.paths();
             (
@@ -1185,6 +1202,7 @@ mod tests {
     use tidepool_toolchain::recovery_artifacts::{
         materialize_recovery_closure, RecoveryArtifactInput,
     };
+    use tidepool_toolchain::certified_products::encode_home_certification;
 
     const IFACE_SHA: [u8; 32] = [
         0xc7, 0x96, 0xd3, 0x7c, 0x6d, 0x49, 0x1e, 0x8f, 0x0c, 0x6e, 0x9b, 0x83, 0xee, 0xd3, 0x4c,
@@ -1230,6 +1248,27 @@ mod tests {
             skinny_iface_sha256: IFACE_SHA,
             product_sha256: PRODUCT_SHA,
         };
+        let package_witness = ciborium::value::Value::Array(vec![
+            ciborium::value::Value::Text("TPPKGROOTS".into()),
+            ciborium::value::Value::Text("1".into()),
+            ciborium::value::Value::Array(vec![
+                ciborium::value::Value::Text("main".into()),
+                ciborium::value::Value::Text("Lib".into()),
+                ciborium::value::Value::Text(
+                    IFACE_SHA
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(""),
+                ),
+            ]),
+            ciborium::value::Value::Array(vec![]),
+        ]);
+        let mut package_bytes = Vec::new();
+        ciborium::ser::into_writer(&package_witness, &mut package_bytes).unwrap();
+        fs::write(source.path().join("Lib.hi.packages"), package_bytes).unwrap();
+        let certification = encode_home_certification(&home_owner, &[], &BTreeMap::new()).unwrap();
+        fs::write(source.path().join("Lib.hi.owners"), certification).unwrap();
         let materialized = materialize_recovery_closure(
             root,
             [0x11; 32],

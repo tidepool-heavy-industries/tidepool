@@ -30,6 +30,8 @@ import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache)
 import GHC.Iface.Make (mkIfaceTc)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
 import GHC.Unit.Module.ModIface (set_mi_extra_decls)
+import GHC.Unit.Module.Deps (imp_mods)
+import GHC.Unit.Finder (FindResult(Found), findImportedModule)
 import GHC.Iface.Tidy (mkBootModDetailsTc)
 import GHC.Types.SourceFile (HscSource(..))
 import GHC.Types.Error (mkUnknownDiagnostic, MessageClass(..), mkLocMessage, getMessages, errMsgDiagnostic)
@@ -41,7 +43,7 @@ import Tidepool.DiagJson (Diag(..), DiagSeverity(..), spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
 import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..))
-import GHC.Unit.Home (homeUnitId)
+import GHC.Unit.Home (homeUnitId, isHomeUnit)
 import GHC.Unit.Types (unitString)
 import GHC.Data.Graph.Directed (flattenSCCs)
 import GHC.Core.Opt.Pipeline (core2core)
@@ -99,7 +101,7 @@ import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUn
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.TypeEnv (typeEnvIds, typeEnvTyCons)
 import GHC.LanguageExtensions.Type qualified as LangExt
-import GHC.Tc.Types (TcGblEnv, tcg_dependent_files, tcg_binds, tcg_rdr_env, tcg_type_env, tcg_insts)
+import GHC.Tc.Types (TcGblEnv, tcg_dependent_files, tcg_binds, tcg_rdr_env, tcg_type_env, tcg_insts, tcg_imports)
 import GHC.Types.Name.Reader (GlobalRdrEnv)
 import GHC.Types.Name.Ppr (mkNamePprCtx)
 import GHC.Types.Name (nameOccName, nameUnique, mkExternalName, mkInternalName, nameModule_maybe)
@@ -158,6 +160,9 @@ import Tidepool.DependencyEvidence
   , sourceEvidenceWithFingerprint )
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope )
+import Tidepool.PackageWitness
+  ( PackageImportRoot(..), packageImportRoot, readPackageImports
+  , validatePackageImportRoot )
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..)
   , readModuleCandidates )
@@ -217,6 +222,7 @@ data PreparedPipelineResult = PreparedPipelineResult
   , pprModules :: [PreparedModule]
   , pprDependencies :: DependencyEvidence
   , pprProductInterfaces :: Map.Map ModuleName ModIface
+  , pprPackageRoots :: Map.Map ModuleName [PackageImportRoot]
   , pprAcceptedCandidates :: [ModuleCandidate]
   }
 
@@ -680,6 +686,7 @@ data ModuleFront = ModuleFront
   { mfSummary    :: ModSummary
   , mfHscEnv     :: HscEnv
   , mfTcGblEnv   :: TcGblEnv
+  , mfPackageRoots :: [PackageImportRoot]
   , mfDesugared  :: ModGuts
   , mfCapturedType :: Maybe String
   , mfCheckedBinderPins :: [CheckedBinderPin]
@@ -1081,6 +1088,7 @@ definingModuleForOcc hscEnv modName occ = pure $ case lookupHpt (hsc_HPT hscEnv)
 data ModuleFacts = ModuleFacts
   { moduleFactTyCons :: [TyCon]
   , moduleFactReferences :: Set.Set ModuleName
+  , moduleFactPackageRoots :: [PackageImportRoot]
   , moduleFactHasDependentFiles :: Bool
   , moduleFactQuasiQuoteOrigins :: QuasiQuoteOrigins
     -- ^ Diagnostic and gate input: see 'QuasiQuoteOrigins'. 'lookupValidMemo'
@@ -1149,6 +1157,7 @@ observationFacts (FreshObservation front) = frontFacts front
 observationFacts (HydratedObservation _ hmi) = pure ModuleFacts
   { moduleFactTyCons = typeEnvTyCons (md_types (hm_details hmi))
   , moduleFactReferences = Set.empty
+  , moduleFactPackageRoots = []
   , moduleFactHasDependentFiles = False
   , moduleFactQuasiQuoteOrigins = NoQuasiQuotes
   }
@@ -1190,12 +1199,26 @@ observationFront (CachedObservation _ _) = Nothing
 observationFront (FreshObservation front) = Just front
 observationFront (HydratedObservation _ _) = Nothing
 
+-- Resolved direct imports include unused, instance-only and compiler-inserted
+-- package imports; interface dependencies alone do not retain that boundary.
+directPackageImportRoots :: HscEnv -> TcGblEnv -> IO [PackageImportRoot]
+directPackageImportRoots env tcg = do
+  let imported = Map.keys (imp_mods (tcg_imports tcg))
+      selected = [owner | owner <- imported
+        , not (isHomeUnit (hsc_home_unit env) (moduleUnit owner))
+        , moduleNameString (moduleName owner) /= "GHC.Prim"]
+  roots <- forM selected $ \owner -> do
+    witness <- packageImportRoot env owner
+    either (ioError . userError . ("direct package import unavailable: " ++)) pure witness
+  pure (Set.toAscList (Set.fromList roots))
+
 frontFacts :: ModuleFront -> IO ModuleFacts
 frontFacts front = do
   dependentFiles <- readIORef (tcg_dependent_files (mfTcGblEnv front))
   pure ModuleFacts
     { moduleFactTyCons = mg_tcs (mfDesugared front)
     , moduleFactReferences = mfReferencedModules front
+    , moduleFactPackageRoots = mfPackageRoots front
     , moduleFactHasDependentFiles = not (null dependentFiles)
     , moduleFactQuasiQuoteOrigins = mfQuasiQuoteOrigins front
     }
@@ -1470,6 +1493,9 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                     mResTy   = foldr (<|>) Nothing
                                  [ capturedBindingType occ tcGblEnv
                                  | occ <- cpResultBinders plan ]
+                packageRoots <- if captureProducts || isJust mMemoRef
+                  then liftIO (directPackageImportRoots hscEnv tcGblEnv)
+                  else pure []
                 when (ms_mod_name modSum == targetModName') $ liftIO $ hPutStrLn stderr $
                   "tidepool-target phase=desugar module=" ++ targetModName
                 (desugared, dsMs) <- timeSection $ liftIO (hscDesugar hscEnv modSum tcGblEnv)
@@ -1480,6 +1506,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 pure ModuleFront { mfSummary    = modSum
                                  , mfHscEnv     = hscEnv
                                  , mfTcGblEnv   = tcGblEnv
+                                 , mfPackageRoots = packageRoots
                                  , mfDesugared  = desugared
                                  , mfCapturedType = capturedType
                                  , mfCheckedBinderPins = checkedBinderPins
@@ -2144,19 +2171,24 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           capturedSources <- liftIO (captureDependencySources modGraphRaw)
           dependencies <- liftIO (dependencyEvidenceFor hscFinal capturedSources modGraphRaw moduleFacts)
           productInterfaces <- liftIO (readIORef productInterfacesRef)
-          pure (pipelineResult, preparedModules, dependencies, productInterfaces)
+          let packageRoots = Map.fromList
+                [(ms_mod_name (observationSummary observation), moduleFactPackageRoots facts)
+                | (observation, facts) <- zip observations moduleFacts
+                , case observation of HydratedObservation _ _ -> False; _ -> True]
+          pure (pipelineResult, preparedModules, dependencies, productInterfaces, packageRoots)
     case selection of
       PreparedStg -> do
-        (result, modules, dependencies, productInterfaces) <- compileExecutable
+        (result, modules, dependencies, productInterfaces, packageRoots) <- compileExecutable
         pure PreparedPipelineResult
           { pprPipelineResult = result
           , pprModules = modules
           , pprDependencies = dependencies
           , pprProductInterfaces = productInterfaces
+          , pprPackageRoots = packageRoots
           , pprAcceptedCandidates = []
           }
       PreparedProducts _ -> do
-        (result, modules, dependencies, productInterfaces) <- compileExecutable
+        (result, modules, dependencies, productInterfaces, packageRoots) <- compileExecutable
         valid <- liftIO $ revalidateAcceptedCandidates (Map.elems acceptedCandidates)
         when (not valid) $ liftIO $ ioError $ userError
           "accepted module candidate changed before artifact publication"
@@ -2165,6 +2197,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           , pprModules = modules
           , pprDependencies = dependencies
           , pprProductInterfaces = productInterfaces
+          , pprPackageRoots = packageRoots
           , pprAcceptedCandidates = Map.elems acceptedCandidates
           }
       CheckedEnvironment -> do
@@ -2310,10 +2343,34 @@ certifyModuleCandidates manifest graph targetPath = do
                     inspected <- liftIO (try (sourceEvidenceWithFingerprint
                       (candidateSource candidate))
                       :: IO (Either IOException (DependencySource, Fingerprint)))
+                    packageWitness <- liftIO $ readPackageImports
+                      (candidatePackageImports candidate)
+                      (candidatePackageImportsSha256 candidate)
+                      (ExactIfaceArtifact (candidateUnit candidate)
+                        (candidateModule candidate) (candidateInterface candidate)
+                        (candidateInterfaceSha256 candidate) [])
+                    packageSelected <- liftIO $ case packageWitness of
+                      Left _ -> pure False
+                      Right roots -> do
+                        recorded <- and <$> mapM (fmap (either (const False) (const True))
+                          . validatePackageImportRoot env) roots
+                        selectedImports <- forM (ms_textual_imps summary ++ ms_srcimps summary) $ \(qualifier, name) -> do
+                          resolved <- findImportedModule env (unLoc name) qualifier
+                          case resolved of
+                            Found _ owner
+                              | isHomeUnit (hsc_home_unit env) (moduleUnit owner)
+                                || moduleNameString (moduleName owner) == "GHC.Prim" ->
+                                  pure (Right Nothing)
+                              | otherwise -> fmap Just <$> packageImportRoot env owner
+                            _ -> pure (Left "direct import does not resolve")
+                        pure $ recorded && case sequence selectedImports of
+                          Left _ -> False
+                          Right selected -> all (`elem` roots) (catMaybes selected)
                     pure $ case inspected of
                       Right (evidence, fingerprint)
                         | dependencySourceSha256 evidence == candidateSourceSha256 candidate
-                        , fingerprint == ms_hs_hash summary ->
+                        , fingerprint == ms_hs_hash summary
+                        , packageSelected ->
                             Just (ms_mod_name summary, (candidate, summary, node))
                       _ -> Nothing
           _ -> pure Nothing
@@ -2384,8 +2441,13 @@ revalidateAcceptedCandidates candidates = and <$> forM candidates (\candidate ->
   readBack <- try $ do
     (source, _) <- sourceEvidenceWithFingerprint (candidateSource candidate)
     interface <- BS.readFile (candidateInterface candidate)
+    packageImports <- readPackageImports (candidatePackageImports candidate)
+      (candidatePackageImportsSha256 candidate)
+      (ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
+        (candidateInterface candidate) (candidateInterfaceSha256 candidate) [])
     pure (dependencySourceSha256 source == candidateSourceSha256 candidate
-      && hexBytes (SHA256.hash interface) == candidateInterfaceSha256 candidate)
+      && hexBytes (SHA256.hash interface) == candidateInterfaceSha256 candidate
+      && either (const False) (const True) packageImports)
     :: IO (Either IOException Bool)
   pure (either (const False) id readBack))
 

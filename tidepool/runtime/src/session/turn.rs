@@ -28,6 +28,7 @@ use tidepool_extract_cmd::{ExtractCmd, SpawnError};
 use tidepool_toolchain::artifacts::{seal_turn_outputs, ModuleCandidateOffer};
 use tidepool_toolchain::certified_products::{PendingCertifiedGroup, PendingImportOwner};
 use tidepool_toolchain::extract_module_name;
+use tidepool_toolchain::recovery_artifacts::CertifiedRecoveryProduct;
 
 use tidepool_repr::execution_schema::{
     parse_program, DecodeLimits, PreparedProgram, SymbolIdentity,
@@ -1577,6 +1578,8 @@ pub struct CompiledTurn {
 pub struct TurnCertification {
     pub groups: Vec<PendingCertifiedGroup>,
     pub target_owners: Vec<PendingImportOwner>,
+    /// Exact owned compiler products for recovery publication after admission.
+    pub recovery_products: Vec<CertifiedRecoveryProduct>,
 }
 
 impl CompiledTurn {
@@ -2645,6 +2648,7 @@ fn read_compiled_turn(
         certification: sealed.map(|sealed| TurnCertification {
             groups: sealed.certified_groups,
             target_owners: sealed.pending_imports,
+            recovery_products: sealed.recovery_products,
         }),
     })
 }
