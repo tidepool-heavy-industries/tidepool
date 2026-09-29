@@ -577,6 +577,16 @@ impl ExtractCmd {
         self
     }
 
+    pub fn declaration_join(&mut self, path: &Path) -> &mut Self {
+        self.request.declaration_join(path);
+        self
+    }
+
+    pub fn declaration_join_out(&mut self, path: &Path) -> &mut Self {
+        self.request.declaration_join_out(path);
+        self
+    }
+
     /// `--session-root <dir>` — where `Tidepool.Session.Val.G<g>` ifaces are
     /// written and where `--inject-val` ifaces are looked up.
     pub fn session_root(&mut self, dir: impl AsRef<OsStr>) -> &mut Self {

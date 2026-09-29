@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v13";
-const MAGIC: &[u8; 8] = b"TPREQ013";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v14";
+const MAGIC: &[u8; 8] = b"TPREQ014";
 
 /// A probe flag deliberately outside the versioned request grammar above: it
 /// asks a worker binary to print the request flag it was built against and
@@ -71,6 +71,8 @@ enum Field {
     TurnPin(String),
     BuildProductsDir(OsString),
     ModuleCandidates(PathBuf),
+    DeclarationJoin(PathBuf),
+    DeclarationJoinOut(PathBuf),
     SessionRoot(OsString),
     /// The session's incarnation identity (the Rust `SessionId`, rendered as
     /// decimal text) -- absent for a one-shot compile or an older caller.
@@ -164,6 +166,11 @@ impl ExtractRequest {
                 Some("--module-candidates") => {
                     request.module_candidates(Path::new(value(&mut args, "--module-candidates")?))
                 }
+                Some("--declaration-join") => {
+                    request.declaration_join(Path::new(value(&mut args, "--declaration-join")?))
+                }
+                Some("--declaration-join-out") => request
+                    .declaration_join_out(Path::new(value(&mut args, "--declaration-join-out")?)),
                 Some("--session-root") => request.session_root(value(&mut args, "--session-root")?),
                 Some("--session-incarnation") => {
                     request.session_incarnation(value(&mut args, "--session-incarnation")?)
@@ -259,6 +266,8 @@ impl ExtractRequest {
                 24 => Field::HarnessProfile,
                 25 => Field::BuildProductsDir(decoder.os_string()?),
                 46 => Field::ModuleCandidates(PathBuf::from(decoder.os_string()?)),
+                47 => Field::DeclarationJoin(PathBuf::from(decoder.os_string()?)),
+                48 => Field::DeclarationJoinOut(PathBuf::from(decoder.os_string()?)),
                 26 => Field::InspectType(decoder.string()?),
                 27 => Field::InspectInfo(decoder.string()?),
                 28 => Field::InspectOut(decoder.os_string()?),
@@ -425,6 +434,15 @@ impl ExtractRequest {
         self.fields.push(Field::ModuleCandidates(value.to_owned()));
     }
 
+    pub(crate) fn declaration_join(&mut self, value: &Path) {
+        self.fields.push(Field::DeclarationJoin(value.to_owned()));
+    }
+
+    pub(crate) fn declaration_join_out(&mut self, value: &Path) {
+        self.fields
+            .push(Field::DeclarationJoinOut(value.to_owned()));
+    }
+
     pub(crate) fn session_root(&mut self, value: impl AsRef<OsStr>) {
         self.fields
             .push(Field::SessionRoot(value.as_ref().to_owned()));
@@ -531,6 +549,12 @@ impl ExtractRequest {
                 Field::ModuleCandidates(value) => {
                     flag(&mut flags, "--module-candidates", value.as_os_str())
                 }
+                Field::DeclarationJoin(value) => {
+                    flag(&mut flags, "--declaration-join", value.as_os_str())
+                }
+                Field::DeclarationJoinOut(value) => {
+                    flag(&mut flags, "--declaration-join-out", value.as_os_str())
+                }
                 Field::SessionRoot(value) => flag(&mut flags, "--session-root", value),
                 Field::SessionIncarnation(value) => {
                     flag(&mut flags, "--session-incarnation", value)
@@ -625,8 +649,15 @@ impl ExtractRequest {
     ///   into a harmless diagnostic failure after the load/lowering this
     ///   warm-up exists for has already happened.
     pub(crate) fn redirect_outputs_for_warm_up(&mut self, dir: &Path) {
-        self.fields
-            .retain(|field| !matches!(field, Field::BindGen(_) | Field::ModuleCandidates(_)));
+        self.fields.retain(|field| {
+            !matches!(
+                field,
+                Field::BindGen(_)
+                    | Field::ModuleCandidates(_)
+                    | Field::DeclarationJoin(_)
+                    | Field::DeclarationJoinOut(_)
+            )
+        });
         for field in &mut self.fields {
             match field {
                 Field::OutputDir(value) => *value = dir.join("output-dir").into_os_string(),
@@ -783,7 +814,7 @@ impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidWorkerArgv => {
-                f.write_str("worker argv must be exactly --worker-request-v13 PAYLOAD")
+                f.write_str("worker argv must be exactly --worker-request-v14 PAYLOAD")
             }
             Self::NonUtf8Payload => f.write_str("worker request payload is not UTF-8"),
             Self::InvalidHeader => f.write_str("invalid worker request header"),
@@ -860,6 +891,8 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         Field::TurnPin(value) => tagged_frame(out, 34, OsStr::new(value)),
         Field::BuildProductsDir(value) => tagged_frame(out, 25, value),
         Field::ModuleCandidates(value) => tagged_frame(out, 46, value.as_os_str()),
+        Field::DeclarationJoin(value) => tagged_frame(out, 47, value.as_os_str()),
+        Field::DeclarationJoinOut(value) => tagged_frame(out, 48, value.as_os_str()),
         Field::SessionRoot(value) => tagged_frame(out, 12, value),
         Field::SessionIncarnation(value) => tagged_frame(out, 44, value),
         Field::InjectVal(value) => tagged_frame(out, 13, value),
@@ -1131,6 +1164,27 @@ mod tests {
     }
 
     #[test]
+    fn declaration_join_paths_round_trip_and_do_not_enter_warm_up() {
+        let mut request = ExtractRequest::default();
+        request.input("Candidate.hs");
+        request.declaration_join(Path::new("/tmp/join-input.cbor"));
+        request.declaration_join_out(Path::new("/tmp/join-output.json"));
+        let decoded = ExtractRequest::decode(&request.encode()).unwrap();
+        assert_eq!(decoded.cli_argv(), request.cli_argv());
+        assert!(matches!(
+            decoded.fields.as_slice(),
+            [
+                Field::Input(_),
+                Field::DeclarationJoin(_),
+                Field::DeclarationJoinOut(_)
+            ]
+        ));
+        let mut warm = decoded;
+        warm.redirect_outputs_for_warm_up(Path::new("/tmp/warm"));
+        assert!(matches!(warm.fields.as_slice(), [Field::Input(_)]));
+    }
+
+    #[test]
     fn strict_inspection_round_trips_through_the_typed_protocol() {
         let mut request = ExtractRequest::default();
         request.inspection_strict();
@@ -1242,6 +1296,7 @@ mod tests {
             b"TPREQ010",
             b"TPREQ011",
             b"TPREQ012",
+            b"TPREQ013",
         ] {
             let mut request = magic.to_vec();
             request.extend_from_slice(&0u32.to_le_bytes());
@@ -1271,6 +1326,12 @@ mod tests {
             "expr".into(),
             "--build-products-dir".into(),
             "/tmp/build".into(),
+            "--module-candidates".into(),
+            "/tmp/module-candidates.cbor".into(),
+            "--declaration-join".into(),
+            "/tmp/declaration-join.cbor".into(),
+            "--declaration-join-out".into(),
+            "/tmp/declaration-join.json".into(),
             "--session-root".into(),
             "/tmp/session".into(),
             "--session-incarnation".into(),
