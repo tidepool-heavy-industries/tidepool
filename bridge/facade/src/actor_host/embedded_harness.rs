@@ -7,7 +7,8 @@ use std::{
 };
 
 use exomonad_actor::{
-    ActorAdmissionLease, ActorExitKind, ActorTerminal, LocalActorRef, ResidentToolError,
+    ActorAdmissionLease, ActorExitKind, ActorTerminal, HostedCheckpointAttachment,
+    HostedCheckpointCapture, HostedCheckpointCaptureError, LocalActorRef, ResidentToolError,
     WorkbenchCancellationOutcome,
 };
 use exomonad_tool::{ToolArguments, ToolInvocationContext};
@@ -76,6 +77,7 @@ impl EmbeddedHarnessRuntime {
             identity,
             actor,
             installation,
+            self.store.clone(),
             wakes,
         )?);
         let conversation = Arc::new(Conversation::attach(
@@ -110,6 +112,7 @@ pub(super) struct EmbeddedHostActor {
     identity: HostIdentity,
     actor: LocalActorRef,
     installation: Arc<EmbeddedPolicyInstallation>,
+    store: Arc<Store>,
     wakes: mpsc::UnboundedSender<DurableMailboxWake>,
     next_surface: AtomicU64,
 }
@@ -119,6 +122,7 @@ impl EmbeddedHostActor {
         identity: HostIdentity,
         actor: LocalActorRef,
         installation: Arc<EmbeddedPolicyInstallation>,
+        store: Arc<Store>,
         wakes: mpsc::UnboundedSender<DurableMailboxWake>,
     ) -> Result<Self, EmbeddedError> {
         let exact_actor = actor.identity();
@@ -134,6 +138,7 @@ impl EmbeddedHostActor {
             identity,
             actor,
             installation,
+            store,
             wakes,
             next_surface: AtomicU64::new(1),
         })
@@ -174,6 +179,7 @@ impl HostActor for EmbeddedHostActor {
         let dispatcher: Arc<dyn Provider> = Arc::new(EmbeddedDispatcher {
             identity: self.identity.clone(),
             snapshot,
+            store: self.store.clone(),
         });
         Ok(Arc::new(ToolSurface::new(version, tools, dispatcher)?))
     }
@@ -207,6 +213,64 @@ impl HostActor for EmbeddedHostActor {
 struct EmbeddedDispatcher {
     identity: HostIdentity,
     snapshot: Arc<EmbeddedPolicySnapshot>,
+    store: Arc<Store>,
+}
+
+/// Host-owned durable half of a Haskell checkpoint. The actor retains this
+/// value on its existing checkpoint lease and revokes it with that lease.
+pub(super) struct EmbeddedHostedCheckpoint {
+    pub(super) checkpoint: harness::checkpoint::Checkpoint<()>,
+}
+
+struct EmbeddedCheckpointCapture {
+    store: Arc<Store>,
+    identity: HostIdentity,
+    operation: OperationId,
+    thread_id: String,
+}
+
+impl HostedCheckpointCapture for EmbeddedCheckpointCapture {
+    fn capture(
+        &self,
+        name: &str,
+        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> Result<HostedCheckpointAttachment, HostedCheckpointCaptureError> {
+        let exact_origin = matches!(
+            &self.operation.origin,
+            ConversationIdentity::Embedded {
+                run,
+                actor,
+                incarnation,
+            } if run == &self.identity.run
+                && actor == &self.identity.actor
+                && incarnation == &self.identity.incarnation
+        );
+        if !exact_origin
+            || boundary.thread_id != self.thread_id
+            || boundary.call_id != self.operation.call.0
+            || name.is_empty()
+        {
+            return Err(HostedCheckpointCaptureError::CaptureFailed);
+        }
+
+        let metadata = json!({
+            "name": name,
+            "operation": self.operation,
+        });
+        let checkpoint = self
+            .store
+            .capture_checkpoint(
+                self.operation.origin.actor(),
+                &self.operation.request,
+                &self.operation.call,
+                &metadata,
+                Arc::new(()),
+            )
+            .map_err(|_| HostedCheckpointCaptureError::CaptureFailed)?;
+        Ok(HostedCheckpointAttachment::new(Arc::new(
+            EmbeddedHostedCheckpoint { checkpoint },
+        )))
+    }
 }
 
 impl EmbeddedDispatcher {
@@ -222,7 +286,7 @@ impl EmbeddedDispatcher {
             _ => return Err(ProviderError::Tool("foreign embedded operation".into())),
         }
         Ok(ToolInvocationContext {
-            context_call_id: None,
+            context_call_id: Some(operation.call.0.clone()),
             thread_id: format!("{}:{}", self.identity.run, self.identity.actor.0),
             turn_id: operation.request.0.clone(),
             call_id: operation.call.0.clone(),
@@ -235,6 +299,7 @@ impl EmbeddedDispatcher {
         name: &str,
         arguments: ToolArguments,
         context: CallContext,
+        capture_checkpoints: bool,
     ) -> Result<Value, ProviderError> {
         let operation = context.operation.as_ref().ok_or_else(|| {
             ProviderError::Tool("embedded dispatch requires an exact operation".into())
@@ -245,8 +310,22 @@ impl EmbeddedDispatcher {
         {
             return Err(ProviderError::Tool("foreign embedded call context".into()));
         }
+        let invocation_context = self.context(operation)?;
+        let checkpoint_capture = (capture_checkpoints && name == "haskell").then(|| {
+            Arc::new(EmbeddedCheckpointCapture {
+                store: self.store.clone(),
+                identity: self.identity.clone(),
+                operation: operation.clone(),
+                thread_id: invocation_context.thread_id.clone(),
+            }) as Arc<dyn HostedCheckpointCapture>
+        });
         self.snapshot
-            .dispatch(name.to_owned(), arguments, self.context(operation)?)
+            .dispatch(
+                name.to_owned(),
+                arguments,
+                invocation_context,
+                checkpoint_capture,
+            )
             .await
             .map_err(|error| ProviderError::Tool(error.to_string()))
     }
@@ -274,7 +353,7 @@ impl Provider for EmbeddedDispatcher {
         arguments: Value,
         context: CallContext,
     ) -> Result<Value, ProviderError> {
-        self.dispatch(name, ToolArguments::Structured(arguments), context)
+        self.dispatch(name, ToolArguments::Structured(arguments), context, false)
             .await
     }
 
@@ -284,7 +363,7 @@ impl Provider for EmbeddedDispatcher {
         input: String,
         context: CallContext,
     ) -> Result<Value, ProviderError> {
-        self.dispatch(name, ToolArguments::Raw(input), context)
+        self.dispatch(name, ToolArguments::Raw(input), context, true)
             .await
     }
 }
@@ -416,9 +495,10 @@ mod tests {
             } else if round == 2 {
                 self.entered.notify_one();
                 self.release.notified().await;
+                // Keep the round nonfinal after settlement so the next boundary compacts.
                 vec![Item(json!({
-                    "type":"message", "role":"assistant", "phase":"final_answer",
-                    "content":[{"type":"output_text","text":"cell finished"}]
+                    "type":"custom_tool_call", "call_id":"raw-cell-2",
+                    "name":"haskell", "input":"1 + 1 :: Int"
                 }))]
             } else {
                 self.completed.notify_one();
@@ -431,7 +511,7 @@ mod tests {
                 response_id: format!("park-{round}"),
                 items,
                 usage: harness::transport::Usage {
-                    input_tokens: if round == 1 { 100_001 } else { 0 },
+                    input_tokens: if round == 2 { 100_001 } else { 0 },
                     ..Default::default()
                 },
             })
@@ -573,6 +653,31 @@ mod tests {
             .await
             .unwrap();
         assert!(receipt.wake_error.is_none(), "{receipt:?}");
+        let store = service.runtime.store();
+        let call = harness::model::CallId("raw-cell-1".into());
+        let host_identity = conversation.identity().clone();
+        let embedded_origin = ConversationIdentity::Embedded {
+            run: host_identity.run.clone(),
+            actor: host_identity.actor.clone(),
+            incarnation: host_identity.incarnation.clone(),
+        };
+        let claim = store
+            .claims(&call)
+            .unwrap()
+            .into_iter()
+            .find(|claim| claim.operation.origin == embedded_origin)
+            .expect("the real Engine call must retain its exact embedded operation");
+        let output = tokio::time::timeout(
+            Duration::from_secs(30),
+            service.runtime.scheduler().wait(&claim.operation),
+        )
+        .await
+        .expect("real Haskell output did not settle while the scripted round was held")
+        .unwrap();
+        assert!(
+            matches!(output, harness::turn::JobOutput::Completed(Ok(_))),
+            "real Haskell call did not settle successfully: {output:?}"
+        );
         transport.release.notify_one();
         tokio::time::timeout(Duration::from_secs(5), transport.completed.notified())
             .await
@@ -599,19 +704,11 @@ mod tests {
             1
         );
         assert!(
-            requests[1]
-                .input
-                .iter()
-                .any(|item| item.0.to_string().contains("42")),
-            "settled Haskell result was not present in the next request: {:#?}",
-            requests[1].input
-        );
-        assert!(
             requests[2]
                 .input
                 .iter()
                 .any(|item| item.0.to_string().contains("42")),
-            "raw-cell result was not retained: {:#?}",
+            "post-compaction history lost the settled Haskell result: {:#?}",
             requests[2].input
         );
         assert!(matches!(
@@ -619,6 +716,49 @@ mod tests {
             InputObservation::Included(_)
         ));
         drop(requests);
+        let capture = EmbeddedCheckpointCapture {
+            store: store.clone(),
+            identity: host_identity.clone(),
+            operation: claim.operation.clone(),
+            thread_id: format!("{}:{}", host_identity.run, host_identity.actor.0),
+        };
+        let boundary = tidepool_runtime::session::WorkbenchForkBoundary {
+            thread_id: capture.thread_id.clone(),
+            call_id: claim.operation.call.0.clone(),
+        };
+        let attachment = capture
+            .capture("captured-child", &boundary)
+            .expect("host capture must freeze the exact Engine call boundary");
+        let captured = attachment
+            .downcast::<EmbeddedHostedCheckpoint>()
+            .expect("host capture must retain its typed harness checkpoint");
+        assert_eq!(captured.checkpoint.origin(), &host_identity.actor);
+        assert_eq!(
+            captured.checkpoint.source_request(),
+            &claim.operation.request
+        );
+        assert_eq!(captured.checkpoint.boundary_call(), &claim.operation.call);
+        assert_eq!(captured.checkpoint.metadata()["name"], "captured-child");
+
+        let missing_call = harness::model::CallId("missing-host-call".into());
+        let missing = EmbeddedCheckpointCapture {
+            store,
+            identity: host_identity,
+            operation: OperationId {
+                call: missing_call.clone(),
+                ..claim.operation.clone()
+            },
+            thread_id: capture.thread_id.clone(),
+        };
+        let missing_boundary = tidepool_runtime::session::WorkbenchForkBoundary {
+            thread_id: missing.thread_id.clone(),
+            call_id: missing_call.0,
+        };
+        assert!(matches!(
+            missing.capture("not-captured", &missing_boundary),
+            Err(HostedCheckpointCaptureError::CaptureFailed)
+        ));
+
         publish_embedded_root_snapshot(
             &service.control,
             conversation.identity(),
@@ -696,10 +836,13 @@ mod tests {
             incarnation: actor.incarnation.0.to_string(),
         };
         let (wakes, _incoming) = mpsc::unbounded_channel();
+        let scratch = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(scratch.path().join("store.sqlite")).unwrap());
         let host = EmbeddedHostActor::new(
             identity,
             campaign.actor.clone(),
             installation.clone(),
+            store,
             wakes,
         )
         .unwrap();

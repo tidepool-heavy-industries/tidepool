@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use exomonad_actor::{
-    ActorRef, LocalResidentInstallation, ResidentToolEndpoint, ResidentToolError,
-    ResidentToolFuture,
+    ActorRef, HostedCheckpointCapture, LocalResidentInstallation, ResidentToolEndpoint,
+    ResidentToolError, ResidentToolFuture,
 };
 use exomonad_tool::{HostedTool, ToolArguments, ToolInvocation, ToolInvocationContext};
 use serde_json::{json, Value};
@@ -63,12 +63,16 @@ impl EmbeddedPolicySnapshot {
         name: String,
         arguments: ToolArguments,
         context: ToolInvocationContext,
+        checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
     ) -> ResidentToolFuture {
-        self.policy.dispatch_boxed(ToolInvocation {
-            context: Some(context),
-            name,
-            arguments,
-        })
+        self.policy.dispatch_with_checkpoint_boxed(
+            ToolInvocation {
+                context: Some(context),
+                name,
+                arguments,
+            },
+            checkpoint_capture,
+        )
     }
 
     pub(super) async fn cancel(
@@ -246,6 +250,7 @@ mod tests {
                 "haskell_v2".into(),
                 ToolArguments::Raw("1".into()),
                 context(),
+                None,
             )
             .await
             .unwrap();
@@ -267,6 +272,7 @@ mod tests {
                 "haskell".into(),
                 ToolArguments::Raw("λ = 1".into()),
                 context(),
+                None,
             )
             .await
             .unwrap();
@@ -282,6 +288,7 @@ mod tests {
                 "lookup".into(),
                 ToolArguments::Structured(json!({"key": "x"})),
                 context(),
+                None,
             )
             .await
             .unwrap();
@@ -293,7 +300,14 @@ mod tests {
             })
         );
         assert!(matches!(
-            first.dispatch("haskell".into(), ToolArguments::Raw("again".into()), context()).await,
+            first
+                .dispatch(
+                    "haskell".into(),
+                    ToolArguments::Raw("again".into()),
+                    context(),
+                    None,
+                )
+                .await,
             Ok(value) if value["marker"] == "first"
         ));
     }
