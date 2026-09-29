@@ -113,12 +113,10 @@ pub struct ScopeDrain {
 struct BindingTip {
     id: BindingTipId,
     visible: HashMap<BindingName, SessionVarId>,
+    /// Frozen exact ancestor values, including shadowed generations needed by
+    /// inherited declaration code. Leasing them keeps observations alive if
+    /// their original owner later stops naming them.
     retained: HashSet<SessionVarId>,
-    /// Exact ancestor bindings available when this lexical view was frozen,
-    /// including shadowed generations used by inherited declaration code.
-    /// Ordinary descendants borrow the still-live ancestor's ownership;
-    /// detached roots additionally retain these ids in `retained`.
-    available_exact: HashSet<SessionVarId>,
     source_instances: HashSet<SourceLeaseKey>,
 }
 
@@ -371,6 +369,15 @@ mod promotion_tests {
         assert!(table
             .resolve_exact_prepared_in(&tree, sibling, &first_identity, 4)
             .is_none());
+
+        assert!(table.save_observation(first_id, &[], 0).is_empty());
+        assert!(table.lease_count(first_id) >= 2);
+        assert!(table
+            .resolve_exact_prepared_in(&tree, descendant, &first_identity, 4)
+            .is_some());
+        assert!(table.drain_scope(descendant).is_empty());
+        assert!(table.drain_scope(captured).is_empty());
+        assert_eq!(table.collect_observations().len(), 1);
     }
 }
 
@@ -1093,7 +1100,7 @@ impl BindingTable {
                 owners
                     .iter()
                     .filter_map(|scope| self.tips.get(scope))
-                    .flat_map(|tip| tip.available_exact.iter().chain(tip.retained.iter()))
+                    .flat_map(|tip| tip.retained.iter())
                     .copied(),
             )
             .chain(
@@ -1106,7 +1113,7 @@ impl BindingTable {
             .collect();
         // Keep the parent's exact value identities rooted for inherited code,
         // but do not give a fresh actor its parent's local display alias name.
-        let retained = self.acquire_leases(inherited.iter().map(|(_, id)| *id));
+        let retained = self.acquire_leases(available_exact);
         let source_instances = self.source_instance_keys_in(tree, parent);
         self.acquire_source_shares(&source_instances);
         let visible = inherited
@@ -1121,7 +1128,6 @@ impl BindingTable {
                 id,
                 visible,
                 retained,
-                available_exact,
                 source_instances,
             },
         );
@@ -1138,9 +1144,7 @@ impl BindingTable {
         parent: ScopeId,
         child: ScopeId,
     ) -> BindingTipId {
-        let id = self.seed_scope(tree, parent, child);
-        self.retain_scope_dependencies(tree, parent, child);
-        id
+        self.seed_scope(tree, parent, child)
     }
 
     /// Retain all value generations an exact external facade from `source`
@@ -1364,15 +1368,9 @@ impl BindingTable {
             .live
             .values()
             .find(|entry| entry.module == module && entry.value.identity == *identity)?;
-        let module_reachable = self
-            .scope_reachable_modules(tree, scope)
-            .any(|reachable| reachable == module);
-        (module_reachable
-            || self
-                .tips
-                .get(&scope)
-                .is_some_and(|tip| tip.available_exact.contains(&entry.id)))
-        .then_some(entry)
+        self.scope_reachable_modules(tree, scope)
+            .any(|reachable| reachable == module)
+            .then_some(entry)
     }
 
     /// Every live binding (including shadowed older gens), unordered.
