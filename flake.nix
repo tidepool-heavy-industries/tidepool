@@ -283,6 +283,7 @@
               version = "0.1.0";
               src = exomonadSource;
               cargoLock.lockFile = ./Cargo.lock;
+              cargoLock.outputHashes."harness-0.1.0" = "sha256-9YfMT6DrdjJcEwQbLpDqgb1vQCl8xCEHBdfuVC2B1oo=";
               cargoBuildFlags = [ "-p" "tidepool-extract-cmd" ];
               cargoInstallFlags = [ "-p" "tidepool-extract-cmd" ];
               # The daemon integration test needs the separately packaged GHC
@@ -306,6 +307,7 @@
           version = "0.1.0";
           src = exomonadSource;
           cargoLock.lockFile = ./Cargo.lock;
+          cargoLock.outputHashes."harness-0.1.0" = "sha256-9YfMT6DrdjJcEwQbLpDqgb1vQCl8xCEHBdfuVC2B1oo=";
           cargoBuildFlags = [
             "-p"
             "tidepool"
