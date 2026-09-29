@@ -30,6 +30,7 @@ import Tidepool.ExactHydration
 main :: IO ()
 main = getArgs >>= \case
   ["--consumer", root] -> recoveredConsumer root
+  ["--next-consumer", root] -> recoveredNextConsumer root
   ["--wire-fixture", root] -> do
     let input = emptyWireInput
     BS.writeFile (root </> "join-v2.cbor") (encodeDeclarationJoin input)
@@ -184,6 +185,11 @@ recoveredConsumer root = do
       liftIO $ case result of
         Left _ -> pure ()
         Right _ -> fail (name ++ " unexpectedly acquired hidden typing evidence")
+    nextSummary <- check "Next"
+    nextEnv <- getSession
+    next <- liftIO (compileOne nextEnv nextSummary 1 1 Nothing emptyHomeModInfoLinkable)
+    setSession (hscUpdateHPT (addHomeModInfoToHpt next) nextEnv)
+    liftIO $ writeFile (root </> "next-object.txt") (ml_obj_file (ms_location nextSummary))
     final <- getSession
     eps <- liftIO (hscEPS final)
     let homeInstances = [i | i <- instEnvElts (eps_inst_env eps),
@@ -199,6 +205,52 @@ recoveredConsumer root = do
   unless (output == "(11,19,22,33,True,'p',True,3,'z',11,44,True,'j')\n")
     (fail ("original dictionary or selected lookup changed: " ++ show output))
   putStrLn "fresh consumer: four hidden-evidence failures and actual old/new dictionary execution passed"
+  renameFile (root </> "Next.hs") (root </> "Next.hidden")
+  self <- getExecutablePath
+  callProcess self ["--next-consumer", root]
+
+recoveredNextConsumer :: FilePath -> IO ()
+recoveredNextConsumer root = do
+  libdir <- ghcLibdir
+  runGhc (Just libdir) $ do
+    configure root
+    initial <- getSession
+    fresh <- liftIO (freshExactState initial)
+    artifacts <- liftIO (mapM (artifact root) ["Common", "Old", "Public", "Joined", "Next"])
+    loaded <- liftIO (readExactIfaceArtifacts fresh artifacts >>= either fail pure)
+    hydrated <- liftIO (hydrateExactScope fresh loaded)
+    let lexical = [(a, if exactModule a == "Next" then [("main", "Joined")] else [])
+          | a <- artifacts, exactModule a `elem` ["Joined", "Next"]]
+        check name = do
+          previous <- getSession
+          setSession previous { hsc_mod_graph = emptyMG }
+          target <- guessTarget (root </> name ++ ".hs") Nothing Nothing
+          setTargets [target]
+          graph <- depanal (map (mkModuleName . exactModule) artifacts) False
+          env <- getSession
+          installed <- liftIO (installExactLexicalGraph graph lexical env >>= either fail pure)
+          setSession installed
+          getModSummary (if name == "NextConsumer" then mkModuleName "Main" else mkModuleName name)
+    setSession hydrated
+    summary <- check "NextConsumer"
+    env <- getSession
+    _ <- liftIO (compileOne env summary 1 1 Nothing emptyHomeModInfoLinkable)
+    liftIO $ writeFile (root </> "next-consumer-object.txt") (ml_obj_file (ms_location summary))
+    bad <- check "BadRetraction"
+    badEnv <- getSession
+    result <- liftIO $ try (compileOne badEnv bad 1 1 Nothing emptyHomeModInfoLinkable)
+      :: Ghc (Either SourceError HomeModInfo)
+    liftIO $ case result of
+      Left _ -> pure ()
+      Right _ -> fail "a retracted original export reappeared after next-turn recovery"
+  nextObject <- readFile (root </> "next-object.txt")
+  consumerObject <- readFile (root </> "next-consumer-object.txt")
+  let executable = root </> "next-consumer"
+      objects = map (\name -> root </> name ++ ".o") ["Common", "Old", "Public"] ++ [nextObject, consumerObject]
+  callProcess "ghc" (objects ++ ["-o", executable])
+  output <- readProcess executable [] ""
+  unless (output == "(99,11,11,True)\n") (fail ("next-turn export identity changed: " ++ show output))
+  putStrLn "next-turn recovery: original constructors, replacement and retraction passed"
 
 configure :: FilePath -> Ghc ()
 configure root = do
@@ -230,7 +282,7 @@ requireIface ifaces name = case [iface | iface <- ifaces, moduleName (mi_module 
 
 sourceFiles :: [String]
 sourceFiles = map (++ ".hs")
-  ["Common", "Old", "Public", "Conflict", "AssociatedConflict", "DataConflict", "InjectiveConflict", "Consumer", "BadClass", "BadFamily", "BadAssociated", "BadFD"]
+  ["Common", "Old", "Public", "Conflict", "AssociatedConflict", "DataConflict", "InjectiveConflict", "Consumer", "BadClass", "BadFamily", "BadAssociated", "BadFD", "Next", "NextConsumer", "BadRetraction"]
 
 temporary :: IO FilePath
 temporary = do
