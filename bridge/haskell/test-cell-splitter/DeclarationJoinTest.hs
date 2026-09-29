@@ -51,7 +51,7 @@ main = getArgs >>= \case
     -- Each defining module is compiled once in its original lexical context.
     -- Old and Public deliberately have incompatible dictionaries; they are
     -- combined only through a selected interface, never an import wrapper.
-    forM_ ["Old", "Public", "Conflict"] $ \target ->
+    forM_ ["Old", "Public", "Conflict", "AssociatedConflict", "DataConflict", "InjectiveConflict"] $ \target ->
       runGhc (Just libdir) $ do
         configure root
         guessed <- guessTarget (root </> target ++ ".hs") Nothing Nothing
@@ -124,22 +124,23 @@ main = getArgs >>= \case
         _ -> fail "an existing immutable Join output was replaced"
       -- A hidden axiom still participates in consistency, though it will not
       -- participate in the downstream consumer's reduction environment.
-      conflicting <- liftIO (artifact root "Conflict")
-      conflictLoaded <- liftIO $ readExactIfaceArtifacts fresh (artifacts ++ [conflicting]) >>= either fail pure
-      conflictEnv <- liftIO (hydrateExactScope fresh conflictLoaded)
-      let conflictIfaces = map snd conflictLoaded
-          conflictFamilies = [exportIdentity (ifFamInstAxiom i) | iface <- conflictIfaces, i <- mi_fam_insts iface]
-      conflict <- liftIO $ buildJoinedInterface conflictEnv joined (root </> "ConflictJoin.hi")
-        conflictIfaces exports selected conflictFamilies
-      liftIO $ case conflict of
-        Left (FamilyInstanceConflict, _) -> pure ()
-        other -> fail ("hidden family conflict was not rejected: " ++ show other)
+      forM_ ["Conflict", "AssociatedConflict", "DataConflict", "InjectiveConflict"] $ \name -> do
+        conflicting <- liftIO (artifact root name)
+        conflictLoaded <- liftIO $ readExactIfaceArtifacts fresh (artifacts ++ [conflicting]) >>= either fail pure
+        conflictEnv <- liftIO (hydrateExactScope fresh conflictLoaded)
+        let conflictIfaces = map snd conflictLoaded
+            conflictFamilies = [exportIdentity (ifFamInstAxiom i) | iface <- conflictIfaces, i <- mi_fam_insts iface]
+        conflict <- liftIO $ buildJoinedInterface conflictEnv joined (root </> name ++ "Join.hi")
+          conflictIfaces exports selected conflictFamilies
+        liftIO $ case conflict of
+          Left (FamilyInstanceConflict, _) -> pure ()
+          other -> fail (name ++ " retained family conflict was not rejected: " ++ show other)
     -- No source restoration or original declaration replay in the fresh worker.
-    forM_ ["Common", "Old", "Public", "Conflict"] $ \name ->
+    forM_ ["Common", "Old", "Public", "Conflict", "AssociatedConflict", "DataConflict", "InjectiveConflict"] $ \name ->
       renameFile (root </> name ++ ".hs") (root </> name ++ ".hidden")
     executable <- getExecutablePath
     callProcess executable ["--consumer", root]
-    putStrLn "declaration join: persisted interface, fresh source-hidden consumer and retained family conflict passed"
+    putStrLn "declaration join: persisted interface, fresh source-hidden consumer and four retained family conflicts passed"
   _ -> fail "unexpected declaration join test arguments"
 
 recoveredConsumer :: FilePath -> IO ()
@@ -195,7 +196,7 @@ recoveredConsumer root = do
       objects = map (\name -> root </> name ++ ".o") ["Common", "Old", "Public"] ++ [consumerObject]
   callProcess "ghc" (objects ++ ["-o", executable])
   output <- readProcess executable [] ""
-  unless (output == "(11,19,22,33,True,'p',True,3,'z',11,44)\n")
+  unless (output == "(11,19,22,33,True,'p',True,3,'z',11,44,True,'j')\n")
     (fail ("original dictionary or selected lookup changed: " ++ show output))
   putStrLn "fresh consumer: four hidden-evidence failures and actual old/new dictionary execution passed"
 
@@ -229,7 +230,7 @@ requireIface ifaces name = case [iface | iface <- ifaces, moduleName (mi_module 
 
 sourceFiles :: [String]
 sourceFiles = map (++ ".hs")
-  ["Common", "Old", "Public", "Conflict", "Consumer", "BadClass", "BadFamily", "BadAssociated", "BadFD"]
+  ["Common", "Old", "Public", "Conflict", "AssociatedConflict", "DataConflict", "InjectiveConflict", "Consumer", "BadClass", "BadFamily", "BadAssociated", "BadFD"]
 
 temporary :: IO FilePath
 temporary = do
