@@ -594,10 +594,12 @@ impl BindingTable {
                 .then_with(|| left.binder.cmp(&right.binder))
         });
         keys.into_iter()
-            .filter_map(|key| {
+            .map(|key| {
                 self.source_instances
                     .get(&key)
-                    .map(|entry| entry.token.clone())
+                    .expect("visible source instance retains its machine root")
+                    .token
+                    .clone()
             })
             .collect()
     }
