@@ -18,7 +18,10 @@ const RECORD_LIMIT: usize = 32 << 20;
 const MANIFEST_LIMIT: usize = 4 << 20;
 const CANDIDATE_LIMIT: usize = 128;
 const RECORD_DIR: &str = "module-candidates-v5";
-pub(crate) const PRODUCT_MAX_BYTES: usize = 32 << 20;
+// A measured 33,955,557-byte ordinary resident display graph exceeds 32 MiB.
+// This is the aggregate worker sidecar limit; each durable module record
+// remains independently capped by RECORD_LIMIT after exact row splitting.
+pub(crate) const PRODUCT_MAX_BYTES: usize = 64 << 20;
 
 pub(crate) fn product_decode_limits() -> DecodeLimits {
     DecodeLimits {
@@ -602,6 +605,13 @@ mod tests {
             module_version_for_product(b"compiler", &[], "source-sha", &[0x42], &split[0]),
             module_version_for_product(b"compiler", &[], "source-sha", &[0x42], &first),
         );
+    }
+
+    #[test]
+    fn aggregate_product_bound_admits_measured_display_graph_but_rejects_over_limit() {
+        assert!(product_decode_limits().max_bytes >= 33_955_557);
+        assert!(split_module_product_bytes(&vec![0; PRODUCT_MAX_BYTES + 1], &[]).is_none());
+        assert_eq!(RECORD_LIMIT, 32 << 20);
     }
 
     fn write_record(root: &Path, source: &Path, unit: &str, module: &str, products: Vec<u8>) {
