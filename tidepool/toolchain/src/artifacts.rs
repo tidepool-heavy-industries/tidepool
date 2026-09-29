@@ -292,7 +292,7 @@ pub fn seal_turn_outputs(
     source: &str,
     prepared: &PreparedProgram,
     target: &str,
-) -> Result<SealedTurnProducts, CompileError> {
+) -> Result<Option<SealedTurnProducts>, CompileError> {
     if std::fs::read_to_string(source_path)? != source {
         return Err(CompileError::ExtractFailed(
             "turn source changed after worker compile".into(),
@@ -301,39 +301,36 @@ pub fn seal_turn_outputs(
     let product_bytes = std::fs::read(output_dir.join("module-products.cbor"))?;
     let evidence_bytes = std::fs::read(output_dir.join("dependencies.json"))?;
     let receipt_bytes = std::fs::read(output_dir.join("certified-products.cbor"))?;
-    if receipt_bytes.is_empty() {
-        if offer.has_candidates() {
-            return Err(CompileError::ExtractFailed(
-                "turn candidate product certificate unavailable".into(),
-            ));
-        }
-        return Ok(SealedTurnProducts {
-            certified_groups: Vec::new(),
-            pending_imports: Vec::new(),
-        });
-    }
-    let receipt = certified_products::decode_receipt(&receipt_bytes)
-        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     let fresh_products = tidepool_repr::execution_schema::parse_module_products(
         &product_bytes,
         &crate::prepared_artifact::production_requirements()?,
-        DecodeLimits::default(),
+        module_candidates::product_decode_limits(),
     )?;
-    let evidence = cache::DependencyEvidence::from_worker(&evidence_bytes, source_path, source);
-    let Some(valid) = evidence.as_ref().filter(|evidence| evidence.valid(source)) else {
-        if receipt
-            .modules
-            .iter()
-            .any(|module| module.origin == certified_products::ProductOrigin::Cached)
-        {
+    let needs_certificate =
+        offer.has_candidates() || !fresh_products.is_empty() || !prepared.globals().is_empty();
+    if receipt_bytes.is_empty() {
+        if needs_certificate {
             return Err(CompileError::ExtractFailed(
-                "turn cached module lacks valid final dependency evidence".into(),
+                "turn required product certificate unavailable".into(),
             ));
         }
-        return Ok(SealedTurnProducts {
-            certified_groups: Vec::new(),
-            pending_imports: Vec::new(),
-        });
+        return Ok(None);
+    }
+    let receipt = certified_products::decode_receipt(&receipt_bytes)
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    let evidence = cache::DependencyEvidence::from_worker(&evidence_bytes, source_path, source);
+    let Some(valid) = evidence.as_ref().filter(|evidence| evidence.valid(source)) else {
+        if needs_certificate
+            || receipt
+                .modules
+                .iter()
+                .any(|module| module.origin == certified_products::ProductOrigin::Cached)
+        {
+            return Err(CompileError::ExtractFailed(
+                "turn required product certificate lacks valid final dependency evidence".into(),
+            ));
+        }
+        return Ok(None);
     };
     let groups = certified_products::certify_products(
         offer.selected.as_ref(),
@@ -383,10 +380,10 @@ pub fn seal_turn_outputs(
         &product_bytes,
         source,
     );
-    Ok(SealedTurnProducts {
+    Ok(Some(SealedTurnProducts {
         certified_groups: groups,
         pending_imports,
-    })
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -636,7 +633,7 @@ fn compile_invocation_inner(
                 let fresh_products = tidepool_repr::execution_schema::parse_module_products(
                     &product_bytes,
                     &crate::prepared_artifact::production_requirements()?,
-                    DecodeLimits::default(),
+                    module_candidates::product_decode_limits(),
                 )?;
                 module_candidates::publish(
                     &producer,
@@ -654,7 +651,7 @@ fn compile_invocation_inner(
         let fresh_products = tidepool_repr::execution_schema::parse_module_products(
             &product_bytes,
             &crate::prepared_artifact::production_requirements()?,
-            DecodeLimits::default(),
+            module_candidates::product_decode_limits(),
         )?;
         let valid_evidence = evidence.as_ref().filter(|value| value.valid(inv.source));
         let certified_groups = if let Some(valid) = valid_evidence {
@@ -1105,7 +1102,7 @@ fn assemble_with_products(
     artifacts.module_products = tidepool_repr::execution_schema::parse_module_products(
         product_bytes,
         &crate::prepared_artifact::production_requirements()?,
-        DecodeLimits::default(),
+        module_candidates::product_decode_limits(),
     )?;
     artifacts
         .module_products
