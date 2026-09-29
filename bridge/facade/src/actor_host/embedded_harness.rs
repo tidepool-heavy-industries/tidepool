@@ -523,13 +523,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(login.status(), reqwest::StatusCode::OK);
-        let cookie = login.headers()[reqwest::header::SET_COOKIE]
+        let set_cookie = login.headers()[reqwest::header::SET_COOKIE]
             .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_owned();
+            .unwrap();
+        for flag in ["HttpOnly", "SameSite=Strict", "Max-Age=28800", "Secure"] {
+            assert!(set_cookie.split(';').any(|part| part.trim() == flag));
+        }
+        let cookie = set_cookie.split(';').next().unwrap().to_owned();
         let response = client
             .post(format!("{api}/commands"))
             .header("Origin", &origin)
@@ -613,6 +613,40 @@ mod tests {
             socket.close(None).await.unwrap();
         }
         service.shutdown().await.unwrap();
+        drop(service);
+        let rotated_secret = "rotated-embedded-browser-test-secret-32-bytes";
+        std::fs::write(&settings.session_secret_file, rotated_secret).unwrap();
+        let mut restarted = EmbeddedService::prepare(campaign.session_root.path(), &settings)
+            .await
+            .unwrap();
+        let restarted_api = format!("http://{}/api", restarted.address);
+        let restarted_origin = format!("https://{}", restarted.address);
+        let stale = client
+            .post(format!("{restarted_api}/commands"))
+            .header("Origin", &restarted_origin)
+            .header(reqwest::header::COOKIE, &cookie)
+            .json(&harness::server::ClientCommand::Submit {
+                command: "stale session".into(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert!(restarted.commands.try_recv().is_err());
+        for (secret, expected) in [
+            (secret, reqwest::StatusCode::UNAUTHORIZED),
+            (rotated_secret, reqwest::StatusCode::OK),
+        ] {
+            let login = client
+                .post(format!("{restarted_api}/session"))
+                .header("Origin", &restarted_origin)
+                .json(&serde_json::json!({"secret": secret}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(login.status(), expected);
+        }
+        restarted.shutdown().await.unwrap();
         campaign.forest.shutdown().await;
         campaign.hosted.await.unwrap();
     }
