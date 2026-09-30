@@ -434,6 +434,7 @@ impl ModuleCandidateOffer {
             root,
             &self.producer,
             exact.semantic_sha256,
+            exact.context.clone(),
             &exact.request_sha256,
             specification,
             exact.validate_outputs_with_planned(root, owner.as_ref())?,
@@ -531,6 +532,13 @@ impl ModuleCandidateOffer {
             (!empty).then_some(baseline),
             string(&fields[6])?.as_bytes(),
         )?;
+        let inventory: serde_json::Value = serde_json::from_str(string(&fields[6])?)
+            .map_err(|error| CompileError::ExtractFailed(format!("planned inventory: {error}")))?;
+        let interface_fingerprint = inventory
+            .get("interface_fingerprint")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(fail)?
+            .to_owned();
         if std::fs::read(&receipt_path)? != bytes
             || std::fs::read(directory.join("original.hi"))? != iface
         {
@@ -538,6 +546,7 @@ impl ModuleCandidateOffer {
         }
         Ok(Some(crate::checked_cell::PlannedCheckedDeclaration {
             source: source.to_owned(),
+            interface_fingerprint,
             certificate: Arc::new(certificate),
             receipt_digest: Sha256::digest(&bytes).into(),
         }))

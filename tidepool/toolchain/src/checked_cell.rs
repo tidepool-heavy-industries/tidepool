@@ -1,7 +1,7 @@
 //! Same-offer whole-cell compiler authority. Public cell observations never
 //! construct either capability; the bound compiler offer validates the receipt.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -137,6 +137,7 @@ pub struct ExactCheckedCell {
     specification: CheckedCellSpecification,
     producer: [u8; 32],
     context: [u8; 32],
+    declaration_context: Arc<crate::declaration_context::ExactDeclarationContext>,
     receipt_digest: [u8; 32],
     checked_source: String,
     evidence: crate::cache::DependencyEvidence,
@@ -149,6 +150,7 @@ pub struct ExactCheckedCell {
 #[derive(Debug)]
 pub(crate) struct PlannedCheckedDeclaration {
     pub(crate) source: String,
+    pub(crate) interface_fingerprint: String,
     pub(crate) certificate: Arc<crate::declaration_join::CertifiedAuthoredDeclaration>,
     pub(crate) receipt_digest: [u8; 32],
 }
@@ -304,7 +306,7 @@ impl CheckedDisplayOffer {
         producer: &[u8],
         context: [u8; 32],
     ) -> Result<Value, CompileError> {
-        self.capture.item.cell.revalidate(producer, &context)?;
+        self.prefix.revalidate_context(producer, &context)?;
         if self.admission_digest == [0; 32]
             || self
                 .prefix
@@ -357,6 +359,7 @@ impl CheckedDisplayOffer {
                 CheckedExpressionPresentation::Rendered => "rendered",
                 CheckedExpressionPresentation::Opaque => "opaque",
             }),
+            self.prefix.planned_authorization(),
         ]))
     }
     pub(crate) fn seal(
@@ -477,6 +480,111 @@ impl ExactCompiledItem {
 }
 
 impl ExactCompiledPrefix {
+    fn planned_authorization(&self) -> Value {
+        self.completed_declaration(0)
+            .and_then(|item| item.cell.planned_declaration.as_ref())
+            .map_or(Value::Null, |planned| {
+                array([
+                    text(&planned.certificate.product().owner().unit),
+                    text(&planned.certificate.product().owner().module),
+                    text(&planned.interface_fingerprint),
+                ])
+            })
+    }
+    fn revalidate_context(&self, producer: &[u8], context: &[u8; 32]) -> Result<(), CompileError> {
+        self.cell.revalidate(producer, &self.cell.context)?;
+        let Some(item) = self.completed_declaration(0) else {
+            return if context == &self.cell.context {
+                Ok(())
+            } else {
+                Err(failure("completed prefix has another declaration context"))
+            };
+        };
+        let certificate = item
+            .planned_declaration()
+            .ok_or_else(|| failure("completed declaration has no original certificate"))?;
+        let baseline = &self.cell.declaration_context;
+        let mut lexical = baseline
+            .lexical_graph()
+            .iter()
+            .filter(|node| !node.owner.module.starts_with("Tidepool.Session."))
+            .map(|node| (node.owner.clone(), node.imports.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut roots = baseline
+            .lexical_graph()
+            .iter()
+            .filter(|node| node.owner.module.starts_with("Tidepool.Session."))
+            .flat_map(|node| node.imports.iter().cloned())
+            .collect::<Vec<_>>();
+        let owner = crate::declaration_join::ExactModuleIdentity {
+            unit: certificate.product().owner().unit.clone(),
+            module: certificate.product().owner().module.clone(),
+        };
+        let imports = certificate
+            .original_home_imports()
+            .map(|(owner, edges)| (owner, edges))
+            .collect::<BTreeMap<_, _>>();
+        let original = imports
+            .get(&owner)
+            .ok_or_else(|| failure("original declaration has no exact import evidence"))?;
+        let new_roots = original
+            .iter()
+            .filter(|owner| !owner.module.starts_with("Tidepool.Session."))
+            .cloned()
+            .collect::<Vec<_>>();
+        roots.extend(new_roots.clone());
+        roots.sort();
+        roots.dedup();
+        let mut pending = new_roots;
+        let mut visited = BTreeSet::new();
+        while let Some(owner) = pending.pop() {
+            if !visited.insert(owner.clone()) {
+                continue;
+            }
+            let edges = imports
+                .get(&owner)
+                .copied()
+                .or_else(|| lexical.get(&owner).map(Vec::as_slice))
+                .ok_or_else(|| {
+                    failure("completed declaration shared import lacks exact source evidence")
+                })?
+                .to_vec();
+            if edges
+                .iter()
+                .any(|edge| edge.module.starts_with("Tidepool.Session."))
+            {
+                return Err(failure(
+                    "completed shared source imports an unselected session owner",
+                ));
+            }
+            pending.extend(edges.clone());
+            if lexical
+                .insert(owner, edges.clone())
+                .is_some_and(|prior| prior != edges)
+            {
+                return Err(failure(
+                    "completed declaration changes an admitted lexical edge",
+                ));
+            }
+        }
+        lexical.insert(owner, roots);
+        let expected = (**baseline).clone().extend(
+            std::slice::from_ref(certificate),
+            &[],
+            lexical
+                .into_iter()
+                .map(
+                    |(owner, imports)| crate::declaration_join::ExactLexicalNode { owner, imports },
+                )
+                .collect(),
+        )?;
+        if &expected.semantic_sha256() != context {
+            return Err(failure(
+                "completed declaration context differs from its same original certificate",
+            ));
+        }
+        Ok(())
+    }
     pub fn append_display(&self, display: Arc<ExactCompiledDisplay>) -> Result<Self, CompileError> {
         if self
             .completed_item(display.capture.item.index())
@@ -752,7 +860,7 @@ impl CheckedItemOffer {
         producer: &[u8],
         context: [u8; 32],
     ) -> Result<Value, CompileError> {
-        self.item.cell.revalidate(producer, &context)?;
+        self.prefix.revalidate_context(producer, &context)?;
         if self.item.index != self.prefix.next_item()
             || !Arc::ptr_eq(&self.item.cell, &self.prefix.cell)
             || self.runtime_prefix_digest == [0; 32]
@@ -818,6 +926,7 @@ impl CheckedItemOffer {
                     .collect(),
             ),
             self.observation_name.as_ref().map_or(Value::Null, text),
+            self.prefix.planned_authorization(),
         ]))
     }
     pub(crate) fn validate_templates(
@@ -954,6 +1063,7 @@ pub(crate) fn admit_checked_cell(
     root: &Path,
     producer: &[u8],
     context: [u8; 32],
+    declaration_context: Arc<crate::declaration_context::ExactDeclarationContext>,
     request_digest: &str,
     specification: &CheckedCellSpecification,
     admissions: Vec<ExactSourceAdmission>,
@@ -1111,6 +1221,7 @@ pub(crate) fn admit_checked_cell(
         specification: specification.clone(),
         producer: Sha256::digest(producer).into(),
         context,
+        declaration_context,
         receipt_digest: Sha256::digest(&receipt).into(),
         checked_source,
         evidence: source.evidence,

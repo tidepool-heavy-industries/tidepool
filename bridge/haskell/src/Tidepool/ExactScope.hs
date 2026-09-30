@@ -17,7 +17,7 @@ import qualified Crypto.Hash.SHA256 as SHA
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Char (isHexDigit)
-import Data.List (nub)
+import Data.List (nub, isPrefixOf)
 import qualified Data.Text as T
 import GHC.Driver.Env (HscEnv)
 import Data.Word (Word64)
@@ -60,6 +60,7 @@ data CheckedDisplayAdmission = CheckedDisplayAdmission
   , displayInjectedModules :: [String]
   , displayValueImports :: [(String,[String])]
   , displayPresentation :: String
+  , displayPlannedDeclaration :: Maybe ((String,String),String)
   } deriving (Eq, Show)
 
 data CheckedCellAdmission = CheckedCellAdmission
@@ -87,6 +88,7 @@ data CheckedItemAdmission = CheckedItemAdmission
   , itemPrefixDigest :: String
   , itemValueImports :: [(String,[String])]
   , itemObservationName :: Maybe String
+  , itemPlannedDeclaration :: Maybe ((String,String),String)
   } deriving (Eq, Show)
 
 data ExactProduct = ExactProduct
@@ -267,7 +269,7 @@ decodeScope = do
         unique "checked reserved modules" (checkedReservedModules admission)
         pure (Just admission,Nothing,Nothing)
       "checked-item" -> do
-        unless (authCount == 15) (fail "invalid checked-item admission")
+        unless (authCount == 16) (fail "invalid checked-item admission")
         admissionDigest <- digestField
         receiptDigest <- digestField
         index <- decodeWord64
@@ -303,16 +305,18 @@ decodeScope = do
         observation <- if observationToken == TypeNull then decodeNull >> pure Nothing else Just <$> nonempty
         unless ((kind == "expr") == maybe False (const True) observation)
           (fail "checked observation identity differs from item kind")
+        planned <- plannedDeclaration
         pure (Nothing, Just (CheckedItemAdmission admissionDigest receiptDigest index sourceDigest kind binders
-          templates injected signatures liftPlan presentation generation prefix valueImports observation), Nothing)
+          templates injected signatures liftPlan presentation generation prefix valueImports observation planned), Nothing)
       "checked-display" -> do
-        unless (authCount == 14) (fail "invalid checked-display admission")
+        unless (authCount == 15) (fail "invalid checked-display admission")
         admission <- CheckedDisplayAdmission <$> digestField <*> digestField <*> decodeWord64
           <*> nonempty <*> decodeWord64 <*> decodeWord64 <*> digestField <*> decodeWord64
           <*> bounded 65536 string <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
           <*> bounded 4096 nonempty
           <*> bounded 4096 (array 2 >> ((,) <$> nonempty <*> bounded 65536 nonempty))
           <*> nonempty
+          <*> plannedDeclaration
         unique "display injected modules" (displayInjectedModules admission)
         unique "display value import owners" (map fst (displayValueImports admission))
         unique "display value import names" (concatMap snd (displayValueImports admission))
@@ -323,6 +327,17 @@ decodeScope = do
       _ -> fail "unsupported exact compile purpose"
   pure (ExactScope "" "" semantic interfaces lexical products checked checkedItem checkedDisplay)
   where
+    plannedDeclaration = do
+      token <- peekTokenType
+      if token == TypeNull then decodeNull >> pure Nothing else do
+        array 3
+        unit <- nonempty
+        ownerModule <- nonempty
+        fingerprint <- nonempty
+        unless (unit == "main" && "Tidepool.Session.Lib.G" `isPrefixOf` ownerModule
+            && length fingerprint == 32 && all isHexDigit fingerprint)
+          (fail "invalid completed original declaration identity")
+        pure (Just ((unit,ownerModule),fingerprint))
     signature = do
       array 3
       key <- nonempty

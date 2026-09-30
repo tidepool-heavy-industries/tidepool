@@ -253,8 +253,8 @@ impl ImportQualifier {
 const GENERATED_SOURCE: &str = "@generated-source";
 
 impl ModuleEvidence {
-    /// Only `from_worker` may replace the exact request source with this
-    /// marker, after checking the consumed bytes and final evidence graph.
+    /// In evidence issued by `from_worker`, this marks the exact request
+    /// source after consumed-byte and final-graph validation.
     pub(crate) fn is_generated_source(&self) -> bool {
         self.source == Path::new(GENERATED_SOURCE)
     }

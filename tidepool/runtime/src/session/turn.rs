@@ -4956,11 +4956,137 @@ mod tests {
         let expression = checked.checked_item(2).unwrap();
         assert!(expression.expression_presentation().unwrap().is_some());
         let prefix = declaration.initial_prefix().unwrap();
-        assert!(prefix.append_declaration(binding).is_err());
+        assert!(prefix.append_declaration(binding.clone()).is_err());
         let prefix = prefix.append_declaration(declaration.clone()).unwrap();
         assert_eq!(prefix.next_item(), 1);
         assert_eq!(prefix.completed_declaration(0), Some(&declaration));
-        assert!(prefix.append_declaration(declaration).is_err());
+        assert!(prefix.append_declaration(declaration.clone()).is_err());
+        let protected = session
+            .begin_checked_prefix(admission, declaration.clone())
+            .unwrap();
+        let reservation = session
+            .admit_checked_item(protected.clone(), declaration)
+            .unwrap();
+        #[derive(Clone)]
+        struct QuietOutput;
+        impl crate::session::OutputSink for QuietOutput {
+            fn drain(&self) -> Vec<String> {
+                Vec::new()
+            }
+            fn snapshot(&self) -> Vec<String> {
+                Vec::new()
+            }
+        }
+        let mut resident = crate::session::ResidentSession::from_persistent_for_test(
+            frunk::HNil,
+            QuietOutput,
+            session,
+        );
+        resident
+            .set_run_context(crate::session::SessionRunContext {
+                lexical_scope: execution.private_scope(),
+                ..Default::default()
+            })
+            .unwrap();
+        resident
+            .adopt_checked_declaration(reservation.clone())
+            .unwrap();
+        assert_eq!(protected.snapshot().compiler_prefix().next_item(), 1);
+        assert!(resident.adopt_checked_declaration(reservation).is_err());
+        for item in [binding, expression] {
+            let reservation = resident
+                .admit_checked_item(protected.clone(), item.clone())
+                .unwrap();
+            let snapshot = reservation.snapshot();
+            let current = snapshot.view();
+            let include = current.include_paths(effects.include_paths());
+            let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+            let injected = snapshot.compiler_prefix().injected_modules();
+            let TurnResult::Bind {
+                bound, compiled, ..
+            } = run_checked_item(
+                TurnRequest {
+                    exact_context: current.exact_declaration_context().cloned(),
+                    session_id: Some(current.session()),
+                    turn_text: item.source(),
+                    templates: &templates,
+                    include: &include,
+                    session_root: current.session_root(),
+                    inject_modules: &injected,
+                    gen: reservation.generation().0,
+                    verdict: Some(checked.items[item.index()].verdict.clone()),
+                    target: None,
+                    retained_imports: &[],
+                },
+                reservation.clone(),
+            )
+            .unwrap()
+            else {
+                panic!("ordered checked item must compile its binding recipe")
+            };
+            if item.kind() == tidepool_toolchain::checked_cell::CheckedItemKind::Bind {
+                resident
+                    .run_bind_with_sites(
+                        "local",
+                        compiled.code(),
+                        &bound[0],
+                        reservation.generation(),
+                    )
+                    .unwrap();
+            } else {
+                resident
+                    .run_observation_with_sites(
+                        compiled.code(),
+                        &bound[0],
+                        reservation.generation(),
+                        false,
+                    )
+                    .unwrap();
+                let display = resident
+                    .admit_checked_display(
+                        protected.clone(),
+                        compiled
+                            .certification
+                            .as_ref()
+                            .unwrap()
+                            .checked_execution()
+                            .unwrap()
+                            .clone(),
+                        &bound[0],
+                        256,
+                        Vec::new(),
+                    )
+                    .unwrap();
+                let TurnResult::Bind {
+                    bound, compiled, ..
+                } = run_checked_display(display.clone(), &include).unwrap()
+                else {
+                    panic!("ordered checked display must compile its bundle")
+                };
+                let [page, metadata, alias] = bound.as_slice() else {
+                    panic!("display bundle must have three rows")
+                };
+                let rendered = resident
+                    .run_checked_display_bundle_with_sites(
+                        compiled.code(),
+                        page,
+                        metadata,
+                        alias,
+                        display.generation(),
+                        display,
+                    )
+                    .unwrap();
+                assert!(
+                    rendered.result().to_string_pretty().contains("41"),
+                    "local declaration result was not rendered: {}",
+                    rendered.result().to_string_pretty()
+                );
+            }
+            assert_eq!(
+                protected.snapshot().compiler_prefix().next_item(),
+                item.index() + 1
+            );
+        }
     }
 
     #[test]
@@ -5428,6 +5554,97 @@ mod tests {
                 .next_item(),
             1
         );
+        let display_admission = resident
+            .admit_checked_display(
+                expression_reservation.prefix().clone(),
+                expression_compiled
+                    .certification
+                    .as_ref()
+                    .unwrap()
+                    .checked_execution()
+                    .unwrap()
+                    .clone(),
+                &expression_bound[0],
+                256,
+                Vec::new(),
+            )
+            .unwrap();
+        let TurnResult::Bind {
+            bound: display_bound,
+            compiled: display_compiled,
+            ..
+        } = run_checked_display(display_admission.clone(), &include).unwrap()
+        else {
+            panic!("checked display must compile its closed binding bundle");
+        };
+        let [page, metadata, alias] = display_bound.as_slice() else {
+            panic!("display must have exactly three bound rows");
+        };
+        let display_snapshot = expression_reservation.prefix().snapshot();
+        let mut edited_table = display_compiled.code();
+        edited_table.table = std::borrow::Cow::Owned(DataConTable::new());
+        assert!(resident
+            .run_checked_display_bundle_with_sites(
+                edited_table,
+                page,
+                metadata,
+                alias,
+                display_admission.generation(),
+                display_admission.clone()
+            )
+            .is_err());
+        let mut edited_page = page.clone();
+        edited_page.var_id ^= 1;
+        assert!(resident
+            .run_checked_display_bundle_with_sites(
+                display_compiled.code(),
+                &edited_page,
+                metadata,
+                alias,
+                display_admission.generation(),
+                display_admission.clone()
+            )
+            .is_err());
+        assert!(resident
+            .run_display_bundle_with_sites(
+                display_compiled.code(),
+                page,
+                metadata,
+                alias,
+                display_admission.generation()
+            )
+            .is_err());
+        assert!(Arc::ptr_eq(
+            &display_snapshot,
+            &expression_reservation.prefix().snapshot()
+        ));
+        let displayed = resident
+            .run_checked_display_bundle_with_sites(
+                display_compiled.code(),
+                page,
+                metadata,
+                alias,
+                display_admission.generation(),
+                display_admission.clone(),
+            )
+            .unwrap();
+        assert!(
+            displayed.result().to_string_pretty().contains("43"),
+            "hidden original result was not rendered: {}",
+            displayed.result().to_string_pretty()
+        );
+        assert_eq!(
+            expression_reservation
+                .prefix()
+                .snapshot()
+                .compiler_prefix()
+                .next_item(),
+            1
+        );
+        assert!(!Arc::ptr_eq(
+            &display_snapshot,
+            &expression_reservation.prefix().snapshot()
+        ));
         let TurnResult::Bind {
             bound: fold_bound,
             compiled: fold_compiled,

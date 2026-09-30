@@ -134,7 +134,7 @@ import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteC
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts)
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.PlannedDeclaration
-  ( PlannedDeclarationInventory, transformPlannedDeclarationImports )
+  ( PlannedDeclarationInventory, transformPlannedDeclarationImports, hydratePlannedDeclarationInventory )
 import Tidepool.FamilyConsistency (validateCompilationFamilies)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
@@ -674,7 +674,7 @@ data PipelineVariant = PipelineVariant
   }
 
 data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile | OriginalDeclarationCompile
-  | CheckedItemCompile [(String,CheckedSignature)]
+  | CheckedItemCompile [(String,CheckedSignature)] (Maybe ((String,String),String))
   | PlannedDeclarationCheck PlannedDeclarationInventory ExactScope
   deriving (Eq, Show)
 
@@ -685,8 +685,14 @@ transformFor CertifyHomeProductsCompile _ _ _ = pure
 transformFor LookupTypeCompile target _ summary
   | ms_mod_name summary == target = pure . normalizeLookupWildcards
   | otherwise = pure
-transformFor (CheckedItemCompile annotations) target env summary
-  | ms_mod_name summary == target = rewriteCheckedAnnotations env annotations
+transformFor (CheckedItemCompile annotations original) target env summary
+  | ms_mod_name summary == target = \parsed -> do
+      annotated <- rewriteCheckedAnnotations env annotations parsed
+      case original of
+        Nothing -> pure annotated
+        Just (owner, fingerprint) -> do
+          inventory <- hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure
+          transformPlannedDeclarationImports inventory env annotated
   | otherwise = pure
 transformFor (PlannedDeclarationCheck inventory _) target env summary
   | ms_mod_name summary == target = transformPlannedDeclarationImports inventory env

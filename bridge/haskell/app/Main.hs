@@ -947,7 +947,15 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
         spliceInto :: FilePath -> IO (String, String, FilePath)
         spliceInto tmplFile = do
           tmplSrc <- readFile tmplFile
-          tmplWithImports <- insertCheckedTypeImports typeImports tmplSrc
+          let original = case (display, admitted) of
+                (Just authority, Nothing) -> displayPlannedDeclaration authority
+                (Nothing, Just authority) -> itemPlannedDeclaration authority
+                _ -> Nothing
+          withOriginal <- case original of
+            Nothing -> pure tmplSrc
+            Just ((_, owner), _) -> replaceRecipeMarker "default (Int, Double, Text)\n"
+              ("import " ++ owner ++ "\ndefault (Int, Double, Text)\n") tmplSrc
+          tmplWithImports <- insertCheckedTypeImports typeImports withOriginal
           spliced <- case (display, admitted) of
             (Just admission, Nothing) -> checkedDisplayRecipe admission tmplWithImports
             (Nothing, Nothing) -> pure (spliceTemplate tmplWithImports turnSrc bindersStr)
@@ -989,9 +997,12 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
         -- A prepared turn uses one compiler pass for the checked metadata
         -- and the prepared modules.
         compileTurn modulePath = do
+          let purpose = case (display, admitted) of
+                (Just authority, Nothing) -> CheckedItemCompile [] (displayPlannedDeclaration authority)
+                (Nothing, Just authority) -> CheckedItemCompile (checkedRecipeAnnotations authority) (itemPlannedDeclaration authority)
+                _ -> GeneralCompile
           compiler (PreparedProducts (requestModuleCandidates args))
-            (Map.keysSet (requestRetainedGenerations args)) (maybe GeneralCompile
-              (CheckedItemCompile . checkedRecipeAnnotations) admitted)
+            (Map.keysSet (requestRetainedGenerations args)) purpose
             (Just scope) modulePath (requestIncludes args)
             (requestBuildProductsDir args)
         compileVariants _ [] = error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
@@ -1300,15 +1311,14 @@ validateCheckedDisplayAdmission args admission source verdict = do
 
 checkedDisplayRecipe :: CheckedDisplayAdmission -> String -> IO String
 checkedDisplayRecipe admission template = do
-  let rowPrefix = "__tidepoolInEffectRow :: Eff "
+  let rowPrefix = "{{TURN_STMT}} ; _ <- (pure () :: Eff "
       rows = [suffix | line <- lines template, Just suffix <- [stripPrefix rowPrefix line]]
   effectRow <- case rows of
     [suffix] -> do
-      let (row, remaining) = T.breakOn " value -> Eff " (T.pack suffix)
-      unless (not (T.null row) && remaining == " value -> Eff " <> row <> " value")
-        (fail "display requires the canonical exact effect-row helper")
-      pure (T.unpack row)
-    _ -> fail "display requires one exact effect-row helper"
+      case T.stripSuffix " ())" (T.pack suffix) of
+        Just row | not (T.null row) -> pure (T.unpack row)
+        _ -> fail "display requires the canonical bind effect-row pin"
+    _ -> fail "display requires one exact bind effect-row pin"
   withImports <- if null (displayValueImports admission) then pure template else
     replaceRecipeMarker "default (Int, Double, Text)\n"
       (concatMap (\(name, binders) -> "import " ++ name ++ " (" ++ intercalate ", " binders ++ ")\n")
@@ -1447,7 +1457,7 @@ attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled admitt
             let admission = CheckedItemAdmission (checkedAdmissionDigest cellAdmission) (shaHex receipt) 0
                   (shaHex (TE.encodeUtf8 (T.pack turnSrc))) "bind" (sbBinders sb)
                   (checkedTurnTemplates cellAdmission) (checkedInjectedModules cellAdmission)
-                  signatures Nothing Nothing generation (checkedAdmissionDigest cellAdmission) [] Nothing
+                  signatures Nothing Nothing generation (checkedAdmissionDigest cellAdmission) [] Nothing Nothing
             validateCheckedItemAdmission args admission turnSrc sb
             pure (Just admission)
         let typeImports = if isJust admitted then [] else nub (concatMap checkedPinImports [pin | Just pin <- pins])
