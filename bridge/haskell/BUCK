@@ -138,9 +138,37 @@ sh_test(
     visibility = ["PUBLIC"],
 )
 
-# Native parity for the accepted Cabal SOURCE SCC product-reuse suite. The
-# shell test stages its four fixture sources at the relative paths the test
-# executable consumes, then runs the same cold/resident/fresh-worker cases.
+# The native suites consume the same sources and fixture paths as Cabal.
+haskell_binary(
+    name = "planned_declaration_test",
+    srcs = {"Main.hs": "test-planned-declaration/Main.hs"},
+    deps = [":tidepool_extract_internal"],
+    compiler_flags = extractor_binary_flags("-package", "mtl"),
+    linker_flags = extractor_binary_link_flags() + ["-package", "mtl"],
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
+    name = "planned_declaration_fixtures",
+    srcs = glob(["test-planned-declaration/fixtures/*.hs"]),
+)
+
+sh_test(
+    name = "planned_declaration",
+    test = "test-with-fixtures.sh",
+    args = [
+        "$(exe :planned_declaration_test)",
+        "$(location :planned_declaration_fixtures)",
+    ],
+    resources = [":planned_declaration_test", ":planned_declaration_fixtures"],
+    env = {
+        "PATH": read_root_config("nix", "ghc_bin") + ":" + read_root_config("nix", "action_path"),
+        "TIDEPOOL_GHC_LIBDIR": read_root_config("nix", "ghc_libdir"),
+    },
+    test_rule_timeout_ms = 300000,
+    visibility = ["PUBLIC"],
+)
+
 haskell_binary(
     name = "source_boot_product_reuse_test",
     srcs = {"Main.hs": "test-source-boot/Main.hs"},
@@ -152,20 +180,14 @@ haskell_binary(
 
 sh_test(
     name = "source_boot_product_reuse",
-    test = "test-source-boot-product-reuse.sh",
+    test = "test-with-fixtures.sh",
     args = [
         "$(exe :source_boot_product_reuse_test)",
-        "$(location :source_boot_cache_even)",
-        "$(location :source_boot_cache_even_boot)",
-        "$(location :source_boot_cache_odd)",
-        "$(location :source_boot_cache_entry)",
+        "$(location :source_boot_fixtures)",
     ],
     resources = [
         ":source_boot_product_reuse_test",
-        ":source_boot_cache_even",
-        ":source_boot_cache_even_boot",
-        ":source_boot_cache_odd",
-        ":source_boot_cache_entry",
+        ":source_boot_fixtures",
     ],
     env = {
         "PATH": read_root_config("nix", "ghc_bin") + ":" + read_root_config("nix", "action_path"),
@@ -174,28 +196,9 @@ sh_test(
     visibility = ["PUBLIC"],
 )
 
-export_file(
-    name = "source_boot_cache_even",
-    src = "test-source-boot/fixtures/CacheEven.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "source_boot_cache_even_boot",
-    src = "test-source-boot/fixtures/CacheEven.hs-boot",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "source_boot_cache_odd",
-    src = "test-source-boot/fixtures/CacheOdd.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "source_boot_cache_entry",
-    src = "test-source-boot/fixtures/CacheEntry.hs",
-    visibility = ["PUBLIC"],
+filegroup(
+    name = "source_boot_fixtures",
+    srcs = glob(["test-source-boot/fixtures/*.hs", "test-source-boot/fixtures/*.hs-boot"]),
 )
 
 # Exact compile-time resources consumed by the native repr targets.
