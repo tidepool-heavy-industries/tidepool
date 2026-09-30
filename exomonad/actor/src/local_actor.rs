@@ -22,6 +22,7 @@ use tidepool_runtime::session::WorkbenchResponse;
 
 mod workbench_step;
 pub use workbench_step::{
+    ActorAbandonGuard, ActorAdvance, OwnedActorCompletion, OwnedActorTask,
     OwnedWorkbenchCompletion, OwnedWorkbenchTask, WorkbenchAbandonGuard, WorkbenchAdvance,
     WorkbenchDispatch,
 };

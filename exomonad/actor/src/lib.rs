@@ -99,10 +99,11 @@ pub use lineage::{
     ForkGroupPublication, ForkGroupRegistry,
 };
 pub use local_actor::{
-    spawn_local_actor, spawn_local_actor_in_incarnation, ChildExitNotice, KernelBehavior,
-    KernelBehaviorError, KernelContext, KernelStep, LocalActor, LocalActorArguments,
-    LocalActorDirectory, LocalActorState, OwnedWorkbenchCompletion, OwnedWorkbenchTask,
-    WorkbenchAbandonGuard, WorkbenchAdvance, WorkbenchDispatch,
+    spawn_local_actor, spawn_local_actor_in_incarnation, ActorAbandonGuard, ActorAdvance,
+    ChildExitNotice, KernelBehavior, KernelBehaviorError, KernelContext, KernelStep, LocalActor,
+    LocalActorArguments, LocalActorDirectory, LocalActorState, OwnedActorCompletion,
+    OwnedActorTask, OwnedWorkbenchCompletion, OwnedWorkbenchTask, WorkbenchAbandonGuard,
+    WorkbenchAdvance, WorkbenchDispatch,
 };
 pub use mailbox::MailboxValue;
 pub use mount::{
