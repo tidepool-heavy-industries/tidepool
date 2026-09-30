@@ -50,7 +50,6 @@ haskell_library(
         "Tidepool/ExecutionSchema.hs": "src/Tidepool/ExecutionSchema.hs",
         "Tidepool/ExecutionProjection.hs": "src/Tidepool/ExecutionProjection.hs",
         "Tidepool/ExecutionEncode.hs": "src/Tidepool/ExecutionEncode.hs",
-        "Tidepool/ExactScope.hs": "src/Tidepool/ExactScope.hs",
         "Tidepool/Json.hs": "src/Tidepool/Json.hs",
         "Tidepool/Resolve.hs": "src/Tidepool/Resolve.hs",
         "Tidepool/Session.hs": "src/Tidepool/Session.hs",
