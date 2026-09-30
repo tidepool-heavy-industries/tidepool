@@ -1875,6 +1875,21 @@ where
             .expect("public visibility epoch exhausted");
     }
 
+    fn finish_declaration_admission<T>(
+        &mut self,
+        scope: ScopeId,
+        outcome: Result<T, SessionError>,
+    ) -> Result<T, SessionError> {
+        if outcome.is_ok()
+            || outcome
+                .as_ref()
+                .is_err_and(|error| error.published_declaration_commit().is_some())
+        {
+            self.advance_public_visibility(scope);
+        }
+        outcome
+    }
+
     /// Capture the actor's declaration, binding and source-instance view under
     /// the caller's machine checkout. `epoch` is not a compiler generation;
     /// exact identities remain the stale authority.
@@ -2017,9 +2032,8 @@ where
         scope: ScopeId,
         decls: &[&str],
     ) -> Result<tidepool_repr::Generation, SessionError> {
-        let generation = self.state.define_scoped_in(scope, decls)?;
-        self.advance_public_visibility(scope);
-        Ok(generation)
+        let outcome = self.state.define_scoped_in(scope, decls);
+        self.finish_declaration_admission(scope, outcome)
     }
 
     /// Commit declarations against frontend-owned imports without recording
@@ -2030,11 +2044,10 @@ where
         decls: &[&str],
         imports: &SourceImports,
     ) -> Result<tidepool_repr::Generation, SessionError> {
-        let generation = self
+        let outcome = self
             .state
-            .define_scoped_with_imports_in(scope, decls, imports)?;
-        self.advance_public_visibility(scope);
-        Ok(generation)
+            .define_scoped_with_imports_in(scope, decls, imports);
+        self.finish_declaration_admission(scope, outcome)
     }
 
     pub fn stage_declarations_in(
@@ -2072,11 +2085,10 @@ where
         receipt: &super::DeclarationReceipt,
         imports: &SourceImports,
     ) -> Result<super::DeclarationPlaneCommit, SessionError> {
-        let committed = self
+        let outcome = self
             .state
-            .commit_declaration_receipt_in(scope, receipt, imports)?;
-        self.advance_public_visibility(scope);
-        Ok(committed)
+            .commit_declaration_receipt_in(scope, receipt, imports);
+        self.finish_declaration_admission(scope, outcome)
     }
 
     pub fn adopt_staged_declaration_in(
@@ -2084,9 +2096,8 @@ where
         staged: super::StagedDeclaration,
     ) -> Result<super::DeclarationPlaneCommit, SessionError> {
         let scope = staged.scope();
-        let committed = self.state.adopt_staged_declaration_in(staged)?;
-        self.advance_public_visibility(scope);
-        Ok(committed)
+        let outcome = self.state.adopt_staged_declaration_in(staged);
+        self.finish_declaration_admission(scope, outcome)
     }
 
     pub fn discard_staged_declaration(&self, staged: &super::StagedDeclaration) {
@@ -5499,6 +5510,168 @@ where
         if let Some(observer) = &self.continuation_observer {
             observer(ResidentContinuationEvent::Retired(hole.to_owned()));
         }
+    }
+}
+
+#[cfg(test)]
+mod authored_publication_tests {
+    use super::*;
+    use crate::session::{recovery, ModuleEnv, SessionId};
+
+    #[derive(Clone)]
+    struct EmptyOutput;
+
+    impl OutputSink for EmptyOutput {
+        fn drain(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn snapshot(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    type TestSession = ResidentSession<frunk::HNil, EmptyOutput>;
+
+    fn authored_lib(root: &Path) -> SessionLib {
+        tidepool_testing::eval_harness::require_extract();
+        let mut lib = SessionLib::open(SessionId(991), root, ModuleEnv::standalone_default())
+            .unwrap()
+            .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
+        lib.attach_recovery_graph_v2(root.join("declarations.json"))
+            .unwrap();
+        lib
+    }
+
+    fn resident_with_replaced_binding(lib: SessionLib) -> TestSession {
+        let mut session =
+            ResidentSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(lib));
+        let binding = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session.state,
+            "answer",
+            71,
+        );
+        session.state.bind(binding);
+        session.state.mark_stub_generation(Generation(71));
+        session.state.lib_mut().fail_authored_durability_once = true;
+        session
+    }
+
+    fn assert_published_and_confirm_only(
+        session: &mut TestSession,
+        root: &Path,
+        error: &SessionError,
+    ) {
+        let commit = error
+            .published_declaration_commit()
+            .expect("post-rename failure retains published commit facts");
+        assert_eq!(commit.generation, Generation(1));
+        assert_eq!(commit.evicted_values, ["answer"]);
+        assert!(session.state.resolve_in(ScopeId::ROOT, "answer").is_none());
+        let snapshot = session
+            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .unwrap();
+        assert_eq!(snapshot.epoch, 1);
+        assert_eq!(snapshot.declaration_tip, Generation(1));
+        assert!(snapshot.bindings.is_empty());
+        assert!(session
+            .state
+            .lib()
+            .durable_graph
+            .as_ref()
+            .unwrap()
+            .unconfirmed
+            .is_some());
+        let manifest = root.join("declarations.json");
+        let graph = recovery::read_v2(&manifest, root).unwrap().unwrap().graph;
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].id, Generation(1));
+        assert!(session
+            .state
+            .lib()
+            .log
+            .certified_authored_at(Generation(1))
+            .is_some());
+        let bytes = std::fs::read(&manifest).unwrap();
+        session
+            .state
+            .lib_mut()
+            .confirm_recovery_durability()
+            .unwrap();
+        session
+            .state
+            .lib_mut()
+            .confirm_recovery_durability()
+            .unwrap();
+        assert_eq!(std::fs::read(&manifest).unwrap(), bytes);
+        assert_eq!(session.state.lib().generation(), Generation(1));
+        assert_eq!(
+            session.public_visibility_snapshot_in(ScopeId::ROOT),
+            Some(snapshot)
+        );
+        assert!(session
+            .state
+            .lib()
+            .durable_graph
+            .as_ref()
+            .unwrap()
+            .unconfirmed
+            .is_none());
+    }
+
+    #[test]
+    fn staged_authored_uncertainty_finalizes_binding_visibility_and_epoch() {
+        let root = tempfile::tempdir().unwrap();
+        let mut lib = authored_lib(root.path());
+        let receipt = lib
+            .declaration_receipt(&["answer :: Int\nanswer = 42"])
+            .unwrap()
+            .unwrap();
+        let candidate = lib
+            .render_admitted_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[])
+            .unwrap();
+        let staged =
+            crate::session::validate_declaration_candidate(candidate, root.path()).unwrap();
+        let mut session = resident_with_replaced_binding(lib);
+        let before = session
+            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .unwrap();
+        assert_eq!(before.epoch, 0);
+        assert_eq!(before.bindings.len(), 1);
+        let error = session
+            .adopt_staged_declaration_in(staged.clone())
+            .unwrap_err();
+        assert_published_and_confirm_only(&mut session, root.path(), &error);
+        assert!(matches!(
+            session.adopt_staged_declaration_in(staged.clone()),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
+        session.discard_staged_declaration(&staged);
+        assert!(root
+            .path()
+            .join(staged.module().relative_hs_path())
+            .exists());
+        assert_eq!(
+            session
+                .public_visibility_snapshot_in(ScopeId::ROOT)
+                .unwrap()
+                .epoch,
+            1
+        );
+    }
+
+    #[test]
+    fn direct_authored_uncertainty_uses_the_same_visibility_finalization() {
+        let root = tempfile::tempdir().unwrap();
+        let lib = authored_lib(root.path());
+        let mut session = resident_with_replaced_binding(lib);
+        let error = session
+            .define_scoped_with_imports_in(
+                ScopeId::ROOT,
+                &["answer :: Int\nanswer = 42"],
+                &SourceImports::new(),
+            )
+            .unwrap_err();
+        assert_published_and_confirm_only(&mut session, root.path(), &error);
     }
 }
 

@@ -4469,7 +4469,7 @@ impl PreparedEngine {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use tidepool_bridge::ToHaskell;
     use tidepool_codegen::host_fns::RuntimeError;
@@ -5384,6 +5384,37 @@ mod tests {
             body: 0,
         };
         testing::prepare(wire).expect("producer fixture")
+    }
+
+    pub(in crate::session) fn rooted_publication_fixture(
+        state: &mut super::super::PersistentSession,
+        name: &str,
+        generation: u64,
+    ) -> BindingEntry {
+        let producer = producer_program();
+        let top = producer.entry();
+        let program = state
+            .install_prepared(producer)
+            .expect("install fixed producer");
+        let engine = state.prepared_mut().expect("installed fixture machine");
+        let handle = engine
+            .machine
+            .retain_top(program, top)
+            .expect("retain fixture top");
+        let root = engine.adopt(handle).expect("adopt real fixture root");
+        BindingEntry {
+            name: tidepool_repr::BindingName(name.into()),
+            id: SessionVarId::from_extract(generation),
+            module: SessionModule::val(tidepool_repr::Generation(generation)),
+            value: BoundValue {
+                root,
+                handle,
+                identity: producer_identity(),
+            },
+            type_display: None,
+            defining_expr: None,
+            scope: tidepool_codegen::scope::ScopeId::ROOT,
+        }
     }
 
     /// A program whose only entry returns its one imported global. The
@@ -6794,7 +6825,7 @@ mod tests {
             super::super::ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_empty_recovery_graph_v2(&manifest).unwrap();
+        lib.attach_recovery_graph_v2(&manifest).unwrap();
         let mut state = super::super::PersistentSession::new(Some(lib), 1024);
         let producer = producer_program();
         let top = producer.entry();

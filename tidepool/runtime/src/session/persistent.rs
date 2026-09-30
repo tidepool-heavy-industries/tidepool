@@ -12,8 +12,8 @@ use std::sync::Arc;
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BindingTipId, SourceLeaseKey};
 use tidepool_codegen::machine::{CancelHandle, MachineDisposition};
 use tidepool_codegen::prepared_program::{
-    DemandedImage, ImageRegistry, InheritedSourceDemand, PendingGroupInventory, PreparedHandle,
-    ProgramId, ResidencyCounts, SourceBinder, SourceGroupOutline, SourceInstanceLease,
+    DemandedImage, ImageRegistry, InheritedSourceDemand, PendingGroupInventory, ProgramId,
+    ResidencyCounts, SourceBinder, SourceGroupOutline, SourceInstanceLease,
 };
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
 use tidepool_codegen::suspension::{ContinuationId, RealmId};
@@ -1331,21 +1331,25 @@ impl PersistentSession {
             .map(|(id, _)| id.var())
             .collect::<Vec<_>>();
         let items = staged.items().to_vec();
-        let generation = self
+        let admitted = self
             .lib
             .as_mut()
             .ok_or(SessionError::StaleStagedDeclaration)?
-            .adopt_staged_batch_with_receipt_and_vals_in(staged, &visible_values)?;
-        self.bindings.preserve_observations(&captured_values);
-        for name in &replaced_names {
-            self.bindings.remove_current_in(scope, name);
-        }
-        Ok(DeclarationPlaneCommit {
-            generation,
-            module: SessionModule::lib(generation),
-            items,
-            evicted_values,
-        })
+            .admit_staged_declaration_in(staged, &visible_values)?;
+        admitted
+            .map_commit(|generation| {
+                self.bindings.preserve_observations(&captured_values);
+                for name in &replaced_names {
+                    self.bindings.remove_current_in(scope, name);
+                }
+                DeclarationPlaneCommit {
+                    generation,
+                    module: SessionModule::lib(generation),
+                    items,
+                    evicted_values,
+                }
+            })
+            .into_result()
     }
 
     pub fn discard_staged_declaration(&self, staged: &super::StagedDeclaration) {
@@ -1786,6 +1790,10 @@ impl PersistentSession {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
+        if self.lib().durable_graph.is_some() {
+            let staged = self.stage_declarations_in(scope, receipt, external, &[])?;
+            return self.adopt_staged_declaration_in(staged);
+        }
         let mut persistent_imports = external.clone();
         persistent_imports.extend(&self.workbench_imports_in(scope));
         let mut replaced_names: Vec<String> = receipt
@@ -2078,7 +2086,7 @@ mod checkpoint_scope_tests {
             super::super::ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_empty_recovery_graph_v2(root.join("declarations.json"))
+        lib.attach_recovery_graph_v2(root.join("declarations.json"))
             .unwrap();
         PersistentSession::new(Some(lib), 1024)
     }
@@ -2304,7 +2312,7 @@ mod checkpoint_scope_tests {
             super::super::ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_empty_recovery_graph_v2(&manifest).unwrap();
+        lib.attach_recovery_graph_v2(&manifest).unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024);
         let first = session.mint_scope(ScopeId::ROOT).unwrap();
         let second = session.mint_scope(ScopeId::ROOT).unwrap();

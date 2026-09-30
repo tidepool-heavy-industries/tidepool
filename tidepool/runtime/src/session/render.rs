@@ -20,6 +20,7 @@
 //! parser — this module only *renders* the structured items.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use tidepool_repr::{Generation, SessionModule};
 
@@ -183,6 +184,10 @@ pub struct DeclLog {
 enum DeclarationSlot {
     Reserved,
     Committed(DeclTurn),
+    CertifiedAuthored {
+        turn: DeclTurn,
+        evidence: Arc<tidepool_toolchain::declaration_join::CertifiedAuthoredDeclaration>,
+    },
     Joined(JoinedDeclaration),
 }
 
@@ -266,6 +271,37 @@ impl DeclLog {
         true
     }
 
+    pub(crate) fn commit_reserved_certified_authored(
+        &mut self,
+        generation: Generation,
+        turn: DeclTurn,
+        evidence: tidepool_toolchain::declaration_join::CertifiedAuthoredDeclaration,
+    ) -> bool {
+        if evidence.product.owner().module != SessionModule::lib(generation).module_name()
+            || !self.commit_reserved_authored(generation, turn.clone())
+        {
+            return false;
+        }
+        self.turns.insert(
+            generation,
+            DeclarationSlot::CertifiedAuthored {
+                turn,
+                evidence: Arc::new(evidence),
+            },
+        );
+        true
+    }
+
+    pub(crate) fn certified_authored_at(
+        &self,
+        generation: Generation,
+    ) -> Option<&tidepool_toolchain::declaration_join::CertifiedAuthoredDeclaration> {
+        match self.turns.get(&generation)? {
+            DeclarationSlot::CertifiedAuthored { evidence, .. } => Some(evidence),
+            _ => None,
+        }
+    }
+
     fn next_generation(&mut self) -> Generation {
         self.high_water = Generation(
             self.high_water
@@ -304,6 +340,7 @@ impl DeclLog {
     pub fn turn(&self, generation: Generation) -> Option<&DeclTurn> {
         match self.turns.get(&generation)? {
             DeclarationSlot::Committed(turn) => Some(turn),
+            DeclarationSlot::CertifiedAuthored { turn, .. } => Some(turn),
             DeclarationSlot::Joined(joined) => Some(&joined.turn),
             DeclarationSlot::Reserved => None,
         }
@@ -312,6 +349,7 @@ impl DeclLog {
     pub fn turn_mut(&mut self, generation: Generation) -> Option<&mut DeclTurn> {
         match self.turns.get_mut(&generation)? {
             DeclarationSlot::Committed(turn) => Some(turn),
+            DeclarationSlot::CertifiedAuthored { turn, .. } => Some(turn),
             DeclarationSlot::Joined(joined) => Some(&mut joined.turn),
             DeclarationSlot::Reserved => None,
         }
@@ -334,7 +372,9 @@ impl DeclLog {
         self.turns.iter().rev().find_map(|(generation, slot)| {
             matches!(
                 slot,
-                DeclarationSlot::Committed(_) | DeclarationSlot::Joined(_)
+                DeclarationSlot::Committed(_)
+                    | DeclarationSlot::CertifiedAuthored { .. }
+                    | DeclarationSlot::Joined(_)
             )
             .then_some(*generation)
         })

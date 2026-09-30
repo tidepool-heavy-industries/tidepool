@@ -67,6 +67,11 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         SessionError::RecoveryManifest { .. } => {
             FailureEnvelope::new(FailureClass::Infra, Phase::Run, err.to_string())
         }
+        // Visibility has committed. The typed error retains the declaration
+        // facts; this envelope diagnoses only the outstanding durability sync.
+        SessionError::PublishedDeclarationDurabilityUnconfirmed { .. } => {
+            FailureEnvelope::new(FailureClass::Infra, Phase::Run, err.to_string())
+        }
     }
 }
 

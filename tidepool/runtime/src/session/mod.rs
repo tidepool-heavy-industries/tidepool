@@ -323,6 +323,69 @@ pub enum SessionError {
     /// may be replayed without repeating effects.
     #[error("declaration recovery manifest {}: {detail}", path.display())]
     RecoveryManifest { path: PathBuf, detail: String },
+    /// The declaration and binding visibility swap has completed. Retry only
+    /// [`SessionLib::confirm_recovery_durability`], never this declaration.
+    #[error("declaration was published; recovery durability is unconfirmed at {}: {detail}", path.display())]
+    PublishedDeclarationDurabilityUnconfirmed {
+        commit: Box<DeclarationPlaneCommit>,
+        path: PathBuf,
+        detail: String,
+    },
+}
+
+impl SessionError {
+    #[must_use]
+    pub fn published_declaration_commit(&self) -> Option<&DeclarationPlaneCommit> {
+        match self {
+            Self::PublishedDeclarationDurabilityUnconfirmed { commit, .. } => Some(commit),
+            _ => None,
+        }
+    }
+}
+
+/// A published declaration must finish every owning layer's visibility swap
+/// before its durability status crosses the public API boundary.
+pub(crate) enum DeclarationAdmission<T> {
+    Committed(T),
+    PublishedDurabilityUnconfirmed {
+        commit: T,
+        path: PathBuf,
+        detail: String,
+    },
+}
+
+impl<T> DeclarationAdmission<T> {
+    fn map_commit<U>(self, finalize: impl FnOnce(T) -> U) -> DeclarationAdmission<U> {
+        match self {
+            Self::Committed(commit) => DeclarationAdmission::Committed(finalize(commit)),
+            Self::PublishedDurabilityUnconfirmed {
+                commit,
+                path,
+                detail,
+            } => DeclarationAdmission::PublishedDurabilityUnconfirmed {
+                commit: finalize(commit),
+                path,
+                detail,
+            },
+        }
+    }
+}
+
+impl DeclarationAdmission<DeclarationPlaneCommit> {
+    fn into_result(self) -> Result<DeclarationPlaneCommit, SessionError> {
+        match self {
+            Self::Committed(commit) => Ok(commit),
+            Self::PublishedDurabilityUnconfirmed {
+                commit,
+                path,
+                detail,
+            } => Err(SessionError::PublishedDeclarationDurabilityUnconfirmed {
+                commit: Box::new(commit),
+                path,
+                detail,
+            }),
+        }
+    }
 }
 
 /// Exact public lexical view captured under one resident-machine checkout.
@@ -438,6 +501,29 @@ impl PublicManifestBase {
     }
 }
 
+fn authored_identity(
+    identity: &tidepool_toolchain::declaration_join::ExportIdentity,
+) -> Option<recovery::RecoverySymbolIdentity> {
+    use tidepool_toolchain::declaration_join::ExportNamespace;
+
+    if identity.record_parent.is_some() {
+        return None;
+    }
+    let namespace = match identity.namespace {
+        ExportNamespace::Value => "value",
+        ExportNamespace::Type => "type",
+        ExportNamespace::Constructor => "constructor",
+        ExportNamespace::Field => "field",
+    };
+    Some(recovery::RecoverySymbolIdentity {
+        unit: identity.unit.clone(),
+        module: identity.module.clone(),
+        namespace: namespace.into(),
+        occurrence: identity.occurrence.clone(),
+        record_parent: None,
+    })
+}
+
 /// A resident session's declaration library. Owns the ordered decl log, the
 /// monotonic generation, and the on-disk include tree.
 pub struct SessionLib {
@@ -488,6 +574,8 @@ pub struct SessionLib {
     /// Actor incarnations in one session have distinct process-local lexical
     /// scopes, including inherited-context children.
     durable_public_scopes: BTreeMap<RecoveryPublicOwner, ScopeId>,
+    #[cfg(test)]
+    fail_authored_durability_once: bool,
 }
 
 struct DurableDeclarationGraph {
@@ -523,6 +611,7 @@ pub struct StagedDeclaration {
     /// or off it, against a private candidate directory (a split cell
     /// preparation).
     rendered: RenderedModule,
+    certified_authored: Option<tidepool_toolchain::declaration_join::CertifiedAuthoredDeclaration>,
 }
 
 impl StagedDeclaration {
@@ -674,13 +763,15 @@ impl SessionLib {
             recovery_report: None,
             durable_graph: None,
             durable_public_scopes: BTreeMap::new(),
+            #[cfg(test)]
+            fail_authored_durability_once: false,
         })
     }
 
     /// Attach a v2 manifest before any declaration is allocated. Private-only
     /// nodes stay inaccessible after restart; a published root requires exact
     /// interface hydration before it can serve turns.
-    pub fn attach_empty_recovery_graph_v2(
+    pub fn attach_recovery_graph_v2(
         &mut self,
         path: impl Into<PathBuf>,
     ) -> Result<(), SessionError> {
@@ -707,6 +798,13 @@ impl SessionLib {
             }
         })? {
             Some(read) => {
+                if !read.artifact_losses.is_empty() {
+                    return Err(SessionError::RecoveryManifest {
+                        path,
+                        detail: "private recovery graph has unavailable or corrupt artifacts"
+                            .into(),
+                    });
+                }
                 if read
                     .graph
                     .public_surfaces
@@ -1452,6 +1550,17 @@ impl SessionLib {
         import_modules: &[String],
         inject_modules: &[String],
     ) -> Result<Generation, SessionError> {
+        if self.durable_graph.is_some() {
+            let candidate = self.render_admitted_candidate_in(
+                scope,
+                external,
+                receipt,
+                import_modules,
+                inject_modules,
+            )?;
+            let staged = validate_declaration_candidate(candidate, &self.root)?;
+            return self.adopt_staged_batch_with_receipt_and_vals_in(staged, &[]);
+        }
         let sources = vec![receipt.source.replay_source(external)];
         let workbench_imports = receipt.source.prologue.workbench_imports();
 
@@ -1587,9 +1696,26 @@ impl SessionLib {
         staged: StagedDeclaration,
         visible_values: &[(SessionVarId, String)],
     ) -> Result<Generation, SessionError> {
+        let items = staged.items().to_vec();
+        self.admit_staged_declaration_in(staged, visible_values)?
+            .map_commit(|generation| DeclarationPlaneCommit {
+                generation,
+                module: SessionModule::lib(generation),
+                items,
+                evicted_values: Vec::new(),
+            })
+            .into_result()
+            .map(|commit| commit.generation)
+    }
+
+    fn admit_staged_declaration_in(
+        &mut self,
+        staged: StagedDeclaration,
+        visible_values: &[(SessionVarId, String)],
+    ) -> Result<DeclarationAdmission<Generation>, SessionError> {
         let slot_matches = if staged.reserved {
             self.durable_graph.is_some()
-                && staged.generation == self.log.generation()
+                && staged.base_generation == staged.generation
                 && self.log.is_reserved(staged.generation)
                 && staged.module == SessionModule::lib(staged.generation)
         } else {
@@ -1599,13 +1725,18 @@ impl SessionLib {
         };
         if staged.session_id != self.id
             || staged.root != self.root
-            || staged.base_generation != self.log.generation()
+            || (!staged.reserved && staged.base_generation != self.log.generation())
             || staged.base_tip != self.scope_tip(staged.scope)
             || !slot_matches
             || staged.visible_values != visible_values
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        let staged_graph = if staged.reserved {
+            Some(self.stage_private_authored_graph(&staged)?)
+        } else {
+            None
+        };
         // Install exactly the bytes GHC already validated — never a
         // re-render — into the shared session root. For the single-checkout
         // caller this rewrites the same bytes already written there at stage
@@ -1613,10 +1744,44 @@ impl SessionLib {
         // candidate touches the shared root, moving it out of the private
         // directory it was validated against.
         self.write_module(&staged.rendered)?;
+        let uncertain = if let Some(staged_graph) = staged_graph {
+            let outcome = self.publish_authored_manifest(staged_graph);
+            let state = self
+                .durable_graph
+                .as_mut()
+                .expect("reserved graph preflight");
+            match outcome {
+                recovery::RecoveryPublishOutcome::BeforeRename { detail, .. } => {
+                    return Err(SessionError::RecoveryManifest {
+                        path: state.path.clone(),
+                        detail,
+                    });
+                }
+                recovery::RecoveryPublishOutcome::Durable { graph, .. } => {
+                    state.graph = graph;
+                    None
+                }
+                recovery::RecoveryPublishOutcome::PublishedDurabilityUnconfirmed {
+                    graph,
+                    publication,
+                    detail,
+                } => {
+                    state.graph = graph;
+                    state.unconfirmed = Some(publication);
+                    Some(detail)
+                }
+            }
+        } else {
+            None
+        };
         let generation = if staged.reserved {
-            assert!(self
-                .log
-                .commit_reserved_authored(staged.generation, staged.turn.clone()));
+            assert!(self.log.commit_reserved_certified_authored(
+                staged.generation,
+                staged.turn.clone(),
+                staged
+                    .certified_authored
+                    .expect("authored evidence preflight"),
+            ));
             self.tips.insert(staged.scope, staged.generation);
             staged.generation
         } else {
@@ -1631,17 +1796,182 @@ impl SessionLib {
                 staged.import_modules.is_empty() && staged.inject_modules.is_empty(),
             ));
         }
-        Ok(generation)
+        if let Some(detail) = uncertain {
+            return Ok(DeclarationAdmission::PublishedDurabilityUnconfirmed {
+                commit: generation,
+                path: self.durable_graph.as_ref().unwrap().path.clone(),
+                detail,
+            });
+        }
+        Ok(DeclarationAdmission::Committed(generation))
+    }
+
+    fn publish_authored_manifest(
+        &mut self,
+        staged: recovery::StagedRecoveryManifest,
+    ) -> recovery::RecoveryPublishOutcome {
+        let outcome = staged.publish();
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_authored_durability_once) {
+            if let recovery::RecoveryPublishOutcome::Durable { graph, publication } = outcome {
+                return recovery::RecoveryPublishOutcome::PublishedDurabilityUnconfirmed {
+                    graph,
+                    publication,
+                    detail: "injected post-rename durability failure".into(),
+                };
+            }
+        }
+        outcome
+    }
+
+    fn stage_private_authored_graph(
+        &self,
+        staged: &StagedDeclaration,
+    ) -> Result<recovery::StagedRecoveryManifest, SessionError> {
+        let state = self
+            .durable_graph
+            .as_ref()
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        let invalid = |detail: &str| SessionError::RecoveryManifest {
+            path: state.path.clone(),
+            detail: detail.into(),
+        };
+        if state.unconfirmed.is_some() || state.graph.high_water < staged.generation {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let certified = staged
+            .certified_authored
+            .as_ref()
+            .ok_or_else(|| invalid("reserved declaration has no certified authored product"))?;
+        if staged.turn.parent.is_some()
+            || !staged.turn.retracts.is_empty()
+            || !staged.import_modules.is_empty()
+            || !staged.inject_modules.is_empty()
+            || !staged.visible_values.is_empty()
+            || !certified.instances.classes.is_empty()
+            || !certified.instances.families.is_empty()
+            || !certified.family_closure.is_empty()
+        {
+            return Err(invalid("authored recovery evidence has unsupported ancestry, live, or instance dependencies"));
+        }
+        if certified.product.source_sha256() != Some(certified.source_sha256)
+            || certified.product.owner().module != staged.module.module_name()
+        {
+            return Err(invalid(
+                "authored recovery product does not match validated source",
+            ));
+        }
+        let root = state
+            .path
+            .parent()
+            .ok_or_else(|| invalid("recovery manifest has no parent"))?;
+        let refs = tidepool_toolchain::recovery_artifacts::materialize_certified_products(
+            root,
+            certified.toolchain_identity_sha256,
+            &certified.recovery_products,
+        )
+        .map_err(|error| invalid(&error.to_string()))?;
+        let own = certified.product.owner();
+        if refs
+            .iter()
+            .filter(|reference| {
+                reference.unit == own.unit
+                    && reference.module == own.module
+                    && reference.module_version == own.module_version.0
+                    && reference.skinny_iface_sha256 == own.skinny_iface_sha256
+                    && reference.product_sha256 == own.product_sha256
+            })
+            .count()
+            != 1
+        {
+            return Err(invalid(
+                "authored recovery closure lacks its exact declaration owner",
+            ));
+        }
+        if certified.exports.iter().any(|export| {
+            export.head.unit != own.unit
+                || export.head.module != own.module
+                || export
+                    .children
+                    .iter()
+                    .any(|child| child.unit != own.unit || child.module != own.module)
+        }) {
+            return Err(invalid(
+                "authored inventory includes nonlocal export identities",
+            ));
+        }
+        let exports = certified
+            .exports
+            .iter()
+            .map(|export| {
+                Ok(recovery::RecoveryExport {
+                    identity: authored_identity(&export.head)
+                        .ok_or_else(|| invalid("unsupported authored export identity"))?,
+                    kind: match export.kind {
+                        tidepool_toolchain::declaration_join::DeclarationKind::Value => {
+                            recovery::RecoveryExportKind::Value
+                        }
+                        tidepool_toolchain::declaration_join::DeclarationKind::Type => {
+                            recovery::RecoveryExportKind::Type
+                        }
+                        tidepool_toolchain::declaration_join::DeclarationKind::Class => {
+                            recovery::RecoveryExportKind::Class
+                        }
+                    },
+                    children: export
+                        .children
+                        .iter()
+                        .map(|child| {
+                            authored_identity(child)
+                                .ok_or_else(|| invalid("unsupported authored child identity"))
+                        })
+                        .collect::<Result<_, _>>()?,
+                })
+            })
+            .collect::<Result<Vec<_>, SessionError>>()?;
+        let artifacts = refs
+            .into_iter()
+            .map(recovery::RecoveryArtifactClosure::Home)
+            .collect::<Vec<_>>();
+        let mut graph = state.graph.clone();
+        let artifact_refs = artifacts
+            .iter()
+            .map(recovery::RecoveryArtifactClosure::key)
+            .collect();
+        graph.nodes.push(recovery::RecoveryNode {
+            id: staged.generation,
+            parent: staged.turn.parent,
+            kind: recovery::RecoveryNodeKind::Authored,
+            implementation_refs: Vec::new(),
+            artifact_refs,
+            exports,
+            retracts: Vec::new(),
+            workbench_imports: staged.turn.workbench_imports.specs().to_vec(),
+            instances: recovery::RecoveryInstanceInventory::default(),
+            live_dependencies: Vec::new(),
+            state: recovery::RecoveryNodeState::ExactArtifactClosure,
+        });
+        for artifact in artifacts {
+            if !graph
+                .artifacts
+                .iter()
+                .any(|existing| existing.key() == artifact.key())
+            {
+                graph.artifacts.push(artifact);
+            }
+        }
+        graph.seal().map_err(|error| invalid(&error.to_string()))?;
+        recovery::stage_v2(&state.path, root, &graph).map_err(|error| invalid(&error.to_string()))
     }
 
     pub(crate) fn discard_staged(&self, staged: &StagedDeclaration) {
         if staged.session_id == self.id
             && staged.root == self.root
-            && staged.base_generation == self.log.generation()
             && if staged.reserved {
                 self.log.is_reserved(staged.generation)
             } else {
-                staged.generation == self.log.generation().next()
+                staged.base_generation == self.log.generation()
+                    && staged.generation == self.log.generation().next()
             }
         {
             // A no-op when the candidate was validated off-checkout, against
@@ -1734,6 +2064,13 @@ impl SessionLib {
         retracts.dedup();
         if retracts.is_empty() {
             return Ok(());
+        }
+        if let Some(state) = &self.durable_graph {
+            return Err(SessionError::RecoveryManifest {
+                path: state.path.clone(),
+                detail: "attached recovery requires exact retraction evidence before admission"
+                    .into(),
+            });
         }
         let tip_before = self.tips.get(&scope).copied();
         let gen = self.push_turn_in(
@@ -2003,6 +2340,25 @@ pub fn validate_declaration_candidate(
         }
     };
 
+    let certified_authored = if candidate.reserved {
+        let source_path = primary_root.join(candidate.rendered.module.relative_hs_path());
+        match tidepool_toolchain::declaration_join::certify_authored_declaration(
+            candidate.rendered.module,
+            &source_path,
+            &candidate.rendered.source,
+            &includes,
+            &candidate.root,
+        ) {
+            Ok(certified) => Some(certified),
+            Err(error) => {
+                remove_module_artifacts(primary_root, candidate.rendered.module);
+                return Err(SessionError::Compile(error));
+            }
+        }
+    } else {
+        None
+    };
+
     let mut turn = candidate.turn;
     turn.value_types = value_types;
     Ok(StagedDeclaration {
@@ -2020,6 +2376,7 @@ pub fn validate_declaration_candidate(
         inject_modules: candidate.inject_modules,
         visible_values: Vec::new(),
         rendered: candidate.rendered,
+        certified_authored,
     })
 }
 
@@ -2047,7 +2404,7 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        first.attach_empty_recovery_graph_v2(&manifest).unwrap();
+        first.attach_recovery_graph_v2(&manifest).unwrap();
         assert!(!manifest.exists());
         assert_eq!(
             first.reserve_join_generation_durable().unwrap(),
@@ -2063,7 +2420,7 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        second.attach_empty_recovery_graph_v2(&manifest).unwrap();
+        second.attach_recovery_graph_v2(&manifest).unwrap();
         assert_eq!(second.generation(), Generation(1));
         assert_eq!(
             second.reserve_join_generation_durable().unwrap(),
@@ -2082,7 +2439,7 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_empty_recovery_graph_v2(&manifest).unwrap();
+        lib.attach_recovery_graph_v2(&manifest).unwrap();
         assert!(lib.reserve_join_generation_durable().is_err());
         assert_eq!(lib.generation(), Generation(0));
         assert!(!manifest.exists());
@@ -2254,7 +2611,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let manifest = root.path().join("declarations.json");
         let mut lib = staged_test_lib(&root);
-        lib.attach_empty_recovery_graph_v2(&manifest).unwrap();
+        lib.attach_recovery_graph_v2(&manifest).unwrap();
         let private = ScopeId(2);
         lib.seed_scope(private, Generation(0));
         let receipt = lib
@@ -2276,26 +2633,83 @@ mod tests {
             Generation(1)
         );
         let staged = validate_declaration_candidate(candidate, lib.include_dir()).unwrap();
+        let exact_evidence = staged.certified_authored.clone().unwrap();
+        let committed_copy = staged.clone();
+        assert_eq!(
+            lib.reserve_join_generation_durable().unwrap(),
+            Generation(2)
+        );
+        assert_eq!(lib.scope_tip(private), Generation(0));
         assert_eq!(
             lib.adopt_staged_batch_with_receipt_and_vals_in(staged, &[])
                 .unwrap(),
             Generation(1)
         );
         assert_eq!(lib.scope_tip(private), Generation(1));
+        assert_eq!(
+            lib.log.certified_authored_at(Generation(1)),
+            Some(&exact_evidence)
+        );
         assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
+        assert!(matches!(
+            lib.adopt_staged_batch_with_receipt_and_vals_in(committed_copy.clone(), &[]),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
+        lib.discard_staged(&committed_copy);
+        assert!(root
+            .path()
+            .join(committed_copy.module().relative_hs_path())
+            .exists());
+        let retained = recovery::read_v2(&manifest, root.path()).unwrap().unwrap();
+        assert!(retained.artifact_losses.is_empty());
+        assert_eq!(retained.graph.high_water, Generation(2));
+        assert_eq!(retained.graph.nodes.len(), 1);
+        assert_eq!(retained.graph.nodes[0].id, Generation(1));
+        assert_eq!(
+            retained.graph.nodes[0].kind,
+            recovery::RecoveryNodeKind::Authored
+        );
+        assert!(!retained.graph.nodes[0].artifact_refs.is_empty());
+        assert!(retained.graph.public_surfaces.is_empty());
         assert_eq!(
             lib.reserve_join_generation_durable().unwrap(),
-            Generation(2)
+            Generation(3)
         );
         drop(lib);
 
         let mut restarted = staged_test_lib(&root);
-        restarted.attach_empty_recovery_graph_v2(&manifest).unwrap();
-        assert_eq!(restarted.generation(), Generation(2));
+        restarted.attach_recovery_graph_v2(&manifest).unwrap();
+        assert_eq!(restarted.generation(), Generation(3));
         assert_eq!(
             restarted.reserve_join_generation_durable().unwrap(),
-            Generation(3)
+            Generation(4)
         );
+        assert!(restarted.current_declarations().is_empty());
+    }
+
+    #[test]
+    fn attached_v2_direct_define_uses_certified_private_graph_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("declarations.json");
+        let mut lib = staged_test_lib(&root);
+        lib.attach_recovery_graph_v2(&manifest).unwrap();
+        assert_eq!(
+            lib.define_batch(&["data DirectFlag = DirectFlag"]).unwrap(),
+            Generation(1)
+        );
+        let retained = recovery::read_v2(&manifest, root.path()).unwrap().unwrap();
+        assert!(retained.artifact_losses.is_empty());
+        assert_eq!(retained.graph.nodes.len(), 1);
+        assert_eq!(
+            retained.graph.nodes[0].kind,
+            recovery::RecoveryNodeKind::Authored
+        );
+        assert_eq!(retained.graph.nodes[0].id, Generation(1));
+        assert!(retained.graph.public_surfaces.is_empty());
+        assert!(!retained.graph.artifacts.is_empty());
+        assert!(lib.retract("DirectFlag").is_err());
+        assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(1));
+        assert_eq!(lib.generation(), Generation(1));
     }
 
     #[test]
@@ -2303,7 +2717,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let manifest = root.path().join("declarations.json");
         let mut lib = staged_test_lib(&root);
-        lib.attach_empty_recovery_graph_v2(&manifest).unwrap();
+        lib.attach_recovery_graph_v2(&manifest).unwrap();
         let receipt = lib
             .declaration_receipt(&["answer :: Int\nanswer = missingHelper"])
             .unwrap()
@@ -2316,7 +2730,7 @@ mod tests {
         assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
         drop(lib);
         let mut restarted = staged_test_lib(&root);
-        restarted.attach_empty_recovery_graph_v2(&manifest).unwrap();
+        restarted.attach_recovery_graph_v2(&manifest).unwrap();
         assert_eq!(restarted.generation(), Generation(1));
         assert_eq!(
             restarted.reserve_join_generation_durable().unwrap(),
@@ -2331,7 +2745,7 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        failed.attach_empty_recovery_graph_v2(&path).unwrap();
+        failed.attach_recovery_graph_v2(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         assert!(failed.reserve_declaration_generation_durable().is_err());
         assert_eq!(failed.generation(), Generation(0));

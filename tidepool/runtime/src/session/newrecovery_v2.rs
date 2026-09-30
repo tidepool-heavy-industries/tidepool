@@ -12,7 +12,7 @@ use tidepool_toolchain::recovery_artifacts::{
 };
 
 const VERSION: u32 = 2;
-const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v1";
+const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v2";
 const MAX_MANIFEST_BYTES: usize = 64 << 20;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -117,7 +117,7 @@ pub(crate) struct RecoveryNode {
     /// are metadata for rebuilding the next workbench context, never replayed
     /// as declaration source.
     pub workbench_imports: Vec<String>,
-    pub instances: Vec<RecoveryInstanceEvidence>,
+    pub instances: RecoveryInstanceInventory,
     pub live_dependencies: Vec<RecoveryLiveDependency>,
     pub state: RecoveryNodeState,
 }
@@ -204,6 +204,13 @@ pub(crate) struct RecoveryInstanceEvidence {
     pub class: RecoverySymbolIdentity,
     pub selected: bool,
     pub selected_axioms: Vec<RecoverySymbolIdentity>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecoveryInstanceInventory {
+    pub classes: Vec<RecoveryInstanceEvidence>,
+    pub selected_family_axioms: Vec<RecoverySymbolIdentity>,
     /// Full consistency closure is retained independently of the selected
     /// reduction surface, so a hidden incompatible family axiom stays known.
     pub family_consistency_closure: Vec<RecoverySymbolIdentity>,
@@ -869,17 +876,27 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
                 node.id.0
             )));
         }
-        for instance in &node.instances {
+        let families: BTreeSet<_> = node.instances.family_consistency_closure.iter().collect();
+        let selected: BTreeSet<_> = node.instances.selected_family_axioms.iter().collect();
+        if families.len() != node.instances.family_consistency_closure.len()
+            || selected.len() != node.instances.selected_family_axioms.len()
+            || !selected.is_subset(&families)
+            || families.iter().any(|id| !valid_identity(id))
+        {
+            return Err(error(format!(
+                "recovery node {} has invalid family evidence",
+                node.id.0
+            )));
+        }
+        let mut dfuns = BTreeSet::new();
+        for instance in &node.instances.classes {
             if !valid_identity(&instance.dfun)
                 || !valid_identity(&instance.class)
+                || !dfuns.insert(&instance.dfun)
                 || instance
                     .selected_axioms
                     .iter()
-                    .any(|id| !valid_identity(id))
-                || instance
-                    .family_consistency_closure
-                    .iter()
-                    .any(|id| !valid_identity(id))
+                    .any(|id| !selected.contains(id))
             {
                 return Err(error(format!(
                     "recovery node {} has invalid instance evidence",
@@ -1313,7 +1330,7 @@ mod tests {
                     exports: vec![export.clone()],
                     retracts: vec![],
                     workbench_imports: vec!["qualified Data.Map.Strict as Map".into()],
-                    instances: vec![],
+                    instances: RecoveryInstanceInventory::default(),
                     live_dependencies: vec![],
                     state: RecoveryNodeState::ExactArtifactClosure,
                 },
@@ -1326,7 +1343,7 @@ mod tests {
                     exports: vec![export],
                     retracts: vec![],
                     workbench_imports: vec!["Data.Proxy (Proxy (..))".into()],
-                    instances: vec![],
+                    instances: RecoveryInstanceInventory::default(),
                     live_dependencies: vec![],
                     state: RecoveryNodeState::MissingArtifactClosure {
                         reason: "winner artifact unavailable".into(),
@@ -1362,7 +1379,7 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        reopened.attach_empty_recovery_graph_v2(&manifest).unwrap();
+        reopened.attach_recovery_graph_v2(&manifest).unwrap();
         assert_eq!(reopened.generation(), Generation(2));
         assert_eq!(reopened.scope_tip(ScopeId::ROOT), Generation(0));
         assert!(reopened.current_module().is_none());
@@ -1393,9 +1410,37 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        assert!(reopened.attach_empty_recovery_graph_v2(&manifest).is_err());
+        assert!(reopened.attach_recovery_graph_v2(&manifest).is_err());
         assert_eq!(reopened.generation(), Generation(0));
         assert!(reopened.current_module().is_none());
+    }
+
+    #[test]
+    fn private_recovery_attach_refuses_corrupt_owned_artifact() {
+        use crate::session::{ModuleEnv, SessionId, SessionLib};
+
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("declarations.json");
+        let mut graph = fixture(root.path());
+        graph.public_surfaces[0].declaration_root = None;
+        graph.nodes.retain(|node| node.id == Generation(1));
+        graph.seal().unwrap();
+        assert!(matches!(
+            stage_v2(&manifest, root.path(), &graph).unwrap().publish(),
+            RecoveryPublishOutcome::Durable { .. }
+        ));
+        let RecoveryArtifactClosure::Home(reference) = &graph.artifacts[0] else {
+            panic!("fixture has a home artifact")
+        };
+        fs::write(root.path().join(&reference.interface_path), b"changed").unwrap();
+        let mut reopened = SessionLib::open(
+            SessionId(41),
+            root.path().join("session"),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        assert!(reopened.attach_recovery_graph_v2(&manifest).is_err());
+        assert_eq!(reopened.generation(), Generation(0));
     }
 
     #[test]
@@ -1608,6 +1653,72 @@ mod tests {
         assert!(error
             .detail
             .contains("lacks the supported paired public visibility schema"));
+    }
+
+    #[test]
+    fn family_only_inventory_retains_hidden_consistency_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut graph = fixture(dir.path());
+        graph.nodes[0].instances = RecoveryInstanceInventory {
+            classes: Vec::new(),
+            selected_family_axioms: vec![identity("selectedAxiom")],
+            family_consistency_closure: vec![identity("selectedAxiom"), identity("hiddenAxiom")],
+        };
+        graph.seal().unwrap();
+        let manifest = dir.path().join("declarations.json");
+        assert!(matches!(
+            stage_v2(&manifest, dir.path(), &graph).unwrap().publish(),
+            RecoveryPublishOutcome::Durable { .. }
+        ));
+        let read = read_v2(&manifest, dir.path()).unwrap().unwrap();
+        assert_eq!(read.graph.nodes[0].instances, graph.nodes[0].instances);
+        assert!(read.graph.nodes[0].instances.classes.is_empty());
+        assert!(read.artifact_losses.is_empty());
+        let mut changed = read.graph;
+        changed.nodes[0].instances.family_consistency_closure.pop();
+        assert!(changed.validate().is_err());
+    }
+
+    #[test]
+    fn selected_family_and_associated_axioms_require_exact_inventory_membership() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut graph = fixture(dir.path());
+        graph.nodes[0].instances.selected_family_axioms = vec![identity("axiom")];
+        assert!(graph.seal().unwrap_err().detail.contains("family evidence"));
+        graph.nodes[0].instances.family_consistency_closure = vec![identity("axiom")];
+        graph.nodes[0].instances.classes = vec![RecoveryInstanceEvidence {
+            dfun: identity("dfun"),
+            class: identity("class"),
+            selected: true,
+            selected_axioms: vec![identity("otherAxiom")],
+        }];
+        assert!(graph
+            .seal()
+            .unwrap_err()
+            .detail
+            .contains("instance evidence"));
+        graph.nodes[0].instances.classes[0].selected_axioms = vec![identity("axiom")];
+        graph.seal().unwrap();
+        let repeated = graph.nodes[0].instances.classes[0].clone();
+        graph.nodes[0].instances.classes.push(repeated);
+        assert!(graph
+            .seal()
+            .unwrap_err()
+            .detail
+            .contains("instance evidence"));
+    }
+
+    #[test]
+    fn prior_paired_schema_cannot_be_read_as_node_level_instance_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("declarations.json");
+        let mut value = serde_json::to_value(fixture(dir.path())).unwrap();
+        value["public_schema"] = serde_json::json!("paired-public-v1");
+        fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+        let error = read_v2(&manifest, dir.path()).err().unwrap();
+        assert!(error
+            .detail
+            .contains("supported paired public visibility schema"));
     }
 
     #[test]
