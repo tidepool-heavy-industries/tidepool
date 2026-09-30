@@ -336,6 +336,7 @@ impl ModuleCandidateOffer {
         prefix: crate::checked_cell::ExactCompiledPrefix,
         runtime_prefix_digest: [u8; 32],
         generation: u64,
+        observation_name: Option<&str>,
         templates: &[(String, String)],
     ) -> Result<Self, CompileError> {
         let context = checked_offer_context(context)?;
@@ -344,6 +345,7 @@ impl ModuleCandidateOffer {
             prefix,
             runtime_prefix_digest,
             generation,
+            observation_name: observation_name.map(str::to_owned),
         };
         checked_item.validate_templates(templates)?;
         checked_item.validate_include(include)?;

@@ -650,7 +650,8 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
               Execution.NonRecursive binding -> [binding]
               Execution.Recursive bindings -> bindings]
     when (any (`Set.notMember` defined) roots) $
-      ioError (userError "required original-group package root has no executable definition")
+      ioError (userError ("required original-group package root has no executable definition: "
+        ++ show (filter (`Set.notMember` defined) roots)))
     bytes <- timePhase timing "prepared_encode" $ evaluate (encodeWireProgram program)
     let admitted = Set.fromList (map siteId (programSites program))
         yieldSites =
@@ -958,13 +959,9 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
         allMatching = [f | (name, f) <- templates, name == templateSelectorWireName selector]
         matching = case admitted of
           Just admission | itemKind admission == "expr" ->
-            let index = case (itemExpressionLift admission,itemExpressionPresentation admission) of
-                  (Just "effectful",Just "rendered") -> 0
-                  (Just "pure",Just "rendered") -> 1
-                  (Just "effectful",Just "opaque") -> 2
-                  (Just "pure",Just "opaque") -> 3
-                  _ -> -1
-            in [(index, file) | (ordinal,file) <- zip [0..] allMatching, ordinal == index, length allMatching == 4]
+            [(0,file) | (kind,file) <- templates, kind == "bind",
+              length [() | (candidate,_) <- templates, candidate == "bind"] == 1,
+              isJust (itemObservationName admission)]
           _ -> zip [0..] allMatching
         -- A prepared turn uses one compiler pass for the checked metadata
         -- and the prepared modules.
@@ -1016,7 +1013,13 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
         bbs  <- mkBoundBinders (sbBinders sb) g root result
         return (TBind (map T.pack (sbBinders sb)) variant bbs asksSites wrapped)
       SBindDiscard -> return (TBind [] variant [] asksSites wrapped)
-      SExpr -> return (TExpr variant asksSites wrapped)
+      SExpr -> case admitted >>= itemObservationName of
+        Just observation -> do
+          generation <- requireArg "--bind-gen" (requestBindGen args)
+          root <- requireArg "--session-root" (requestSessionRoot args)
+          bound <- mkBoundBinders [observation] generation root result
+          return (TBind [T.pack observation] variant bound asksSites wrapped)
+        Nothing -> return (TExpr variant asksSites wrapped)
       SDecl -> error ("--turn: unexpected verdict kind: " ++ templateSelectorWireName selector)
 
 -- | Block classify mode (@--classify@):
@@ -1183,22 +1186,18 @@ checkedRecipeSource admission template source = case itemKind admission of
     pure (spliceTemplate amended source result)
   "expr" -> case checkedRecipeAnnotations admission of
     [(alias,signature)] -> do
-      let prefix = case itemExpressionLift admission of
-            Just "effectful" -> "__workbenchValue = __tidepoolInEffectRow $ let {\n"
-            Just "pure" -> "__workbenchValue = let {\n"
+      observation <- maybe (fail "checked expression has no owning observation name") pure (itemObservationName admission)
+      unless ("__result = do {\n{{TURN_STMT}}" `isInfixOf` template)
+        (fail "checked expression capture requires canonical bind recipe version two")
+      let liftStatement = case itemExpressionLift admission of
+            Just "effectful" -> "__tidepool_checked_captured_value <- " ++ alias
+              ++ "\n; let { " ++ observation ++ " = (\\() -> __tidepool_checked_captured_value) }"
+            Just "pure" -> "let { " ++ observation ++ " = (\\() -> " ++ alias ++ ") }"
             _ -> ""
-          body = case (itemExpressionLift admission,itemExpressionPresentation admission) of
-            (Just "effectful",Just "rendered") -> "do { __value <- __workbenchValue ; pure (__value, T.pack (show __value)) }"
-            (Just "pure",Just "rendered") -> "pure (__workbenchValue, T.pack (show __workbenchValue))"
-            (Just "effectful",Just "opaque") -> "do { _ <- __workbenchValue ; pure (T.pack \"<opaque value>\") }"
-            (Just "pure",Just "opaque") -> "pure (__workbenchValue `seq` T.pack \"<opaque value>\")"
-            _ -> ""
-      unless (not (null prefix) && prefix `isInfixOf` template
-          && ("__result = __tidepoolInEffectRow $ " ++ body ++ "\n") `isInfixOf` template)
-        (fail "checked expression requires canonical lift and presentation recipe version one")
-      amended <- replaceRecipeMarker " __value =" (" __value :: (" ++ signatureType signature ++ ");\n __value =") template
-      let renamed = T.unpack (T.replace (T.pack "__value") (T.pack alias) (T.pack amended))
-      pure (spliceTemplate renamed source "")
+      when (null liftStatement) (fail "checked expression has no certified lift plan")
+      let statement = "let { " ++ alias ++ " :: (" ++ signatureType signature ++ "); "
+            ++ alias ++ " = (\n" ++ source ++ "\n) }\n; " ++ liftStatement
+      pure (spliceTemplate template statement observation)
     _ -> fail "checked expression has no unique full signature"
   _ -> fail "checked declaration lacks an original identity certificate"
 
@@ -1216,7 +1215,7 @@ writeCheckedItemReceipt root scope admission source = do
       receipt = encodeListLen 8 <> text "TPEXACTITEM" <> text "1"
         <> text (scopeRequestSha256 scope) <> text (itemAdmissionDigest admission)
         <> text (itemCellReceiptDigest admission) <> encodeWord64 (itemIndex admission)
-        <> text (shaHex (TE.encodeUtf8 (T.pack source))) <> text "tidepool-checked-recipe-1"
+        <> text (shaHex (TE.encodeUtf8 (T.pack source))) <> text "tidepool-checked-recipe-2"
   BS.writeFile (root </> "checked-item.cbor") (toStrictByteString receipt)
 
 -- | After a successful whole-cell check, attempt ONE further compile in the
@@ -1272,7 +1271,7 @@ attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled admitt
             let admission = CheckedItemAdmission (checkedAdmissionDigest cellAdmission) (shaHex receipt) 0
                   (shaHex (TE.encodeUtf8 (T.pack turnSrc))) "bind" (sbBinders sb)
                   (checkedTurnTemplates cellAdmission) (checkedInjectedModules cellAdmission)
-                  signatures Nothing Nothing generation (checkedAdmissionDigest cellAdmission) []
+                  signatures Nothing Nothing generation (checkedAdmissionDigest cellAdmission) [] Nothing
             validateCheckedItemAdmission args admission turnSrc sb
             pure (Just admission)
         let typeImports = if isJust admitted then [] else nub (concatMap checkedPinImports [pin | Just pin <- pins])

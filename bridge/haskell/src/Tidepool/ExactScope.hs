@@ -69,6 +69,7 @@ data CheckedItemAdmission = CheckedItemAdmission
   , itemGeneration :: Word64
   , itemPrefixDigest :: String
   , itemValueImports :: [(String,[String])]
+  , itemObservationName :: Maybe String
   } deriving (Eq, Show)
 
 data ExactProduct = ExactProduct
@@ -249,7 +250,7 @@ decodeScope = do
         unique "checked reserved modules" (checkedReservedModules admission)
         pure (Just admission,Nothing)
       "checked-item" -> do
-        unless (authCount == 14) (fail "invalid checked-item admission")
+        unless (authCount == 15) (fail "invalid checked-item admission")
         admissionDigest <- digestField
         receiptDigest <- digestField
         index <- decodeWord64
@@ -281,8 +282,12 @@ decodeScope = do
         unique "completed value import owners" (map fst valueImports)
         unique "completed value import names" (concatMap snd valueImports)
         unless (all ((`elem` injected) . fst) valueImports) (fail "completed value import has no exact injected owner")
+        observationToken <- peekTokenType
+        observation <- if observationToken == TypeNull then decodeNull >> pure Nothing else Just <$> nonempty
+        unless ((kind == "expr") == maybe False (const True) observation)
+          (fail "checked observation identity differs from item kind")
         pure (Nothing, Just (CheckedItemAdmission admissionDigest receiptDigest index sourceDigest kind binders
-          templates injected signatures liftPlan presentation generation prefix valueImports))
+          templates injected signatures liftPlan presentation generation prefix valueImports observation))
       _ -> fail "unsupported exact compile purpose"
   pure (ExactScope "" "" semantic interfaces lexical products checked checkedItem)
   where

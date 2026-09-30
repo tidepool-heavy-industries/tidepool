@@ -2485,6 +2485,12 @@ pub fn check_cell_admitted(
     fold: Option<CellFoldTurn<'_>>,
 ) -> Result<(CellCheck, Option<TurnResult>), CellCheckFailure> {
     let view = admission.view();
+    if admission.private_execution().is_none() {
+        return Err(CompileError::ExtractFailed(
+            "checked execution requires its owning private admission".into(),
+        )
+        .into());
+    }
     if req.session_id != Some(view.session())
         || req.session_root != view.session_root()
         || req.compile_generation != view.next_value_generation().0
@@ -3052,6 +3058,7 @@ fn run_turn_with_pin(
             admission.snapshot().compiler_prefix().clone(),
             admission.digest(),
             req.gen,
+            admission.observation_name(),
             &req.templates
                 .iter()
                 .map(|template| (template.kind.wire_name().into(), template.source.clone()))
@@ -4853,16 +4860,18 @@ mod tests {
             injected_modules: injected.clone(),
             reserved_declaration_modules: Vec::new(),
         };
+        let binding_execution = Arc::new(session.begin_private_execution(public).unwrap());
+        let binding_scope = binding_execution.private_scope();
         let admission = session
-            .admit_cell_in(
-                public,
+            .admit_cell_for_execution(
+                binding_execution.clone(),
                 0,
                 Arc::new(admission_specification.clone()),
                 admission_specification.specification_digest(),
                 [0; 32],
             )
             .unwrap();
-        let (checked, folded) = check_cell_admitted(
+        let (checked, mut folded) = check_cell_admitted(
             CellCheckRequest {
                 exact_context: Some(context.clone()),
                 session_id: Some(view.session()),
@@ -4912,6 +4921,10 @@ mod tests {
             .begin_checked_prefix(admission.clone(), item.clone())
             .unwrap();
         let item_admission = session.admit_checked_item(prefix, item.clone()).unwrap();
+        let binding_prefix = item_admission.prefix().clone();
+        checked
+            .attach_fold_prefix(folded.as_mut().unwrap(), item_admission.clone())
+            .unwrap();
         let TurnResult::Bind {
             bound, compiled, ..
         } = run_checked_item(
@@ -4940,7 +4953,7 @@ mod tests {
             "{}",
             bound[0].type_display
         );
-        let certification = compiled.certification.unwrap();
+        let certification = compiled.certification.as_ref().unwrap();
         certification
             .validate_checked_bind(&compiled.prepared, view.next_value_generation().0, &bound)
             .unwrap();
@@ -4975,9 +4988,11 @@ mod tests {
             injected_modules: injected.clone(),
             reserved_declaration_modules: Vec::new(),
         };
+        let expression_execution = Arc::new(session.begin_private_execution(public).unwrap());
+        let expression_scope = expression_execution.private_scope();
         let expression_admission = session
-            .admit_cell_in(
-                public,
+            .admit_cell_for_execution(
+                expression_execution.clone(),
                 0,
                 Arc::new(expression_specification.clone()),
                 expression_specification.specification_digest(),
@@ -5035,17 +5050,18 @@ mod tests {
         let mut edited_templates = templates.clone();
         edited_templates[0].source.push_str("\n-- edited wrapper\n");
         assert!(expression_request(&edited_templates).is_err());
-        let TurnResult::Expr {
+        let TurnResult::Bind {
             variant,
+            bound: expression_bound,
             compiled: expression_compiled,
             ..
         } = expression_request(&templates).unwrap()
         else {
-            panic!("checked expression must compile its certified recipe");
+            panic!("checked expression must compile its certified capture recipe");
         };
         assert_eq!(
-            variant, 1,
-            "hidden nominal pure expression must retain the rendered plan"
+            variant, 0,
+            "hidden nominal expression capture must use its canonical recipe"
         );
         assert!(expression_compiled
             .certification
@@ -5056,6 +5072,103 @@ mod tests {
             .matches_target(&expression_compiled.prepared));
         assert!(!original_path.exists());
         assert!(view.is_current_for(&session.compile_view_in(public).unwrap()));
+        #[derive(Clone)]
+        struct QuietOutput;
+        impl crate::session::OutputSink for QuietOutput {
+            fn drain(&self) -> Vec<String> {
+                Vec::new()
+            }
+            fn snapshot(&self) -> Vec<String> {
+                Vec::new()
+            }
+        }
+        let mut resident = crate::session::ResidentSession::from_persistent_for_test(
+            frunk::HNil,
+            QuietOutput,
+            session,
+        );
+        resident
+            .set_run_context(crate::session::SessionRunContext {
+                lexical_scope: binding_scope,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(resident
+            .run_bind_with_sites(
+                "edited",
+                compiled.code(),
+                &edited[0],
+                view.next_value_generation()
+            )
+            .is_err());
+        assert!(
+            !resident.prepared_machine_ready(),
+            "edited binder metadata reached native install"
+        );
+        assert_eq!(binding_prefix.snapshot().compiler_prefix().next_item(), 0);
+        resident
+            .set_run_context(crate::session::SessionRunContext {
+                lexical_scope: expression_scope,
+                ..Default::default()
+            })
+            .unwrap();
+        let outcome = resident
+            .run_observation_with_sites(
+                expression_compiled.code(),
+                &expression_bound[0],
+                expression_reservation.generation(),
+                false,
+            )
+            .unwrap();
+        match outcome {
+            crate::session::ResidentOutcome::Completed { .. }
+            | crate::session::ResidentOutcome::BindingsCommitted { .. } => {}
+            other => panic!("hidden nominal expression did not complete: {other:?}"),
+        }
+        assert_eq!(
+            expression_reservation
+                .prefix()
+                .snapshot()
+                .compiler_prefix()
+                .next_item(),
+            1
+        );
+        let TurnResult::Bind {
+            bound: fold_bound,
+            compiled: fold_compiled,
+            ..
+        } = folded.unwrap()
+        else {
+            panic!("eligible folded bind is absent")
+        };
+        resident
+            .set_run_context(crate::session::SessionRunContext {
+                lexical_scope: binding_scope,
+                ..Default::default()
+            })
+            .unwrap();
+        let outcome = resident
+            .run_bind_with_sites(
+                "folded",
+                fold_compiled.code(),
+                &fold_bound[0],
+                view.next_value_generation(),
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::session::ResidentOutcome::Completed { .. }
+                | crate::session::ResidentOutcome::BindingsCommitted { .. }
+        ));
+        assert_eq!(binding_prefix.snapshot().compiler_prefix().next_item(), 1);
+        assert!(resident
+            .run_bind_with_sites(
+                "replayed",
+                compiled.code(),
+                &bound[0],
+                view.next_value_generation()
+            )
+            .is_err());
     }
 
     use super::*;
