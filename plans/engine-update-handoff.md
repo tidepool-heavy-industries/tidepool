@@ -109,3 +109,11 @@ produced incompatible stale repr evidence in this wave. Do not clear caches.
 Buck remains local-only with `-c remote.enabled=false`, mounted buck-out and
 owned existing daemon. Preserve Nix/compiler/shared services; no daemon restart
 is needed for this update. No root-owned build gate was running at wind-down.
+
+Final wind-down: runtime is clean at `214469d824d77976e06235df15ad8a4d7e25cb72`
+on `completion/runtime-exact-consumer-wip`. Actor is held at product baseline
+`76ce77921a` with four uncommitted scheduler scaffold files; production preparation,
+awaitWatch and task-local continuation consumers are NOT wired. Formatting and
+diff checks only. Its detailed `actor-park-owner-handoff.md` and final patch are
+copied into the snapshot; SHA256.json was refreshed after both owners became
+idle. No implementation gate was started during wind-down.
