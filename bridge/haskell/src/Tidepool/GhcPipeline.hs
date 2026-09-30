@@ -124,7 +124,7 @@ import System.FilePath (takeBaseName, takeFileName, normalise, pathSeparator, (<
 import System.Directory (canonicalizePath, makeAbsolute)
 import System.IO (hPutStrLn, stderr, readFile')
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad (forM, forM_, when)
+import Control.Monad (forM, forM_, when, unless)
 import Data.Data (Data, cast, gmapQ)
 import Data.Generics (everything, mkQ)
 import Data.Foldable (toList)
