@@ -7,7 +7,7 @@ def _tidepool_execution_platforms(ctx):
         properties["toolchain"] = ctx.attrs.toolchain
     platform = ExecutionPlatformInfo(
         label = ctx.label.raw_target(),
-        configuration = ConfigurationInfo(constraints = {}, values = {}),
+        configuration = ctx.attrs.host_platform[PlatformInfo].configuration,
         executor_config = CommandExecutorConfig(
             local_enabled = not remote,
             remote_enabled = remote,
@@ -21,6 +21,7 @@ def _tidepool_execution_platforms(ctx):
 tidepool_execution_platforms = rule(
     impl = _tidepool_execution_platforms,
     attrs = {
+        "host_platform": attrs.dep(providers = [PlatformInfo]),
         "remote": attrs.bool(),
         "toolchain": attrs.string(),
     },

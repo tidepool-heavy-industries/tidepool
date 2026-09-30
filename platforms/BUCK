@@ -2,6 +2,7 @@ load(":defs.bzl", "tidepool_execution_platforms")
 
 tidepool_execution_platforms(
     name = "platforms",
+    host_platform = "prelude//platforms:default",
     remote = read_root_config("remote", "enabled", "false") == "true",
     toolchain = read_root_config("remote", "toolchain", ""),
 )
