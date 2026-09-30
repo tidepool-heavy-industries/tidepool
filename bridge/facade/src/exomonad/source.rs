@@ -18,8 +18,9 @@
 //!
 //! Publishing a revision is one `rename(2)` of a symlink: a compile that opens
 //! `active/0` sees either the whole previous revision or the whole new one,
-//! never a mixture. No include VECTOR changes for the life of an actor — only
-//! what one path on it resolves to.
+//! never a mixture. Workbench and checkpoint admission resolve that publication
+//! to immutable revision paths and issue an opaque source capsule. Its clones
+//! retain the configured run owner until every admitted capture releases.
 //!
 //! Not implemented, and why: an actor's already-installed tool record is not
 //! re-derived on reload (it is a one-shot compile at actor startup; the
