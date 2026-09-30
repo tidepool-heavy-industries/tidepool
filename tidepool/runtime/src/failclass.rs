@@ -67,6 +67,7 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         SessionError::DeadScope(_)
         | SessionError::MissingDeclarationLibrary
         | SessionError::WrongPublicManifestTicket
+        | SessionError::InvalidRecoveryInitialization { .. }
         | SessionError::UnsupportedPrivateValueReplacement
         | SessionError::InvalidPublicBindingPromotion(_)
         | SessionError::InvalidBindingIdentity(_)

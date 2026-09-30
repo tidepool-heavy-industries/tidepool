@@ -106,6 +106,9 @@ pub struct PersistentSession {
     /// Names native instance IDs within the exact machine lifetime, including
     /// while the engine is temporarily moved into a machine lease.
     machine_incarnation: Option<tidepool_repr::SessionId>,
+    /// The exact bootstrap dependencies sealed by the host's initialization
+    /// entry before actor admission. Transfer never imports old heap roots.
+    recovery_initialization: Option<RecoveryInitialization>,
     /// The image registry the machine installs through, held here so a
     /// registry given before the first turn reaches the bootstrap install.
     image_registry: Option<Arc<tidepool_codegen::prepared_program::ImageRegistry>>,
@@ -186,6 +189,15 @@ struct CachedCompileView {
     digest: [u8; 32],
 }
 
+struct RecoveryInitialization {
+    library: uuid::Uuid,
+    manifest_owner: Arc<super::recovery_hydration::OwnedRecoveryManifest>,
+    scope: ScopeId,
+    owner_epoch: u64,
+    machine_incarnation: Option<tidepool_repr::SessionId>,
+    sources: Vec<SourceInstanceLease>,
+}
+
 /// The committed fact from moving one name into the persistent binding store.
 /// Callers use this rather than inferring success from a partly-mutated view.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -221,6 +233,7 @@ impl PersistentSession {
             admission_owner: Arc::new(super::admission::RuntimeAdmissionOwner::new()),
             machine: None,
             machine_incarnation: None,
+            recovery_initialization: None,
             image_registry: None,
             session_table: DataConTable::new(),
             lib,
@@ -1777,6 +1790,157 @@ impl PersistentSession {
             .validate_recovered_public_owner(owner)
     }
 
+    /// Freeze the actual native dependencies of the host's fresh root driver
+    /// before admitting its actor. This does not authorize an actor or a
+    /// transfer; the retained run owner and actor-journal proof remain required.
+    pub fn seal_recovery_initialization_scope(
+        &mut self,
+        scope: ScopeId,
+    ) -> Result<(), SessionError> {
+        use super::RecoveryInitializationFailure as Failure;
+        let snapshot = self
+            .public_visibility_snapshot_in(scope)
+            .ok_or(SessionError::DeadScope(scope))?;
+        self.validate_fresh_recovery_scope(&snapshot)?;
+        let state = self
+            .lib()
+            .durable_graph
+            .as_ref()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        let manifest_owner = state
+            .owner
+            .as_ref()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        manifest_owner.validate_owner()?;
+        if state.unconfirmed.is_some() {
+            return Err(SessionError::InvalidRecoveryInitialization {
+                scope,
+                reason: Failure::UnconfirmedPublication,
+            });
+        }
+        if !self.lib().durable_public_scopes.is_empty() {
+            return Err(SessionError::InvalidRecoveryInitialization {
+                scope,
+                reason: Failure::ExistingPublicOwner,
+            });
+        }
+        let sources = self.bindings.source_instances_in(&self.scopes, scope);
+        self.validate_recovery_native_dependencies(scope, &sources)?;
+        if self.recovery_initialization.is_some() {
+            return self.validate_recovery_initialization(&snapshot);
+        }
+        self.recovery_initialization = Some(RecoveryInitialization {
+            library: self.lib().compile_view_identity,
+            manifest_owner: Arc::clone(manifest_owner),
+            scope,
+            owner_epoch: self.admission_owner().epoch(),
+            machine_incarnation: self.machine_incarnation,
+            sources,
+        });
+        Ok(())
+    }
+
+    fn validate_fresh_recovery_scope(
+        &self,
+        snapshot: &super::PublicVisibilitySnapshot,
+    ) -> Result<(), SessionError> {
+        use super::RecoveryInitializationFailure as Failure;
+        let retained_values = self
+            .bindings
+            .scope_reachable_binding_ids(&self.scopes, snapshot.scope)
+            .len();
+        let reason = if snapshot.scope == ScopeId::ROOT {
+            Some(Failure::RootScope)
+        } else if snapshot.declaration_tip != Generation(0) {
+            Some(Failure::DeclarationTip(snapshot.declaration_tip))
+        } else if !snapshot.bindings.is_empty() {
+            Some(Failure::ValueBindings(snapshot.bindings.len()))
+        } else if retained_values != 0 {
+            Some(Failure::RetainedValueBindings(retained_values))
+        } else {
+            None
+        };
+        match reason {
+            Some(reason) => Err(SessionError::InvalidRecoveryInitialization {
+                scope: snapshot.scope,
+                reason,
+            }),
+            None => Ok(()),
+        }
+    }
+
+    fn validate_recovery_native_dependencies(
+        &self,
+        scope: ScopeId,
+        sources: &[SourceInstanceLease],
+    ) -> Result<(), SessionError> {
+        if !sources.is_empty()
+            && (self.machine_incarnation.is_none()
+                || self.machine.as_ref().is_none_or(|engine| {
+                    sources.iter().any(|source| {
+                        engine.prepared_handle_of(source.handle().raw()) != Some(source.handle())
+                    })
+                }))
+        {
+            return Err(SessionError::InvalidRecoveryInitialization {
+                scope,
+                reason: super::RecoveryInitializationFailure::UnavailableNativeDependency,
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_recovery_initialization(
+        &self,
+        snapshot: &super::PublicVisibilitySnapshot,
+    ) -> Result<(), SessionError> {
+        use super::RecoveryInitializationFailure as Failure;
+        let fail = |reason| SessionError::InvalidRecoveryInitialization {
+            scope: snapshot.scope,
+            reason,
+        };
+        let Some(initialization) = &self.recovery_initialization else {
+            return if snapshot.source_instances.is_empty() {
+                Ok(())
+            } else {
+                Err(fail(Failure::MissingSeal))
+            };
+        };
+        if initialization.library != self.lib().compile_view_identity
+            || self
+                .lib()
+                .durable_graph
+                .as_ref()
+                .and_then(|graph| graph.owner.as_ref())
+                .is_none_or(|owner| !Arc::ptr_eq(owner, &initialization.manifest_owner))
+            || initialization.scope != snapshot.scope
+            || initialization.owner_epoch != self.admission_owner().epoch()
+            || initialization.machine_incarnation != self.machine_incarnation
+        {
+            return Err(fail(Failure::ForeignSeal));
+        }
+        let sources = self
+            .bindings
+            .source_instances_in(&self.scopes, snapshot.scope);
+        if sources.len() != initialization.sources.len()
+            || sources
+                .iter()
+                .zip(&initialization.sources)
+                .any(|(current, original)| {
+                    current.instance() != original.instance()
+                        || current.binder() != original.binder()
+                        || current.handle() != original.handle()
+                        || current.owner() != original.owner()
+                        || current.original_ordinal() != original.original_ordinal()
+                        || current.value() != original.value()
+                        || current.entry_signature() != original.entry_signature()
+                })
+        {
+            return Err(fail(Failure::ChangedNativeDependencies));
+        }
+        self.validate_recovery_native_dependencies(snapshot.scope, &initialization.sources)
+    }
+
     /// Durably initialize one actor's exact captured public surface before
     /// application readiness. Existing owners and declaration products remain
     /// unchanged; heap values are recorded as recovery loss metadata.
@@ -1941,6 +2105,7 @@ impl PersistentSession {
         lib.durable_public_scopes = public_scopes;
         lib.tips = tips;
         self.public_visibility_epochs.insert(target, 1);
+        self.recovery_initialization = None;
         Ok(commit)
     }
 
@@ -1960,13 +2125,8 @@ impl PersistentSession {
         let snapshot = self
             .public_visibility_snapshot_in(target)
             .ok_or(SessionError::MissingDeclarationLibrary)?;
-        if target == ScopeId::ROOT
-            || snapshot.declaration_tip != Generation(0)
-            || !snapshot.bindings.is_empty()
-            || !snapshot.source_instances.is_empty()
-        {
-            return Err(SessionError::WrongPublicManifestTicket);
-        }
+        self.validate_fresh_recovery_scope(&snapshot)?;
+        self.validate_recovery_initialization(&snapshot)?;
         let lib = self
             .lib
             .as_ref()
@@ -1983,16 +2143,28 @@ impl PersistentSession {
             invalid("root successor transfer requires the configured manifest owner".into())
         })?;
         owner.validate_owner()?;
-        if state.unconfirmed.is_some()
-            || predecessor == &successor
-            || !lib.durable_public_scopes.is_empty()
-            || state
-                .graph
-                .public_surfaces
-                .iter()
-                .any(|surface| surface.owner == successor)
+        use super::RecoveryInitializationFailure as Failure;
+        let reason = if state.unconfirmed.is_some() {
+            Some(Failure::UnconfirmedPublication)
+        } else if predecessor == &successor {
+            Some(Failure::RepeatedIncarnation)
+        } else if !lib.durable_public_scopes.is_empty() {
+            Some(Failure::ExistingPublicOwner)
+        } else if state
+            .graph
+            .public_surfaces
+            .iter()
+            .any(|surface| surface.owner == successor)
         {
-            return Err(SessionError::WrongPublicManifestTicket);
+            Some(Failure::ExistingSuccessor)
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            return Err(SessionError::InvalidRecoveryInitialization {
+                scope: target,
+                reason,
+            });
         }
         let index = state
             .graph
@@ -2091,6 +2263,7 @@ impl PersistentSession {
         lib.durable_public_scopes.insert(successor, target);
         self.public_visibility_epochs.insert(target, epoch);
         self.invalidate_execution_admissions_after_owner_transfer(admission_epoch);
+        self.recovery_initialization = None;
         Ok(committed)
     }
 

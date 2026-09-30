@@ -5381,7 +5381,7 @@ pub(super) mod tests {
         assert!(engine.unpin(bootstrap));
     }
 
-    fn install_source_publication_fixture(
+    pub(in crate::session) fn install_source_publication_fixture(
         session: &mut super::super::PersistentSession,
         scope: tidepool_codegen::scope::ScopeId,
     ) -> (

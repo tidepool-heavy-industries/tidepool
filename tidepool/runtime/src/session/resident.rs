@@ -2232,6 +2232,13 @@ where
             .transfer_recovered_public_owner(predecessor, successor, scope, authority)
     }
 
+    pub fn seal_recovery_initialization_scope(
+        &mut self,
+        scope: ScopeId,
+    ) -> Result<(), SessionError> {
+        self.state.seal_recovery_initialization_scope(scope)
+    }
+
     pub fn confirm_publication_durability(&mut self) -> Result<(), SessionError> {
         if !self.state.has_lib() {
             return Err(SessionError::MissingDeclarationLibrary);

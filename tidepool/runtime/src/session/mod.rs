@@ -330,6 +330,11 @@ pub enum SessionError {
     MissingDeclarationLibrary,
     #[error("staged public manifest belongs to a different session, actor, or manifest")]
     WrongPublicManifestTicket,
+    #[error("recovery initialization for scope {scope:?}: {reason}")]
+    InvalidRecoveryInitialization {
+        scope: ScopeId,
+        reason: RecoveryInitializationFailure,
+    },
     #[error("private value replacement requires a certified lexical overlay")]
     UnsupportedPrivateValueReplacement,
     #[error("public binding promotion failed preflight: {0:?}")]
@@ -352,6 +357,34 @@ pub enum SessionError {
         path: PathBuf,
         detail: String,
     },
+}
+
+#[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryInitializationFailure {
+    #[error("the root scope cannot be a fresh actor placement")]
+    RootScope,
+    #[error("the fresh placement already has declarations at {0:?}")]
+    DeclarationTip(Generation),
+    #[error("the fresh placement already exposes {0} value bindings")]
+    ValueBindings(usize),
+    #[error("the fresh placement still retains {0} heap value bindings")]
+    RetainedValueBindings(usize),
+    #[error("native dependencies have no owning initialization seal")]
+    MissingSeal,
+    #[error("native dependencies differ from the original initialization")]
+    ChangedNativeDependencies,
+    #[error("an initialization dependency is unavailable in the owning native machine")]
+    UnavailableNativeDependency,
+    #[error("the initialization belongs to a different library, manifest owner, scope, or runtime epoch")]
+    ForeignSeal,
+    #[error("the manifest has an unconfirmed publication")]
+    UnconfirmedPublication,
+    #[error("a durable public owner is already mapped in this runtime")]
+    ExistingPublicOwner,
+    #[error("the successor incarnation is already published")]
+    ExistingSuccessor,
+    #[error("the successor repeats the predecessor incarnation")]
+    RepeatedIncarnation,
 }
 
 impl SessionError {

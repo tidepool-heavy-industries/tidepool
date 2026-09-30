@@ -838,6 +838,158 @@ fn successor_transfer_fences_old_admissions_after_durable_and_uncertain_rename()
 }
 
 #[test]
+fn successor_transfer_retains_only_the_sealed_live_bootstrap_dependencies() {
+    for uncertain in [false, true] {
+        let durable = tempfile::tempdir().unwrap();
+        let original_source = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let manifest = persist_empty_public(durable.path(), original_source.path(), 4440);
+        let run = run_owner(durable.path());
+        let mut lib = SessionLib::open(
+            SessionId(4441),
+            source.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        lib.attach_owned_recovery_graph_v3(&manifest, run.clone())
+            .unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let target = session.mint_isolated_scope();
+        let (_, keys) = prepared::tests::install_source_publication_fixture(&mut session, target);
+        assert_eq!(keys.len(), 2);
+        let snapshot = session.public_visibility_snapshot_in(target).unwrap();
+        assert_eq!(snapshot.declaration_tip, Generation(0));
+        assert!(snapshot.bindings.is_empty());
+        let before = std::fs::read(&manifest).unwrap();
+        let transfer = |session: &mut PersistentSession, scope| {
+            session.transfer_recovered_public_owner(
+                &owner(1),
+                owner(2),
+                scope,
+                Arc::new(TestSuccessor {
+                    run: run.clone(),
+                    session: SessionId(4441),
+                    target: scope,
+                }),
+            )
+        };
+        assert!(matches!(
+            transfer(&mut session, target),
+            Err(SessionError::InvalidRecoveryInitialization {
+                reason: RecoveryInitializationFailure::MissingSeal,
+                ..
+            })
+        ));
+        assert_eq!(std::fs::read(&manifest).unwrap(), before);
+        session.seal_recovery_initialization_scope(target).unwrap();
+        session.seal_recovery_initialization_scope(target).unwrap();
+        let foreign = session.mint_isolated_scope();
+        assert!(matches!(
+            transfer(&mut session, foreign),
+            Err(SessionError::InvalidRecoveryInitialization {
+                reason: RecoveryInitializationFailure::ForeignSeal,
+                ..
+            })
+        ));
+        assert_eq!(std::fs::read(&manifest).unwrap(), before);
+        session.lib_mut().fail_recovery_durability_once = uncertain;
+        let outcome = transfer(&mut session, target).unwrap();
+        if uncertain {
+            assert!(matches!(
+                outcome,
+                PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+            ));
+        } else {
+            assert_eq!(outcome, PublicManifestCommit::Durable);
+        }
+        let transferred = session.public_visibility_snapshot_in(target).unwrap();
+        assert_eq!(transferred.source_instances, snapshot.source_instances);
+        assert_eq!(
+            transferred.machine_incarnation,
+            snapshot.machine_incarnation
+        );
+        assert!(transferred.bindings.is_empty());
+        assert_eq!(transferred.epoch, 2);
+        let bytes = std::fs::read(&manifest).unwrap();
+        let persisted = recovery::read_v2(&manifest, durable.path())
+            .unwrap()
+            .unwrap();
+        // Current-machine bootstrap handles are retained locally. They never
+        // become reminted persisted source instances during owner transfer.
+        assert!(persisted.graph.public_surfaces[0]
+            .source_instances
+            .is_empty());
+        session
+            .confirm_durable_public_scope(&owner(2), target)
+            .unwrap();
+        session
+            .confirm_durable_public_scope(&owner(2), target)
+            .unwrap();
+        assert_eq!(std::fs::read(&manifest).unwrap(), bytes);
+        for lease in session
+            .bindings()
+            .source_instances_in(session.scope_tree(), target)
+        {
+            assert_eq!(
+                session
+                    .prepared()
+                    .unwrap()
+                    .prepared_handle_of(lease.handle().raw()),
+                Some(lease.handle())
+            );
+        }
+    }
+}
+
+#[test]
+fn successor_initialization_refuses_changed_or_released_native_dependencies() {
+    for released in [false, true] {
+        let durable = tempfile::tempdir().unwrap();
+        let original_source = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let manifest = persist_empty_public(durable.path(), original_source.path(), 4442);
+        let run = run_owner(durable.path());
+        let mut lib = SessionLib::open(
+            SessionId(4443),
+            source.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        lib.attach_owned_recovery_graph_v3(&manifest, run.clone())
+            .unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let target = session.mint_isolated_scope();
+        let (_, keys) = prepared::tests::install_source_publication_fixture(&mut session, target);
+        session.seal_recovery_initialization_scope(target).unwrap();
+        let reason = if released {
+            let lease = session
+                .bindings()
+                .source_instances_in(session.scope_tree(), target)[0]
+                .clone();
+            assert!(session.prepared_mut().unwrap().release(lease.handle()));
+            RecoveryInitializationFailure::UnavailableNativeDependency
+        } else {
+            assert!(session.retire_failed_turn_source_instances(target, &keys[..1]));
+            RecoveryInitializationFailure::ChangedNativeDependencies
+        };
+        let before = std::fs::read(&manifest).unwrap();
+        assert!(matches!(
+            session.transfer_recovered_public_owner(
+                &owner(1), owner(2), target,
+                Arc::new(TestSuccessor { run, session: SessionId(4443), target }),
+            ),
+            Err(SessionError::InvalidRecoveryInitialization { reason: actual, .. }) if actual == reason
+        ));
+        assert_eq!(std::fs::read(&manifest).unwrap(), before);
+        assert!(session.lib().durable_public_scopes.is_empty());
+        assert_eq!(
+            session.public_visibility_snapshot_in(target).unwrap().epoch,
+            0
+        );
+    }
+}
+
+#[test]
 fn initial_public_owner_survives_restart_before_first_cell() {
     let durable = tempfile::tempdir().unwrap();
     let source = tempfile::tempdir().unwrap();
