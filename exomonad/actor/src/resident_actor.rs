@@ -10193,6 +10193,13 @@ where
             .directory
             .session_context(actor)
             .ok_or_else(|| refuse("root recovery actor has no admitted session context"))?;
+        if self
+            .directory
+            .resolve(actor)
+            .is_none_or(|actor| actor.terminal().get().is_some())
+        {
+            return Err(refuse("root recovery actor is unavailable or terminal"));
+        }
         let records = self.environment.actors.lock();
         let record = records
             .get(&actor)
@@ -10220,6 +10227,72 @@ where
             owner,
             context.placement,
         ))
+    }
+
+    /// Persist the admitted root's initial empty surface. Readiness requires
+    /// `Durable`; a post-rename uncertainty permits only durability confirmation.
+    pub async fn bind_durable_root_public_owner(
+        &self,
+        actor: ActorRef,
+    ) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
+        let placement = self.root_recovery_placement(actor)?;
+        let context = self.root_recovery_context(&placement)?;
+        let outcome = self
+            .environment
+            .runner
+            .bind_durable_root_public_owner(context, placement.owner().clone())
+            .await?;
+        self.root_recovery_context(&placement)?;
+        Ok(outcome)
+    }
+
+    /// The runtime checks the configured run lease and opaque journal proof;
+    /// the successor owner always comes from this actually admitted root.
+    pub async fn transfer_recovered_root_public_owner(
+        &self,
+        actor: ActorRef,
+        predecessor: &tidepool_runtime::session::RecoveryPublicOwner,
+        authority: Arc<dyn tidepool_runtime::session::RecoverySuccessorAuthority>,
+    ) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
+        let placement = self.root_recovery_placement(actor)?;
+        let context = self.root_recovery_context(&placement)?;
+        let outcome = self
+            .environment
+            .runner
+            .transfer_recovered_root_public_owner(
+                context,
+                predecessor,
+                placement.owner().clone(),
+                authority,
+            )
+            .await?;
+        self.root_recovery_context(&placement)?;
+        Ok(outcome)
+    }
+
+    fn root_recovery_context(
+        &self,
+        expected: &crate::RootRecoveryPlacement,
+    ) -> Result<ActorSessionContext, ResidentActorWorkbenchError> {
+        let current = self.root_recovery_placement(expected.actor())?;
+        let context = self
+            .directory
+            .session_context(expected.actor())
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "root recovery placement was retired".into(),
+                )
+            })?;
+        if current.owner() != expected.owner()
+            || current.placement() != expected.placement()
+            || context.actor != expected.actor()
+            || context.placement != expected.placement()
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "root recovery placement changed before readiness".into(),
+            ));
+        }
+        Ok(context)
     }
 
     /// Whether `session` is still live in the shared machine registry — for
