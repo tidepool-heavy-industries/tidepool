@@ -4958,7 +4958,6 @@ async fn run_interactive_applications(
                             None => release_waiters.entry(actor).or_default().push(request),
                         }
                     }
-                    #[cfg(feature = "codex-compat")]
                     LocalResidentDeployment::CommandBackend(request) => {
                         // An actor with an agent process of its own runs its
                         // commands inside that process's sandbox. One without
@@ -4968,79 +4967,33 @@ async fn run_interactive_applications(
                         // custody of. Borrowing an ancestor's sandbox, which
                         // is what this did before, put the command somewhere
                         // the actor's own worktree is mounted read-only.
-                        let backend = launch_context.config.command_resources.clone()
-                            .ok_or_else(|| tidepool_bridge_effects::CommandError::CommandUnavailable("this run has no command resource authority".into()))
-                            .and_then(|resources| {
-                                match deployments.iter().find(|app| app.actor == request.owner).and_then(|app| app.thread.clone()) {
-                                    Some(thread) => {
-                                        let Some(backend) = launch_context.backend.codex_backend() else {
-                                            return Err(tidepool_bridge_effects::CommandError::CommandUnavailable(
-                                                "native command backend is unavailable for the embedded provider".into(),
-                                            ));
-                                        };
-                                        Ok(Arc::new(commands::NativeCommandBackend::new(
-                                            Arc::clone(backend), thread, resources, request.owner,
-                                        )) as Arc<dyn exomonad_actor::command_jobs::CommandBackend>)
-                                    },
-                                    None => {
-                                        let bubblewrap = resolve_scope_bubblewrap(
-                                            &launch_context.config.pane_environment,
-                                        )
-                                        .map_err(|error| {
-                                            tidepool_bridge_effects::CommandError::CommandUnavailable(
-                                                format!("cannot resolve bubblewrap for resident commands: {error}"),
-                                            )
-                                        })?;
-                                        Ok(Arc::new(commands::HostCommandBackend::new(
-                                            resources,
-                                            request.owner,
-                                            resident_command_roots(
-                                                &worktree_authority,
-                                                &launch_context.worktrees,
-                                                &launch_context.config.workspace,
-                                                request.owner,
-                                            ),
-                                            bubblewrap,
-                                        ))
-                                            as Arc<dyn exomonad_actor::command_jobs::CommandBackend>)
-                                    }
-                                }
-                            });
-                        request.supply(backend);
-                    }
-                    #[cfg(not(feature = "codex-compat"))]
-                    LocalResidentDeployment::CommandBackend(request) => {
-                        let backend = launch_context
-                            .config
-                            .command_resources
-                            .clone()
-                            .ok_or_else(|| {
-                                tidepool_bridge_effects::CommandError::CommandUnavailable(
-                                    "this run has no command resource authority".into(),
-                                )
-                            })
-                            .and_then(|resources| {
-                                let bubblewrap = resolve_scope_bubblewrap(
-                                    &launch_context.config.pane_environment,
-                                )
-                                .map_err(|error| {
-                                    tidepool_bridge_effects::CommandError::CommandUnavailable(
-                                        format!("cannot resolve bubblewrap for resident commands: {error}"),
-                                    )
-                                })?;
-                                Ok(Arc::new(commands::HostCommandBackend::new(
-                                    resources,
-                                    request.owner,
-                                    resident_command_roots(
-                                        &worktree_authority,
-                                        &launch_context.worktrees,
-                                        &launch_context.config.workspace,
-                                        request.owner,
-                                    ),
-                                    bubblewrap,
-                                )) as Arc<dyn exomonad_actor::command_jobs::CommandBackend>)
-                            });
-                        request.supply(backend);
+                        let owner = request.owner;
+                        let resource_client = launch_context.config.command_resources.clone();
+                        let host_resources = resource_client.clone();
+                        #[cfg(feature = "codex-compat")]
+                        supply_resident_command_backend(
+                            request,
+                            &launch_context.config,
+                            &worktree_authority,
+                            &launch_context.worktrees,
+                            owner,
+                            resource_client,
+                            host_resources,
+                            deployments
+                                .iter()
+                                .find(|app| app.actor == owner)
+                                .and_then(|app| app.thread.clone()),
+                            launch_context.backend.codex_backend().cloned(),
+                        );
+                        #[cfg(not(feature = "codex-compat"))]
+                        supply_resident_command_backend(
+                            request,
+                            &launch_context.config,
+                            &worktree_authority,
+                            &launch_context.worktrees,
+                            owner,
+                            host_resources,
+                        );
                     }
                     #[cfg(feature = "codex-compat")]
                     LocalResidentDeployment::NotificationSend(command) => {
@@ -6942,6 +6895,59 @@ fn resolve_scope_bubblewrap(
         std::io::ErrorKind::NotFound,
         format!("{BUBBLEWRAP_PROGRAM} is not executable on the frozen pane PATH"),
     ))
+}
+
+fn supply_resident_command_backend(
+    request: Arc<exomonad_actor::command_jobs::CommandBackendRequest>,
+    config: &ActorHostConfig,
+    authority: &ActorWorktreeAuthority,
+    worktrees: &WorktreeManager,
+    actor: ActorRef,
+    #[cfg(feature = "codex-compat")] resource_client: Option<
+        Arc<exomonad_node::command_resources::CommandResourceClient>,
+    >,
+    host_resources: Option<Arc<exomonad_node::command_resources::CommandResourceClient>>,
+    #[cfg(feature = "codex-compat")] thread: Option<QueueReadyThread>,
+    #[cfg(feature = "codex-compat")] native: Option<Arc<dyn InteractiveAgentBackend>>,
+) {
+    let backend = (|| {
+        #[cfg(feature = "codex-compat")]
+        if let Some(thread) = thread {
+            let resources = resource_client.as_ref().cloned().ok_or_else(|| {
+                tidepool_bridge_effects::CommandError::CommandUnavailable(
+                    "this run has no command resource authority".into(),
+                )
+            })?;
+            let Some(native) = native else {
+                return Err(tidepool_bridge_effects::CommandError::CommandUnavailable(
+                    "native command backend is unavailable for the embedded provider".into(),
+                ));
+            };
+            return Ok(Arc::new(commands::NativeCommandBackend::new(
+                native, thread, resources, actor,
+            ))
+                as Arc<dyn exomonad_actor::command_jobs::CommandBackend>);
+        }
+
+        let resources = host_resources.ok_or_else(|| {
+            tidepool_bridge_effects::CommandError::CommandUnavailable(
+                "this run has no command resource authority".into(),
+            )
+        })?;
+        let bubblewrap = resolve_scope_bubblewrap(&config.pane_environment).map_err(|error| {
+            tidepool_bridge_effects::CommandError::CommandUnavailable(format!(
+                "cannot resolve bubblewrap for resident commands: {error}"
+            ))
+        })?;
+        Ok(Arc::new(commands::HostCommandBackend::new(
+            resources,
+            actor,
+            resident_command_roots(authority, worktrees, &config.workspace, actor),
+            bubblewrap,
+        ))
+            as Arc<dyn exomonad_actor::command_jobs::CommandBackend>)
+    })();
+    request.supply(backend);
 }
 
 fn orient_launch_instructions(

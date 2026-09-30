@@ -92,6 +92,10 @@ suite-check:
 test-command-resources-delegated:
     {{ nix }} exomonad/scripts/test-command-resources-delegated.sh
 
+# Exercise the embedded host's real resident command process under delegated cgroups.
+test-embedded-command-delegated:
+    exomonad/scripts/test-embedded-command-delegated.sh
+
 # Run an inner-loop test selection derived from files changed since BASE.
 [positional-arguments]
 changed base="HEAD":
