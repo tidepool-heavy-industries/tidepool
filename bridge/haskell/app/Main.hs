@@ -83,7 +83,7 @@ import Tidepool.DeclarationJoin
   , renderDeclarationInventoryOutcome )
 import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson
-  ( ReportOutcome(..), DiagSeverity(..), Diag(..), SourceRejection(..), InputRejection(..)
+  ( ReportOutcome(..), DiagSeverity(..), Diag(..), SourceRejection(..), InputRejection(..), DependencyLoadFailure(..)
   , diagsFromSourceError, diagFromException, renderDiagsJson )
 import Tidepool.ExtractUtil (capitalize)
 import Tidepool.ExtractRequest (InspectionRequest(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
@@ -432,13 +432,16 @@ reportDiagsWithWarnings (Left e) = do
         Nothing -> case fromException e of
           Just (se :: SourceError) -> (ReportSourceFailure, diagsFromSourceError se)
           Nothing -> case fromException e of
-            Just (SourceRejection message) ->
-              (ReportSourceFailure, [Diag Nothing DiagError message])
+            Just (DependencySourceFailure diagnostics) -> (ReportSourceFailure, diagnostics)
+            Just DependencyWorkerFailure -> (ReportWorkerFailure, [diagFromException e])
             Nothing -> case fromException e of
-              Just (LocatedCellRejection (CellSourceSpan sl sc el ec) message) ->
-                (ReportSourceFailure,
-                  [Diag (Just ("<cell>", sl, sc, el, ec)) DiagError message])
-              Nothing -> (ReportWorkerFailure, [diagFromException e])
+              Just (SourceRejection message) ->
+                (ReportSourceFailure, [Diag Nothing DiagError message])
+              Nothing -> case fromException e of
+                Just (LocatedCellRejection (CellSourceSpan sl sc el ec) message) ->
+                  (ReportSourceFailure,
+                    [Diag (Just ("<cell>", sl, sc, el, ec)) DiagError message])
+                Nothing -> (ReportWorkerFailure, [diagFromException e])
   putStrLn (renderDiagsJson outcome diags)
   -- Debug copy for humans only; stdout (above) is the authoritative machine
   -- contract.

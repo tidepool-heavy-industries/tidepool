@@ -38,7 +38,7 @@ import GHC.Types.SourceError (SourceError, srcErrorMessages)
 import GHC.Driver.Errors.Types (GhcMessage(..))
 import GHC.Tc.Errors.Types (TcRnMessage(..), TcRnMessageDetailed(..), DeriveInstanceErrReason(..))
 import GHC.Utils.Logger (LogAction)
-import Tidepool.DiagJson (Diag(..), DiagSeverity(..), InputRejection(..), spanOf)
+import Tidepool.DiagJson (Diag(..), DiagSeverity(..), InputRejection(..), DependencyLoadFailure(..), spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
 import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..))
@@ -720,10 +720,10 @@ transformWithCompletedValues captured purpose target env summary = case purpose 
 data CompilePlan = CompilePlan
   { cpLoadGraph :: ModuleGraph
     -- ^ The graph handed to @load'@ (the skeleton applies @unpoison@ itself).
-  , cpAfterLoad :: SuccessFlag -> Ghc ()
+  , cpAfterLoad :: Ghc ()
     -- ^ Runs immediately after @load'@ and its @ghc_load@ phase emit, before
-    -- summaries are taken. The session path puts its PHASE-1 load barrier and
-    -- module-graph restore here; dependency-directed Val injection occurs at
+    -- summaries are taken, after the shared load barrier. The session path
+    -- restores its module graph here; dependency-directed Val injection occurs at
     -- 'cpBeforeModule'.
   , cpSummaries :: Ghc [ModSummary]
     -- ^ The modules to compile, in compile ORDER, BEFORE the hs-boot filter
@@ -738,10 +738,9 @@ data CompilePlan = CompilePlan
     -- dependencies have entered the HPT and before the first importer needs
     -- them.
   , cpTier :: TierPolicy
-  , cpBeforeMerge :: SuccessFlag -> [String] -> Ghc ()
+  , cpBeforeMerge :: Ghc ()
     -- ^ Runs after the compile loop and its phase emits, before the guts are
-    -- merged. The normal path puts its load barrier here (deliberately LATE —
-    -- see 'normalVariant').
+    -- merged. The session path reports accumulated injection timing here.
   , cpFinalEnv :: HscEnv -> HscEnv
     -- ^ Applied to the post-loop session before it becomes 'prHscEnv'.
   }
@@ -1349,8 +1348,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
       either (liftIO . ioError . userError) pure verified
     target <- guessTarget path Nothing Nothing
     setTargets [target]
-    -- Install target-diagnostic capture before load/typecheck. Warnings become
-    -- part of a successful result; errors remain available if 'load'' reports
+    -- Install diagnostic capture before load/typecheck. Target warnings become
+    -- part of a successful result; all source errors remain available if 'load'' reports
     -- only a 'Failed' flag rather than throwing a 'SourceError'.
     warnRef <- liftIO (newIORef [])
     errorRef <- liftIO (newIORef [])
@@ -1428,8 +1427,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
         plan | Set.null acceptedNames = originalPlan
              | otherwise = originalPlan
                  { cpLoadGraph = candidateLoadGraph
-                 , cpAfterLoad = \flag -> do
-                     cpAfterLoad originalPlan flag
+                 , cpAfterLoad = do
+                     cpAfterLoad originalPlan
                      current <- getSession
                      setSession current { hsc_mod_graph = modGraphRaw }
                      forM_ (Set.toAscList acceptedNames) $ \name ->
@@ -1493,7 +1492,13 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                     ++ " bytecode=" ++ show (isJust (homeMod_bytecode linkable))
                     ++ " object=" ++ show (isJust (homeMod_object linkable))
           _ -> pure ()
-    cpAfterLoad plan loadFlag
+    case loadFlag of
+      Succeeded -> cpAfterLoad plan
+      Failed -> do
+        diagnostics <- liftIO (nub . reverse <$> readIORef errorRef)
+        liftIO $ throwIO $ if null diagnostics
+          then DependencyWorkerFailure
+          else DependencySourceFailure diagnostics
     -- Exclude hs-boot summaries in one shared site for both variants:
     -- a boot node shares its ModuleName with the real module, so its
     -- near-empty desugared guts would CLOBBER the real module's entry in
@@ -2225,8 +2230,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 ++ " validation_only=" ++ show validationOnly
                 ++ " reachable_names=" ++ show (map moduleNameString (Set.toList reachableMods))
             _ -> pure ()
-          capturedErrors <- liftIO (nub . reverse <$> readIORef errorRef)
-          timePhase timing "merge_barrier" $ cpBeforeMerge plan loadFlag capturedErrors
+          timePhase timing "merge_barrier" $ cpBeforeMerge plan
           -- Merge: dependency module bindings first, target module last
           let isTargetMod output =
                 moduleNameString (moduleName (moduleOutputModule output)) == targetModName
@@ -2358,9 +2362,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                   HomeInterfaceNeededForSessionInjection ->
                     retainInterface " reason=session-value-interface"
                 pure (if isTarget then Just (tcg, inspectionProbes) else Nothing)
-          errors <- liftIO (nub . reverse <$> readIORef errorRef)
           warnings <- liftIO (nub . reverse <$> readIORef warnRef)
-          cpBeforeMerge plan loadFlag errors
+          cpBeforeMerge plan
           case [(tcg, probes) | Just (tcg, probes) <- checked] of
             [(tcg, probes)] -> do
               env <- getSession
@@ -2944,28 +2947,28 @@ evictTargetMemo :: ModuleName -> IORef GutsMemo -> IO ()
 evictTargetMemo targetModName' memoRef =
   modifyIORef' memoRef (Map.delete targetModName')
 
--- | Record target-module warnings for successful results and target-module
--- errors for the late load barrier. GHC can report a fatal warning from
+-- | Record target-module warnings for successful results and all source errors
+-- for the shared load barrier. GHC can report a fatal warning from
 -- 'load'' only through the logger and return 'Failed'; preserving it here
--- prevents the barrier from replacing the useful diagnostic with a generic
--- "module load failed" error.
+-- prevents the barrier from losing the source diagnostic or treating it as a
+-- worker failure. Dependency errors retain their original paths and spans.
 --
--- The physical-path arm records only @targetPath@. The cell check also accepts
--- GHC's @<cell>@ LINE-pragmas for authored input; other targets still exclude
--- virtual spans from dependency modules compiled in the same session.
+-- Warning capture records only @targetPath@. Cell warnings also accept GHC's
+-- @<cell>@ LINE-pragmas for authored input; dependency errors are captured
+-- regardless of their physical or virtual source span.
 -- Rendered with 'mkLocMessage', the same formatter GHC's default log action
 -- uses, so the text carries the familiar @Expr.hs:<line>:<col>: warning:
 -- ...@ shape callers already parse compile errors out of. Delegates to
 -- `fallback` unconditionally so normal stderr printing is unaffected — this
 -- only ADDS a capture, it never suppresses.
 diagnosticCollectorHook
-  :: FilePath -> IORef [(String, Diag)] -> IORef [String] -> LogAction -> LogAction
+  :: FilePath -> IORef [(String, Diag)] -> IORef [Diag] -> LogAction -> LogAction
 diagnosticCollectorHook targetPath warningRef errorRef fallback flags msgClass srcSpan msg = do
   case msgClass of
     MCDiagnostic SevWarning _ _ | inTarget srcSpan ->
-      modifyIORef' warningRef ((rendered, structured) :)
-    MCDiagnostic SevError _ _ | inTarget srcSpan ->
-      modifyIORef' errorRef (rendered :)
+      modifyIORef' warningRef ((rendered, structured DiagWarning) :)
+    MCDiagnostic SevError _ _ ->
+      modifyIORef' errorRef (structured DiagError :)
     _ -> pure ()
   fallback flags msgClass srcSpan msg
   where
@@ -2977,9 +2980,9 @@ diagnosticCollectorHook targetPath warningRef errorRef fallback flags msgClass s
     rendered = Text.unpack $ Text.replace (Text.pack targetPath)
       (Text.pack (takeFileName targetPath)) (Text.pack renderedRaw)
     renderedRaw = renderWithContext defaultSDocContext (mkLocMessage msgClass srcSpan msg)
-    structured = Diag
+    structured severity = Diag
       { dFile = spanOf srcSpan
-      , dSeverity = DiagWarning
+      , dSeverity = severity
       , dMessage = renderWithContext defaultSDocContext msg
       }
     inTarget (RealSrcSpan rss _) = unpackFS (srcSpanFile rss) == targetPath
@@ -3079,22 +3082,9 @@ normalVariant purpose path = do
    , pvTransformParsed = transformFor purpose targetModName'
    , pvPlan = \_timing modGraphRaw -> pure CompilePlan
       { cpLoadGraph = modGraphRaw
-      , cpAfterLoad = \_ -> pure ()
-        -- TOPOLOGICAL RECOVERY ORDER (was: 'mgModSummaries <$> getModuleGraph',
-        -- whose order is NOT guaranteed dependency-first — see its haddock).
-        -- Each summary's own 'parseModule'/'typecheckModule' below redoes its
-        -- typecheck INDEPENDENTLY of 'load'' (see 'compileFront'), and a
-        -- genuine failure throws a spanned 'SourceError' that stops this
-        -- 'forM' loop immediately — so whichever module the loop visits FIRST
-        -- among a failing module and its dependents determines whether a
-        -- caller sees the real diagnostic or a downstream "module X is not
-        -- loaded" cascade (the dependent's own typecheck can't resolve an
-        -- import that hasn't been redone yet in THIS loop, even though
-        -- 'load'' already failed on it upstream). Dependency order makes this
-        -- deterministic: a module with a genuine error of its own is always
-        -- reached before anything that imports it, so its real error fires
-        -- first and the loop never reaches the dependent at all. Same idiom
-        -- 'sessionVariant' already uses one seam down, for the same reason.
+      , cpAfterLoad = pure ()
+        -- Parse/typecheck each source in dependency order after the shared
+        -- load barrier has established a complete environment.
       , cpSummaries = pure
           [ ms | ModuleNode _ ms <- flattenSCCs (topSortModuleGraph True modGraphRaw Nothing) ]
         -- 'runPipeline' (single-shot eval) always compiles a target named
@@ -3106,26 +3096,7 @@ normalVariant purpose path = do
       , cpBeforeModule = \_ -> pure ()
       , cpTier = if purpose == CertifyHomeProductsCompile
           then OptimizeEveryModule else OptimizeCoreReachable
-        -- Phase barrier (backstop): a target or dependency compile error
-        -- already threw a spanned 'SourceError' from inside the compile loop
-        -- (each summary's own 'parseModule'/'typecheckModule' redoes its
-        -- typecheck independently of 'load'', so a real user type error
-        -- surfaces there with its span intact) — this MUST run AFTER the
-        -- loop, not before, or that spanned diagnostic never fires and
-        -- callers get this generic message instead. That is exactly why this
-        -- variant fills 'cpBeforeMerge' and leaves 'cpAfterLoad' empty, while
-        -- 'sessionVariant' does the opposite. The phase timings are emitted
-        -- first, so a run that dies here still reports the work it did.
-        -- Reaching here with 'loadFlag' still 'Failed' means the loop
-        -- finished without re-surfacing whatever 'load'' choked on; stop
-        -- rather than return a 'PipelineResult' built against a
-        -- half-populated environment.
-      , cpBeforeMerge = \loadFlag capturedErrors -> case loadFlag of
-          Failed | not (null capturedErrors) ->
-            liftIO $ ioError $ userError (unlines capturedErrors)
-          Failed -> liftIO $ ioError $ userError $
-            "runPipeline: module load failed compiling " ++ path
-          Succeeded -> pure ()
+      , cpBeforeMerge = pure ()
       , cpFinalEnv = id
       }
   }
@@ -3228,15 +3199,7 @@ sessionVariant purpose scope path = do
         -- filtered out above) — equivalent to the old @LoadDependenciesOf@
         -- but without compiling the target prematurely.
         { cpLoadGraph = depGraph
-        , cpAfterLoad = \loadFlag -> do
-            -- Phase barrier: unlike 'normalVariant' this variant checks
-            -- EARLY — a 'Failed' dependency load stops here, before the
-            -- module-graph restore, the Val iface injection, or the
-            -- per-module compile ever see a half-populated HPT.
-            case loadFlag of
-              Failed    -> liftIO $ ioError $ userError $
-                "runSessionPipeline: PHASE 1 dependency load failed compiling " ++ path
-              Succeeded -> pure ()
+        , cpAfterLoad = do
             -- Restore the FULL module graph (target included) so the
             -- per-module typecheck can see HPT instances from dep modules:
             -- @hptSomeThingsBelowUs@ walks @moduleGraphModulesBelow
@@ -3326,8 +3289,7 @@ sessionVariant purpose scope path = do
                 setSession hydrated
                 liftIO (writeIORef completedValuesRef (Just captured))
         , cpTier = OptimizeEveryModule
-          -- The load barrier already fired in 'cpAfterLoad' (see there).
-        , cpBeforeMerge = \_ _ ->
+        , cpBeforeMerge =
             liftIO (readIORef injectMsRef >>= emitPhase timing "inject")
         , cpFinalEnv = hscUpdateFlags canonicalizeDFlags
         }

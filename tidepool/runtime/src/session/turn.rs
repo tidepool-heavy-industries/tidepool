@@ -5228,6 +5228,106 @@ mod tests {
     }
 
     #[test]
+    fn dependency_load_errors_keep_source_spans_and_allow_a_valid_retry() {
+        use crate::session::{ModuleEnv, PersistentSession, SessionLib};
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_repr::SessionId;
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let dependency = root.path().join("RootChoice.hs");
+        std::fs::write(
+            &dependency,
+            include_str!("fixtures/checked-search-invalid.hs"),
+        )
+        .unwrap();
+        let specification = CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: "let value = RootChoice.value".into(),
+            template_source: include_str!("fixtures/checked-fold-outcome-template.hs").replace(
+                "{{CELL_IMPORTS}}",
+                "{{CELL_IMPORTS}}\nimport qualified RootChoice",
+            ),
+            turn_templates: Vec::new(),
+            injected_modules: Vec::new(),
+            reserved_declaration_modules: Vec::new(),
+        };
+        let include = vec![root.path().to_path_buf()];
+        let lib = SessionLib::open(
+            SessionId(1010),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        let mut state = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = state.mint_scope(ScopeId::ROOT).unwrap();
+        let execution = Arc::new(state.begin_private_execution(public).unwrap());
+        let admission = state
+            .admit_cell_for_execution(
+                execution,
+                0,
+                Arc::new(specification.clone()),
+                specification.specification_digest(),
+                [1; 32],
+                include.clone(),
+            )
+            .unwrap();
+        let ordinary = || {
+            let temp = TempDir::new().unwrap();
+            let source = temp.path().join("cell.txt");
+            let template = temp.path().join("template.hs");
+            std::fs::write(&source, &specification.cell_source).unwrap();
+            std::fs::write(&template, &specification.template_source).unwrap();
+            let mut cmd = extract_cmd().unwrap();
+            cmd.input(&source)
+                .cell()
+                .cell_template(&template)
+                .cell_out(temp.path().join("cell.cbor"))
+                .output_dir(temp.path())
+                .includes(&[root.path()]);
+            let endpoint = cmd.bind().unwrap();
+            let run = endpoint.execute(&cmd).unwrap();
+            crate::diag::decode_extract_result(
+                run.success(),
+                &run.output.stdout,
+                &run.output.stderr,
+            )
+        };
+        let assert_source_failure = |failure: CompileError| {
+            assert_eq!(
+                crate::failclass::classify_compile(&failure).class,
+                crate::failclass::FailureClass::UserHaskell
+            );
+            let CompileError::Diagnostics(diagnostics) = failure else {
+                panic!("a dependency type error must remain a structured source failure")
+            };
+            assert!(diagnostics.iter().any(|diagnostic| {
+                diagnostic.severity == crate::diag::DiagnosticSeverity::Error
+                    && diagnostic.span.as_ref().is_some_and(|span| {
+                        Path::new(&span.file) == dependency && span.start_line == 3
+                    })
+            }), "the original dependency source span must survive the load barrier");
+        };
+        assert_source_failure(ordinary().unwrap_err());
+        assert_source_failure(
+            compile_public_checked_offer_with_inputs(
+                &admission,
+                specification.clone(),
+                &include,
+                &include,
+            )
+            .unwrap_err(),
+        );
+        std::fs::write(
+            &dependency,
+            include_str!("fixtures/checked-search-original.hs"),
+        )
+        .unwrap();
+        ordinary().unwrap();
+        let (_artifacts, first) = compile_public_checked_offer(&admission, specification);
+        state.begin_checked_prefix(admission, &first).unwrap();
+    }
+
+    #[test]
     fn substituted_search_inputs_refuse_before_compilation_or_prefix_claim() {
         use crate::session::{ModuleEnv, PersistentSession, SessionLib};
         use tidepool_codegen::scope::ScopeId;

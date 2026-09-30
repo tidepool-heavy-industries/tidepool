@@ -6,7 +6,7 @@ module Tidepool.DiagJson
   ( ReportOutcome(..)
   , DiagSeverity(..)
   , Diag(..)
-  , SourceRejection(..), InputRejection(..)
+  , SourceRejection(..), InputRejection(..), DependencyLoadFailure(..)
   , diagsFromSourceError
   , diagFromException
   , renderDiagsJson
@@ -50,8 +50,17 @@ instance Exception InputRejection
 newtype SourceRejection = SourceRejection String deriving Show
 instance Exception SourceRejection
 
+-- GHC's dependency loader can return Failed after reporting diagnostics only
+-- through its logger. Retain the source failure separately from a loader that
+-- failed without any source diagnostics.
+data DependencyLoadFailure
+  = DependencySourceFailure [Diag]
+  | DependencyWorkerFailure
+  deriving Show
+instance Exception DependencyLoadFailure
+
 -- | Severity carried by one structured diagnostic.
-data DiagSeverity = DiagError | DiagWarning deriving (Eq)
+data DiagSeverity = DiagError | DiagWarning deriving (Eq, Show)
 
 -- | One diagnostic: an optional source span, a severity ("error"/"warning"),
 -- and the rendered message text.
@@ -61,7 +70,7 @@ data Diag = Diag
   -- no real span for the diagnostic ('UnhelpfulSpan').
   , dSeverity :: DiagSeverity
   , dMessage  :: String
-  } deriving (Eq)
+  } deriving (Eq, Show)
 
 -- | Every diagnostic (errors + warnings) carried by a caught 'SourceError',
 -- in the order GHC collected them.
