@@ -2095,6 +2095,22 @@ where
         }
     }
 
+    pub fn retain_lexical_scope(
+        &mut self,
+        source: ScopeId,
+    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, ResidentError> {
+        self.settle_dropped_custody();
+        Ok(self.state.retain_lexical_scope(source)?)
+    }
+
+    pub fn mint_scope_from_lease(
+        &mut self,
+        lease: &super::RuntimeLexicalScopeLease,
+    ) -> Result<ScopeId, ResidentError> {
+        self.settle_dropped_custody();
+        Ok(self.state.mint_scope_from_lease(lease)?)
+    }
+
     /// The materialized bindings visible while a compiled cell waits to run.
     /// A later item in that same cell may still import one of these identities
     /// after an earlier item shadows its public name, so preparation retains

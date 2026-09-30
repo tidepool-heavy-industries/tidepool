@@ -43,7 +43,7 @@ impl PrivateExecutionAdmission {
 /// Original declaration identities are burned before checking any source.
 pub struct RuntimeCellAdmission {
     owner: Arc<RuntimeAdmissionOwner>,
-    retained_scope: ScopeId,
+    _retained_scope: Arc<RuntimeLexicalScopeLease>,
     prefix_started: std::sync::atomic::AtomicBool,
     view: SessionCompileView,
     visibility: PublicVisibilitySnapshot,
@@ -72,9 +72,27 @@ impl RuntimeAdmissionOwner {
     }
 }
 
-impl Drop for RuntimeCellAdmission {
+/// Shared exact lexical lifetime, issued by its existing runtime owner.
+/// The detached scope retains the binding and native shares captured at mint.
+pub struct RuntimeLexicalScopeLease {
+    owner: Arc<RuntimeAdmissionOwner>,
+    scope: ScopeId,
+}
+impl RuntimeLexicalScopeLease {
+    pub fn scope(&self) -> ScopeId {
+        self.scope
+    }
+}
+impl std::fmt::Debug for RuntimeLexicalScopeLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeLexicalScopeLease")
+            .field("scope", &self.scope)
+            .finish_non_exhaustive()
+    }
+}
+impl Drop for RuntimeLexicalScopeLease {
     fn drop(&mut self) {
-        self.owner.retired.lock().push(self.retained_scope);
+        self.owner.retired.lock().push(self.scope);
     }
 }
 
@@ -99,7 +117,7 @@ pub struct RuntimeCheckedPrefix {
 struct RuntimeCheckedState {
     snapshot: Arc<RuntimeCheckedPrefixSnapshot>,
     in_flight: Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>>,
-    retained_scopes: Vec<ScopeId>,
+    retained_scopes: Vec<Arc<RuntimeLexicalScopeLease>>,
 }
 
 #[derive(Debug)]
@@ -168,16 +186,6 @@ impl RuntimeCheckedPrefix {
     }
 }
 
-impl Drop for RuntimeCheckedPrefix {
-    fn drop(&mut self) {
-        self.admission
-            .owner
-            .retired
-            .lock()
-            .extend(std::mem::take(&mut self.state.get_mut().retained_scopes));
-    }
-}
-
 /// Travels with the existing resident continuation token. It records no
 /// completed prefix while an effect is parked or an execution has failed.
 #[derive(Debug)]
@@ -231,9 +239,7 @@ impl CheckedTurnCompletion {
             compiler_prefix,
             self.prefix.admission.digest(),
         ));
-        let retained = session
-            .mint_detached_scope(self.scope)
-            .ok_or(SessionError::DeadScope(self.scope))?;
+        let retained = session.retain_lexical_scope(self.scope)?;
         state.retained_scopes.push(retained);
         state.snapshot = snapshot;
         state.in_flight = None;
@@ -370,6 +376,30 @@ impl RuntimeCellAdmission {
 }
 
 impl PersistentSession {
+    pub fn retain_lexical_scope(
+        &mut self,
+        source: ScopeId,
+    ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
+        self.reap_admission_leases();
+        let scope = self
+            .mint_detached_scope(source)
+            .ok_or(SessionError::DeadScope(source))?;
+        Ok(Arc::new(RuntimeLexicalScopeLease {
+            owner: self.admission_owner().clone(),
+            scope,
+        }))
+    }
+    pub fn mint_scope_from_lease(
+        &mut self,
+        lease: &RuntimeLexicalScopeLease,
+    ) -> Result<ScopeId, SessionError> {
+        self.reap_admission_leases();
+        if !Arc::ptr_eq(&lease.owner, self.admission_owner()) {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        self.mint_detached_scope(lease.scope)
+            .ok_or(SessionError::DeadScope(lease.scope))
+    }
     pub fn begin_checked_prefix(
         &self,
         admission: Arc<RuntimeCellAdmission>,
@@ -394,7 +424,15 @@ impl PersistentSession {
             first_item.initial_prefix()?,
             admission.digest(),
         ));
-        admission.prefix_started.compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire).map_err(|_| SessionError::StaleStagedDeclaration)?;
+        admission
+            .prefix_started
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map_err(|_| SessionError::StaleStagedDeclaration)?;
         Ok(Arc::new(RuntimeCheckedPrefix {
             admission,
             state: parking_lot::Mutex::new(RuntimeCheckedState {
@@ -530,12 +568,10 @@ impl PersistentSession {
             }
         }
         let digest = *digest.finalize().as_bytes();
-        let retained_scope = self
-            .mint_detached_scope(scope)
-            .ok_or(SessionError::DeadScope(scope))?;
+        let retained_scope = self.retain_lexical_scope(scope)?;
         Ok(Arc::new(RuntimeCellAdmission {
             owner: self.admission_owner().clone(),
-            retained_scope,
+            _retained_scope: retained_scope,
             prefix_started: std::sync::atomic::AtomicBool::new(false),
             view,
             visibility,
@@ -554,6 +590,37 @@ impl PersistentSession {
 mod tests {
     use super::*;
     use crate::session::{ModuleEnv, SessionId, SessionLib};
+
+    #[test]
+    fn lexical_scope_lease_survives_owner_retirement_and_releases_after_child() {
+        let root = tempfile::tempdir().unwrap();
+        let lib =
+            SessionLib::open(SessionId(988), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let source = session.mint_scope(ScopeId::ROOT).unwrap();
+        let value = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "capturedRoot",
+            702,
+        );
+        let id = value.id;
+        session.bind_in(source, value).unwrap();
+        let lease = session.retain_lexical_scope(source).unwrap();
+        let admitted = lease.clone();
+        session.retire_scope(source);
+        drop(lease);
+        session.reap_admission_leases();
+        assert!(session.scope_tree().is_live(admitted.scope()));
+        let child = session.mint_scope_from_lease(&admitted).unwrap();
+        assert_eq!(session.resolve_in(child, "capturedRoot").unwrap().id, id);
+        let retained = admitted.scope();
+        drop(admitted);
+        session.reap_admission_leases();
+        assert!(!session.scope_tree().is_live(retained));
+        assert_eq!(session.resolve_in(child, "capturedRoot").unwrap().id, id);
+        session.retire_scope(child);
+        assert!(session.bindings().get(id).is_none());
+    }
 
     #[test]
     fn admission_owner_fences_same_library_and_scope_counters() {
