@@ -115,6 +115,90 @@ pub struct AdmittedValueInterface {
     bytes: Arc<[u8]>,
 }
 
+/// Interfaces retain compiler-owned byte Arcs. Each successful item appends
+/// one immutable delta; its commitment binds ordered exact module membership
+/// without copying or rehashing the preceding interfaces.
+#[derive(Clone, Debug)]
+struct CheckedInterfaces {
+    base: Arc<[AdmittedValueInterface]>,
+    tail: Option<Arc<CheckedInterfaceDelta>>,
+    commitment: [u8; 32],
+    #[cfg(test)]
+    bytes_hashed: Arc<std::sync::atomic::AtomicUsize>,
+}
+#[derive(Debug)]
+struct CheckedInterfaceDelta {
+    previous: Option<Arc<CheckedInterfaceDelta>>,
+    interface: AdmittedValueInterface,
+}
+impl CheckedInterfaces {
+    fn base(
+        interfaces: &[AdmittedValueInterface],
+    ) -> (Self, std::collections::BTreeMap<u64, [u8; 32]>) {
+        let mut index = std::collections::BTreeMap::new();
+        let mut commitment = *blake3::hash(b"TidepoolCheckedInterfaces1").as_bytes();
+        for interface in interfaces {
+            let digest = *blake3::hash(&interface.bytes).as_bytes();
+            index.insert(interface.module.gen.0, digest);
+            commitment = Self::extend_commitment(commitment, interface.module, digest);
+        }
+        (
+            Self {
+                base: Arc::from(interfaces),
+                tail: None,
+                commitment,
+                #[cfg(test)]
+                bytes_hashed: Arc::new(std::sync::atomic::AtomicUsize::new(
+                    interfaces
+                        .iter()
+                        .map(|interface| interface.bytes.len())
+                        .sum(),
+                )),
+            },
+            index,
+        )
+    }
+    fn interface_digest(&self, bytes: &[u8]) -> [u8; 32] {
+        #[cfg(test)]
+        self.bytes_hashed
+            .fetch_add(bytes.len(), std::sync::atomic::Ordering::Relaxed);
+        *blake3::hash(bytes).as_bytes()
+    }
+    fn extend_commitment(
+        previous: [u8; 32],
+        module: tidepool_repr::SessionModule,
+        digest: [u8; 32],
+    ) -> [u8; 32] {
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"TidepoolCheckedInterfaceDelta1");
+        hash.update(&previous);
+        hash.update(&module.gen.0.to_le_bytes());
+        hash.update(&digest);
+        *hash.finalize().as_bytes()
+    }
+    fn append(&self, interface: AdmittedValueInterface, digest: [u8; 32]) -> Self {
+        Self {
+            base: self.base.clone(),
+            commitment: Self::extend_commitment(self.commitment, interface.module, digest),
+            #[cfg(test)]
+            bytes_hashed: self.bytes_hashed.clone(),
+            tail: Some(Arc::new(CheckedInterfaceDelta {
+                previous: self.tail.clone(),
+                interface,
+            })),
+        }
+    }
+    fn iter(&self) -> impl Iterator<Item = &AdmittedValueInterface> {
+        let mut suffix = Vec::new();
+        let mut node = self.tail.as_deref();
+        while let Some(delta) = node {
+            suffix.push(&delta.interface);
+            node = delta.previous.as_deref();
+        }
+        self.base.iter().chain(suffix.into_iter().rev())
+    }
+}
+
 /// Only resident settlement can extend this same-cell execution prefix.
 /// Snapshots remain immutable while compilation runs off checkout.
 #[derive(Debug)]
@@ -129,7 +213,7 @@ struct RuntimeCheckedState {
     snapshot: Arc<RuntimeCheckedPrefixSnapshot>,
     in_flight: Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>>,
     reservation: Option<CheckedItemReservation>,
-    retained_scopes: Vec<Arc<RuntimeLexicalScopeLease>>,
+    interface_index: std::collections::BTreeMap<u64, [u8; 32]>,
 }
 
 #[derive(Debug)]
@@ -216,7 +300,8 @@ impl RuntimeCheckedItemAdmission {
 pub struct RuntimeCheckedPrefixSnapshot {
     view: SessionCompileView,
     visibility: PublicVisibilitySnapshot,
-    interfaces: Vec<AdmittedValueInterface>,
+    interfaces: CheckedInterfaces,
+    _retained_scope: Arc<RuntimeLexicalScopeLease>,
     native_shares: Vec<SourceLeaseKey>,
     compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
     digest: [u8; 32],
@@ -226,8 +311,8 @@ impl RuntimeCheckedPrefixSnapshot {
     pub fn view(&self) -> &SessionCompileView {
         &self.view
     }
-    pub fn interfaces(&self) -> &[AdmittedValueInterface] {
-        &self.interfaces
+    pub fn interfaces(&self) -> impl Iterator<Item = &AdmittedValueInterface> {
+        self.interfaces.iter()
     }
     pub fn native_shares(&self) -> &[SourceLeaseKey] {
         &self.native_shares
@@ -312,31 +397,39 @@ impl CheckedTurnCompletion {
         let visibility = session
             .public_visibility_snapshot_in(self.scope)
             .ok_or(SessionError::DeadScope(self.scope))?;
-        let mut interfaces = self.prefix.admission.interfaces.clone();
-        for (module, bytes) in compiler_prefix.completed_interfaces() {
+        let mut interfaces = state.snapshot.interfaces.clone();
+        if let Some((module, bytes)) = self.execution.value_interface_owned() {
             let module = checked_value_module(module)?;
-            if interfaces
-                .iter()
-                .any(|existing| existing.module == module && existing.bytes.as_ref() != bytes)
-            {
-                return Err(SessionError::StaleStagedDeclaration);
-            }
-            if !interfaces.iter().any(|existing| existing.module == module) {
-                interfaces.push(AdmittedValueInterface {
-                    module,
-                    bytes: Arc::from(bytes),
-                });
+            let digest = interfaces.interface_digest(bytes);
+            match state.interface_index.get(&module.gen.0) {
+                Some(existing) if existing != &digest => {
+                    return Err(SessionError::StaleStagedDeclaration)
+                }
+                Some(_) => {}
+                None => {
+                    interfaces = interfaces.append(
+                        AdmittedValueInterface {
+                            module,
+                            bytes: bytes.clone(),
+                        },
+                        digest,
+                    );
+                    state.interface_index.insert(module.gen.0, digest);
+                }
             }
         }
+        // The next snapshot owns the complete exact dependency closure before
+        // the previous snapshot can drop. Outstanding compiler/display owners
+        // keep their own old snapshot and lexical lease until they finish.
+        let retained = session.retain_lexical_scope(self.scope)?;
         let snapshot = Arc::new(checked_snapshot(
             view,
             visibility,
             interfaces,
             compiler_prefix,
             self.prefix.admission.digest(),
+            retained,
         ));
-        let retained = session.retain_lexical_scope(self.scope)?;
-        state.retained_scopes.push(retained);
         state.snapshot = snapshot;
         state.in_flight = None;
         state.reservation = None;
@@ -359,9 +452,10 @@ fn checked_value_module(name: &str) -> Result<tidepool_repr::SessionModule, Sess
 fn checked_snapshot(
     view: SessionCompileView,
     visibility: PublicVisibilitySnapshot,
-    interfaces: Vec<AdmittedValueInterface>,
+    interfaces: CheckedInterfaces,
     compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
     admission: [u8; 32],
+    retained_scope: Arc<RuntimeLexicalScopeLease>,
 ) -> RuntimeCheckedPrefixSnapshot {
     let native_shares = visibility.source_instances.clone();
     let mut digest = blake3::Hasher::new();
@@ -387,11 +481,8 @@ fn checked_snapshot(
         frame(name.as_bytes());
         frame(&id.raw().to_le_bytes());
     }
-    for interface in &interfaces {
-        frame(b"interface");
-        frame(interface.module.module_name().as_bytes());
-        frame(&interface.bytes);
-    }
+    frame(b"interfaces");
+    frame(&interfaces.commitment);
     for key in &native_shares {
         frame(b"native");
         frame(&key.instance.raw().to_le_bytes());
@@ -412,6 +503,7 @@ fn checked_snapshot(
         view,
         visibility,
         interfaces,
+        _retained_scope: retained_scope,
         native_shares,
         compiler_prefix,
         digest: *digest.finalize().as_bytes(),
@@ -691,12 +783,14 @@ impl PersistentSession {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        let (interfaces, interface_index) = CheckedInterfaces::base(&admission.interfaces);
         let snapshot = Arc::new(checked_snapshot(
             admission.view.clone(),
             admission.visibility.clone(),
-            admission.interfaces.clone(),
+            interfaces,
             first_item.initial_prefix()?,
             admission.digest(),
+            admission._retained_scope.clone(),
         ));
         admission
             .prefix_started
@@ -714,7 +808,7 @@ impl PersistentSession {
                 snapshot,
                 in_flight: None,
                 reservation: None,
-                retained_scopes: Vec::new(),
+                interface_index,
             }),
         }))
     }
@@ -1029,6 +1123,109 @@ mod tests {
         drop(private);
         session.reap_admission_leases();
         assert!(!session.scope_tree().is_live(old_scope));
+    }
+
+    #[test]
+    fn interface_snapshots_share_bytes_and_hash_only_the_new_delta() {
+        const BYTES: usize = 64 * 1024;
+        for baseline_count in [0, 100] {
+            for count in [1, 10, 100] {
+                let baseline = (0..baseline_count)
+                    .map(|index| AdmittedValueInterface {
+                        module: tidepool_repr::SessionModule::val(Generation(index + 1)),
+                        bytes: Arc::from(vec![index as u8; BYTES]),
+                    })
+                    .collect::<Vec<_>>();
+                let (mut snapshot, mut index) = CheckedInterfaces::base(&baseline);
+                let original = snapshot.clone();
+                let mut deltas = Vec::new();
+                for offset in 0..count {
+                    let bytes: Arc<[u8]> = Arc::from(vec![offset as u8; BYTES]);
+                    let module =
+                        tidepool_repr::SessionModule::val(Generation(baseline_count + offset + 1));
+                    let digest = snapshot.interface_digest(&bytes);
+                    assert!(index.insert(module.gen.0, digest).is_none());
+                    snapshot = snapshot.append(
+                        AdmittedValueInterface {
+                            module,
+                            bytes: bytes.clone(),
+                        },
+                        digest,
+                    );
+                    deltas.push(bytes);
+                }
+                assert_eq!(original.iter().count(), baseline_count as usize);
+                let actual = snapshot.iter().collect::<Vec<_>>();
+                assert_eq!(actual.len(), (baseline_count + count) as usize);
+                for (expected, current) in baseline.iter().zip(&actual) {
+                    assert!(Arc::ptr_eq(&expected.bytes, &current.bytes));
+                }
+                for (expected, current) in deltas
+                    .iter()
+                    .zip(actual.iter().skip(baseline_count as usize))
+                {
+                    assert!(Arc::ptr_eq(expected, &current.bytes));
+                }
+                let hashed = snapshot
+                    .bytes_hashed
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                assert_eq!(hashed, (baseline_count + count) as usize * BYTES);
+                assert_ne!(original.commitment, snapshot.commitment);
+                eprintln!("prefix interfaces baseline={baseline_count} items={count} bytes_copied=0 bytes_hashed={hashed} delta_nodes={count}");
+            }
+        }
+    }
+
+    #[test]
+    fn latest_snapshot_lease_keeps_shadowed_native_roots_without_accumulating_scopes() {
+        for count in [1, 10, 100] {
+            let root = tempfile::tempdir().unwrap();
+            let lib =
+                SessionLib::open(SessionId(989), root.path(), ModuleEnv::standalone_default())
+                    .unwrap();
+            let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+            let source = session.mint_scope(ScopeId::ROOT).unwrap();
+            let mut latest = None;
+            let mut older_reader = None;
+            let mut ids = Vec::new();
+            for offset in 0..count {
+                let value = crate::session::prepared::tests::rooted_publication_fixture(
+                    &mut session,
+                    "shadowed",
+                    800 + offset,
+                );
+                ids.push(value.id);
+                session.bind_in(source, value).unwrap();
+                latest = Some(session.retain_lexical_scope(source).unwrap());
+                if offset == 0 && count > 1 {
+                    older_reader = latest.clone();
+                }
+                session.reap_admission_leases();
+                assert!(session.scope_tree().len() <= 4);
+                assert!(session.bindings().lease_count(ids[0]) <= 2);
+            }
+            // An outstanding old compilation/cancellation owner retains only
+            // its exact snapshot. Dropping it releases that share normally.
+            drop(older_reader);
+            session.reap_admission_leases();
+            assert_eq!(session.scope_tree().len(), 3);
+            assert_eq!(session.bindings().lease_count(ids[0]), 1);
+            session.retire_scope(source);
+            for id in &ids {
+                assert!(session.bindings().get(*id).is_some());
+            }
+            let latest = latest.unwrap();
+            let child = session.mint_scope_from_lease(&latest).unwrap();
+            drop(latest);
+            session.reap_admission_leases();
+            for id in &ids {
+                assert!(session.bindings().get(*id).is_some());
+            }
+            session.retire_scope(child);
+            assert!(session.bindings().is_empty());
+            assert_eq!(session.scope_tree().len(), 1);
+            eprintln!("prefix lexical owners items={count} steady_scopes=3 max_scopes=4 final_scopes=1 final_live_bindings=0");
+        }
     }
 
     #[test]
