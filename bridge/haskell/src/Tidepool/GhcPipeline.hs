@@ -2474,9 +2474,10 @@ certifyModuleCandidates manifest graph targetPath = do
               Just node -> all (`Map.member` selected) (requiredHome node)
                 && all (`Map.member` bootSummaries) (requiredBoot node)
               Nothing -> False
-          shrink selected = Map.filter (\(_, _, node) ->
+          shrink selected = Map.filterWithKey (\name (_, _, node) ->
             all (`Map.member` selected) (requiredHome node)
-              && all (bootClosed selected) (requiredBoot node)) selected
+              && all (bootClosed selected) (requiredBoot node)
+              && (not (Map.member name bootSummaries) || bootClosed selected name)) selected
           closed selected = let smaller = shrink selected in
             if Map.keysSet smaller == Map.keysSet selected then smaller else closed smaller
           admitted = closed initial
