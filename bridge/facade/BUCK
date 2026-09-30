@@ -887,6 +887,35 @@ tidepool_rust_test_cases(
 )
 
 tidepool_rust_test_cases(
+    name = "facade_host_raw_test",
+    binary = ":tidepool_unit_tests",
+    exact_tests = [
+        "actor_host::m1_host_tests::production_host_retains_http_haskell_commands_and_reconnects_without_replay",
+    ],
+    expected_count = 1,
+    ignored = False,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 660000,
+    env = {
+        "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
+        "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
+        "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "toolchains//:test_tools_closure",
+        "//web:dist",
+        "//bridge/haskell:facade_embedded_sources",
+    ],
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
     name = "facade_late_output_test",
     binary = ":tidepool_unit_tests",
     exact_tests = [

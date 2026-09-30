@@ -360,8 +360,8 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
         for runtime_only in ("TIDEPOOL_EXTRACT", "TIDEPOOL_BROWSER", "//web:dist", "resources ="):
             self.assertNotIn(runtime_only, unit_rule)
         cases = {}
-        for name in ("facade_process_tests", "facade_host_tests", "facade_late_output_test",
-                     "facade_browser_test", "tidepool_unit_tests_all"):
+        for name in ("facade_process_tests", "facade_host_tests", "facade_host_raw_test",
+                     "facade_late_output_test", "facade_browser_test", "tidepool_unit_tests_all"):
             cases[name] = facade_buck.split(
                 'tidepool_rust_test_cases(\n    name = "' + name + '",', 1
             )[1].split("\n)\n", 1)[0]
@@ -380,6 +380,18 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
         self.assertIn('"TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib"', host)
         self.assertNotIn("TIDEPOOL_BROWSER_DRIVER", host)
         self.assertNotIn("playwright", host)
+        raw_host = cases["facade_host_raw_test"]
+        self.assertIn(
+            '"actor_host::m1_host_tests::production_host_retains_http_haskell_commands_and_reconnects_without_replay"',
+            raw_host,
+        )
+        self.assertIn("expected_count = 1", raw_host)
+        self.assertIn('"TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)"', raw_host)
+        self.assertIn('"EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web"', raw_host)
+        self.assertIn('"//bridge/haskell:facade_embedded_sources"', raw_host)
+        self.assertIn('"//web:dist"', raw_host)
+        self.assertIn('"toolchains//:test_tools_closure"', raw_host)
+        self.assertNotIn("TIDEPOOL_BROWSER_DRIVER", raw_host)
         self.assertIn("expected_count = 1", cases["facade_late_output_test"])
         browser = cases["facade_browser_test"]
         self.assertIn("expected_count = 1", browser)

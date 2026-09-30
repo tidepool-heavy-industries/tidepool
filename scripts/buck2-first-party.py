@@ -650,6 +650,9 @@ def facade_test_cases(binary):
             "host_cancellation_stops_a_real_running_haskell_cell",
             "production_host_marks_embedded_root_ready_and_retires_invalid_auth_failure",
         )], host_env, host_resources, True, False, 600),
+        ("facade_host_raw_test", [prefix +
+            "production_host_retains_http_haskell_commands_and_reconnects_without_replay"],
+         host_env, host_resources, True, False, 600),
         ("facade_late_output_test", [prefix +
             "real_host_late_output_tests::real_host_retains_one_late_haskell_output_across_compaction"],
          host_env, host_resources, True, False, 600),
