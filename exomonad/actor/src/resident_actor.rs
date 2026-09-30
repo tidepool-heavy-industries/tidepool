@@ -12151,7 +12151,7 @@ mod tests {
                 }],
             }
         };
-        let checked = CellCheck {
+        let checked: CellCheck = tidepool_runtime::session::turn::CellCheckObservations {
             prologue: Default::default(),
             items: vec![
                 item(TurnKind::Decl, 1),
@@ -12166,7 +12166,8 @@ mod tests {
             compile_view_evidence: String::new(),
             expression_plans: Vec::new(),
             warnings: Vec::new(),
-        };
+        }
+        .into();
         let committed = WorkbenchItemReceipt {
             diagnostics: Vec::new(),
             index: 0,
@@ -12243,7 +12244,7 @@ mod tests {
             end_line: 2,
             end_column: 45,
         };
-        let checked = CellCheck {
+        let checked: CellCheck = tidepool_runtime::session::turn::CellCheckObservations {
             prologue: Default::default(),
             items: vec![CellAnalysisItem {
                 span,
@@ -12277,7 +12278,7 @@ mod tests {
                 severity: DiagnosticSeverity::Warning,
                 message: "Fields of ‘MergeRequest’ not initialised: mergeSourceWorktree".into(),
             }],
-        };
+        }.into();
         let (warnings, diagnostics) = super::committed_declaration_warnings(&checked, 0);
         let response = workbench_response(
             WorkbenchRunStatus::Committed,
