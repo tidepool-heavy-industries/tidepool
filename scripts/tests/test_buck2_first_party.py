@@ -125,7 +125,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                 ("tidepool_build_script", "custom-build", "build.rs"),
                 ("tidepool", "lib", "src/lib.rs"),
                 ("tidepool", "bin", "src/main.rs"),
-                ("exomonad", "bin", "src/exomonad.rs"),
+                ("exomonad", "bin", "src/bin/exomonad.rs"),
                 ("exomonad-view-helper", "bin", "src/view_helper.rs"),
                 ("tidepool-compile-report", "bin", "src/compile_report_main.rs"),
             ]),
@@ -139,7 +139,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             if package["name"] in {"tidepool", "exomonad-agent"}:
                 package["features"] = {"default": ["codex-compat"], "codex-compat": []}
         self.write("bridge/facade/build.rs", "fn main() {}\n")
-        for source in ("src/lib.rs", "src/main.rs", "src/exomonad.rs", "src/view_helper.rs",
+        for source in ("src/lib.rs", "src/main.rs", "src/bin/exomonad.rs", "src/view_helper.rs",
                        "src/compile_report_main.rs"):
             self.write(f"bridge/facade/{source}", "fn main() {}\n")
         self.metadata = self.base / "metadata.json"
@@ -325,9 +325,20 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         })
         self.metadata.write_text(json.dumps(metadata))
         self.write("bridge/facade/src/actor_host.rs", "#[cfg(test)] mod m1_host_tests;\n")
-        self.write("bridge/facade/src/actor_host/m1_host_tests.rs", "#[test] fn browser_gate() {}\n")
+        self.write("bridge/facade/src/actor_host/m1_host_tests.rs", "#[path = \"m1_browser_runner.rs\"] mod browser_runner; #[test] fn browser_gate() {}\n")
+        self.write("bridge/facade/src/actor_host/m1_browser_runner.rs", "pub fn run() {}\n")
         self.write("bridge/facade/src/actor_host/test_campaign.rs", "pub struct TestCampaign;\n")
+        self.write("bridge/facade/src/actor_host/documentation_tests.rs", 'const OMITTED: &str = include_str!("../../../../.exomonad/workspace/checks/not-in-profile.hs");\n')
+        self.write("bridge/facade/src/actor_host/agent_spec_tests.rs", 'const OMITTED: &str = include_str!("../../../../exomonad/examples/workspace/.exomonad/AgentSpec.hs");\n')
+        self.write("bridge/facade/src/exomonad.rs", '''
+const AGENT_SPEC: &str = include_str!("../../../exomonad/examples/workspace/.exomonad/AgentSpec.hs");
+const JEV_OPERATORS: &str = include_str!("../../../.exomonad/workspace/Jev/Operators.hs");
+const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.exomonad/prompts/review.md");
+''')
         self.write("bridge/testing/src/lib.rs", "pub struct TestSupport;\n")
+        self.write(".exomonad/workspace/Jev/Operators.hs", "module Jev.Operators where\n")
+        self.write("exomonad/examples/workspace/.exomonad/AgentSpec.hs", "module AgentSpec where\n")
+        self.write("exomonad/examples/workspace/.exomonad/prompts/review.md", "review prompt\n")
 
         result = self.generate("--package", "tidepool", "--no-default-features", "tidepool")
 
@@ -335,13 +346,19 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         facade_buck, groups = self.groups("bridge/facade")
         self.assertIn('name = "tidepool_unit_tests_sources"', facade_buck)
         unit_rule = facade_buck.split('tidepool_rust_test(\n    name = "tidepool_unit_tests",', 1)[1].split("\n)\n", 1)[0]
-        for source in ("src/actor_host/m1_host_tests.rs", "src/actor_host/test_campaign.rs"):
+        for source in (
+            "src/actor_host/m1_host_tests.rs", "src/actor_host/m1_browser_runner.rs",
+            "src/actor_host/test_campaign.rs", "src/exomonad.rs",
+        ):
             self.assertIn(source, groups["tidepool_unit_tests_sources"])
+        for source in ("src/actor_host/documentation_tests.rs", "src/actor_host/agent_spec_tests.rs"):
+            self.assertNotIn(source, groups["tidepool_unit_tests_sources"])
         self.assertIn("//bridge/testing:tidepool_testing", unit_rule)
         self.assertIn('"EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web"', unit_rule)
         self.assertIn('"TIDEPOOL_BROWSER_DRIVER": "$(location //build/testing/browser:driver_bundle)/driver.mjs"', unit_rule)
         self.assertIn('"TIDEPOOL_BROWSER_NODE": "$(exe toolchains//:browser_node)"', unit_rule)
         self.assertIn('"PLAYWRIGHT_BROWSERS_PATH": "$(location toolchains//:playwright_browsers)"', unit_rule)
+        self.assertIn('"toolchains//:git"', unit_rule)
         self.assertIn('"//web:dist"', unit_rule)
         self.assertIn('"toolchains//:browser_test_closure"', unit_rule)
         self.assertIn("haskell_worker = True", unit_rule)
@@ -349,6 +366,14 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         support_buck, support_groups = self.groups("bridge/testing")
         self.assertIn('name = "tidepool_testing"', support_buck)
         self.assertIn("src/lib.rs", support_groups["tidepool_testing_sources"])
+        self.assertIn(
+            "//:facade_test_jev_operators",
+            groups["tidepool_unit_tests_sources"],
+        )
+        self.assertIn(
+            "//exomonad/examples/workspace:facade_scaffold_sources",
+            groups["tidepool_unit_tests_sources"],
+        )
 
     def test_transitive_reindeer_target_uses_unique_locked_source_identity(self):
         metadata = json.loads(self.metadata.read_text())

@@ -62,6 +62,7 @@ nix_tool(name = "node", executable = read_root_config("nix", "node"), visibility
 nix_tool(name = "npm", executable = read_root_config("nix", "npm"), visibility = ["PUBLIC"])
 nix_tool(name = "browser_node", executable = read_root_config("nix", "browser_node"), visibility = ["PUBLIC"])
 nix_tool(name = "browser_npm", executable = read_root_config("nix", "browser_npm"), visibility = ["PUBLIC"])
+nix_tool(name = "git", executable = read_root_config("nix", "git"), visibility = ["PUBLIC"])
 nix_tool(name = "python", executable = read_root_config("nix", "python"), visibility = ["PUBLIC"])
 nix_tool(name = "bash", executable = read_root_config("nix", "bash"), visibility = ["PUBLIC"])
 nix_tool(name = "ghc", executable = read_root_config("nix", "ghc"), visibility = ["PUBLIC"])

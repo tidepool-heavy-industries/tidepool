@@ -478,6 +478,7 @@
           packages.buck-browser-npm-cache = browserTestNpmCache;
           packages.buck-playwright-browsers = playwrightChromium;
           packages.buck-bash = pkgs.bash;
+          packages.buck-test-git = pkgs.git;
           packages.buck-coreutils = pkgs.coreutils;
           packages.buck-tar = pkgs.gnutar;
           packages.buck-gzip = pkgs.gzip;
@@ -504,6 +505,7 @@
               pkgs.perl
               pkgs.pkg-config
               pkgs.openssl
+              pkgs.git
             ];
           };
           packages.buck-browser-test-closure = pkgs.closureInfo {
@@ -511,6 +513,7 @@
               harnessPkgs.nodejs_24
               browserTestNpmCache
               playwrightChromium
+              pkgs.git
             ];
           };
 

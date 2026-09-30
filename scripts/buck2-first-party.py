@@ -350,6 +350,31 @@ CODEGEN_TEST_ONLY_SOURCES = {
     "retention_tests.rs", "settlement_tests.rs", "tests.rs",
 }
 
+# The no-default facade test profile does not compile these test modules: each
+# is guarded by `cfg(all(test, feature = "codex-compat"))` at its owning
+# module declaration. Keep them out of its source and fixture closure too.
+TIDEPOOL_CODEX_TEST_ONLY_SOURCES = {
+    "src/actor_host/agent_spec_tests.rs",
+    "src/actor_host/background_command_example_tests.rs",
+    "src/actor_host/call_timing_tests.rs",
+    "src/actor_host/cell_compile_cost_tests.rs",
+    "src/actor_host/command_jobs_tests.rs",
+    "src/actor_host/custody_tests.rs",
+    "src/actor_host/documentation_tests.rs",
+    "src/actor_host/hosted_retirement.rs",
+    "src/actor_host/hosted_tools_tests.rs",
+    "src/actor_host/jev_tests.rs",
+    "src/actor_host/lookup_availability_tests.rs",
+    "src/actor_host/observation_budget_tests.rs",
+    "src/actor_host/research_policy_tests.rs",
+    "src/actor_host/resource_tests.rs",
+    "src/actor_host/source_reload_tests.rs",
+    "src/actor_host/tests.rs",
+    "src/actor_host/tui_resource_tests.rs",
+    "src/actor_host/tui_sleep_tests.rs",
+    "src/actor_host/workspace_tests.rs",
+}
+
 NO_DEFAULT_PROFILE = load_profile(ROOT)
 
 
@@ -360,12 +385,18 @@ def source_inputs(package, target, features=()):
     external = {}
     if source_root.is_relative_to(directory / "src"):
         sources.update((directory / "src").rglob("*.rs"))
-        if package["name"] == "tidepool" and not target["name"].endswith("_unit_tests"):
+        facade_unit_test = package["name"] == "tidepool" and target["name"].endswith("_unit_tests")
+        if package["name"] == "tidepool" and not facade_unit_test:
             sources = {
                 source for source in sources
                 if source.name != "tests.rs"
                 and not source.stem.endswith("_tests")
                 and source.stem != "test_campaign"
+            }
+        if facade_unit_test and "codex-compat" not in features:
+            sources = {
+                source for source in sources
+                if source.relative_to(directory).as_posix() not in TIDEPOOL_CODEX_TEST_ONLY_SOURCES
             }
         if (
             package["name"] == "exomonad-agent"
@@ -446,6 +477,9 @@ def source_inputs(package, target, features=()):
         "exomonad/prompts/docs/unfold.md": "//exomonad/prompts:doc_unfold",
         "exomonad/prompts/docs/watch.md": "//exomonad/prompts:doc_watch",
         "exomonad/prompts/docs/workbench.md": "//exomonad/prompts:doc_workbench",
+        "exomonad/examples/workspace/.exomonad/AgentSpec.hs": "//exomonad/examples/workspace:facade_scaffold_sources",
+        "exomonad/examples/workspace/.exomonad/prompts/review.md": "//exomonad/examples/workspace:facade_scaffold_sources",
+        ".exomonad/workspace/Jev/Operators.hs": "//:facade_test_jev_operators",
     }
     while pending:
         source = pending.pop()
@@ -455,6 +489,7 @@ def source_inputs(package, target, features=()):
             included = (source.parent / relative).resolve()
             if (
                 package["name"] == "tidepool"
+                and not target["name"].endswith("_unit_tests")
                 and included.is_relative_to(ROOT)
                 and included.relative_to(ROOT).as_posix().startswith((
                     ".exomonad/workspace/",
@@ -659,6 +694,7 @@ tidepool_buildscript_run(
     resources = [
         "//build/testing/browser:driver_bundle",
         "//web:dist",
+        "toolchains//:git",
         "toolchains//:browser_test_closure",
         "toolchains//:playwright_browsers",
     ],

@@ -23,6 +23,7 @@ browser_node="$(output_path browser-node)"
 browser_npm_cache="$(output_path browser-npm-cache)"
 playwright_browsers="$(output_path playwright-browsers)"
 browser_test_closure="$(output_path browser-test-closure)"
+git_path="$(output_path test-git)"
 bash_path="$(output_path bash)"
 coreutils="$(output_path coreutils)"
 tar_path="$(output_path tar)"
@@ -66,6 +67,7 @@ browser_npm = $browser_node/bin/npm
 browser_npm_cache = $browser_npm_cache
 playwright_browsers = $playwright_browsers
 browser_test_closure = $browser_test_closure
+git = $git_path/bin/git
 bash = $bash_path/bin/bash
 coreutils = $coreutils/bin
 tar = $tar_path/bin/tar
@@ -74,7 +76,7 @@ python = $python/bin/python3
 cmake = $cmake/bin/cmake
 perl = $perl/bin/perl
 pkg_config = $pkg_config/bin/pkg-config
-action_path = $rust/bin:$cc/bin:$binutils/bin:$cmake/bin:$perl/bin:$pkg_config/bin:$python/bin:$bash_path/bin:$coreutils/bin:$tar_path/bin:$gzip/bin:$node/bin
+action_path = $rust/bin:$cc/bin:$binutils/bin:$cmake/bin:$perl/bin:$pkg_config/bin:$python/bin:$bash_path/bin:$coreutils/bin:$tar_path/bin:$gzip/bin:$node/bin:$git_path/bin
 
 [remote]
 enabled = $remote_enabled
