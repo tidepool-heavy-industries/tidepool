@@ -4244,6 +4244,7 @@ where
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
         let check_specification = specification.clone();
         let check_admission = admission.clone();
+        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "checked_cell_compile_started", "workbench phase");
         let (checked, folded) =
             crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                 tidepool_runtime::with_compiler_transaction_cancellable(cancellation, || {
@@ -4280,6 +4281,7 @@ where
             }))
             .await
             .map_err(ResidentActorWorkbenchError::Join)??;
+        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "checked_cell_compile_completed", "workbench phase");
         cancel_on_drop.0 = None;
         let item_caps = (0..checked.items.len())
             .map(|index| checked.checked_item(index))
@@ -4288,7 +4290,8 @@ where
         let first = item_caps.first().cloned();
         let prefix = if let Some(first) = first {
             let prefix_admission = admission.clone();
-            Some(
+            tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "checked_prefix_admit_started", "workbench phase");
+            let prefix = Some(
                 self.access
                     .with_machine(context.clone(), move |session, _, _| {
                         session
@@ -4298,7 +4301,9 @@ where
                             })
                     })
                     .await?,
-            )
+            );
+            tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "checked_prefix_admit_completed", "workbench phase");
+            prefix
         } else {
             None
         };
