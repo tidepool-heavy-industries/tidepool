@@ -1,0 +1,354 @@
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+
+use exomonad_actor::{ActorGraphNode, ActorId, ActorRef, ActorWorkbenchPosture, Incarnation};
+use harness::{
+    embedding::{
+        AdmissionGuard, Conversation, EmbeddedError, HostActor, HostControl, HostIdentity,
+    },
+    model::AgentPath,
+    server::{ClientCommand, CommandControl, CommandReceiptOutcome, HostCommand},
+    store::Store,
+};
+use serde_json::Value;
+
+use super::*;
+
+struct TestLease;
+
+impl AdmissionGuard for TestLease {}
+
+struct TestHost {
+    identity: HostIdentity,
+    wakes: AtomicUsize,
+    controls: std::sync::Mutex<Vec<HostControl>>,
+    fail_retire: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl HostActor for TestHost {
+    fn identity(&self) -> &HostIdentity {
+        &self.identity
+    }
+
+    fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+        Ok(Box::new(TestLease))
+    }
+
+    fn tool_surface(&self) -> Result<Arc<harness::embedding::ToolSurface>, EmbeddedError> {
+        Err(EmbeddedError::Surface("not used in routing test".into()))
+    }
+
+    async fn wake(&self, _envelope_id: i64) -> Result<(), String> {
+        self.wakes.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn control(&self, control: HostControl) -> Result<Value, String> {
+        let refuse_retire =
+            matches!(&control, HostControl::Retire) && self.fail_retire.load(Ordering::Relaxed);
+        self.controls
+            .lock()
+            .expect("test host control mutex")
+            .push(control);
+        if refuse_retire {
+            Err("retirement refused".into())
+        } else {
+            Ok(serde_json::json!({ "requested": true }))
+        }
+    }
+}
+
+struct RoutingFixture {
+    projection: embedded_projection::EmbeddedProjection,
+    nodes: Vec<ActorGraphNode>,
+    live: BTreeSet<ActorRef>,
+    conversations: HashMap<ActorRef, Arc<Conversation>>,
+    hosts: HashMap<ActorRef, Arc<TestHost>>,
+    lifecycle: embedded_projection::LifecycleSender,
+    lifecycle_rx: tokio::sync::watch::Receiver<embedded_projection::LifecycleState>,
+}
+
+impl RoutingFixture {
+    fn new() -> Self {
+        let store = Arc::new(Store::memory().expect("memory store"));
+        let root_actor = actor(99);
+        let first = actor(1);
+        let second = actor(2);
+        let root_identity = identity("run", "/root", root_actor);
+        let first_identity = identity("run", "/root/1", first);
+        let second_identity = identity("run", "/root/2", second);
+        let root_host = Arc::new(TestHost {
+            identity: root_identity.clone(),
+            wakes: AtomicUsize::new(0),
+            controls: std::sync::Mutex::new(Vec::new()),
+            fail_retire: std::sync::atomic::AtomicBool::new(false),
+        });
+        let first_host = Arc::new(TestHost {
+            identity: first_identity.clone(),
+            wakes: AtomicUsize::new(0),
+            controls: std::sync::Mutex::new(Vec::new()),
+            fail_retire: std::sync::atomic::AtomicBool::new(false),
+        });
+        let second_host = Arc::new(TestHost {
+            identity: second_identity.clone(),
+            wakes: AtomicUsize::new(0),
+            controls: std::sync::Mutex::new(Vec::new()),
+            fail_retire: std::sync::atomic::AtomicBool::new(false),
+        });
+        let root = AgentPath("/root".into());
+        let root_conversation = Arc::new(
+            Conversation::attach(store.clone(), root_host.clone(), None).expect("attach root host"),
+        );
+        let first_conversation = Arc::new(
+            Conversation::attach(store.clone(), first_host.clone(), Some(&root))
+                .expect("attach first host"),
+        );
+        let second_conversation = Arc::new(
+            Conversation::attach(store, second_host.clone(), Some(&root))
+                .expect("attach second host"),
+        );
+        let mut projection = embedded_projection::EmbeddedProjection::default();
+        projection.attached(root_actor, &root_identity);
+        projection.attached(first, &first_identity);
+        projection.attached(second, &second_identity);
+        let (lifecycle, lifecycle_rx) = embedded_projection::LifecycleSender::channel();
+
+        Self {
+            projection,
+            nodes: vec![
+                model_node(root_actor),
+                model_node(first),
+                model_node(second),
+            ],
+            live: BTreeSet::from([root_actor, first, second]),
+            conversations: HashMap::from([
+                (root_actor, root_conversation),
+                (first, first_conversation),
+                (second, second_conversation),
+            ]),
+            hosts: HashMap::from([
+                (root_actor, root_host),
+                (first, first_host),
+                (second, second_host),
+            ]),
+            lifecycle,
+            lifecycle_rx,
+        }
+    }
+
+    async fn dispatch(&self, command_id: &str, command: ClientCommand) -> CommandReceiptOutcome {
+        dispatch_embedded_browser_command(
+            command_id,
+            command,
+            "run",
+            &self.nodes,
+            &self.live,
+            &self.projection,
+            &self.conversations,
+            &self.lifecycle,
+        )
+        .await
+    }
+}
+
+fn actor(id: u64) -> ActorRef {
+    ActorRef {
+        id: ActorId(id),
+        incarnation: Incarnation::FIRST,
+    }
+}
+
+fn identity(run: &str, path: &str, actor: ActorRef) -> HostIdentity {
+    HostIdentity {
+        run: run.into(),
+        actor: AgentPath(path.into()),
+        incarnation: actor.incarnation.0.to_string(),
+    }
+}
+
+fn model_node(actor: ActorRef) -> ActorGraphNode {
+    ActorGraphNode {
+        actor,
+        label: format!("actor-{}", actor.id.0),
+        model_actor: true,
+        creator: None,
+        supervisor_parent: None,
+        context_parent: None,
+        terminal: None,
+        workbench: ActorWorkbenchPosture::Idle,
+        provider_thread: None,
+        provider_turn: None,
+        provider_observation_stale: false,
+        bound_worktree: None,
+        active_requests: Vec::new(),
+        queued_requests: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn production_dispatch_admits_input_only_to_the_exact_actor() {
+    let fixture = RoutingFixture::new();
+    let first = actor(1);
+    let second = actor(2);
+    let target = fixture.hosts[&second].identity.clone();
+
+    let outcome = fixture
+        .dispatch(
+            "input-1",
+            ClientCommand::Host {
+                command: HostCommand::Input {
+                    target: target.clone(),
+                    text: "hello child".into(),
+                },
+            },
+        )
+        .await;
+
+    assert!(matches!(
+        outcome,
+        CommandReceiptOutcome::Admitted {
+            target: Some(actual),
+            envelope_id,
+            wake_error: None,
+        } if actual == target && !envelope_id.is_empty()
+    ));
+    assert_eq!(fixture.hosts[&first].wakes.load(Ordering::Relaxed), 0);
+    assert_eq!(fixture.hosts[&second].wakes.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn production_dispatch_refuses_wrong_run_and_incarnation_before_admission() {
+    let fixture = RoutingFixture::new();
+    let host = &fixture.hosts[&actor(2)];
+    let identity = host.identity.clone();
+    let mut wrong_run = identity.clone();
+    wrong_run.run = "other-run".into();
+    let mut wrong_incarnation = identity.clone();
+    wrong_incarnation.incarnation = "2".into();
+
+    for target in [wrong_run, wrong_incarnation] {
+        let outcome = fixture
+            .dispatch(
+                "invalid-target",
+                ClientCommand::Host {
+                    command: HostCommand::Input {
+                        target: target.clone(),
+                        text: "must not wake".into(),
+                    },
+                },
+            )
+            .await;
+        assert!(matches!(
+            outcome,
+            CommandReceiptOutcome::Refused {
+                target: Some(actual),
+                ..
+            } if actual == target
+        ));
+    }
+    assert_eq!(host.wakes.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn production_dispatch_routes_interrupt_and_retire_to_their_exact_actors() {
+    let fixture = RoutingFixture::new();
+    let first = actor(1);
+    let second = actor(2);
+    let first_identity = fixture.hosts[&first].identity.clone();
+    let second_identity = fixture.hosts[&second].identity.clone();
+
+    let interrupted = fixture
+        .dispatch(
+            "interrupt-2",
+            ClientCommand::Host {
+                command: HostCommand::Interrupt {
+                    target: second_identity.clone(),
+                },
+            },
+        )
+        .await;
+    assert!(matches!(
+        interrupted,
+        CommandReceiptOutcome::ControlRequested {
+            target,
+            control: CommandControl::Interrupt,
+        } if target == second_identity
+    ));
+
+    let retired = fixture
+        .dispatch(
+            "retire-1",
+            ClientCommand::Host {
+                command: HostCommand::Retire {
+                    target: first_identity.clone(),
+                },
+            },
+        )
+        .await;
+    assert!(matches!(
+        retired,
+        CommandReceiptOutcome::ControlRequested {
+            target,
+            control: CommandControl::Retire,
+        } if target == first_identity
+    ));
+    assert!(matches!(
+        fixture.hosts[&first]
+            .controls
+            .lock()
+            .expect("first controls")
+            .as_slice(),
+        [HostControl::Retire]
+    ));
+    assert!(matches!(
+        fixture.hosts[&second]
+            .controls
+            .lock()
+            .expect("second controls")
+            .as_slice(),
+        [HostControl::Interrupt]
+    ));
+    assert_eq!(
+        fixture.lifecycle_rx.borrow()[&first],
+        harness::server::HostActorLifecycle::Retiring
+    );
+    assert!(!fixture.lifecycle_rx.borrow().contains_key(&second));
+}
+
+#[tokio::test]
+async fn refused_retirement_does_not_publish_retiring_lifecycle() {
+    let fixture = RoutingFixture::new();
+    let actor = actor(1);
+    let target = fixture.hosts[&actor].identity.clone();
+    fixture.hosts[&actor]
+        .fail_retire
+        .store(true, Ordering::Relaxed);
+
+    let outcome = fixture
+        .dispatch(
+            "retire-refused",
+            ClientCommand::Host {
+                command: HostCommand::Retire {
+                    target: target.clone(),
+                },
+            },
+        )
+        .await;
+
+    let CommandReceiptOutcome::Refused {
+        target: Some(actual),
+        reason,
+    } = outcome
+    else {
+        panic!("expected a targeted retirement refusal");
+    };
+    assert_eq!(actual, target);
+    assert!(
+        reason.starts_with("host refused:") && reason.contains("retirement refused"),
+        "refusal should retain host error context: {reason}"
+    );
+    assert!(!fixture.lifecycle_rx.borrow().contains_key(&actor));
+}

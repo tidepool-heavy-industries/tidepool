@@ -6,6 +6,8 @@ use std::{
     },
 };
 
+use parking_lot::Mutex as ParkingMutex;
+
 use exomonad_actor::{
     ActorAdmissionLease, ActorExitKind, ActorTerminal, HostedCheckpointAttachment,
     HostedCheckpointCapture, HostedCheckpointCaptureError, LocalActorRef, ResidentToolError,
@@ -27,7 +29,7 @@ use harness::{
     turn::JobScheduler,
 };
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::embedded_policy::{EmbeddedPolicyInstallation, EmbeddedPolicySnapshot};
 
@@ -73,12 +75,14 @@ impl EmbeddedHarnessRuntime {
             ));
         }
         let (wakes, incoming) = mpsc::unbounded_channel();
+        let round_control = Arc::new(EmbeddedRoundControl::default());
         let host = Arc::new(EmbeddedHostActor::new(
             identity,
             actor,
             installation,
             self.store.clone(),
             wakes,
+            round_control.clone(),
         )?);
         let conversation = Arc::new(Conversation::attach(
             self.store.clone(),
@@ -88,6 +92,7 @@ impl EmbeddedHarnessRuntime {
         Ok(EmbeddedConversation {
             conversation,
             incoming,
+            round_control,
         })
     }
 
@@ -103,6 +108,80 @@ impl EmbeddedHarnessRuntime {
 pub(super) struct EmbeddedConversation {
     pub(super) conversation: Arc<Conversation>,
     pub(super) incoming: mpsc::UnboundedReceiver<DurableMailboxWake>,
+    pub(super) round_control: Arc<EmbeddedRoundControl>,
+}
+
+/// The host and its single Engine driver share one exact active-round slot.
+/// A handle can signal only the watch instance created for its own round.
+#[derive(Default)]
+pub(super) struct EmbeddedRoundControl {
+    active: ParkingMutex<Option<RoundCancellationHandle>>,
+}
+
+#[derive(Clone)]
+pub(super) struct RoundCancellationHandle {
+    sender: watch::Sender<bool>,
+}
+
+pub(super) struct EmbeddedRoundLease {
+    control: Arc<EmbeddedRoundControl>,
+    handle: RoundCancellationHandle,
+    receiver: watch::Receiver<bool>,
+}
+
+impl EmbeddedRoundControl {
+    pub(super) fn begin(self: &Arc<Self>) -> Result<EmbeddedRoundLease, String> {
+        let mut active = self.active.lock();
+        if active.is_some() {
+            return Err("an embedded Engine round is already active".into());
+        }
+        let (sender, receiver) = watch::channel(false);
+        let handle = RoundCancellationHandle { sender };
+        *active = Some(handle.clone());
+        Ok(EmbeddedRoundLease {
+            control: self.clone(),
+            handle,
+            receiver,
+        })
+    }
+
+    pub(super) fn interrupt_current(&self) -> Result<(), String> {
+        let handle = self
+            .active
+            .lock()
+            .clone()
+            .ok_or_else(|| "no embedded Engine round is active".to_owned())?;
+        handle.cancel();
+        Ok(())
+    }
+}
+
+impl RoundCancellationHandle {
+    pub(super) fn cancel(&self) {
+        self.sender.send_replace(true);
+    }
+}
+
+impl EmbeddedRoundLease {
+    pub(super) fn cancellation(&self) -> watch::Receiver<bool> {
+        self.receiver.clone()
+    }
+
+    pub(super) fn cancel(&self) {
+        self.handle.cancel();
+    }
+}
+
+impl Drop for EmbeddedRoundLease {
+    fn drop(&mut self) {
+        let mut active = self.control.active.lock();
+        if active
+            .as_ref()
+            .is_some_and(|current| current.sender.same_channel(&self.handle.sender))
+        {
+            *active = None;
+        }
+    }
 }
 
 /// The exact actor and installation used by one bound harness conversation.
@@ -114,6 +193,7 @@ pub(super) struct EmbeddedHostActor {
     installation: Arc<EmbeddedPolicyInstallation>,
     store: Arc<Store>,
     wakes: mpsc::UnboundedSender<DurableMailboxWake>,
+    round_control: Arc<EmbeddedRoundControl>,
     next_surface: AtomicU64,
 }
 
@@ -124,6 +204,7 @@ impl EmbeddedHostActor {
         installation: Arc<EmbeddedPolicyInstallation>,
         store: Arc<Store>,
         wakes: mpsc::UnboundedSender<DurableMailboxWake>,
+        round_control: Arc<EmbeddedRoundControl>,
     ) -> Result<Self, EmbeddedError> {
         let exact_actor = actor.identity();
         if installation.actor() != exact_actor
@@ -140,6 +221,7 @@ impl EmbeddedHostActor {
             installation,
             store,
             wakes,
+            round_control,
             next_surface: AtomicU64::new(1),
         })
     }
@@ -202,9 +284,10 @@ impl HostActor for EmbeddedHostActor {
                     .map_err(|error| error.to_string())?;
                 Ok(json!({"requested":true}))
             }
-            HostControl::Interrupt => Err(
-                "interrupt requires an exact operation; use the bound cancellation owner".into(),
-            ),
+            HostControl::Interrupt => self
+                .round_control
+                .interrupt_current()
+                .map(|()| json!({"requested":true})),
         }
     }
 }
@@ -399,12 +482,41 @@ impl CancellationOwner for EmbeddedDispatcher {
 }
 
 #[cfg(test)]
+mod round_control_tests {
+    use super::*;
+
+    #[test]
+    fn interrupt_requires_an_active_round_and_stale_handles_do_not_retarget() {
+        let control = Arc::new(EmbeddedRoundControl::default());
+        assert!(control.interrupt_current().is_err());
+
+        let first = control.begin().expect("first round");
+        let mut first_receiver = first.cancellation();
+        let old_handle = first.handle.clone();
+        control.interrupt_current().expect("interrupt first round");
+        assert!(*first_receiver.borrow_and_update());
+        drop(first);
+        assert!(control.interrupt_current().is_err());
+
+        let second = control.begin().expect("second round");
+        old_handle.cancel();
+        let second_receiver = second.cancellation();
+        assert!(
+            !*second_receiver.borrow(),
+            "an old cancellation handle must signal only its own watch instance"
+        );
+        control.interrupt_current().expect("interrupt second round");
+        assert!(*second_receiver.borrow());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actor_host::embedded_projection::{EmbeddedProjection, LifecycleState};
     use crate::actor_host::embedded_service::{
         attach_actor, drive_conversation_with_transport, submit_browser_command, EmbeddedService,
     };
-    use crate::actor_host::publish_embedded_root_snapshot;
     use crate::actor_host::test_campaign::TestCampaign;
     use async_trait::async_trait;
     use futures_util::StreamExt;
@@ -758,10 +870,13 @@ mod tests {
             InputObservation::Included(_)
         ));
         drop(requests);
-        publish_embedded_root_snapshot(
+        let mut projection = EmbeddedProjection::default();
+        projection.attached(actor, conversation.identity());
+        projection.publish(
             &service.control,
-            conversation.identity(),
-            harness::server::HostActorLifecycle::Waiting,
+            &conversation.identity().run,
+            &campaign.forest.inspect_host_graph(),
+            &LifecycleState::default(),
         );
         for _ in 0..2 {
             let mut request = format!("ws://{}/api/ws", service.address)
@@ -843,6 +958,7 @@ mod tests {
             installation.clone(),
             store,
             wakes,
+            Arc::new(EmbeddedRoundControl::default()),
         )
         .unwrap();
         let held_store_transaction = campaign.actor.admit_transaction().unwrap();

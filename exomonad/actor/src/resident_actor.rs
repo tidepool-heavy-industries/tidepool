@@ -9296,6 +9296,7 @@ where
 pub struct ActorGraphNode {
     pub actor: ActorRef,
     pub label: String,
+    pub model_actor: bool,
     pub creator: Option<ActorRef>,
     pub supervisor_parent: Option<ActorRef>,
     pub context_parent: Option<ActorRef>,
@@ -9573,13 +9574,25 @@ where
         {
             return None;
         }
+        self.actor_graph(Some(requester))
+    }
+
+    /// Host-owned observation of this forest, including surviving children and
+    /// terminal actors after its original root has stopped.
+    pub fn inspect_host_graph(&self) -> Vec<ActorGraphNode> {
+        self.actor_graph(None).unwrap_or_default()
+    }
+
+    fn actor_graph(&self, requester: Option<ActorRef>) -> Option<Vec<ActorGraphNode>> {
         let records = self.environment.actors.lock();
-        if !records.contains_key(&requester) {
+        if requester.is_some_and(|requester| !records.contains_key(&requester)) {
             return None;
         }
         let mut nodes = records
             .iter()
-            .filter(|(actor, _)| actor_can_observe(requester, **actor, &records))
+            .filter(|(actor, _)| {
+                requester.is_none_or(|requester| actor_can_observe(requester, **actor, &records))
+            })
             .map(|(actor, record)| {
                 let runtime = record.runtime_observation.snapshot();
                 let (active_requests, queued_requests) =
@@ -9587,6 +9600,7 @@ where
                 ActorGraphNode {
                     actor: *actor,
                     label: record.descriptor.label().to_owned(),
+                    model_actor: record.interactive_policy_installed,
                     creator: record.descriptor.creator(),
                     supervisor_parent: record.descriptor.supervisor_parent(),
                     context_parent: record.descriptor.context_parent(),

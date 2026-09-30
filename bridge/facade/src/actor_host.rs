@@ -19,10 +19,13 @@ mod commands;
 mod custody_tests;
 #[cfg(all(test, feature = "codex-compat"))]
 mod documentation_tests;
+#[cfg(test)]
+mod embedded_command_tests;
 mod embedded_harness;
 #[cfg(test)]
 mod embedded_pending_compaction_tests;
 mod embedded_policy;
+mod embedded_projection;
 mod embedded_service;
 mod host_incarnation;
 #[cfg(feature = "codex-compat")]
@@ -126,6 +129,7 @@ use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
+use self::embedded_projection::LifecyclePublisher;
 pub(crate) use self::host_incarnation::HostIncarnationLease;
 use self::overlay_resource::{
     ArtifactInspection, OverlayResourceLease, OverlaySnapshot, SharedOverlayResource,
@@ -1314,46 +1318,93 @@ fn embedded_root_attachment_error(
     None
 }
 
-fn publish_embedded_root_snapshot(
-    control: &harness::server::ServerControl,
-    identity: &harness::embedding::HostIdentity,
-    lifecycle: harness::server::HostActorLifecycle,
-) {
-    let path = identity.actor.0.clone();
-    let conversation_state = match lifecycle {
-        harness::server::HostActorLifecycle::Running => "busy",
-        harness::server::HostActorLifecycle::Waiting => "idle",
-        harness::server::HostActorLifecycle::Retiring => "retiring",
-        harness::server::HostActorLifecycle::Retired => "retired",
-        harness::server::HostActorLifecycle::Lost => "unavailable",
+async fn dispatch_embedded_browser_command(
+    command_id: &str,
+    command: harness::server::ClientCommand,
+    run: &str,
+    nodes: &[exomonad_actor::ActorGraphNode],
+    live: &BTreeSet<ActorRef>,
+    projection: &embedded_projection::EmbeddedProjection,
+    conversations: &HashMap<ActorRef, Arc<harness::embedding::Conversation>>,
+    lifecycle: &embedded_projection::LifecycleSender,
+) -> harness::server::CommandReceiptOutcome {
+    let route = |target: Option<harness::embedding::HostIdentity>, reason: String| {
+        harness::server::CommandReceiptOutcome::Refused { target, reason }
     };
-    control.set_snapshot(harness::server::Snapshot {
-        actors: vec![harness::server::HostActorProjection {
-            identity: harness::server::HostActorIdentity {
-                run: identity.run.clone(),
-                actor: identity.actor.clone(),
-                incarnation: identity.incarnation.clone(),
-            },
-            parent: None,
-            kind: harness::server::HostActorKind::Model,
-            lifecycle,
-            model_conversation: Some(path.clone()),
-        }],
-        conversations: vec![serde_json::json!({
-            "id": path.clone(),
-            "path": path,
-            "state": conversation_state,
-        })],
-        ..harness::server::Snapshot::default()
-    });
-}
 
-fn embedded_lifecycle_update_is_current(
-    update_actor: Option<ActorRef>,
-    root_actor: ActorRef,
-    conversation_attached: bool,
-) -> bool {
-    update_actor == Some(root_actor) && conversation_attached
+    let harness::server::ClientCommand::Host { command } = command else {
+        return route(
+            None,
+            "standalone submit is unavailable while the browser is attached to an embedded host"
+                .into(),
+        );
+    };
+    let target = match &command {
+        harness::server::HostCommand::Input { target, .. }
+        | harness::server::HostCommand::Interrupt { target }
+        | harness::server::HostCommand::Retire { target } => target.clone(),
+    };
+    if target.run != run {
+        return route(
+            Some(target),
+            "target belongs to a different host run".into(),
+        );
+    }
+    let Some(actor) = projection.resolve_identity(run, &target, nodes) else {
+        return route(
+            Some(target),
+            "target actor identity is not present in this host run".into(),
+        );
+    };
+    let is_live = nodes
+        .iter()
+        .find(|node| node.actor == actor)
+        .is_some_and(|node| node.terminal.is_none())
+        && live.contains(&actor);
+    if !is_live {
+        return route(Some(target), "target actor is no longer live".into());
+    }
+    let Some(conversation) = conversations.get(&actor) else {
+        return route(Some(target), "target has no live model conversation".into());
+    };
+
+    match command {
+        harness::server::HostCommand::Input { text, .. } => {
+            match conversation.input(command_id, "browser", &text).await {
+                Ok(receipt) => harness::server::CommandReceiptOutcome::Admitted {
+                    target: Some(target),
+                    envelope_id: receipt.envelope_id.to_string(),
+                    wake_error: receipt.wake_error,
+                },
+                Err(error) => route(Some(target), error.to_string()),
+            }
+        }
+        harness::server::HostCommand::Interrupt { .. } => match conversation
+            .control(harness::embedding::HostControl::Interrupt)
+            .await
+        {
+            Ok(_) => harness::server::CommandReceiptOutcome::ControlRequested {
+                target,
+                control: harness::server::CommandControl::Interrupt,
+            },
+            Err(error) => route(Some(target), error.to_string()),
+        },
+        harness::server::HostCommand::Retire { .. } => {
+            match conversation
+                .control(harness::embedding::HostControl::Retire)
+                .await
+            {
+                Ok(_) => {
+                    lifecycle.publish(actor, harness::server::HostActorLifecycle::Retiring);
+                    harness::server::CommandReceiptOutcome::ControlRequested {
+                        target,
+                        control: harness::server::CommandControl::Retire,
+                    }
+                }
+                Err(error) => route(Some(target), error.to_string()),
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -2223,6 +2274,7 @@ struct InteractiveFleet {
     actor_recovery: Arc<exomonad_actor::ActorRecoveryJournal>,
     recovered_threads: Arc<BTreeMap<ActorRef, (ActorRef, QueueReadyThread)>>,
     recovered_root_predecessor: Option<ActorRef>,
+    host_graph: Arc<dyn Fn() -> Vec<exomonad_actor::ActorGraphNode> + Send + Sync>,
 }
 
 #[derive(Clone)]
@@ -2695,6 +2747,8 @@ pub(crate) async fn run(
     let (shutdown, shutdown_rx) = watch::channel(None);
     let (root_config, root_config_rx) = watch::channel(config.clone());
     let watch_forest = Arc::clone(&forest);
+    let host_graph_forest = Arc::clone(&forest);
+    let host_graph = Arc::new(move || host_graph_forest.inspect_host_graph());
     let watch_retention: WatchRetentionCheck =
         Arc::new(move |owner, watch| watch_forest.retains_watch(owner, watch));
     let watch_observation_forest = Arc::clone(&forest);
@@ -2724,6 +2778,7 @@ pub(crate) async fn run(
             actor_recovery: actor_recovery.clone(),
             recovered_threads,
             recovered_root_predecessor,
+            host_graph,
         },
         shutdown_rx,
         root_config_rx,
@@ -4010,6 +4065,7 @@ async fn run_interactive_applications(
         actor_recovery,
         recovered_threads,
         recovered_root_predecessor,
+        host_graph,
     } = fleet;
     let base_prompt = FrozenBasePrompt::materialize_selected(
         &run_root,
@@ -4046,12 +4102,10 @@ async fn run_interactive_applications(
     let mut embedded_live = BTreeSet::new();
     let mut embedded_conversations: HashMap<ActorRef, Arc<harness::embedding::Conversation>> =
         HashMap::new();
-    let mut embedded_root: Option<Arc<harness::embedding::Conversation>> = None;
-    let mut embedded_root_identity: Option<harness::embedding::HostIdentity> = None;
-    let (embedded_lifecycle_tx, mut embedded_lifecycle_rx) = watch::channel((
-        None::<ActorRef>,
-        harness::server::HostActorLifecycle::Waiting,
-    ));
+    let (embedded_lifecycle_tx, mut embedded_lifecycle_rx) =
+        embedded_projection::LifecycleSender::channel();
+    let mut embedded_projection = embedded_projection::EmbeddedProjection::default();
+    let embedded_run = runtime_namespace(&launch_context.run_root);
     #[cfg(feature = "codex-compat")]
     let mut binding_discoveries = JoinSet::new();
     #[cfg(not(feature = "codex-compat"))]
@@ -4074,6 +4128,14 @@ async fn run_interactive_applications(
     #[cfg(not(feature = "codex-compat"))]
     let mut process_observations: JoinSet<()> = JoinSet::new();
     let mut health = tokio::time::interval(Duration::from_secs(1));
+    if let Some(service) = embedded_service.as_ref() {
+        embedded_projection.publish(
+            &service.control,
+            &embedded_run,
+            &(host_graph)(),
+            &embedded_projection::LifecycleState::default(),
+        );
+    }
     let failure = AssertUnwindSafe(async {
         let failure = loop {
         tokio::select! {
@@ -4084,17 +4146,14 @@ async fn run_interactive_applications(
             }
             changed = embedded_lifecycle_rx.changed() => {
                 if changed.is_ok() {
-                    let (actor, lifecycle) = *embedded_lifecycle_rx.borrow_and_update();
-                    if embedded_lifecycle_update_is_current(
-                        actor,
-                        root_identity,
-                        embedded_root.is_some(),
-                    ) {
-                        if let (Some(identity), Some(service)) =
-                            (embedded_root_identity.as_ref(), embedded_service.as_ref())
-                        {
-                            publish_embedded_root_snapshot(&service.control, identity, lifecycle);
-                        }
+                    let states = (*embedded_lifecycle_rx.borrow_and_update()).clone();
+                    if let Some(service) = embedded_service.as_ref() {
+                        embedded_projection.publish(
+                            &service.control,
+                            &embedded_run,
+                            &(host_graph)(),
+                            &states,
+                        );
                     }
                 }
             }
@@ -4107,6 +4166,12 @@ async fn run_interactive_applications(
                         };
                         break Some(format!("embedded browser server failed: {detail}"));
                     }
+                    embedded_projection.publish(
+                        &service.control,
+                        &embedded_run,
+                        &(host_graph)(),
+                        &(*embedded_lifecycle_rx.borrow()).clone(),
+                    );
                 }
                 #[cfg(feature = "codex-compat")]
                 if process_observations.is_empty() {
@@ -4245,23 +4310,26 @@ async fn run_interactive_applications(
                     break Some("embedded browser command channel closed".into());
                 };
                 let control = &embedded_service.as_ref().expect("branch requires service").control;
-                let command_id = command.command_id.clone();
-                let Some(root) = embedded_root.as_ref().cloned() else {
-                    let error = "embedded root is unavailable";
-                    tracing::warn!(%error, command_id = %command_id, "embedded browser input was not admitted");
-                    control.publish("command.rejected", serde_json::json!({
-                        "commandId": command_id,
-                        "error": error,
-                    }));
-                    continue;
-                };
-                if let Err(error) = embedded_service::submit_browser_command(command, &root, control).await {
-                    tracing::warn!(%error, command_id = %command_id, "embedded browser input was not admitted");
-                    control.publish("command.rejected", serde_json::json!({
-                        "commandId": command_id,
-                        "error": error,
-                    }));
+                let command_id = command.command_id;
+                let nodes = (host_graph)();
+                let outcome = dispatch_embedded_browser_command(
+                    &command_id,
+                    command.command,
+                    &embedded_run,
+                    &nodes,
+                    &embedded_live,
+                    &embedded_projection,
+                    &embedded_conversations,
+                    &embedded_lifecycle_tx,
+                )
+                .await;
+                if let harness::server::CommandReceiptOutcome::Refused { reason, .. } = &outcome {
+                    tracing::warn!(%reason, command_id = %command_id, "embedded browser command was refused");
                 }
+                control.publish_command_receipt(harness::server::CommandReceipt {
+                    command_id,
+                    outcome,
+                });
             }
             Some(result) = embedded_tasks.join_next(), if !embedded_tasks.is_empty() => {
                 let (actor, local_actor, outcome) = match result {
@@ -4275,19 +4343,9 @@ async fn run_interactive_applications(
                     }
                     Some(ActorExitKind::Failed) | None => harness::server::HostActorLifecycle::Lost,
                 };
-                if actor == root_identity {
-                    embedded_lifecycle_tx.send_replace((Some(actor), lifecycle));
-                    if let (Some(identity), Some(service)) =
-                        (embedded_root_identity.as_ref(), embedded_service.as_ref())
-                    {
-                        publish_embedded_root_snapshot(&service.control, identity, lifecycle);
-                    }
-                }
+                embedded_lifecycle_tx.publish(actor, lifecycle);
                 embedded_cancellations.remove(&actor);
                 embedded_conversations.remove(&actor);
-                if actor == root_identity {
-                    embedded_root = None;
-                }
                 if let Some(waiters) = release_waiters.remove(&actor) {
                     for waiter in waiters {
                         waiter.answer(exomonad_actor::ResourceRelease::Released);
@@ -4415,9 +4473,25 @@ async fn run_interactive_applications(
                                 )),
                             };
                             let root_conversation = Arc::clone(&embedded.conversation);
+                            embedded_projection
+                                .attached(actor, root_conversation.identity());
                             embedded_conversations.insert(actor, Arc::clone(&root_conversation));
                             embedded_cancellations.insert(actor, embedded.cancellation.clone());
                             embedded_live.insert(actor);
+                            let lifecycle = if has_initial_input {
+                                harness::server::HostActorLifecycle::Running
+                            } else {
+                                harness::server::HostActorLifecycle::Waiting
+                            };
+                            embedded_lifecycle_tx.publish(actor, lifecycle);
+                            let lifecycle_states =
+                                (*embedded_lifecycle_rx.borrow()).clone();
+                            embedded_projection.publish(
+                                &service.control,
+                                &embedded_run,
+                                &(host_graph)(),
+                                &lifecycle_states,
+                            );
                             let runtime = Arc::clone(&service.runtime);
                             #[cfg(test)]
                             let test_transport = service.test_transport();
@@ -4476,19 +4550,6 @@ async fn run_interactive_applications(
                             // actor-owned readiness boundary; SessionReady below
                             // carries subsequent typed request input only.
                             if is_root {
-                                embedded_root = Some(Arc::clone(&root_conversation));
-                                let lifecycle = if has_initial_input {
-                                    harness::server::HostActorLifecycle::Running
-                                } else {
-                                    harness::server::HostActorLifecycle::Waiting
-                                };
-                                embedded_root_identity = Some(root_conversation.identity().clone());
-                                embedded_lifecycle_tx.send_replace((Some(actor), lifecycle));
-                                publish_embedded_root_snapshot(
-                                    &service.control,
-                                    root_conversation.identity(),
-                                    lifecycle,
-                                );
                                 readiness
                                     .send(ActorHostReadiness::EmbeddedReady {
                                         root: root_identity,
@@ -4672,20 +4733,12 @@ async fn run_interactive_applications(
                             cancel.send_replace(true);
                         }
                         embedded_conversations.remove(&actor);
-                        if actor == root_identity {
-                            embedded_root = None;
-                            let lifecycle = if terminal.kind == ActorExitKind::Failed {
-                                harness::server::HostActorLifecycle::Lost
-                            } else {
-                                harness::server::HostActorLifecycle::Retired
-                            };
-                            embedded_lifecycle_tx.send_replace((Some(actor), lifecycle));
-                            if let (Some(identity), Some(service)) =
-                                (embedded_root_identity.as_ref(), embedded_service.as_ref())
-                            {
-                                publish_embedded_root_snapshot(&service.control, identity, lifecycle);
-                            }
-                        }
+                        let lifecycle = if terminal.kind == ActorExitKind::Failed {
+                            harness::server::HostActorLifecycle::Lost
+                        } else {
+                            harness::server::HostActorLifecycle::Retired
+                        };
+                        embedded_lifecycle_tx.publish(actor, lifecycle);
                         if let Some(resources) = &launch_context.config.command_resources {
                             let producer = format!("{}-{}", actor.id.0, actor.incarnation.0);
                             if let Err(error) = resources.seal_producer(&producer).await {

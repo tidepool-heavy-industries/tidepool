@@ -16,6 +16,7 @@ use tokio::{
 use super::{
     embedded_harness::{EmbeddedConversation, EmbeddedHarnessRuntime},
     embedded_policy::EmbeddedPolicyInstallation,
+    embedded_projection::LifecyclePublisher,
 };
 use crate::exomonad::EmbeddedLaunchConfig;
 
@@ -187,10 +188,7 @@ pub(super) async fn drive_conversation(
     effort: Effort,
     instructions: String,
     cancellation: watch::Receiver<bool>,
-    lifecycle: watch::Sender<(
-        Option<exomonad_actor::ActorRef>,
-        harness::server::HostActorLifecycle,
-    )>,
+    lifecycle: impl LifecyclePublisher,
     actor_ref: exomonad_actor::ActorRef,
 ) -> Result<(), String> {
     drive_conversation_with_transport::<CodexFileAuth, _>(
@@ -216,10 +214,7 @@ pub(super) async fn drive_conversation_with_transport<A, C>(
     effort: Effort,
     instructions: String,
     mut cancellation: watch::Receiver<bool>,
-    lifecycle: watch::Sender<(
-        Option<exomonad_actor::ActorRef>,
-        harness::server::HostActorLifecycle,
-    )>,
+    lifecycle: impl LifecyclePublisher,
     actor_ref: exomonad_actor::ActorRef,
     transport: C,
 ) -> Result<(), String>
@@ -230,6 +225,7 @@ where
     let EmbeddedConversation {
         conversation,
         mut incoming,
+        round_control,
         ..
     } = embedded;
     let actor = conversation.identity().actor.clone();
@@ -288,40 +284,66 @@ where
             .send(first)
             .map_err(|_| "embedded Engine wake receiver closed")?;
         let recovering_this_round = recovering;
-        lifecycle.send_replace((
-            Some(actor_ref),
-            harness::server::HostActorLifecycle::Running,
-        ));
-        let run = async {
-            if recovering_this_round {
-                engine
-                    .run_recovering_embedded(
-                        head.clone(),
-                        Vec::new(),
-                        cancellation.clone(),
-                        forwarded,
-                    )
-                    .await
-            } else {
-                engine
-                    .run_embedded(head.clone(), Vec::new(), cancellation.clone(), forwarded)
-                    .await
+        lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Running);
+        let mut lifetime_stopped = false;
+        let result = {
+            let round = round_control
+                .begin()
+                .map_err(|error| format!("could not begin embedded Engine round: {error}"))?;
+            let run = async {
+                if recovering_this_round {
+                    engine
+                        .run_recovering_embedded(
+                            head.clone(),
+                            Vec::new(),
+                            round.cancellation(),
+                            forwarded,
+                        )
+                        .await
+                } else {
+                    engine
+                        .run_embedded(head.clone(), Vec::new(), round.cancellation(), forwarded)
+                        .await
+                }
+            };
+            tokio::pin!(run);
+            let mut incoming_closed = false;
+            loop {
+                tokio::select! {
+                    biased;
+                    changed = cancellation.changed() => {
+                        if changed.is_err() || *cancellation.borrow() {
+                            lifetime_stopped = true;
+                            round.cancel();
+                            break run.await;
+                        }
+                    }
+                    result = &mut run => break result,
+                    wake = incoming.recv(), if !incoming_closed => match wake {
+                        Some(wake) => { forward.send(wake).ok(); }
+                        None => { incoming_closed = true; }
+                    },
+                }
             }
         };
-        tokio::pin!(run);
-        let mut incoming_closed = false;
-        let completion = loop {
-            tokio::select! {
-                biased;
-                result = &mut run => break result.map_err(|error| error.to_string())?,
-                wake = incoming.recv(), if !incoming_closed => match wake {
-                    Some(wake) => { forward.send(wake).ok(); }
-                    None => { incoming_closed = true; }
-                },
+        let interrupted = matches!(&result, Err(error) if cancelled_head(error).is_some());
+        let cleanup_failure = match &result {
+            Err(error @ harness::engine::EngineError::Cleanup { primary, .. })
+                if cancelled_head(primary).is_some() =>
+            {
+                Some(error.to_string())
             }
+            _ => None,
+        };
+        let durable_head = match result {
+            Ok(completion) => Some(completion.head_request),
+            Err(error) => match cancelled_head(&error) {
+                Some(request_head) => request_head.or_else(|| head.clone()),
+                None => return Err(error.to_string()),
+            },
         };
         if !store
-            .advance_agent_head(&actor, head.as_ref(), Some(&completion.head_request))
+            .advance_agent_head(&actor, head.as_ref(), durable_head.as_ref())
             .map_err(|error| error.to_string())?
         {
             return Err(format!(
@@ -329,11 +351,31 @@ where
                 actor.0
             ));
         }
-        lifecycle.send_replace((
-            Some(actor_ref),
-            harness::server::HostActorLifecycle::Waiting,
-        ));
+        if lifetime_stopped || *cancellation.borrow() {
+            return Err("engine cancelled".into());
+        }
+        if interrupted {
+            if let Some(error) = cleanup_failure {
+                return Err(error);
+            }
+            // The interrupted request and its settled claims are durable.
+            // Reconcile exact claims before the next model request.
+            recovering = true;
+            lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Waiting);
+            continue;
+        }
+        lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Waiting);
         recovering = false;
+    }
+}
+
+fn cancelled_head(
+    error: &harness::engine::EngineError,
+) -> Option<Option<harness::model::RequestId>> {
+    match error {
+        harness::engine::EngineError::Cancelled { head_request } => Some(head_request.clone()),
+        harness::engine::EngineError::Cleanup { primary, .. } => cancelled_head(primary),
+        _ => None,
     }
 }
 
@@ -348,15 +390,18 @@ pub(super) async fn submit_browser_command(
                 .input(&command.command_id, "browser", &text)
                 .await
                 .map_err(|error| error.to_string())?;
-            control.publish(
-                "command.admitted",
-                serde_json::json!({
-                    "commandId": command.command_id,
-                    "envelopeId": receipt.envelope_id,
-                    "wakeError": receipt.wake_error,
-                }),
-            );
+            control.publish_command_receipt(harness::server::CommandReceipt {
+                command_id: command.command_id,
+                outcome: harness::server::CommandReceiptOutcome::Admitted {
+                    target: None,
+                    envelope_id: receipt.envelope_id.to_string(),
+                    wake_error: receipt.wake_error.clone(),
+                },
+            });
             Ok(receipt)
+        }
+        ClientCommand::Host { .. } => {
+            Err("targeted host commands must be routed through the embedded actor owner".into())
         }
     }
 }

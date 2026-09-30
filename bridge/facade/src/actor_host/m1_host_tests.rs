@@ -184,30 +184,6 @@ async fn browser_snapshot_until(
     .unwrap_or_else(|_| panic!("host did not publish {lifecycle} snapshot"))
 }
 
-#[test]
-fn delayed_embedded_lifecycle_updates_cannot_replace_terminal_root_projection() {
-    let retired = ActorRef::first(exomonad_actor::ActorId(7));
-    let replacement = ActorRef {
-        id: retired.id,
-        incarnation: exomonad_actor::Incarnation(retired.incarnation.0 + 1),
-    };
-    assert!(embedded_lifecycle_update_is_current(
-        Some(replacement),
-        replacement,
-        true,
-    ));
-    assert!(!embedded_lifecycle_update_is_current(
-        Some(retired),
-        replacement,
-        true,
-    ));
-    assert!(!embedded_lifecycle_update_is_current(
-        Some(replacement),
-        replacement,
-        false,
-    ));
-}
-
 #[tokio::test]
 async fn production_host_runs_browser_haskell_reconnects_without_replay_and_retires_root() {
     let files = tempfile::tempdir().unwrap();
@@ -271,6 +247,7 @@ async fn production_host_runs_browser_haskell_reconnects_without_replay_and_reti
     let (readiness_tx, mut readiness_rx) = mpsc::unbounded_channel();
     let (shutdown_tx, shutdown_rx) = watch::channel(None);
     let (_config_tx, config_rx) = watch::channel(campaign.config.clone());
+    let host_graph_forest = Arc::clone(&campaign.forest);
     let fleet = InteractiveFleet {
         root: campaign.actor.clone(),
         config: campaign.config.clone(),
@@ -291,6 +268,7 @@ async fn production_host_runs_browser_haskell_reconnects_without_replay_and_reti
         .unwrap(),
         recovered_threads: Arc::new(BTreeMap::new()),
         recovered_root_predecessor: None,
+        host_graph: Arc::new(move || host_graph_forest.inspect_host_graph()),
     };
     let host = tokio::spawn(run_interactive_applications(
         lifecycle_rx,
@@ -678,6 +656,7 @@ async fn production_host_marks_embedded_root_ready_and_retires_invalid_auth_fail
     let (shutdown_tx, shutdown_rx) = watch::channel(None);
     let (_config_tx, config_rx) = watch::channel(campaign.config.clone());
     let actor = campaign.actor.clone();
+    let host_graph_forest = Arc::clone(&campaign.forest);
     let fleet = InteractiveFleet {
         root: actor,
         config: campaign.config.clone(),
@@ -698,6 +677,7 @@ async fn production_host_marks_embedded_root_ready_and_retires_invalid_auth_fail
         .unwrap(),
         recovered_threads: Arc::new(BTreeMap::new()),
         recovered_root_predecessor: None,
+        host_graph: Arc::new(move || host_graph_forest.inspect_host_graph()),
     };
     let host = tokio::spawn(run_interactive_applications(
         lifecycle_rx,
