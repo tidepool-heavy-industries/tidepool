@@ -113,6 +113,7 @@ impl RuntimeAdmissionOwner {
 /// The detached scope retains the binding and native shares captured at mint.
 pub struct RuntimeLexicalScopeLease {
     owner: Arc<RuntimeAdmissionOwner>,
+    owner_epoch: u64,
     scope: ScopeId,
 }
 impl RuntimeLexicalScopeLease {
@@ -1475,8 +1476,27 @@ impl PersistentSession {
             .ok_or(SessionError::DeadScope(source))?;
         Ok(Arc::new(RuntimeLexicalScopeLease {
             owner: self.admission_owner().clone(),
+            owner_epoch: self.admission_owner().epoch(),
             scope,
         }))
+    }
+    /// Validate a retained placement without minting another scope or changing
+    /// its custody. Owner transfer invalidates an unconsumed placement grant.
+    pub fn validate_lexical_scope_lease(
+        &self,
+        scope: ScopeId,
+        lease: &RuntimeLexicalScopeLease,
+    ) -> Result<(), SessionError> {
+        if !Arc::ptr_eq(&lease.owner, self.admission_owner())
+            || lease.owner_epoch != self.admission_owner().epoch()
+            || lease.scope != scope
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        if !self.scope_tree().is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
+        Ok(())
     }
     pub fn mint_scope_from_lease(
         &mut self,
@@ -1663,6 +1683,7 @@ impl PersistentSession {
             durable_owner,
             scope_lease: Arc::new(RuntimeLexicalScopeLease {
                 owner: self.admission_owner().clone(),
+                owner_epoch: self.admission_owner().epoch(),
                 scope: private_scope,
             }),
             admitted,
@@ -2804,6 +2825,56 @@ mod tests {
         assert_eq!(session.resolve_in(child, "capturedRoot").unwrap().id, id);
         session.retire_scope(child);
         assert!(session.bindings().get(id).is_none());
+    }
+
+    #[test]
+    fn lexical_placement_validation_fences_foreign_scope_epoch_and_retirement() {
+        let root = tempfile::tempdir().unwrap();
+        let make_session = || {
+            PersistentSession::new(
+                Some(
+                    SessionLib::open(SessionId(997), root.path(), ModuleEnv::standalone_default())
+                        .unwrap(),
+                ),
+                1024 * 1024,
+            )
+        };
+        let mut first = make_session();
+        let mut second = make_session();
+        let source = first.mint_scope(ScopeId::ROOT).unwrap();
+        second.mint_scope(ScopeId::ROOT).unwrap();
+        let lease = first.retain_lexical_scope(source).unwrap();
+        let foreign = second.retain_lexical_scope(source).unwrap();
+        assert_eq!(lease.scope(), foreign.scope());
+        first
+            .validate_lexical_scope_lease(lease.scope(), &lease)
+            .unwrap();
+        assert!(matches!(
+            second.validate_lexical_scope_lease(lease.scope(), &lease),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
+        assert!(matches!(
+            first.validate_lexical_scope_lease(source, &lease),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
+        let next = first.prepare_execution_admission_epoch_advance().unwrap();
+        first.invalidate_execution_admissions_after_owner_transfer(next);
+        assert!(matches!(
+            first.validate_lexical_scope_lease(lease.scope(), &lease),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
+        // Custody survives invalidation; only the unconsumed placement grant
+        // is stale. A newly captured exact lease can authorize this owner.
+        assert!(first.scope_tree().is_live(lease.scope()));
+        let fresh = first.retain_lexical_scope(lease.scope()).unwrap();
+        first
+            .validate_lexical_scope_lease(fresh.scope(), &fresh)
+            .unwrap();
+        first.retire_scope(fresh.scope());
+        assert!(matches!(
+            first.validate_lexical_scope_lease(fresh.scope(), &fresh),
+            Err(SessionError::DeadScope(_))
+        ));
     }
 
     #[test]

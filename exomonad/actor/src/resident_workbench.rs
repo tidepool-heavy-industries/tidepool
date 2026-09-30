@@ -7105,6 +7105,41 @@ where
             .await
     }
 
+    /// Consume the child's original retained placement under the same
+    /// checkout that initializes its canonical durable public surface.
+    pub(crate) async fn initialize_fork_child_public_owner(
+        &self,
+        context: crate::ActorSessionContext,
+        owner: tidepool_runtime::session::RecoveryPublicOwner,
+        lease: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    ) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, context, _| {
+                let scope = context.placement.lexical_scope;
+                session.validate_lexical_scope_lease(scope, &lease)?;
+                session
+                    .initialize_durable_public_scope(owner, scope)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })
+            })
+            .await
+    }
+
+    pub(crate) async fn validate_fork_child_scope(
+        &self,
+        context: crate::ActorSessionContext,
+        lease: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, context, _| {
+                session
+                    .validate_lexical_scope_lease(context.placement.lexical_scope, &lease)
+                    .map_err(Into::into)
+            })
+            .await
+    }
+
     /// Transfer only the journal-certified durable predecessor to this exact
     /// newly admitted placement. Runtime fences all pre-transfer offers.
     pub(crate) async fn transfer_recovered_root_public_owner(
@@ -9810,11 +9845,15 @@ where
         &self,
         session_id: tidepool_repr::SessionId,
         scope: ScopeId,
-    ) -> Result<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>, ResidentActorWorkbenchError> {
+    ) -> Result<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>, ResidentActorWorkbenchError>
+    {
         self.access
-            .with_host_machine("retain-fork-release-scope", session_id, None, move |session, _| {
-                session.retain_lexical_scope(scope).map_err(Into::into)
-            })
+            .with_host_machine(
+                "retain-fork-release-scope",
+                session_id,
+                None,
+                move |session, _| session.retain_lexical_scope(scope).map_err(Into::into),
+            )
             .await
     }
 

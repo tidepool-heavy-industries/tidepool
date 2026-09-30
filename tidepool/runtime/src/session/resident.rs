@@ -2659,6 +2659,14 @@ where
         Ok(self.state.mint_scope_from_lease(lease)?)
     }
 
+    pub fn validate_lexical_scope_lease(
+        &self,
+        scope: ScopeId,
+        lease: &super::RuntimeLexicalScopeLease,
+    ) -> Result<(), ResidentError> {
+        Ok(self.state.validate_lexical_scope_lease(scope, lease)?)
+    }
+
     /// The materialized bindings visible while a compiled cell waits to run.
     /// A later item in that same cell may still import one of these identities
     /// after an earlier item shadows its public name, so preparation retains
