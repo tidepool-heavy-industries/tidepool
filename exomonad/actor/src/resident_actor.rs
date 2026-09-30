@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+mod after_tool_wait;
 #[cfg(test)]
 mod capture_workspace_tests;
 mod clock_wait;
@@ -991,6 +992,7 @@ struct WorkbenchUnitExecution<'a> {
     total: usize,
     named_tool: bool,
     operations: &'a mut Vec<WorkbenchOperationReceipt>,
+    effect_ordinal: &'a mut usize,
     display_remaining: &'a mut usize,
     command_output: &'a mut Vec<String>,
 }
@@ -1298,6 +1300,22 @@ struct WorkbenchCursor {
     started: Option<Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>>,
     unit: WorkbenchUnitState,
     tool_dispatch: Option<Arc<RootCustody>>,
+    completed: Option<WorkbenchItemReceipt>,
+    after_tool: Option<WorkbenchAfterToolExecution>,
+}
+
+enum WorkbenchAfterToolAnswer {
+    Settled(Result<crate::after_tool::Annotation, ResidentActorWorkbenchError>),
+    TimedOut,
+}
+
+struct WorkbenchAfterToolExecution {
+    frame: after_tool_wait::AfterToolFrame,
+    receipt: WorkbenchItemReceipt,
+    prepared: Option<Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>>,
+    answer: Option<WorkbenchAfterToolAnswer>,
+    enforce_deadline: bool,
+    span: tracing::Span,
 }
 
 struct WorkbenchFragmentExecution {
@@ -1308,7 +1326,6 @@ struct WorkbenchFragmentExecution {
     resume_failure: Option<ResidentActorWorkbenchError>,
     fragment: Option<ResidentWorkbenchFragment>,
     outcome: Option<ResidentOutcome>,
-    effect_ordinal: usize,
 }
 
 impl WorkbenchFragmentExecution {
@@ -1320,13 +1337,13 @@ impl WorkbenchFragmentExecution {
             resume_failure: None,
             fragment: Some(fragment),
             outcome: Some(outcome),
-            effect_ordinal: 0,
         }
     }
 }
 
 #[derive(Default)]
 struct WorkbenchUnitState {
+    effect_ordinal: usize,
     operations: Vec<WorkbenchOperationReceipt>,
     command_output: Vec<String>,
     display_remaining: usize,
@@ -1348,6 +1365,8 @@ impl Default for WorkbenchCursor {
             started: None,
             unit: WorkbenchUnitState::default(),
             tool_dispatch: None,
+            completed: None,
+            after_tool: None,
         }
     }
 }
@@ -1417,6 +1436,8 @@ enum WorkbenchRunAdvance {
     ParkUnit,
     ParkNative,
     ParkEffect,
+    ParkAfterToolStart,
+    ParkAfterToolFinish,
 }
 
 enum FragmentAdvance {
@@ -6571,7 +6592,7 @@ where
                                 .expect("running unit owns its outcome"),
                         },
                     };
-                    if execution_state.park_effects && !execution_state.after_tool_active {
+                    if execution_state.park_effects {
                         assert!(
                             current.native_start.is_none(),
                             "one captured native request"
@@ -6607,8 +6628,8 @@ where
                             effect: effect.clone(),
                         },
                     );
-                    let ordinal = current.effect_ordinal;
-                    current.effect_ordinal += 1;
+                    let ordinal = *unit.effect_ordinal;
+                    *unit.effect_ordinal += 1;
                     // Timed from here, not from `capture_boundary` above:
                     // this brackets the boundary's own service work, which
                     // is what `record_workbench_operation` reports as
@@ -6624,9 +6645,7 @@ where
                         effect = %effect,
                         "effect boundary captured"
                     );
-                    let boundary = if execution_state.park_effects
-                        && !execution_state.after_tool_active
-                    {
+                    let boundary = if execution_state.park_effects {
                         match OwnedWorkbenchWait::capture(boundary) {
                             Ok(wait) => {
                                 if matches!(
@@ -7194,6 +7213,7 @@ where
         payload: serde_json::Value,
     ) -> Result<crate::after_tool::Annotation, ResidentActorWorkbenchError> {
         let mut operations = Vec::new();
+        let mut effect_ordinal = 0;
         let mut display_remaining = 16usize * 1024;
         let mut command_output = Vec::new();
         let step = workbench
@@ -7215,6 +7235,7 @@ where
                             total: 1,
                             named_tool: true,
                             operations: &mut operations,
+                            effect_ordinal: &mut effect_ordinal,
                             display_remaining: &mut display_remaining,
                             command_output: &mut command_output,
                         },
@@ -7519,6 +7540,160 @@ where
             }
             while cursor.index < request.items.len() {
                 let source = request.items[cursor.index].clone();
+                if let Some(mut receipt) = cursor.completed.take() {
+                    let command_prefix = cursor.unit.command_output.join("\n");
+                    if let Some(checked) = &cursor.cell_check {
+                        let spent = if checked.items[cursor.index].verdict.kind
+                            == tidepool_runtime::session::TurnKind::Expr
+                        {
+                            receipt.output.chars().count()
+                        } else {
+                            command_prefix.chars().count()
+                        };
+                        cursor.cell_display_remaining =
+                            cursor.cell_display_remaining.saturating_sub(spent);
+                    }
+                    if self.environment.fork_groups.has_ready(context.actor) {
+                        let publication = if effects.publication.boundary().is_none() {
+                            self.environment.fork_groups.publish_ready(context.actor)
+                        } else {
+                            Ok(Vec::new())
+                        };
+                        if let Err(source) = publication {
+                            settle_prepared_operations(
+                                &mut cursor.unit.operations,
+                                WorkbenchOperationDisposition::Unknown,
+                            );
+                            return Err(workbench_failure_after_operations(
+                                &cursor.receipts,
+                                cursor.index,
+                                request.items.len(),
+                                ResidentActorWorkbenchError::ActorProtocol(source.to_string()),
+                                std::mem::take(&mut cursor.unit.operations),
+                            ));
+                        }
+                        settle_prepared_operations(
+                            &mut cursor.unit.operations,
+                            WorkbenchOperationDisposition::Committed,
+                        );
+                    } else if self.environment.fork_groups.has_incomplete(context.actor) {
+                        self.abort_incomplete_groups(
+                            kernel,
+                            context.actor,
+                            "Haskell input ended before unfold admission committed",
+                        )
+                        .await;
+                        settle_prepared_operations(
+                            &mut cursor.unit.operations,
+                            WorkbenchOperationDisposition::Rejected,
+                        );
+                        cursor.receipts.push(WorkbenchItemReceipt {
+                            diagnostics: Vec::new(),
+                            index: cursor.index,
+                            kind: None,
+                            span: None,
+                            source_items: Vec::new(),
+                            status: WorkbenchItemStatus::Rejected,
+                            output: "unfold admission ended without committing every fork group"
+                                .into(),
+                            warnings: Vec::new(),
+                            installed_bindings: Vec::new(),
+                            operations: std::mem::take(&mut cursor.unit.operations),
+                            terminal_transfer: None,
+                            failure_layer: Some(WorkbenchFailureLayer::Effect),
+                        });
+                        return Ok(WorkbenchRunAdvance::Complete(KernelStep::Continue(
+                            workbench_response(
+                                WorkbenchRunStatus::Rejected,
+                                std::mem::take(&mut cursor.receipts),
+                                cursor.index,
+                                request.items.len(),
+                                cursor
+                                    .cell_check
+                                    .as_ref()
+                                    .map(|checked| checked.items.as_slice()),
+                            ),
+                        )));
+                    }
+                    receipt.operations = std::mem::take(&mut cursor.unit.operations);
+                    cursor.receipts.push(receipt);
+                    cursor.index += 1;
+                    continue;
+                }
+                if cursor.after_tool.is_some() {
+                    let prepared = cursor
+                        .after_tool
+                        .as_mut()
+                        .expect("same after-tool frame")
+                        .prepared
+                        .take();
+                    let mut settled = match prepared {
+                        Some(Ok(ResidentWorkbenchStep::Running { fragment, outcome })) => {
+                            cursor.running =
+                                Some(WorkbenchFragmentExecution::new(*fragment, *outcome));
+                            None
+                        }
+                        Some(step) => Some(step),
+                        None => None,
+                    };
+                    if cursor.running.is_some() {
+                        match self
+                            .settle_fragment_effects(
+                                kernel,
+                                context,
+                                effects,
+                                workbench,
+                                cursor
+                                    .running
+                                    .as_mut()
+                                    .expect("after-tool retains original fragment cursor"),
+                                WorkbenchUnitExecution {
+                                    execution: execution.as_ref(),
+                                    input_unit_index: cursor.index,
+                                    total: request.items.len(),
+                                    named_tool: true,
+                                    operations: &mut cursor.unit.operations,
+                                    effect_ordinal: &mut cursor.unit.effect_ordinal,
+                                    display_remaining: &mut cursor.unit.display_remaining,
+                                    command_output: &mut cursor.unit.command_output,
+                                },
+                            )
+                            .await
+                        {
+                            Ok(FragmentAdvance::ParkEffect) => {
+                                return Ok(WorkbenchRunAdvance::ParkEffect)
+                            }
+                            Ok(FragmentAdvance::ParkNative) => {
+                                return Ok(WorkbenchRunAdvance::ParkNative)
+                            }
+                            Ok(FragmentAdvance::Settled(step)) => settled = Some(Ok(step)),
+                            Err(error) => settled = Some(Err(error)),
+                        }
+                        cursor.running = None;
+                    }
+                    let answer = match settled.expect("after-tool settles or yields one owned task")
+                    {
+                        Ok(ResidentWorkbenchStep::Committed { output, .. }) => {
+                            crate::after_tool::Annotation::decode(&output)
+                                .map_err(ResidentActorWorkbenchError::ActorProtocol)
+                        }
+                        Ok(ResidentWorkbenchStep::Rejected(rejection)) => {
+                            Err(ResidentActorWorkbenchError::ActorProtocol(rejection.output))
+                        }
+                        Ok(_) => Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "the after-tool slot ended in a transfer instead of an annotation"
+                                .into(),
+                        )),
+                        Err(error) => Err(error),
+                    };
+                    let after_tool = cursor
+                        .after_tool
+                        .as_mut()
+                        .expect("same completed slot frame");
+                    after_tool.answer = Some(WorkbenchAfterToolAnswer::Settled(answer));
+                    after_tool.enforce_deadline = false;
+                    return Ok(WorkbenchRunAdvance::ParkAfterToolFinish);
+                }
                 let mut step = None;
                 if cursor.running.is_none() {
                     let started = match cursor.started.take() {
@@ -7666,6 +7841,7 @@ where
                                     total: request.items.len(),
                                     named_tool: request.tool_call().is_some(),
                                     operations: &mut cursor.unit.operations,
+                                    effect_ordinal: &mut cursor.unit.effect_ordinal,
                                     display_remaining: &mut cursor.unit.display_remaining,
                                     command_output: &mut cursor.unit.command_output,
                                 },
@@ -7769,99 +7945,8 @@ where
                         } else {
                             None
                         };
-                        let output = match hosted_call.or(cell_call) {
-                            Some((call, dispatch)) => {
-                                match installed_tools
-                                    .as_ref()
-                                    .and_then(crate::InstalledToolLease::tools)
-                                {
-                                    Some(tools) => {
-                                        self.annotate_tool_result(
-                                            kernel, context, effects, &workbench, tools, dispatch,
-                                            &call, output,
-                                        )
-                                        .await
-                                    }
-                                    None => output,
-                                }
-                            }
-                            None => output,
-                        };
-                        if let Some(checked) = &cursor.cell_check {
-                            let spent = if checked.items[cursor.index].verdict.kind
-                                == tidepool_runtime::session::TurnKind::Expr
-                            {
-                                output.chars().count()
-                            } else {
-                                command_prefix.chars().count()
-                            };
-                            cursor.cell_display_remaining =
-                                cursor.cell_display_remaining.saturating_sub(spent);
-                        }
-                        if self.environment.fork_groups.has_ready(context.actor) {
-                            let publication = if effects.publication.boundary().is_none() {
-                                self.environment.fork_groups.publish_ready(context.actor)
-                            } else {
-                                Ok(Vec::new())
-                            };
-                            if let Err(source) = publication {
-                                settle_prepared_operations(
-                                    &mut cursor.unit.operations,
-                                    WorkbenchOperationDisposition::Unknown,
-                                );
-                                return Err(workbench_failure_after_operations(
-                                    &cursor.receipts,
-                                    cursor.index,
-                                    request.items.len(),
-                                    ResidentActorWorkbenchError::ActorProtocol(source.to_string()),
-                                    std::mem::take(&mut cursor.unit.operations),
-                                ));
-                            }
-                            settle_prepared_operations(
-                                &mut cursor.unit.operations,
-                                WorkbenchOperationDisposition::Committed,
-                            );
-                        } else if self.environment.fork_groups.has_incomplete(context.actor) {
-                            self.abort_incomplete_groups(
-                                kernel,
-                                context.actor,
-                                "Haskell input ended before unfold admission committed",
-                            )
-                            .await;
-                            settle_prepared_operations(
-                                &mut cursor.unit.operations,
-                                WorkbenchOperationDisposition::Rejected,
-                            );
-                            cursor.receipts.push(WorkbenchItemReceipt {
-                                diagnostics: Vec::new(),
-                                index: cursor.index,
-                                kind: None,
-                                span: None,
-                                source_items: Vec::new(),
-                                status: WorkbenchItemStatus::Rejected,
-                                output:
-                                    "unfold admission ended without committing every fork group"
-                                        .into(),
-                                warnings: Vec::new(),
-                                installed_bindings: Vec::new(),
-                                operations: std::mem::take(&mut cursor.unit.operations),
-                                terminal_transfer: None,
-                                failure_layer: Some(WorkbenchFailureLayer::Effect),
-                            });
-                            return Ok(WorkbenchRunAdvance::Complete(KernelStep::Continue(
-                                workbench_response(
-                                    WorkbenchRunStatus::Rejected,
-                                    std::mem::take(&mut cursor.receipts),
-                                    cursor.index,
-                                    request.items.len(),
-                                    cursor
-                                        .cell_check
-                                        .as_ref()
-                                        .map(|checked| checked.items.as_slice()),
-                                ),
-                            )));
-                        }
-                        cursor.receipts.push(WorkbenchItemReceipt {
+                        let call = hosted_call.or(cell_call);
+                        let mut receipt = WorkbenchItemReceipt {
                             diagnostics,
                             index: cursor.index,
                             kind: None,
@@ -7871,10 +7956,61 @@ where
                             output,
                             warnings,
                             installed_bindings,
-                            operations: std::mem::take(&mut cursor.unit.operations),
+                            operations: Vec::new(),
                             terminal_transfer: None,
                             failure_layer: None,
-                        });
+                        };
+                        if let Some((call, dispatch)) = call {
+                            if let Some(lease) = installed_tools.as_ref().filter(|lease| {
+                                lease.tools().is_some_and(|tools| {
+                                    tools
+                                        .slots
+                                        .iter()
+                                        .any(|slot| slot == crate::after_tool::AFTER_TOOL_SLOT)
+                                })
+                            }) {
+                                if effects.park_effects {
+                                    let frame = after_tool_wait::capture(
+                                        lease.clone(),
+                                        dispatch,
+                                        call,
+                                        std::mem::take(&mut receipt.output),
+                                        self.after_tool.begin(),
+                                        cursor.unit.display_remaining,
+                                    );
+                                    let span = tracing::info_span!("after_tool_slot",
+                                        slot = %crate::after_tool::AFTER_TOOL_SLOT,
+                                        tool = %frame.call().name,
+                                        actor = %context.actor,
+                                        revision = %frame.revision(), ordinal = frame.ordinal(),
+                                    );
+                                    cursor.after_tool = Some(WorkbenchAfterToolExecution {
+                                        frame,
+                                        receipt,
+                                        prepared: None,
+                                        answer: None,
+                                        enforce_deadline: true,
+                                        span,
+                                    });
+                                    effects.after_tool_active = true;
+                                    return Ok(WorkbenchRunAdvance::ParkAfterToolStart);
+                                }
+                                receipt.output = self
+                                    .annotate_tool_result(
+                                        kernel,
+                                        context,
+                                        effects,
+                                        workbench,
+                                        lease.tools().expect("selected after-tool installation"),
+                                        dispatch,
+                                        &call,
+                                        receipt.output,
+                                    )
+                                    .await;
+                            }
+                        }
+                        cursor.completed = Some(receipt);
+                        continue;
                     }
                     ResidentWorkbenchStep::Rejected(rejection) => {
                         let tidepool_runtime::session::CompileRejection {
@@ -8214,7 +8350,6 @@ where
                         unreachable!("running workbench steps are settled above")
                     }
                 }
-                cursor.index += 1;
             }
             Ok(WorkbenchRunAdvance::Complete(KernelStep::Continue(
                 workbench_response(
@@ -9525,7 +9660,9 @@ where
                     WorkbenchRunAdvance::Complete(step) => step,
                     WorkbenchRunAdvance::ParkEffect
                     | WorkbenchRunAdvance::ParkUnit
-                    | WorkbenchRunAdvance::ParkNative => {
+                    | WorkbenchRunAdvance::ParkNative
+                    | WorkbenchRunAdvance::ParkAfterToolStart
+                    | WorkbenchRunAdvance::ParkAfterToolFinish => {
                         unreachable!("legacy workbench remains serial")
                     }
                 });

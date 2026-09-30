@@ -107,34 +107,18 @@ impl AfterToolFrame {
     }
 }
 
-pub(super) struct AfterToolPrepared {
-    frame: AfterToolFrame,
-    step: Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>,
-}
-
-impl AfterToolPrepared {
-    pub(super) fn into_parts(
-        self,
-    ) -> (
-        AfterToolFrame,
-        Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>,
-    ) {
-        (self.frame, self.step)
-    }
-}
-
 /// Only the original workbench's native begin runs here. The actor applies the
 /// returned step under its existing fence and owns effect/timeout settlement.
 pub(super) async fn prepare<H, O>(
-    frame: AfterToolFrame,
+    frame: &AfterToolFrame,
     workbench: &crate::ResidentActorWorkbench<H, O>,
     context: ActorSessionContext,
-) -> AfterToolPrepared
+) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    let step = if frame.tools.actor() != context.actor {
+    if frame.tools.actor() != context.actor {
         Err(ResidentActorWorkbenchError::ActorProtocol(
             "after-tool lease belongs to another actor incarnation".into(),
         ))
@@ -150,11 +134,10 @@ where
         workbench
             .begin_after_tool(
                 context,
-                Arc::clone(&frame.dispatch),
+                Arc::clone(frame.dispatch()),
                 frame.call.name.clone(),
                 frame.payload(),
             )
             .await
-    };
-    AfterToolPrepared { frame, step }
+    }
 }

@@ -225,6 +225,7 @@ struct OwnedExecution<H, O> {
     timing: Option<crate::call_timing::CallScope>,
     cleanup: crate::resident_workbench::ParkedHoleAbortGuard,
     resources: Arc<ExecutionResourceOwners>,
+    observation: crate::ActorRuntimeObservationHandle,
 }
 
 pub(super) struct WorkbenchUnitStart {
@@ -396,11 +397,70 @@ where
     {
         OwnedWorkbenchTask::new(Box::pin(async move {
             let (timing, cleanup) = owned.scopes();
-            let completed = timing.scope(cleanup.scope(run(&mut owned))).await;
+            let deadline = owned
+                .state
+                .cursor
+                .after_tool
+                .as_ref()
+                .filter(|slot| slot.enforce_deadline)
+                .map(|slot| (slot.frame.deadline(), slot.frame.entered()));
+            let span = owned
+                .state
+                .cursor
+                .after_tool
+                .as_ref()
+                .map(|slot| slot.span.clone())
+                .unwrap_or_else(tracing::Span::none);
+            let observation = owned.observation.clone();
+            let index = owned.state.cursor.index;
+            let total = owned.state.request.items.len();
+            let operation = async {
+                    match deadline {
+                        Some((deadline, entered)) => {
+                            let operation = run(&mut owned);
+                            tokio::pin!(operation);
+                            let mut progress = tokio::time::interval_at(
+                                entered + crate::after_tool::AFTER_TOOL_PROGRESS,
+                                crate::after_tool::AFTER_TOOL_PROGRESS,
+                            );
+                            loop {
+                                tokio::select! {
+                                    biased;
+                                    completed = &mut operation => break Some(completed),
+                                    () = tokio::time::sleep_until(deadline) => break None,
+                                    _ = progress.tick() => observation.publish_workbench_posture(
+                                        crate::ActorWorkbenchPosture::AwaitingEffect {
+                                            input_unit_index: index, total,
+                                            effect: format!("after-tool slot, {}s elapsed", entered.elapsed().as_secs()),
+                                        },
+                                    ),
+                                }
+                            }
+                        },
+                        None => Some(run(&mut owned).await),
+                    }
+                }.instrument(span.clone());
+            let completed = timing.scope(cleanup.scope(operation)).await;
             OwnedWorkbenchCompletion::advance(move |behavior: &mut Self, kernel| {
                 let (timing, cleanup) = owned.scopes();
-                timing
-                    .sync_scope(|| cleanup.sync_scope(|| apply(behavior, kernel, owned, completed)))
+                timing.sync_scope(|| {
+                    cleanup.sync_scope(|| match completed {
+                        Some(completed) => apply(behavior, kernel, owned, completed),
+                        None => {
+                            let slot = owned
+                                .state
+                                .cursor
+                                .after_tool
+                                .as_mut()
+                                .expect("timeout retains the original after-tool frame");
+                            slot.answer = Some(WorkbenchAfterToolAnswer::TimedOut);
+                            slot.enforce_deadline = false;
+                            Ok(WorkbenchAdvance::Park(
+                                behavior.finish_owned_after_tool_task(owned, kernel.clone()),
+                            ))
+                        }
+                    })
+                })
             })
         }))
     }
@@ -489,6 +549,7 @@ where
             resources.clone(),
         );
         let owned = OwnedExecution {
+            observation: self.runtime_observation.clone(),
             state: WorkbenchExecutionState {
                 effects: WorkbenchEffectState {
                     park_effects: true,
@@ -623,7 +684,9 @@ where
                     Ok(
                         park @ (WorkbenchRunAdvance::ParkEffect
                         | WorkbenchRunAdvance::ParkUnit
-                        | WorkbenchRunAdvance::ParkNative),
+                        | WorkbenchRunAdvance::ParkNative
+                        | WorkbenchRunAdvance::ParkAfterToolStart
+                        | WorkbenchRunAdvance::ParkAfterToolFinish),
                     ) => {
                         tracing::debug!(actor = ?owned.state.effects.context.actor,
                         input_unit_index = owned.state.cursor.index, "serial cursor yielded its captured unit or effect");
@@ -642,6 +705,14 @@ where
                                             WorkbenchRunAdvance::ParkNative => {
                                                 behavior.owned_fragment_task(owned)
                                             }
+                                            WorkbenchRunAdvance::ParkAfterToolStart => {
+                                                Self::begin_owned_after_tool_task(owned)
+                                            }
+                                            WorkbenchRunAdvance::ParkAfterToolFinish => behavior
+                                                .finish_owned_after_tool_task(
+                                                    owned,
+                                                    kernel.clone(),
+                                                ),
                                             WorkbenchRunAdvance::Complete(_) => {
                                                 unreachable!("captured execution parks")
                                             }
@@ -657,7 +728,9 @@ where
                             WorkbenchRunAdvance::Complete(step) => step,
                             WorkbenchRunAdvance::ParkEffect
                             | WorkbenchRunAdvance::ParkUnit
-                            | WorkbenchRunAdvance::ParkNative => {
+                            | WorkbenchRunAdvance::ParkNative
+                            | WorkbenchRunAdvance::ParkAfterToolStart
+                            | WorkbenchRunAdvance::ParkAfterToolFinish => {
                                 unreachable!("effect wait handled above")
                             }
                         });
@@ -699,6 +772,247 @@ where
                 Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
             },
         )
+    }
+
+    fn begin_owned_after_tool_task(mut owned: OwnedExecution<H, O>) -> OwnedWorkbenchTask<Self> {
+        let budget = owned
+            .state
+            .cursor
+            .after_tool
+            .as_ref()
+            .expect("original slot budget")
+            .frame
+            .remaining_display_budget();
+        owned.state.cursor.unit.display_remaining =
+            owned.state.cursor.unit.display_remaining.min(budget);
+        Self::owned_step_task(
+            owned,
+            |owned| {
+                let context = owned.state.effects.context.clone();
+                let frame = &owned
+                    .state
+                    .cursor
+                    .after_tool
+                    .as_ref()
+                    .expect("one admitted after-tool frame")
+                    .frame;
+                let workbench = owned
+                    .workbench
+                    .as_ref()
+                    .expect("original admitted workbench");
+                Box::pin(after_tool_wait::prepare(frame, workbench, context))
+            },
+            |_behavior, _kernel, mut owned, result| {
+                owned
+                    .state
+                    .cursor
+                    .after_tool
+                    .as_mut()
+                    .expect("same after-tool frame")
+                    .prepared = Some(result);
+                Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
+            },
+        )
+    }
+
+    fn finish_owned_after_tool_task(
+        &self,
+        mut owned: OwnedExecution<H, O>,
+        kernel: KernelContext,
+    ) -> OwnedWorkbenchTask<Self> {
+        let answer = owned
+            .state
+            .cursor
+            .after_tool
+            .as_mut()
+            .expect("one completed after-tool invocation")
+            .answer
+            .take()
+            .expect("one after-tool answer or timeout");
+        Self::owned_step_task(
+            owned,
+            move |owned| {
+                let context = owned.state.effects.context.clone();
+                let registration = owned.cleanup.registration();
+                let workbench = owned
+                    .workbench
+                    .as_ref()
+                    .expect("original admitted workbench");
+                let frame = &owned
+                    .state
+                    .cursor
+                    .after_tool
+                    .as_ref()
+                    .expect("same after-tool frame")
+                    .frame;
+                Box::pin(async move {
+                    if matches!(
+                        &answer,
+                        WorkbenchAfterToolAnswer::TimedOut
+                            | WorkbenchAfterToolAnswer::Settled(Err(_))
+                    ) {
+                        let reason =
+                            "after-tool slot did not complete its native continuation".to_owned();
+                        let aborted = tokio::select! {
+                            aborted = workbench.abort_owned_continuations(context.clone(), registration, reason) => aborted,
+                            terminal = kernel.wait_requested_shutdown() => Err(ResidentActorWorkbenchError::ActorProtocol(
+                                format!("after-tool cleanup remains unconfirmed during actor retirement: {}", terminal.summary)
+                            )),
+                        };
+                        if let Err(error) = aborted {
+                            return (answer, Err(error));
+                        }
+                    }
+                    let binding = match &answer {
+                        WorkbenchAfterToolAnswer::Settled(Ok(
+                            crate::after_tool::Annotation::Pruned { .. },
+                        )) => {
+                            workbench
+                                .bind_tool_result(
+                                    context,
+                                    frame.handle().to_owned(),
+                                    frame.output().to_owned(),
+                                )
+                                .await
+                        }
+                        _ => Ok(()),
+                    };
+                    (answer, binding)
+                })
+            },
+            |behavior, _kernel, mut owned, (answer, binding)| {
+                let mut slot = owned
+                    .state
+                    .cursor
+                    .after_tool
+                    .take()
+                    .expect("same after-tool invocation");
+                owned.state.effects.after_tool_active = false;
+                owned.state.cursor.running = None;
+                // A failed cleanup is an execution failure: it cannot publish the
+                // private writes or call the original result an acknowledged timeout.
+                if let Err(error) = &binding {
+                    if matches!(
+                        &answer,
+                        WorkbenchAfterToolAnswer::TimedOut
+                            | WorkbenchAfterToolAnswer::Settled(Err(_))
+                    ) {
+                        slot.receipt.output = format!(
+                            "{}\nAfter-tool cleanup remains unconfirmed: {error}",
+                            slot.frame.output(),
+                        );
+                        slot.receipt.status = WorkbenchItemStatus::Stopped;
+                        slot.receipt.failure_layer = Some(WorkbenchFailureLayer::Effect);
+                        slot.receipt.operations =
+                            std::mem::take(&mut owned.state.cursor.unit.operations);
+                        owned.state.cursor.receipts.push(slot.receipt);
+                        let failure = WorkbenchExecutionFailure {
+                            receipts: std::mem::take(&mut owned.state.cursor.receipts),
+                            failed_index: owned.state.cursor.index,
+                            total: owned.state.request.items.len(),
+                            source: binding.expect_err("failed exact cleanup"),
+                        };
+                        return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
+                            owned,
+                            Err(failure),
+                        )));
+                    }
+                }
+                slot.receipt.output =
+                    behavior.render_owned_after_tool(&slot.frame, answer, binding);
+                owned.state.cursor.completed = Some(slot.receipt);
+                Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
+            },
+        )
+    }
+
+    fn render_owned_after_tool(
+        &mut self,
+        frame: &after_tool_wait::AfterToolFrame,
+        answer: WorkbenchAfterToolAnswer,
+        binding: Result<(), ResidentActorWorkbenchError>,
+    ) -> String {
+        use crate::after_tool::{Annotation, Disposition, Invocation};
+        let output = frame.output();
+        let revision = frame.revision();
+        let (delivered, disposition, detail) = match answer {
+            WorkbenchAfterToolAnswer::TimedOut => {
+                let wait = frame.deadline().duration_since(frame.entered());
+                let reason = format!(
+                    "no answer within {}",
+                    crate::after_tool::describe_wait(wait)
+                );
+                let notice = self.after_tool.notice(frame.ordinal(), &reason);
+                (
+                    crate::after_tool::failed(output, &notice),
+                    Disposition::TimedOut(wait),
+                    reason,
+                )
+            }
+            WorkbenchAfterToolAnswer::Settled(Err(error))
+                if error.is_observation_budget_exhausted() =>
+            {
+                (
+                    output.to_owned(),
+                    Disposition::Abstained(
+                        "tool result too large for the slot to relay through its own effects"
+                            .into(),
+                    ),
+                    String::new(),
+                )
+            }
+            WorkbenchAfterToolAnswer::Settled(Err(error)) => {
+                let reason = crate::after_tool::compact_reason(&error.to_string());
+                let notice = self.after_tool.notice(frame.ordinal(), &reason);
+                (
+                    crate::after_tool::failed(output, &notice),
+                    Disposition::Failed(reason.clone()),
+                    reason,
+                )
+            }
+            WorkbenchAfterToolAnswer::Settled(Ok(Annotation::Nothing)) => {
+                (output.to_owned(), Disposition::Silent, String::new())
+            }
+            WorkbenchAfterToolAnswer::Settled(Ok(Annotation::Abstained(reason))) => (
+                output.to_owned(),
+                Disposition::Abstained(reason.clone()),
+                reason,
+            ),
+            WorkbenchAfterToolAnswer::Settled(Ok(Annotation::Annotated(text))) => (
+                crate::after_tool::annotated(output, &text, revision),
+                Disposition::Annotated,
+                crate::after_tool::compact_reason(&text),
+            ),
+            WorkbenchAfterToolAnswer::Settled(Ok(Annotation::Pruned { text, .. })) => match binding
+            {
+                Ok(()) => (
+                    crate::after_tool::pruned(&text, frame.handle(), revision),
+                    Disposition::Pruned(frame.handle().into()),
+                    crate::after_tool::compact_reason(&text),
+                ),
+                Err(error) => {
+                    let reason = crate::after_tool::compact_reason(&error.to_string());
+                    let notice = self.after_tool.notice(frame.ordinal(), &reason);
+                    (
+                        crate::after_tool::failed(output, &notice),
+                        Disposition::Failed(reason.clone()),
+                        reason,
+                    )
+                }
+            },
+        };
+        let elapsed = frame.entered().elapsed();
+        tracing::info!(actor = %frame.tools().actor(), tool = %frame.call().name,
+            ordinal = frame.ordinal(), elapsed_ms = elapsed.as_millis(),
+            disposition = ?disposition, detail = %detail, "after-tool slot invoked");
+        self.after_tool.record(Invocation {
+            ordinal: frame.ordinal(),
+            tool: frame.call().name.clone(),
+            elapsed,
+            provenance: frame.provenance().into(),
+            disposition,
+        });
+        delivered
     }
 
     fn owned_fragment_task(&self, mut owned: OwnedExecution<H, O>) -> OwnedWorkbenchTask<Self> {
