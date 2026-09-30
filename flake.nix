@@ -209,6 +209,7 @@
               lens
               errors
               cryptohash-sha256
+              cborg
               witherable
               safe
               random
