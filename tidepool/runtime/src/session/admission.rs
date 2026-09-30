@@ -509,6 +509,7 @@ pub(crate) struct CheckedDisplayPlan {
     pub(crate) proof: Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>,
     pub(crate) metadata: super::BoundBinder,
     pub(crate) binding_names: [String; 3],
+    pub(crate) binding_ids: [tidepool_repr::SessionVarId; 3],
 }
 impl CheckedDisplayPlan {
     pub(crate) fn validate_ready(
@@ -535,6 +536,7 @@ impl CheckedDisplayPlan {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        session.validate_new_binding_ids(self.binding_ids)?;
         refuse_ephemeral_declaration_replacement(
             prefix,
             session,

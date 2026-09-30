@@ -1022,9 +1022,8 @@ impl PersistentSession {
     // -- persistent binding bookkeeping ----------------------------------
 
     /// Record a materialized value binding in the persistent binding store.
-    pub fn bind(&mut self, entry: BindingEntry) {
-        self.binding_index.on_bind(&entry);
-        self.bindings.bind(entry);
+    pub fn bind(&mut self, entry: BindingEntry) -> Result<(), SessionError> {
+        self.bind_in(ScopeId::ROOT, entry)
     }
 
     /// Module names of every live value binding — injected (`--inject-val`) AND
@@ -2269,8 +2268,13 @@ impl PersistentSession {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
-        self.binding_index.on_bind(&entry);
-        self.bindings.bind_in(scope, entry);
+        self.bindings.validate_bind_in(scope, &entry)?;
+        let is_new = self.bindings.get(entry.id).is_none();
+        let record = BindRecord::of(&entry);
+        self.bindings.bind_in(scope, entry)?;
+        if is_new {
+            self.binding_index.on_bind_record(&record);
+        }
         Ok(())
     }
 
@@ -2305,6 +2309,7 @@ impl PersistentSession {
             return Err(SessionError::DeadScope(scope));
         }
         let name = entry.name.0.clone();
+        self.bindings.validate_bind_in(scope, &entry)?;
         self.retract_value_heads_in(scope, std::slice::from_ref(&name))?;
         let receipt = ValuePlaneCommit {
             name,
@@ -2341,16 +2346,24 @@ impl PersistentSession {
     /// it succeeds are entries installed in the value table.  On any failure,
     /// every produced root is retired before the error returns, so none becomes
     /// an unowned persistent GC root.
+    #[allow(
+        clippy::expect_used,
+        reason = "the complete set is preflighted under the exclusive session checkout"
+    )]
     pub fn bind_replacing_decls_in(
         &mut self,
         scope: ScopeId,
         entries: Vec<BindingEntry>,
     ) -> Result<MaterializationSetCommit, SessionError> {
-        if !self.scopes.is_live(scope) {
+        if let Err(error) = self.validate_binding_set_in(scope, &entries) {
             self.discard_unbound_entries(entries);
-            return Err(SessionError::DeadScope(scope));
+            return Err(error);
         }
-        let names: Vec<String> = entries.iter().map(|entry| entry.name.0.clone()).collect();
+        let names: Vec<String> = entries
+            .iter()
+            .filter(|entry| self.bindings.get(entry.id).is_none())
+            .map(|entry| entry.name.0.clone())
+            .collect();
         if let Err(error) = self.retract_value_heads_in(scope, &names) {
             self.discard_unbound_entries(entries);
             return Err(error);
@@ -2362,8 +2375,8 @@ impl PersistentSession {
                     name: entry.name.0.clone(),
                     module: entry.module,
                 };
-                self.binding_index.on_bind(&entry);
-                self.bindings.bind_in(scope, entry);
+                self.bind_in(scope, entry)
+                    .expect("complete binding set preflighted before declaration retraction");
                 receipt
             })
             .collect();
@@ -2372,6 +2385,10 @@ impl PersistentSession {
 
     /// A sealed checked native item overlays Value heads in its exact private
     /// scope. Its original declaration module remains available by qualification.
+    #[allow(
+        clippy::expect_used,
+        reason = "the complete sealed set is preflighted under the exclusive session checkout"
+    )]
     pub(crate) fn bind_checked_private_values_in(
         &mut self,
         completion: &super::admission::CheckedTurnCompletion,
@@ -2403,9 +2420,9 @@ impl PersistentSession {
             self.discard_unbound_entries(entries);
             return Err(SessionError::StaleStagedDeclaration);
         }
-        if !self.scopes.is_live(scope) {
+        if let Err(error) = self.validate_binding_set_in(scope, &entries) {
             self.discard_unbound_entries(entries);
-            return Err(SessionError::DeadScope(scope));
+            return Err(error);
         }
         let bindings = entries
             .into_iter()
@@ -2414,12 +2431,45 @@ impl PersistentSession {
                     name: entry.name.0.clone(),
                     module: entry.module,
                 };
-                self.binding_index.on_bind(&entry);
-                self.bindings.bind_in(scope, entry);
+                self.bind_in(scope, entry)
+                    .expect("complete checked binding set preflighted before mutation");
                 receipt
             })
             .collect();
         Ok(MaterializationSetCommit { bindings })
+    }
+
+    fn validate_binding_set_in(
+        &self,
+        scope: ScopeId,
+        entries: &[BindingEntry],
+    ) -> Result<(), SessionError> {
+        if !self.scopes.is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
+        let mut ids = std::collections::HashSet::new();
+        for entry in entries {
+            if !ids.insert(entry.id) {
+                return Err(
+                    tidepool_codegen::binding_table::BindingIdentityError { id: entry.id }.into(),
+                );
+            }
+            self.bindings.validate_bind_in(scope, entry)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_new_binding_ids(
+        &self,
+        ids: impl IntoIterator<Item = SessionVarId>,
+    ) -> Result<(), SessionError> {
+        let mut unique = std::collections::HashSet::new();
+        for id in ids {
+            if !unique.insert(id) || self.bindings.get(id).is_some() {
+                return Err(tidepool_codegen::binding_table::BindingIdentityError { id }.into());
+            }
+        }
+        Ok(())
     }
 
     /// Root-scope [`Self::bind_replacing_decls_in`].
@@ -2435,11 +2485,28 @@ impl PersistentSession {
     /// not ordinary Rust-owned allocations, so dropping `RootSlot` alone would
     /// leak them until session teardown.
     fn discard_unbound_entries(&mut self, entries: Vec<BindingEntry>) {
+        let mut owned = self
+            .bindings
+            .iter_live()
+            .map(|entry| entry.value.handle.raw().0)
+            .collect::<std::collections::HashSet<_>>();
+        if let Some(engine) = self.machine.as_ref() {
+            for (identity, generation) in engine.code_export_retentions() {
+                if let Some(ImportOwner::CodeExport { root_id, .. }) =
+                    engine.retained_code_export_owner(&identity, generation)
+                {
+                    owned.insert(root_id);
+                }
+            }
+        }
+        let mut released = std::collections::HashSet::new();
         if let Some(engine) = self.machine.as_mut() {
             // A prepared entry's root is its adopted handle.
             for entry in entries {
                 let BoundValue { handle, .. } = entry.value;
-                engine.release(handle);
+                if !owned.contains(&handle.raw().0) && released.insert(handle.raw().0) {
+                    engine.release(handle);
+                }
             }
         }
     }
@@ -2779,6 +2846,120 @@ pub struct ScopeRetirement {
 #[cfg(test)]
 mod checkpoint_scope_tests {
     use super::*;
+
+    #[test]
+    fn immutable_binding_reinsertion_preserves_index_and_native_owner() {
+        let mut session = PersistentSession::new(None, 1024);
+        let scope = session.mint_isolated_scope();
+        let mut entry =
+            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 401);
+        entry.scope = scope;
+        let id = entry.id;
+        let same = BindingEntry {
+            name: entry.name.clone(),
+            id: entry.id,
+            module: entry.module,
+            value: entry.value.clone(),
+            type_display: entry.type_display.clone(),
+            defining_expr: entry.defining_expr.clone(),
+            scope,
+        };
+        session.bind_in(scope, same).unwrap();
+        let revision = session.bindings.mutation_revision();
+        let roots = session.persistent_roots_count();
+        let live_modules = session.live_val_modules();
+        session.bind_in(scope, entry).unwrap();
+        assert_eq!(session.bindings.mutation_revision(), revision);
+        assert_eq!(session.persistent_roots_count(), roots);
+        assert_eq!(session.live_val_modules(), live_modules);
+        let retirement = session.retire_scope(scope);
+        assert_eq!(retirement.roots_released, 1);
+        assert!(session.bindings.get(id).is_none());
+        assert!(session.live_val_modules().is_empty());
+        assert_eq!(session.persistent_roots_count(), roots - 1);
+    }
+
+    #[test]
+    fn late_binding_identity_conflict_refuses_entire_materialization_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = publication_session(dir.path(), 402);
+        let existing = super::super::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "existing",
+            402,
+        );
+        let id = existing.id;
+        let existing_handle = existing.value.handle;
+        session.bind(existing).unwrap();
+        let before = session
+            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .unwrap();
+        let generation = session.lib().generation();
+        let revision = session.bindings.mutation_revision();
+        let first =
+            super::super::prepared::tests::rooted_publication_fixture(&mut session, "first", 403);
+        let first_id = first.id;
+        let first_handle = first.value.handle;
+        let mut conflict = super::super::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "conflict",
+            404,
+        );
+        let conflict_handle = conflict.value.handle;
+        conflict.id = id;
+        let roots = session.persistent_roots_count();
+        assert!(matches!(
+            session.bind_replacing_decls(vec![first, conflict]),
+            Err(SessionError::InvalidBindingIdentity(error)) if error.id == id
+        ));
+        assert_eq!(
+            session
+                .public_visibility_snapshot_in(ScopeId::ROOT)
+                .unwrap(),
+            before
+        );
+        assert_eq!(session.lib().generation(), generation);
+        assert_eq!(session.bindings.mutation_revision(), revision);
+        assert!(session.bindings.get(first_id).is_none());
+        assert_eq!(session.persistent_roots_count(), roots - 2);
+        let machine = session.prepared().unwrap();
+        assert_eq!(
+            machine.prepared_handle_of(existing_handle.raw()),
+            Some(existing_handle)
+        );
+        assert!(machine.prepared_handle_of(first_handle.raw()).is_none());
+        assert!(machine.prepared_handle_of(conflict_handle.raw()).is_none());
+        assert!(!dir.path().join("declarations.json").exists());
+    }
+
+    #[test]
+    fn duplicate_binding_ids_release_new_roots_without_partial_visibility() {
+        let mut session = PersistentSession::new(None, 1024);
+        let first =
+            super::super::prepared::tests::rooted_publication_fixture(&mut session, "first", 405);
+        let id = first.id;
+        let mut second =
+            super::super::prepared::tests::rooted_publication_fixture(&mut session, "second", 406);
+        second.id = id;
+        let handles = [first.value.handle, second.value.handle];
+        let roots = session.persistent_roots_count();
+        let revision = session.bindings.mutation_revision();
+        assert!(matches!(
+            session.bind_replacing_decls(vec![first, second]),
+            Err(SessionError::InvalidBindingIdentity(error)) if error.id == id
+        ));
+        assert_eq!(session.bindings.mutation_revision(), revision);
+        assert!(session.bindings.get(id).is_none());
+        assert!(session.live_val_modules().is_empty());
+        assert_eq!(session.persistent_roots_count(), roots - 2);
+        for handle in handles {
+            assert!(session
+                .prepared()
+                .unwrap()
+                .prepared_handle_of(handle.raw())
+                .is_none());
+        }
+    }
 
     fn public_owner(path: &str) -> RecoveryPublicOwner {
         RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse(path).unwrap(), 1).unwrap()

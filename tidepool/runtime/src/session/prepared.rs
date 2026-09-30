@@ -6564,7 +6564,7 @@ pub(super) mod tests {
         let mut index = BindingIndex::new();
         index.on_bind(&entry);
         let mut bindings = BindingTable::new();
-        bindings.bind(entry);
+        bindings.bind(entry).unwrap();
         (engine, first, top, bindings, index)
     }
 

@@ -1045,6 +1045,17 @@ fn checked_turn_plan(
     }))
 }
 
+fn binding_ids_of(mode: &PreparedTurnMode<'_>) -> Vec<SessionVarId> {
+    match mode {
+        PreparedTurnMode::Value => Vec::new(),
+        PreparedTurnMode::Binding { binder, .. } => vec![SessionVarId::from_extract(binder.var_id)],
+        PreparedTurnMode::Projected { binders, .. } => binders
+            .iter()
+            .map(|binder| SessionVarId::from_extract(binder.var_id))
+            .collect(),
+    }
+}
+
 fn is_checked_turn(code: &TurnCode<'_>) -> bool {
     code.certification
         .as_ref()
@@ -1105,6 +1116,8 @@ fn checked_display_plan(
         proof: proof.clone(),
         metadata: metadata.clone(),
         binding_names: [page.name.clone(), metadata.name.clone(), alias.name.clone()],
+        binding_ids: [page, metadata, alias]
+            .map(|binder| SessionVarId::from_extract(binder.var_id)),
     })
 }
 
@@ -3109,7 +3122,7 @@ where
                 type_display: None,
                 defining_expr: None,
                 scope: ScopeId::ROOT,
-            });
+            })?;
             self.advance_public_visibility(ScopeId::ROOT);
         }
         Ok(RootCustody::new(
@@ -3246,6 +3259,13 @@ where
         if !self.state.scope_tree().is_live(scope) {
             self.discard_custody(custody);
             return Err(SessionError::DeadScope(scope).into());
+        }
+        if let Err(error) = self
+            .state
+            .validate_new_binding_ids([SessionVarId::from_extract(binder.var_id)])
+        {
+            self.discard_custody(custody);
+            return Err(error.into());
         }
         let expected_module = SessionModule::val(gen).module_name();
         if binder.module != expected_module {
@@ -3566,6 +3586,8 @@ where
         if !self.state.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope).into());
         }
+        self.state
+            .validate_new_binding_ids([SessionVarId::from_extract(binder.var_id)])?;
         let expected_module = SessionModule::val(gen).module_name();
         if binder.module != expected_module {
             return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
@@ -3747,6 +3769,8 @@ where
         ) -> Result<PreparedHandle, PreparedRuntimeError>,
     ) -> Result<(), ResidentError> {
         refuse_checked_turn(&code)?;
+        self.state
+            .validate_new_binding_ids([SessionVarId::from_extract(binder.var_id)])?;
         let table = code
             .table
             .with_json_layout(json_runtime_layout_optional(&code.prepared));
@@ -4261,6 +4285,7 @@ where
         mode: PreparedTurnMode<'_>,
         argument: Option<PreparedHandle>,
     ) -> Result<ResidentOutcome, ResidentError> {
+        self.state.validate_new_binding_ids(binding_ids_of(&mode))?;
         let checked = checked_turn_plan(
             code.certification.as_ref(),
             code.prepared.as_ref(),
@@ -4393,6 +4418,8 @@ where
         mode: PendingPreparedMode,
         argument: Option<PreparedHandle>,
     ) -> Result<PendingPreparedInstall, ResidentError> {
+        self.state
+            .validate_new_binding_ids(binding_ids_of(&mode.as_mode()))?;
         let checked = checked_turn_plan(
             code.certification.as_ref(),
             code.prepared.as_ref(),
@@ -4475,6 +4502,8 @@ where
             park,
             checked,
         } = pending;
+        self.state
+            .validate_new_binding_ids(binding_ids_of(&mode.as_mode()))?;
         let install_started = std::time::Instant::now();
         let mut checked_completion = None;
         let (program, source_keys) = match (snapshot, compiled.kind) {
@@ -4892,6 +4921,9 @@ where
         checked: Option<CheckedDisplayPlan>,
     ) -> Result<ResidentDisplayBundle, ResidentError> {
         check_display_bundle_binders(page, metadata, alias)?;
+        self.state.validate_new_binding_ids(
+            [page, metadata, alias].map(|binder| SessionVarId::from_extract(binder.var_id)),
+        )?;
         let lexical_scope = self.run_context.lexical_scope;
         if let Some(plan) = &checked {
             plan.start(&self.state, lexical_scope)?;
@@ -5004,6 +5036,9 @@ where
         checked: Option<CheckedDisplayPlan>,
     ) -> Result<PendingDisplayInstall, ResidentError> {
         check_display_bundle_binders(page, metadata, alias)?;
+        self.state.validate_new_binding_ids(
+            [page, metadata, alias].map(|binder| SessionVarId::from_extract(binder.var_id)),
+        )?;
         let prepared = code.prepared.into_owned();
         let provenance = self.provenance_for(&code.sites)?;
         self.state
@@ -5063,6 +5098,9 @@ where
         if lexical_scope != self.run_context.lexical_scope {
             return Err(SessionError::StaleStagedDeclaration.into());
         }
+        self.state.validate_new_binding_ids(
+            [page, alias].map(|binder| SessionVarId::from_extract(binder.var_id)),
+        )?;
         if let Some(plan) = &checked {
             validate_checked_display_rows(plan, page, alias)?;
             plan.validate_ready(&self.state, lexical_scope)?;
@@ -6206,6 +6244,76 @@ mod authored_publication_tests {
     type TestSession = ResidentSession<frunk::HNil, EmptyOutput>;
 
     #[test]
+    fn native_binding_identity_conflicts_refuse_before_install_and_snapshot() {
+        use std::borrow::Cow;
+        use tidepool_repr::execution_schema::testing;
+
+        let root = tempfile::tempdir().unwrap();
+        let lib =
+            SessionLib::open(SessionId(407), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(lib));
+        let entry = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session.state,
+            "existing",
+            407,
+        );
+        let id = entry.id;
+        session.state.bind(entry).unwrap();
+        let before = session
+            .state
+            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .unwrap();
+        let residency = session.residency();
+        let roots = session.state.persistent_roots_count();
+        let table = session.state.session_table().clone();
+        let prepared = testing::prepare(testing::wire_program()).unwrap();
+        let code = TurnCode {
+            prepared: Cow::Owned(prepared),
+            table: Cow::Owned(table.clone()),
+            sites: Cow::Borrowed(&[]),
+            certification: Cow::Owned(None),
+        };
+        let occupied = BoundBinder {
+            name: "replacement".into(),
+            var_id: id.raw(),
+            module: SessionModule::val(Generation(408)).module_name(),
+            tier: ValueTier::RetainOpaque,
+            type_display: "Int".into(),
+            root_head: None,
+            host_authority: None,
+        };
+        let fresh = BoundBinder {
+            name: "fresh".into(),
+            var_id: 408,
+            ..occupied.clone()
+        };
+        assert!(matches!(
+            session.run_projected_bind_with_sites("projected", code.clone(), &[fresh, occupied.clone()], Generation(408)),
+            Err(ResidentError::Session(SessionError::InvalidBindingIdentity(error))) if error.id == id
+        ));
+        assert!(matches!(
+            session.run_bind_with_sites("replacement", code.clone(), &occupied, Generation(408)),
+            Err(ResidentError::Session(SessionError::InvalidBindingIdentity(error))) if error.id == id
+        ));
+        assert!(matches!(
+            session.snapshot_run_prepared(code, PendingPreparedMode::Binding {
+                binder: occupied, generation: Generation(408), observation: None,
+            }, None),
+            Err(ResidentError::Session(SessionError::InvalidBindingIdentity(error))) if error.id == id
+        ));
+        assert_eq!(session.residency(), residency);
+        assert_eq!(session.state.persistent_roots_count(), roots);
+        assert_eq!(session.state.session_table(), &table);
+        assert_eq!(
+            session
+                .state
+                .public_visibility_snapshot_in(ScopeId::ROOT)
+                .unwrap(),
+            before
+        );
+    }
+
+    #[test]
     fn unsupported_checked_routes_refuse_before_native_install_and_prefix_settlement() {
         use crate::session::turn::{check_cell_admitted, run_checked_item, TemplateSelector};
         use crate::session::{
@@ -6442,7 +6550,7 @@ mod authored_publication_tests {
             "answer",
             71,
         );
-        session.state.bind(binding);
+        session.state.bind(binding).unwrap();
         session.state.mark_stub_generation(Generation(71));
         session.state.lib_mut().fail_recovery_durability_once = true;
         session
@@ -6466,7 +6574,7 @@ mod authored_publication_tests {
             201,
         );
         let old_id = binding.id;
-        session.state.bind(binding);
+        session.state.bind(binding).unwrap();
         session.hidden_host_bindings.insert(old_id, ());
         let templates = resident_workbench_templates(effects.preamble(), effects.row(), "");
         let mut includes = effects.include_paths().to_vec();
@@ -6524,7 +6632,7 @@ mod authored_publication_tests {
             202,
         );
         let new_id = replacement.id;
-        session.state.bind(replacement);
+        session.state.bind(replacement).unwrap();
         session.hidden_host_bindings.insert(new_id, ());
         // Exact identities fence low-level native updates independently of
         // the displayed names or the notification epoch.

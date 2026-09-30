@@ -60,6 +60,7 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         | SessionError::WrongPublicManifestTicket
         | SessionError::UnsupportedPrivateValueReplacement
         | SessionError::InvalidPublicBindingPromotion(_)
+        | SessionError::InvalidBindingIdentity(_)
         | SessionError::StaleStagedDeclaration => {
             FailureEnvelope::new(FailureClass::Runtime, Phase::Run, err.to_string())
         }

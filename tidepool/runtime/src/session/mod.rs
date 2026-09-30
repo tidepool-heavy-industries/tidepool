@@ -299,6 +299,8 @@ impl std::fmt::Display for DeclarationValidationFailure {
 
 #[derive(thiserror::Error, Debug)]
 pub enum SessionError {
+    #[error(transparent)]
+    InvalidBindingIdentity(#[from] tidepool_codegen::binding_table::BindingIdentityError),
     /// Filesystem I/O failure (creating the session root, writing/reading a
     /// gen module, etc.).
     #[error("I/O error: {0}")]
