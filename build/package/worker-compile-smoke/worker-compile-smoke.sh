@@ -14,11 +14,12 @@ export TIDEPOOL_EXTRACT_WORKER="$bundle/bin/tidepool-extract-bin"
 
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/tidepool-worker-compile.XXXXXX")"
 trap 'rm -rf "$scratch"' EXIT
+cp "$source" "$scratch/WorkerSmoke.hs"
 
 if ! "$bundle/bin/tidepool-extract" \
     --target answer \
     --output-dir "$scratch/out" \
-    "$source" >"$scratch/stdout" 2>"$scratch/stderr"; then
+    "$scratch/WorkerSmoke.hs" >"$scratch/stdout" 2>"$scratch/stderr"; then
   cat "$scratch/stdout"
   cat "$scratch/stderr" >&2
   exit 1
