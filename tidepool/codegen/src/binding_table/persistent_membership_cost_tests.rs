@@ -1,8 +1,82 @@
 //! Explicit fallback costs include real observation mutations and complete
 //! exact inventory requests. Stable bookkeeping slots are not native values.
 
-use super::{cost_tests, persistent_name_cost_tests::Scenario, *};
+use super::*;
+use crate::prepared_program::PreparedHandle;
+use crate::suspension::ValueHandle;
 use std::hint::black_box;
+use tidepool_repr::execution_schema::{RuntimeRep, SymbolIdentity};
+use tidepool_repr::Generation;
+
+struct Scenario {
+    table: BindingTable,
+    tree: ScopeTree,
+    origin: ScopeId,
+    owner: ScopeId,
+    unrelated: ScopeId,
+    next_id: u64,
+    // The table only stores these bookkeeping cells; each address is stable.
+    slots: Vec<Box<*mut u8>>,
+}
+
+impl Scenario {
+    fn new() -> Self {
+        let mut tree = ScopeTree::new();
+        let origin = tree.mint_isolated();
+        let owner = tree.mint_isolated();
+        let unrelated = tree.mint_isolated();
+        Self {
+            table: BindingTable::new(),
+            tree,
+            origin,
+            owner,
+            unrelated,
+            next_id: 1,
+            slots: Vec::new(),
+        }
+    }
+
+    fn bind(&mut self, scope: ScopeId, name: String) -> SessionVarId {
+        let generation = self.next_id;
+        self.next_id += 1;
+        let mut slot = Box::new(std::ptr::null_mut::<u8>());
+        let root = unsafe { RootSlot::new(slot.as_mut() as *mut *mut u8) };
+        self.slots.push(slot);
+        let id = SessionVarId::from_extract(generation);
+        self.table
+            .bind_in(
+                scope,
+                BindingEntry {
+                    name: BindingName(name.clone()),
+                    id,
+                    module: SessionModule::val(Generation(generation)),
+                    value: BoundValue {
+                        root,
+                        handle: PreparedHandle::new(ValueHandle(generation), RuntimeRep::LiftedRef),
+                        identity: SymbolIdentity {
+                            unit: "fixture".into(),
+                            module: format!("Val.G{generation}"),
+                            namespace: "value".into(),
+                            occurrence: name,
+                            record_parent: None,
+                        },
+                    },
+                    type_display: None,
+                    defining_expr: None,
+                    scope: ScopeId::ROOT,
+                },
+            )
+            .unwrap();
+        id
+    }
+
+    fn drain(&mut self, scope: ScopeId) -> ScopeDrain {
+        assert_eq!(self.tree.retire(scope), vec![scope]);
+        let drained = self.table.drain_scope_with_sources(scope);
+        assert!(drained.source_instances.is_empty());
+        drained
+    }
+}
 
 fn emit(
     steps: usize,
