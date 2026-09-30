@@ -605,9 +605,11 @@ async fn production_cold_successor_executes_retained_original_declaration_in_fre
     let unit = answer["identity"]["unit"].as_str().unwrap();
     let module = answer["identity"]["module"].as_str().unwrap();
     assert!(!unit.is_empty());
-    assert!(
-        module.starts_with("Lib.G"),
-        "authored owner was not original Lib.G: {module}"
+    let authored_generation = tidepool_repr::Generation(authored["id"].as_u64().unwrap());
+    assert_eq!(
+        module,
+        tidepool_repr::SessionModule::lib(authored_generation).module_name(),
+        "authored owner does not match its original declaration generation"
     );
     assert!(
         exports.iter().any(|export| {
