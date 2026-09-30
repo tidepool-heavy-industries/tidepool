@@ -236,10 +236,12 @@ Perfetto. Use `--since 15m`, `--actor ID@INCARNATION`, `--execution ID`, or
 accept UTC Unix milliseconds. Selector flags filter timeline events while the
 actor inventory and review retain their normal scope. The export includes
 trace source file and line references plus counts for time cutoff, selectors,
-and the timeline limit. It exports metadata only; model input, output, and
-errors are not included. It does not make missing identifiers into causal
-links. Usage remains unknown until a harness-owned evidence export is
-available.
+the timeline limit, and unclassified records. It uses fixed event labels and
+exports metadata only; model input, output, errors, and arbitrary log messages
+are not included. It draws duration spans only for known tracing close records;
+other durations stay attached to instant events. It does not make missing
+identifiers into causal links. Usage remains unknown until a harness-owned
+evidence export is available.
 
 ## Where to go next
 

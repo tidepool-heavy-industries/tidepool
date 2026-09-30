@@ -56,6 +56,7 @@ pub struct TraceSummary {
     pub omitted_timeline_events: u64,
     pub timeline_filtered_events: u64,
     pub timeline_outside_window_events: u64,
+    pub timeline_unclassified_events: u64,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct TimelineEvent {
@@ -63,6 +64,8 @@ pub struct TimelineEvent {
     pub category: String,
     pub at_unix_ms: u64,
     pub duration_ms: Option<u64>,
+    /// Present only when the source record is a known span close event.
+    pub interval_start_unix_ms: Option<u64>,
     pub actor: Option<String>,
     pub execution: Option<String>,
     pub call_id: Option<String>,
@@ -104,6 +107,7 @@ impl Default for TraceSummary {
             omitted_timeline_events: 0,
             timeline_filtered_events: 0,
             timeline_outside_window_events: 0,
+            timeline_unclassified_events: 0,
         }
     }
 }
@@ -422,6 +426,71 @@ impl TraceEvents {
     }
 }
 
+/// Only fixed event names from known trace owners enter the timeline. In
+/// particular, the arbitrary `message` string is never copied into exports.
+fn timeline_label(
+    target: &str,
+    message: &str,
+    record: &Value,
+) -> Option<(&'static str, &'static str)> {
+    let span_name = record["span"]["name"].as_str().unwrap_or("");
+    Some(match (target, message, span_name) {
+        ("tidepool::host_dynamic_tools", "close", "tool_call") => ("hosted tool call", "host_tool"),
+        ("tidepool_extract_cmd::endpoint", "close", "compile_request") => {
+            ("compile request", "compile")
+        }
+        ("tidepool_codegen::prepared_compile", "prepared compile", _) => {
+            ("prepared compile", "compile")
+        }
+        ("exomonad_actor::resident_actor", "jev call answered", _) => ("Jev call answered", "jev"),
+        ("exomonad_actor::call_timing", "call timing", _) => ("hosted call timing", "host_call"),
+        ("exomonad_actor::resident_actor", "resident actor standing transition", _) => {
+            ("actor standing transition", "actor")
+        }
+        ("tidepool::actor_host", "interactive application launched", _) => {
+            ("actor launched", "actor")
+        }
+        ("tidepool::actor_host", "interactive application retired", _) => {
+            ("actor retired", "actor")
+        }
+        ("exomonad_actor::resident_tools", "workbench cell dispatched to its actor", _) => {
+            ("cell dispatched", "execution")
+        }
+        ("exomonad_actor::resident_actor", "actor notification sent", _) => {
+            ("notification sent", "delivery")
+        }
+        ("exomonad::content", "input unit receipt", _) => ("input unit receipt", "execution"),
+        ("exomonad_actor::resident_actor", "effect settled", _) => ("effect settled", "execution"),
+        ("exomonad_actor::resident_actor", "reply rejected", _) => ("reply rejected", "execution"),
+        ("exomonad_actor::resident_actor", "after-tool slot invoked", _) => {
+            ("after-tool slot invoked", "actor")
+        }
+        ("tidepool::host_dynamic_tools", "hosted workbench cancellation", _) => {
+            ("hosted workbench cancelled", "host_call")
+        }
+        ("tidepool::host_dynamic_tools", "resident tool dispatch failed", _) => {
+            ("tool dispatch failed", "host_tool")
+        }
+        ("exomonad_actor::resident_actor", "typed refusal", _) => ("typed refusal", "execution"),
+        ("tidepool_extract_cmd::daemon", "compiler request finished", _) => {
+            ("compiler request finished", "compile")
+        }
+        _ => return None,
+    })
+}
+
+fn trace_id(value: Option<&str>) -> Option<String> {
+    value
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_:.".contains(&byte))
+        })
+        .map(str::to_owned)
+}
+
 fn unknown<T>(reason: &str) -> Evidence<T> {
     Evidence::Unknown {
         reason: reason.into(),
@@ -683,58 +752,75 @@ pub(super) fn read_trace(
         let span = &record["span"];
         let spans = record["spans"].as_array();
         if !message.is_empty() {
-            let actor = fields["actor"]
-                .as_str()
-                .and_then(actor_key)
-                .or_else(|| {
-                    Some(format!(
-                        "{}@{}",
-                        lenient_u64(&fields["actor"])?,
-                        lenient_u64(&fields["incarnation"])?
-                    ))
-                })
-                .or_else(|| span_field(&record, "actor").and_then(actor_key));
-            let execution = span_field(&record, "execution")
-                .map(str::to_owned)
-                .or_else(|| fields["execution"].as_str().map(str::to_owned));
-            let call_id = span_field(&record, "call_id")
-                .map(str::to_owned)
-                .or_else(|| fields["call_id"].as_str().map(str::to_owned));
-            let matches = timeline_filter
-                .actor
-                .as_ref()
-                .is_none_or(|want| actor.as_ref() == Some(want))
-                && timeline_filter
-                    .execution
+            let label = timeline_label(target, message, &record);
+            if label.is_none() {
+                summary.timeline_unclassified_events =
+                    summary.timeline_unclassified_events.saturating_add(1);
+            }
+            if let Some((name, category)) = label {
+                let actor = fields["actor"]
+                    .as_str()
+                    .and_then(actor_key)
+                    .or_else(|| {
+                        Some(format!(
+                            "{}@{}",
+                            lenient_u64(&fields["actor"])?,
+                            lenient_u64(&fields["incarnation"])?
+                        ))
+                    })
+                    .or_else(|| span_field(&record, "actor").and_then(actor_key));
+                let execution = trace_id(span_field(&record, "execution"))
+                    .or_else(|| trace_id(fields["execution"].as_str()));
+                let call_id = trace_id(span_field(&record, "call_id"))
+                    .or_else(|| trace_id(fields["call_id"].as_str()));
+                let matches = timeline_filter
+                    .actor
                     .as_ref()
-                    .is_none_or(|want| execution.as_ref() == Some(want))
-                && timeline_filter
-                    .call_id
-                    .as_ref()
-                    .is_none_or(|want| call_id.as_ref() == Some(want));
-            if matches {
-                if summary.timeline.len() < 100_000 {
-                    summary.timeline.push(TimelineEvent {
-                        name: message.to_owned(),
-                        category: target.to_owned(),
-                        at_unix_ms: time,
-                        duration_ms: if message == "call timing" {
-                            lenient_u64(&fields["total_ms"])
-                        } else {
-                            elapsed_ms(fields)
-                        },
-                        actor,
-                        execution,
-                        call_id,
-                        certainty: "observed",
-                        source: source.clone(),
-                    });
+                    .is_none_or(|want| actor.as_ref() == Some(want))
+                    && timeline_filter
+                        .execution
+                        .as_ref()
+                        .is_none_or(|want| execution.as_ref() == Some(want))
+                    && timeline_filter
+                        .call_id
+                        .as_ref()
+                        .is_none_or(|want| call_id.as_ref() == Some(want));
+                if matches {
+                    if summary.timeline.len() < 100_000 {
+                        let duration_ms = match message {
+                            "close" => elapsed_ms(fields),
+                            "call timing" => lenient_u64(&fields["total_ms"]),
+                            "prepared compile" => lenient_u64(&fields["total_ms"]),
+                            "jev call answered"
+                            | "compiler request finished"
+                            | "after-tool slot invoked" => lenient_u64(&fields["elapsed_ms"]),
+                            _ => None,
+                        };
+                        // Only tracing's close records carry an end timestamp for
+                        // the span named in the record. Other durations are values
+                        // in event args; their timestamp is left untouched.
+                        let interval_start_unix_ms = (message == "close")
+                            .then(|| duration_ms.and_then(|duration| time.checked_sub(duration)))
+                            .flatten();
+                        summary.timeline.push(TimelineEvent {
+                            name: name.into(),
+                            category: category.into(),
+                            at_unix_ms: time,
+                            duration_ms,
+                            interval_start_unix_ms,
+                            actor,
+                            execution,
+                            call_id,
+                            certainty: "observed",
+                            source: source.clone(),
+                        });
+                    } else {
+                        summary.omitted_timeline_events += 1;
+                    }
                 } else {
-                    summary.omitted_timeline_events += 1;
+                    summary.timeline_filtered_events =
+                        summary.timeline_filtered_events.saturating_add(1);
                 }
-            } else {
-                summary.timeline_filtered_events =
-                    summary.timeline_filtered_events.saturating_add(1);
             }
         }
         if let (Some(phase), Some(ms)) = (
