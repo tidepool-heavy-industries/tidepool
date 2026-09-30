@@ -5205,10 +5205,10 @@ mod tests {
                         display,
                     )
                     .unwrap();
-                let displayed = rendered.result().to_string_pretty();
-                assert!(
-                    displayed.contains("41") && displayed.contains("40"),
-                    "private replacement or qualified historical declaration changed: {displayed}"
+                assert_eq!(
+                    rendered.result().to_json(),
+                    serde_json::json!(["(41, 40)", false, false]),
+                    "private replacement or qualified historical declaration changed"
                 );
             }
             assert_eq!(
