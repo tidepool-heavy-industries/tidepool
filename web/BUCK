@@ -7,8 +7,15 @@ genrule(
     name = "web_manifests",
     srcs = ["//third-party/rust:matched_harness_source"],
     out = ".",
-    bash = """set -euo pipefail
-SOURCE="$PWD/$(location //third-party/rust:matched_harness_source)/web"
+bash = """set -euo pipefail
+SOURCE_ROOT="$PWD/$(location //third-party/rust:matched_harness_source)"
+shopt -s nullglob
+WEB_SOURCES=("$SOURCE_ROOT"/*/web)
+if [[ ${#WEB_SOURCES[@]} -ne 1 || ! -f "${WEB_SOURCES[0]}/package.json" || ! -f "${WEB_SOURCES[0]}/package-lock.json" ]]; then
+    echo "expected one matched harness web source tree under $SOURCE_ROOT" >&2
+    exit 1
+fi
+SOURCE="${WEB_SOURCES[0]}"
 OUTPUT="$PWD/$OUT"
 mkdir -p "$OUTPUT"
 cp "$SOURCE/package.json" "$SOURCE/package-lock.json" "$OUTPUT/"
@@ -52,7 +59,14 @@ genrule(
     bash = """set -euo pipefail
 NODE='$(exe toolchains//:node)'
 NPM='$(exe toolchains//:npm)'
-SOURCE="$PWD/$(location //third-party/rust:matched_harness_source)/web"
+SOURCE_ROOT="$PWD/$(location //third-party/rust:matched_harness_source)"
+shopt -s nullglob
+WEB_SOURCES=("$SOURCE_ROOT"/*/web)
+if [[ ${#WEB_SOURCES[@]} -ne 1 ]]; then
+    echo "expected one matched harness web source tree under $SOURCE_ROOT" >&2
+    exit 1
+fi
+SOURCE="${WEB_SOURCES[0]}"
 NPM_DEPS="$PWD/$(location :npm_dependencies)"
 OUTPUT="$PWD/$OUT"
 export PATH="${NODE%/*}:$PATH"
