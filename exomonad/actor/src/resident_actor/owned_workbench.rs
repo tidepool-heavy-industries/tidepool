@@ -208,7 +208,8 @@ impl WorkbenchPublicOwner {
 
 struct OwnedExecution<H, O> {
     state: WorkbenchExecutionState,
-    workbench: crate::ResidentActorWorkbench<H, O>,
+    workbench: Option<crate::ResidentActorWorkbench<H, O>>,
+    private: Option<Arc<crate::resident_workbench::ExecutionPrivateScope>>,
     timing: Option<crate::call_timing::CallScope>,
     cleanup: crate::resident_workbench::ParkedHoleAbortGuard,
     resources: Arc<ExecutionResourceOwners>,
@@ -345,6 +346,7 @@ where
         let (actor, incarnation) = actor_address(context.actor);
         let timing = crate::call_timing::CallScope::new(kind, actor as u64, incarnation as u64);
         let resources = ExecutionResourceOwners::new(compilation_authority, public_owner);
+        let control = Some(control.unwrap_or_else(crate::WorkbenchExecutionControl::untracked));
         let cleanup = workbench.continuation_cleanup_owner(
             context.clone(),
             "hosted execution abandoned before exact continuation settlement".into(),
@@ -371,7 +373,8 @@ where
                 invocation,
                 cursor: WorkbenchCursor::default(),
             },
-            workbench,
+            workbench: Some(workbench),
+            private: None,
             timing: Some(timing),
             cleanup,
             resources,
@@ -381,30 +384,59 @@ where
             owned,
             move |owned| {
                 Box::pin(async move {
-                    let public = runner.public_visibility_snapshot(context.clone()).await;
-                    let cell = match owned.state.request.cell_source().filter(|_| public.is_ok()) {
+                    let decision = owned
+                        .state
+                        .effects
+                        .control
+                        .as_ref()
+                        .expect("owned execution retains its original control")
+                        .publication_decision();
+                    let private = Arc::new(
+                        runner
+                            .begin_private_execution(
+                                context,
+                                owned.resources.public.clone(),
+                                decision,
+                            )
+                            .await?,
+                    );
+                    owned.resources.retain_private(private.admission.clone())?;
+                    owned.state.effects.public_visibility = Some(private.admitted_public.clone());
+                    owned.state.effects.context.placement.lexical_scope = private.private_scope;
+                    let workbench = owned
+                        .workbench
+                        .take()
+                        .expect("original workbench is installed once");
+                    owned.workbench = Some(workbench.with_private_execution(private.clone()));
+                    owned.private = Some(private);
+                    let cell = match owned.state.request.cell_source() {
                         Some(source) => Some(
                             owned
                                 .workbench
-                                .prepare_cell(context.clone(), source.to_owned())
+                                .as_ref()
+                                .expect("original workbench retains its private owner")
+                                .prepare_cell(
+                                    owned.state.effects.context.clone(),
+                                    source.to_owned(),
+                                )
                                 .await,
                         ),
                         None => None,
                     };
-                    (public, cell)
+                    Ok::<_, ResidentActorWorkbenchError>(cell)
                 })
             },
             |behavior, _kernel, mut owned, prepared| {
-                match prepared.0 {
-                    Ok(public) => owned.state.effects.public_visibility = Some(public),
+                let cell = match prepared {
+                    Ok(cell) => cell,
                     Err(error) => {
                         return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
                             owned,
                             Err(workbench_failure(&[], 0, 1, error)),
                         )))
                     }
-                }
-                if let Some(cell) = prepared.1 {
+                };
+                if let Some(cell) = cell {
                     match install_cell_preparation(
                         &mut owned.state.request,
                         &mut owned.state.cursor,
@@ -448,7 +480,7 @@ where
                     .scope(cleanup.scope(behavior.execute_workbench(
                         &kernel,
                         &mut owned.state,
-                        Some(&owned.workbench),
+                        owned.workbench.as_ref(),
                     )))
                     .await;
                 match result {
@@ -477,8 +509,8 @@ where
                             }
                         });
                         let completion = OwnedWorkbenchCompletion::advance(
-                            move |behavior: &mut Self, _kernel| {
-                                Self::begin_owned_finalization(behavior, owned, result)
+                            move |behavior: &mut Self, kernel| {
+                                Self::begin_owned_finalization(behavior, kernel, owned, result)
                             },
                         );
                         (behavior, completion)
@@ -534,13 +566,18 @@ where
             return OwnedWorkbenchTask::new(Box::pin(async move {
                 let (timing, cleanup) = owned.scopes();
                 let prepared = timing
-                    .scope(cleanup.scope(command_presentation::prepare(
-                        &environment.commands,
-                        &owned.state.effects.context,
-                        &owned.workbench,
-                        request,
-                        permitted,
-                    )))
+                    .scope(
+                        cleanup.scope(command_presentation::prepare(
+                            &environment.commands,
+                            &owned.state.effects.context,
+                            owned
+                                .workbench
+                                .as_ref()
+                                .expect("prepared execution has its workbench"),
+                            request,
+                            permitted,
+                        )),
+                    )
                     .await;
                 OwnedWorkbenchCompletion::advance(move |behavior: &mut Self, _kernel| {
                     let (timing, cleanup) = owned.scopes();
@@ -670,13 +707,38 @@ where
         result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     ) -> OwnedWorkbenchTask<Self> {
         OwnedWorkbenchTask::new(Box::pin(async move {
-            OwnedWorkbenchCompletion::advance(move |behavior: &mut Self, _kernel| {
-                Self::begin_owned_finalization(behavior, owned, result)
+            OwnedWorkbenchCompletion::advance(move |behavior: &mut Self, kernel| {
+                Self::begin_owned_finalization(behavior, kernel, owned, result)
             })
         }))
     }
 
     fn begin_owned_finalization(
+        behavior: &mut Self,
+        kernel: &KernelContext,
+        owned: OwnedExecution<H, O>,
+        result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+    ) -> Result<WorkbenchAdvance<Self>, KernelInvocationFailure> {
+        if owned.private.is_some() && private_publication_required(&result) {
+            return Ok(WorkbenchAdvance::Park(Self::publish_owned_execution_task(
+                owned,
+                behavior.environment.clone(),
+                kernel.clone(),
+                result,
+            )));
+        }
+        owned
+            .state
+            .effects
+            .control
+            .as_ref()
+            .expect("owned execution retains its original control")
+            .publication_decision()
+            .terminate();
+        Self::settle_owned_execution(behavior, owned, result)
+    }
+
+    fn settle_owned_execution(
         behavior: &mut Self,
         owned: OwnedExecution<H, O>,
         result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
@@ -694,6 +756,115 @@ where
                 ))
             })
         })
+    }
+
+    fn publish_owned_execution_task(
+        owned: OwnedExecution<H, O>,
+        environment: ResidentEnvironment<H, O>,
+        kernel: KernelContext,
+        result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+    ) -> OwnedWorkbenchTask<Self> {
+        let runner = environment.runner.clone();
+        Self::owned_step_task(
+            owned,
+            move |owned| {
+                let private = owned
+                    .private
+                    .as_ref()
+                    .expect("publication retains original private admission")
+                    .clone();
+                let context = owned.state.effects.context.clone();
+                Box::pin(async move { runner.publish_private_execution(context, private).await })
+            },
+            move |behavior, _kernel, owned, published| {
+                use crate::resident_workbench::PrivateExecutionPublication;
+                use tidepool_runtime::session::PublicManifestCommit;
+                match published {
+                    Ok(PrivateExecutionPublication::Manifest(
+                        PublicManifestCommit::Durable | PublicManifestCommit::Ephemeral,
+                    )) => Self::settle_owned_execution(behavior, owned, result),
+                    Ok(PrivateExecutionPublication::Manifest(
+                        PublicManifestCommit::PublishedDurabilityUnconfirmed { detail },
+                    )) => Ok(WorkbenchAdvance::Park(
+                        Self::confirm_owned_publication_task(
+                            owned,
+                            environment,
+                            kernel,
+                            result,
+                            detail,
+                        ),
+                    )),
+                    failure => {
+                        let error = match failure {
+                            Err(error) => error,
+                            Ok(PrivateExecutionPublication::Rejected { reason, diagnostic }) => {
+                                ResidentActorWorkbenchError::ActorProtocol(format!(
+                                    "private publication rejected: {reason:?}: {diagnostic}"
+                                ))
+                            }
+                            Ok(PrivateExecutionPublication::Manifest(commit)) => {
+                                ResidentActorWorkbenchError::ActorProtocol(format!(
+                                    "private publication did not commit: {commit:?}"
+                                ))
+                            }
+                        };
+                        owned
+                            .state
+                            .effects
+                            .control
+                            .as_ref()
+                            .expect("owned execution retains its original control")
+                            .publication_decision()
+                            .terminate();
+                        Self::settle_owned_execution(
+                            behavior,
+                            owned,
+                            Err(private_publication_failure(result, error)),
+                        )
+                    }
+                }
+            },
+        )
+    }
+
+    fn confirm_owned_publication_task(
+        owned: OwnedExecution<H, O>,
+        environment: ResidentEnvironment<H, O>,
+        kernel: KernelContext,
+        result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+        detail: String,
+    ) -> OwnedWorkbenchTask<Self> {
+        Self::owned_step_task(
+            owned,
+            move |owned| {
+                let context = owned.state.effects.context.clone();
+                Box::pin(async move {
+                    // The existing atomic-write owner retains the visible write.
+                    // This task attempts confirmation once, never execution or staging.
+                    tokio::select! {
+                        confirmed = environment.runner.confirm_publication_durability(context) => confirmed,
+                        terminal = kernel.wait_requested_shutdown() => Err(
+                            ResidentActorWorkbenchError::ActorProtocol(format!(
+                                "published write durability remains unconfirmed during actor retirement: {}",
+                                terminal.summary,
+                            ))
+                        ),
+                    }
+                })
+            },
+            move |behavior, _kernel, owned, confirmed| {
+                let result = match confirmed {
+                    Ok(()) => result,
+                    Err(error) => Err(private_publication_failure(
+                        result,
+                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "published write durability remains unconfirmed: {detail}; {error}"
+                        )),
+                    )),
+                };
+                Self::settle_owned_execution(behavior, owned, result)
+            },
+        )
     }
 
     fn settle_owned_finalization_task(
@@ -726,6 +897,40 @@ where
                 result.map(WorkbenchAdvance::Complete)
             },
         )
+    }
+}
+
+fn private_publication_required(
+    result: &Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+) -> bool {
+    let response = match result {
+        Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
+        | Ok(KernelStep::Stop {
+            output: response, ..
+        }) => response,
+        Err(_) => return false,
+    };
+    !matches!(
+        response.status,
+        WorkbenchRunStatus::Rejected | WorkbenchRunStatus::RequestCancelled
+    )
+}
+
+fn private_publication_failure(
+    result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+    source: ResidentActorWorkbenchError,
+) -> WorkbenchExecutionFailure {
+    match result {
+        Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
+        | Ok(KernelStep::Stop {
+            output: response, ..
+        }) => WorkbenchExecutionFailure {
+            receipts: response.items,
+            failed_index: response.next_index.saturating_sub(1),
+            total: response.total,
+            source,
+        },
+        Err(failure) => WorkbenchExecutionFailure { source, ..failure },
     }
 }
 
