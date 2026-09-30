@@ -85,8 +85,15 @@ async function releaseBarrier(spec, defaultExpectedInput) {
   if (!Array.isArray(intermediate) || intermediate.some((phase) => typeof phase !== 'string' || phase.length === 0)) {
     throw new Error('allowed_intermediate_phases must be an array of phase names');
   }
+  const timeoutMs = spec.timeout_ms ?? 120_000;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000) {
+    throw new Error('provider barrier timeout_ms must be an integer from 1 through 300000');
+  }
+  const deadline = performance.now() + timeoutMs;
   for (let index = 0; index < 8; index += 1) {
-    const barrier = await receive('provider_barrier', 120_000);
+    const remaining = Math.ceil(deadline - performance.now());
+    if (remaining <= 0) throw new Error(`timed out waiting for provider barrier ${finalPhase}`);
+    const barrier = await receive('provider_barrier', remaining);
     if (typeof barrier.id !== 'string' || barrier.id.length === 0) {
       throw new Error('provider barrier is missing its release ID');
     }
