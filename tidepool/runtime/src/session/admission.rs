@@ -652,6 +652,9 @@ impl AdmittedValueInterface {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+    pub fn bytes_owned(&self) -> &Arc<[u8]> {
+        &self.bytes
+    }
 }
 
 impl std::fmt::Debug for RuntimeCellAdmission {
