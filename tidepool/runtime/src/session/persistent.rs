@@ -313,14 +313,6 @@ impl PersistentSession {
     pub fn bindings(&self) -> &BindingTable {
         &self.bindings
     }
-    /// The persistent binding table (mutate).
-    pub fn bindings_mut(&mut self) -> &mut BindingTable {
-        // A mutable owner borrow also permits replacing the whole table.
-        // Per-table revisions cannot witness that replacement.
-        self.compile_views.get_mut().clear();
-        &mut self.bindings
-    }
-
     pub(super) fn acquire_binding_leases(
         &mut self,
         ids: impl IntoIterator<Item = SessionVarId>,
@@ -3176,7 +3168,7 @@ mod checkpoint_scope_tests {
     }
 
     #[test]
-    fn scoped_view_rebuilds_for_direct_hiding_declaration_and_library_changes() {
+    fn scoped_view_rebuilds_for_owned_binding_declaration_and_library_changes() {
         let dir = tempfile::tempdir().unwrap();
         let mut session = publication_session(dir.path(), 412);
         let entry =
@@ -3184,11 +3176,12 @@ mod checkpoint_scope_tests {
         session.bind(entry).unwrap();
         let scope = ScopeId::ROOT;
         let before = session.scoped_compile_view_in(scope).unwrap();
-        // The mutation owner stamps even direct writes through bindings_mut.
-        session.bindings_mut().remove_current_in(scope, "value");
-        let hidden = session.scoped_compile_view_in(scope).unwrap();
-        assert!(!Arc::ptr_eq(&before, &hidden));
-        assert_ne!(before.digest, hidden.digest);
+        let replacement =
+            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 414);
+        session.bind(replacement).unwrap();
+        let rebound = session.scoped_compile_view_in(scope).unwrap();
+        assert!(!Arc::ptr_eq(&before, &rebound));
+        assert_ne!(before.digest, rebound.digest);
         let turn = super::super::render::DeclTurn {
             normalized: Default::default(),
             external_imports: SourceImports::new(),
@@ -3202,7 +3195,7 @@ mod checkpoint_scope_tests {
         let generation = session.lib_mut().log.push(turn);
         session.lib_mut().tips.insert(scope, generation);
         let declared = session.scoped_compile_view_in(scope).unwrap();
-        assert_ne!(declared.digest, hidden.digest);
+        assert_ne!(declared.digest, rebound.digest);
         // Same session/path/tip counters cannot reuse another library's cache.
         let mut replacement = SessionLib::open(
             session.lib().session_id(),
@@ -3225,41 +3218,6 @@ mod checkpoint_scope_tests {
         let replaced = session.scoped_compile_view_in(scope).unwrap();
         assert!(!Arc::ptr_eq(&declared, &replaced));
         assert_ne!(declared.digest, replaced.digest);
-    }
-
-    #[test]
-    fn scoped_view_refuses_equal_revision_binding_owner_replacement() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut session = publication_session(dir.path(), 413);
-        let original = super::super::prepared::tests::rooted_publication_fixture(
-            &mut session,
-            "original",
-            413,
-        );
-        session.bind(original).unwrap();
-        let scope = ScopeId::ROOT;
-        let cached = session.scoped_compile_view_in(scope).unwrap();
-        let before = session
-            .bindings
-            .scope_witness(&session.scopes, scope)
-            .unwrap();
-        let different = super::super::prepared::tests::rooted_publication_fixture(
-            &mut session,
-            "different",
-            414,
-        );
-        let mut replacement = BindingTable::new();
-        replacement.bind(different).unwrap();
-        assert_eq!(
-            replacement.scope_witness(&session.scopes, scope),
-            Some(before)
-        );
-        let original = std::mem::replace(session.bindings_mut(), replacement);
-        let replaced = session.scoped_compile_view_in(scope).unwrap();
-        assert!(!Arc::ptr_eq(&cached, &replaced));
-        assert_ne!(cached.digest, replaced.digest);
-        assert_eq!(replaced.view.visible_value_names[0].1, ["different"]);
-        drop(original);
     }
 
     #[test]
