@@ -155,9 +155,7 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         1024 * 1024,
     );
     let public = producer.mint_isolated_scope();
-    producer
-        .bind_durable_public_scope(owner(1), public)
-        .unwrap();
+    assert_eq!(producer.initialize_durable_public_scope(owner(1), public).unwrap(), PublicManifestCommit::Durable);
     let admission = producer.begin_private_execution(public).unwrap();
     let original = producer
         .define_scoped_in(

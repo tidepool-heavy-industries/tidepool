@@ -1777,6 +1777,10 @@ impl PersistentSession {
             }
         };
         lib.durable_public_scopes.insert(owner, target);
+        // The declaration publication owner requires an explicit public tip,
+        // including G0 before the first cell. Isolated scope minting alone
+        // deliberately does not create that declaration-log entry.
+        lib.seed_scope(target, Generation(0));
         self.public_visibility_epochs.insert(target, 1);
         Ok(commit)
     }
