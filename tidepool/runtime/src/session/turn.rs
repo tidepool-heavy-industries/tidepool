@@ -5071,6 +5071,7 @@ mod tests {
             .any(|instance| instance.class.occurrence == "LocalClass"
                 && instance.class.module == module));
         assert!(!certificate.instances().families.is_empty());
+        let original_product = certificate.product().clone();
         let replacement = checked.checked_item(1).unwrap();
         let binding = checked.checked_item(2).unwrap();
         assert!(binding.signatures()[0]
@@ -5221,6 +5222,14 @@ mod tests {
                 "private value overlays must preserve the exact original declaration context"
             );
         }
+        let private_winners = resident
+            .public_visibility_snapshot_in(execution.private_scope())
+            .unwrap()
+            .bindings
+            .into_iter()
+            .filter(|(name, _)| name == "historical" || name == "local")
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(private_winners.len(), 2);
         let intent = resident.freeze_private_execution(&execution).unwrap();
         let crate::session::ExecutionPublication::Declarations(base) = resident
             .restage_ephemeral_execution_publication(intent)
@@ -5243,14 +5252,15 @@ mod tests {
             crate::session::PublicManifestCommit::Ephemeral
         );
         let public_bindings = resident.public_visibility_snapshot_in(public).unwrap();
-        assert!(public_bindings
-            .bindings
-            .iter()
-            .any(|(name, _)| name == "historical"));
-        assert!(public_bindings
-            .bindings
-            .iter()
-            .any(|(name, _)| name == "local"));
+        assert_eq!(
+            public_bindings
+                .bindings
+                .into_iter()
+                .filter(|(name, _)| name == "historical" || name == "local")
+                .collect::<BTreeMap<_, _>>(),
+            private_winners,
+            "publication changed the actual native Value winner IDs"
+        );
         let public_context = resident.compile_view_in(public).unwrap();
         assert!(
             public_context
@@ -5260,6 +5270,16 @@ mod tests {
                 .iter()
                 .any(|owner| owner.module == module),
             "publication discarded the original Lib identity"
+        );
+        assert_eq!(
+            public_context
+                .exact_declaration_context()
+                .unwrap()
+                .recovery_products()
+                .iter()
+                .find(|product| product.owner().module == module),
+            Some(&original_product),
+            "publication changed the certified original product or interface bytes"
         );
     }
 
