@@ -11,7 +11,7 @@ import Data.Set qualified as Set
 import System.Directory
   ( createDirectory, createDirectoryIfMissing, getTemporaryDirectory
   , removeDirectoryRecursive, removeFile )
-import System.FilePath ((</>))
+import System.FilePath ((</>), takeDirectory)
 import System.IO (hClose, openTempFile)
 import GHC
   ( runGhc, setSession, setTargets, guessTarget, depanal, mgModSummaries

@@ -325,11 +325,11 @@ decodeScope = do
           (fail "checked observation identity differs from item kind")
         planned <- plannedDeclaration
         values <- completedValues
-        interfaces <- valueInterfaces
-        validateInterfaces injected interfaces
+        valueInputs <- valueInterfaces
+        validateInterfaces injected valueInputs
         validateValues valueImports values
         pure (Nothing, Just (CheckedItemAdmission admissionDigest receiptDigest index sourceDigest kind binders
-          templates injected signatures liftPlan presentation generation prefix valueImports observation planned values interfaces), Nothing)
+          templates injected signatures liftPlan presentation generation prefix valueImports observation planned values valueInputs), Nothing)
       "checked-display" -> do
         unless (authCount == 17) (fail "invalid checked-display admission")
         admission <- CheckedDisplayAdmission <$> digestField <*> digestField <*> decodeWord64
@@ -358,7 +358,7 @@ decodeScope = do
     validateInterfaces injected values = do
       unique "checked value interface owners" (map exactModule values)
       let canonicalValue value = case parseSessionModule (exactModule value) of
-            Just owner -> smKind owner == ValMod && sessionModuleString owner == exactModule value
+            Just valueOwner -> smKind valueOwner == ValMod && sessionModuleString valueOwner == exactModule value
             Nothing -> False
       unless (all ((== "main") . exactUnit) values && all canonicalValue values
           && length values == length injected && all (`elem` injected) (map exactModule values))
