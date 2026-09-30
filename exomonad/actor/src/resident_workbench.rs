@@ -3111,7 +3111,17 @@ where
         reason: String,
         operation: impl std::future::Future<Output = T>,
     ) -> T {
-        let guard = ParkedHoleAbortGuard::with_latest(&self.access, context, None, reason);
+        let retained_authority = SLOT_CONTINUATION_OWNER
+            .try_with(|owner| owner.0.retained_authority.clone())
+            .ok()
+            .flatten();
+        let guard = ParkedHoleAbortGuard::with_retained_latest(
+            &self.access,
+            context,
+            None,
+            reason,
+            retained_authority,
+        );
         SLOT_CONTINUATION_OWNER
             .scope(guard.registration(), operation)
             .await
@@ -16917,7 +16927,7 @@ mod request_tests {
         failed_cleanup_context.placement.lexical_scope = tidepool_codegen::scope::ScopeId(u64::MAX);
         let guard = ParkedHoleAbortGuard::with_retained_latest(
             &workbench.access,
-            failed_cleanup_context,
+            failed_cleanup_context.clone(),
             None,
             "test failed cleanup admission".into(),
             Some(authority),
@@ -16925,16 +16935,22 @@ mod request_tests {
         let cleanup_weak = Arc::downgrade(&guard.shared);
         let registration = guard.registration();
         let (block, verdict) = suspending_fragment();
-        let step = registration
-            .scope(workbench.begin_fragment_split(
-                context.clone(),
-                source,
-                vec![],
-                block,
-                Some(verdict),
+        let (step, nested_cleanup_weak) = registration
+            .scope(workbench.with_exact_continuation_cleanup(
+                failed_cleanup_context,
+                "nested slot cleanup admission failed".into(),
+                async {
+                    let nested_cleanup_weak = SLOT_CONTINUATION_OWNER
+                        .try_with(|owner| Arc::downgrade(&owner.0))
+                        .expect("nested production cleanup owner is installed");
+                    let step = workbench
+                        .begin_fragment_split(context.clone(), source, vec![], block, Some(verdict))
+                        .await;
+                    (step, nested_cleanup_weak)
+                },
             ))
-            .await
-            .expect("real native frame parks with its authority");
+            .await;
+        let step = step.expect("real nested native frame parks with original authority");
         let ResidentWorkbenchStep::Running { outcome, .. } = step else {
             panic!("expected a native suspension")
         };
@@ -16946,7 +16962,7 @@ mod request_tests {
         // The failed checkout has returned and no abort claim is kept alive
         // by an artificial cycle. Its lease belongs to the native frame.
         tokio::time::timeout(Duration::from_secs(5), async {
-            while cleanup_weak.upgrade().is_some() {
+            while cleanup_weak.upgrade().is_some() || nested_cleanup_weak.upgrade().is_some() {
                 tokio::task::yield_now().await;
             }
         })
