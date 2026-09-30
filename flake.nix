@@ -210,6 +210,7 @@
               errors
               cryptohash-sha256
               cborg
+              syb
               witherable
               safe
               random
