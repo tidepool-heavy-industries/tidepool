@@ -2,9 +2,30 @@
 
 Approved for implementation 2026-09-30. This refines
 `engine-harness-completion-wave.md`; conflicting older sequencing is superseded.
-The finish line is verified release readiness. Live trials, pushes and backend
-default changes remain separate. Native goal tools stay disabled. Codex is not
+The finish line is verified release readiness. Live trials and backend default
+changes remain separate. Publication of viable work to main is authorized by
+the user; dependency revisions must be published before their consumers.
+Native goal tools stay disabled. Codex is not
 built with Buck; the resident compiler remains a runtime service.
+
+### Publication checkpoint, 2026-09-30
+
+At `b38490f520290f83ff9cbe60bb2eb7cea898502f`, GitHub Tidepool main was
+`f84bf313d8f0364fff474dcfd883aeca443b291f`: 619 local commits ahead and zero
+upstream-only commits. The rejected push targeted the unrelated local
+`.exomonad/workspace` repository because the superproject's origin URL had
+changed. Origin now fetches Tidepool over HTTPS and pushes over SSH. The cause
+of that configuration change is under investigation; no merge or force push
+is required.
+
+Publication is pending GitHub authentication for this session. SSH dry-run
+fails host-key verification; HTTPS has no usable credential helper. Publish
+the pinned harness revision `814b1697226344e8fd16196666e41c184a73531d` and
+verify availability of the Codex gitlink
+`d2d1d7c754a72f51087a54c230185831c649913b` before publishing Tidepool. Harness
+origin currently names a local bundle, so publication must explicitly target
+the harness GitHub repository. These delivery checks do not establish M1,
+M2, or full-engine acceptance.
 
 ## Source checkpoint and ownership
 
