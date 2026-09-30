@@ -11,7 +11,9 @@
 //!   [`FailureClass::VersionSkew`] (the extractor's wire format was rejected by
 //!   this server's reader → redeploy/reconnect so both sides run one build).
 //! - **phase** — WHEN it failed: [`Phase::Compile`] (during source compilation
-//!   extraction) or [`Phase::Run`] (during JIT execution).
+//!   extraction), [`Phase::Install`] (while parsing, linking, compiling, or
+//!   admitting a prepared program before execution), or [`Phase::Run`] (during
+//!   JIT execution).
 //!
 //! Splitting the two axes is the fix for the class of bug where a wire-format
 //! version skew (new extractor, old server) surfaced tagged as a user Haskell
@@ -64,11 +66,16 @@ impl FailureClass {
     }
 }
 
-/// WHEN it failed — the compile→run boundary is machine creation.
+/// WHEN it failed — source extraction, prepared-program installation, or
+/// execution. The `install` stage distinguishes failures before a prepared
+/// program starts running from failures produced by execution itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     /// During source compilation (the `tidepool-extract` shell-out + read).
     Compile,
+    /// While parsing, linking, compiling, or admitting a prepared program,
+    /// before its machine executes.
+    Install,
     /// During JIT execution of the compiled program.
     Run,
 }
@@ -79,6 +86,7 @@ impl Phase {
     pub fn tag(self) -> &'static str {
         match self {
             Phase::Compile => "compile",
+            Phase::Install => "install",
             Phase::Run => "run",
         }
     }
@@ -294,6 +302,7 @@ mod tests {
         assert_eq!(FailureClass::Infra.tag(), "infra");
         assert_eq!(FailureClass::VersionSkew.tag(), "version-skew");
         assert_eq!(Phase::Compile.tag(), "compile");
+        assert_eq!(Phase::Install.tag(), "install");
         assert_eq!(Phase::Run.tag(), "run");
     }
 }
