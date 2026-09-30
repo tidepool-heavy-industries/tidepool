@@ -1584,7 +1584,7 @@ impl PersistentSession {
                             path: self.lib().root.clone(),
                             detail: "native source lease has no owning machine incarnation".into(),
                         })?;
-                let identity = key.binder.binder;
+                let identity = key.binder.binder.clone();
                 Ok(super::recovery::RecoveryPublicSourceInstance {
                     machine_incarnation: incarnation.0,
                     instance: key.instance.raw(),
