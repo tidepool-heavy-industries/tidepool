@@ -622,8 +622,11 @@ fn durable_copy(path: &Path, bytes: &[u8], digest: &[u8; 32]) -> Result<(), Reco
     }
     tidepool_atomic_write::write_durable_new(path, bytes).map_err(io::Error::from)?;
     reject_symlink(path)?;
-    read_checked(path, digest)?;
-    Ok(())
+    if verify_existing_durable(path, bytes.len(), digest)? {
+        Ok(())
+    } else {
+        Err(RecoveryArtifactError::Unavailable(path.to_path_buf()))
+    }
 }
 
 fn verify_existing_durable(
