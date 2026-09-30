@@ -21,6 +21,7 @@ use tidepool_repr::execution_schema::{
     CachedHomeOwner, ImportOwner, JsonLayout, PreparedProgram, SymbolIdentity,
 };
 
+use super::admission::CheckedTurnCompletion;
 use super::prepared::{ParkPolicy, PreparedRuntimeError, PreparedSettlement};
 use super::turn::TurnCode;
 use tidepool_codegen::suspension::{ContinuationId, RealmId, ValueHandle};
@@ -546,6 +547,7 @@ impl Drop for CustodyTransfer {
 #[derive(Clone, Debug)]
 pub struct PlainHole {
     id: String,
+    checked: Option<Arc<CheckedTurnCompletion>>,
 }
 
 /// See [`ResidentHole`]'s doc — the `Binding` variant's payload.
@@ -556,6 +558,7 @@ pub struct BindingHole {
     generation: Generation,
     observation: Option<Vec<tidepool_repr::VarId>>,
     lexical_scope: ScopeId,
+    checked: Option<Arc<CheckedTurnCompletion>>,
 }
 
 /// See [`ResidentHole`]'s doc — a projected pattern bind retains every GHC
@@ -566,6 +569,7 @@ pub struct ProjectedBindingHole {
     binders: Vec<BoundBinder>,
     generation: Generation,
     lexical_scope: ScopeId,
+    checked: Option<Arc<CheckedTurnCompletion>>,
 }
 
 /// The public continuation token: a sum over a parked turn's completion
@@ -593,7 +597,7 @@ impl ResidentHole {
 
     fn mint(id: String, seed: HoleSeed) -> Self {
         match seed {
-            HoleSeed::Plain => ResidentHole::Plain(PlainHole { id }),
+            HoleSeed::Plain => ResidentHole::Plain(PlainHole { id, checked: None }),
             HoleSeed::Binding {
                 binder,
                 generation,
@@ -605,7 +609,17 @@ impl ResidentHole {
                 generation,
                 observation,
                 lexical_scope,
+                checked: None,
             }),
+            HoleSeed::Checked { seed, completion } => {
+                let mut hole = Self::mint(id, *seed);
+                match &mut hole {
+                    Self::Plain(hole) => hole.checked = Some(completion),
+                    Self::Binding(hole) => hole.checked = Some(completion),
+                    Self::ProjectedBinding(hole) => hole.checked = Some(completion),
+                }
+                hole
+            }
             HoleSeed::ProjectedBinding {
                 binders,
                 generation,
@@ -615,6 +629,7 @@ impl ResidentHole {
                 binders,
                 generation,
                 lexical_scope,
+                checked: None,
             }),
         }
     }
@@ -624,7 +639,7 @@ impl ResidentHole {
     /// of re-suspensions all carry the SAME binder/generation/scope through to
     /// whichever one finally completes.
     fn seed(&self) -> HoleSeed {
-        match self {
+        let seed = match self {
             ResidentHole::Plain(_) => HoleSeed::Plain,
             ResidentHole::Binding(h) => HoleSeed::Binding {
                 binder: h.binder.clone(),
@@ -637,7 +652,13 @@ impl ResidentHole {
                 generation: h.generation,
                 lexical_scope: h.lexical_scope,
             },
-        }
+        };
+        let checked = match self {
+            Self::Plain(hole) => &hole.checked,
+            Self::Binding(hole) => &hole.checked,
+            Self::ProjectedBinding(hole) => &hole.checked,
+        };
+        seed.with_checked(checked.clone())
     }
 
     /// Construct a `Plain` hole from a bare continuation id, for a caller
@@ -653,7 +674,10 @@ impl ResidentHole {
     /// There is no way to fabricate a `Binding` hole from a bare string; a
     /// real suspension through `run_bind` is the only source of one.
     pub fn plain(cont_id: impl Into<String>) -> Self {
-        ResidentHole::Plain(PlainHole { id: cont_id.into() })
+        ResidentHole::Plain(PlainHole {
+            id: cont_id.into(),
+            checked: None,
+        })
     }
 }
 
@@ -661,6 +685,10 @@ impl ResidentHole {
 /// suspension — [`ResidentHole`] minus the id, which is minted alongside it.
 #[derive(Clone)]
 enum HoleSeed {
+    Checked {
+        seed: Box<HoleSeed>,
+        completion: Arc<CheckedTurnCompletion>,
+    },
     Plain,
     Binding {
         binder: BoundBinder,
@@ -673,6 +701,24 @@ enum HoleSeed {
         generation: Generation,
         lexical_scope: ScopeId,
     },
+}
+
+impl HoleSeed {
+    fn with_checked(self, checked: Option<Arc<CheckedTurnCompletion>>) -> Self {
+        match checked {
+            Some(completion) => Self::Checked {
+                seed: Box::new(self),
+                completion,
+            },
+            None => self,
+        }
+    }
+    fn into_unchecked(self) -> (Self, Option<Arc<CheckedTurnCompletion>>) {
+        match self {
+            Self::Checked { seed, completion } => (*seed, Some(completion)),
+            seed => (seed, None),
+        }
+    }
 }
 
 /// The classified result of driving a resident turn to its first yield.
@@ -940,6 +986,62 @@ pub struct PendingPreparedInstall {
     realm: RealmId,
     lexical_scope: ScopeId,
     park: ParkPolicy,
+    checked: Option<PreparedCheckedTurn>,
+}
+
+struct PreparedCheckedTurn {
+    prefix: Arc<super::RuntimeCheckedPrefix>,
+    execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
+}
+
+fn checked_turn_plan(
+    certification: &Option<super::turn::TurnCertification>,
+    prepared: &PreparedProgram,
+    mode: &PreparedTurnMode<'_>,
+) -> Result<Option<PreparedCheckedTurn>, ResidentError> {
+    let Some(certification) = certification else {
+        return Ok(None);
+    };
+    let (generation, binders) = match mode {
+        PreparedTurnMode::Value => (
+            certification
+                .checked_execution()
+                .map_or(0, |execution| execution.generation()),
+            &[][..],
+        ),
+        PreparedTurnMode::Binding {
+            binder, generation, ..
+        } => (generation.0, std::slice::from_ref(*binder)),
+        PreparedTurnMode::Projected {
+            binders,
+            generation,
+        } => (generation.0, *binders),
+    };
+    certification
+        .validate_checked_bind(prepared, generation, binders)
+        .map_err(SessionError::Compile)?;
+    let Some(execution) = certification.checked_execution() else {
+        return Ok(None);
+    };
+    let prefix = certification.checked_prefix().ok_or_else(|| {
+        SessionError::Compile(crate::CompileError::ExtractFailed(
+            "checked execution lacks its runtime prefix owner".into(),
+        ))
+    })?;
+    Ok(Some(PreparedCheckedTurn {
+        prefix: prefix.clone(),
+        execution: execution.clone(),
+    }))
+}
+
+impl PreparedCheckedTurn {
+    fn start(
+        self,
+        session: &PersistentSession,
+        scope: ScopeId,
+    ) -> Result<Arc<CheckedTurnCompletion>, SessionError> {
+        self.prefix.start(session, scope, self.execution)
+    }
 }
 
 enum PendingPreparedSource {
@@ -1883,6 +1985,83 @@ where
         self.state.public_visibility_snapshot_in(scope)
     }
 
+    pub fn begin_private_execution(
+        &mut self,
+        public: ScopeId,
+    ) -> Result<super::PrivateExecutionAdmission, SessionError> {
+        self.settle_dropped_custody();
+        self.state.begin_private_execution(public)
+    }
+
+    pub fn admit_cell_in(
+        &mut self,
+        scope: ScopeId,
+        declarations: usize,
+        specification: Arc<dyn std::any::Any + Send + Sync>,
+        specification_digest: [u8; 32],
+        authority_digest: [u8; 32],
+    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
+        self.settle_dropped_custody();
+        self.state.admit_cell_in(
+            scope,
+            declarations,
+            specification,
+            specification_digest,
+            authority_digest,
+        )
+    }
+
+    pub fn begin_checked_prefix(
+        &self,
+        admission: Arc<super::RuntimeCellAdmission>,
+        first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
+    ) -> Result<Arc<super::RuntimeCheckedPrefix>, SessionError> {
+        self.state.begin_checked_prefix(admission, first_item)
+    }
+
+    pub fn admit_checked_item(
+        &mut self,
+        prefix: Arc<super::RuntimeCheckedPrefix>,
+        item: tidepool_toolchain::checked_cell::ExactCheckedItem,
+    ) -> Result<Arc<super::RuntimeCheckedItemAdmission>, SessionError> {
+        self.settle_dropped_custody();
+        self.state.admit_checked_item(prefix, item)
+    }
+
+    pub fn freeze_execution_intent(
+        &mut self,
+        admission: &super::PrivateExecutionAdmission,
+        writes: Vec<SessionVarId>,
+        sources: Vec<tidepool_codegen::binding_table::SourceLeaseKey>,
+    ) -> Result<Arc<super::FinalExecutionIntent>, SessionError> {
+        self.settle_dropped_custody();
+        self.state
+            .freeze_execution_intent(admission, writes, sources)
+    }
+
+    pub fn restage_execution_publication(
+        &mut self,
+        owner: super::RecoveryPublicOwner,
+        intent: Arc<super::FinalExecutionIntent>,
+    ) -> Result<super::ExecutionPublication, SessionError> {
+        self.state.restage_execution_publication(owner, intent)
+    }
+
+    pub fn revalidate_declaration_rejection(
+        &self,
+        rejected: &super::RejectedDeclarationPublication,
+    ) -> Result<super::DeclarationPublicationRejection, SessionError> {
+        self.state.revalidate_declaration_rejection(rejected)
+    }
+
+    pub fn publish_staged_public_manifest(
+        &mut self,
+        ticket: super::StagedPublicManifest,
+        decision: &Arc<super::PublicationDecision>,
+    ) -> Result<super::PublicManifestCommit, SessionError> {
+        self.state.publish_staged_public_manifest(ticket, decision)
+    }
+
     /// Admit one compiler-certified target and its demanded source closure
     /// against a single scope snapshot under this session's machine checkout.
     /// The persistent registrar owns every new source root before the target
@@ -2698,6 +2877,7 @@ where
             continuation = %cont_id,
             handle = ?transfer.handle,
             obligation = match &seed {
+                HoleSeed::Checked { .. } => "checked",
                 HoleSeed::Plain => "plain",
                 HoleSeed::Binding { .. } => "binding",
                 HoleSeed::ProjectedBinding { .. } => "projected-binding",
@@ -3788,6 +3968,12 @@ where
         mode: PreparedTurnMode<'_>,
         argument: Option<PreparedHandle>,
     ) -> Result<ResidentOutcome, ResidentError> {
+        let checked =
+            checked_turn_plan(code.certification.as_ref(), code.prepared.as_ref(), &mode)?;
+        let lexical_scope = self.run_context.lexical_scope;
+        let checked = checked
+            .map(|checked| checked.start(&self.state, lexical_scope))
+            .transpose()?;
         let prepared = code.prepared.into_owned();
         let provenance = self.provenance_for(&code.sites)?;
         self.state
@@ -3875,7 +4061,7 @@ where
                 return Err(error);
             }
         };
-        self.complete_prepared(run, mode, program, lexical_scope, provenance, None)
+        self.complete_prepared(run, mode, program, lexical_scope, provenance, None, checked)
     }
 
     /// Whether this session already has a resident machine to snapshot an
@@ -3910,6 +4096,11 @@ where
         mode: PendingPreparedMode,
         argument: Option<PreparedHandle>,
     ) -> Result<PendingPreparedInstall, ResidentError> {
+        let checked = checked_turn_plan(
+            code.certification.as_ref(),
+            code.prepared.as_ref(),
+            &mode.as_mode(),
+        )?;
         let prepared = code.prepared.into_owned();
         let provenance = self.provenance_for(&code.sites)?;
         self.state
@@ -3959,6 +4150,7 @@ where
             realm,
             lexical_scope,
             park,
+            checked,
         })
     }
 
@@ -3983,8 +4175,10 @@ where
             realm,
             lexical_scope,
             park,
+            checked,
         } = pending;
         let install_started = std::time::Instant::now();
+        let mut checked_completion = None;
         let (program, source_keys) = match (snapshot, compiled.kind) {
             (PendingPreparedSource::Legacy(snapshot), CompiledPreparedKind::Legacy(compiled)) => {
                 match self
@@ -4011,6 +4205,9 @@ where
                 {
                     return Ok(None);
                 }
+                checked_completion = checked
+                    .map(|checked| checked.start(&self.state, lexical_scope))
+                    .transpose()?;
                 self.install_certified_turn_in(
                     lexical_scope,
                     target,
@@ -4069,6 +4266,7 @@ where
             lexical_scope,
             provenance,
             None,
+            checked_completion,
         )?))
     }
 
@@ -4084,8 +4282,9 @@ where
         lexical_scope: ScopeId,
         provenance: Arc<ProgramProvenance>,
         resumed: Option<&str>,
+        checked: Option<Arc<CheckedTurnCompletion>>,
     ) -> Result<ResidentOutcome, ResidentError> {
-        let seed = hole_seed_of(&mode, lexical_scope);
+        let seed = hole_seed_of(&mode, lexical_scope).with_checked(checked.clone());
         let outcome = match run {
             PreparedRun::Done { handle, value } => {
                 let engine = self.state.require_prepared()?;
@@ -4194,6 +4393,14 @@ where
         if let Some(engine) = self.state.prepared_mut() {
             if engine.disposition() == tidepool_codegen::machine::MachineDisposition::Reusable {
                 engine.quiesce_and_collect()?;
+            }
+        }
+        if matches!(
+            &outcome,
+            ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. }
+        ) {
+            if let Some(checked) = checked {
+                checked.settle(&mut self.state)?;
             }
         }
         Ok(outcome)
@@ -4939,6 +5146,7 @@ where
             lexical_scope,
             provenance,
             None,
+            None,
         )
     }
 
@@ -5320,6 +5528,7 @@ where
         seed: HoleSeed,
         provenance: Arc<ProgramProvenance>,
     ) -> Result<ResidentOutcome, ResidentError> {
+        let (seed, checked) = seed.into_unchecked();
         let input = match input {
             ResidentResumeInput::Abort(reason) => {
                 let aborted = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
@@ -5361,6 +5570,9 @@ where
                     generation: *generation,
                 },
             ),
+            HoleSeed::Checked { .. } => {
+                unreachable!("checked completion was separated from its hole obligation")
+            }
         };
         let plan = settle_plan_of(&mode);
         let park = ParkPolicy {
@@ -5421,7 +5633,15 @@ where
                 return Err(error);
             }
         };
-        self.complete_prepared(run, mode, runner, lexical_scope, provenance, Some(cont_id))
+        self.complete_prepared(
+            run,
+            mode,
+            runner,
+            lexical_scope,
+            provenance,
+            Some(cont_id),
+            checked,
+        )
     }
 
     /// The `ValueHandle` custody of a prepared-route binding named `name`,
