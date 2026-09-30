@@ -418,6 +418,7 @@ pub struct PublicVisibilitySnapshot {
 /// Staging its replacement is fallible and may run after that checkout ends.
 pub struct PublicManifestBase {
     admission_owner: Option<std::sync::Arc<admission::RuntimeAdmissionOwner>>,
+    admission_owner_epoch: Option<u64>,
     session: SessionId,
     path: PathBuf,
     owner: RecoveryPublicOwner,
@@ -436,6 +437,7 @@ pub struct PublicManifestBase {
 /// compare its baseline and rename it while holding the machine checkout.
 pub struct StagedPublicManifest {
     admission_owner: Option<std::sync::Arc<admission::RuntimeAdmissionOwner>>,
+    admission_owner_epoch: Option<u64>,
     session: SessionId,
     path: PathBuf,
     owner: RecoveryPublicOwner,
@@ -505,6 +507,7 @@ impl PublicManifestBase {
         })?;
         Ok(StagedPublicManifest {
             admission_owner: self.admission_owner,
+            admission_owner_epoch: self.admission_owner_epoch,
             session: self.session,
             path: self.path,
             owner: self.owner,
@@ -951,6 +954,7 @@ impl SessionLib {
         }
         Ok(PublicManifestBase {
             admission_owner: None,
+            admission_owner_epoch: None,
             session: self.id,
             path: state.path.clone(),
             owner,

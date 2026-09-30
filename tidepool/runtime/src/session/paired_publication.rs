@@ -48,6 +48,7 @@ struct AuthoredWrite {
 /// The private scope keeps live roots owned until publication or abandonment.
 pub struct FinalExecutionIntent {
     owner: Arc<super::admission::RuntimeAdmissionOwner>,
+    owner_epoch: u64,
     _private_scope_lease: Option<Arc<super::RuntimeLexicalScopeLease>>,
     admitted: PublicVisibilitySnapshot,
     private: PublicVisibilitySnapshot,
@@ -482,6 +483,7 @@ impl PersistentSession {
         source_keys: Vec<SourceLeaseKey>,
     ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
         if !Arc::ptr_eq(&admission.owner, self.admission_owner())
+            || admission.owner_epoch != self.admission_owner().epoch()
             || admission.view().session() != self.lib().session_id()
             || self.binding_tip_id(admission.private_scope()) != Some(admission.binding_tip())
         {
@@ -668,6 +670,7 @@ impl PersistentSession {
         let reserved = self.lib_mut().reserve_join_generation_durable()?;
         Ok(Arc::new(FinalExecutionIntent {
             owner: self.admission_owner().clone(),
+            owner_epoch: self.admission_owner().epoch(),
             _private_scope_lease: private_scope_lease,
             admitted: admitted.clone(),
             private,
@@ -708,7 +711,9 @@ impl PersistentSession {
         owner: RecoveryPublicOwner,
         intent: Arc<FinalExecutionIntent>,
     ) -> Result<DeclarationPublicationBase, SessionError> {
-        if !Arc::ptr_eq(&intent.owner, self.admission_owner()) {
+        if !Arc::ptr_eq(&intent.owner, self.admission_owner())
+            || intent.owner_epoch != self.admission_owner().epoch()
+        {
             return Err(SessionError::StaleStagedDeclaration);
         }
         let public = self.snapshot_publication(
@@ -788,6 +793,7 @@ impl PersistentSession {
             .admission_owner
             .as_ref()
             .is_none_or(|owner| !Arc::ptr_eq(owner, self.admission_owner()))
+            || base.admission_owner_epoch != Some(self.admission_owner().epoch())
         {
             return Ok(false);
         }

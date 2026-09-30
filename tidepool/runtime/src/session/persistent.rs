@@ -1685,6 +1685,7 @@ impl PersistentSession {
                 final_source_instances,
             )?;
         base.admission_owner = Some(self.admission_owner().clone());
+        base.admission_owner_epoch = Some(self.admission_owner().epoch());
         Ok(base)
     }
 
@@ -1699,6 +1700,7 @@ impl PersistentSession {
             .admission_owner
             .as_ref()
             .is_none_or(|owner| !Arc::ptr_eq(owner, self.admission_owner()))
+            || ticket.admission_owner_epoch != Some(self.admission_owner().epoch())
         {
             return Ok(PublicManifestCommit::Stale);
         }

@@ -15,6 +15,7 @@ use super::{PersistentSession, PublicVisibilitySnapshot, SessionCompileView, Ses
 /// binding-store owner; completion must retire that scope once.
 pub struct PrivateExecutionAdmission {
     pub(super) owner: Arc<RuntimeAdmissionOwner>,
+    pub(super) owner_epoch: u64,
     pub(super) scope_lease: Arc<RuntimeLexicalScopeLease>,
     admitted: PublicVisibilitySnapshot,
     private_scope: ScopeId,
@@ -44,6 +45,7 @@ impl PrivateExecutionAdmission {
 /// Original declaration identities are burned before checking any source.
 pub struct RuntimeCellAdmission {
     owner: Arc<RuntimeAdmissionOwner>,
+    owner_epoch: u64,
     private_execution: Option<Arc<PrivateExecutionAdmission>>,
     _retained_scope: Arc<RuntimeLexicalScopeLease>,
     prefix_started: std::sync::atomic::AtomicBool,
@@ -63,13 +65,18 @@ pub struct RuntimeCellAdmission {
 /// distinct from recoverable source-session IDs and per-store counters.
 pub(super) struct RuntimeAdmissionOwner {
     identity: uuid::Uuid,
+    epoch: std::sync::atomic::AtomicU64,
     retired: parking_lot::Mutex<Vec<ScopeId>>,
 }
 
 impl RuntimeAdmissionOwner {
+    pub(super) fn epoch(&self) -> u64 {
+        self.epoch.load(std::sync::atomic::Ordering::Acquire)
+    }
     pub(super) fn new() -> Self {
         Self {
             identity: uuid::Uuid::new_v4(),
+            epoch: std::sync::atomic::AtomicU64::new(0),
             retired: parking_lot::Mutex::new(Vec::new()),
         }
     }
@@ -465,6 +472,7 @@ impl RuntimeCellAdmission {
     }
     pub(super) fn belongs_to(&self, session: &PersistentSession) -> bool {
         Arc::ptr_eq(&self.owner, session.admission_owner())
+            && self.owner_epoch == session.admission_owner().epoch()
     }
     pub fn specification(&self) -> &Arc<dyn Any + Send + Sync> {
         &self.specification
@@ -472,6 +480,26 @@ impl RuntimeCellAdmission {
 }
 
 impl PersistentSession {
+    /// Check exhaustion before the authoritative owner manifest rename.
+    pub(crate) fn prepare_execution_admission_epoch_advance(&self) -> Result<u64, SessionError> {
+        self.admission_owner()
+            .epoch()
+            .checked_add(1)
+            .ok_or_else(|| SessionError::RecoveryManifest {
+                path: self.lib().root.clone(),
+                detail: "execution admission epoch exhausted".into(),
+            })
+    }
+
+    /// Successful durable owner transfer fences every offer and publication
+    /// issued before that transfer, while their scopes remain alive for abort.
+    /// The next epoch was preflighted under this same exclusive checkout.
+    pub(crate) fn invalidate_execution_admissions_after_owner_transfer(&mut self, next: u64) {
+        self.admission_owner()
+            .epoch
+            .store(next, std::sync::atomic::Ordering::Release);
+    }
+
     pub fn admit_checked_display(
         &mut self,
         prefix: Arc<RuntimeCheckedPrefix>,
@@ -718,6 +746,7 @@ impl PersistentSession {
             .expect("detached scope captures a binding tip");
         Ok(PrivateExecutionAdmission {
             owner: self.admission_owner().clone(),
+            owner_epoch: self.admission_owner().epoch(),
             scope_lease: Arc::new(RuntimeLexicalScopeLease {
                 owner: self.admission_owner().clone(),
                 scope: private_scope,
@@ -785,6 +814,7 @@ impl PersistentSession {
         };
         frame(b"TidepoolRuntimeCellAdmission1");
         frame(self.admission_owner().identity.as_bytes());
+        frame(&self.admission_owner().epoch().to_le_bytes());
         frame(&specification_digest);
         frame(&authority_digest);
         frame(&view.session().0.to_le_bytes());
@@ -829,6 +859,7 @@ impl PersistentSession {
         let retained_scope = self.retain_lexical_scope(scope)?;
         Ok(Arc::new(RuntimeCellAdmission {
             owner: self.admission_owner().clone(),
+            owner_epoch: self.admission_owner().epoch(),
             private_execution: None,
             _retained_scope: retained_scope,
             prefix_started: std::sync::atomic::AtomicBool::new(false),
@@ -857,6 +888,7 @@ impl PersistentSession {
         authority_digest: [u8; 32],
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         if !Arc::ptr_eq(&execution.owner, self.admission_owner())
+            || execution.owner_epoch != self.admission_owner().epoch()
             || execution.view().session() != self.lib().session_id()
             || self.binding_tip_id(execution.private_scope()) != Some(execution.binding_tip())
         {
@@ -925,6 +957,78 @@ mod tests {
         drop(first_cell);
         session.reap_admission_leases();
         assert!(!session.scope_tree().is_live(scope));
+    }
+
+    #[test]
+    fn durable_owner_transfer_fences_offers_and_staged_tickets_without_retiring_scopes() {
+        use crate::session::{
+            ExecutionPublication, PublicManifestCommit, PublicationDecision, PublicationPhase,
+            RecoveryPublicOwner,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let mut lib =
+            SessionLib::open(SessionId(987), root.path(), ModuleEnv::standalone_default()).unwrap();
+        lib.attach_recovery_graph_v2(root.path().join("declarations.json"))
+            .unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let owner = RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/owner-transfer").unwrap(),
+            1,
+        )
+        .unwrap();
+        session
+            .bind_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        let private = Arc::new(session.begin_private_execution(public).unwrap());
+        let cell = session
+            .admit_cell_for_execution(private.clone(), 0, Arc::new(()), [7; 32], [8; 32])
+            .unwrap();
+        let intent = session
+            .freeze_execution_intent(&private, vec![], vec![])
+            .unwrap();
+        let ExecutionPublication::Bindings(base) = session
+            .restage_execution_publication(owner.clone(), intent.clone())
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        let ticket = base.stage().unwrap();
+        let next = session.prepare_execution_admission_epoch_advance().unwrap();
+        session.invalidate_execution_admissions_after_owner_transfer(next);
+        assert!(!cell.belongs_to(&session));
+        assert!(matches!(
+            session.admit_cell_for_execution(private.clone(), 0, Arc::new(()), [7; 32], [8; 32]),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
+        assert!(matches!(
+            session.freeze_execution_intent(&private, vec![], vec![]),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
+        assert!(matches!(
+            session.restage_execution_publication(owner.clone(), intent),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
+        let decision = PublicationDecision::new();
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(ticket, &decision)
+                .unwrap(),
+            PublicManifestCommit::Stale
+        );
+        assert_eq!(decision.phase(), PublicationPhase::Running);
+        assert!(session.scope_tree().is_live(private.private_scope()));
+        let fresh = Arc::new(session.begin_private_execution(public).unwrap());
+        let current = session
+            .admit_cell_for_execution(fresh, 0, Arc::new(()), [7; 32], [8; 32])
+            .unwrap();
+        assert!(current.belongs_to(&session));
+        assert_ne!(cell.digest(), current.digest());
+        let old_scope = private.private_scope();
+        drop(cell);
+        drop(private);
+        session.reap_admission_leases();
+        assert!(!session.scope_tree().is_live(old_scope));
     }
 
     #[test]
