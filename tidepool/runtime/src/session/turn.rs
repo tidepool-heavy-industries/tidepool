@@ -6092,7 +6092,7 @@ mod tests {
                 assert_eq!(
                     rendered.result().to_json(),
                     serde_json::json!([
-                        "(41, 40, True, \"LocalBox {localNumber = 41}\")",
+                        "(41,40,True,\"LocalBox {localNumber = 41}\")",
                         false,
                         false
                     ]),
