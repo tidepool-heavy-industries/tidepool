@@ -194,3 +194,41 @@ tidepool_rust_test_cases(
     test_rule_timeout_ms = 150000,
     visibility = ["PUBLIC"],
 )
+
+tidepool_rust_test_cases(
+    name = "runtime_checked_cache_test",
+    binary = ":tidepool_runtime_unit_tests",
+    exact_tests = ["session::turn::tests::empty_checked_context_reuses_immutable_support_and_invalidates_changed_source"],
+    expected_count = 1,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 660000,
+    env = {
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    haskell_worker = True,
+    resources = ["//bridge/haskell:facade_embedded_sources"],
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
+    name = "runtime_checked_original_test",
+    binary = ":tidepool_runtime_unit_tests",
+    exact_tests = ["session::turn::tests::admitted_cell_certifies_original_local_declaration_before_its_bind_and_expression"],
+    expected_count = 1,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 660000,
+    env = {
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    haskell_worker = True,
+    resources = ["//bridge/haskell:facade_embedded_sources"],
+    visibility = ["PUBLIC"],
+)

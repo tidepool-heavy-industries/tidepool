@@ -377,6 +377,7 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
         self.assertIn("expected_count = 3", host)
         self.assertIn("haskell_worker = True", host)
         self.assertIn('"TIDEPOOL_EXTRACT_WORKER"', host)
+        self.assertIn('"TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib"', host)
         self.assertNotIn("TIDEPOOL_BROWSER_DRIVER", host)
         self.assertNotIn("playwright", host)
         self.assertIn("expected_count = 1", cases["facade_late_output_test"])
@@ -466,8 +467,14 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         self.assertIn('tidepool_rust_binary(\n    name = "tidepool_runtime_unit_tests",', runtime)
         self.assertIn('binary = ":tidepool_runtime_unit_tests"', runtime)
         self.assertIn("expected_count = 3", runtime)
+        admission = runtime.split('name = "runtime_admission_tests",', 1)[1].split("\n)\n", 1)[0]
         for heavyweight in ("haskell_worker", "TIDEPOOL_EXTRACT", "trybuild", "//web:"):
-            self.assertNotIn(heavyweight, runtime)
+            self.assertNotIn(heavyweight, admission)
+        for name in ("runtime_checked_cache_test", "runtime_checked_original_test"):
+            checked = runtime.split(f'name = "{name}",', 1)[1].split("\n)\n", 1)[0]
+            self.assertIn("expected_count = 1", checked)
+            self.assertIn("haskell_worker = True", checked)
+            self.assertIn('"TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib"', checked)
         derive, _ = self.groups("tidepool/bridge-derive")
         self.assertIn("proc_macro = True", derive)
 

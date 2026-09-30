@@ -28,11 +28,17 @@ pub fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// The Haskell stdlib / Prelude include dir (`<root>/bridge/haskell/lib`).
-///
-/// Every effectful or Prelude-using test needs this on the include path.
+/// Resolve the test's stdlib through the production toolchain owner. Native
+/// builds supply a declared resource with `TIDEPOOL_PRELUDE_DIR`; Cargo can
+/// use the checkout containing this support crate.
 pub fn prelude_path() -> PathBuf {
-    repo_root().join("bridge/haskell/lib")
+    use tidepool_toolchain::toolchain::{locate_stdlib, StdlibFallbacks};
+    locate_stdlib(&StdlibFallbacks {
+        bundle: None,
+        build_tree: Some(repo_root().join("bridge/haskell/lib")),
+    })
+    .unwrap_or_else(|error| panic!("test stdlib is unavailable: {error}"))
+    .dir
 }
 
 /// The user verb-library dir (`<root>/.tidepool/lib`).

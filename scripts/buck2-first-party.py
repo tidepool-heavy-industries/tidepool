@@ -578,14 +578,34 @@ def runtime_test_cases(binary):
         "native_admission_uses_exact_scoped_roots_and_keeps_its_original_ledger",
         "native_admission_commits_the_live_machine_export_owner",
     )]
-    return "\n".join([
+    rules = ["\n".join([
         "tidepool_rust_test_cases(",
         '    name = "runtime_admission_tests",',
         f"    binary = {json.dumps(':' + binary)},",
         "    exact_tests = [", render_strings(tests, 8), "    ],",
         "    expected_count = 3,", "    jobs = 1,", "    timeout = 30,",
         "    test_rule_timeout_ms = 150000,", '    visibility = ["PUBLIC"],', ")", "",
-    ])
+    ])]
+    for name, test in (
+        ("runtime_checked_cache_test", "empty_checked_context_reuses_immutable_support_and_invalidates_changed_source"),
+        ("runtime_checked_original_test", "admitted_cell_certifies_original_local_declaration_before_its_bind_and_expression"),
+    ):
+        rules.append("\n".join([
+            "tidepool_rust_test_cases(", f"    name = {json.dumps(name)},",
+            f"    binary = {json.dumps(':' + binary)},",
+            f'    exact_tests = ["session::turn::tests::{test}"],',
+            "    expected_count = 1,", "    jobs = 1,", "    timeout = 600,",
+            "    test_rule_timeout_ms = 660000,",
+            "    env = {",
+            '        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",',
+            '        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",',
+            '        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",',
+            '        "TIDEPOOL_KEEP_TEST_LOGS": "1",',
+            "    },", "    haskell_worker = True,",
+            '    resources = ["//bridge/haskell:facade_embedded_sources"],',
+            '    visibility = ["PUBLIC"],', ")", "",
+        ]))
+    return "\n".join(rules)
 
 
 def facade_test_cases(binary):
@@ -599,6 +619,7 @@ def facade_test_cases(binary):
         "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web",
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     }
     browser_env = {
@@ -608,7 +629,7 @@ def facade_test_cases(binary):
         "PLAYWRIGHT_BROWSERS_PATH": "$(location toolchains//:playwright_browsers)",
     }
     process_resources = ["toolchains//:test_tools_closure"]
-    host_resources = process_resources + ["//web:dist"]
+    host_resources = process_resources + ["//web:dist", "//bridge/haskell:facade_embedded_sources"]
     browser_resources = host_resources + [
         "//build/testing/browser:driver_bundle",
         "toolchains//:browser_test_closure",
