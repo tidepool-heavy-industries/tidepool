@@ -17,13 +17,13 @@ import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (intercalate, nub, isInfixOf)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
 import Data.Word (Word64)
-import Control.Monad (foldM, forM, forM_, when, unless)
+import Control.Monad (foldM, forM, forM_, when, unless, void)
 import System.Exit (ExitCode(..), exitWith)
 import System.IO (hClose, hPutStrLn, openBinaryTempFile, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8)
 import qualified System.Info as SystemInfo
 
 import GHC.Types.SourceError (SourceError)
-import GHC (Module, ModuleName, moduleName, moduleNameString, moduleUnit)
+import GHC (Module, ModuleName, moduleName, moduleNameString, moduleUnit, mkModuleName)
 import GHC.Driver.Env (HscEnv, hsc_dflags)
 import GHC.Driver.Session (targetProfile)
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
@@ -92,6 +92,10 @@ import Tidepool.ExactScope
   ( ExactCompilation(..), ExactScope(..), ExactProduct(..), ExactOriginalGroup(..)
   , CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, revalidateExactScope, writeExactCompilation )
 import Tidepool.CheckedCell (CheckedSignature(..), encodeCheckedSignature)
+import Tidepool.PlannedDeclaration
+  ( PlannedDeclaration, PlannedDeclarationInventory, plannedSource, plannedCheckPlan
+  , preparePlannedDeclaration, certifyPlannedDeclaration
+  , renderPlannedDeclarationInventory )
 import Tidepool.Session
   ( SessionScope(..), preparedScaffoldTargetName, preparedResumeTargetName
   , preparedApplyEntryTargetName, preparedApplyValueTargetName
@@ -334,10 +338,11 @@ runInspectionMode compiler args _path = do
     runSingletons scope queries = snd <$> foldM inspectNext (Map.empty, []) (zip (requestFiles args) queries)
       where
         inspectNext (environments, answers) (path, query) = do
-          let purpose = case query of
-                InspectTypeSearch _ -> LookupTypeCompile
-                _ -> GeneralCompile
-              key = (purpose, path)
+          let normalizesWildcards = case query of
+                InspectTypeSearch _ -> True
+                _ -> False
+              purpose = if normalizesWildcards then LookupTypeCompile else GeneralCompile
+              key = (normalizesWildcards, path)
           compiled <- case Map.lookup key environments of
             Just previous -> pure previous
             Nothing -> try (compiler CheckedEnvironment Set.empty purpose scope path (requestIncludes args) (requestBuildProductsDir args))
@@ -502,7 +507,13 @@ processFile compiler caches timing args path = do
 writeCertifiedProducts
   :: FilePath -> HscEnv -> PreparedPipelineResult -> Maybe ProjectionContext
   -> [PreparedArtifact] -> IO ()
-writeCertifiedProducts outDir hscEnv prepared productContext preparedArtifacts = do
+writeCertifiedProducts outDir hscEnv prepared productContext preparedArtifacts =
+  void (writeCertifiedProductsKeeping outDir hscEnv prepared productContext preparedArtifacts)
+
+writeCertifiedProductsKeeping
+  :: FilePath -> HscEnv -> PreparedPipelineResult -> Maybe ProjectionContext
+  -> [PreparedArtifact] -> IO [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])]
+writeCertifiedProductsKeeping outDir hscEnv prepared productContext preparedArtifacts = do
     (availability, freshProducts) <- writeModuleProducts outDir hscEnv
       productContext (pprModules prepared) (pprProductInterfaces prepared)
       (pprPackageRoots prepared)
@@ -538,6 +549,7 @@ writeCertifiedProducts outDir hscEnv prepared productContext preparedArtifacts =
       Left reason -> do
         hPutStrLn stderr ("product certification unavailable: " ++ reason)
         BS.writeFile (outDir </> "certified-products.cbor") BS.empty
+    pure freshProducts
 
 trySynchronous :: IO a -> IO (Either SomeException a)
 trySynchronous action = do
@@ -1061,9 +1073,6 @@ runCellMode compiler caches args cellPath = do
     forM_ admittedScope $ \scope -> forM_ (scopeCheckedCell scope) $ \admission ->
       validateCheckedCellAdmission args admission cellSource template
     initialPlan <- analyzeCell template cellSource >>= either throwCellSplitError pure
-    when (isJust (admittedScope >>= scopeCheckedCell)
-        && any ((== KDecl) . sbKind . cellAnalysisVerdict) (cellPlanItems initialPlan))
-      (fail "checked local declarations lack same-offer original identity certification")
     initialSource <- either fail pure (renderCellCheckSource template initialPlan)
     let outDir = fromMaybe
           (takeDirectory cellPath </> takeBaseName cellPath ++ "_cell")
@@ -1075,15 +1084,24 @@ runCellMode compiler caches args cellPath = do
           else Nothing
     createDirectoryIfMissing True outDir
     out <- requireArg "--cell-out" (requestCellOut args)
+    preparedDeclaration <- case admittedScope >>= \exact -> (,) exact <$> scopeCheckedCell exact of
+      Just (exact, admission)
+        | any ((== KDecl) . sbKind . cellAnalysisVerdict) (cellPlanItems initialPlan) ->
+            Just <$> prepareOriginalCellDeclaration compiler caches args template outDir scope exact admission initialPlan
+      _ -> pure Nothing
+    let checkPurpose = maybe GeneralCompile (\(_,_,inventory,exact) -> PlannedDeclarationCheck inventory exact) preparedDeclaration
+        checkPlan plan = maybe plan (\(_,planned,_,_) -> plannedCheckPlan planned) preparedDeclaration
     (analyzed, provisional) <- checkCellInstances (\plan -> do
-      rendered <- either fail pure (renderCellCheckSource template plan)
+      let effective = checkPlan plan
+      rendered <- either fail pure (renderCellCheckSource template effective)
       writeFile modulePath rendered
       -- Preserve the latest plan for failure diagnostics without encoding and
       -- writing a provisional result before every successful check attempt.
       writeIORef provisionalOutput (Just (out, plan, rendered))
-      compiler CheckedEnvironment Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)) initialPlan
-    checkedSource <- either fail pure (renderCellCheckSource template analyzed)
-    (finalPlan, finalSource, compiled) <- if null (cellPlanDisplayTargets analyzed)
+      compiler CheckedEnvironment Set.empty checkPurpose scope modulePath (requestIncludes args) (requestBuildProductsDir args))
+        (maybe initialPlan (\(plan,_,_,_) -> plan) preparedDeclaration)
+    checkedSource <- either fail pure (renderCellCheckSource template (checkPlan analyzed))
+    (finalPlan, finalSource, compiled) <- if isJust preparedDeclaration || null (cellPlanDisplayTargets analyzed)
       then pure (analyzed, checkedSource, provisional)
       else do
         contextDeclarations <- cellDisplayDeclarations DisplayInstanceContexts provisional analyzed
@@ -1137,6 +1155,87 @@ runCellMode compiler caches args cellPath = do
         pure ()
     Right _ -> pure ()
   reportDiagsWithWarnings res
+
+-- Refine generated instances in the original declaration's typed environment.
+-- The final prepared interface is the only original interface subsequently
+-- installed in the checking transaction.
+prepareOriginalCellDeclaration
+  :: Compiler -> RecoveryCaches -> WorkerRequest -> String -> FilePath -> Maybe SessionScope
+  -> ExactScope -> CheckedCellAdmission -> CellSourcePlan
+  -> IO (CellSourcePlan, PlannedDeclaration, PlannedDeclarationInventory, ExactScope)
+prepareOriginalCellDeclaration compiler caches args template outDir scope exact admission initial = do
+  reserved <- case checkedReservedModules admission of
+    [owner] -> pure owner
+    _ -> fail "local declaration requires one reserved original Lib module"
+  wrapper <- originalDeclarationWrapper template
+  let directory = outDir </> "planned-declaration"
+      sourcePath = directory </> reserved ++ ".hs"
+      planned plan = either fail pure (preparePlannedDeclaration reserved wrapper plan)
+      writeOriginal plan = do
+        original <- planned plan
+        writeFile sourcePath (plannedSource original)
+        pure original
+      checkOriginal plan = do
+        _ <- writeOriginal plan
+        compiler CheckedEnvironment Set.empty GeneralCompile scope sourcePath
+          (requestIncludes args) (requestBuildProductsDir args)
+  createDirectoryIfMissing True directory
+  (analyzed, provisional) <- checkCellInstances checkOriginal initial
+  finalized <- if null (cellPlanDisplayTargets analyzed) then pure analyzed else do
+    contexts <- cellDisplayDeclarations DisplayInstanceContexts provisional analyzed
+    contextual <- pure (installCellDisplayDeclarations contexts analyzed)
+    contextChecked <- checkOriginal contextual
+    fields <- cellDisplayDeclarations DisplayInstanceFields contextChecked analyzed
+    pure (installCellDisplayDeclarations fields analyzed)
+  original <- writeOriginal finalized
+  prepared <- compiler (PreparedProducts Nothing) (Map.keysSet (requestRetainedGenerations args))
+    GeneralCompile scope sourcePath (requestIncludes args) (requestBuildProductsDir args)
+  let result = pprPipelineResult prepared
+      environment = prHscEnv result
+      binds = prBinds result
+  inventory <- certifyPlannedDeclaration original environment >>= either fail pure
+  (artifacts, productContext) <- prepareArtifacts caches sourcePath environment (pprModules prepared)
+    ["__result"] [] (requestRetainedGenerations args) (pprAcceptedCandidates prepared)
+    (compilationScope <$> pprExactCompilation prepared)
+  writePreparedSidecars SeparateYieldSites directory binds (prTyCons result)
+    Nothing (map T.pack (prWarnings result)) artifacts
+  writePreparedArtifacts directory artifacts
+  products <- writeCertifiedProductsKeeping directory environment prepared productContext artifacts
+  (unit, interfaceBytes) <- case
+      [(T.unpack unit, bytes) | (unit, name, bytes, _) <- products, T.unpack name == reserved] of
+    [value] -> pure value
+    _ -> fail "planned original declaration has no unique prepared interface"
+  let interfacePath = directory </> "original.hi"
+      packagesPath = directory </> "original.hi.packages"
+      requirements = nub
+        [(importedUnit,name) | compilation <- maybe [] pure (pprExactCompilation prepared)
+          , ((_,name',_), edges) <- compilationImports compilation, name' == reserved
+          , (_,name,False,importedUnit) <- edges]
+      interface = ExactIfaceArtifact unit reserved interfacePath (shaHex interfaceBytes) requirements
+  roots <- maybe (fail "planned original declaration has no package interface witness") pure
+    (Map.lookup (mkModuleName reserved) (pprPackageRoots prepared))
+  let packageBytes = encodePackageImports interface roots
+      extended = exact
+        { scopeInterfaces = scopeInterfaces exact ++ [(interface, packagesPath, shaHex packageBytes)]
+        , scopeLexical = scopeLexical exact ++ [((unit,reserved), requirements)] }
+      text = encodeString . T.pack
+      receipt = encodeListLen 8 <> text "TPEXACTDECL" <> text "1"
+        <> text (scopeRequestSha256 exact) <> text reserved <> text (plannedSource original)
+        <> text (shaHex interfaceBytes) <> text (renderPlannedDeclarationInventory inventory)
+        <> text "planned-declaration"
+  BS.writeFile interfacePath interfaceBytes
+  BS.writeFile packagesPath packageBytes
+  BS.writeFile (outDir </> "planned-declaration.cbor") (toStrictByteString receipt)
+  pure (finalized, original, inventory, extended)
+
+originalDeclarationWrapper :: String -> IO String
+originalDeclarationWrapper template = do
+  let marker = "\n__tidepoolInEffectRow ::"
+      (prefix, remaining) = T.breakOn (T.pack marker) (T.pack template)
+  when (T.null remaining) (fail "original declaration requires canonical whole-cell recipe")
+  let stripped = T.replace "{{CELL_PRAGMAS}}" "" (T.replace "{{CELL_IMPORTS}}" "" prefix)
+  when ("{{" `T.isInfixOf` stripped) (fail "original declaration wrapper has an unknown placeholder")
+  pure (T.unpack stripped ++ "\n{{TURN}}\n__result :: Int\n__result = (0 :: Int)\n")
 
 validateCheckedCellAdmission :: WorkerRequest -> CheckedCellAdmission -> String -> String -> IO ()
 validateCheckedCellAdmission args admission cellSource template = do

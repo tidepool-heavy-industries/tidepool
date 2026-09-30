@@ -132,6 +132,8 @@ import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellDisplayTa
 import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts)
 import Tidepool.CompileInputPolicy (pluginInputIssues)
+import Tidepool.PlannedDeclaration
+  ( PlannedDeclarationInventory, transformPlannedDeclarationImports )
 import Tidepool.FamilyConsistency (validateCompilationFamilies)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
@@ -672,7 +674,8 @@ data PipelineVariant = PipelineVariant
 
 data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile
   | CheckedItemCompile [(String,CheckedSignature)]
-  deriving (Eq, Ord, Show)
+  | PlannedDeclarationCheck PlannedDeclarationInventory ExactScope
+  deriving (Eq, Show)
 
 transformFor :: CompilePurpose -> ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
 transformFor GeneralCompile _ _ _ = pure
@@ -682,6 +685,9 @@ transformFor LookupTypeCompile target _ summary
   | otherwise = pure
 transformFor (CheckedItemCompile annotations) target env summary
   | ms_mod_name summary == target = rewriteCheckedAnnotations env annotations
+  | otherwise = pure
+transformFor (PlannedDeclarationCheck inventory _) target env summary
+  | ms_mod_name summary == target = transformPlannedDeclarationImports inventory env
   | otherwise = pure
 
 -- | The seam values for one run, derived from the downsweep graph.
@@ -3087,8 +3093,14 @@ normalVariant purpose path = do
 sessionVariant :: CompilePurpose -> SessionScope -> FilePath -> IO PipelineVariant
 sessionVariant purpose scope path = do
   targetModName' <- targetModuleNameFor path
-  exact <- traverse (\manifest -> readExactScope manifest >>= either (ioError . userError) pure)
+  capturedExact <- traverse (\manifest -> readExactScope manifest >>= either (ioError . userError) pure)
     (ssExactScope scope)
+  let exact = case purpose of
+        PlannedDeclarationCheck _ admitted -> Just admitted
+        _ -> capturedExact
+  forM_ exact $ \admitted -> case capturedExact of
+    Just original | scopeRequestSha256 original == scopeRequestSha256 admitted -> pure ()
+    _ -> ioError (userError "planned declaration leaves its original compiler offer")
   -- The injected source-less @Val.G<g>@ modules: excluded from the
   -- downsweep (no source to summarise) — a deferred module's @import@ of
   -- them resolves from the HPT entry 'cpBeforeModule' registers immediately
