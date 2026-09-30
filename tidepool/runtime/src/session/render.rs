@@ -266,6 +266,7 @@ enum DeclarationSlot {
         surface: AdmittedDeclarationSurface,
     },
     Joined(JoinedDeclaration),
+    Recovered(RecoveredDeclaration),
 }
 
 /// A compiler-certified merged declaration interface with a public lexical
@@ -276,6 +277,15 @@ pub(crate) struct JoinedDeclaration {
     pub turn: DeclTurn,
     pub evidence: Arc<tidepool_toolchain::declaration_join::AcceptedJoin>,
     pub context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+    pub surface: AdmittedDeclarationSurface,
+}
+
+/// A source-free public tip restored from the compiler's retained-artifact
+/// readback. Its original module identity is never allocated again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RecoveredDeclaration {
+    pub turn: DeclTurn,
+    pub evidence: Arc<tidepool_toolchain::declaration_join::RecoveredDeclarationTip>,
     pub surface: AdmittedDeclarationSurface,
 }
 
@@ -311,6 +321,24 @@ impl DeclLog {
             return false;
         }
         self.high_water = high_water;
+        true
+    }
+
+    pub(crate) fn restore_recovered(
+        &mut self,
+        generation: Generation,
+        recovered: RecoveredDeclaration,
+    ) -> bool {
+        if generation.0 == 0
+            || generation > self.high_water
+            || self.turns.contains_key(&generation)
+            || recovered.turn.parent.is_some()
+            || recovered.evidence.root().module != SessionModule::lib(generation).module_name()
+        {
+            return false;
+        }
+        self.turns
+            .insert(generation, DeclarationSlot::Recovered(recovered));
         true
     }
 
@@ -410,6 +438,7 @@ impl DeclLog {
         match self.turns.get(&generation)? {
             DeclarationSlot::Joined(joined) => Some(joined.context.clone()),
             DeclarationSlot::CertifiedAuthored { context, .. } => Some(context.clone()),
+            DeclarationSlot::Recovered(recovered) => Some(recovered.evidence.context().clone()),
             _ => None,
         }
     }
@@ -421,6 +450,7 @@ impl DeclLog {
         match self.turns.get(&generation)? {
             DeclarationSlot::Joined(joined) => Some(&joined.surface),
             DeclarationSlot::CertifiedAuthored { surface, .. } => Some(surface),
+            DeclarationSlot::Recovered(recovered) => Some(&recovered.surface),
             _ => None,
         }
     }
@@ -428,6 +458,13 @@ impl DeclLog {
     pub(crate) fn joined_at(&self, generation: Generation) -> Option<&JoinedDeclaration> {
         match self.turns.get(&generation)? {
             DeclarationSlot::Joined(joined) => Some(joined),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn recovered_at(&self, generation: Generation) -> Option<&RecoveredDeclaration> {
+        match self.turns.get(&generation)? {
+            DeclarationSlot::Recovered(recovered) => Some(recovered),
             _ => None,
         }
     }
@@ -475,6 +512,7 @@ impl DeclLog {
             DeclarationSlot::Committed(turn) => Some(turn),
             DeclarationSlot::CertifiedAuthored { turn, .. } => Some(turn),
             DeclarationSlot::Joined(joined) => Some(&joined.turn),
+            DeclarationSlot::Recovered(recovered) => Some(&recovered.turn),
             DeclarationSlot::Reserved => None,
         }
     }
@@ -484,6 +522,7 @@ impl DeclLog {
             DeclarationSlot::Committed(turn) => Some(turn),
             DeclarationSlot::CertifiedAuthored { turn, .. } => Some(turn),
             DeclarationSlot::Joined(joined) => Some(&mut joined.turn),
+            DeclarationSlot::Recovered(recovered) => Some(&mut recovered.turn),
             DeclarationSlot::Reserved => None,
         }
     }
@@ -508,6 +547,7 @@ impl DeclLog {
                 DeclarationSlot::Committed(_)
                     | DeclarationSlot::CertifiedAuthored { .. }
                     | DeclarationSlot::Joined(_)
+                    | DeclarationSlot::Recovered(_)
             )
             .then_some(*generation)
         })
@@ -516,7 +556,7 @@ impl DeclLog {
     fn is_joined(&self, generation: Generation) -> bool {
         matches!(
             self.turns.get(&generation),
-            Some(DeclarationSlot::Joined(_))
+            Some(DeclarationSlot::Joined(_) | DeclarationSlot::Recovered(_))
         )
     }
 

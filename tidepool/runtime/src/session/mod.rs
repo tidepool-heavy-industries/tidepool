@@ -27,6 +27,7 @@ pub mod persistent;
 pub mod prepared;
 mod publication;
 mod recovery;
+mod recovery_hydration;
 pub mod registry;
 pub mod render;
 pub mod resident;
@@ -821,9 +822,9 @@ impl SessionLib {
         })
     }
 
-    /// Attach a v2 manifest before any declaration is allocated. Private-only
-    /// nodes stay inaccessible after restart; a published root requires exact
-    /// interface hydration before it can serve turns.
+    /// Attach the exact recovery graph before any declaration is allocated.
+    /// Public roots are hydrated from verified original artifacts through the
+    /// bound compiler; private nodes and heap values stay inaccessible.
     pub fn attach_recovery_graph_v2(
         &mut self,
         path: impl Into<PathBuf>,
@@ -858,18 +859,6 @@ impl SessionLib {
                             .into(),
                     });
                 }
-                if read
-                    .graph
-                    .public_surfaces
-                    .iter()
-                    .any(|surface| surface.declaration_root.is_some())
-                {
-                    return Err(SessionError::RecoveryManifest {
-                        path,
-                        detail: "published v2 declarations require exact interface hydration"
-                            .into(),
-                    });
-                }
                 read.graph
             }
             None if path.exists() => {
@@ -885,12 +874,10 @@ impl SessionLib {
                 }
             })?,
         };
-        if !self.log.restore_high_water(graph.high_water) {
-            return Err(SessionError::RecoveryManifest {
-                path,
-                detail: "declaration allocator cannot restore recovery high-water".into(),
-            });
-        }
+        // Build every recovered slot before changing admission state. A failed
+        // compiler readback leaves the allocator and all public scopes empty.
+        let recovered_log = self.hydrate_recovery_graph(&graph, root)?;
+        self.log = recovered_log;
         self.durable_graph = Some(DurableDeclarationGraph {
             path,
             graph,

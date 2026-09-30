@@ -1585,6 +1585,58 @@ impl PersistentSession {
             .bind_durable_public_scope(owner, scope)
     }
 
+    /// Remint one persisted exact actor incarnation's public declaration scope.
+    /// Heap bindings and mutable source instances are deliberately absent; the
+    /// durable winning names remain loss metadata and never reveal old values.
+    pub fn recover_public_scope(
+        &mut self,
+        owner: &RecoveryPublicOwner,
+    ) -> Result<ScopeId, SessionError> {
+        let lib = self
+            .lib
+            .as_ref()
+            .ok_or(SessionError::MissingDeclarationLibrary)?;
+        let state = lib
+            .durable_graph
+            .as_ref()
+            .ok_or_else(|| SessionError::RecoveryManifest {
+                path: lib.root.clone(),
+                detail: "exact recovery graph is not attached".into(),
+            })?;
+        if lib.durable_public_scopes.contains_key(owner) {
+            return Err(SessionError::RecoveryManifest {
+                path: state.path.clone(),
+                detail: "persisted public owner already has a live scope".into(),
+            });
+        }
+        let surface = state
+            .graph
+            .public_surfaces
+            .iter()
+            .find(|surface| &surface.owner == owner)
+            .ok_or_else(|| SessionError::RecoveryManifest {
+                path: state.path.clone(),
+                detail: "persisted public owner path or incarnation does not match".into(),
+            })?;
+        let generation = surface.declaration_root.unwrap_or(Generation(0));
+        let epoch = surface.epoch;
+        if generation != Generation(0) && lib.log.recovered_at(generation).is_none() {
+            return Err(SessionError::RecoveryManifest {
+                path: state.path.clone(),
+                detail: "persisted declaration root has not been hydrated".into(),
+            });
+        }
+        let scope = self.mint_isolated_scope();
+        let lib = self.lib.as_mut().expect("declaration library checked");
+        lib.seed_scope(scope, generation);
+        if let Err(error) = lib.bind_durable_public_scope(owner.clone(), scope) {
+            self.retire_scope(scope);
+            return Err(error);
+        }
+        self.public_visibility_epochs.insert(scope, epoch);
+        Ok(scope)
+    }
+
     /// Capture a binding-only publication against one exact private and public
     /// lexical view. Caller stages its bytes after releasing this checkout.
     pub fn snapshot_binding_publication(

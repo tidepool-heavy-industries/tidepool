@@ -170,6 +170,13 @@ fn tip(lib: &SessionLib, generation: Generation) -> Result<Option<DeclarationTip
             joined.evidence.instances().clone(),
             joined.evidence.family_closure().to_vec(),
         )
+    } else if let Some(recovered) = lib.log.recovered_at(generation) {
+        (
+            recovered.evidence.root().clone(),
+            recovered.evidence.exports().to_vec(),
+            recovered.evidence.instances().clone(),
+            recovered.evidence.family_closure().to_vec(),
+        )
     } else if let Some(authored) = lib.log.certified_authored_at(generation) {
         let inherited = turn
             .parent
