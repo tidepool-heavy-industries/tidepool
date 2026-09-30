@@ -108,6 +108,15 @@ mod tests {
         })
     }
 
+    fn altered_prepared(
+        program: PreparedProgram,
+        alter: impl FnOnce(&mut WireProgram),
+    ) -> PreparedProgram {
+        let mut wire = program.wire.as_ref().clone();
+        alter(&mut wire);
+        super::super::prepared_from_validated(wire)
+    }
+
     fn imports(generation: u64) -> MachineImports {
         let value = ImportedValue {
             identity: identity(),
@@ -184,8 +193,9 @@ mod tests {
 
     #[test]
     fn links_no_success_only_with_matching_entry_contract() {
-        let mut no_success_declaration = prepared(Some(7));
-        no_success_declaration.wire.signatures[0].results = ResultContract::NoSuccess;
+        let no_success_declaration = altered_prepared(prepared(Some(7)), |wire| {
+            wire.signatures[0].results = ResultContract::NoSuccess;
+        });
         let mut snapshot = imports(7);
         let imported = snapshot.values.get_mut(&identity()).unwrap();
         imported.entry_signature.as_mut().unwrap().results = ResultContract::NoSuccess;
@@ -199,8 +209,9 @@ mod tests {
             .as_mut()
             .unwrap()
             .results = ResultContract::Returns(vec![]);
-        let mut no_success_declaration = prepared(Some(7));
-        no_success_declaration.wire.signatures[0].results = ResultContract::NoSuccess;
+        let no_success_declaration = altered_prepared(prepared(Some(7)), |wire| {
+            wire.signatures[0].results = ResultContract::NoSuccess;
+        });
         assert!(matches!(
             link_program(no_success_declaration, &snapshot),
             Err(LinkError::ImportContract(_))
@@ -223,20 +234,22 @@ mod tests {
             Err(LinkError::ImportContract(_))
         ));
 
-        let mut different_id_equal_shape = prepared(Some(7));
-        different_id_equal_shape.wire.signatures.push(Signature {
-            arguments: vec![],
-            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        let different_id_equal_shape = altered_prepared(prepared(Some(7)), |wire| {
+            wire.signatures.push(Signature {
+                arguments: vec![],
+                results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+            });
+            wire.globals[0].entry_signature = Some(SignatureId(1));
         });
-        different_id_equal_shape.wire.globals[0].entry_signature = Some(SignatureId(1));
         assert!(link_program(different_id_equal_shape, &imports(7)).is_ok());
     }
 
     #[test]
     fn raw_address_import_has_no_invented_callable_contract() {
-        let mut prepared = prepared(None);
-        prepared.wire.globals[0].rep = RuntimeRep::Address;
-        prepared.wire.globals[0].entry_signature = None;
+        let prepared = altered_prepared(prepared(None), |wire| {
+            wire.globals[0].rep = RuntimeRep::Address;
+            wire.globals[0].entry_signature = None;
+        });
         let mut imports = imports(7);
         let imported = imports.values.get_mut(&identity()).unwrap();
         imported.rep = RuntimeRep::Address;
@@ -246,8 +259,9 @@ mod tests {
 
     #[test]
     fn unknown_lifted_entry_accepts_known_import_entry() {
-        let mut prepared = prepared(None);
-        prepared.wire.globals[0].entry_signature = None;
+        let prepared = altered_prepared(prepared(None), |wire| {
+            wire.globals[0].entry_signature = None;
+        });
         assert!(link_program(prepared, &imports(7)).is_ok());
     }
 

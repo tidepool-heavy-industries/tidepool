@@ -21,7 +21,7 @@ use tidepool_repr::execution_schema::{
 use tidepool_repr::Generation;
 
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
-struct AllocationCounts {
+pub(crate) struct AllocationCounts {
     allocations: u64,
     allocated_bytes: u64,
     reallocations: u64,
@@ -116,7 +116,7 @@ impl Drop for AllocationWindow {
     }
 }
 
-fn measure(operation: impl FnOnce()) -> (u128, AllocationCounts) {
+pub(crate) fn measure(operation: impl FnOnce()) -> (u128, AllocationCounts) {
     let window = AllocationWindow::start();
     let started = Instant::now();
     operation();

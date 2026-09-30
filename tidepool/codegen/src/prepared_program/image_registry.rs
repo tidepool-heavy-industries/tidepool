@@ -24,7 +24,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 
-use tidepool_repr::execution_schema::{CertifiedGroup, LinkedProgram, PreparedProgram};
+use tidepool_repr::execution_schema::{
+    CertifiedGroup, CertifiedGroupCode, LinkedProgram, PreparedProgram,
+};
 
 use super::CompiledProgram;
 
@@ -47,11 +49,12 @@ struct Entries {
 
 /// Distinct content domains share one weak registry and one flight protocol.
 /// A certified group key includes its exact home/version, original ordinal,
-/// neutral definitions and import owners; neither key includes live handles.
+/// neutral definitions and declared import contracts. Machine-local owner
+/// ids and handles are checked at installation and cannot fragment this key.
 #[derive(Clone, Eq, Hash, PartialEq)]
 enum ImageKey {
     Program(PreparedProgram),
-    Group(CertifiedGroup),
+    Group(CertifiedGroupCode),
 }
 
 enum Entry {
@@ -234,7 +237,7 @@ impl ImageRegistry {
         group: &CertifiedGroup,
         compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
     ) -> Result<Arc<CompiledProgram>, E> {
-        self.get_or_compile_key(ImageKey::Group(group.clone()), compile)
+        self.get_or_compile_key(ImageKey::Group(group.code_identity()), compile)
     }
 
     fn get_or_compile_key<E>(
@@ -640,3 +643,7 @@ mod tests {
         follower.join().unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "image_registry/cost_tests.rs"]
+mod cost_tests;

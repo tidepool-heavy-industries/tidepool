@@ -5,6 +5,10 @@
 //! a validated [`PreparedProgram`] and an atomically linked [`LinkedProgram`].
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+
+mod shared_content;
+use shared_content::SharedContent;
 
 use crate::session_ids::SessionVarId;
 
@@ -996,12 +1000,12 @@ impl<'a> From<&'a ProgramDefinitions> for DefinitionsView<'a> {
 /// executable consumer crosses the same validation boundary.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct PreparedProgram {
-    wire: WireProgram,
+    wire: SharedContent<WireProgram>,
 }
 
 impl PreparedProgram {
     pub fn definitions(&self) -> DefinitionsView<'_> {
-        DefinitionsView::from(&self.wire)
+        DefinitionsView::from(self.wire.as_ref())
     }
 
     pub fn envelope(&self) -> &ProgramEnvelope {
@@ -1119,13 +1123,13 @@ pub enum ImportOwner {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ProjectedGroup {
     original_ordinal: u32,
-    binders: Vec<SymbolIdentity>,
-    definitions: ProgramDefinitions,
+    binders: SharedContent<Vec<SymbolIdentity>>,
+    definitions: SharedContent<ProgramDefinitions>,
 }
 
 impl ProjectedGroup {
     pub fn definitions(&self) -> DefinitionsView<'_> {
-        DefinitionsView::from(&self.definitions)
+        DefinitionsView::from(self.definitions.as_ref())
     }
 
     #[must_use]
@@ -1159,9 +1163,18 @@ pub struct CachedHomeOwner {
 /// each global in the group's local declaration order.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CertifiedGroup {
-    owner: CachedHomeOwner,
+    owner: Arc<CachedHomeOwner>,
     group: ProjectedGroup,
-    imports: Vec<ImportOwner>,
+    imports: Arc<[ImportOwner]>,
+}
+
+/// Native compilation identity issued from a checked source group. It keeps
+/// exact immutable source provenance and definitions; machine-local import
+/// owners remain in CertifiedGroup and are checked for every installation.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct CertifiedGroupCode {
+    owner: Arc<CachedHomeOwner>,
+    group: ProjectedGroup,
 }
 
 impl CertifiedGroup {
@@ -1237,10 +1250,18 @@ impl CertifiedGroup {
             }
         }
         Ok(Self {
-            owner,
+            owner: Arc::new(owner),
             group,
-            imports,
+            imports: imports.into(),
         })
+    }
+
+    #[must_use]
+    pub fn code_identity(&self) -> CertifiedGroupCode {
+        CertifiedGroupCode {
+            owner: Arc::clone(&self.owner),
+            group: self.group.clone(),
+        }
     }
 
     pub fn owner(&self) -> &CachedHomeOwner {
@@ -1278,8 +1299,8 @@ pub fn parse_projected_group(
     }
     Ok(ProjectedGroup {
         original_ordinal,
-        binders,
-        definitions,
+        binders: SharedContent::new(binders),
+        definitions: SharedContent::new(definitions),
     })
 }
 
@@ -1486,7 +1507,9 @@ pub use link::link_program;
 // constructors crate-private prevents a partially checked program escaping
 // while the implementation is split across focused waves.
 pub(super) fn prepared_from_validated(wire: WireProgram) -> PreparedProgram {
-    PreparedProgram { wire }
+    PreparedProgram {
+        wire: SharedContent::new(wire),
+    }
 }
 
 pub(super) fn linked_from_validated(
@@ -1601,8 +1624,81 @@ mod projected_group_tests {
         )
         .is_err());
         let mut changed = group;
-        changed.binders[0] = testing::identity("Fixture", "other");
+        let mut binders = changed.binders.as_ref().clone();
+        binders[0] = testing::identity("Fixture", "other");
+        changed.binders = SharedContent::new(binders);
         assert!(CertifiedGroup::admit(owner, changed, vec![]).is_err());
+    }
+
+    #[test]
+    fn native_code_identity_excludes_live_owners_and_preserves_definition_contracts() {
+        let mut wire = testing::wire_program();
+        let binder = testing::identity("Imports", "retained");
+        wire.globals.push(GlobalDecl {
+            identity: binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: Some(1),
+        });
+        let group = testing::projected_group(wire.clone(), 3).unwrap();
+        let owner = CachedHomeOwner {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            module_version: ModuleVersion([1; 32]),
+            skinny_iface_sha256: [2; 32],
+            product_sha256: [3; 32],
+        };
+        let retained = |id| {
+            vec![ImportOwner::Retained {
+                id: SessionVarId::from_extract(id),
+                generation: 1,
+            }]
+        };
+        let first = CertifiedGroup::admit(owner.clone(), group.clone(), retained(1)).unwrap();
+        let later = CertifiedGroup::admit(owner.clone(), group.clone(), retained(2)).unwrap();
+        let exported = CertifiedGroup::admit(
+            owner.clone(),
+            group.clone(),
+            vec![ImportOwner::CodeExport {
+                binder: binder.clone(),
+                generation: 1,
+                root_id: 99,
+            }],
+        )
+        .unwrap();
+        assert_ne!(first, later);
+        assert_ne!(first, exported);
+        assert_eq!(first.code_identity(), later.code_identity());
+        assert_eq!(first.code_identity(), exported.code_identity());
+        let mut foreign = owner.clone();
+        foreign.product_sha256[0] ^= 1;
+        let different = CertifiedGroup::admit(foreign, group.clone(), retained(1)).unwrap();
+        assert_ne!(first.code_identity(), different.code_identity());
+        let ordinal = CertifiedGroup::admit(
+            owner.clone(),
+            testing::projected_group(wire.clone(), 4).unwrap(),
+            retained(1),
+        )
+        .unwrap();
+        assert_ne!(first.code_identity(), ordinal.code_identity());
+        wire.globals[0].required_evaluated = true;
+        let contract = CertifiedGroup::admit(
+            owner,
+            testing::projected_group(wire, 3).unwrap(),
+            retained(1),
+        )
+        .unwrap();
+        assert_ne!(first.code_identity(), contract.code_identity());
+        assert!(CertifiedGroup::admit(
+            first.owner().clone(),
+            group,
+            vec![ImportOwner::Retained {
+                id: SessionVarId::from_extract(1),
+                generation: 2,
+            }]
+        )
+        .is_err());
     }
 
     #[test]

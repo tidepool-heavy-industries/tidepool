@@ -136,8 +136,8 @@ pub fn projected_group(
     super::validation::validate_group(&definitions, &requirements, DecodeLimits::default())?;
     Ok(ProjectedGroup {
         original_ordinal,
-        binders,
-        definitions,
+        binders: super::SharedContent::new(binders),
+        definitions: super::SharedContent::new(definitions),
     })
 }
 

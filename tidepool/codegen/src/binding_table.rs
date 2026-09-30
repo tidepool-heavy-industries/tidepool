@@ -1943,4 +1943,4 @@ mod identity_tests;
 
 #[cfg(test)]
 #[path = "binding_table/cost_tests.rs"]
-mod cost_tests;
+pub(crate) mod cost_tests;
