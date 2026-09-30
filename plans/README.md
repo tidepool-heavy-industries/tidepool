@@ -7,6 +7,10 @@ unconsumed proposals are removed; Git retains their history.
 
 ## Open design questions
 
+- [Final engine and harness delivery](engine-harness-final-delivery.md): accepted
+  implementation wave through M1/M2, recovery, structural performance and native
+  Buck release readiness; live trials and publication remain separate.
+
 - [Engine and harness implementation](engine-harness-integration.md): approved
   parallel foundation closure, compiler/native and Git/process redesign, shared
   private notebook execution and embedded harness; stop at verified readiness.
