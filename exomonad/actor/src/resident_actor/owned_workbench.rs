@@ -870,7 +870,8 @@ where
                         | WorkbenchRunAdvance::ParkUnit
                         | WorkbenchRunAdvance::ParkNative
                         | WorkbenchRunAdvance::ParkAfterToolStart
-                        | WorkbenchRunAdvance::ParkAfterToolFinish),
+                        | WorkbenchRunAdvance::ParkAfterToolFinish
+                        | WorkbenchRunAdvance::ParkBackground(_)),
                     ) => {
                         tracing::debug!(actor = ?owned.state.effects.context.actor,
                         input_unit_index = owned.state.cursor.index, "serial cursor yielded its captured unit or effect");
@@ -897,6 +898,12 @@ where
                                                     owned,
                                                     kernel.clone(),
                                                 ),
+                                            WorkbenchRunAdvance::ParkBackground(presentation) => {
+                                                behavior.owned_background_command_task(
+                                                    owned,
+                                                    presentation,
+                                                )
+                                            }
                                             WorkbenchRunAdvance::Complete(_) => {
                                                 unreachable!("captured execution parks")
                                             }
@@ -914,7 +921,8 @@ where
                             | WorkbenchRunAdvance::ParkUnit
                             | WorkbenchRunAdvance::ParkNative
                             | WorkbenchRunAdvance::ParkAfterToolStart
-                            | WorkbenchRunAdvance::ParkAfterToolFinish => {
+                            | WorkbenchRunAdvance::ParkAfterToolFinish
+                            | WorkbenchRunAdvance::ParkBackground(_) => {
                                 unreachable!("effect wait handled above")
                             }
                         });
@@ -954,6 +962,62 @@ where
                 );
                 owned.state.cursor.started = Some(started);
                 Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
+            },
+        )
+    }
+
+    fn owned_background_command_task(
+        &self,
+        owned: OwnedExecution<H, O>,
+        request: background_command_wait::BackgroundCommandRequest,
+    ) -> OwnedWorkbenchTask<Self> {
+        let jobs = self.environment.commands.clone();
+        let binding = request.binding.clone();
+        Self::owned_step_task(
+            owned,
+            move |owned| {
+                let actor = owned.state.effects.context.actor;
+                Box::pin(
+                    async move { background_command_wait::prepare(&jobs, actor, request).await },
+                )
+            },
+            move |behavior, kernel, mut owned, prepared| {
+                let output = prepared.apply(
+                    &behavior.environment.commands,
+                    owned.state.effects.context.actor,
+                );
+                owned.state.cursor.receipts.push(WorkbenchItemReceipt {
+                    diagnostics: Vec::new(),
+                    index: owned.state.cursor.index,
+                    kind: None,
+                    span: None,
+                    source_items: Vec::new(),
+                    status: WorkbenchItemStatus::Stopped,
+                    output,
+                    warnings: Vec::new(),
+                    installed_bindings: vec![binding],
+                    operations: std::mem::take(&mut owned.state.cursor.unit.operations),
+                    terminal_transfer: Some(WorkbenchTerminalTransfer::CommandBackgrounded),
+                    failure_layer: None,
+                });
+                let response = workbench_response(
+                    WorkbenchRunStatus::Backgrounded,
+                    std::mem::take(&mut owned.state.cursor.receipts),
+                    owned.state.cursor.index,
+                    owned.state.request.items.len(),
+                    owned
+                        .state
+                        .cursor
+                        .cell_check
+                        .as_ref()
+                        .map(|checked| checked.items.as_slice()),
+                );
+                Self::begin_owned_finalization(
+                    behavior,
+                    kernel,
+                    owned,
+                    Ok(KernelStep::Continue(response)),
+                )
             },
         )
     }

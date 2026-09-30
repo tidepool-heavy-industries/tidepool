@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 mod after_tool_wait;
+mod background_command_wait;
 #[cfg(test)]
 mod capture_workspace_tests;
 mod clock_wait;
@@ -1447,6 +1448,7 @@ enum WorkbenchRunAdvance {
     ParkEffect,
     ParkAfterToolStart,
     ParkAfterToolFinish,
+    ParkBackground(background_command_wait::BackgroundCommandRequest),
 }
 
 enum FragmentAdvance {
@@ -8092,50 +8094,24 @@ where
                         binding,
                         reason,
                     } => {
-                        let reason =
-                            crate::workbench_display::bounded_output(&reason.to_string(), 1024);
-                        let mut output = if request.tool_call().is_some() {
-                            format!(
-                            "session_id: {job}\n{reason}. Observation ended; the command remains retained. Poll/send input with write_stdin; read_output navigates output. Later handler effects did not run.\nHaskell binding: {binding} :: Cmd.Job"
-                        )
-                        } else {
-                            format!(
-                            "Retained command · session_id: {job}\n{reason}. Available binding:\n\n{binding} :: Cmd.Job\n\nThe enclosing result was not bound; subsequent statements did not run.\nContinue with: result <- Cmd.await {binding}"
-                        )
+                        let presentation = background_command_wait::BackgroundCommandRequest {
+                            job,
+                            binding: binding.clone(),
+                            reason,
+                            named_tool: request.tool_call().is_some(),
+                            command_prefix,
+                            display_remaining: cursor.unit.display_remaining,
                         };
-                        if !command_prefix.is_empty() {
-                            output.push_str(&format!("\n{command_prefix}"));
+                        if effects.park_effects {
+                            return Ok(WorkbenchRunAdvance::ParkBackground(presentation));
                         }
-                        match self
-                            .environment
-                            .commands
-                            .observation(context.actor, &job)
-                            .await
-                        {
-                            Ok(pages) => {
-                                let rendered = crate::workbench_display::bounded_output(
-                                    &crate::workbench_display::command_pages(&pages),
-                                    cursor.unit.display_remaining.saturating_sub(output.len()),
-                                );
-                                if !rendered.is_empty() {
-                                    output.push_str(&rendered);
-                                    // Explicit pages remain available even when presentation is shortened.
-                                    if let Err(error) = self.environment.commands.mark_displayed(
-                                        context.actor,
-                                        &job,
-                                        &pages,
-                                    ) {
-                                        output.push_str(&format!("\nOutput cursor unavailable: {error:?}; explicit reads remain non-consuming."));
-                                    }
-                                }
-                            }
-                            Err(tidepool_bridge_effects::CommandError::CommandOutputPending) => {
-                                output.push_str("\nNo output yet; streams are starting.")
-                            }
-                            Err(error) => output.push_str(&format!(
-                                "\nOutput unavailable: {error:?}; the same job remains retained."
-                            )),
-                        }
+                        let output = background_command_wait::prepare(
+                            &self.environment.commands,
+                            context.actor,
+                            presentation,
+                        )
+                        .await
+                        .apply(&self.environment.commands, context.actor);
                         cursor.receipts.push(WorkbenchItemReceipt {
                             diagnostics: Vec::new(),
                             index: cursor.index,
@@ -9685,7 +9661,8 @@ where
                     | WorkbenchRunAdvance::ParkUnit
                     | WorkbenchRunAdvance::ParkNative
                     | WorkbenchRunAdvance::ParkAfterToolStart
-                    | WorkbenchRunAdvance::ParkAfterToolFinish => {
+                    | WorkbenchRunAdvance::ParkAfterToolFinish
+                    | WorkbenchRunAdvance::ParkBackground(_) => {
                         unreachable!("legacy workbench remains serial")
                     }
                 });
