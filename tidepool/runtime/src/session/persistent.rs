@@ -1666,6 +1666,121 @@ impl PersistentSession {
         Ok(scope)
     }
 
+    /// Durably seed a new run's empty public owner before application readiness.
+    /// No declaration, binding, execution, or synthetic graph node is created.
+    pub fn initialize_durable_public_scope(
+        &mut self,
+        owner: RecoveryPublicOwner,
+        target: ScopeId,
+    ) -> Result<PublicManifestCommit, SessionError> {
+        let snapshot = self
+            .public_visibility_snapshot_in(target)
+            .ok_or(SessionError::DeadScope(target))?;
+        if target == ScopeId::ROOT
+            || snapshot.declaration_tip != Generation(0)
+            || !snapshot.bindings.is_empty()
+            || !snapshot.source_instances.is_empty()
+        {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        let lib = self
+            .lib
+            .as_ref()
+            .ok_or(SessionError::MissingDeclarationLibrary)?;
+        let state = lib
+            .durable_graph
+            .as_ref()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        let invalid = |detail: String| SessionError::RecoveryManifest {
+            path: state.path.clone(),
+            detail,
+        };
+        let retained = state.owner.as_ref().ok_or_else(|| {
+            invalid("initial durable public scope requires its configured run owner".into())
+        })?;
+        retained.validate_owner()?;
+        if state.unconfirmed.is_some()
+            || !state.graph.public_surfaces.is_empty()
+            || !lib.durable_public_scopes.is_empty()
+        {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        let root = state
+            .path
+            .parent()
+            .expect("attached canonical manifest parent");
+        let original = match std::fs::read(&state.path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(invalid(error.to_string())),
+        };
+        if let Some(bytes) = &original {
+            let read = super::recovery::read_v2_bytes(&state.path, root, bytes)
+                .map_err(|error| invalid(error.to_string()))?
+                .ok_or(SessionError::WrongPublicManifestTicket)?;
+            if !read.artifact_losses.is_empty() || read.graph.checksum != state.graph.checksum {
+                return Err(SessionError::WrongPublicManifestTicket);
+            }
+        } else if state.graph.high_water != Generation(0)
+            || !state.graph.nodes.is_empty()
+            || !state.graph.artifacts.is_empty()
+        {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        let staged = super::recovery::stage_public_visibility_v2(
+            &state.path,
+            root,
+            &state.graph,
+            owner.clone(),
+            0,
+            vec![],
+            vec![],
+        )
+        .map_err(|error| invalid(error.to_string()))?;
+        retained.validate_owner()?;
+        let current = match std::fs::read(&state.path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(invalid(error.to_string())),
+        };
+        if current != original {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        self.public_visibility_epochs
+            .try_reserve(1)
+            .map_err(|error| invalid(error.to_string()))?;
+        let lib = self
+            .lib
+            .as_mut()
+            .expect("initial owner preflight checked library");
+        let outcome = lib.publish_recovery_manifest(staged);
+        let state = lib
+            .durable_graph
+            .as_mut()
+            .expect("initial owner preflight checked manifest");
+        let commit = match outcome {
+            super::recovery::RecoveryPublishOutcome::BeforeRename { detail, .. } => {
+                return Ok(PublicManifestCommit::BeforeRename { detail })
+            }
+            super::recovery::RecoveryPublishOutcome::Durable { graph, .. } => {
+                state.graph = graph;
+                PublicManifestCommit::Durable
+            }
+            super::recovery::RecoveryPublishOutcome::PublishedDurabilityUnconfirmed {
+                graph,
+                publication,
+                detail,
+            } => {
+                state.graph = graph;
+                state.unconfirmed = Some(publication);
+                PublicManifestCommit::PublishedDurabilityUnconfirmed { detail }
+            }
+        };
+        lib.durable_public_scopes.insert(owner, target);
+        self.public_visibility_epochs.insert(target, 1);
+        Ok(commit)
+    }
+
     /// Transfer the retained root to the exact durably admitted successor.
     /// The run owner and actor journal are checked before staging and again
     /// before rename. No heap values or mutable source instances are reminted.
@@ -1806,7 +1921,10 @@ impl PersistentSession {
                 PublicManifestCommit::PublishedDurabilityUnconfirmed { detail }
             }
         };
-        lib.seed_scope(target, generation);
+        // Preflight proved this fresh scope has exactly G0. It may already
+        // have an explicit G0 entry from ordinary scope minting, so transfer
+        // must set the recovered tip rather than use inheritance-only seeding.
+        lib.tips.insert(target, generation);
         lib.durable_public_scopes.insert(successor, target);
         self.public_visibility_epochs.insert(target, epoch);
         self.invalidate_execution_admissions_after_owner_transfer(admission_epoch);

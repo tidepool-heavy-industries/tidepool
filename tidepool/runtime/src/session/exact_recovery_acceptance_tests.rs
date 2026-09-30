@@ -1,0 +1,480 @@
+use super::*;
+use std::sync::Arc;
+use tidepool_codegen::scope::ScopeId;
+use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+use tidepool_repr::ActorPath;
+use tidepool_testing::effect_surface::TestEffectSurface;
+
+fn owner(incarnation: u64) -> RecoveryPublicOwner {
+    RecoveryPublicOwner::new(&ActorPath::parse("root/recovered").unwrap(), incarnation).unwrap()
+}
+
+struct TestRunOwner {
+    root: PathBuf,
+    _lock: std::fs::File,
+}
+
+#[derive(Clone)]
+struct EmptyOutput;
+impl OutputSink for EmptyOutput {
+    fn drain(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn snapshot(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+impl RecoveryRunAuthority for TestRunOwner {
+    fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
+        Ok(root.canonicalize()? == self.root)
+    }
+}
+
+fn run_owner(root: &Path) -> Arc<TestRunOwner> {
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join("test-run-owner.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    Arc::new(TestRunOwner {
+        root: root.canonicalize().unwrap(),
+        _lock: lock,
+    })
+}
+
+struct TestSuccessor {
+    run: Arc<TestRunOwner>,
+    session: SessionId,
+    target: ScopeId,
+}
+impl RecoverySuccessorAuthority for TestSuccessor {
+    fn validate_successor(
+        &self,
+        root: &Path,
+        old: &RecoveryPublicOwner,
+        new: &RecoveryPublicOwner,
+        session: SessionId,
+        target: ScopeId,
+    ) -> std::io::Result<bool> {
+        Ok(self.run.owns_run(root)?
+            && old == &owner(1)
+            && new == &owner(2)
+            && session == self.session
+            && target == self.target)
+    }
+}
+
+fn library(id: u64, source: &Path, manifest: &Path, include: &[PathBuf]) -> SessionLib {
+    let mut lib = SessionLib::open(SessionId(id), source, ModuleEnv::standalone_default())
+        .unwrap()
+        .with_validation_include(include.to_vec());
+    lib.attach_owned_recovery_graph_v3(manifest, run_owner(manifest.parent().unwrap()))
+        .unwrap();
+    lib
+}
+
+#[test]
+fn recovered_public_owner_rejects_foreign_admission_and_incarnation_without_effects() {
+    let durable = tempfile::tempdir().unwrap();
+    let first_root = tempfile::tempdir().unwrap();
+    let second_root = tempfile::tempdir().unwrap();
+    let manifest = durable.path().join("declarations.json");
+    let mut first =
+        PersistentSession::new(Some(library(4401, first_root.path(), &manifest, &[])), 1024);
+    let public = first.mint_isolated_scope();
+    first.bind_durable_public_scope(owner(1), public).unwrap();
+    let admission = first.begin_private_execution(public).unwrap();
+    let intent = first
+        .freeze_execution_intent(&admission, vec![], vec![])
+        .unwrap();
+    let ExecutionPublication::Bindings(base) = first
+        .restage_execution_publication(owner(1), intent.clone())
+        .unwrap()
+    else {
+        panic!("empty execution has a binding-only publication");
+    };
+    assert_eq!(
+        first
+            .publish_staged_public_manifest(base.stage().unwrap(), &PublicationDecision::new())
+            .unwrap(),
+        PublicManifestCommit::Durable
+    );
+    let before = std::fs::read(&manifest).unwrap();
+    drop(first);
+    // Even identical serialized session/scope counters cannot restore this
+    // process's admission owner. No heap bindings are fabricated on restart.
+    let mut second = PersistentSession::new(
+        Some(library(4401, second_root.path(), &manifest, &[])),
+        1024,
+    );
+    assert!(second.recover_public_scope(&owner(2)).is_err());
+    assert!(second.lib().durable_public_scopes.is_empty());
+    let recovered = second.recover_public_scope(&owner(1)).unwrap();
+    let snapshot = second.public_visibility_snapshot_in(recovered).unwrap();
+    assert_eq!(snapshot.epoch, 1);
+    assert!(snapshot.bindings.is_empty());
+    assert!(snapshot.source_instances.is_empty());
+    assert!(matches!(
+        second.freeze_execution_intent(&admission, vec![], vec![]),
+        Err(SessionError::StaleStagedDeclaration)
+    ));
+    assert!(matches!(
+        second.restage_execution_publication(owner(1), intent),
+        Err(SessionError::StaleStagedDeclaration)
+    ));
+    assert!(second.recover_public_scope(&owner(1)).is_err());
+    assert_eq!(
+        second.public_visibility_snapshot_in(recovered),
+        Some(snapshot)
+    );
+    assert_eq!(std::fs::read(&manifest).unwrap(), before);
+}
+
+#[test]
+fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_dependencies_and_retractions(
+) {
+    tidepool_testing::eval_harness::require_extract();
+    assert!(
+        std::env::var_os("TIDEPOOL_EXTRACT_DAEMON_SOCKET").is_none(),
+        "this acceptance gate requires fresh compiler processes"
+    );
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let durable = tempfile::tempdir().unwrap();
+    let producer_root = tempfile::tempdir().unwrap();
+    let manifest = durable.path().join("declarations.json");
+    let mut producer = PersistentSession::new(
+        Some(library(
+            4402,
+            producer_root.path(),
+            &manifest,
+            effects.include_paths(),
+        )),
+        1024 * 1024,
+    );
+    let public = producer.mint_isolated_scope();
+    producer
+        .bind_durable_public_scope(owner(1), public)
+        .unwrap();
+    let admission = producer.begin_private_execution(public).unwrap();
+    let original = producer
+        .define_scoped_in(
+            admission.private_scope(),
+            &[include_str!("fixtures/recovery-original.hs")],
+        )
+        .unwrap();
+    let dependent = producer
+        .define_scoped_in(
+            admission.private_scope(),
+            &[include_str!("fixtures/recovery-dependent.hs")],
+        )
+        .unwrap();
+    producer
+        .retract_in(admission.private_scope(), "HiddenResult")
+        .unwrap();
+    producer
+        .retract_in(admission.private_scope(), "answer")
+        .unwrap();
+    let intent = producer
+        .freeze_execution_intent(&admission, vec![], vec![])
+        .unwrap();
+    let CertifiedDeclarationPublication::Accepted(accepted) = producer
+        .restage_declaration_publication(owner(1), intent)
+        .unwrap()
+        .certify()
+        .unwrap()
+    else {
+        panic!("real retained declarations must publish");
+    };
+    assert_eq!(
+        producer
+            .publish_staged_public_manifest(accepted.stage().unwrap(), &PublicationDecision::new())
+            .unwrap(),
+        PublicManifestCommit::Durable
+    );
+    let expected = producer.public_visibility_snapshot_in(public).unwrap();
+    let before = std::fs::read(&manifest).unwrap();
+    drop(admission);
+    drop(producer);
+    drop(producer_root);
+    // All authored modules and request scratch are gone. Only the production
+    // v3 graph and its run-owned certified bytes cross this recovery boundary.
+    let consumer_root = tempfile::tempdir().unwrap();
+    let recovery_owner = run_owner(durable.path());
+    let mut recovered_library = SessionLib::open(
+        SessionId(4403),
+        consumer_root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(effects.include_paths().to_vec());
+    recovered_library
+        .attach_owned_recovery_graph_v3(&manifest, recovery_owner.clone())
+        .unwrap();
+    let mut consumer = PersistentSession::new(Some(recovered_library), 1024 * 1024);
+    assert_eq!(consumer.lib().scope_tip(ScopeId::ROOT), Generation(0));
+    // Ordinary minting creates an explicit G0 tip: successor transfer must
+    // replace it with the recovered tip, not use inheritance-only seeding.
+    let public = consumer.mint_scope(ScopeId::ROOT).unwrap();
+    assert_eq!(std::fs::read(&manifest).unwrap(), before);
+    assert_eq!(
+        consumer
+            .transfer_recovered_public_owner(
+                &owner(1),
+                owner(2),
+                public,
+                Arc::new(TestSuccessor {
+                    run: recovery_owner,
+                    session: SessionId(4403),
+                    target: public
+                })
+            )
+            .unwrap(),
+        PublicManifestCommit::Durable
+    );
+    assert!(consumer.recover_public_scope(&owner(1)).is_err());
+    let before = std::fs::read(&manifest).unwrap();
+    let snapshot = consumer.public_visibility_snapshot_in(public).unwrap();
+    assert_eq!(snapshot.declaration_tip, expected.declaration_tip);
+    assert_eq!(snapshot.epoch, expected.epoch + 1);
+    assert!(snapshot.bindings.is_empty());
+    let view = consumer.compile_view_in(public).unwrap();
+    let context = view.exact_declaration_context().unwrap().clone();
+    for generation in [original, dependent] {
+        assert!(context
+            .recovery_products()
+            .iter()
+            .any(|product| product.owner().module == SessionModule::lib(generation).module_name()));
+        assert!(
+            context
+                .lexical_graph()
+                .iter()
+                .all(|node| node.owner.module != SessionModule::lib(generation).module_name()),
+            "retained implementation must not become lexical authority"
+        );
+    }
+    let read = recovery::read_v2(&manifest, durable.path())
+        .unwrap()
+        .unwrap();
+    let projection = read.projection(&owner(2)).unwrap();
+    let heads = projection
+        .values()
+        .filter_map(|head| match head {
+            recovery::RecoveryHead::Available { export, .. } => Some(&export.identity),
+            recovery::RecoveryHead::Tombstone(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(heads.iter().any(|head| head.occurrence == "makeResult"
+        && head.module == SessionModule::lib(original).module_name()));
+    assert!(heads.iter().any(|head| head.occurrence == "recoveredAnswer"
+        && head.module == SessionModule::lib(dependent).module_name()));
+    assert!(heads
+        .iter()
+        .all(|head| head.occurrence != "HiddenResult" && head.occurrence != "answer"));
+    let imports = view.turn_imports(&SourceImports::new());
+    let include = view.include_paths(effects.include_paths());
+    let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let injected = view.injected_module_names();
+    let queries = [
+        InspectionQuery::TypeOf("recoveredAnswer (41 :: Int)".into()),
+        InspectionQuery::TypeOf("answer (41 :: Int)".into()),
+        InspectionQuery::TypeOf("(undefined :: HiddenResult)".into()),
+    ];
+    let inspected = run_inspections(InspectionRequest {
+        exact_context: Some(context.clone()),
+        preamble: effects.preamble(),
+        imports: &imports,
+        include: &include,
+        session_root: view.session_root(),
+        inject_modules: &injected,
+        queries: &queries,
+        effects: Some(effects.row()),
+    })
+    .unwrap();
+    assert!(matches!(&inspected[0], InspectionResult::Type { display, .. } if display == "Int"));
+    assert!(matches!(&inspected[1], InspectionResult::Rejected { .. }));
+    assert!(matches!(&inspected[2], InspectionResult::Rejected { .. }));
+    let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
+    let TurnResult::Expr { compiled, .. } = run_turn(TurnRequest {
+        exact_context: Some(context),
+        session_id: Some(view.session()),
+        turn_text: "recoveredAnswer (41 :: Int)",
+        templates: &templates,
+        include: &include,
+        session_root: view.session_root(),
+        inject_modules: &injected,
+        gen: view.next_value_generation().0,
+        verdict: None,
+        target: None,
+        retained_imports: &[],
+    })
+    .unwrap() else {
+        panic!("recovered transitive call must compile as an expression");
+    };
+    assert_eq!(
+        std::fs::read(&manifest).unwrap(),
+        before,
+        "recovery and fresh compilation cannot replay or publish original execution"
+    );
+    let mut resident =
+        ResidentSession::from_persistent_for_test(frunk::HNil, EmptyOutput, consumer);
+    resident
+        .set_actor_execution(
+            SessionRunContext {
+                lexical_scope: public,
+                ..SessionRunContext::ROOT
+            },
+            EffectRunPolicy::HandleOrSuspend,
+            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        )
+        .unwrap();
+    let ResidentOutcome::Completed { result, .. } = resident
+        .run_with_sites("recovered_original_dependency", compiled.into_code())
+        .unwrap()
+    else {
+        panic!("real recovered original dependency must execute");
+    };
+    assert_eq!(result.to_json(), serde_json::json!([42, "42"]));
+    assert_eq!(std::fs::read(&manifest).unwrap(), before);
+}
+
+fn persist_empty_public(root: &Path, source: &Path, id: u64) -> PathBuf {
+    let manifest = root.join("declarations.json");
+    let mut session = PersistentSession::new(Some(library(id, source, &manifest, &[])), 1024);
+    let public = session.mint_isolated_scope();
+    assert_eq!(
+        session
+            .initialize_durable_public_scope(owner(1), public)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    );
+    manifest
+}
+
+#[test]
+fn owned_manifest_read_refuses_foreign_run_symlink_and_changed_public_selectors() {
+    let durable = tempfile::tempdir().unwrap();
+    let original_source = tempfile::tempdir().unwrap();
+    let foreign = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let manifest = persist_empty_public(durable.path(), original_source.path(), 4410);
+    let bytes = std::fs::read(&manifest).unwrap();
+    let mut unowned = SessionLib::open(
+        SessionId(4411),
+        source.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap();
+    assert!(unowned.attach_recovery_graph_v2(&manifest).is_err());
+    assert_eq!(unowned.log.generation(), Generation(0));
+    assert!(unowned
+        .attach_owned_recovery_graph_v3(&manifest, run_owner(foreign.path()))
+        .is_err());
+    let alias = foreign.path().join("escaped.json");
+    std::os::unix::fs::symlink(&manifest, &alias).unwrap();
+    assert!(unowned
+        .attach_owned_recovery_graph_v3(&alias, run_owner(foreign.path()))
+        .is_err());
+    let mut session =
+        PersistentSession::new(Some(library(4412, source.path(), &manifest, &[])), 1024);
+    let mut altered = recovery::read_v2(&manifest, durable.path())
+        .unwrap()
+        .unwrap()
+        .graph;
+    altered.public_surfaces[0].owner = owner(2);
+    altered.seal().unwrap();
+    // The same retained products with copied, edited public selectors cannot
+    // change the immutable owner-issued read admitted by this runtime.
+    std::fs::write(&manifest, serde_json::to_vec_pretty(&altered).unwrap()).unwrap();
+    assert!(session.recover_public_scope(&owner(1)).is_err());
+    assert!(session.recover_public_scope(&owner(2)).is_err());
+    assert!(session.lib().durable_public_scopes.is_empty());
+    assert_ne!(std::fs::read(&manifest).unwrap(), bytes);
+}
+
+#[test]
+fn successor_transfer_fences_old_admissions_after_durable_and_uncertain_rename() {
+    for uncertain in [false, true] {
+        let durable = tempfile::tempdir().unwrap();
+        let original_source = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let manifest = persist_empty_public(durable.path(), original_source.path(), 4420);
+        let run = run_owner(durable.path());
+        let mut lib = SessionLib::open(
+            SessionId(4421),
+            source.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        lib.attach_owned_recovery_graph_v3(&manifest, run.clone())
+            .unwrap();
+        lib.fail_recovery_durability_once = uncertain;
+        let mut session = PersistentSession::new(Some(lib), 1024);
+        let target = session.mint_scope(ScopeId::ROOT).unwrap();
+        let old = session.begin_private_execution(target).unwrap();
+        let old_intent = session
+            .freeze_execution_intent(&old, vec![], vec![])
+            .unwrap();
+        let outcome = session
+            .transfer_recovered_public_owner(
+                &owner(1),
+                owner(2),
+                target,
+                Arc::new(TestSuccessor {
+                    run,
+                    session: SessionId(4421),
+                    target,
+                }),
+            )
+            .unwrap();
+        if uncertain {
+            assert!(matches!(
+                outcome,
+                PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+            ));
+        } else {
+            assert_eq!(outcome, PublicManifestCommit::Durable);
+        }
+        let bytes = std::fs::read(&manifest).unwrap();
+        assert!(matches!(
+            session.freeze_execution_intent(&old, vec![], vec![]),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
+        assert!(matches!(
+            session.restage_execution_publication(owner(2), old_intent),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
+        assert!(session.recover_public_scope(&owner(1)).is_err());
+        assert_eq!(
+            session.public_visibility_snapshot_in(target).unwrap().epoch,
+            2
+        );
+        assert_eq!(std::fs::read(&manifest).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn initial_public_owner_survives_restart_before_first_cell() {
+    let durable = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let manifest = persist_empty_public(durable.path(), source.path(), 4430);
+    let read = recovery::read_v2(&manifest, durable.path()).unwrap().unwrap();
+    assert!(read.graph.nodes.is_empty());
+    assert_eq!(read.graph.high_water, Generation(0));
+    assert_eq!(read.graph.public_surfaces[0].owner, owner(1));
+    let next_source = tempfile::tempdir().unwrap();
+    let run = run_owner(durable.path());
+    let mut lib = SessionLib::open(SessionId(4431), next_source.path(), ModuleEnv::standalone_default()).unwrap();
+    lib.attach_owned_recovery_graph_v3(&manifest, run.clone()).unwrap();
+    let mut session = PersistentSession::new(Some(lib), 1024);
+    let target = session.mint_isolated_scope();
+    assert_eq!(session.transfer_recovered_public_owner(&owner(1), owner(2), target,
+        Arc::new(TestSuccessor { run, session: SessionId(4431), target })).unwrap(), PublicManifestCommit::Durable);
+    let read = recovery::read_v2(&manifest, durable.path()).unwrap().unwrap();
+    assert!(read.graph.nodes.is_empty());
+    assert_eq!(read.graph.high_water, Generation(0));
+    assert_eq!(read.graph.public_surfaces[0].owner, owner(2));
+    assert_eq!(session.public_visibility_snapshot_in(target).unwrap().declaration_tip, Generation(0));
+}

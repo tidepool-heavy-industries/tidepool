@@ -19,6 +19,9 @@
 mod admission;
 mod binding_table;
 mod dialect;
+#[cfg(test)]
+#[path = "exact_recovery_acceptance_tests.rs"]
+mod exact_recovery_acceptance_tests;
 pub mod facade;
 pub mod inspection;
 pub mod kernel;
