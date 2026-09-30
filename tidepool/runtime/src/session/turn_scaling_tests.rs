@@ -144,6 +144,16 @@ fn execute_cell(
         "this fixture measures separate check and native compile"
     );
     assert!(!checked.items.is_empty());
+    eprintln!(
+        "protected-scale {}",
+        serde_json::json!({
+            "schema": 1, "prefix": scenario.0, "baseline": scenario.1,
+            "phase": format!("{label}.checked_inventory"),
+            "binder_counts": (0..checked.items.len())
+                .map(|index| checked.checked_item(index).unwrap().binders().len())
+                .collect::<Vec<_>>(),
+        })
+    );
     let prefix = resident
         .begin_checked_prefix(admission, checked.checked_item(0).unwrap())
         .unwrap();
@@ -208,7 +218,17 @@ fn execute_cell(
                 panic!("checked native item did not return its binding recipe")
             };
             if item.kind() == CheckedItemKind::Bind {
-                assert_eq!(bound.len(), 1);
+                assert_eq!(
+                    bound
+                        .iter()
+                        .map(|binder| binder.name.as_str())
+                        .collect::<Vec<_>>(),
+                    item.binders()
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                    "native recipe must preserve the complete checked binder inventory"
+                );
                 measured(
                     resident,
                     images,
@@ -216,14 +236,26 @@ fn execute_cell(
                     &format!("{label}.native_bind"),
                     Some(index),
                     |resident| {
-                        resident
-                            .run_bind_with_sites(
-                                &bound[0].name,
-                                compiled.code(),
-                                &bound[0],
-                                reservation.generation(),
-                            )
-                            .unwrap();
+                        if bound.len() == 1 {
+                            resident
+                                .run_bind_with_sites(
+                                    &bound[0].name,
+                                    compiled.code(),
+                                    &bound[0],
+                                    reservation.generation(),
+                                )
+                                .unwrap();
+                        } else {
+                            assert!(!bound.is_empty());
+                            resident
+                                .run_projected_bind_with_sites(
+                                    label,
+                                    compiled.code(),
+                                    &bound,
+                                    reservation.generation(),
+                                )
+                                .unwrap();
+                        }
                     },
                 );
             } else {
@@ -409,8 +441,24 @@ fn growing_prefix(prefix: usize, baseline: usize) {
         .recovery_products()
         .to_vec();
     if baseline != 0 {
+        // GHC tuples permit at most 62 fields; two 50-field items provide
+        // 100 real bindings without 100 separately compiled setup items.
         let source = (0..baseline)
-            .map(|index| format!("let baseline_{index:04} = ({index} :: Int)\n"))
+            .collect::<Vec<_>>()
+            .chunks(50)
+            .map(|indices| {
+                let names = indices
+                    .iter()
+                    .map(|index| format!("baseline_{index:04}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let values = indices
+                    .iter()
+                    .map(|index| format!("({index} :: Int)"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("let ({names}) = ({values})\n")
+            })
             .collect::<String>();
         execute_cell(
             &mut resident,
@@ -437,7 +485,15 @@ fn growing_prefix(prefix: usize, baseline: usize) {
                 .replace("SCALE_PREVIOUS", &previous),
         );
     }
-    source.push_str(&format!("scale_value_{prefix:04}\n"));
+    if baseline == 0 {
+        source.push_str(&format!("scale_value_{prefix:04}\n"));
+    } else {
+        source.push_str(&format!(
+            "scale_value_{prefix:04} + baseline_0000 + (baseline_{:04} - {})\n",
+            baseline - 1,
+            baseline - 1,
+        ));
+    }
     execute_cell(
         &mut resident,
         public,
@@ -492,6 +548,10 @@ fn protected_growing_prefix_100_baseline_0() {
 #[test]
 fn protected_growing_prefix_1_baseline_100() {
     growing_prefix(1, 100);
+}
+#[test]
+fn protected_growing_prefix_1_baseline_2() {
+    growing_prefix(1, 2);
 }
 #[test]
 fn protected_growing_prefix_10_baseline_100() {
