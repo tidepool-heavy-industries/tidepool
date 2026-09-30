@@ -517,6 +517,8 @@ impl ActorCompileView {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ActorCompileViewError {
+    #[error("nonempty actor helper source requires an owned source capsule")]
+    UnownedSourceLayer,
     #[error("actor source view belongs to session {actual:?}, expected {expected:?}")]
     WrongSession {
         expected: SessionId,
@@ -547,11 +549,17 @@ pub struct ActorSessionContext {
 impl ActorSessionContext {
     /// Select the immutable revision paths captured for an issued workbench
     /// request. Actor authority and lexical placement remain unchanged.
-    pub(crate) fn with_issued_source(mut self, source: &CheckpointSourceLayer) -> Self {
-        if !source.include_paths().is_empty() {
+    pub(crate) fn with_issued_source(
+        mut self,
+        source: &CheckpointSourceLayer,
+    ) -> Result<Self, ActorCompileViewError> {
+        if !source.is_owned() && !self.source_layer.is_empty() {
+            return Err(ActorCompileViewError::UnownedSourceLayer);
+        }
+        if source.is_owned() {
             self.source_layer = source.include_paths().to_vec().into();
         }
-        self
+        Ok(self)
     }
 
     #[must_use]
