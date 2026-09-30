@@ -1768,6 +1768,20 @@ where
     O: OutputSink + Sync + 'static,
 {
     let result = match wait {
+        OwnedWorkbenchWait::Drain {
+            continuation,
+            target,
+        } => {
+            return drain_wait::await_drain(
+                environment,
+                kernel,
+                context,
+                control,
+                continuation,
+                target,
+            )
+            .await;
+        }
         OwnedWorkbenchWait::Exit {
             continuation,
             terminal,

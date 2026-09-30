@@ -4106,6 +4106,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_owned_drain_before_dispatch_keeps_target_admission_open() {
+        let fixture = behavior(false);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        let control = crate::WorkbenchExecutionControl::untracked();
+        control.arm_sleep();
+        assert!(control.request_cancellation());
+        assert!(matches!(
+            crate::resident_actor::wait_drain_event(&actor, &control, std::future::pending()).await,
+            crate::resident_actor::DrainWaitEvent::Cancelled
+        ));
+        assert!(control.cancellation_requested());
+        assert!(actor.terminal().get().is_none());
+        actor
+            .address()
+            .call(
+                |reply| KernelMessage::Tool {
+                    invocation: tool_invocation("still-open"),
+                    reply,
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "test finished".into(),
+            })
+            .await
+            .unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_owned_drain_waiter_does_not_withdraw_the_accepted_target_fence() {
+        let mut fixture = behavior(false);
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        fixture.behavior.workbench_gate = Some((Arc::clone(&entered), Arc::clone(&release)));
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        let workbench = send_workbench(&actor);
+        entered.notified().await;
+        let control = crate::WorkbenchExecutionControl::untracked();
+        control.arm_sleep();
+        let mut drain = Box::pin(crate::resident_actor::wait_drain_event(
+            &actor,
+            &control,
+            std::future::pending(),
+        ));
+        assert!(matches!(
+            futures_util::poll!(&mut drain),
+            std::task::Poll::Pending
+        ));
+        assert!(control.request_cancellation());
+        assert!(matches!(
+            drain.await,
+            crate::resident_actor::DrainWaitEvent::Cancelled
+        ));
+        assert!(control.cancellation_requested());
+        assert!(actor.terminal().get().is_none());
+        release.notify_one();
+        assert!(workbench.await.unwrap().is_ok());
+        let terminal = tokio::time::timeout(Duration::from_secs(2), actor.terminal().wait())
+            .await
+            .expect("accepted drain remains owned by its target");
+        assert_eq!(terminal.kind, ActorExitKind::Completed);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn drain_racing_shutdown_observes_the_exact_retained_terminal() {
         let fixture = behavior(false);
         let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();

@@ -15,6 +15,7 @@ mod clock_wait;
 mod command_presentation;
 mod command_settlement;
 mod commands;
+mod drain_wait;
 mod inspection_wait;
 mod owned_workbench;
 #[cfg(test)]
@@ -25,6 +26,8 @@ mod status_rendering;
 mod terminal_wait;
 mod workbench_ledger;
 
+#[cfg(test)]
+pub(crate) use drain_wait::{wait_drain_event, DrainWaitEvent};
 pub(crate) use owned_workbench::{
     ExecutionResourceOwners, WorkbenchCompilationAuthority, WorkbenchPublicOwner,
 };
@@ -1391,6 +1394,10 @@ struct ParkedWorkbenchEffect {
 
 enum OwnedWorkbenchWait {
     Watch(crate::request_effect::WatchPoll),
+    Drain {
+        continuation: ResidentHole,
+        target: LocalActorRef,
+    },
     Exit {
         continuation: ResidentHole,
         terminal: crate::RetainedActorExit,
@@ -1662,6 +1669,24 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             )
         })?;
         Ok(actor.terminal().clone())
+    }
+
+    fn capture_drain_target(
+        &self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        target: ActorRef,
+    ) -> Result<LocalActorRef, ResidentActorWorkbenchError> {
+        let authorized = target != context.actor
+            && actor_can_control(context.actor, target, &self.environment.actors.lock());
+        if !authorized {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "actor drain is not authorized".into(),
+            ));
+        }
+        kernel.resolve(target).ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol("drain target is unavailable".into())
+        })
     }
 
     /// Replace `standing`, logging the transition. The sole place `standing`
@@ -4867,16 +4892,7 @@ where
                 continuation,
                 target,
             } => Box::pin(async move {
-                let authorized = target != context.actor
-                    && actor_can_control(context.actor, target, &self.environment.actors.lock());
-                if !authorized {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "actor drain is not authorized".into(),
-                    ));
-                }
-                let actor = kernel.resolve(target).ok_or_else(|| {
-                    ResidentActorWorkbenchError::ActorProtocol("drain target is unavailable".into())
-                })?;
+                let actor = self.capture_drain_target(kernel, context, target)?;
                 actor.drain().await.map_err(|error| {
                     ResidentActorWorkbenchError::ActorProtocol(error.to_string())
                 })?;
@@ -6686,6 +6702,13 @@ where
                     );
                     let boundary = if execution_state.park_effects {
                         let captured = match boundary {
+                            ResidentActorBoundary::Drain {
+                                continuation,
+                                target,
+                            } => Ok(OwnedWorkbenchWait::Drain {
+                                continuation,
+                                target: self.capture_drain_target(kernel, context, target)?,
+                            }),
                             ResidentActorBoundary::Wait(wait) => {
                                 let terminal = self.capture_exit_target(
                                     kernel,
@@ -6717,6 +6740,7 @@ where
                                     OwnedWorkbenchWait::Watch(_)
                                         | OwnedWorkbenchWait::Sleep { .. }
                                         | OwnedWorkbenchWait::Exit { .. }
+                                        | OwnedWorkbenchWait::Drain { .. }
                                 ) || matches!(&wait, OwnedWorkbenchWait::Command { request, .. }
                                     if commands::waits_for_completion(request)
                                         && self.descriptor.effective_role().effect_keys().contains(&crate::ActorEffectKey::Commands))
