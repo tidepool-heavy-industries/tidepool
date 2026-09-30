@@ -2544,7 +2544,12 @@ pub(crate) async fn run(
         crate::exomonad::HostBackendOptions::Embedded => HostRuntimeMode::Embedded,
     };
     let application_owners: InteractiveOwners = Arc::new(Mutex::new(HashMap::new()));
-    let source_layers = source_service(&config, &run_root, worktrees.clone());
+    let source_layers = source_service(
+        &config,
+        &run_root,
+        worktrees.clone(),
+        crate::exomonad::source::SourceRootOwner::Host(Arc::clone(&host_incarnation)),
+    )?;
     let actor_recovery_path = run_root.join("actor-lifecycle.v2.jsonl");
     let run_id = run_root
         .file_name()
@@ -3583,15 +3588,20 @@ pub(crate) fn source_service(
     config: &ActorHostConfig,
     run_root: &Path,
     worktrees: WorktreeManager,
-) -> Option<Arc<crate::exomonad::source::ExomonadSourceReload>> {
-    let inputs = config.workspace_inputs.as_ref()?;
-    Some(Arc::new(
-        crate::exomonad::source::ExomonadSourceReload::new(
+    owner: crate::exomonad::source::SourceRootOwner,
+) -> Result<Option<Arc<crate::exomonad::source::ExomonadSourceReload>>, Box<dyn std::error::Error>>
+{
+    let Some(inputs) = config.workspace_inputs.as_ref() else {
+        return Ok(None);
+    };
+    Ok(Some(Arc::new(
+        crate::exomonad::source::ExomonadSourceReload::new_owned(
             inputs.clone(),
             config.workspace.clone(),
             run_root.to_path_buf(),
             config.haskell_root.clone(),
-        )
+            owner,
+        )?
         .with_helper_root(
             worktrees
                 .managed_root()
@@ -3599,7 +3609,7 @@ pub(crate) fn source_service(
                 .join(runtime_namespace(run_root))
                 .join("helpers"),
         ),
-    ))
+    )))
 }
 
 fn source_handler(

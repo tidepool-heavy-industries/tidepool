@@ -33,14 +33,150 @@ pub struct ActorSourceImports {
     imports: SourceImports,
 }
 
-/// Immutable source revisions selected for a captured context. Paths point
-/// directly into revision directories, never through an actor's mutable
-/// `active` link.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CheckpointSourceLayer {
-    pub identities: Vec<String>,
-    pub include_paths: Vec<PathBuf>,
+/// A source graph retained by the configured host source owner.
+///
+/// Implementations retain the actual run or capture guard. These observations
+/// describe the immutable graph; they are not compiler byte or negative-input
+/// witnesses. Only the configured `ActorSourceLayers` implementation issues
+/// this authority at its source admission boundary through its private issuer.
+pub trait RetainedSourceLayer: Send + Sync {
+    fn identities(&self) -> &[String];
+    fn include_paths(&self) -> &[PathBuf];
 }
+
+/// Issuing authority belonging to one configured host source service.
+/// Cloning shares that issuer; constructing another issuer never authorizes
+/// the first service's capsules, even when observations and digests match.
+#[derive(Clone, Debug)]
+pub struct SourceLayerIssuer(std::sync::Arc<uuid::Uuid>);
+
+impl Default for SourceLayerIssuer {
+    fn default() -> Self {
+        Self(std::sync::Arc::new(uuid::Uuid::new_v4()))
+    }
+}
+
+impl SourceLayerIssuer {
+    /// Issue from the actual retained source owner, never from its descriptor.
+    #[must_use]
+    pub fn issue(&self, owner: std::sync::Arc<dyn RetainedSourceLayer>) -> CheckpointSourceLayer {
+        CheckpointSourceLayer {
+            retained: Some(std::sync::Arc::new(RetainedCheckpointSource {
+                issuer: self.0.clone(),
+                identities: owner.identities().to_vec(),
+                include_paths: owner.include_paths().to_vec(),
+                _owner: owner,
+            })),
+        }
+    }
+
+    #[must_use]
+    pub fn owns(&self, source: &CheckpointSourceLayer) -> bool {
+        source
+            .retained
+            .as_ref()
+            .is_some_and(|source| std::sync::Arc::ptr_eq(&self.0, &source.issuer))
+    }
+}
+
+/// Host-issued immutable source authority for a captured context. Clones share
+/// the original owner rather than minting authority from observed paths.
+/// An empty default carries no source ownership.
+///
+/// ```compile_fail
+/// let mut source = exomonad_actor::CheckpointSourceLayer::default();
+/// source.include_paths = vec![std::path::PathBuf::from("unowned")];
+/// ```
+#[derive(Clone, Default)]
+pub struct CheckpointSourceLayer {
+    retained: Option<std::sync::Arc<RetainedCheckpointSource>>,
+}
+
+struct RetainedCheckpointSource {
+    _owner: std::sync::Arc<dyn RetainedSourceLayer>,
+    issuer: std::sync::Arc<uuid::Uuid>,
+    identities: Vec<String>,
+    include_paths: Vec<PathBuf>,
+}
+
+impl CheckpointSourceLayer {
+    #[must_use]
+    pub fn identities(&self) -> &[String] {
+        self.retained
+            .as_ref()
+            .map_or(&[], |source| &source.identities)
+    }
+
+    #[must_use]
+    pub fn include_paths(&self) -> &[PathBuf] {
+        self.retained
+            .as_ref()
+            .map_or(&[], |source| &source.include_paths)
+    }
+
+    #[must_use]
+    pub fn is_owned(&self) -> bool {
+        self.retained.is_some()
+    }
+
+    /// Same configured source owner and ordered revisions. Helper branches
+    /// may materialize the same revision at different immutable paths.
+    #[must_use]
+    pub fn same_revision(&self, other: &Self) -> bool {
+        match (&self.retained, &other.retained) {
+            (Some(left), Some(right)) => {
+                std::sync::Arc::ptr_eq(&left.issuer, &right.issuer)
+                    && left.identities == right.identities
+            }
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    /// Bind the precise owner and source selection independently of the
+    /// compiler's canonical cell recipe digest.
+    #[must_use]
+    pub fn semantic_digest(&self) -> [u8; 32] {
+        let mut digest = blake3::Hasher::new();
+        let mut frame = |bytes: &[u8]| {
+            digest.update(&(bytes.len() as u64).to_le_bytes());
+            digest.update(bytes);
+        };
+        frame(b"exomonad-retained-checkpoint-source-v1");
+        if let Some(source) = &self.retained {
+            frame(b"owned");
+            frame(source.issuer.as_bytes());
+            frame(&(source.identities.len() as u64).to_le_bytes());
+            for identity in &source.identities {
+                frame(identity.as_bytes());
+            }
+            frame(&(source.include_paths.len() as u64).to_le_bytes());
+            for path in &source.include_paths {
+                frame(path.as_os_str().as_encoded_bytes());
+            }
+        } else {
+            frame(b"unowned-empty");
+        }
+        *digest.finalize().as_bytes()
+    }
+}
+
+impl std::fmt::Debug for CheckpointSourceLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CheckpointSourceLayer")
+            .field("owned", &self.is_owned())
+            .field("identities", &self.identities())
+            .field("include_paths", &self.include_paths())
+            .finish()
+    }
+}
+
+impl PartialEq for CheckpointSourceLayer {
+    fn eq(&self, other: &Self) -> bool {
+        self.same_revision(other) && self.include_paths() == other.include_paths()
+    }
+}
+impl Eq for CheckpointSourceLayer {}
 
 impl ActorSourceImports {
     #[must_use]
@@ -62,6 +198,16 @@ impl ActorSourceImports {
 /// remains in the shared graph; a checkout's historical package is not
 /// included automatically.
 pub trait ActorSourceLayers: Send + Sync {
+    /// Validate opaque source ownership at cell/checkpoint admission. A host
+    /// that issues no source authority can admit only the empty default.
+    fn validate_source_authority(&self, source: &CheckpointSourceLayer) -> Result<(), String> {
+        if source.is_owned() {
+            Err("host did not issue this source authority".into())
+        } else {
+            Ok(())
+        }
+    }
+
     fn freeze_checkpoint_layer(
         &self,
         _issuer: PrincipalId,
@@ -76,11 +222,12 @@ pub trait ActorSourceLayers: Send + Sync {
         helper_branch: &str,
         worktrees: &[String],
     ) -> Result<Vec<PathBuf>, String> {
+        self.validate_source_authority(checkpoint)?;
         let selected = self.layer_include_for(helper_branch, worktrees)?;
-        if checkpoint.identities.is_empty() {
+        if checkpoint.identities().is_empty() && selected.is_empty() {
             Ok(selected)
         } else {
-            Err("host cannot compare checkpoint source revisions".into())
+            Err("host cannot admit checkpoint source without owned immutable revisions".into())
         }
     }
 
@@ -88,9 +235,10 @@ pub trait ActorSourceLayers: Send + Sync {
         &self,
         actor: PrincipalId,
         _helper_branch: &str,
-        _checkpoint: &CheckpointSourceLayer,
-    ) {
+        checkpoint: &CheckpointSourceLayer,
+    ) -> Result<(), String> {
         let _ = actor;
+        self.validate_source_authority(checkpoint)
     }
     /// Reserve one actor-private helper branch before the actor has an ID.
     /// A prepared fork workspace may already have copied its branch.
@@ -400,8 +548,8 @@ impl ActorSessionContext {
     /// Select the immutable revision paths captured for an issued workbench
     /// request. Actor authority and lexical placement remain unchanged.
     pub(crate) fn with_issued_source(mut self, source: &CheckpointSourceLayer) -> Self {
-        if !source.include_paths.is_empty() {
-            self.source_layer = source.include_paths.clone().into();
+        if !source.include_paths().is_empty() {
+            self.source_layer = source.include_paths().to_vec().into();
         }
         self
     }

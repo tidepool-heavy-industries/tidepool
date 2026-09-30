@@ -29,6 +29,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::{fs::File, os::unix::fs::OpenOptionsExt};
 
 use exomonad_worktree::GitCli;
@@ -566,6 +567,45 @@ enum ActorSourceScope {
     Checkpoint(exomonad_actor::CheckpointSourceLayer),
 }
 
+/// Existing owner of the physical run source tree. Persistent revisions have
+/// no per-revision reclamation: the run lease excludes maintenance until the
+/// last issued capture releases. Disposable sessions retain their TempDir.
+pub(crate) enum SourceRootOwner {
+    Host(Arc<crate::actor_host::HostIncarnationLease>),
+    Temporary(Arc<tempfile::TempDir>),
+}
+
+impl SourceRootOwner {
+    fn validate(&self, run_root: &Path) -> Result<()> {
+        let owns = match self {
+            Self::Host(owner) => owner.owns_run(run_root)?,
+            Self::Temporary(owner) => {
+                std::fs::canonicalize(owner.path())? == std::fs::canonicalize(run_root)?
+            }
+        };
+        if !owns {
+            return Err("source owner belongs to another run tree".into());
+        }
+        Ok(())
+    }
+}
+
+struct RetainedSourceGraph {
+    _root_owner: Arc<SourceRootOwner>,
+    identities: Vec<String>,
+    include_paths: Vec<PathBuf>,
+}
+
+impl exomonad_actor::RetainedSourceLayer for RetainedSourceGraph {
+    fn identities(&self) -> &[String] {
+        &self.identities
+    }
+
+    fn include_paths(&self) -> &[PathBuf] {
+        &self.include_paths
+    }
+}
+
 /// The run's answer to the `Source` effect, for every actor in it.
 ///
 /// It owns the run's frozen workspace and authored source layer. The
@@ -573,6 +613,8 @@ enum ActorSourceScope {
 /// ordinary driver compile, so a run reload is checked by exactly the
 /// compiler the run uses.
 pub(crate) struct ExomonadSourceReload {
+    source_issuer: exomonad_actor::SourceLayerIssuer,
+    source_owner: Arc<SourceRootOwner>,
     frozen: FrozenWorkspace,
     workspace: PathBuf,
     run_root: PathBuf,
@@ -595,15 +637,19 @@ pub(crate) struct ExomonadSourceReload {
 }
 
 impl ExomonadSourceReload {
-    pub(crate) fn new(
+    pub(crate) fn new_owned(
         frozen: FrozenWorkspace,
         workspace: PathBuf,
         run_root: PathBuf,
         haskell_root: PathBuf,
-    ) -> Self {
+        owner: SourceRootOwner,
+    ) -> Result<Self> {
+        owner.validate(&run_root)?;
         let helper_root = run_root.join("helpers");
         let layer = SourceLayer::new(&run_root);
-        Self {
+        Ok(Self {
+            source_issuer: exomonad_actor::SourceLayerIssuer::default(),
+            source_owner: Arc::new(owner),
             frozen,
             workspace,
             run_root,
@@ -615,7 +661,25 @@ impl ExomonadSourceReload {
             helper_scopes: RwLock::new(HashMap::new()),
             gate: Mutex::new(()),
             drift_seen: Mutex::new(HashMap::new()),
-        }
+        })
+    }
+
+    #[cfg(test)]
+    fn new(
+        frozen: FrozenWorkspace,
+        workspace: PathBuf,
+        run_root: PathBuf,
+        haskell_root: PathBuf,
+    ) -> Self {
+        let owner = Arc::new(crate::actor_host::HostIncarnationLease::claim(&run_root).unwrap());
+        Self::new_owned(
+            frozen,
+            workspace,
+            run_root,
+            haskell_root,
+            SourceRootOwner::Host(owner),
+        )
+        .unwrap()
     }
 
     pub(crate) fn with_helper_root(mut self, root: PathBuf) -> Self {
@@ -677,10 +741,11 @@ impl ExomonadSourceReload {
         };
         add(&self.helper_layer(helper_branch), "helpers")?;
         add(&self.layer, "run")?;
-        Ok(exomonad_actor::CheckpointSourceLayer {
+        Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
+            _root_owner: Arc::clone(&self.source_owner),
             identities,
             include_paths,
-        })
+        })))
     }
 
     fn helper_draft(&self, branch: &str) -> PathBuf {
@@ -1494,6 +1559,17 @@ impl tidepool_handlers::SourceReloadService for ExomonadSourceReload {
 }
 
 impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
+    fn validate_source_authority(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+    ) -> std::result::Result<(), String> {
+        if self.source_issuer.owns(source) {
+            Ok(())
+        } else {
+            Err("checkpoint source was not issued by this run source owner".into())
+        }
+    }
+
     fn freeze_checkpoint_layer(
         &self,
         issuer: PrincipalId,
@@ -1520,6 +1596,7 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         _worktrees: &[String],
     ) -> std::result::Result<Vec<PathBuf>, String> {
         let _one_at_a_time = self.gate.lock();
+        self.validate_source_authority(checkpoint)?;
         let candidate = match self.scope(creator) {
             ActorSourceScope::Checkpoint(layer) => layer,
             _ => {
@@ -1529,13 +1606,13 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
                     .map_err(|error| error.to_string())?
             }
         };
-        if candidate.identities != checkpoint.identities {
+        if !candidate.same_revision(checkpoint) {
             return Err(format!(
                 "checkpoint source revisions differ from authored entry source: captured {:?}, entry {:?}",
-                checkpoint.identities, candidate.identities,
+                checkpoint.identities(), candidate.identities(),
             ));
         }
-        Ok(checkpoint.include_paths.clone())
+        Ok(checkpoint.include_paths().to_vec())
     }
 
     fn bind_checkpoint_for(
@@ -1543,13 +1620,15 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         actor: PrincipalId,
         helper_branch: &str,
         checkpoint: &exomonad_actor::CheckpointSourceLayer,
-    ) {
+    ) -> std::result::Result<(), String> {
+        self.validate_source_authority(checkpoint)?;
         self.helper_scopes
             .write()
             .insert(actor, helper_branch.to_owned());
         self.scopes
             .write()
             .insert(actor, ActorSourceScope::Checkpoint(checkpoint.clone()));
+        Ok(())
     }
 
     fn prepare_helpers(
@@ -1775,19 +1854,19 @@ mod tests {
             crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
         );
         let captured = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
-        assert_eq!(captured.identities.len(), 2);
-        assert!(captured.identities[0].starts_with("helpers:"));
-        assert!(captured.identities[1].starts_with("run:"));
-        assert!(!captured.include_paths.is_empty());
+        assert_eq!(captured.identities().len(), 2);
+        assert!(captured.identities()[0].starts_with("helpers:"));
+        assert!(captured.identities()[1].starts_with("run:"));
+        assert!(!captured.include_paths().is_empty());
         assert!(captured
-            .include_paths
+            .include_paths()
             .iter()
             .all(|path| !path.to_string_lossy().contains("/active/")));
         assert_eq!(
             reload
                 .admit_checkpoint_layer(&captured, PrincipalId::SYSTEM, "run", &[])
                 .unwrap(),
-            captured.include_paths
+            captured.include_paths()
         );
 
         let alternate = tempfile::tempdir().unwrap();
@@ -1805,14 +1884,134 @@ mod tests {
             .admit_checkpoint_layer(&captured, PrincipalId::SYSTEM, "run", &[])
             .unwrap_err();
         assert!(refusal.contains("source revisions differ"));
-        assert!(captured.include_paths[0].exists());
+        assert!(captured.include_paths()[0].exists());
         let checkpoint_actor = PrincipalId::new(1, 1);
-        reload.bind_checkpoint_for(checkpoint_actor, "run", &captured);
+        reload
+            .bind_checkpoint_for(checkpoint_actor, "run", &captured)
+            .unwrap();
         assert_eq!(
             reload.freeze_checkpoint_layer(checkpoint_actor).unwrap(),
             captured,
             "a checkpoint descendant must retain the frozen helper and run graph"
         );
+    }
+
+    #[test]
+    fn checkpoint_source_capsule_refuses_foreign_issuer_and_edited_observations() {
+        use exomonad_actor::ActorSourceLayers;
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let run = Arc::new(run);
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let reload = ExomonadSourceReload::new_owned(
+            frozen.clone(),
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+            SourceRootOwner::Temporary(Arc::clone(&run)),
+        )
+        .unwrap();
+        let captured = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+        let digest = captured.semantic_digest();
+        let mut observed_paths = captured.include_paths().to_vec();
+        let mut observed_revisions = captured.identities().to_vec();
+        observed_paths[0] = project.path().to_path_buf();
+        observed_revisions.clear();
+        assert_eq!(captured.semantic_digest(), digest);
+        assert_ne!(captured.include_paths(), observed_paths);
+        assert_ne!(captured.identities(), observed_revisions);
+
+        let foreign_owner = ExomonadSourceReload::new_owned(
+            frozen,
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+            SourceRootOwner::Temporary(Arc::clone(&run)),
+        )
+        .unwrap();
+        let foreign = foreign_owner
+            .freeze_checkpoint_layer(PrincipalId::SYSTEM)
+            .unwrap();
+        assert_eq!(foreign.identities(), captured.identities());
+        assert_eq!(foreign.include_paths(), captured.include_paths());
+        assert_ne!(foreign.semantic_digest(), digest);
+        assert!(!foreign.same_revision(&captured));
+        assert!(reload.validate_source_authority(&foreign).is_err());
+        assert!(reload
+            .admit_checkpoint_layer(&foreign, PrincipalId::SYSTEM, "run", &[])
+            .is_err());
+        assert!(reload
+            .bind_checkpoint_for(PrincipalId::new(1, 1), "run", &foreign)
+            .is_err());
+        assert!(reload
+            .validate_source_authority(&exomonad_actor::CheckpointSourceLayer::default())
+            .is_err());
+        reload.validate_source_authority(&captured).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_source_capsule_retains_temporary_tree_after_owner_drop() {
+        use exomonad_actor::ActorSourceLayers;
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let run = Arc::new(run);
+        let run_path = run.path().to_path_buf();
+        let frozen = FrozenWorkspace::load(project.path(), &run_path).unwrap();
+        let reload = ExomonadSourceReload::new_owned(
+            frozen,
+            project.path().to_path_buf(),
+            run_path.clone(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+            SourceRootOwner::Temporary(Arc::clone(&run)),
+        )
+        .unwrap();
+        let captured = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+        let surviving_child = captured.clone();
+        drop(reload);
+        drop(run);
+        drop(captured);
+        assert!(surviving_child
+            .include_paths()
+            .iter()
+            .all(|path| path.exists()));
+        assert!(run_path.exists());
+        drop(surviving_child);
+        assert!(
+            !run_path.exists(),
+            "the last capture releases the physical owner"
+        );
+    }
+
+    #[test]
+    fn checkpoint_source_capsule_retains_run_exclusion_after_owner_drop() {
+        use exomonad_actor::ActorSourceLayers;
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let reload = ExomonadSourceReload::new(
+            frozen,
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+        );
+        let captured = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+        drop(reload);
+        assert!(crate::actor_host::HostIncarnationLease::claim(run.path()).is_err());
+        assert!(captured.include_paths().iter().all(|path| path.exists()));
+        drop(captured);
+        crate::actor_host::HostIncarnationLease::claim(run.path()).unwrap();
+    }
+
+    #[test]
+    fn source_service_refuses_owner_for_another_run_tree() {
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let foreign_run = Arc::new(tempfile::tempdir().unwrap());
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let result = ExomonadSourceReload::new_owned(
+            frozen,
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+            SourceRootOwner::Temporary(foreign_run),
+        );
+        assert!(result.is_err());
     }
 
     fn workspace_with(source: &str) -> (tempfile::TempDir, tempfile::TempDir) {

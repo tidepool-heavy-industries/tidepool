@@ -5,7 +5,7 @@ use super::*;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub(super) struct ModelFreeSession {
-    pub session_root: tempfile::TempDir,
+    pub session_root: Arc<tempfile::TempDir>,
     pub worktrees: WorktreeManager,
     pub bindings: Arc<Mutex<BindingTable>>,
     pub authority: ActorWorktreeAuthority,
@@ -39,7 +39,7 @@ impl ModelFreeSession {
         transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
         conversation: Option<exomonad_actor::ConversationReader>,
     ) -> Result<Self> {
-        let session_root = tempfile::tempdir()?;
+        let session_root = Arc::new(tempfile::tempdir()?);
         let (worktrees, bindings) = actor_worktree_resources_at(
             &config.run_root.join("check-worktrees"),
             &config.workspace,
@@ -49,7 +49,12 @@ impl ModelFreeSession {
             runtime_namespace(session_root.path()),
             Arc::clone(&bindings),
         );
-        let source_layers = super::source_service(config, session_root.path(), worktrees.clone());
+        let source_layers = super::source_service(
+            config,
+            session_root.path(),
+            worktrees.clone(),
+            crate::exomonad::source::SourceRootOwner::Temporary(Arc::clone(&session_root)),
+        )?;
         let (source, root, program, child_session_factory, image_registry) = compile_root(
             config,
             session_root.path(),
