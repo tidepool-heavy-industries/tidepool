@@ -5049,7 +5049,7 @@ mod tests {
         )
         .unwrap();
         assert!(fold.is_none());
-        assert_eq!(checked.items.len(), 3);
+        assert_eq!(checked.items.len(), 4);
         let declaration = checked.checked_item(0).unwrap();
         let certificate = declaration
             .planned_declaration()
@@ -5071,12 +5071,13 @@ mod tests {
             .any(|instance| instance.class.occurrence == "LocalClass"
                 && instance.class.module == module));
         assert!(!certificate.instances().families.is_empty());
-        let binding = checked.checked_item(1).unwrap();
+        let replacement = checked.checked_item(1).unwrap();
+        let binding = checked.checked_item(2).unwrap();
         assert!(binding.signatures()[0]
             .names()
             .iter()
             .any(|name| name.module() == module && name.occurrence() == "LocalBox"));
-        let expression = checked.checked_item(2).unwrap();
+        let expression = checked.checked_item(3).unwrap();
         assert!(expression.expression_presentation().unwrap().is_some());
         let prefix = declaration.initial_prefix().unwrap();
         assert!(prefix.append_declaration(binding.clone()).is_err());
@@ -5116,7 +5117,12 @@ mod tests {
             .unwrap();
         assert_eq!(protected.snapshot().compiler_prefix().next_item(), 1);
         assert!(resident.adopt_checked_declaration(reservation).is_err());
-        for item in [binding, expression] {
+        let original_context = protected
+            .snapshot()
+            .view()
+            .exact_declaration_context()
+            .cloned();
+        for item in [replacement, binding, expression] {
             let reservation = resident
                 .admit_checked_item(protected.clone(), item.clone())
                 .unwrap();
@@ -5150,7 +5156,7 @@ mod tests {
             if item.kind() == tidepool_toolchain::checked_cell::CheckedItemKind::Bind {
                 resident
                     .run_bind_with_sites(
-                        "local",
+                        &bound[0].name,
                         compiled.code(),
                         &bound[0],
                         reservation.generation(),
@@ -5199,15 +5205,20 @@ mod tests {
                         display,
                     )
                     .unwrap();
+                let displayed = rendered.result().to_string_pretty();
                 assert!(
-                    rendered.result().to_string_pretty().contains("41"),
-                    "local declaration result was not rendered: {}",
-                    rendered.result().to_string_pretty()
+                    displayed.contains("41") && displayed.contains("40"),
+                    "private replacement or qualified historical declaration changed: {displayed}"
                 );
             }
             assert_eq!(
                 protected.snapshot().compiler_prefix().next_item(),
                 item.index() + 1
+            );
+            assert_eq!(
+                protected.snapshot().view().exact_declaration_context(),
+                original_context.as_ref(),
+                "private value overlays must preserve the exact original declaration context"
             );
         }
     }

@@ -8,5 +8,8 @@ type family LocalPayload (flag :: Bool) where
   LocalPayload 'True = LocalBox
 makeLocal :: Int -> LocalPayload 'True
 makeLocal = LocalBox
-let local = makeLocal (41 :: Int)
-localValue local
+historical :: Int
+historical = 40
+let historical = 41
+let local = makeLocal historical
+(localValue local, Tidepool.Session.Lib.G1.historical)
