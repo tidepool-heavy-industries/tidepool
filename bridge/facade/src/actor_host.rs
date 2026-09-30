@@ -4042,6 +4042,7 @@ fn compile_root(
     let child_journal = journal.clone();
     let child_worktree_handler = worktree_handler.clone();
     let child_run_root = run_root.to_path_buf();
+    let child_run_lease = Arc::clone(&host_incarnation);
     // This run's one shared image cache: installed on the forest
     // (`ResidentForest::with_image_registry`) so it is applied to every
     // session's engine, root and child alike, including each session's
@@ -4067,9 +4068,15 @@ fn compile_root(
             .join(child_session_id.0.to_string());
         let mut validation_include = source_layer.to_vec();
         validation_include.extend(child_include.iter().cloned());
-        let library = SessionLib::open(child_session_id, &session_root, module_env)
+        let mut library = SessionLib::open(child_session_id, &session_root, module_env)
             .map_err(|error| format!("child session declaration plane: {error}"))?
             .with_validation_include(validation_include);
+        root_declaration_recovery::attach(
+            &mut library,
+            &child_run_root,
+            Arc::clone(&child_run_lease),
+        )
+        .map_err(|error| format!("child session declaration recovery: {error}"))?;
         let child_event_handler =
             RepoEventHandler::with_source(Box::new(InertObservationSource), EventConfig::default());
         let child_worktree_handler = child_worktree_handler.clone();
