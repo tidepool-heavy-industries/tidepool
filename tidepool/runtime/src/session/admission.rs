@@ -164,6 +164,18 @@ struct CheckedNativeDelta {
     bindings: Vec<SettledNativeBinding>,
 }
 
+impl Drop for CheckedNativeDelta {
+    fn drop(&mut self) {
+        let mut previous = self.previous.take();
+        while let Some(parent) = previous {
+            match Arc::try_unwrap(parent) {
+                Ok(mut delta) => previous = delta.previous.take(),
+                Err(_) => break,
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 struct SettledNativeImport {
     identity: SymbolIdentity,
@@ -308,6 +320,17 @@ struct CheckedInterfaces {
 struct CheckedInterfaceDelta {
     previous: Option<Arc<CheckedInterfaceDelta>>,
     interface: AdmittedValueInterface,
+}
+impl Drop for CheckedInterfaceDelta {
+    fn drop(&mut self) {
+        let mut previous = self.previous.take();
+        while let Some(parent) = previous {
+            match Arc::try_unwrap(parent) {
+                Ok(mut delta) => previous = delta.previous.take(),
+                Err(_) => break,
+            }
+        }
+    }
 }
 impl CheckedInterfaces {
     fn base(
@@ -2094,6 +2117,54 @@ mod tests {
             .bindings()
             .get(SessionVarId::from_extract(912))
             .is_some());
+    }
+
+    #[test]
+    fn long_settled_delta_release_is_iterative_and_preserves_older_consumers() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(|| {
+                let mut native = None;
+                let mut interfaces = None;
+                let bytes: Arc<[u8]> = Arc::from([1]);
+                let mut retained = None;
+                let mut oldest = None;
+                for generation in 0..50_000 {
+                    native = Some(Arc::new(CheckedNativeDelta {
+                        previous: native,
+                        imports: Vec::new(),
+                        bindings: Vec::new(),
+                    }));
+                    interfaces = Some(Arc::new(CheckedInterfaceDelta {
+                        previous: interfaces,
+                        interface: AdmittedValueInterface {
+                            module: tidepool_repr::SessionModule::val(Generation(generation)),
+                            bytes: bytes.clone(),
+                        },
+                    }));
+                    if generation == 0 {
+                        oldest = Some((
+                            Arc::downgrade(native.as_ref().unwrap()),
+                            Arc::downgrade(interfaces.as_ref().unwrap()),
+                        ));
+                    }
+                    if generation == 25_000 {
+                        retained = Some((native.clone(), interfaces.clone()));
+                    }
+                }
+                let (old_native, old_interface) = oldest.unwrap();
+                drop(native);
+                drop(interfaces);
+                assert!(old_native.upgrade().is_some());
+                assert!(old_interface.upgrade().is_some());
+                drop(retained);
+                assert!(old_native.upgrade().is_none());
+                assert!(old_interface.upgrade().is_none());
+                assert_eq!(Arc::strong_count(&bytes), 1);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
