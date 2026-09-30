@@ -263,6 +263,7 @@ pub struct ModuleCandidateOffer {
     exact: Option<crate::declaration_context::ExactCompilationRequest>,
     checked_cell: Option<crate::checked_cell::CheckedCellSpecification>,
     checked_item: Option<crate::checked_cell::CheckedItemOffer>,
+    checked_display: Option<crate::checked_cell::CheckedDisplayOffer>,
 }
 
 fn checked_offer_context(
@@ -285,6 +286,7 @@ impl ModuleCandidateOffer {
             exact: None,
             checked_cell: None,
             checked_item: None,
+            checked_display: None,
         }
     }
 
@@ -301,6 +303,7 @@ impl ModuleCandidateOffer {
             exact: Some(context.prepare_compilation(&scratch.join("exact-scope"), producer)?),
             checked_cell: None,
             checked_item: None,
+            checked_display: None,
         })
     }
 
@@ -324,6 +327,7 @@ impl ModuleCandidateOffer {
             )?),
             checked_cell: Some(specification),
             checked_item: None,
+            checked_display: None,
         })
     }
 
@@ -361,6 +365,49 @@ impl ModuleCandidateOffer {
             )?),
             checked_cell: None,
             checked_item: Some(checked_item),
+            checked_display: None,
+        })
+    }
+
+    pub fn select_checked_display(
+        producer: &[u8],
+        include: &[PathBuf],
+        scratch: &Path,
+        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        capture: Arc<crate::checked_cell::ExactCompiledItem>,
+        prefix: crate::checked_cell::ExactCompiledPrefix,
+        generation: u64,
+        admission_digest: [u8; 32],
+        budget: u64,
+        presented: Vec<String>,
+    ) -> Result<Self, CompileError> {
+        let context = checked_offer_context(context)?;
+        if include != capture.item().cell_include() {
+            return Err(CompileError::ExtractFailed(
+                "checked display include search order changed".into(),
+            ));
+        }
+        let display = crate::checked_cell::CheckedDisplayOffer {
+            capture,
+            prefix,
+            generation,
+            admission_digest,
+            budget,
+            presented,
+        };
+        let authorization = display.authorization(producer, context.semantic_sha256())?;
+        Ok(Self {
+            selected: None,
+            producer: producer.to_vec(),
+            include: include.to_vec(),
+            exact: Some(context.prepare_compilation_with_authorization(
+                &scratch.join("exact-scope"),
+                producer,
+                Some(authorization),
+            )?),
+            checked_cell: None,
+            checked_item: None,
+            checked_display: Some(display),
         })
     }
 
@@ -376,15 +423,124 @@ impl ModuleCandidateOffer {
         let specification = self.checked_cell.as_ref().ok_or_else(|| {
             CompileError::ExtractFailed("ordinary compile offer cannot admit a checked cell".into())
         })?;
+        let planned = self.admit_planned_declaration(root, exact, specification)?;
+        let owner = planned
+            .as_ref()
+            .map(|planned| crate::declaration_join::ExactModuleIdentity {
+                unit: planned.certificate.product().owner().unit.clone(),
+                module: planned.certificate.product().owner().module.clone(),
+            });
         crate::checked_cell::admit_checked_cell(
             root,
             &self.producer,
             exact.semantic_sha256,
             &exact.request_sha256,
             specification,
-            exact.validate_outputs(root)?,
+            exact.validate_outputs_with_planned(root, owner.as_ref())?,
             &self.include,
+            planned,
         )
+    }
+
+    fn admit_planned_declaration(
+        &self,
+        root: &Path,
+        exact: &crate::declaration_context::ExactCompilationRequest,
+        specification: &crate::checked_cell::CheckedCellSpecification,
+    ) -> Result<Option<crate::checked_cell::PlannedCheckedDeclaration>, CompileError> {
+        use sha2::{Digest, Sha256};
+        let receipt_path = root.join("planned-declaration.cbor");
+        if !receipt_path.exists() {
+            return Ok(None);
+        }
+        let bytes = crate::checked_cell::read(&receipt_path, 16 * 1024 * 1024)?;
+        let receipt = crate::checked_cell::decode(&bytes)?;
+        let fields = crate::checked_cell::row(&receipt, 8)?;
+        let string = crate::checked_cell::string;
+        let fail = || {
+            CompileError::ExtractFailed(
+                "planned declaration differs from its same compiler offer".into(),
+            )
+        };
+        let module_name = string(&fields[3])?;
+        let module = module_name
+            .strip_prefix("Tidepool.Session.Lib.G")
+            .and_then(|generation| generation.parse::<u64>().ok())
+            .filter(|generation| *generation > 0)
+            .map(|generation| {
+                tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation))
+            })
+            .ok_or_else(fail)?;
+        let source = string(&fields[4])?;
+        let directory = root.join("planned-declaration");
+        let source_path = directory.join(format!("{module_name}.hs"));
+        if string(&fields[0])? != "TPEXACTDECL"
+            || string(&fields[1])? != "1"
+            || string(&fields[2])? != exact.request_sha256
+            || specification.reserved_declaration_modules.as_slice() != [module_name]
+            || module.module_name() != module_name
+            || string(&fields[7])? != "planned-declaration"
+            || extract_module_name(source).as_deref() != Some(module_name)
+            || std::fs::read(&source_path)? != source.as_bytes()
+        {
+            return Err(fail());
+        }
+        // The exact original source transaction was issued before enriching the
+        // checking scope. It therefore validates only against the captured baseline.
+        let admission = exact.admit_source(&source_path, source)?;
+        let requirements = crate::prepared_artifact::production_requirements()?;
+        let target = Arc::new(
+            tidepool_repr::execution_schema::parse_program(
+                &crate::checked_cell::read(
+                    directory.join("__result.prepared.cbor"),
+                    128 * 1024 * 1024,
+                )?,
+                &requirements,
+                DecodeLimits::default(),
+            )
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?,
+        );
+        let sealed =
+            seal_turn_outputs(self, &directory, &source_path, source, &target, "__result")?
+                .ok_or_else(fail)?;
+        let products = sealed
+            .recovery_products
+            .iter()
+            .filter(|product| product.owner().module == module_name)
+            .collect::<Vec<_>>();
+        let [original] = products.as_slice() else {
+            return Err(fail());
+        };
+        let iface = crate::checked_cell::read(directory.join("original.hi"), 32 * 1024 * 1024)?;
+        let digest = crate::checked_cell::hash(&iface);
+        if string(&fields[5])? != digest || original.interface_bytes() != iface {
+            return Err(fail());
+        }
+        let baseline = &exact.context;
+        let empty = baseline.recovery_products().is_empty()
+            && baseline.joined_interfaces().is_empty()
+            && baseline.lexical_graph().is_empty()
+            && baseline.interface_owners().is_empty();
+        let certificate = crate::declaration_join::certify_same_offer_planned_declaration(
+            module,
+            source,
+            &self.producer,
+            &sealed,
+            &admission,
+            &self.include,
+            (!empty).then_some(baseline),
+            string(&fields[6])?.as_bytes(),
+        )?;
+        if std::fs::read(&receipt_path)? != bytes
+            || std::fs::read(directory.join("original.hi"))? != iface
+        {
+            return Err(fail());
+        }
+        Ok(Some(crate::checked_cell::PlannedCheckedDeclaration {
+            source: source.to_owned(),
+            certificate: Arc::new(certificate),
+            receipt_digest: Sha256::digest(&bytes).into(),
+        }))
     }
 
     pub fn admit_checked_fold(
@@ -393,7 +549,7 @@ impl ModuleCandidateOffer {
         cell: &Arc<crate::checked_cell::ExactCheckedCell>,
         generation: u64,
         source: &str,
-        target: &PreparedProgram,
+        target: &Arc<PreparedProgram>,
     ) -> Result<Arc<crate::checked_cell::ExactCompiledItem>, CompileError> {
         if self.checked_cell.is_none() {
             return Err(CompileError::ExtractFailed(
@@ -457,6 +613,7 @@ pub struct SealedTurnProducts {
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
     pub package_interfaces: certified_products::CertifiedTargetPackageInterfaces,
     pub checked_execution: Option<Arc<crate::checked_cell::ExactCompiledItem>>,
+    pub checked_display: Option<Arc<crate::checked_cell::ExactCompiledDisplay>>,
 }
 
 fn has_ready_home_module(evidence: &cache::DependencyEvidence) -> bool {
@@ -509,7 +666,7 @@ pub fn seal_turn_outputs(
     output_dir: &Path,
     source_path: &Path,
     source: &str,
-    prepared: &PreparedProgram,
+    prepared: &Arc<PreparedProgram>,
     target: &str,
 ) -> Result<Option<SealedTurnProducts>, CompileError> {
     if std::fs::read_to_string(source_path)? != source {
@@ -621,6 +778,22 @@ pub fn seal_turn_outputs(
         );
     }
     Ok(Some(SealedTurnProducts {
+        checked_display: offer
+            .checked_display
+            .as_ref()
+            .map(|display| {
+                display.seal(
+                    output_dir,
+                    &offer
+                        .exact
+                        .as_ref()
+                        .expect("checked display has exact scope")
+                        .request_sha256,
+                    source,
+                    prepared,
+                )
+            })
+            .transpose()?,
         checked_execution: offer
             .checked_item
             .as_ref()

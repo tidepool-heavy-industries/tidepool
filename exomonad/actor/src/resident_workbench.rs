@@ -5884,7 +5884,7 @@ fn cloned_turn_code(turn: &CompiledTurn) -> TurnCode<'static> {
     TurnCode {
         table: std::borrow::Cow::Owned(turn.table.clone()),
         sites: std::borrow::Cow::Owned(turn.asks.clone()),
-        prepared: std::borrow::Cow::Owned(turn.prepared.clone()),
+        prepared: std::borrow::Cow::Owned(turn.prepared.as_ref().clone()),
         certification: std::borrow::Cow::Owned(turn.certification.clone()),
     }
 }

@@ -1784,7 +1784,7 @@ pub struct CompiledTurn {
     /// Typed suspension sites decoded from the `TurnOut` wire payload.
     pub asks: Vec<YieldSite>,
     /// The turn's prepared-STG program.
-    pub prepared: PreparedProgram,
+    pub prepared: Arc<PreparedProgram>,
     /// Worker-certified original source groups and the target's exact owner
     /// rows. Retained imports still require lexical resolution at admission.
     pub certification: Option<TurnCertification>,
@@ -1801,9 +1801,19 @@ pub struct TurnCertification {
     pub(crate) checked_item: Option<ExactCheckedItem>,
     pub(crate) checked_execution: Option<Arc<ExactCompiledItem>>,
     pub(crate) checked_prefix: Option<Arc<super::RuntimeCheckedPrefix>>,
+    pub(crate) checked_display: Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>>,
+    pub(crate) checked_display_admission: Option<Arc<super::RuntimeCheckedDisplayAdmission>>,
 }
 
 impl TurnCertification {
+    pub fn checked_display(
+        &self,
+    ) -> Option<&Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>> {
+        self.checked_display.as_ref()
+    }
+    pub fn checked_display_admission(&self) -> Option<&Arc<super::RuntimeCheckedDisplayAdmission>> {
+        self.checked_display_admission.as_ref()
+    }
     pub fn checked_item(&self) -> Option<&ExactCheckedItem> {
         self.checked_item.as_ref()
     }
@@ -1879,7 +1889,7 @@ impl CompiledTurn {
         TurnCode {
             table: std::borrow::Cow::Borrowed(&self.table),
             sites: std::borrow::Cow::Borrowed(&self.asks),
-            prepared: std::borrow::Cow::Borrowed(&self.prepared),
+            prepared: std::borrow::Cow::Borrowed(self.prepared.as_ref()),
             certification: std::borrow::Cow::Borrowed(&self.certification),
         }
     }
@@ -1890,7 +1900,7 @@ impl CompiledTurn {
         TurnCode {
             table: std::borrow::Cow::Owned(self.table),
             sites: std::borrow::Cow::Owned(self.asks),
-            prepared: std::borrow::Cow::Owned(self.prepared),
+            prepared: std::borrow::Cow::Owned(Arc::unwrap_or_clone(self.prepared)),
             certification: std::borrow::Cow::Owned(self.certification),
         }
     }
@@ -2502,9 +2512,9 @@ pub fn check_cell_admitted(
         )
         .into());
     }
-    if !admission.reserved_generations().is_empty() {
+    if admission.reserved_generations().len() > 1 {
         return Err(CompileError::ExtractFailed(
-            "planned declarations require same-offer original certification".into(),
+            "checked cells support one initial reserved declaration group".into(),
         )
         .into());
     }
@@ -3314,13 +3324,15 @@ fn read_compiled_turn(
             checked_item: None,
             checked_execution: sealed.checked_execution,
             checked_prefix: None,
+            checked_display: sealed.checked_display,
+            checked_display_admission: None,
         }),
     })
 }
 
 /// Read the prepared-STG program the worker wrote for this turn. A requested
 /// program that is absent is a missing output.
-fn read_prepared_program(output_dir: &Path) -> Result<PreparedProgram, CompileError> {
+fn read_prepared_program(output_dir: &Path) -> Result<Arc<PreparedProgram>, CompileError> {
     let path = output_dir.join(format!("{PREPARED_SCAFFOLD_TARGET}.prepared.cbor"));
     if !path.exists() {
         return Err(CompileError::MissingOutput(path));
@@ -3338,6 +3350,7 @@ fn read_prepared_program(output_dir: &Path) -> Result<PreparedProgram, CompileEr
     let requirements = tidepool_toolchain::prepared_artifact::production_requirements()
         .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     parse_program(&bytes, &requirements, DecodeLimits::default())
+        .map(Arc::new)
         .map_err(|error| CompileError::ExtractFailed(format!("{path:?}: {error}")))
 }
 
@@ -4954,6 +4967,10 @@ mod tests {
             bound[0].type_display
         );
         let certification = compiled.certification.as_ref().unwrap();
+        assert!(certification
+            .checked_execution()
+            .unwrap()
+            .shares_target(&compiled.prepared));
         certification
             .validate_checked_bind(&compiled.prepared, view.next_value_generation().0, &bound)
             .unwrap();

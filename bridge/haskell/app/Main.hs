@@ -6,7 +6,7 @@ import System.Environment (getArgs)
 import System.FilePath (takeBaseName, takeDirectory, takeFileName, (</>))
 import System.Directory (createDirectoryIfMissing, removeFile, setCurrentDirectory)
 import qualified Data.ByteString as BS
-import Codec.CBOR.Encoding (encodeBytes, encodeListLen, encodeString, encodeWord, encodeWord64)
+import Codec.CBOR.Encoding (encodeBytes, encodeListLen, encodeString, encodeWord, encodeWord64, encodeNull)
 import Codec.CBOR.Write (toStrictByteString)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -14,7 +14,7 @@ import Control.Exception
   ( evaluate, try, finally, throwIO, SomeAsyncException, SomeException, Exception
   , fromException, toException, IOException )
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
-import Data.List (intercalate, nub, isInfixOf)
+import Data.List (intercalate, nub, isInfixOf, stripPrefix)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
 import Data.Word (Word64)
 import Control.Monad (foldM, forM, forM_, when, unless, void)
@@ -90,7 +90,8 @@ import Tidepool.ExtractRequest (InspectionRequest(..), WorkerRequest(..), worker
 import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
 import Tidepool.ExactScope
   ( ExactCompilation(..), ExactScope(..), ExactProduct(..), ExactOriginalGroup(..)
-  , CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, revalidateExactScope, writeExactCompilation )
+  , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..)
+  , readExactScope, revalidateExactScope, writeExactCompilation )
 import Tidepool.CheckedCell (CheckedSignature(..), encodeCheckedSignature)
 import Tidepool.PlannedDeclaration
   ( PlannedDeclaration, PlannedDeclarationInventory, plannedSource, plannedCheckPlan
@@ -845,6 +846,8 @@ runTurnMode compiler caches args path = do
     exact <- traverse (\manifest -> readExactScope manifest >>= either fail pure) (requestSessionArtifacts args)
     let admittedItem = exact >>= scopeCheckedItem
     forM_ admittedItem $ \admission -> validateCheckedItemAdmission args admission turnSrc sb
+    let admittedDisplay = exact >>= scopeCheckedDisplay
+    forM_ admittedDisplay $ \admission -> validateCheckedDisplayAdmission args admission turnSrc sb
     let outDir     = fromMaybe (takeDirectory path </> takeBaseName path ++ "_cbor") (requestOutDir args)
         bindersStr = fromMaybe
           (intercalate ", " (sbBinders sb))
@@ -867,7 +870,7 @@ runTurnMode compiler caches args path = do
                         then map (T.pack . exportItemName) items
                         else map T.pack (sbBinders sb)
         return (TDecl binders items declarationSource)
-      _kind -> compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr [] admittedItem lastAttempt
+      _kind -> compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr [] admittedItem admittedDisplay lastAttempt
     outFile <- requireArg "--turn-out" (requestTurnOut args)
     let cbor = encodeTurnOut turnOut
     BS.writeFile outFile cbor
@@ -876,6 +879,10 @@ runTurnMode compiler caches args path = do
         TBind _ _ _ _ wrapped -> writeCheckedItemReceipt outDir scope admission (T.unpack wrapped)
         TExpr _ _ wrapped -> writeCheckedItemReceipt outDir scope admission (T.unpack wrapped)
         TDecl {} -> fail "checked recipe cannot compile an unproved declaration"
+    forM_ (exact >>= \scope -> (,) scope <$> scopeCheckedDisplay scope) $ \(scope,admission) ->
+      case turnOut of
+        TBind _ _ _ _ wrapped -> writeCheckedDisplayReceipt outDir scope admission (T.unpack wrapped)
+        _ -> fail "checked display did not produce its capture bundle"
     hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (BS.length cbor) ++ " bytes)"
   case res of
     Left _ -> do
@@ -923,9 +930,10 @@ insertCheckedTypeImports modules source =
 
 compileClassifiedTurn
   :: Compiler -> RecoveryCaches -> WorkerRequest -> Bool -> FilePath
-  -> String -> StmtBinders -> String -> [String] -> Maybe CheckedItemAdmission -> IORef (Maybe (FilePath, String))
+  -> String -> StmtBinders -> String -> [String] -> Maybe CheckedItemAdmission -> Maybe CheckedDisplayAdmission
+  -> IORef (Maybe (FilePath, String))
   -> IO TurnOut
-compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted lastAttempt = do
+compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt = do
     let templates = requestTurnTemplates args
         -- Splice @tmplFile@ against the turn text, write the spliced module
         -- to a scratch file under 'outDir', and return it alongside the
@@ -939,9 +947,11 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
         spliceInto tmplFile = do
           tmplSrc <- readFile tmplFile
           tmplWithImports <- insertCheckedTypeImports typeImports tmplSrc
-          spliced <- case admitted of
-            Nothing -> pure (spliceTemplate tmplWithImports turnSrc bindersStr)
-            Just admission -> do
+          spliced <- case (display, admitted) of
+            (Just admission, Nothing) -> checkedDisplayRecipe admission tmplWithImports
+            (Nothing, Nothing) -> pure (spliceTemplate tmplWithImports turnSrc bindersStr)
+            (Just _, Just _) -> fail "display and item authority cannot share one recipe"
+            (Nothing, Just admission) -> do
               withPrefix <- if null (itemValueImports admission) then pure tmplWithImports else
                 replaceRecipeMarker "default (Int, Double, Text)\n"
                   (concatMap (\(moduleName',names) -> "import " ++ moduleName' ++ " (" ++ intercalate ", " names ++ ")\n")
@@ -1128,15 +1138,17 @@ runCellMode compiler caches args cellPath = do
       validateCheckedCellAdmission args admission cellNow templateNow
       verified <- revalidateExactScope (crHscEnv compiled) receiptScope
       either fail pure verified
+      plannedReceipt <- traverse (const (BS.readFile (outDir </> "planned-declaration.cbor"))) preparedDeclaration
       let text = encodeString . T.pack
           signatures = binderSignatures ++ map snd expressionEvidence
-          receipt = encodeListLen 9
+          receipt = encodeListLen 10
             <> text "TPEXACTCHECK" <> text "1" <> text (scopeRequestSha256 receiptScope)
             <> text (checkedAdmissionDigest admission) <> text (checkedCellSha256 admission)
             <> text (checkedTemplateSha256 admission) <> text (shaHex outputBytes)
             <> text (shaHex (TE.encodeUtf8 (T.pack finalSource)))
             <> encodeListLen (fromIntegral (length signatures))
             <> foldMap encodeCheckedSignature signatures
+            <> maybe encodeNull (text . shaHex) plannedReceipt
       BS.writeFile (outDir </> "checked-cell.cbor") (toStrictByteString receipt)
     -- Best-effort, and entirely inside this SAME 'try': a fold failure (an
     -- ineligible cell shape, a missing template, a real compile rejection)
@@ -1264,6 +1276,69 @@ validateCheckedItemAdmission args admission source verdict = do
   when ("__tidepool_checked_annotation_" `isInfixOf` source)
     (fail "authored checked item uses a compiler-reserved annotation name")
 
+checkedDisplayBinders :: CheckedDisplayAdmission -> [String]
+checkedDisplayBinders admission =
+  ["__tidepoolPage" ++ show (displayGeneration admission)
+  ,"__tidepoolMetadata" ++ show (displayGeneration admission),"cellDisplay"]
+
+validateCheckedDisplayAdmission :: WorkerRequest -> CheckedDisplayAdmission -> String -> StmtBinders -> IO ()
+validateCheckedDisplayAdmission args admission source verdict = do
+  templates <- forM (requestTurnTemplates args) $ \(kind,path) -> (,) kind . shaHex <$> BS.readFile path
+  generation <- requireArg "--bind-gen" (requestBindGen args)
+  unless (null source && sbKind verdict == KBind && sbBinders verdict == checkedDisplayBinders admission
+      && generation == displayGeneration admission && templates == displayTurnTemplates admission
+      && requestInjectVals args == displayInjectedModules admission
+      && not (requestActivationPreview args))
+    (fail "display request differs from its completed observation admission")
+  let observation = SymbolIdentity "main"
+        (T.pack ("Tidepool.Session.Val.G" ++ show (displayCaptureGeneration admission)))
+        "value" (T.pack (displayObservationName admission)) Nothing
+  unless (Map.lookup observation (requestRetainedGenerations args) == Just (displayCaptureGeneration admission))
+    (fail "display lacks its exact retained observation generation")
+
+checkedDisplayRecipe :: CheckedDisplayAdmission -> String -> IO String
+checkedDisplayRecipe admission template = do
+  let rowPrefix = "__tidepoolInEffectRow :: Eff "
+      rows = [suffix | line <- lines template, Just suffix <- [stripPrefix rowPrefix line]]
+  effectRow <- case rows of
+    [suffix] -> do
+      let (row, remaining) = T.breakOn " value -> Eff " (T.pack suffix)
+      unless (not (T.null row) && remaining == " value -> Eff " <> row <> " value")
+        (fail "display requires the canonical exact effect-row helper")
+      pure (T.unpack row)
+    _ -> fail "display requires one exact effect-row helper"
+  withImports <- if null (displayValueImports admission) then pure template else
+    replaceRecipeMarker "default (Int, Double, Text)\n"
+      (concatMap (\(name, binders) -> "import " ++ name ++ " (" ++ intercalate ", " binders ++ ")\n")
+        (displayValueImports admission) ++ "default (Int, Double, Text)\n") template
+  unless ("__result = do {\n{{TURN_STMT}}" `isInfixOf` withImports)
+    (fail "display requires canonical bind recipe version one")
+  (page,metadata,alias) <- case checkedDisplayBinders admission of
+    [page,metadata,alias] -> pure (page,metadata,alias)
+    _ -> fail "display requires its three canonical binders"
+  let keys = intercalate "," ["T.pack " ++ show key | key <- displayPresented admission]
+      budget = show (displayBudget admission)
+      rendering = if displayPresentation admission == "rendered"
+        then "TidepoolInspection.displayPageWithout [" ++ keys ++ "] " ++ budget
+          ++ " (" ++ displayObservationName admission ++ " ())"
+        else "TidepoolInspection.pageWithContinuation " ++ budget
+          ++ " (TidepoolInspection.TextLeaf (T.pack \"<opaque value>\")) Nothing"
+      statement = "(" ++ intercalate ", " [page,metadata,alias] ++ ") <- do {\n"
+        ++ page ++ " <- pure ((" ++ rendering ++ ") :: TidepoolInspection.DisplayPage " ++ effectRow ++ ");\n"
+        ++ metadata ++ " <- pure (T.copy (TidepoolInspection.text " ++ page ++ "), TidepoolInspection.pageHasMore "
+        ++ page ++ ", TidepoolInspection.pageUnavailable " ++ page ++ ");\n"
+        ++ alias ++ " <- pure " ++ page ++ ";\npure (" ++ intercalate ", " [page,metadata,alias] ++ ")\n}"
+  pure (spliceTemplate withImports statement (intercalate ", " [page,metadata,alias]))
+
+writeCheckedDisplayReceipt :: FilePath -> ExactScope -> CheckedDisplayAdmission -> String -> IO ()
+writeCheckedDisplayReceipt root scope admission source = do
+  let text = encodeString . T.pack
+      receipt = encodeListLen 8 <> text "TPEXACTDISPLAY" <> text "1"
+        <> text (scopeRequestSha256 scope) <> text (displayCellReceiptDigest admission)
+        <> encodeWord64 (displayItemIndex admission) <> text (displayPrefixDigest admission)
+        <> text (shaHex (TE.encodeUtf8 (T.pack source))) <> text "tidepool-display-recipe-1"
+  BS.writeFile (root </> "checked-display.cbor") (toStrictByteString receipt)
+
 checkedRecipeAnnotations :: CheckedItemAdmission -> [(String,CheckedSignature)]
 checkedRecipeAnnotations admission =
   [("__tidepool_checked_annotation_" ++ show index,signature)
@@ -1374,7 +1449,7 @@ attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled admitt
             validateCheckedItemAdmission args admission turnSrc sb
             pure (Just admission)
         let typeImports = if isJust admitted then [] else nub (concatMap checkedPinImports [pin | Just pin <- pins])
-        turnOut <- compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted lastAttempt
+        turnOut <- compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted Nothing lastAttempt
         BS.writeFile outFile (encodeTurnOut turnOut)
         forM_ (admittedScope >>= \scope -> (,) scope <$> admitted) $ \(scope,admission) ->
           case turnOut of

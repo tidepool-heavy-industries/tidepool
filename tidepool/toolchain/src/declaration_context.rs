@@ -120,6 +120,14 @@ impl ExactCompilationRequest {
         &self,
         root: &Path,
     ) -> Result<Vec<ExactSourceAdmission>, CompileError> {
+        self.validate_outputs_with_planned(root, None)
+    }
+
+    pub(crate) fn validate_outputs_with_planned(
+        &self,
+        root: &Path,
+        planned: Option<&ExactModuleIdentity>,
+    ) -> Result<Vec<ExactSourceAdmission>, CompileError> {
         self.context.validate_artifacts(&self.artifacts)?;
         if sha256(&std::fs::read(&self.manifest)?) != self.request_sha256 {
             return Err(failure("scope request changed during compilation"));
@@ -134,11 +142,15 @@ impl ExactCompilationRequest {
         }
         receipts
             .iter()
-            .map(|path| self.validate_receipt(&path.join("receipt.cbor")))
+            .map(|path| self.validate_receipt(&path.join("receipt.cbor"), planned))
             .collect()
     }
 
-    fn validate_receipt(&self, path: &Path) -> Result<ExactSourceAdmission, CompileError> {
+    fn validate_receipt(
+        &self,
+        path: &Path,
+        planned: Option<&ExactModuleIdentity>,
+    ) -> Result<ExactSourceAdmission, CompileError> {
         use sha2::Digest;
         let bytes = bounded_read(path, 4 * 1024 * 1024)?;
         let mut cursor = std::io::Cursor::new(&bytes);
@@ -180,7 +192,7 @@ impl ExactCompilationRequest {
                 .ok_or_else(|| {
                     failure("fresh compilation lacks complete tracked source evidence")
                 })?;
-        let exact_owners: BTreeSet<_> = self
+        let mut exact_owners: BTreeSet<_> = self
             .artifacts
             .iter()
             .map(|artifact| {
@@ -190,6 +202,9 @@ impl ExactCompilationRequest {
                 )
             })
             .collect();
+        if let Some(planned) = planned {
+            exact_owners.insert((planned.unit.as_str(), planned.module.as_str()));
+        }
         let source_owners: BTreeSet<_> = evidence
             .modules
             .iter()
@@ -201,12 +216,15 @@ impl ExactCompilationRequest {
         {
             return Err(failure("fresh module replaced an admitted exact owner"));
         }
-        let selected: BTreeSet<_> = self
+        let mut selected: BTreeSet<_> = self
             .context
             .lexical
             .iter()
             .map(|node| (node.owner.unit.as_str(), node.owner.module.as_str()))
             .collect();
+        if let Some(planned) = planned {
+            selected.insert((planned.unit.as_str(), planned.module.as_str()));
+        }
         let edges = list(&header[8], 4096)?;
         let mut seen = BTreeSet::new();
         let mut exact_imports = BTreeMap::new();

@@ -143,6 +143,14 @@ pub struct ExactCheckedCell {
     observations: Vec<u8>,
     items: Vec<CheckedItem>,
     include: Vec<std::path::PathBuf>,
+    planned_declaration: Option<PlannedCheckedDeclaration>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PlannedCheckedDeclaration {
+    pub(crate) source: String,
+    pub(crate) certificate: Arc<crate::declaration_join::CertifiedAuthoredDeclaration>,
+    pub(crate) receipt_digest: [u8; 32],
 }
 
 impl ExactCheckedCell {
@@ -206,7 +214,22 @@ pub enum CheckedExpressionPresentation {
 #[derive(Clone, Debug)]
 pub struct ExactCompiledPrefix {
     cell: Arc<ExactCheckedCell>,
-    completed: Vec<Arc<ExactCompiledItem>>,
+    completed: Vec<CompletedCheckedItem>,
+    displays: Vec<Arc<ExactCompiledDisplay>>,
+}
+
+#[derive(Clone, Debug)]
+enum CompletedCheckedItem {
+    Native(Arc<ExactCompiledItem>),
+    Declaration(ExactCheckedItem),
+}
+impl CompletedCheckedItem {
+    fn native(&self) -> Option<&Arc<ExactCompiledItem>> {
+        match self {
+            Self::Native(item) => Some(item),
+            Self::Declaration(_) => None,
+        }
+    }
 }
 
 /// A checked recipe and its exact prepared target, issued together by the
@@ -221,7 +244,188 @@ pub struct ExactCompiledItem {
     observation_name: Option<String>,
 }
 
+#[derive(Debug)]
+pub struct ExactCompiledDisplay {
+    capture: Arc<ExactCompiledItem>,
+    target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
+    generation: u64,
+    admission_digest: [u8; 32],
+    bound_binders: Vec<Value>,
+    value_interface: (String, Arc<[u8]>),
+}
+
+impl ExactCompiledDisplay {
+    pub fn value_interface_owned(&self) -> (&str, &Arc<[u8]>) {
+        (&self.value_interface.0, &self.value_interface.1)
+    }
+    pub fn capture(&self) -> &Arc<ExactCompiledItem> {
+        &self.capture
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub fn admission_digest(&self) -> [u8; 32] {
+        self.admission_digest
+    }
+    pub fn validate_bound_binders(&self, bound: &[Value]) -> Result<(), CompileError> {
+        if bound != self.bound_binders {
+            return Err(failure("compiled display binder metadata was edited"));
+        }
+        Ok(())
+    }
+    pub fn matches_target(
+        &self,
+        target: &tidepool_repr::execution_schema::PreparedProgram,
+    ) -> bool {
+        std::ptr::eq(self.target.as_ref(), target) || self.target.as_ref() == target
+    }
+}
+
+pub(crate) struct CheckedDisplayOffer {
+    pub(crate) capture: Arc<ExactCompiledItem>,
+    pub(crate) prefix: ExactCompiledPrefix,
+    pub(crate) generation: u64,
+    pub(crate) admission_digest: [u8; 32],
+    pub(crate) budget: u64,
+    pub(crate) presented: Vec<String>,
+}
+
+impl CheckedDisplayOffer {
+    pub(crate) fn authorization(
+        &self,
+        producer: &[u8],
+        context: [u8; 32],
+    ) -> Result<Value, CompileError> {
+        self.capture.item.cell.revalidate(producer, &context)?;
+        if self.admission_digest == [0; 32]
+            || self
+                .prefix
+                .completed_item(self.capture.item.index())
+                .is_none_or(|completed| !Arc::ptr_eq(completed, &self.capture))
+        {
+            return Err(failure(
+                "display has no protected same-cell completed capture",
+            ));
+        }
+        let observation = self
+            .capture
+            .observation_name()
+            .ok_or_else(|| failure("display item is not an observation capture"))?;
+        let presentation = self
+            .capture
+            .item
+            .expression_presentation()?
+            .ok_or_else(|| failure("display has no checked presentation"))?;
+        Ok(array([
+            text("checked-display"),
+            text(hex(&self.capture.item.admission_digest())),
+            text(hex(&self.capture.item.cell.receipt_digest)),
+            Value::Integer((self.capture.item.index as u64).into()),
+            text(observation),
+            Value::Integer(self.capture.generation.into()),
+            Value::Integer(self.generation.into()),
+            text(hex(&self.admission_digest)),
+            Value::Integer(self.budget.into()),
+            Value::Array(self.presented.iter().map(text).collect()),
+            Value::Array(
+                self.capture
+                    .item
+                    .turn_templates()
+                    .iter()
+                    .map(|(kind, source)| array([text(kind), text(hash(source.as_bytes()))]))
+                    .collect(),
+            ),
+            Value::Array(self.prefix.injected_modules().iter().map(text).collect()),
+            Value::Array(
+                self.prefix
+                    .value_imports()
+                    .iter()
+                    .map(|(module, names)| {
+                        array([text(module), Value::Array(names.iter().map(text).collect())])
+                    })
+                    .collect(),
+            ),
+            text(match presentation {
+                CheckedExpressionPresentation::Rendered => "rendered",
+                CheckedExpressionPresentation::Opaque => "opaque",
+            }),
+        ]))
+    }
+    pub(crate) fn seal(
+        &self,
+        root: &Path,
+        request: &str,
+        source: &str,
+        target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
+    ) -> Result<Arc<ExactCompiledDisplay>, CompileError> {
+        let receipt = decode(&read(root.join("checked-display.cbor"), 4 * 1024 * 1024)?)?;
+        let fields = row(&receipt, 8)?;
+        if string(&fields[0])? != "TPEXACTDISPLAY"
+            || string(&fields[1])? != "1"
+            || string(&fields[2])? != request
+            || string(&fields[3])? != hex(&self.capture.item.cell.receipt_digest)
+            || fields[4] != Value::Integer((self.capture.item.index as u64).into())
+            || string(&fields[5])? != hex(&self.admission_digest)
+            || string(&fields[6])? != hash(source.as_bytes())
+            || string(&fields[7])? != "tidepool-display-recipe-1"
+        {
+            return Err(failure(
+                "display recipe differs from its completed capture offer",
+            ));
+        }
+        let turn = decode(&read(root.join("turn.cbor"), 32 * 1024 * 1024)?)?;
+        let turn = row(&turn, 2)?;
+        if string(&turn[0])? != "Bind" {
+            return Err(failure("display recipe is not its binding bundle"));
+        }
+        let fields = row(&turn[1], 5)?;
+        let names = [
+            format!("__tidepoolPage{}", self.generation),
+            format!("__tidepoolMetadata{}", self.generation),
+            "cellDisplay".into(),
+        ];
+        if fields[0] != Value::Array(names.iter().map(text).collect())
+            || string(&fields[4])? != source
+        {
+            return Err(failure("display bundle names or wrapper changed"));
+        }
+        let bound = list(&fields[2], 3)?.to_vec();
+        let module = tidepool_repr::SessionModule::val(tidepool_repr::Generation(self.generation))
+            .module_name();
+        if bound.len() != 3 {
+            return Err(failure("display binder inventory differs"));
+        }
+        for (binder, name) in bound.iter().zip(&names) {
+            let fields = row(binder, 7)?;
+            if string(&fields[0])? != name || string(&fields[2])? != module {
+                return Err(failure("display binder has another reserved native owner"));
+            }
+        }
+        let bytes = read(
+            root.join("admitted-values").join(
+                tidepool_repr::SessionModule::val(tidepool_repr::Generation(self.generation))
+                    .relative_hi_path(),
+            ),
+            32 * 1024 * 1024,
+        )?;
+        Ok(Arc::new(ExactCompiledDisplay {
+            capture: self.capture.clone(),
+            target: target.clone(),
+            generation: self.generation,
+            admission_digest: self.admission_digest,
+            bound_binders: bound,
+            value_interface: (module, bytes.into()),
+        }))
+    }
+}
+
 impl ExactCompiledItem {
+    pub fn shares_target(
+        &self,
+        target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
+    ) -> bool {
+        Arc::ptr_eq(&self.target, target)
+    }
     pub fn observation_name(&self) -> Option<&str> {
         self.observation_name.as_deref()
     }
@@ -243,7 +447,7 @@ impl ExactCompiledItem {
         &self,
         target: &tidepool_repr::execution_schema::PreparedProgram,
     ) -> bool {
-        self.target.as_ref() == target
+        std::ptr::eq(self.target.as_ref(), target) || self.target.as_ref() == target
     }
     pub fn value_interface(&self) -> Option<(&str, &[u8])> {
         self.value_interface
@@ -258,8 +462,33 @@ impl ExactCompiledItem {
 }
 
 impl ExactCompiledPrefix {
+    pub fn append_display(&self, display: Arc<ExactCompiledDisplay>) -> Result<Self, CompileError> {
+        if self
+            .completed_item(display.capture.item.index())
+            .is_none_or(|capture| !Arc::ptr_eq(capture, &display.capture))
+            || self
+                .displays
+                .iter()
+                .any(|prior| prior.generation == display.generation)
+        {
+            return Err(failure(
+                "display is not a new bundle of its same completed capture",
+            ));
+        }
+        let mut next = self.clone();
+        next.displays.push(display);
+        Ok(next)
+    }
     pub fn completed_item(&self, index: usize) -> Option<&Arc<ExactCompiledItem>> {
-        self.completed.get(index)
+        self.completed
+            .get(index)
+            .and_then(CompletedCheckedItem::native)
+    }
+    pub fn completed_declaration(&self, index: usize) -> Option<&ExactCheckedItem> {
+        match self.completed.get(index) {
+            Some(CompletedCheckedItem::Declaration(item)) => Some(item),
+            _ => None,
+        }
     }
     pub fn next_item(&self) -> usize {
         self.completed.len()
@@ -276,7 +505,20 @@ impl ExactCompiledPrefix {
             ));
         }
         let mut next = self.clone();
-        next.completed.push(completed);
+        next.completed.push(CompletedCheckedItem::Native(completed));
+        Ok(next)
+    }
+    pub fn append_declaration(&self, item: ExactCheckedItem) -> Result<Self, CompileError> {
+        if item.index != self.next_item()
+            || !Arc::ptr_eq(&item.cell, &self.cell)
+            || item.planned_declaration().is_none()
+        {
+            return Err(failure(
+                "declaration is not the next original certified item of this cell",
+            ));
+        }
+        let mut next = self.clone();
+        next.completed.push(CompletedCheckedItem::Declaration(item));
         Ok(next)
     }
     pub fn injected_modules(&self) -> Vec<String> {
@@ -285,22 +527,43 @@ impl ExactCompiledPrefix {
             .injected_modules
             .iter()
             .cloned()
-            .chain(self.completed.iter().filter_map(|completed| {
-                completed
-                    .value_interface
-                    .as_ref()
-                    .map(|(module, _)| module.clone())
-            }))
+            .chain(
+                self.completed
+                    .iter()
+                    .filter_map(CompletedCheckedItem::native)
+                    .filter_map(|completed| {
+                        completed
+                            .value_interface
+                            .as_ref()
+                            .map(|(module, _)| module.clone())
+                    }),
+            )
+            .chain(
+                self.displays
+                    .iter()
+                    .map(|display| display.value_interface.0.clone()),
+            )
             .collect()
     }
     pub fn completed_interfaces(&self) -> impl Iterator<Item = (&str, &[u8])> {
         self.completed
             .iter()
+            .filter_map(CompletedCheckedItem::native)
             .filter_map(|completed| completed.value_interface())
+            .chain(self.displays.iter().map(|display| {
+                (
+                    display.value_interface.0.as_str(),
+                    display.value_interface.1.as_ref(),
+                )
+            }))
     }
     fn value_imports(&self) -> Vec<(String, Vec<String>)> {
         let mut winners = std::collections::BTreeMap::new();
-        for completed in &self.completed {
+        for completed in self
+            .completed
+            .iter()
+            .filter_map(CompletedCheckedItem::native)
+        {
             if let Some((module, _)) = completed.value_interface() {
                 for name in completed
                     .item
@@ -329,6 +592,26 @@ impl PartialEq for ExactCheckedItem {
 impl Eq for ExactCheckedItem {}
 
 impl ExactCheckedItem {
+    pub fn planned_declaration(
+        &self,
+    ) -> Option<&Arc<crate::declaration_join::CertifiedAuthoredDeclaration>> {
+        (self.kind() == CheckedItemKind::Declaration)
+            .then_some(self.cell.planned_declaration.as_ref())
+            .flatten()
+            .map(|planned| &planned.certificate)
+    }
+    pub fn planned_declaration_source(&self) -> Option<&str> {
+        (self.kind() == CheckedItemKind::Declaration)
+            .then_some(self.cell.planned_declaration.as_ref())
+            .flatten()
+            .map(|planned| planned.source.as_str())
+    }
+    pub(crate) fn cell_include(&self) -> &[std::path::PathBuf] {
+        &self.cell.include
+    }
+    pub fn turn_templates(&self) -> &[(String, String)] {
+        &self.cell.specification.turn_templates
+    }
     pub fn index(&self) -> usize {
         self.index
     }
@@ -379,6 +662,7 @@ impl ExactCheckedItem {
         Ok(ExactCompiledPrefix {
             cell: self.cell.clone(),
             completed: Vec::new(),
+            displays: Vec::new(),
         })
     }
     pub fn validate_observations(
@@ -412,7 +696,7 @@ pub(crate) fn seal_checked_fold(
     cell: &Arc<ExactCheckedCell>,
     generation: u64,
     source: &str,
-    target: &tidepool_repr::execution_schema::PreparedProgram,
+    target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
 ) -> Result<Arc<ExactCompiledItem>, CompileError> {
     cell.revalidate(producer, &context)?;
     if cell.items.len() != 1
@@ -541,7 +825,7 @@ impl CheckedItemOffer {
         root: &Path,
         request: &str,
         source: &str,
-        target: &tidepool_repr::execution_schema::PreparedProgram,
+        target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
     ) -> Result<Arc<ExactCompiledItem>, CompileError> {
         let receipt = decode(&read(root.join("checked-item.cbor"), 4 * 1024 * 1024)?)?;
         let fields = row(&receipt, 8)?;
@@ -610,7 +894,7 @@ impl CheckedItemOffer {
         };
         Ok(Arc::new(ExactCompiledItem {
             item: self.item.clone(),
-            target: Arc::new(target.clone()),
+            target: target.clone(),
             value_interface,
             generation: self.generation,
             bound_binders,
@@ -649,10 +933,11 @@ pub(crate) fn admit_checked_cell(
     specification: &CheckedCellSpecification,
     admissions: Vec<ExactSourceAdmission>,
     include: &[std::path::PathBuf],
+    planned_declaration: Option<PlannedCheckedDeclaration>,
 ) -> Result<Arc<ExactCheckedCell>, CompileError> {
     let receipt = read(root.join("checked-cell.cbor"), 8 * 1024 * 1024)?;
     let value = decode(&receipt)?;
-    let header = row(&value, 9)?;
+    let header = row(&value, 10)?;
     let observations = read(root.join("cell.cbor"), 32 * 1024 * 1024)?;
     let output = decode(&observations)?;
     let output = row(&output, 5)?;
@@ -669,6 +954,15 @@ pub(crate) fn admit_checked_cell(
         return Err(failure(
             "whole-cell receipt differs from the same admitted compiler offer",
         ));
+    }
+    match (&planned_declaration, &header[9]) {
+        (Some(planned), Value::Text(digest)) if digest == &hex(&planned.receipt_digest) => {}
+        (None, Value::Null) => {}
+        _ => {
+            return Err(failure(
+                "whole-cell receipt differs from its original declaration receipt",
+            ))
+        }
     }
     let source = admissions
         .into_iter()
@@ -754,6 +1048,23 @@ pub(crate) fn admit_checked_cell(
             })
         })
         .collect::<Result<Vec<_>, CompileError>>()?;
+    let declaration_indices = items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.kind == CheckedItemKind::Declaration)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if declaration_indices
+        != if planned_declaration.is_some() {
+            vec![0]
+        } else {
+            vec![]
+        }
+    {
+        return Err(failure(
+            "initial declaration lacks its original same-offer certificate",
+        ));
+    }
     let used = items
         .iter()
         .flat_map(|item| &item.signatures)
@@ -781,6 +1092,7 @@ pub(crate) fn admit_checked_cell(
         observations,
         items,
         include: include.to_vec(),
+        planned_declaration,
     }))
 }
 
@@ -828,7 +1140,7 @@ fn unique_key(values: &[Value], key: &str, count: usize) -> Result<Value, Compil
         _ => Err(failure("missing or duplicate checked key")),
     }
 }
-fn read(path: impl AsRef<Path>, limit: u64) -> Result<Vec<u8>, CompileError> {
+pub(crate) fn read(path: impl AsRef<Path>, limit: u64) -> Result<Vec<u8>, CompileError> {
     if std::fs::metadata(path.as_ref())?.len() > limit {
         return Err(failure("checked evidence exceeds bound"));
     }
@@ -838,7 +1150,7 @@ fn read(path: impl AsRef<Path>, limit: u64) -> Result<Vec<u8>, CompileError> {
     }
     Ok(bytes)
 }
-fn decode(bytes: &[u8]) -> Result<Value, CompileError> {
+pub(crate) fn decode(bytes: &[u8]) -> Result<Value, CompileError> {
     let mut cursor = std::io::Cursor::new(bytes);
     let value = ciborium::de::from_reader(&mut cursor).map_err(failure)?;
     if cursor.position() != bytes.len() as u64 {
@@ -846,7 +1158,7 @@ fn decode(bytes: &[u8]) -> Result<Value, CompileError> {
     }
     Ok(value)
 }
-fn row(value: &Value, count: usize) -> Result<&[Value], CompileError> {
+pub(crate) fn row(value: &Value, count: usize) -> Result<&[Value], CompileError> {
     let values = list(value, count)?;
     if values.len() != count {
         return Err(failure("invalid checked evidence row"));
@@ -859,7 +1171,7 @@ fn list(value: &Value, limit: usize) -> Result<&[Value], CompileError> {
         _ => Err(failure("invalid checked evidence array")),
     }
 }
-fn string(value: &Value) -> Result<&str, CompileError> {
+pub(crate) fn string(value: &Value) -> Result<&str, CompileError> {
     match value {
         Value::Text(value) => Ok(value),
         _ => Err(failure("invalid checked evidence text")),
@@ -871,7 +1183,7 @@ fn array<const N: usize>(values: [Value; N]) -> Value {
 fn text(value: impl AsRef<str>) -> Value {
     Value::Text(value.as_ref().to_owned())
 }
-fn hash(bytes: &[u8]) -> String {
+pub(crate) fn hash(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes).into())
 }
 fn hex(bytes: &[u8; 32]) -> String {

@@ -2,7 +2,7 @@
 
 module Tidepool.ExactScope
   ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..)
-  , CheckedCellAdmission(..), CheckedItemAdmission(..)
+  , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..)
   , readExactScope, revalidateExactScope
   , writeExactCompilation
   ) where
@@ -43,6 +43,23 @@ data ExactScope = ExactScope
   , scopeProducts :: [ExactProduct]
   , scopeCheckedCell :: Maybe CheckedCellAdmission
   , scopeCheckedItem :: Maybe CheckedItemAdmission
+  , scopeCheckedDisplay :: Maybe CheckedDisplayAdmission
+  } deriving (Eq, Show)
+
+data CheckedDisplayAdmission = CheckedDisplayAdmission
+  { displayAdmissionDigest :: String
+  , displayCellReceiptDigest :: String
+  , displayItemIndex :: Word64
+  , displayObservationName :: String
+  , displayCaptureGeneration :: Word64
+  , displayGeneration :: Word64
+  , displayPrefixDigest :: String
+  , displayBudget :: Word64
+  , displayPresented :: [String]
+  , displayTurnTemplates :: [(String,String)]
+  , displayInjectedModules :: [String]
+  , displayValueImports :: [(String,[String])]
+  , displayPresentation :: String
   } deriving (Eq, Show)
 
 data CheckedCellAdmission = CheckedCellAdmission
@@ -237,7 +254,7 @@ decodeScope = do
           (exactUnit iface, exactModule iface) == (originalUnit originalProduct, originalModule originalProduct)
           && exactSha256 iface == originalIfaceSha256 originalProduct) interfaces) products)
     (fail "incomplete or conflicting exact owner closure")
-  (checked, checkedItem) <- if version == "1" then pure (Nothing,Nothing) else do
+  (checked, checkedItem, checkedDisplay) <- if version == "1" then pure (Nothing,Nothing,Nothing) else do
     authCount <- decodeListLen
     purpose <- string
     case purpose of
@@ -248,7 +265,7 @@ decodeScope = do
           <*> bounded 4096 nonempty <*> bounded 4096 nonempty
         unique "checked injected modules" (checkedInjectedModules admission)
         unique "checked reserved modules" (checkedReservedModules admission)
-        pure (Just admission,Nothing)
+        pure (Just admission,Nothing,Nothing)
       "checked-item" -> do
         unless (authCount == 15) (fail "invalid checked-item admission")
         admissionDigest <- digestField
@@ -287,9 +304,24 @@ decodeScope = do
         unless ((kind == "expr") == maybe False (const True) observation)
           (fail "checked observation identity differs from item kind")
         pure (Nothing, Just (CheckedItemAdmission admissionDigest receiptDigest index sourceDigest kind binders
-          templates injected signatures liftPlan presentation generation prefix valueImports observation))
+          templates injected signatures liftPlan presentation generation prefix valueImports observation), Nothing)
+      "checked-display" -> do
+        unless (authCount == 14) (fail "invalid checked-display admission")
+        admission <- CheckedDisplayAdmission <$> digestField <*> digestField <*> decodeWord64
+          <*> nonempty <*> decodeWord64 <*> decodeWord64 <*> digestField <*> decodeWord64
+          <*> bounded 65536 string <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
+          <*> bounded 4096 nonempty
+          <*> bounded 4096 (array 2 >> ((,) <$> nonempty <*> bounded 65536 nonempty))
+          <*> nonempty
+        unique "display injected modules" (displayInjectedModules admission)
+        unique "display value import owners" (map fst (displayValueImports admission))
+        unique "display value import names" (concatMap snd (displayValueImports admission))
+        unless (displayPresentation admission `elem` ["rendered","opaque"]
+            && all ((`elem` displayInjectedModules admission) . fst) (displayValueImports admission))
+          (fail "invalid display presentation or imported owner")
+        pure (Nothing,Nothing,Just admission)
       _ -> fail "unsupported exact compile purpose"
-  pure (ExactScope "" "" semantic interfaces lexical products checked checkedItem)
+  pure (ExactScope "" "" semantic interfaces lexical products checked checkedItem checkedDisplay)
   where
     signature = do
       array 3
