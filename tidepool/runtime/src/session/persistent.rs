@@ -1561,6 +1561,19 @@ impl PersistentSession {
         private_scope: ScopeId,
         write_ids: Vec<SessionVarId>,
     ) -> Result<PublicManifestBase, SessionError> {
+        self.snapshot_publication(owner, public_scope, private_scope, write_ids, Vec::new())
+    }
+
+    /// Shared data-plane snapshot for paired declaration publication. Every
+    /// selected key must be an actual native lease owned by the private view.
+    pub(super) fn snapshot_publication(
+        &self,
+        owner: RecoveryPublicOwner,
+        public_scope: ScopeId,
+        private_scope: ScopeId,
+        write_ids: Vec<SessionVarId>,
+        source_keys: Vec<SourceLeaseKey>,
+    ) -> Result<PublicManifestBase, SessionError> {
         if !self.scopes.is_live(public_scope) {
             return Err(SessionError::DeadScope(public_scope));
         }
@@ -1573,7 +1586,7 @@ impl PersistentSession {
                 private_scope,
                 public_scope,
                 &write_ids,
-                &[],
+                &source_keys,
             )
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
         let expected_public = self
@@ -1582,6 +1595,36 @@ impl PersistentSession {
         let expected_private = self
             .public_visibility_snapshot_in(private_scope)
             .ok_or(SessionError::MissingDeclarationLibrary)?;
+        let final_source_keys: std::collections::BTreeSet<_> = expected_public
+            .source_instances
+            .iter()
+            .chain(source_keys.iter())
+            .cloned()
+            .collect();
+        let final_source_instances = final_source_keys
+            .into_iter()
+            .map(|key| {
+                let incarnation =
+                    self.machine_incarnation
+                        .ok_or_else(|| SessionError::RecoveryManifest {
+                            path: self.lib().root.clone(),
+                            detail: "native source lease has no owning machine incarnation".into(),
+                        })?;
+                let identity = key.binder.binder;
+                Ok(super::recovery::RecoveryPublicSourceInstance {
+                    machine_incarnation: incarnation.0,
+                    instance: key.instance.raw(),
+                    module_version: key.binder.version.0,
+                    binder: super::recovery::RecoverySourceIdentity {
+                        unit: identity.unit,
+                        module: identity.module,
+                        namespace: identity.namespace,
+                        occurrence: identity.occurrence,
+                        record_parent: identity.record_parent,
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, SessionError>>()?;
         let mut final_by_name: BTreeMap<String, SessionVarId> =
             expected_public.bindings.iter().cloned().collect();
         for id in &write_ids {
@@ -1601,9 +1644,11 @@ impl PersistentSession {
                 public_scope,
                 private_scope,
                 write_ids,
+                source_keys,
                 expected_public,
                 expected_private,
                 final_by_name.into_iter().collect(),
+                final_source_instances,
             )
     }
 
@@ -1642,7 +1687,7 @@ impl PersistentSession {
                 ticket.private_scope,
                 ticket.public_scope,
                 &ticket.write_ids,
-                &[],
+                &ticket.source_keys,
             )
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
         let Some(claim) = decision.claim_commit() else {

@@ -411,9 +411,11 @@ pub struct PublicManifestBase {
     public_scope: ScopeId,
     private_scope: ScopeId,
     write_ids: Vec<SessionVarId>,
+    source_keys: Vec<SourceLeaseKey>,
     expected_public: PublicVisibilitySnapshot,
     expected_private: PublicVisibilitySnapshot,
     final_bindings: Vec<(String, SessionVarId)>,
+    final_source_instances: Vec<recovery::RecoveryPublicSourceInstance>,
     graph: recovery::RecoveryGraph,
 }
 
@@ -426,6 +428,7 @@ pub struct StagedPublicManifest {
     public_scope: ScopeId,
     private_scope: ScopeId,
     write_ids: Vec<SessionVarId>,
+    source_keys: Vec<SourceLeaseKey>,
     expected_public: PublicVisibilitySnapshot,
     expected_private: PublicVisibilitySnapshot,
     base_checksum: String,
@@ -445,8 +448,8 @@ pub enum PublicManifestCommit {
 }
 
 impl PublicManifestBase {
-    /// Stage binding-only visibility. Existing source-instance evidence is
-    /// preserved; adding new source instances requires a separate exact issuer.
+    /// Stage the exact binding and native source-instance winners captured by
+    /// the session owner. This writes bytes without borrowing the machine.
     pub fn stage(self) -> Result<StagedPublicManifest, SessionError> {
         let root = self
             .path
@@ -461,7 +464,6 @@ impl PublicManifestBase {
             .iter()
             .find(|s| s.owner == self.owner);
         let epoch = surface.map_or(0, |s| s.epoch);
-        let source_instances = surface.map_or_else(Vec::new, |s| s.source_instances.clone());
         let bindings = self
             .final_bindings
             .into_iter()
@@ -480,7 +482,7 @@ impl PublicManifestBase {
             self.owner.clone(),
             epoch,
             bindings,
-            source_instances,
+            self.final_source_instances,
         )
         .map_err(|error| SessionError::RecoveryManifest {
             path: self.path.clone(),
@@ -493,6 +495,7 @@ impl PublicManifestBase {
             public_scope: self.public_scope,
             private_scope: self.private_scope,
             write_ids: self.write_ids,
+            source_keys: self.source_keys,
             expected_public: self.expected_public,
             expected_private: self.expected_private,
             base_checksum: self.graph.checksum,
@@ -576,7 +579,7 @@ pub struct SessionLib {
     /// scopes, including inherited-context children.
     durable_public_scopes: BTreeMap<RecoveryPublicOwner, ScopeId>,
     #[cfg(test)]
-    fail_authored_durability_once: bool,
+    fail_recovery_durability_once: bool,
 }
 
 struct DurableDeclarationGraph {
@@ -765,7 +768,7 @@ impl SessionLib {
             durable_graph: None,
             durable_public_scopes: BTreeMap::new(),
             #[cfg(test)]
-            fail_authored_durability_once: false,
+            fail_recovery_durability_once: false,
         })
     }
 
@@ -882,9 +885,11 @@ impl SessionLib {
         public_scope: ScopeId,
         private_scope: ScopeId,
         write_ids: Vec<SessionVarId>,
+        source_keys: Vec<SourceLeaseKey>,
         expected_public: PublicVisibilitySnapshot,
         expected_private: PublicVisibilitySnapshot,
         final_bindings: Vec<(String, SessionVarId)>,
+        final_source_instances: Vec<recovery::RecoveryPublicSourceInstance>,
     ) -> Result<PublicManifestBase, SessionError> {
         let state = self
             .durable_graph
@@ -905,9 +910,11 @@ impl SessionLib {
             public_scope,
             private_scope,
             write_ids,
+            source_keys,
             expected_public,
             expected_private,
             final_bindings,
+            final_source_instances,
             graph: state.graph.clone(),
         })
     }
@@ -935,11 +942,12 @@ impl SessionLib {
         &mut self,
         ticket: StagedPublicManifest,
     ) -> PublicManifestCommit {
+        let outcome = self.publish_recovery_manifest(ticket.staged);
         let state = self
             .durable_graph
             .as_mut()
             .expect("ticket preflight found manifest");
-        match ticket.staged.publish() {
+        match outcome {
             recovery::RecoveryPublishOutcome::BeforeRename { detail, .. } => {
                 PublicManifestCommit::BeforeRename { detail }
             }
@@ -1746,7 +1754,7 @@ impl SessionLib {
         // directory it was validated against.
         self.write_module(&staged.rendered)?;
         let uncertain = if let Some(staged_graph) = staged_graph {
-            let outcome = self.publish_authored_manifest(staged_graph);
+            let outcome = self.publish_recovery_manifest(staged_graph);
             let state = self
                 .durable_graph
                 .as_mut()
@@ -1807,13 +1815,13 @@ impl SessionLib {
         Ok(DeclarationAdmission::Committed(generation))
     }
 
-    fn publish_authored_manifest(
+    fn publish_recovery_manifest(
         &mut self,
         staged: recovery::StagedRecoveryManifest,
     ) -> recovery::RecoveryPublishOutcome {
         let outcome = staged.publish();
         #[cfg(test)]
-        if std::mem::take(&mut self.fail_authored_durability_once) {
+        if std::mem::take(&mut self.fail_recovery_durability_once) {
             if let recovery::RecoveryPublishOutcome::Durable { graph, publication } = outcome {
                 return recovery::RecoveryPublishOutcome::PublishedDurabilityUnconfirmed {
                     graph,

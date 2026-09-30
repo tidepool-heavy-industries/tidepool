@@ -4843,8 +4843,13 @@ pub(super) mod tests {
         assert!(engine.unpin(bootstrap));
     }
 
-    #[test]
-    fn certified_target_registration_uses_exact_persistent_scope_custody() {
+    fn install_source_publication_fixture(
+        session: &mut super::super::PersistentSession,
+        scope: tidepool_codegen::scope::ScopeId,
+    ) -> (
+        ProgramId,
+        Vec<tidepool_codegen::binding_table::SourceLeaseKey>,
+    ) {
         use tidepool_codegen::prepared_program::GroupInventory;
         use tidepool_repr::execution_schema::{ImportOwner, ModuleVersion};
 
@@ -4892,9 +4897,7 @@ pub(super) mod tests {
                 (groups[1].owner().clone(), groups[1].original_ordinal()),
             ),
         ]);
-        let mut session = super::super::persistent::PersistentSession::new(None, 1024 * 1024);
-        let scope = session.mint_isolated_scope();
-        let (installed, source_keys) = session
+        session
             .install_certified_turn_in(
                 scope,
                 target,
@@ -4903,7 +4906,15 @@ pub(super) mod tests {
                 demand.compile(&registry).unwrap(),
                 &[],
             )
-            .unwrap();
+            .unwrap()
+    }
+
+    #[test]
+    fn certified_target_registration_uses_exact_persistent_scope_custody() {
+        let registry = ImageRegistry::new();
+        let mut session = super::super::persistent::PersistentSession::new(None, 1024 * 1024);
+        let scope = session.mint_isolated_scope();
+        let (installed, source_keys) = install_source_publication_fixture(&mut session, scope);
         assert_eq!(
             session
                 .bindings()
@@ -4947,6 +4958,154 @@ pub(super) mod tests {
         for lease in newly_rooted {
             assert!(!session.prepared_mut().unwrap().release(lease.handle()));
         }
+    }
+
+    #[test]
+    fn source_publication_preserves_original_instances_after_uncertain_commit() {
+        use super::super::{
+            ModuleEnv, PersistentSession, PublicManifestCommit, PublicationDecision,
+            PublicationPhase, RecoveryPublicOwner, SessionError, SessionLib,
+        };
+        use tidepool_codegen::binding_table::BindingPromotionError;
+        use tidepool_codegen::scope::ScopeId;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("declarations.json");
+        let mut lib = SessionLib::open(
+            tidepool_repr::SessionId(773),
+            root.path().join("include"),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        lib.attach_recovery_graph_v2(&path).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let private = session.mint_detached_scope(public).unwrap();
+        let foreign = session.mint_detached_scope(public).unwrap();
+        let owner =
+            RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse("root/source").unwrap(), 1)
+                .unwrap();
+        session
+            .bind_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        let (target, mut keys) = install_source_publication_fixture(&mut session, private);
+        keys.sort();
+        assert_eq!(keys.len(), 2);
+        assert!(session.prepared_mut().unwrap().unpin(target));
+        let incarnation = session
+            .public_visibility_snapshot_in(private)
+            .unwrap()
+            .machine_incarnation
+            .unwrap();
+        assert!(matches!(
+            session.snapshot_publication(owner.clone(), public, foreign, vec![], keys.clone()),
+            Err(SessionError::InvalidPublicBindingPromotion(
+                BindingPromotionError::MissingOrForeignSourceInstance
+            ))
+        ));
+
+        let cancel_stage = session
+            .snapshot_publication(owner.clone(), public, private, vec![], keys.clone())
+            .unwrap()
+            .stage()
+            .unwrap();
+        let cancelled = PublicationDecision::new();
+        cancelled.request_cancellation();
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(cancel_stage, &cancelled)
+                .unwrap(),
+            PublicManifestCommit::Cancelled
+        );
+        assert!(session
+            .public_visibility_snapshot_in(public)
+            .unwrap()
+            .source_instances
+            .is_empty());
+        assert!(!path.exists());
+
+        let stage = session
+            .snapshot_publication(owner.clone(), public, private, vec![], keys.clone())
+            .unwrap()
+            .stage()
+            .unwrap();
+        let old_stage = session
+            .snapshot_publication(owner.clone(), public, private, vec![], keys.clone())
+            .unwrap()
+            .stage()
+            .unwrap();
+        session.lib_mut().fail_recovery_durability_once = true;
+        let decision = PublicationDecision::new();
+        assert!(matches!(
+            session
+                .publish_staged_public_manifest(stage, &decision)
+                .unwrap(),
+            PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+        ));
+        assert_eq!(decision.phase(), PublicationPhase::Published);
+        let published = session.public_visibility_snapshot_in(public).unwrap();
+        assert_eq!(published.epoch, 1);
+        assert_eq!(published.machine_incarnation, Some(incarnation));
+        assert_eq!(published.source_instances, keys);
+        let graph = super::super::recovery::read_v2(&path, root.path())
+            .unwrap()
+            .unwrap()
+            .graph;
+        let surface = graph
+            .public_surfaces
+            .iter()
+            .find(|surface| surface.owner == owner)
+            .unwrap();
+        assert_eq!(surface.source_instances.len(), keys.len());
+        for key in &keys {
+            let source = surface
+                .source_instances
+                .iter()
+                .find(|source| source.instance == key.instance.raw())
+                .unwrap();
+            assert_eq!(source.machine_incarnation, incarnation.0);
+            assert_eq!(source.module_version, key.binder.version.0);
+            assert_eq!(source.binder.unit, key.binder.binder.unit);
+            assert_eq!(source.binder.module, key.binder.binder.module);
+            assert_eq!(source.binder.namespace, key.binder.binder.namespace);
+            assert_eq!(source.binder.occurrence, key.binder.binder.occurrence);
+            assert_eq!(source.binder.record_parent, key.binder.binder.record_parent);
+        }
+        let stale = PublicationDecision::new();
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(old_stage, &stale)
+                .unwrap(),
+            PublicManifestCommit::Stale
+        );
+        assert_eq!(stale.phase(), PublicationPhase::Running);
+        let bytes = std::fs::read(&path).unwrap();
+        session.lib_mut().confirm_recovery_durability().unwrap();
+        session.lib_mut().confirm_recovery_durability().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            session.public_visibility_snapshot_in(public).unwrap(),
+            published
+        );
+
+        assert_eq!(session.retire_scope(private).roots_released, 0);
+        assert_eq!(
+            session
+                .public_visibility_snapshot_in(public)
+                .unwrap()
+                .source_instances,
+            keys
+        );
+        assert_eq!(session.retire_scope(public).roots_released, keys.len());
+        // Retiring the leases releases their handles. Quiescence then retires
+        // the unreachable native groups and their internal import roots.
+        session
+            .prepared_mut()
+            .unwrap()
+            .quiesce_and_collect_now()
+            .unwrap();
+        assert_eq!(session.residency().unwrap().programs, 0);
+        assert_eq!(session.persistent_roots_count(), 0);
     }
 
     #[test]

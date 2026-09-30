@@ -5504,7 +5504,7 @@ mod authored_publication_tests {
         );
         session.state.bind(binding);
         session.state.mark_stub_generation(Generation(71));
-        session.state.lib_mut().fail_authored_durability_once = true;
+        session.state.lib_mut().fail_recovery_durability_once = true;
         session
     }
 
