@@ -124,6 +124,7 @@ impl RunningBrowserHost {
             }
         };
         let fleet = InteractiveFleet {
+            provider_forest: Arc::clone(&campaign.forest),
             root: campaign.actor.clone(),
             config: campaign.config.clone(),
             run_root: campaign.config.run_root.clone(),

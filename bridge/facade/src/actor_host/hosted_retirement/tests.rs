@@ -166,6 +166,7 @@ impl HttpFixture {
 }
 
 struct SealBackend {
+    bind_calls: std::sync::atomic::AtomicUsize,
     calls: std::sync::atomic::AtomicUsize,
     entered: Arc<Semaphore>,
     release: Option<Arc<Semaphore>>,
@@ -182,6 +183,7 @@ enum SealResult {
 impl SealBackend {
     fn immediate(result: SealResult) -> Arc<Self> {
         Arc::new(Self {
+            bind_calls: std::sync::atomic::AtomicUsize::new(0),
             calls: std::sync::atomic::AtomicUsize::new(0),
             entered: Arc::new(Semaphore::new(0)),
             release: None,
@@ -190,6 +192,7 @@ impl SealBackend {
     }
     fn held(entered: Arc<Semaphore>, release: Arc<Semaphore>) -> Arc<Self> {
         Arc::new(Self {
+            bind_calls: std::sync::atomic::AtomicUsize::new(0),
             calls: std::sync::atomic::AtomicUsize::new(0),
             entered,
             release: Some(release),
@@ -198,6 +201,18 @@ impl SealBackend {
     }
 }
 impl InteractiveAgentBackend for SealBackend {
+    fn bind_input<'a>(
+        &'a self,
+        _: &'a QueueReadyThread,
+    ) -> exomonad_agent::InteractiveInputFuture<'a> {
+        self.bind_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async {
+            Err(InteractiveInputError::NotSubmitted(
+                "bound native input control is unavailable".into(),
+            ))
+        })
+    }
     fn seal_input_producer<'a>(
         &'a self,
         thread: &'a QueueReadyThread,
@@ -460,6 +475,48 @@ async fn native_input_seal_failure_retains_hosted_completion_and_http_owner() {
 }
 
 #[tokio::test]
+async fn retired_provider_admission_refuses_bind_after_input_custody_await() {
+    let campaign = test_campaign::TestCampaign::start().await;
+    let fixture = HttpFixture::canonical_requiring_input_seal(campaign.actor.clone()).await;
+    let backend = SealBackend::immediate(SealResult::Applied);
+    let thread = active_queue_ready_thread(fixture._directory.path()).await;
+    let producer = producer();
+    let admission = provider_attachment::ProviderAttachment::admit(
+        Arc::clone(&campaign.forest),
+        campaign.actor.identity(),
+    )
+    .unwrap();
+    let custody = fixture.owner.lock().await;
+    let binding = super::super::retain_input_custody_and_bind(
+        &fixture.owner,
+        backend.clone(),
+        &thread,
+        &producer,
+        &admission,
+    );
+    futures_util::pin_mut!(binding);
+    assert!(futures_util::poll!(binding.as_mut()).is_pending());
+    campaign.forest.shutdown().await;
+    assert!(admission.validate().is_err());
+    drop(custody);
+    let error = binding.await.unwrap_err();
+    assert!(
+        error.contains("native provider attachment is unavailable"),
+        "{error}"
+    );
+    assert_eq!(
+        backend.bind_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert!(matches!(
+        &fixture.owner.lock().await.input_seal,
+        InputSealState::Pending(Operation::Pending(_))
+    ));
+    fixture.dispose_http().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn native_bind_failure_still_retains_the_exact_input_seal() {
     let campaign = test_campaign::TestCampaign::start().await;
     let fixture = HttpFixture::canonical_requiring_input_seal(campaign.actor.clone()).await;
@@ -472,6 +529,11 @@ async fn native_bind_failure_still_retains_the_exact_input_seal() {
         backend.clone(),
         &thread,
         &producer,
+        &provider_attachment::ProviderAttachment::admit(
+            Arc::clone(&campaign.forest),
+            campaign.actor.identity(),
+        )
+        .unwrap(),
     )
     .await
     .unwrap_err();

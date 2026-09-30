@@ -66,6 +66,8 @@ async fn resource_admission_timeout_and_cancellation_create_no_native_launch() {
                 pane: pane.clone(),
                 process: process.clone(),
             },
+            provider_attachment::ProviderAttachment::admit(Arc::clone(&campaign.forest), actor)
+                .unwrap(),
         );
         tokio::pin!(launch);
         if let Some(delay) = cancel_after {

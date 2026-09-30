@@ -617,6 +617,7 @@ async fn production_host_marks_embedded_root_ready_and_retires_invalid_auth_fail
     let actor = campaign.actor.clone();
     let host_graph_forest = Arc::clone(&campaign.forest);
     let fleet = InteractiveFleet {
+        provider_forest: Arc::clone(&campaign.forest),
         root: actor,
         config: campaign.config.clone(),
         run_root: campaign.config.run_root.clone(),

@@ -68,6 +68,7 @@ pub(crate) use workspace::{copy_helper_draft, initialize_helper_draft};
 use workspace::{ActiveWorkspace, PreparedWorkspace};
 mod model_free;
 mod prompt_catalog;
+mod provider_attachment;
 pub(crate) mod recipe_checks;
 #[cfg(all(test, feature = "codex-compat"))]
 mod research_policy_tests;
@@ -1289,6 +1290,7 @@ pub enum ActorHostReadiness {
 
 #[cfg(feature = "codex-compat")]
 struct InteractiveDeployment {
+    _provider_attachment: provider_attachment::ProviderAttachment,
     /// Retain the view independently of the bootstrap and native process lifetimes.
     active_workspace: Arc<ActiveWorkspace>,
     supervisor: Option<ActorRef>,
@@ -2380,6 +2382,7 @@ fn application_error(
 }
 
 struct InteractiveFleet {
+    provider_forest: Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
     root: LocalActorRef,
     config: ActorHostConfig,
     run_root: PathBuf,
@@ -2997,6 +3000,7 @@ pub(crate) async fn run(
         deployments,
         application_owners.clone(),
         InteractiveFleet {
+            provider_forest: Arc::clone(&forest),
             root: root_actor.clone(),
             config: config.clone(),
             run_root: run_root.clone(),
@@ -4025,6 +4029,7 @@ fn compile_root(
         },
     )
     .with_actor_path(root_declaration_recovery::root_path())
+    .with_persistence_policy(exomonad_actor::ActorPersistencePolicy::Durable)
     // Profiles classify resident Haskell rows, not the native Codex sandbox.
     // The root allocates worktrees and may attenuate children to ReadOnly.
     .with_profile(ActorEffectProfile::ReadWrite)
@@ -4266,6 +4271,7 @@ async fn retain_input_custody_and_bind(
     backend: Arc<dyn InteractiveAgentBackend>,
     thread: &QueueReadyThread,
     producer: &InputProducerId,
+    provider_attachment: &provider_attachment::ProviderAttachment,
 ) -> Result<(), String> {
     hosted_retirement::begin_input_seal(
         owner,
@@ -4275,6 +4281,9 @@ async fn retain_input_custody_and_bind(
     )
     .await
     .map_err(|error| format!("could not retain native input custody: {error}"))?;
+    provider_attachment
+        .validate()
+        .map_err(|error| format!("native provider attachment is unavailable: {error}"))?;
     if !thread.supports_active_input() {
         return Ok(());
     }
@@ -4294,6 +4303,7 @@ async fn run_interactive_applications(
     mut embedded_service: Option<embedded_service::EmbeddedService>,
 ) -> Result<(), String> {
     let InteractiveFleet {
+        provider_forest,
         root,
         config,
         run_root,
@@ -4359,7 +4369,7 @@ async fn run_interactive_applications(
     #[cfg(not(feature = "codex-compat"))]
     let mut launches: JoinSet<()> = JoinSet::new();
     let mut embedded_tasks: JoinSet<(ActorRef, LocalActorRef, Result<(), String>)> = JoinSet::new();
-    let mut embedded_cancellations = HashMap::new();
+    let mut embedded_cancellations: HashMap<ActorRef, watch::Sender<bool>> = HashMap::new();
     let mut embedded_live = BTreeSet::new();
     let mut embedded_conversations: HashMap<ActorRef, embedded_harness::EmbeddedActorBinding> =
         HashMap::new();
@@ -4368,7 +4378,7 @@ async fn run_interactive_applications(
         Vec<exomonad_actor::ResidentActivation>,
     > = HashMap::new();
     let (embedded_ready_tx, mut embedded_ready_rx) = mpsc::unbounded_channel::<(
-        ActorRef,
+        (ActorRef, provider_attachment::ProviderAttachment),
         LocalActorRef,
         Arc<harness::embedding::Conversation>,
         oneshot::Sender<()>,
@@ -4691,7 +4701,12 @@ async fn run_interactive_applications(
                     }
                 }
             }
-            Some((actor, local_actor, conversation, ready_ack)) = embedded_ready_rx.recv() => {
+            Some(((actor, provider_attachment), local_actor, conversation, ready_ack)) = embedded_ready_rx.recv() => {
+                if let Err(error) = provider_attachment.validate() {
+                    tracing::warn!(?actor, %error, "embedded provider attachment became unavailable");
+                    if let Some(cancel) = embedded_cancellations.get(&actor) { cancel.send_replace(true); }
+                    continue;
+                }
                 let Some(activations) = embedded_pending_activations.remove(&actor) else {
                     continue;
                 };
@@ -4736,12 +4751,26 @@ async fn run_interactive_applications(
                     tracing::warn!(?actor, %error, "embedded child attachment refused an activation");
                     continue;
                 }
+                if let Err(error) = provider_attachment.validate() {
+                    tracing::warn!(?actor, %error, "embedded provider readiness became unavailable");
+                    if let Some(cancel) = embedded_cancellations.get(&actor) { cancel.send_replace(true); }
+                    continue;
+                }
                 ready_ack.send(()).ok();
             }
             event = lifecycle.recv() => {
                 let Some(event) = event else { break None };
                 match event {
                     LocalResidentDeployment::PolicyInstalled(installation) => {
+                        let provider_attachment = match provider_attachment::ProviderAttachment::admit(
+                            Arc::clone(&provider_forest), installation.actor.identity(),
+                        ) {
+                            Ok(admission) => admission,
+                            Err(error) => break Some(format!(
+                                "actor {:?} provider attachment is unavailable: {error}",
+                                installation.actor.identity(),
+                            )),
+                        };
                         let embedded_policy = Arc::new(
                             embedded_policy::EmbeddedPolicyInstallation::from_installation(&installation),
                         );
@@ -4899,6 +4928,7 @@ async fn run_interactive_applications(
                                         if *cancellation_rx.borrow() || local_actor.terminal().get().is_some() {
                                             return Ok(());
                                         }
+                                        provider_attachment.validate().map_err(|error| error.to_string())?;
                                         let attachment = async {
                                             match selected_parent {
                                                 Some(parent) => embedded_service::attach_selected_actor(runtime.as_ref(), &run_root, parent, *installation, initial_input).await,
@@ -4912,10 +4942,14 @@ async fn run_interactive_applications(
                                         if *cancellation_rx.borrow() || local_actor.terminal().get().is_some() {
                                             return Ok(());
                                         }
+                                        if let Err(error) = provider_attachment.validate() {
+                                            embedded.cancellation.send_replace(true);
+                                            return Err(error.to_string());
+                                        }
                                         embedded.cancellation = cancel;
                                         embedded.cancellation_rx = cancellation_rx;
                                         let (ready_ack, acknowledged) = oneshot::channel();
-                                        ready.send((actor, local_actor.clone(), Arc::clone(&embedded.conversation), ready_ack))
+                                        ready.send(((actor, provider_attachment.clone()), local_actor.clone(), Arc::clone(&embedded.conversation), ready_ack))
                                             .map_err(|_| "embedded attachment owner stopped".to_owned())?;
                                         tokio::select! {
                                             accepted = acknowledged => {
@@ -4923,6 +4957,7 @@ async fn run_interactive_applications(
                                             }
                                             _ = embedded.cancellation_rx.changed() => return Ok(()),
                                         }
+                                        let _provider_attachment = provider_attachment;
                                         #[cfg(test)]
                                         let result = if let Some(transport) = test_transport {
                                             embedded_service::drive_conversation_with_transport::<
@@ -4964,6 +4999,9 @@ async fn run_interactive_applications(
                                 drop(queue_admission);
                                 continue;
                             }
+                            if let Err(error) = provider_attachment.validate() {
+                                break Some(format!("actor {actor:?} provider attachment became unavailable: {error}"));
+                            }
                             let attachment = embedded_service::attach_actor(
                                 service,
                                 &launch_context.run_root,
@@ -4978,6 +5016,10 @@ async fn run_interactive_applications(
                                     "embedded actor {actor:?} could not attach: {error}"
                                 )),
                             };
+                            if let Err(error) = provider_attachment.validate() {
+                                embedded.cancellation.send_replace(true);
+                                break Some(format!("actor {actor:?} provider attachment became unavailable: {error}"));
+                            }
                             let root_conversation = Arc::clone(&embedded.conversation);
                             let binding = embedded_conversations
                                 .get_mut(&actor)
@@ -5028,7 +5070,9 @@ async fn run_interactive_applications(
                             let test_transport = service.test_transport();
                             let embedded_lifecycle = embedded_lifecycle_tx.clone();
                             let embedded_actor = actor;
+                            let provider_owner = provider_attachment.clone();
                             embedded_tasks.spawn(async move {
+                                let _provider_attachment = provider_owner;
                                 #[cfg(test)]
                                 let result = if let Some(transport) = test_transport {
                                     embedded_service::drive_conversation_with_transport::<
@@ -5081,6 +5125,9 @@ async fn run_interactive_applications(
                             // actor-owned readiness boundary; SessionReady below
                             // carries subsequent typed request input only.
                             if is_root {
+                                if let Err(error) = provider_attachment.validate() {
+                                    break Some(format!("actor {actor:?} provider readiness is unavailable: {error}"));
+                                }
                                 readiness
                                     .send(ActorHostReadiness::EmbeddedReady {
                                         root: root_identity,
@@ -5194,6 +5241,7 @@ async fn run_interactive_applications(
                                     cancelled,
                                     InteractiveInheritance { thread: fork_parent_thread, build_snapshot },
                                     retention,
+                                    provider_attachment.clone(),
                                 ).await
                             })
                             .catch_unwind()
@@ -5212,7 +5260,7 @@ async fn run_interactive_applications(
                                 };
                                 launch_observation.publish_launch_pending(format!("{state}: {}", error.detail));
                             }
-                            (local_actor, result)
+                            ((local_actor, provider_attachment), result)
                         });
                         }
                         #[cfg(not(feature = "codex-compat"))]
@@ -5670,7 +5718,7 @@ async fn run_interactive_applications(
                 #[cfg(feature = "codex-compat")]
                 {
                 match launched {
-                    Some(Ok((local_actor, Ok(Some(launched))))) => {
+                    Some(Ok(((local_actor, provider_attachment), Ok(Some(launched))))) => {
                         let actor = local_actor.identity();
                         let (already_retired, pending_activations) = {
                             let mut owners = application_owners.lock();
@@ -5680,6 +5728,10 @@ async fn run_interactive_applications(
                             (owner.terminal.is_some(), std::mem::take(&mut owner.pending_activations))
                         };
                         let mut deployment = launched.deployment;
+                        if let Err(error) = provider_attachment.validate() {
+                            spawn_owned_retirement(&mut retirements, deployment, tmux.clone(), &application_owners);
+                            break Some(format!("actor {actor:?} provider attachment became unavailable: {error}"));
+                        }
                         if already_retired {
                             spawn_owned_retirement(&mut retirements, deployment, tmux.clone(), &application_owners);
                             continue;
@@ -5756,7 +5808,7 @@ async fn run_interactive_applications(
                                 },
                                 (result, _) => result,
                             };
-                            (actor, result)
+                            ((actor, provider_attachment), result)
                         });
                         let mut activation_error = None;
                         for activation in pending_activations {
@@ -5768,14 +5820,14 @@ async fn run_interactive_applications(
                         deployments.push(deployment);
                         if let Some(error) = activation_error { break Some(error); }
                     }
-                    Some(Ok((local_actor, Ok(None)))) => {
+                    Some(Ok(((local_actor, _provider_attachment), Ok(None)))) => {
                         let actor = local_actor.identity();
                         if let Some(owner) = application_owners.lock().get_mut(&actor) {
                             owner.launch = HostLaunchState::Abandoned;
                             owner.cancel();
                         }
                     }
-                    Some(Ok((local_actor, Err(error)))) => {
+                    Some(Ok(((local_actor, _provider_attachment), Err(error)))) => {
                         let actor = local_actor.identity();
                         if let Some(owner) = application_owners.lock().get_mut(&actor) {
                             owner.launch = match error.disposition {
@@ -5805,12 +5857,15 @@ async fn run_interactive_applications(
                 #[cfg(feature = "codex-compat")]
                 {
                 match discovered {
-                    Some(Ok((actor, Ok(thread)))) => {
+                    Some(Ok(((actor, provider_attachment), Ok(thread)))) => {
                         let Some(deployment) = deployments.iter_mut().find(|app| app.actor == actor) else {
                             continue;
                         };
                         if !matches!(deployment.connection, InteractiveConnection::AwaitingBinding) {
                             break Some(format!("interactive application {actor:?} published more than one conversation binding"));
+                        }
+                        if let Err(error) = provider_attachment.validate() {
+                            break Some(format!("actor {actor:?} provider binding is unavailable: {error}"));
                         }
                         if let Err(error) = launch_context.actor_recovery.bind_application(
                             actor,
@@ -5828,12 +5883,16 @@ async fn run_interactive_applications(
                             native_backend.clone(),
                             &thread,
                             &deployment.input_producer,
+                            &provider_attachment,
                         )
                         .await
                         {
                             break Some(format!(
                                 "interactive application {actor:?} {error}"
                             ));
+                        }
+                        if let Err(error) = provider_attachment.validate() {
+                            break Some(format!("actor {actor:?} provider binding became unavailable: {error}"));
                         }
                         let (delivery_shutdown, stop_delivery) = oneshot::channel();
                         let delivery = tokio::spawn(run_delivery_pump(
@@ -5875,7 +5934,7 @@ async fn run_interactive_applications(
                             }).ok();
                         }
                     }
-                    Some(Ok((actor, Err(error)))) => {
+                    Some(Ok(((actor, _provider_attachment), Err(error)))) => {
                         let Some(deployment) = deployments.iter_mut().find(|app| app.actor == actor) else {
                             continue;
                         };
@@ -6256,7 +6315,15 @@ async fn launch_interactive_application(
     cancelled: oneshot::Receiver<NativeRetirement>,
     inherited: InteractiveInheritance,
     retention: InteractiveLaunchRetention,
+    provider_attachment: provider_attachment::ProviderAttachment,
 ) -> Result<Option<LaunchedInteractiveApplication>, InteractiveApplicationError> {
+    provider_attachment.validate().map_err(|error| {
+        application_error(
+            installation.actor.identity(),
+            InteractiveOperation::PrepareRuntime,
+            error,
+        )
+    })?;
     let worktree = prepare_actor_worktree(&installation, &context)?;
     launch_prepared_interactive_application(
         installation,
@@ -6265,6 +6332,7 @@ async fn launch_interactive_application(
         cancelled,
         inherited,
         retention,
+        provider_attachment,
     )
     .await
 }
@@ -6367,6 +6435,7 @@ async fn launch_prepared_interactive_application(
     mut cancelled: oneshot::Receiver<NativeRetirement>,
     inherited: InteractiveInheritance,
     retention: InteractiveLaunchRetention,
+    provider_attachment: provider_attachment::ProviderAttachment,
 ) -> Result<Option<LaunchedInteractiveApplication>, InteractiveApplicationError> {
     let InteractiveInheritance {
         thread: fork_parent_thread,
@@ -6407,6 +6476,13 @@ async fn launch_prepared_interactive_application(
             actor_identity,
             InteractiveOperation::BuildCommand,
             "native interactive launch has no Codex installation",
+        )
+    })?;
+    provider_attachment.validate().map_err(|error| {
+        application_error(
+            actor_identity,
+            InteractiveOperation::PrepareRuntime,
+            error.to_string(),
         )
     })?;
     let _resource_start = match &config.command_resources {
@@ -6873,6 +6949,9 @@ async fn launch_prepared_interactive_application(
         }
         None => supervisor_command,
     };
+    provider_attachment.validate().map_err(|error| {
+        application_error(actor_identity, InteractiveOperation::LaunchProcess, error)
+    })?;
     let pane = match tokio::time::timeout(
         PROCESS_OPERATION_TIMEOUT,
         tmux.spawn_window(&TmuxLaunch {
@@ -6924,6 +7003,7 @@ async fn launch_prepared_interactive_application(
     let release_gate_worker = release_gate.clone();
     let activation_workspace = prepared_workspace.clone();
     let activation_worktrees = worktrees.clone();
+    let activation_provider = provider_attachment.clone();
     let mut activation_task = tidepool_runtime::spawn_blocking_in_span(move || {
         let deadline = std::time::Instant::now() + PROCESS_OPERATION_TIMEOUT;
         while !activation_socket.exists() {
@@ -6971,8 +7051,14 @@ async fn launch_prepared_interactive_application(
         if activation_cancelled_worker.load(std::sync::atomic::Ordering::Acquire) {
             return Err(scoped_custody::ScopedProcessError::WrongPhase);
         }
+        activation_provider
+            .validate()
+            .map_err(|_| scoped_custody::ScopedProcessError::WrongPhase)?;
         let view = scoped_custody::supervisor_workspace(&activation_slot, deadline)?;
         let active = activation_workspace.activate(&activation_worktrees, view)?;
+        activation_provider
+            .validate()
+            .map_err(|_| scoped_custody::ScopedProcessError::WrongPhase)?;
         match scoped_custody::release_supervisor_slot(&activation_slot, deadline)? {
             scoped_custody::ScopedProcessObservation::Released => Ok(active),
             // A committed but unconfirmed release is never retried. Retain the
@@ -7072,6 +7158,7 @@ async fn launch_prepared_interactive_application(
     let binding_control = service.lock().await.control.clone();
     Ok(Some(LaunchedInteractiveApplication {
         deployment: InteractiveDeployment {
+            _provider_attachment: provider_attachment,
             active_workspace,
             supervisor: installation.supervisor_parent,
             notified_provider_failures: Default::default(),

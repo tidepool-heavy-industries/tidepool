@@ -332,6 +332,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
     let (shutdown_tx, shutdown_rx) = watch::channel(None);
     let (_config_tx, config_rx) = watch::channel(campaign.config.clone());
     let fleet = InteractiveFleet {
+        provider_forest: Arc::clone(&campaign.forest),
         root: campaign.actor.clone(),
         config: campaign.config.clone(),
         run_root: campaign.config.run_root.clone(),
