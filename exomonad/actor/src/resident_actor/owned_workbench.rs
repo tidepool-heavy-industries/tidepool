@@ -236,6 +236,38 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    /// A typed task owns only this admitted execution. The scheduler fences its
+    /// result before this synchronous application can touch actor-owned state.
+    fn owned_step_task<T, Run, Apply>(
+        mut owned: OwnedExecution<H, O>,
+        run: Run,
+        apply: Apply,
+    ) -> OwnedWorkbenchTask<Self>
+    where
+        T: Send + 'static,
+        Run: for<'a> FnOnce(&'a mut OwnedExecution<H, O>) -> futures_util::future::BoxFuture<'a, T>
+            + Send
+            + 'static,
+        Apply: FnOnce(
+                &mut Self,
+                &KernelContext,
+                OwnedExecution<H, O>,
+                T,
+            ) -> Result<WorkbenchAdvance<Self>, KernelInvocationFailure>
+            + Send
+            + 'static,
+    {
+        OwnedWorkbenchTask::new(Box::pin(async move {
+            let (timing, cleanup) = owned.scopes();
+            let completed = timing.scope(cleanup.scope(run(&mut owned))).await;
+            OwnedWorkbenchCompletion::advance(move |behavior: &mut Self, kernel| {
+                let (timing, cleanup) = owned.scopes();
+                timing
+                    .sync_scope(|| cleanup.sync_scope(|| apply(behavior, kernel, owned, completed)))
+            })
+        }))
+    }
+
     pub(super) fn dispatch_owned_workbench(
         &mut self,
         kernel: &KernelContext,
@@ -345,10 +377,10 @@ where
             resources,
         };
         let runner = self.environment.runner.clone();
-        WorkbenchDispatch::Owned(OwnedWorkbenchTask::new(Box::pin(async move {
-            let (timing, cleanup) = owned.scopes();
-            let prepared = timing
-                .scope(cleanup.scope(async {
+        WorkbenchDispatch::Owned(Self::owned_step_task(
+            owned,
+            move |owned| {
+                Box::pin(async move {
                     let public = runner.public_visibility_snapshot(context.clone()).await;
                     let cell = match owned.state.request.cell_source().filter(|_| public.is_ok()) {
                         Some(source) => Some(
@@ -360,56 +392,50 @@ where
                         None => None,
                     };
                     (public, cell)
-                }))
-                .await;
-            OwnedWorkbenchCompletion::advance(move |behavior: &mut Self, _kernel| {
-                let (timing, cleanup) = owned.scopes();
-                timing.sync_scope(|| {
-                    cleanup.sync_scope(|| {
-                        let mut owned = owned;
-                        match prepared.0 {
-                            Ok(public) => owned.state.effects.public_visibility = Some(public),
-                            Err(error) => {
-                                return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
-                                    owned,
-                                    Err(workbench_failure(&[], 0, 1, error)),
-                                )))
-                            }
-                        }
-                        if let Some(cell) = prepared.1 {
-                            match install_cell_preparation(
-                                &mut owned.state.request,
-                                &mut owned.state.cursor,
-                                cell,
-                            ) {
-                                Ok(Some(step)) => {
-                                    return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
-                                        owned,
-                                        Ok(step),
-                                    )))
-                                }
-                                Err(error) => {
-                                    return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
-                                        owned,
-                                        Err(error),
-                                    )))
-                                }
-                                Ok(None) => {}
-                            }
-                        } else {
-                            owned.state.cursor.preparation_done = true;
-                        }
-                        behavior.runtime_observation.publish_workbench_posture(
-                            crate::ActorWorkbenchPosture::RunningUnit {
-                                input_unit_index: 0,
-                                total: owned.state.request.items.len(),
-                            },
-                        );
-                        Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
-                    })
                 })
-            })
-        })))
+            },
+            |behavior, _kernel, mut owned, prepared| {
+                match prepared.0 {
+                    Ok(public) => owned.state.effects.public_visibility = Some(public),
+                    Err(error) => {
+                        return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
+                            owned,
+                            Err(workbench_failure(&[], 0, 1, error)),
+                        )))
+                    }
+                }
+                if let Some(cell) = prepared.1 {
+                    match install_cell_preparation(
+                        &mut owned.state.request,
+                        &mut owned.state.cursor,
+                        cell,
+                    ) {
+                        Ok(Some(step)) => {
+                            return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
+                                owned,
+                                Ok(step),
+                            )))
+                        }
+                        Err(error) => {
+                            return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
+                                owned,
+                                Err(error),
+                            )))
+                        }
+                        Ok(None) => {}
+                    }
+                } else {
+                    owned.state.cursor.preparation_done = true;
+                }
+                behavior.runtime_observation.publish_workbench_posture(
+                    crate::ActorWorkbenchPosture::RunningUnit {
+                        input_unit_index: 0,
+                        total: owned.state.request.items.len(),
+                    },
+                );
+                Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
+            },
+        ))
     }
 
     /// The existing serial driver keeps all unconverted handlers and terminal
@@ -573,7 +599,7 @@ where
 
     fn resume_owned_effect_task(
         &self,
-        mut owned: OwnedExecution<H, O>,
+        owned: OwnedExecution<H, O>,
         kernel: KernelContext,
         pending: ParkedWorkbenchEffect,
     ) -> OwnedWorkbenchTask<Self> {
@@ -590,69 +616,53 @@ where
             .control
             .clone()
             .unwrap_or_else(crate::WorkbenchExecutionControl::untracked);
-        OwnedWorkbenchTask::new(Box::pin(async move {
-            let (timing, cleanup) = owned.scopes();
-            let result = timing
-                .scope(cleanup.scope(await_effect(
+        Self::owned_step_task(
+            owned,
+            move |_| {
+                Box::pin(await_effect(
                     environment,
                     kernel,
                     context,
                     control,
                     pending.wait,
                     commands_permitted,
-                )))
-                .await;
-            OwnedWorkbenchCompletion::advance(move |_behavior: &mut Self, _kernel| {
-                let (timing, cleanup) = owned.scopes();
-                timing.sync_scope(|| {
-                    cleanup.sync_scope(|| {
-                        record_workbench_operation(
-                            &mut owned.state.cursor.unit.operations,
-                            owned.state.request.execution_id(),
-                            owned.state.cursor.index,
-                            pending.ordinal,
-                            &pending.effect,
-                            pending.started.elapsed(),
-                            result.disposition,
-                        );
-                        if let Some(job) = result.started_job {
-                            owned
-                                .state
-                                .cursor
-                                .running
-                                .as_mut()
-                                .expect("same command fragment")
-                                .fragment
-                                .as_mut()
-                                .expect("captured command owns its fragment")
-                                .record_started_job(job);
-                        }
-                        match result.outcome {
-                            Ok(outcome) => {
-                                owned
-                                    .state
-                                    .cursor
-                                    .running
-                                    .as_mut()
-                                    .expect("same watched fragment")
-                                    .outcome = Some(outcome);
-                                Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
-                            }
-                            Err(error) => {
-                                owned
-                                    .state
-                                    .cursor
-                                    .running
-                                    .as_mut()
-                                    .expect("same watched fragment")
-                                    .resume_failure = Some(error);
-                                Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
-                            }
-                        }
-                    })
-                })
-            })
-        }))
+                ))
+            },
+            move |_behavior, _kernel, mut owned, result| {
+                record_workbench_operation(
+                    &mut owned.state.cursor.unit.operations,
+                    owned.state.request.execution_id(),
+                    owned.state.cursor.index,
+                    pending.ordinal,
+                    &pending.effect,
+                    pending.started.elapsed(),
+                    result.disposition,
+                );
+                if let Some(job) = result.started_job {
+                    owned
+                        .state
+                        .cursor
+                        .running
+                        .as_mut()
+                        .expect("same command fragment")
+                        .fragment
+                        .as_mut()
+                        .expect("captured command owns its fragment")
+                        .record_started_job(job);
+                }
+                let current = owned
+                    .state
+                    .cursor
+                    .running
+                    .as_mut()
+                    .expect("same effect fragment");
+                match result.outcome {
+                    Ok(outcome) => current.outcome = Some(outcome),
+                    Err(error) => current.resume_failure = Some(error),
+                }
+                Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
+            },
+        )
     }
 
     fn finish_owned_task(
@@ -687,43 +697,35 @@ where
     }
 
     fn settle_owned_finalization_task(
-        mut owned: OwnedExecution<H, O>,
+        owned: OwnedExecution<H, O>,
         environment: ResidentEnvironment<H, O>,
         finalization: WorkbenchFinalization,
     ) -> OwnedWorkbenchTask<Self> {
-        OwnedWorkbenchTask::new(Box::pin(async move {
-            let (timing, cleanup) = owned.scopes();
-            let result = timing
-                .scope(cleanup.scope(settle_workbench_finalization(environment, finalization)))
-                .await;
-            OwnedWorkbenchCompletion::new(move |behavior: &mut Self| {
-                let (timing, cleanup) = owned.scopes();
-                timing.sync_scope(|| {
-                    cleanup.sync_scope(|| {
-                        let result =
-                            behavior.complete_workbench_finalization(&mut owned.state, result);
-                        let outcome = match &result {
-                            Ok(
-                                KernelStep::Continue(response)
-                                | KernelStep::ContinueLater(response)
-                                | KernelStep::Stop {
-                                    output: response, ..
-                                },
-                            ) => format!("{:?}", response.status),
-                            Err(_) => "error".into(),
-                        };
-                        owned
-                            .timing
-                            .take()
-                            .expect("one terminal timing owner")
-                            .finish(&outcome);
-                        // Exact resources and continuation custody cross the last fence.
-                        let _owned = owned;
-                        result
-                    })
-                })
-            })
-        }))
+        Self::owned_step_task(
+            owned,
+            move |_| Box::pin(settle_workbench_finalization(environment, finalization)),
+            |behavior, _kernel, mut owned, result| {
+                let result = behavior.complete_workbench_finalization(&mut owned.state, result);
+                let outcome = match &result {
+                    Ok(
+                        KernelStep::Continue(response)
+                        | KernelStep::ContinueLater(response)
+                        | KernelStep::Stop {
+                            output: response, ..
+                        },
+                    ) => format!("{:?}", response.status),
+                    Err(_) => "error".into(),
+                };
+                owned
+                    .timing
+                    .take()
+                    .expect("one terminal timing owner")
+                    .finish(&outcome);
+                // Exact resources and continuation custody cross the last fence.
+                let _owned = owned;
+                result.map(WorkbenchAdvance::Complete)
+            },
+        )
     }
 }
 
