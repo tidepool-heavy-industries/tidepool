@@ -4769,7 +4769,6 @@ async fn run_interactive_applications(
                                 ));
                             }
                             let initial_input = installation.initial_user_message.clone();
-                            let has_initial_input = initial_input.is_some();
                             if !is_root {
                                 let selected_parent = if installation.checkpoint.is_none() {
                                     let identities = embedded_conversations.iter().map(|(actor, conversation)| (*actor, conversation.identity().clone())).collect();
@@ -4935,12 +4934,10 @@ async fn run_interactive_applications(
                             }
                             embedded_cancellations.insert(actor, embedded.cancellation.clone());
                             embedded_live.insert(actor);
-                            let lifecycle = if has_initial_input {
-                                harness::server::HostActorLifecycle::Running
-                            } else {
-                                harness::server::HostActorLifecycle::Waiting
-                            };
-                            embedded_lifecycle_tx.publish(actor, lifecycle);
+                            embedded_lifecycle_tx.publish(
+                                actor,
+                                harness::server::HostActorLifecycle::Waiting,
+                            );
                             let lifecycle_states =
                                 (*embedded_lifecycle_rx.borrow()).clone();
                             embedded_projection.publish(
