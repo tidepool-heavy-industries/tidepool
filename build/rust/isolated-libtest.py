@@ -1,6 +1,7 @@
 """Run selected Buck-built libtest cases in fresh, bounded processes."""
 import argparse
 import concurrent.futures
+from concurrent.futures import FIRST_COMPLETED, wait
 import os
 from pathlib import Path
 import re
@@ -18,6 +19,8 @@ RESULT = re.compile(
 )
 ACTIVE_PROCESSES = {}
 ACTIVE_PROCESSES_LOCK = threading.Lock()
+ACTIVE_PROCESS_SNAPSHOT = ()
+INTERRUPT_SIGNAL = None
 
 
 class RunnerInterrupted(Exception):
@@ -26,21 +29,43 @@ class RunnerInterrupted(Exception):
 
 
 def _signal_active_processes(signum, _frame):
+    global INTERRUPT_SIGNAL
+    if INTERRUPT_SIGNAL is None:
+        INTERRUPT_SIGNAL = signum
+    # Signal handlers do not take locks: a repeated signal must not deadlock
+    # against a worker registering or retiring a child process.
+    for process in ACTIVE_PROCESS_SNAPSHOT:
+        _kill_group(process.pid)
+
+
+def _kill_group(pgid):
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _register_process(process):
+    global ACTIVE_PROCESS_SNAPSHOT
     with ACTIVE_PROCESSES_LOCK:
-        processes = list(ACTIVE_PROCESSES.values())
-    for process in processes:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    raise RunnerInterrupted(signum)
+        ACTIVE_PROCESSES[process.pid] = process
+        ACTIVE_PROCESS_SNAPSHOT = tuple(ACTIVE_PROCESSES.values())
+    if INTERRUPT_SIGNAL is not None:
+        _kill_group(process.pid)
+        _kill_and_reap(process)
+        _unregister_process(process)
+        raise RunnerInterrupted(INTERRUPT_SIGNAL)
+
+
+def _unregister_process(process):
+    global ACTIVE_PROCESS_SNAPSHOT
+    with ACTIVE_PROCESSES_LOCK:
+        ACTIVE_PROCESSES.pop(process.pid, None)
+        ACTIVE_PROCESS_SNAPSHOT = tuple(ACTIVE_PROCESSES.values())
 
 
 def _kill_and_reap(process):
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    _kill_group(process.pid)
     try:
         return process.communicate(timeout=5)
     except subprocess.TimeoutExpired:
@@ -58,6 +83,8 @@ def _kill_and_reap(process):
 
 def execute(args, timeout):
     """Run a command in its own process group, reaping it even after timeout."""
+    if INTERRUPT_SIGNAL is not None:
+        raise RunnerInterrupted(INTERRUPT_SIGNAL)
     process = subprocess.Popen(
         args,
         stdout=subprocess.PIPE,
@@ -65,8 +92,7 @@ def execute(args, timeout):
         text=True,
         start_new_session=True,
     )
-    with ACTIVE_PROCESSES_LOCK:
-        ACTIVE_PROCESSES[process.pid] = process
+    _register_process(process)
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as error:
@@ -78,8 +104,10 @@ def execute(args, timeout):
         _kill_and_reap(process)
         raise
     finally:
-        with ACTIVE_PROCESSES_LOCK:
-            ACTIVE_PROCESSES.pop(process.pid, None)
+        _unregister_process(process)
+    # Test leaders sometimes leave a detached same-group child after a passing
+    # result. The process group remains the cleanup owner through this point.
+    _kill_group(process.pid)
     return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
@@ -189,53 +217,105 @@ def run_one(binary, name, ignored, timeout):
 
 
 def main(argv=None):
+    global INTERRUPT_SIGNAL
     options = parse_args(sys.argv[1:] if argv is None else argv)
-    try:
-        all_names = names(options.binary)
-        ignored_names = set(names(options.binary, '--ignored'))
-        selected = select_tests(all_names, ignored_names, options)
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
-        print(f'libtest selection failed: {error}', file=sys.stderr)
-        return 1
-
-    failures = 0
-
-    def run(name):
-        return name, run_one(
-            options.binary, name, name in ignored_names, options.timeout
-        )
-
-    jobs = options.jobs
-    if jobs is None:
-        jobs = 1 if options.exact_names else min(8, os.cpu_count() or 1)
-    jobs = min(jobs, len(selected))
+    with ACTIVE_PROCESSES_LOCK:
+        if ACTIVE_PROCESSES:
+            raise RuntimeError('libtest runner already has active child processes')
+        INTERRUPT_SIGNAL = None
     old_handlers = {}
     for signum in (signal.SIGINT, signal.SIGTERM):
         old_handlers[signum] = signal.signal(signum, _signal_active_processes)
     try:
-        # Each selected case is a separate process; focused groups default to serial.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
-            for name, (passed, output, stderr) in pool.map(run, selected):
-                print(f'{"PASS" if passed else "FAIL"} {name}', flush=True)
-                if not passed:
-                    failures += 1
-                    if output:
-                        print(output, end='' if output.endswith('\n') else '\n')
-                    if stderr:
-                        print(stderr, end='' if stderr.endswith('\n') else '\n', file=sys.stderr)
-    except RunnerInterrupted as error:
-        print(f'libtest runner interrupted by signal {error.signum}', file=sys.stderr)
-        return 128 + error.signum
+        try:
+            all_names = names(options.binary)
+            ignored_names = set(names(options.binary, '--ignored'))
+            selected = select_tests(all_names, ignored_names, options)
+        except RunnerInterrupted as error:
+            print(f'libtest runner interrupted by signal {error.signum}', file=sys.stderr)
+            return 128 + error.signum
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            if INTERRUPT_SIGNAL is not None:
+                print(f'libtest runner interrupted by signal {INTERRUPT_SIGNAL}', file=sys.stderr)
+                return 128 + INTERRUPT_SIGNAL
+            print(f'libtest selection failed: {error}', file=sys.stderr)
+            return 1
+        if INTERRUPT_SIGNAL is not None:
+            print(f'libtest runner interrupted by signal {INTERRUPT_SIGNAL}', file=sys.stderr)
+            return 128 + INTERRUPT_SIGNAL
+
+        failures = 0
+
+        def run(name):
+            if INTERRUPT_SIGNAL is not None:
+                raise RunnerInterrupted(INTERRUPT_SIGNAL)
+            return name, run_one(
+                options.binary, name, name in ignored_names, options.timeout
+            )
+
+        jobs = options.jobs
+        if jobs is None:
+            jobs = 1 if options.exact_names else min(8, os.cpu_count() or 1)
+        jobs = min(jobs, len(selected))
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=jobs)
+        pending = {}
+        next_test = 0
+        interrupted = None
+        try:
+            # Keep at most `jobs` futures outstanding so cancellation cannot
+            # start a large queued tail after the runner receives a signal.
+            while next_test < len(selected) and len(pending) < jobs:
+                name = selected[next_test]
+                pending[pool.submit(run, name)] = name
+                next_test += 1
+            while pending:
+                if INTERRUPT_SIGNAL is not None:
+                    interrupted = INTERRUPT_SIGNAL
+                    for future in pending:
+                        future.cancel()
+                    break
+                completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    name = pending.pop(future)
+                    try:
+                        _, (passed, output, stderr) = future.result()
+                    except RunnerInterrupted:
+                        interrupted = INTERRUPT_SIGNAL or signal.SIGTERM
+                        continue
+                    print(f'{"PASS" if passed else "FAIL"} {name}', flush=True)
+                    if not passed:
+                        failures += 1
+                        if output:
+                            print(output, end='' if output.endswith('\n') else '\n')
+                        if stderr:
+                            print(stderr, end='' if stderr.endswith('\n') else '\n', file=sys.stderr)
+                if interrupted is not None or INTERRUPT_SIGNAL is not None:
+                    interrupted = interrupted or INTERRUPT_SIGNAL
+                    for future in pending:
+                        future.cancel()
+                    break
+                while next_test < len(selected) and len(pending) < jobs:
+                    name = selected[next_test]
+                    pending[pool.submit(run, name)] = name
+                    next_test += 1
+        finally:
+            for future in pending:
+                future.cancel()
+            pool.shutdown(wait=True, cancel_futures=True)
+        if interrupted is not None:
+            print(f'libtest runner interrupted by signal {interrupted}', file=sys.stderr)
+            return 128 + interrupted
+
+        passed = len(selected) - failures
+        print(
+            f'Isolated libtest: {passed} passed; {failures} failed; '
+            f'{len(ignored_names)} ignored in binary',
+            flush=True,
+        )
+        return int(failures != 0)
     finally:
         for signum, handler in old_handlers.items():
             signal.signal(signum, handler)
-    passed = len(selected) - failures
-    print(
-        f'Isolated libtest: {passed} passed; {failures} failed; '
-        f'{len(ignored_names)} ignored in binary',
-        flush=True,
-    )
-    return int(failures != 0)
 
 
 if __name__ == '__main__':

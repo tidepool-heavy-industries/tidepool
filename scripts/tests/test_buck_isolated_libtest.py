@@ -77,8 +77,13 @@ class IsolatedLibtestTests(unittest.TestCase):
             def __exit__(self, *_args):
                 return False
 
-            def map(self, function, values):
-                return map(function, values)
+            def submit(self, function, *args):
+                future = runner.concurrent.futures.Future()
+                future.set_result(function(*args))
+                return future
+
+            def shutdown(self, wait, cancel_futures):
+                self.assert_shutdown = (wait, cancel_futures)
 
         def run(argv, timeout):
             discovered = self.discover(argv)
@@ -247,17 +252,82 @@ class IsolatedLibtestTests(unittest.TestCase):
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
 
-    def test_runner_signal_kills_test_process_group_and_descendant(self):
+    def test_registration_race_and_repeated_signal_do_not_miss_process(self):
+        runner.INTERRUPT_SIGNAL = None
+
+        class Process:
+            pid = 781234
+            stdout = None
+            stderr = None
+
+            def communicate(self, timeout=None):
+                return '', ''
+
+        def spawn(*_args, **_kwargs):
+            process = Process()
+            # Simulate delivery after Popen created the child but before the
+            # caller could register its process-group cleanup handle.
+            runner._signal_active_processes(signal.SIGTERM, None)
+            runner._signal_active_processes(signal.SIGTERM, None)
+            return process
+
+        with patch.object(runner.subprocess, 'Popen', side_effect=spawn), \
+             patch.object(runner.os, 'killpg') as killpg, \
+             self.assertRaises(runner.RunnerInterrupted):
+            runner.execute(['fake-test'], 1)
+        self.assertGreaterEqual(killpg.call_count, 1)
+        runner.INTERRUPT_SIGNAL = None
+        runner.ACTIVE_PROCESSES.clear()
+        runner.ACTIVE_PROCESS_SNAPSHOT = ()
+
+    def test_runner_signal_during_discovery_kills_process_group(self):
+        binary = Path(self.tmp.name) / 'discovery-libtest'
+        child_pid_file = Path(self.tmp.name) / 'discovery-child.pid'
+        binary.write_text(
+            '#!/usr/bin/env python3\n'
+            'import subprocess, sys, time\n'
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            f"open({str(child_pid_file)!r}, 'w').write(str(child.pid))\n"
+            'time.sleep(60)\n'
+        )
+        binary.chmod(0o755)
+        helper = subprocess.Popen(
+            [sys.executable, str(SCRIPT), str(binary)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not child_pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(child_pid_file.exists(), 'discovery process never started')
+            child_pid = int(child_pid_file.read_text())
+            os.kill(helper.pid, signal.SIGTERM)
+            stdout, stderr = helper.communicate(timeout=5)
+            self.assertEqual(helper.returncode, 128 + signal.SIGTERM, (stdout, stderr))
+            self.assertIn('interrupted by signal', stderr)
+            self.assert_process_gone(child_pid)
+        finally:
+            if helper.poll() is None:
+                helper.kill()
+            helper.communicate(timeout=5)
+
+    def test_runner_signal_with_single_job_does_not_start_queued_case(self):
         binary = Path(self.tmp.name) / 'fake-libtest'
         child_pid_file = Path(self.tmp.name) / 'descendant.pid'
+        starts_file = Path(self.tmp.name) / 'starts.txt'
         binary.write_text(
             '#!/usr/bin/env python3\n'
             'import subprocess, sys, time\n'
             "if '--list' in sys.argv and '--ignored' in sys.argv:\n"
             '    raise SystemExit(0)\n'
             "if '--list' in sys.argv:\n"
-            "    print('suite::hangs: test')\n"
+            "    print('suite::first: test')\n"
+            "    print('suite::second: test')\n"
             '    raise SystemExit(0)\n'
+            f"open({str(starts_file)!r}, 'a').write(sys.argv[2] + '\\n')\n"
             "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
             f"open({str(child_pid_file)!r}, 'w').write(str(child.pid))\n"
             'time.sleep(60)\n'
@@ -269,8 +339,12 @@ class IsolatedLibtestTests(unittest.TestCase):
                 str(SCRIPT),
                 str(binary),
                 '--exact',
-                'suite::hangs',
+                'suite::first',
+                '--exact',
+                'suite::second',
                 '--expected-count',
+                '2',
+                '--jobs',
                 '1',
                 '--timeout',
                 '30',
@@ -287,22 +361,43 @@ class IsolatedLibtestTests(unittest.TestCase):
             self.assertTrue(child_pid_file.exists(), 'selected test process never started')
             child_pid = int(child_pid_file.read_text())
             os.kill(helper.pid, signal.SIGTERM)
+            time.sleep(0.01)
+            os.kill(helper.pid, signal.SIGTERM)
             stdout, stderr = helper.communicate(timeout=5)
             self.assertEqual(helper.returncode, 128 + signal.SIGTERM, (stdout, stderr))
             self.assertIn('interrupted by signal', stderr)
-            deadline = time.monotonic() + 2
-            while time.monotonic() < deadline:
-                try:
-                    os.kill(child_pid, 0)
-                except ProcessLookupError:
-                    break
-                time.sleep(0.02)
-            else:
-                self.fail('test descendant survived runner interruption')
+            self.assertEqual(starts_file.read_text().splitlines(), ['suite::first'])
+            self.assert_process_gone(child_pid)
         finally:
             if helper.poll() is None:
                 helper.kill()
             helper.communicate(timeout=5)
+
+    def test_successful_test_leader_kills_pipe_closed_descendant(self):
+        binary = Path(self.tmp.name) / 'passing-libtest'
+        child_pid_file = Path(self.tmp.name) / 'passing-child.pid'
+        binary.write_text(
+            '#!/usr/bin/env python3\n'
+            'import subprocess, sys\n'
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+            'stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n'
+            f"open({str(child_pid_file)!r}, 'w').write(str(child.pid))\n"
+            "print('test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s')\n"
+        )
+        binary.chmod(0o755)
+        passed, output, errors = runner.run_one(str(binary), 'suite::pass', False, 2)
+        self.assertTrue(passed, (output, errors))
+        self.assert_process_gone(int(child_pid_file.read_text()))
+
+    def assert_process_gone(self, pid):
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.02)
+        self.fail(f'process {pid} survived cleanup')
 
     def test_discovery_timeout_fails_closed(self):
         def timeout(argv, timeout):
