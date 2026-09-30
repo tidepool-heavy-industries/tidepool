@@ -45,187 +45,209 @@ where
             .effective_role()
             .effect_keys()
             .contains(&crate::ActorEffectKey::Commands);
-        let jobs = self.environment.commands.clone();
-        let owner = context.actor;
-        let mut settled = WorkbenchOperationDisposition::Unknown;
-        let mut started_job = None;
-        macro_rules! answer {
-            ($action:expr) => {{
-                let result = if permitted {
-                    $action
+        resolve_command(
+            &self.environment,
+            kernel,
+            context,
+            continuation,
+            request,
+            permitted,
+        )
+        .await
+    }
+}
+
+pub(super) async fn resolve_command<H, O>(
+    environment: &ResidentEnvironment<H, O>,
+    kernel: &KernelContext,
+    context: &ActorSessionContext,
+    continuation: ResidentHole,
+    request: CommandsReq,
+    permitted: bool,
+) -> CommandResolution
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    let jobs = environment.commands.clone();
+    let owner = context.actor;
+    let mut settled = WorkbenchOperationDisposition::Unknown;
+    let mut started_job = None;
+    macro_rules! answer {
+        ($action:expr) => {{
+            let result = if permitted {
+                $action
+            } else {
+                Err(CommandError::CommandUnauthorized)
+            };
+            settled = disposition(&result);
+            environment
+                .runner
+                .resume_value(context.clone(), continuation, result)
+                .await
+        }};
+    }
+    let outcome = async {
+        match request {
+            // An inspection-only actor runs commands in its read-only
+            // project view; the mount, not this handler, prevents writes.
+            CommandsReq::CommandStartWith(spec) => answer!({
+                match jobs.start(kernel, spec).await {
+                    Ok((id, request)) => {
+                        super::command_settlement::dispatch_backend(
+                            &environment.deployments,
+                            request,
+                        );
+                        started_job = Some(id.clone());
+                        Ok(id)
+                    }
+                    Err(error) => Err(error),
+                }
+            }),
+            // Returns at once; the job's completion settles a request
+            // whose notice (or a watch on the job) wakes the owner.
+            CommandsReq::CommandBackgroundWith(spec) => answer!({
+                let started = super::command_settlement::CommandSettlements::new(&environment)
+                    .start(kernel, spec)
+                    .await;
+                if let Ok(id) = &started {
+                    started_job = Some(id.clone());
+                }
+                started
+            }),
+            CommandsReq::CommandStatusWith(id) => answer!(jobs.status(owner, &id).await),
+            CommandsReq::CommandAwaitWith(id, milliseconds) => {
+                answer!(jobs.wait(owner, &id, milliseconds).await)
+            }
+            CommandsReq::CommandAwaitAndNotifyWith(id, milliseconds) => answer!({
+                super::command_settlement::CommandSettlements::new(&environment)
+                    .await_and_notify(owner, &id, milliseconds)
+                    .await
+            }),
+            CommandsReq::CommandForegroundWith(id) => {
+                let observed = if permitted {
+                    jobs.wait(owner, &id, 30_000).await
                 } else {
                     Err(CommandError::CommandUnauthorized)
                 };
-                settled = disposition(&result);
-                self.environment
-                    .runner
-                    .resume_value(context.clone(), continuation, result)
-                    .await
-            }};
-        }
-        let outcome = async {
-            match request {
-                // An inspection-only actor runs commands in its read-only
-                // project view; the mount, not this handler, prevents writes.
-                CommandsReq::CommandStartWith(spec) => answer!({
-                    match jobs.start(kernel, spec).await {
-                        Ok((id, request)) => {
-                            super::command_settlement::dispatch_backend(
-                                &self.environment.deployments,
-                                request,
-                            );
-                            started_job = Some(id.clone());
-                            Ok(id)
-                        }
-                        Err(error) => Err(error),
-                    }
-                }),
-                // Returns at once; the job's completion settles a request
-                // whose notice (or a watch on the job) wakes the owner.
-                CommandsReq::CommandBackgroundWith(spec) => answer!({
-                    let started =
-                        super::command_settlement::CommandSettlements::new(&self.environment)
-                            .start(kernel, spec)
-                            .await;
-                    if let Ok(id) = &started {
-                        started_job = Some(id.clone());
-                    }
-                    started
-                }),
-                CommandsReq::CommandStatusWith(id) => answer!(jobs.status(owner, &id).await),
-                CommandsReq::CommandAwaitWith(id, milliseconds) => {
-                    answer!(jobs.wait(owner, &id, milliseconds).await)
-                }
-                CommandsReq::CommandAwaitAndNotifyWith(id, milliseconds) => answer!({
-                    super::command_settlement::CommandSettlements::new(&self.environment)
-                        .await_and_notify(owner, &id, milliseconds)
-                        .await
-                }),
-                CommandsReq::CommandForegroundWith(id) => {
-                    let observed = if permitted {
-                        jobs.wait(owner, &id, 30_000).await
-                    } else {
-                        Err(CommandError::CommandUnauthorized)
-                    };
-                    match observed {
-                        Ok(tidepool_bridge_effects::CommandStatus::CommandFinished(result)) => {
-                            settled = WorkbenchOperationDisposition::Committed;
-                            match jobs.output(owner, &id, 1024 * 1024).await {
-                                Ok(output) => {
-                                    self.environment
-                                        .runner
-                                        .resume_value(
-                                            context.clone(),
-                                            continuation,
-                                            Ok::<_, CommandError>(
-                                                tidepool_bridge_effects::CommandObservation {
-                                                    result,
-                                                    output,
-                                                },
-                                            ),
-                                        )
-                                        .await
-                                }
-                                Err(error) => {
-                                    self.environment
-                                        .runner
-                                        .stop_command_observation(
-                                            context.clone(),
-                                            continuation,
-                                            id,
-                                            CommandObservationStop::OutputUnavailable(error),
-                                        )
-                                        .await
-                                }
+                match observed {
+                    Ok(tidepool_bridge_effects::CommandStatus::CommandFinished(result)) => {
+                        settled = WorkbenchOperationDisposition::Committed;
+                        match jobs.output(owner, &id, 1024 * 1024).await {
+                            Ok(output) => {
+                                environment
+                                    .runner
+                                    .resume_value(
+                                        context.clone(),
+                                        continuation,
+                                        Ok::<_, CommandError>(
+                                            tidepool_bridge_effects::CommandObservation {
+                                                result,
+                                                output,
+                                            },
+                                        ),
+                                    )
+                                    .await
+                            }
+                            Err(error) => {
+                                environment
+                                    .runner
+                                    .stop_command_observation(
+                                        context.clone(),
+                                        continuation,
+                                        id,
+                                        CommandObservationStop::OutputUnavailable(error),
+                                    )
+                                    .await
                             }
                         }
-                        Ok(_) => {
-                            settled = WorkbenchOperationDisposition::Committed;
-                            self.environment
-                                .runner
-                                .stop_command_observation(
-                                    context.clone(),
-                                    continuation,
-                                    id,
-                                    CommandObservationStop::Deadline,
-                                )
-                                .await
-                        }
-                        Err(error) => {
-                            settled = disposition::<()>(&Err(error.clone()));
-                            self.environment
-                                .runner
-                                .resume_value(
-                                    context.clone(),
-                                    continuation,
-                                    Err::<tidepool_bridge_effects::CommandObservation, _>(error),
-                                )
-                                .await
-                        }
                     }
-                }
-                CommandsReq::CommandPresentWith(id, _) => {
-                    if !permitted {
-                        settled = WorkbenchOperationDisposition::Rejected;
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(
-                            "command presentation is not authorized".into(),
-                        ));
-                    }
-                    jobs.status(owner, &id).await.map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(format!(
-                            "command presentation rejected: {error:?}"
-                        ))
-                    })?;
-                    settled = WorkbenchOperationDisposition::Committed;
-                    self.environment
-                        .runner
-                        .resume_unit(context.clone(), continuation)
-                        .await
-                }
-                CommandsReq::CommandOutputWith(id, bytes) => answer!({
-                    match usize::try_from(bytes) {
-                        Ok(bytes) => jobs.output(owner, &id, bytes).await,
-                        Err(_) => Err(CommandError::CommandInvalid(
-                            "output byte count must be nonnegative".into(),
-                        )),
-                    }
-                }),
-                CommandsReq::CommandReadWith(id, stream, position) => {
-                    answer!(jobs.read(owner, &id, stream, position).await)
-                }
-                CommandsReq::CommandInputWith(id, text) => {
-                    answer!(jobs.control(owner, &id, CommandControl::Input(text)).await)
-                }
-                CommandsReq::CommandFinishInputWith(id, text) => {
-                    answer!(
-                        jobs.control(owner, &id, CommandControl::InputAndClose(text))
+                    Ok(_) => {
+                        settled = WorkbenchOperationDisposition::Committed;
+                        environment
+                            .runner
+                            .stop_command_observation(
+                                context.clone(),
+                                continuation,
+                                id,
+                                CommandObservationStop::Deadline,
+                            )
                             .await
-                    )
-                }
-                CommandsReq::CommandCloseInputWith(id) => {
-                    answer!(jobs.control(owner, &id, CommandControl::CloseInput).await)
-                }
-                CommandsReq::CommandCancelWith(id) => {
-                    answer!(jobs.control(owner, &id, CommandControl::Cancel).await)
-                }
-                CommandsReq::CommandResizeWith(id, rows, columns) => answer!({
-                    match (u16::try_from(rows), u16::try_from(columns)) {
-                        (Ok(rows), Ok(columns)) if rows > 0 && columns > 0 => {
-                            jobs.control(owner, &id, CommandControl::Resize { rows, columns })
-                                .await
-                        }
-                        _ => Err(CommandError::CommandInvalid(
-                            "terminal dimensions must be 1..65535".into(),
-                        )),
                     }
-                }),
+                    Err(error) => {
+                        settled = disposition::<()>(&Err(error.clone()));
+                        environment
+                            .runner
+                            .resume_value(
+                                context.clone(),
+                                continuation,
+                                Err::<tidepool_bridge_effects::CommandObservation, _>(error),
+                            )
+                            .await
+                    }
+                }
             }
+            CommandsReq::CommandPresentWith(id, _) => {
+                if !permitted {
+                    settled = WorkbenchOperationDisposition::Rejected;
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "command presentation is not authorized".into(),
+                    ));
+                }
+                jobs.status(owner, &id).await.map_err(|error| {
+                    ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "command presentation rejected: {error:?}"
+                    ))
+                })?;
+                settled = WorkbenchOperationDisposition::Committed;
+                environment
+                    .runner
+                    .resume_unit(context.clone(), continuation)
+                    .await
+            }
+            CommandsReq::CommandOutputWith(id, bytes) => answer!({
+                match usize::try_from(bytes) {
+                    Ok(bytes) => jobs.output(owner, &id, bytes).await,
+                    Err(_) => Err(CommandError::CommandInvalid(
+                        "output byte count must be nonnegative".into(),
+                    )),
+                }
+            }),
+            CommandsReq::CommandReadWith(id, stream, position) => {
+                answer!(jobs.read(owner, &id, stream, position).await)
+            }
+            CommandsReq::CommandInputWith(id, text) => {
+                answer!(jobs.control(owner, &id, CommandControl::Input(text)).await)
+            }
+            CommandsReq::CommandFinishInputWith(id, text) => {
+                answer!(
+                    jobs.control(owner, &id, CommandControl::InputAndClose(text))
+                        .await
+                )
+            }
+            CommandsReq::CommandCloseInputWith(id) => {
+                answer!(jobs.control(owner, &id, CommandControl::CloseInput).await)
+            }
+            CommandsReq::CommandCancelWith(id) => {
+                answer!(jobs.control(owner, &id, CommandControl::Cancel).await)
+            }
+            CommandsReq::CommandResizeWith(id, rows, columns) => answer!({
+                match (u16::try_from(rows), u16::try_from(columns)) {
+                    (Ok(rows), Ok(columns)) if rows > 0 && columns > 0 => {
+                        jobs.control(owner, &id, CommandControl::Resize { rows, columns })
+                            .await
+                    }
+                    _ => Err(CommandError::CommandInvalid(
+                        "terminal dimensions must be 1..65535".into(),
+                    )),
+                }
+            }),
         }
-        .await;
-        CommandResolution {
-            disposition: settled,
-            outcome,
-            started_job,
-        }
+    }
+    .await;
+    CommandResolution {
+        disposition: settled,
+        outcome,
+        started_job,
     }
 }

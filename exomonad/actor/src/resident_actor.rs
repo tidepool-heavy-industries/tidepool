@@ -1326,6 +1326,10 @@ enum OwnedWorkbenchWait {
         continuation: ResidentHole,
         request: String,
     },
+    Command {
+        continuation: ResidentHole,
+        request: crate::generated::commands::CommandsReq,
+    },
 }
 
 impl OwnedWorkbenchWait {
@@ -1349,6 +1353,19 @@ impl OwnedWorkbenchWait {
                 continuation,
                 request,
             }),
+            ResidentActorBoundary::Command {
+                continuation,
+                request,
+            } if !matches!(
+                request,
+                crate::generated::commands::CommandsReq::CommandPresentWith(..)
+            ) =>
+            {
+                Ok(Self::Command {
+                    continuation,
+                    request,
+                })
+            }
             other => Err(other),
         }
     }
@@ -6443,7 +6460,13 @@ where
         unit: WorkbenchUnitExecution<'_>,
     ) -> Result<FragmentAdvance, ResidentActorWorkbenchError> {
         if let Some(error) = current.resume_failure.take() {
-            return Err(error);
+            return match error {
+                ResidentActorWorkbenchError::CommandObservationStopped { job, reason } => workbench
+                    .bind_background_job(context.clone(), job, reason)
+                    .await
+                    .map(FragmentAdvance::Settled),
+                error => Err(error),
+            };
         }
         loop {
             self.runtime_observation.publish_workbench_posture(

@@ -361,6 +361,11 @@ where
             .take()
             .expect("one captured effect wait");
         let environment = self.environment.clone();
+        let commands_permitted = self
+            .descriptor
+            .effective_role()
+            .effect_keys()
+            .contains(&crate::ActorEffectKey::Commands);
         let context = owned.state.effects.context.clone();
         let control = owned
             .state
@@ -377,6 +382,7 @@ where
                     context,
                     control,
                     pending.wait,
+                    commands_permitted,
                 )))
                 .await;
             OwnedWorkbenchCompletion::advance(move |_behavior: &mut Self, _kernel| {
@@ -390,12 +396,21 @@ where
                             pending.ordinal,
                             &pending.effect,
                             pending.started.elapsed(),
-                            match &result {
-                                Ok(_) => WorkbenchOperationDisposition::Committed,
-                                Err(error) => disposition_for_non_command_failure(error),
-                            },
+                            result.disposition,
                         );
-                        match result {
+                        if let Some(job) = result.started_job {
+                            owned
+                                .state
+                                .cursor
+                                .running
+                                .as_mut()
+                                .expect("same command fragment")
+                                .fragment
+                                .as_mut()
+                                .expect("captured command owns its fragment")
+                                .record_started_job(job);
+                        }
+                        match result.outcome {
                             Ok(outcome) => {
                                 owned
                                     .state
@@ -509,12 +524,13 @@ async fn await_effect<H, O>(
     context: ActorSessionContext,
     control: Arc<crate::WorkbenchExecutionControl>,
     wait: OwnedWorkbenchWait,
-) -> Result<ResidentOutcome, ResidentActorWorkbenchError>
+    commands_permitted: bool,
+) -> commands::CommandResolution
 where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    match wait {
+    let result = match wait {
         OwnedWorkbenchWait::Watch(poll) => {
             await_watch(environment, kernel, context, control, poll).await
         }
@@ -539,6 +555,31 @@ where
             continuation,
             request,
         } => ask_jev(environment, kernel, context, continuation, request).await,
+        OwnedWorkbenchWait::Command {
+            continuation,
+            request,
+        } => {
+            let exec_started = std::time::Instant::now();
+            let result = commands::resolve_command(
+                &environment,
+                &kernel,
+                &context,
+                continuation,
+                request,
+                commands_permitted,
+            )
+            .await;
+            crate::call_timing::add_exec_ms(exec_started.elapsed().as_millis());
+            return result;
+        }
+    };
+    commands::CommandResolution {
+        disposition: match &result {
+            Ok(_) => WorkbenchOperationDisposition::Committed,
+            Err(error) => disposition_for_non_command_failure(error),
+        },
+        outcome: result,
+        started_job: None,
     }
 }
 
