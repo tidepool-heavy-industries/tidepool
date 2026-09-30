@@ -1418,12 +1418,16 @@ impl PersistentSession {
     /// Retract a set of declaration heads through one durable declaration
     /// generation. Used by set materialization so a later name cannot fail
     /// after an earlier name has already entered the persistent binding store.
-    fn retract_many_in(&mut self, scope: ScopeId, names: &[String]) -> Result<(), SessionError> {
+    fn retract_value_heads_in(
+        &mut self,
+        scope: ScopeId,
+        names: &[String],
+    ) -> Result<(), SessionError> {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
         match self.lib.as_mut() {
-            Some(lib) => lib.retract_many_in(scope, names),
+            Some(lib) => lib.retract_value_heads_in(scope, names),
             None => Ok(()),
         }
     }
@@ -1660,7 +1664,8 @@ impl PersistentSession {
                 ))?;
             final_by_name.insert(entry.name.0.clone(), *id);
         }
-        self.lib
+        let mut base = self
+            .lib
             .as_ref()
             .ok_or(SessionError::MissingDeclarationLibrary)?
             .snapshot_public_manifest(
@@ -1673,7 +1678,9 @@ impl PersistentSession {
                 expected_private,
                 final_by_name.into_iter().collect(),
                 final_source_instances,
-            )
+            )?;
+        base.admission_owner = Some(self.admission_owner().clone());
+        Ok(base)
     }
 
     /// Compare and rename under the same exclusive session checkout. A stale
@@ -1683,6 +1690,13 @@ impl PersistentSession {
         ticket: StagedPublicManifest,
         decision: &Arc<PublicationDecision>,
     ) -> Result<PublicManifestCommit, SessionError> {
+        if ticket
+            .admission_owner
+            .as_ref()
+            .is_none_or(|owner| !Arc::ptr_eq(owner, self.admission_owner()))
+        {
+            return Ok(PublicManifestCommit::Stale);
+        }
         let lib = self
             .lib
             .as_ref()
@@ -1803,7 +1817,7 @@ impl PersistentSession {
             return Err(SessionError::DeadScope(scope));
         }
         let name = entry.name.0.clone();
-        self.retract_many_in(scope, std::slice::from_ref(&name))?;
+        self.retract_value_heads_in(scope, std::slice::from_ref(&name))?;
         let receipt = ValuePlaneCommit {
             name,
             module: entry.module,
@@ -1849,7 +1863,7 @@ impl PersistentSession {
             return Err(SessionError::DeadScope(scope));
         }
         let names: Vec<String> = entries.iter().map(|entry| entry.name.0.clone()).collect();
-        if let Err(error) = self.retract_many_in(scope, &names) {
+        if let Err(error) = self.retract_value_heads_in(scope, &names) {
             self.discard_unbound_entries(entries);
             return Err(error);
         }

@@ -164,8 +164,8 @@ use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::{Generation, SessionId, SessionModule, SessionVarId};
 
 pub use render::{
-    subtract_import_list_names, DeclLog, DeclTurn, DeclarationKind, ExportItem, ModuleEnv,
-    RenderedModule,
+    subtract_import_list_names, DeclLog, DeclTurn, DeclarationKind, DeclarationRetraction,
+    ExportItem, ModuleEnv, RenderedModule,
 };
 
 /// The stdlib include dir a candidate gen module needs at validation time, or
@@ -416,6 +416,7 @@ pub struct PublicVisibilitySnapshot {
 /// Immutable v2 manifest baseline captured under the owning session checkout.
 /// Staging its replacement is fallible and may run after that checkout ends.
 pub struct PublicManifestBase {
+    admission_owner: Option<std::sync::Arc<admission::RuntimeAdmissionOwner>>,
     session: SessionId,
     path: PathBuf,
     owner: RecoveryPublicOwner,
@@ -433,6 +434,7 @@ pub struct PublicManifestBase {
 /// A fully written, fsynced manifest candidate. Only the owning session may
 /// compare its baseline and rename it while holding the machine checkout.
 pub struct StagedPublicManifest {
+    admission_owner: Option<std::sync::Arc<admission::RuntimeAdmissionOwner>>,
     session: SessionId,
     path: PathBuf,
     owner: RecoveryPublicOwner,
@@ -501,6 +503,7 @@ impl PublicManifestBase {
             detail: error.to_string(),
         })?;
         Ok(StagedPublicManifest {
+            admission_owner: self.admission_owner,
             session: self.session,
             path: self.path,
             owner: self.owner,
@@ -946,6 +949,7 @@ impl SessionLib {
             return Err(SessionError::WrongPublicManifestTicket);
         }
         Ok(PublicManifestBase {
+            admission_owner: None,
             session: self.id,
             path: state.path.clone(),
             owner,
@@ -1359,7 +1363,12 @@ impl SessionLib {
         for g in self.log.chain_from_root(self.scope_tip(scope)) {
             let turn = self.log.turn(g).expect("scope tip is committed");
             for r in &turn.retracts {
-                live.retain(|n| *n != r.as_str());
+                live.retain(|n| {
+                    !r.selects(
+                        tidepool_toolchain::declaration_join::ExportNamespace::Value,
+                        n,
+                    )
+                });
             }
             for item in &turn.items {
                 if let ExportItem::Value { name } = item {
@@ -2167,17 +2176,64 @@ impl SessionLib {
         scope: ScopeId,
         names: &[String],
     ) -> Result<(), SessionError> {
+        self.retract_heads_in(scope, names, None)
+    }
+
+    pub(crate) fn retract_value_heads_in(
+        &mut self,
+        scope: ScopeId,
+        names: &[String],
+    ) -> Result<(), SessionError> {
+        self.retract_heads_in(
+            scope,
+            names,
+            Some(tidepool_toolchain::declaration_join::ExportNamespace::Value),
+        )
+    }
+
+    fn retract_heads_in(
+        &mut self,
+        scope: ScopeId,
+        names: &[String],
+        namespace: Option<tidepool_toolchain::declaration_join::ExportNamespace>,
+    ) -> Result<(), SessionError> {
         let tip = self.scope_tip(scope);
-        let heads = self.log.current_heads_at(tip);
-        let mut retracts: Vec<String> = names
+        let heads = self.log.current_items_at(tip);
+        let mut retracts: Vec<DeclarationRetraction> = names
             .iter()
-            .filter(|name| heads.iter().any(|(head, _)| head == *name))
-            .cloned()
+            .filter(|name| {
+                heads.iter().any(|(head, _)| {
+                    head.head_name() == name.as_str()
+                        && namespace.is_none_or(|namespace| namespace == head.head_namespace())
+                })
+            })
+            .map(|name| match namespace {
+                Some(namespace) => DeclarationRetraction::Head {
+                    namespace,
+                    occurrence: name.clone(),
+                },
+                None => DeclarationRetraction::Name(name.clone()),
+            })
             .collect();
         retracts.sort();
         retracts.dedup();
         if retracts.is_empty() {
             return Ok(());
+        }
+        if self.durable_graph.is_none()
+            && self.recovery_manifest_path.is_some()
+            && namespace.is_some()
+            && heads.iter().any(|(head, _)| {
+                retracts.iter().any(|retraction| {
+                    retraction.occurrence() == head.head_name()
+                        && !retraction.selects(head.head_namespace(), head.head_name())
+                })
+            })
+        {
+            return Err(SessionError::RecoveryManifest {
+                path: self.recovery_manifest_path.clone().unwrap(),
+                detail: "typed retraction requires the exact recovery graph format".into(),
+            });
         }
         if let Some(state) = &self.durable_graph {
             let _ = state;
@@ -2228,7 +2284,10 @@ impl SessionLib {
                 self.id.0,
                 gen.0,
                 Vec::new(),
-                retracts,
+                retracts
+                    .iter()
+                    .map(|retraction| retraction.occurrence().to_owned())
+                    .collect(),
                 true,
             ));
         }

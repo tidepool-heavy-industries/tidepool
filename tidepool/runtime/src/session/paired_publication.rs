@@ -372,24 +372,32 @@ pub(super) fn authored_context(
 pub(super) fn exact_retractions(
     lib: &SessionLib,
     parent: Generation,
-    names: &[String],
+    names: &[super::DeclarationRetraction],
 ) -> Result<Vec<ExportIdentity>, SessionError> {
     if names.is_empty() {
         return Ok(Vec::new());
     }
     let parent = tip(lib, parent)?
         .ok_or_else(|| invalid_at(&lib.root, "retraction has no exact declaration baseline"))?;
-    names
-        .iter()
-        .map(|name| {
-            parent
-                .exports
-                .iter()
-                .find(|export| &export.head.occurrence == name)
-                .map(|export| export.head.clone())
-                .ok_or_else(|| invalid_at(&lib.root, "retraction lacks its selected exact head"))
-        })
-        .collect()
+    let mut exact = Vec::new();
+    for name in names {
+        let selected = parent
+            .exports
+            .iter()
+            .filter(|export| name.selects(export.head.namespace, &export.head.occurrence))
+            .map(|export| export.head.clone())
+            .collect::<Vec<_>>();
+        if selected.is_empty() {
+            return Err(invalid_at(
+                &lib.root,
+                "retraction lacks its selected exact head",
+            ));
+        }
+        exact.extend(selected);
+    }
+    exact.sort();
+    exact.dedup();
+    Ok(exact)
 }
 
 pub(super) fn recovery_instances(
@@ -618,7 +626,7 @@ impl PersistentSession {
                         std::iter::once(&export.head)
                             .chain(export.children.iter())
                             .any(|identity| {
-                                identity.namespace == ExportNamespace::Value
+                                identity.namespace != ExportNamespace::Type
                                     && identity.occurrence == entry.name.0
                             })
                     })
@@ -771,6 +779,13 @@ impl PersistentSession {
         &self,
         base: &PublicManifestBase,
     ) -> Result<bool, SessionError> {
+        if base
+            .admission_owner
+            .as_ref()
+            .is_none_or(|owner| !Arc::ptr_eq(owner, self.admission_owner()))
+        {
+            return Ok(false);
+        }
         if !self.has_lib() {
             return Err(SessionError::MissingDeclarationLibrary);
         }
@@ -1107,8 +1122,13 @@ impl AcceptedDeclarationPublication {
                     .iter()
                     .any(|identity| item.head_name() == identity.occurrence)
             });
-            turn.value_types
-                .retain(|name, _| !write.turn.retracts.contains(name));
+            turn.value_types.retain(|name, _| {
+                !write
+                    .turn
+                    .retracts
+                    .iter()
+                    .any(|retraction| retraction.selects(ExportNamespace::Value, name))
+            });
             extend_exports_by_head(&mut turn.items, &write.turn.items);
             turn.value_types.extend(write.turn.value_types.clone());
             turn.workbench_imports.extend(&write.turn.workbench_imports);
@@ -1260,6 +1280,168 @@ mod tests {
                 panic!("unexpected rejection: {:?}", rejected.receipt.outcome())
             }
         }
+    }
+
+    #[test]
+    fn paired_foreign_staged_ticket_never_claims_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("declarations.json");
+        let mut lib =
+            SessionLib::open(SessionId(986), root.path(), ModuleEnv::standalone_default()).unwrap();
+        lib.attach_recovery_graph_v2(&path).unwrap();
+        let mut first = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = first.mint_scope(ScopeId::ROOT).unwrap();
+        let owner = RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/foreign-stage").unwrap(),
+            1,
+        )
+        .unwrap();
+        first
+            .bind_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        let private = first.begin_private_execution(public).unwrap();
+        let intent = first
+            .freeze_execution_intent(&private, vec![], vec![])
+            .unwrap();
+        let ExecutionPublication::Bindings(base) = first
+            .restage_execution_publication(owner.clone(), intent.clone())
+            .unwrap()
+        else {
+            panic!("empty intent publishes bindings");
+        };
+        let ticket = base.stage().unwrap();
+        let mut second_lib =
+            SessionLib::open(SessionId(986), root.path(), ModuleEnv::standalone_default()).unwrap();
+        second_lib.attach_recovery_graph_v2(&path).unwrap();
+        let mut second = PersistentSession::new(Some(second_lib), 1024 * 1024);
+        let second_public = second.mint_scope(ScopeId::ROOT).unwrap();
+        second
+            .bind_durable_public_scope(owner.clone(), second_public)
+            .unwrap();
+        let second_private = second.begin_private_execution(second_public).unwrap();
+        assert_eq!(private.admitted_public(), second_private.admitted_public());
+        assert_eq!(
+            first.public_visibility_snapshot_in(private.private_scope()),
+            second.public_visibility_snapshot_in(second_private.private_scope())
+        );
+        let decision = PublicationDecision::new();
+        assert_eq!(
+            second
+                .publish_staged_public_manifest(ticket, &decision)
+                .unwrap(),
+            PublicManifestCommit::Stale
+        );
+        assert_eq!(decision.phase(), PublicationPhase::Running);
+        let ExecutionPublication::Bindings(base) =
+            first.restage_execution_publication(owner, intent).unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            first
+                .publish_staged_public_manifest(base.stage().unwrap(), &decision)
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+    }
+
+    #[test]
+    fn paired_materialized_value_retracts_only_admitted_value_namespace() {
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("declarations.json");
+        let mut lib =
+            SessionLib::open(SessionId(987), root.path(), ModuleEnv::standalone_default())
+                .unwrap()
+                .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
+        lib.attach_recovery_graph_v2(&path).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let owner = RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/admitted-namespace").unwrap(),
+            1,
+        )
+        .unwrap();
+        session
+            .bind_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        commit_source(
+            &mut session,
+            public,
+            include_str!("fixtures/paired-late-operator.hs"),
+        );
+        let a = session.begin_private_execution(public).unwrap();
+        let withdrawal = session.begin_private_execution(public).unwrap();
+        let value =
+            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "%%", 601);
+        let value_id = value.id;
+        session
+            .bind_replacing_decl_in(a.private_scope(), value)
+            .unwrap();
+        let private_tip = tip(session.lib(), session.lib().scope_tip(a.private_scope()))
+            .unwrap()
+            .unwrap();
+        assert!(private_tip
+            .exports
+            .iter()
+            .any(|export| export.head.occurrence == "%%"
+                && export.head.namespace == ExportNamespace::Type));
+        assert!(!private_tip
+            .exports
+            .iter()
+            .any(|export| export.head.occurrence == "%%"
+                && export.head.namespace == ExportNamespace::Value));
+        session
+            .lib_mut()
+            .retract_many_in(withdrawal.private_scope(), &["%%".into()])
+            .unwrap();
+        let withdrawn = session
+            .freeze_execution_intent(&withdrawal, vec![], vec![])
+            .unwrap();
+        assert_eq!(withdrawn.writes[0].retractions.len(), 2);
+        let withdrawn_proof = accepted(
+            session
+                .restage_declaration_publication(owner.clone(), withdrawn)
+                .unwrap(),
+        );
+        assert!(!withdrawn_proof
+            .receipt
+            .exports()
+            .iter()
+            .any(|export| export.head.occurrence == "%%"));
+        let intent = session
+            .freeze_execution_intent(&a, vec![value_id], vec![])
+            .unwrap();
+        assert_eq!(intent.writes[0].retractions.len(), 1);
+        assert_eq!(
+            intent.writes[0].retractions[0].namespace,
+            ExportNamespace::Value
+        );
+        let publication = accepted(
+            session
+                .restage_declaration_publication(owner, intent)
+                .unwrap(),
+        );
+        assert!(publication
+            .receipt
+            .exports()
+            .iter()
+            .any(|export| export.head.occurrence == "%%"
+                && export.head.namespace == ExportNamespace::Type));
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(
+                    publication.stage().unwrap(),
+                    &PublicationDecision::new()
+                )
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+        assert!(session
+            .public_visibility_snapshot_in(public)
+            .unwrap()
+            .bindings
+            .contains(&("%%".into(), value_id)));
     }
 
     #[test]

@@ -182,7 +182,7 @@ pub struct DeclTurn {
     /// fold (`cumulative_exports_before`, `current_heads`, `replayable_sources`,
     /// `render_module`) so all persistent declaration environment views stay consistent; a later
     /// `define` of the same name naturally un-retracts it (latest-wins).
-    pub retracts: Vec<String>,
+    pub retracts: Vec<DeclarationRetraction>,
     /// The generation this turn chains from — `None` only for the very first
     /// turn ever pushed to the log. `Generation` stays a single globally
     /// monotone counter (`turns.len()`) so module names never collide across
@@ -192,6 +192,56 @@ pub struct DeclTurn {
     /// always has `parent == Some(g - 1)` (or `None` for `g == 1`), which is
     /// the back-compat degeneracy every fold below must preserve.
     pub parent: Option<Generation>,
+}
+
+/// Explicit withdrawal names select every matching admitted namespace;
+/// materialized values withdraw only an exact value head.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DeclarationRetraction {
+    Name(String),
+    Head {
+        namespace: tidepool_toolchain::declaration_join::ExportNamespace,
+        occurrence: String,
+    },
+}
+
+impl From<String> for DeclarationRetraction {
+    fn from(name: String) -> Self {
+        Self::Name(name)
+    }
+}
+impl From<&str> for DeclarationRetraction {
+    fn from(name: &str) -> Self {
+        Self::Name(name.into())
+    }
+}
+
+impl DeclarationRetraction {
+    pub fn occurrence(&self) -> &str {
+        match self {
+            Self::Name(name)
+            | Self::Head {
+                occurrence: name, ..
+            } => name,
+        }
+    }
+    pub(crate) fn selects(
+        &self,
+        namespace: tidepool_toolchain::declaration_join::ExportNamespace,
+        name: &str,
+    ) -> bool {
+        self.occurrence() == name
+            && match self {
+                Self::Name(_) => true,
+                Self::Head {
+                    namespace: selected,
+                    ..
+                } => *selected == namespace,
+            }
+    }
+    fn selects_item(&self, item: &ExportItem) -> bool {
+        self.selects(item.head_namespace(), item.head_name())
+    }
 }
 
 /// The sparse generation-addressed declaration graph. A reserved identity
@@ -521,7 +571,7 @@ impl DeclLog {
                 .turn(g)
                 .expect("scope chain contains only committed nodes");
             for r in &turn.retracts {
-                map.retain(|(_, name), _| name != r);
+                map.retain(|(namespace, name), _| !r.selects(*namespace, name));
             }
             for item in &turn.items {
                 map.insert(
@@ -575,7 +625,7 @@ impl DeclLog {
                 .turn(g)
                 .expect("scope chain contains only committed nodes");
             for retracted in &turn.retracts {
-                exports.retain(|item: &ExportItem| item.head_name() != retracted);
+                exports.retain(|item: &ExportItem| !retracted.selects_item(item));
             }
             extend_exports_by_head(&mut exports, &turn.items);
         }
@@ -617,7 +667,11 @@ impl DeclLog {
             let turn = self
                 .turn(g)
                 .expect("scope chain contains only committed nodes");
-            let heads: Vec<&str> = turn.items.iter().map(ExportItem::head_name).collect();
+            let heads: Vec<_> = turn
+                .items
+                .iter()
+                .map(|item| (item.head_namespace(), item.head_name()))
+                .collect();
             // A turn's source is dropped once every head it introduced is later
             // redefined OR retracted (later IN THIS CHAIN) — the
             // migrated/superseded decl must not reappear in a flat `:program`
@@ -628,8 +682,11 @@ impl DeclLog {
                         let later = self
                             .turn(later_g)
                             .expect("scope chain contains only committed nodes");
-                        later.items.iter().any(|it| it.head_name() == *h)
-                            || later.retracts.iter().any(|r| r == h)
+                        later
+                            .items
+                            .iter()
+                            .any(|it| (it.head_namespace(), it.head_name()) == *h)
+                            || later.retracts.iter().any(|r| r.selects(h.0, h.1))
                     })
                 });
             if !fully_superseded {
@@ -854,7 +911,7 @@ fn cumulative_exports_before(log: &DeclLog, gen_one_based: usize) -> Vec<ExportI
             .expect("scope chain contains only committed nodes");
         // A turn removes prior exports it either redefines OR retracts; then
         // re-adds its own. (A retraction adds nothing.)
-        acc.retain(|prior| !turn.retracts.iter().any(|r| r == prior.head_name()));
+        acc.retain(|prior| !turn.retracts.iter().any(|r| r.selects_item(prior)));
         extend_exports_by_head(&mut acc, &turn.items);
     }
     acc
@@ -937,7 +994,7 @@ pub fn render_module_with_vals(
         .iter()
         .filter(|p| {
             new_heads.contains(&(p.head_namespace(), p.head_name()))
-                || this.retracts.iter().any(|r| r == p.head_name())
+                || this.retracts.iter().any(|r| r.selects_item(p))
         })
         .collect();
 
