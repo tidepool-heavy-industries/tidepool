@@ -654,6 +654,7 @@ fn compile_invocation_inner(
         "extract spawn"
     );
 
+    let compiler_stderr = run.output.stderr.clone();
     let extracted = extract_and_read(
         run,
         temp_dir.path(),
@@ -677,7 +678,13 @@ fn compile_invocation_inner(
             tracing::warn!(%error, "candidate compile failed; retrying without candidates");
             return compile_invocation_inner(inv, on_stage, false, session_root);
         }
-        Err(error) => return Err(error),
+        Err(error) => {
+            return Err(retain_compiler_failure(
+                temp_dir.path(),
+                &compiler_stderr,
+                error,
+            ))
+        }
     };
 
     // Store only what DESERIALIZED, so a malformed artifact set is never
@@ -872,26 +879,39 @@ fn compile_invocation_inner(
             tracing::warn!(%error, "candidate certification failed; retrying without candidates");
             compile_invocation_inner(inv, on_stage, false, session_root)
         }
-        result => {
-            if result.is_err() && std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() == Ok("1") {
-                match retain_failed_compiler_artifacts(temp_dir.path()) {
-                    Ok(retained) => {
-                        return result.map_err(|error| match error {
-                            CompileError::ExtractFailed(message) => {
-                                CompileError::ExtractFailed(format!(
-                                    "{message}; compiler artifacts retained at {}",
-                                    retained.display()
-                                ))
-                            }
-                            other => other,
-                        })
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "could not retain failed compiler artifacts")
-                    }
-                }
+        result => result
+            .map_err(|error| retain_compiler_failure(temp_dir.path(), &compiler_stderr, error)),
+    }
+}
+
+/// Retain worker outputs and stderr after compilation or final sealing fails.
+/// The existing test-log policy is optional, and retention never replaces the
+/// original error. Call before the request's temporary directory is dropped.
+pub fn retain_compiler_failure(
+    directory: &Path,
+    stderr: &[u8],
+    error: CompileError,
+) -> CompileError {
+    if std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() != Ok("1") {
+        return error;
+    }
+    match retain_failed_compiler_artifacts(directory) {
+        Ok(retained) => {
+            if let Err(failure) = std::fs::write(retained.join("compiler.stderr"), stderr) {
+                tracing::warn!(%failure, "could not retain compiler stderr");
             }
-            result
+            tracing::warn!(path = %retained.display(), "retained failed compiler artifacts");
+            match error {
+                CompileError::ExtractFailed(message) => CompileError::ExtractFailed(format!(
+                    "{message}; compiler artifacts retained at {}",
+                    retained.display()
+                )),
+                other => other,
+            }
+        }
+        Err(failure) => {
+            tracing::warn!(%failure, "could not retain failed compiler artifacts");
+            error
         }
     }
 }
