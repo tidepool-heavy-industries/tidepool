@@ -1,4 +1,11 @@
 load("@prelude//:rules.bzl", "genrule", "sh_test")
+load(":runtime_shared_libraries.bzl", "tidepool_runtime_shared_libraries")
+
+tidepool_runtime_shared_libraries(
+    name = "tidepool_extract_runtime_libraries",
+    library = "//bridge/haskell:tidepool_extract_internal",
+    visibility = ["PUBLIC"],
+)
 
 genrule(
     name = "embedded_web_provenance",
@@ -33,7 +40,7 @@ genrule(
         "//bridge/facade:exomonad",
         "//tidepool/extract-cmd:tidepool-extract",
         "//bridge/haskell:tidepool_extract_bin",
-        "//bridge/haskell:tidepool_extract_internal[shared]",
+        ":tidepool_extract_runtime_libraries",
         "//web:dist",
         ":embedded_web_provenance",
     ],
@@ -49,7 +56,11 @@ GHC="$(exe toolchains//:ghc)"
 cp -a "$PWD/$(location //bridge/facade:exomonad)" "$OUTPUT/bin/exomonad"
 cp -a "$PWD/$(location //tidepool/extract-cmd:tidepool-extract)" "$OUTPUT/bin/tidepool-extract"
 cp -a "$PWD/$(location //bridge/haskell:tidepool_extract_bin)" "$OUTPUT/bin/tidepool-extract-bin"
-cp -a "$PWD/$(location //bridge/haskell:tidepool_extract_internal[shared])" "$OUTPUT/bin/__tidepool_extract_bin__shared_libs_symlink_tree/"
+RUNTIME_LIBRARIES="$PWD/$(location :tidepool_extract_runtime_libraries)"
+for library in "$RUNTIME_LIBRARIES"/*; do
+    test -e "$library"
+    cp -L "$library" "$OUTPUT/bin/__tidepool_extract_bin__shared_libs_symlink_tree/"
+done
 WEB="$PWD/$(location //web:dist)"
 cp -a "$WEB/web/." "$OUTPUT/share/exomonad/web/"
 cp -a "$PWD/$(location :embedded_web_provenance)" "$OUTPUT/share/exomonad/harness-source-revision.txt"
