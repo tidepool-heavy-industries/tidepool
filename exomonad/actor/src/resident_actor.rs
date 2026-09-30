@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 #[cfg(test)]
 mod capture_workspace_tests;
+mod clock_wait;
 mod command_presentation;
 mod command_settlement;
 mod commands;
@@ -3680,7 +3681,7 @@ where
                     .control()
                     .unwrap_or_else(crate::WorkbenchExecutionControl::untracked);
                 control.arm_sleep();
-                owned_workbench::await_sleep(
+                clock_wait::await_sleep(
                     self.environment.clone(),
                     kernel.clone(),
                     context.clone(),

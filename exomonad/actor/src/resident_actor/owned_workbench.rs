@@ -1053,7 +1053,7 @@ where
             continuation,
             duration,
         } => {
-            await_sleep(
+            clock_wait::await_sleep(
                 environment,
                 kernel,
                 context,
@@ -1179,84 +1179,6 @@ where
         .runner
         .resume_value(context.clone(), continuation, answer)
         .await
-}
-
-pub(super) async fn await_sleep<H, O>(
-    environment: ResidentEnvironment<H, O>,
-    kernel: KernelContext,
-    context: ActorSessionContext,
-    control: Arc<crate::WorkbenchExecutionControl>,
-    continuation: ResidentHole,
-    duration: std::time::Duration,
-) -> Result<ResidentOutcome, ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send + 'static,
-    O: OutputSink + Sync + 'static,
-{
-    let timer = tokio::time::sleep(duration);
-    tokio::pin!(timer);
-    tokio::select! {
-        () = &mut timer => {
-            if control.claim_expiry() {
-                let outcome = environment
-                    .runner
-                    .resume_unit(context.clone(), continuation)
-                    .await;
-                control.finish_sleep();
-                outcome
-            } else {
-                let (outcome, consumed) = environment
-                    .runner
-                    .abort_live(
-                        context.clone(),
-                        continuation,
-                        "sleep interrupted by delivered input".into(),
-                    )
-                    .await;
-                if consumed {
-                    control.acknowledge_cancellation();
-                }
-                outcome
-            }
-        }
-        () = control.wait_for_cancellation() => {
-            let (outcome, consumed) = environment
-                .runner
-                .abort_live(
-                    context.clone(),
-                    continuation,
-                    "sleep interrupted by delivered input".into(),
-                )
-                .await;
-            if consumed {
-                control.acknowledge_cancellation();
-            }
-            outcome
-        }
-        terminal = kernel.wait_requested_shutdown() => {
-            if control.request_cancellation() || control.cancellation_requested() {
-                let (outcome, consumed) = environment
-                    .runner
-                    .abort_live(
-                        context.clone(),
-                        continuation,
-                        format!("sleep interrupted by actor retirement: {}", terminal.summary),
-                    )
-                    .await;
-                if consumed {
-                    control.acknowledge_cancellation();
-                }
-                outcome
-            } else {
-                let outcome = environment
-                    .runner
-                    .resume_unit(context.clone(), continuation)
-                    .await;
-                control.finish_sleep();
-                outcome
-            }
-        }
-    }
 }
 
 #[cfg(test)]
