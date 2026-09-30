@@ -1664,18 +1664,10 @@ impl PersistentSession {
             .as_ref()
             .ok_or(SessionError::MissingDeclarationLibrary)?;
         let graph_is_current = lib.public_manifest_ticket_is_current(&ticket)?;
-        if !self.scopes.is_live(ticket.public_scope) || !self.scopes.is_live(ticket.private_scope) {
-            return Ok(PublicManifestCommit::Stale);
-        }
         if !graph_is_current
-            || self
-                .public_visibility_snapshot_in(ticket.public_scope)
-                .as_ref()
-                != Some(&ticket.expected_public)
-            || self
-                .public_visibility_snapshot_in(ticket.private_scope)
-                .as_ref()
-                != Some(&ticket.expected_private)
+            || !lib.declaration_publication_is_ready(&ticket)
+            || !self
+                .publication_views_are_current(&ticket.expected_public, &ticket.expected_private)
         {
             return Ok(PublicManifestCommit::Stale);
         }
@@ -1690,6 +1682,11 @@ impl PersistentSession {
                 &ticket.source_keys,
             )
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        let declared_names = ticket
+            .declaration
+            .as_ref()
+            .map(|declaration| declaration.declared_names.clone())
+            .unwrap_or_default();
         let Some(claim) = decision.claim_commit() else {
             return Ok(PublicManifestCommit::Cancelled);
         };
@@ -1706,6 +1703,9 @@ impl PersistentSession {
             PublicManifestCommit::Durable
             | PublicManifestCommit::PublishedDurabilityUnconfirmed { .. } => {
                 self.bindings.commit_exact_binding_promotion(prepared);
+                for name in declared_names {
+                    self.bindings.remove_current_in(public_scope, &name);
+                }
                 self.public_visibility_epochs
                     .insert(public_scope, next_epoch);
                 claim.published();
@@ -1715,6 +1715,15 @@ impl PersistentSession {
             }
         }
         Ok(outcome)
+    }
+
+    pub(super) fn publication_views_are_current(
+        &self,
+        public: &super::PublicVisibilitySnapshot,
+        private: &super::PublicVisibilitySnapshot,
+    ) -> bool {
+        self.public_visibility_snapshot_in(public.scope).as_ref() == Some(public)
+            && self.public_visibility_snapshot_in(private.scope).as_ref() == Some(private)
     }
 
     /// Record a materialized value binding in `scope`'s frame.

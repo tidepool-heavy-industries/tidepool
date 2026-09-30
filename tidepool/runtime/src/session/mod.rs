@@ -21,6 +21,7 @@ mod dialect;
 pub mod facade;
 pub mod inspection;
 pub mod kernel;
+mod paired_publication;
 pub mod persistent;
 pub mod prepared;
 mod publication;
@@ -50,6 +51,10 @@ pub use persistent::{
     ScopeRetirement, ValuePlaneCommit,
 };
 
+pub use paired_publication::{
+    AcceptedDeclarationPublication, CertifiedDeclarationPublication, DeclarationPublicationBase,
+    DeclarationPublicationRejection, RejectedDeclarationPublication,
+};
 pub use prepared::{
     CancelHandle, PreparedEngine, PreparedFailureKind, PreparedRuntimeError, PreparedSettlement,
     RealmId, SiteTypeEvidence,
@@ -434,6 +439,7 @@ pub struct StagedPublicManifest {
     base_checksum: String,
     base_high_water: Generation,
     staged: recovery::StagedRecoveryManifest,
+    declaration: Option<paired_publication::PreparedDeclarationPublication>,
 }
 
 /// A stale stage preserves the execution's intent; its caller can stage again
@@ -501,6 +507,7 @@ impl PublicManifestBase {
             base_checksum: self.graph.checksum,
             base_high_water: self.graph.high_water,
             staged,
+            declaration: None,
         })
     }
 }
@@ -923,31 +930,52 @@ impl SessionLib {
         &self,
         ticket: &StagedPublicManifest,
     ) -> Result<bool, SessionError> {
+        self.public_manifest_baseline_is_current(
+            ticket.session,
+            &ticket.path,
+            &ticket.owner,
+            ticket.public_scope,
+            &ticket.base_checksum,
+            ticket.base_high_water,
+        )
+    }
+
+    fn public_manifest_baseline_is_current(
+        &self,
+        session: SessionId,
+        path: &Path,
+        owner: &RecoveryPublicOwner,
+        public_scope: ScopeId,
+        checksum: &str,
+        high_water: Generation,
+    ) -> Result<bool, SessionError> {
         let state = self
             .durable_graph
             .as_ref()
             .ok_or(SessionError::WrongPublicManifestTicket)?;
-        if ticket.session != self.id
-            || ticket.path != state.path
-            || self.durable_public_scopes.get(&ticket.owner) != Some(&ticket.public_scope)
+        if session != self.id
+            || path != state.path
+            || self.durable_public_scopes.get(owner) != Some(&public_scope)
         {
             return Err(SessionError::WrongPublicManifestTicket);
         }
         Ok(!(state.unconfirmed.is_some()
-            || state.graph.checksum != ticket.base_checksum
-            || state.graph.high_water != ticket.base_high_water))
+            || state.graph.checksum != checksum
+            || state.graph.high_water != high_water))
     }
 
     fn publish_staged_public_manifest_unchecked(
         &mut self,
-        ticket: StagedPublicManifest,
+        mut ticket: StagedPublicManifest,
     ) -> PublicManifestCommit {
+        let declaration = ticket.declaration.take();
+        let public_scope = ticket.public_scope;
         let outcome = self.publish_recovery_manifest(ticket.staged);
         let state = self
             .durable_graph
             .as_mut()
             .expect("ticket preflight found manifest");
-        match outcome {
+        let committed = match outcome {
             recovery::RecoveryPublishOutcome::BeforeRename { detail, .. } => {
                 PublicManifestCommit::BeforeRename { detail }
             }
@@ -964,7 +992,17 @@ impl SessionLib {
                 state.unconfirmed = Some(publication);
                 PublicManifestCommit::PublishedDurabilityUnconfirmed { detail }
             }
+        };
+        if matches!(
+            committed,
+            PublicManifestCommit::Durable
+                | PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+        ) {
+            if let Some(declaration) = declaration {
+                self.commit_prepared_declaration(public_scope, declaration);
+            }
         }
+        committed
     }
 
     /// Burn a unique authored or Join module identity before exposing it to the compiler.
