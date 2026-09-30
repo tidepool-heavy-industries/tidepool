@@ -344,6 +344,26 @@ impl PersistentSession {
             .register_source_instances_in(&self.scopes, scope, tokens)
     }
 
+    /// One resolution pass over the exact scoped dependency closure. Sorted
+    /// IDs preserve the binding owner's choice among same-owner aliases.
+    fn scoped_prepared_bindings_in(
+        &self,
+        scope: ScopeId,
+    ) -> HashMap<(&SymbolIdentity, SessionModule), &BindingEntry> {
+        let mut entries = HashMap::new();
+        for id in self
+            .bindings
+            .scope_reachable_binding_ids(&self.scopes, scope)
+        {
+            if let Some(entry) = self.bindings.get(id) {
+                entries
+                    .entry((&entry.value.identity, entry.module))
+                    .or_insert(entry);
+            }
+        }
+        entries
+    }
+
     /// Resolve the worker's retained imports against the exact inherited
     /// lexical view or owning engine's immutable export ledger, before native
     /// compilation. The worker never supplies a `SessionVarId` or native root
@@ -358,6 +378,7 @@ impl PersistentSession {
         if !self.scopes.is_live(scope) {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
         }
+        let retained = std::cell::OnceCell::new();
         let mut source_evidence = BTreeMap::new();
         let mut resolve = |globals: &[GlobalDecl], pending: &[PendingImportOwner]| {
             if globals.len() != pending.len() {
@@ -402,12 +423,10 @@ impl PersistentSession {
                         {
                             return Err(PreparedRuntimeError::CertifiedTargetOwners);
                         }
-                        if let Some(entry) = self.bindings.resolve_exact_prepared_in(
-                            &self.scopes,
-                            scope,
-                            identity,
-                            *generation,
-                        ) {
+                        if let Some(entry) = retained
+                            .get_or_init(|| self.scoped_prepared_bindings_in(scope))
+                            .get(&(identity, SessionModule::val(Generation(*generation))))
+                        {
                             return Ok(ImportOwner::Retained {
                                 id: entry.id,
                                 generation: *generation,
@@ -574,6 +593,7 @@ impl PersistentSession {
             }
         }
         let mut exact_external = HashMap::new();
+        let retained = std::cell::OnceCell::new();
         for (globals, owners) in std::iter::once((target.globals(), target_owners)).chain(
             demanded.iter().map(|selected| {
                 (
@@ -589,14 +609,18 @@ impl PersistentSession {
                 let ImportOwner::Retained { id, generation } = owner else {
                     continue;
                 };
-                let entry = self
-                    .bindings
-                    .resolve_exact_prepared_in(&self.scopes, scope, &global.identity, *generation)
+                let entry = retained
+                    .get_or_init(|| self.scoped_prepared_bindings_in(scope))
+                    .get(&(
+                        &global.identity,
+                        SessionModule::val(Generation(*generation)),
+                    ))
                     .filter(|entry| entry.id == *id)
                     .ok_or_else(|| PreparedRuntimeError::MissingCertifiedOwner(owner.clone()))?;
                 exact_external.insert(owner.clone(), entry.value.handle);
             }
         }
+        drop(retained);
         let mut bootstrap = if self.machine.is_none() {
             Some(PreparedEngine::empty_certified(
                 self.nursery_size,
@@ -3106,6 +3130,53 @@ pub struct ScopeRetirement {
 #[cfg(test)]
 mod checkpoint_scope_tests {
     use super::*;
+
+    #[test]
+    fn scoped_prepared_inventory_keeps_historical_roots_and_excludes_sibling_instances() {
+        let mut session = PersistentSession::new(None, 1024 * 1024);
+        session.set_image_registry(Arc::new(ImageRegistry::new()));
+        let public = session.mint_isolated_scope();
+        let original =
+            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 460);
+        let identity = original.value.identity.clone();
+        session.bind_in(public, original).unwrap();
+        let private = session.mint_detached_scope(public).unwrap();
+        let replacement =
+            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 461);
+        session.bind_in(public, replacement).unwrap();
+        let own =
+            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 462);
+        session.bind_in(private, own).unwrap();
+        let sibling = session.mint_isolated_scope();
+        let mut foreign =
+            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 463);
+        // An equal exact Name/module in another live scope must not choose
+        // that scope's distinct native CAF installation.
+        foreign.module = SessionModule::val(Generation(462));
+        session.bind_in(sibling, foreign).unwrap();
+        let inventory = session.scoped_prepared_bindings_in(private);
+        assert_eq!(inventory.len(), 2);
+        for (generation, expected) in [(460, Some(460)), (461, None), (462, Some(462))] {
+            let entry = inventory.get(&(&identity, SessionModule::val(Generation(generation))));
+            assert_eq!(entry.map(|entry| entry.id.raw()), expected);
+            assert_eq!(
+                entry.map(|entry| entry.id),
+                session.bindings().resolve_exact_prepared_in(
+                    session.scope_tree(), private, &identity, generation,
+                ).map(|entry| entry.id),
+            );
+        }
+        let own = inventory
+            .get(&(&identity, SessionModule::val(Generation(462))))
+            .unwrap();
+        assert_eq!(
+            session
+                .prepared()
+                .unwrap()
+                .prepared_handle_of(own.value.handle.raw()),
+            Some(own.value.handle),
+        );
+    }
 
     #[test]
     fn scoped_view_commitment_reuses_unchanged_binding_owner_witness() {
