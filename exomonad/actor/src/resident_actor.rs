@@ -22,6 +22,7 @@ mod provider_owner_tests;
 mod replacement;
 mod request_wait;
 mod status_rendering;
+mod terminal_wait;
 mod workbench_ledger;
 
 pub(crate) use owned_workbench::{
@@ -1390,6 +1391,15 @@ struct ParkedWorkbenchEffect {
 
 enum OwnedWorkbenchWait {
     Watch(crate::request_effect::WatchPoll),
+    Exit {
+        continuation: ResidentHole,
+        terminal: crate::RetainedActorExit,
+    },
+    PollExit {
+        continuation: ResidentHole,
+        target: ActorRef,
+        terminal: Option<ActorTerminal>,
+    },
     Sleep {
         continuation: ResidentHole,
         duration: std::time::Duration,
@@ -1409,6 +1419,17 @@ enum OwnedWorkbenchWait {
 }
 
 impl OwnedWorkbenchWait {
+    fn observe_after_resume(&self) -> Option<ActorRef> {
+        match self {
+            Self::PollExit {
+                target,
+                terminal: Some(_),
+                ..
+            } => Some(*target),
+            _ => None,
+        }
+    }
+
     fn capture(boundary: ResidentActorBoundary) -> Result<Self, ResidentActorBoundary> {
         match boundary {
             ResidentActorBoundary::WatchAwait(poll) => Ok(Self::Watch(poll)),
@@ -1617,6 +1638,30 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     ) -> bool {
         effect_owner.publication().boundary().is_some()
             && self.environment.fork_groups.is_pending_child(target)
+    }
+
+    fn capture_exit_target(
+        &self,
+        kernel: &KernelContext,
+        effect_owner: &CurrentEffectOwner<'_>,
+        target: ActorRef,
+    ) -> Result<crate::RetainedActorExit, ResidentActorWorkbenchError> {
+        if self.pending_in_tool_block(effect_owner, target) {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "child starts after this tool block completes; register a watch or wait in a later tool invocation".into(),
+            ));
+        }
+        let actor = kernel.resolve(target).ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                KernelCallFailure::TargetUnavailable(target).to_string(),
+            )
+        })?;
+        kernel.session_context(target).ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                KernelCallFailure::TargetUnavailable(target).to_string(),
+            )
+        })?;
+        Ok(actor.terminal().clone())
     }
 
     /// Replace `standing`, logging the transition. The sole place `standing`
@@ -4841,31 +4886,9 @@ where
                     .await
             }),
             ResidentActorBoundary::Wait(wait) => Box::pin(async move {
-                if self.pending_in_tool_block(&effect_owner, wait.target) {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "child starts after this tool block completes; register a watch or wait in a later tool invocation".into(),
-                    ));
-                }
-                let target = kernel.resolve(wait.target).ok_or_else(|| {
-                    ResidentActorWorkbenchError::ActorProtocol(
-                        KernelCallFailure::TargetUnavailable(wait.target).to_string(),
-                    )
-                })?;
-                // Still resolved (and discarded) only to prove the target
-                // actor's placement exists at all -- `kernel.resolve` above
-                // already proved the actor itself is live.
-                let _target_context = kernel.session_context(wait.target).ok_or_else(|| {
-                    ResidentActorWorkbenchError::ActorProtocol(
-                        KernelCallFailure::TargetUnavailable(wait.target).to_string(),
-                    )
-                })?;
-                // No session-equality gate here: the value that crosses,
-                // `ActorTerminal { kind, summary }`, is plain data with no
-                // machine-rooted custody in it at all (see
-                // `crate::termination::ActorTerminal`), so there was never
-                // anything for a machine-boundary check to protect.
+                let target = self.capture_exit_target(kernel, &effect_owner, wait.target)?;
                 self.record_child_observation(wait.target);
-                let terminal = target.terminal().wait().await;
+                let terminal = target.wait().await;
                 self.environment
                     .runner
                     .resume_terminal(context.clone(), wait.continuation, terminal)
@@ -6662,11 +6685,38 @@ where
                         "effect boundary captured"
                     );
                     let boundary = if execution_state.park_effects {
-                        match OwnedWorkbenchWait::capture(boundary) {
+                        let captured = match boundary {
+                            ResidentActorBoundary::Wait(wait) => {
+                                let terminal = self.capture_exit_target(
+                                    kernel,
+                                    &CurrentEffectOwner::Workbench(execution_state),
+                                    wait.target,
+                                )?;
+                                self.record_child_observation(wait.target);
+                                Ok(OwnedWorkbenchWait::Exit {
+                                    continuation: wait.continuation,
+                                    terminal,
+                                })
+                            }
+                            ResidentActorBoundary::Poll(poll) => {
+                                let terminal = kernel
+                                    .resolve(poll.target)
+                                    .and_then(|target| target.terminal().get());
+                                Ok(OwnedWorkbenchWait::PollExit {
+                                    continuation: poll.continuation,
+                                    target: poll.target,
+                                    terminal,
+                                })
+                            }
+                            boundary => OwnedWorkbenchWait::capture(boundary),
+                        };
+                        match captured {
                             Ok(wait) => {
                                 if matches!(
                                     &wait,
-                                    OwnedWorkbenchWait::Watch(_) | OwnedWorkbenchWait::Sleep { .. }
+                                    OwnedWorkbenchWait::Watch(_)
+                                        | OwnedWorkbenchWait::Sleep { .. }
+                                        | OwnedWorkbenchWait::Exit { .. }
                                 ) || matches!(&wait, OwnedWorkbenchWait::Command { request, .. }
                                     if commands::waits_for_completion(request)
                                         && self.descriptor.effective_role().effect_keys().contains(&crate::ActorEffectKey::Commands))

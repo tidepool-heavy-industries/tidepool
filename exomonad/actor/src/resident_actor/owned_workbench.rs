@@ -1447,6 +1447,7 @@ where
             .control
             .clone()
             .unwrap_or_else(crate::WorkbenchExecutionControl::untracked);
+        let observed_child = pending.wait.observe_after_resume();
         Self::owned_step_task(
             owned,
             move |_| {
@@ -1459,7 +1460,7 @@ where
                     commands_permitted,
                 ))
             },
-            move |_behavior, _kernel, mut owned, result| {
+            move |behavior, _kernel, mut owned, result| {
                 owned
                     .state
                     .cursor
@@ -1495,7 +1496,12 @@ where
                     .as_mut()
                     .expect("same effect fragment");
                 match result.outcome {
-                    Ok(outcome) => current.outcome = Some(outcome),
+                    Ok(outcome) => {
+                        if let Some(child) = observed_child {
+                            behavior.record_child_observation(child);
+                        }
+                        current.outcome = Some(outcome);
+                    }
                     Err(error) => current.resume_failure = Some(error),
                 }
                 Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
@@ -1762,6 +1768,30 @@ where
     O: OutputSink + Sync + 'static,
 {
     let result = match wait {
+        OwnedWorkbenchWait::Exit {
+            continuation,
+            terminal,
+        } => {
+            terminal_wait::await_exit(
+                environment,
+                kernel,
+                context,
+                control,
+                continuation,
+                terminal,
+            )
+            .await
+        }
+        OwnedWorkbenchWait::PollExit {
+            continuation,
+            terminal,
+            ..
+        } => {
+            environment
+                .runner
+                .resume_optional_terminal(context, continuation, terminal)
+                .await
+        }
         OwnedWorkbenchWait::Watch(poll) => {
             request_wait::await_watch(environment, kernel, context, control, poll).await
         }
