@@ -30,7 +30,7 @@ pub(super) struct TestCampaign {
     pub config: ActorHostConfig,
     pub _repository: exomonad_worktree::testing::TestRepo,
     pub _runtime: tempfile::TempDir,
-    pub session_root: tempfile::TempDir,
+    pub session_root: Arc<tempfile::TempDir>,
     pub worktrees: WorktreeManager,
     pub bindings: Arc<Mutex<BindingTable>>,
     pub authority: ActorWorktreeAuthority,
