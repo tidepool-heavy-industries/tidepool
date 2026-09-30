@@ -895,6 +895,10 @@ struct PendingWorkbench {
 }
 
 enum WorkbenchTaskOutcome<B> {
+    Rejoined {
+        behavior: B,
+        completion: OwnedWorkbenchCompletion<B>,
+    },
     Returned {
         behavior: B,
         result: Result<
@@ -1699,20 +1703,44 @@ fn spawn_workbench_task<B: KernelBehavior>(
         .clone();
     let myself = myself.clone();
     let worker = match dispatch {
-        WorkbenchDispatch::Owned(task) => tokio::spawn(
-            async move {
-                match std::panic::AssertUnwindSafe(task.into_future())
-                    .catch_unwind()
-                    .await
-                {
-                    Ok(completion) => WorkbenchTaskOutcome::Owned(completion),
-                    Err(_) => {
-                        WorkbenchTaskOutcome::Lost("execution-owned workbench task panicked".into())
+        WorkbenchDispatch::Owned(task) => match task.into_execution() {
+            workbench_step::WorkbenchTaskExecution::Owned(run) => tokio::spawn(
+                async move {
+                    match std::panic::AssertUnwindSafe(run).catch_unwind().await {
+                        Ok(completion) => WorkbenchTaskOutcome::Owned(completion),
+                        Err(_) => WorkbenchTaskOutcome::Lost(
+                            "execution-owned workbench task panicked".into(),
+                        ),
                     }
                 }
+                .instrument(tracing::Span::current()),
+            ),
+            workbench_step::WorkbenchTaskExecution::Serial(run) => {
+                let context = Arc::clone(&state.context);
+                let behavior = state
+                    .behavior
+                    .0
+                    .take()
+                    .expect("one serial workbench continuation");
+                tokio::spawn(
+                    async move {
+                        match std::panic::AssertUnwindSafe(run(behavior, context))
+                            .catch_unwind()
+                            .await
+                        {
+                            Ok((behavior, completion)) => WorkbenchTaskOutcome::Rejoined {
+                                behavior,
+                                completion,
+                            },
+                            Err(_) => WorkbenchTaskOutcome::Lost(
+                                "serial workbench continuation panicked".into(),
+                            ),
+                        }
+                    }
+                    .instrument(tracing::Span::current()),
+                )
             }
-            .instrument(tracing::Span::current()),
-        ),
+        },
         WorkbenchDispatch::Sequential {
             invocation,
             control,
@@ -1783,7 +1811,20 @@ async fn complete_workbench<B: KernelBehavior>(
             return;
         }
     };
+    let outcome = match outcome {
+        WorkbenchTaskOutcome::Rejoined {
+            behavior,
+            completion,
+        } => {
+            state.behavior.0 = Some(behavior);
+            WorkbenchTaskOutcome::Owned(completion)
+        }
+        outcome => outcome,
+    };
     match outcome {
+        WorkbenchTaskOutcome::Rejoined { .. } => {
+            unreachable!("serial owner rejoined before advancement")
+        }
         WorkbenchTaskOutcome::Owned(completion) => {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 completion.finish(&mut state.behavior, &state.context)

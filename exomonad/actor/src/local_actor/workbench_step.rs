@@ -9,31 +9,70 @@ use super::{KernelContext, KernelInvocationFailure, KernelStep};
 /// finalizer, so actor-owned state is changed only by the matching mailbox
 /// completion after the step key has been checked.
 pub struct OwnedWorkbenchTask<B> {
-    run: BoxFuture<'static, OwnedWorkbenchCompletion<B>>,
+    run: WorkbenchTaskExecution<B>,
     abandon_guard: Option<WorkbenchAbandonGuard>,
+}
+
+pub(super) enum WorkbenchTaskExecution<B> {
+    Owned(BoxFuture<'static, OwnedWorkbenchCompletion<B>>),
+    /// Temporary transfer for handlers still using the existing serial driver.
+    /// It resumes the retained cursor; it cannot admit an invocation again.
+    Serial(
+        Box<
+            dyn FnOnce(
+                    B,
+                    std::sync::Arc<KernelContext>,
+                ) -> BoxFuture<'static, (B, OwnedWorkbenchCompletion<B>)>
+                + Send,
+        >,
+    ),
 }
 
 impl<B: 'static> OwnedWorkbenchTask<B> {
     pub fn new(run: BoxFuture<'static, OwnedWorkbenchCompletion<B>>) -> Self {
         Self {
-            run,
+            run: WorkbenchTaskExecution::Owned(run),
             abandon_guard: None,
         }
     }
 
-    pub(super) fn into_future(self) -> BoxFuture<'static, OwnedWorkbenchCompletion<B>> {
-        Box::pin(async move {
-            let guard = self.abandon_guard;
-            let mut completion = self.run.await;
-            if let Some(guard) = guard {
-                assert!(
-                    completion.abandon_guard.is_none(),
-                    "one workbench cleanup owner"
-                );
-                completion.abandon_guard = Some(guard);
+    pub(crate) fn serial(
+        run: impl FnOnce(
+                B,
+                std::sync::Arc<KernelContext>,
+            ) -> BoxFuture<'static, (B, OwnedWorkbenchCompletion<B>)>
+            + Send
+            + 'static,
+    ) -> Self {
+        Self {
+            run: WorkbenchTaskExecution::Serial(Box::new(run)),
+            abandon_guard: None,
+        }
+    }
+
+    pub(super) fn into_execution(self) -> WorkbenchTaskExecution<B>
+    where
+        B: Send,
+    {
+        let guard = self.abandon_guard;
+        match self.run {
+            WorkbenchTaskExecution::Owned(run) => {
+                WorkbenchTaskExecution::Owned(Box::pin(async move {
+                    let mut completion = run.await;
+                    completion.inherit_guard(guard);
+                    completion
+                }))
             }
-            completion
-        })
+            WorkbenchTaskExecution::Serial(run) => {
+                WorkbenchTaskExecution::Serial(Box::new(move |behavior, context| {
+                    Box::pin(async move {
+                        let (behavior, mut completion) = run(behavior, context).await;
+                        completion.inherit_guard(guard);
+                        (behavior, completion)
+                    })
+                }))
+            }
+        }
     }
 }
 
@@ -96,6 +135,12 @@ pub struct OwnedWorkbenchCompletion<B> {
 }
 
 impl<B> OwnedWorkbenchCompletion<B> {
+    fn inherit_guard(&mut self, guard: Option<WorkbenchAbandonGuard>) {
+        if let Some(guard) = guard {
+            assert!(self.abandon_guard.is_none(), "one workbench cleanup owner");
+            self.abandon_guard = Some(guard);
+        }
+    }
     pub fn new(
         finish: impl FnOnce(&mut B) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>
             + Send

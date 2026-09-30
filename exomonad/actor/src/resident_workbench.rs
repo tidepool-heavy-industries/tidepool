@@ -1021,7 +1021,7 @@ impl ParkedHoleAbortGuard {
         }
     }
 
-    fn registration(&self) -> ParkedHoleAbortRegistration {
+    pub(crate) fn registration(&self) -> ParkedHoleAbortRegistration {
         ParkedHoleAbortRegistration(Arc::clone(&self.shared))
     }
 
@@ -1064,6 +1064,14 @@ impl Clone for ParkedHoleAbortRegistration {
 }
 
 impl ParkedHoleAbortRegistration {
+    pub(crate) async fn scope<F: std::future::Future>(&self, operation: F) -> F::Output {
+        SLOT_CONTINUATION_OWNER.scope(self.clone(), operation).await
+    }
+
+    pub(crate) fn sync_scope<T>(&self, operation: impl FnOnce() -> T) -> T {
+        SLOT_CONTINUATION_OWNER.sync_scope(self.clone(), operation)
+    }
+
     fn observe(&self, event: ResidentContinuationEvent) {
         let abort = {
             let mut state = self.0.state.lock();
@@ -2958,6 +2966,14 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    pub(crate) fn continuation_cleanup_owner(
+        &self,
+        context: crate::ActorSessionContext,
+        reason: String,
+    ) -> ParkedHoleAbortGuard {
+        ParkedHoleAbortGuard::with_latest(&self.access, context, None, reason)
+    }
+
     pub(crate) async fn with_exact_continuation_cleanup<T>(
         &self,
         context: crate::ActorSessionContext,

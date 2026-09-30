@@ -1,9 +1,9 @@
 //! One INFO line per hosted tool call or Haskell cell, breaking down where
 //! its wall time went.
 //!
-//! The call/cell entry point (`ResidentKernelBehavior::workbench` in
-//! `resident_actor.rs`) opens a [`CallScope`] and runs the whole call inside
-//! it. Every site downstream that spends wall time on the caller's behalf —
+//! Admission opens one [`CallScope`]. Its registration scopes every owned
+//! successor and synchronous actor advance into the same totals. Every site
+//! downstream that spends wall time on the caller's behalf —
 //! `resident_workbench.rs`'s resident-machine checkout wait/hold and its
 //! off-checkout GHC compile calls, the `Jev` effect handler, the command
 //! effect handler — adds to the open scope with a one-line call
@@ -15,8 +15,7 @@
 //! hosted call or cell) is a harmless no-op.
 //!
 //! `CallScope::finish` emits the single summary line when the call settles,
-//! however it settles (`?`-propagated error included, since a scope wraps
-//! the whole call future with `run` and the caller still owns `finish`).
+//! however it settles; the execution retains its single `finish` owner.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -99,7 +98,23 @@ pub struct CallScope {
     totals: Arc<Totals>,
 }
 
+#[derive(Clone)]
+pub(crate) struct CallTimingRegistration(Arc<Totals>);
+
+impl CallTimingRegistration {
+    pub(crate) async fn scope<F: Future>(&self, body: F) -> F::Output {
+        CURRENT.scope(Arc::clone(&self.0), body).await
+    }
+
+    pub(crate) fn sync_scope<T>(&self, body: impl FnOnce() -> T) -> T {
+        CURRENT.sync_scope(Arc::clone(&self.0), body)
+    }
+}
+
 impl CallScope {
+    pub(crate) fn registration(&self) -> CallTimingRegistration {
+        CallTimingRegistration(Arc::clone(&self.totals))
+    }
     /// `kind` names the call: a hosted tool's name, or `"cell"` for a
     /// Haskell cell.
     pub fn new(kind: impl Into<String>, actor_id: u64, incarnation: u64) -> Self {
@@ -177,5 +192,35 @@ mod tests {
         assert_eq!(scope.totals.jev_count.load(Ordering::Relaxed), 2);
         assert_eq!(scope.totals.exec_ms.load(Ordering::Relaxed), 50);
         assert_eq!(scope.totals.compile_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn successor_tasks_and_synchronous_joins_share_only_their_execution_totals() {
+        let first = CallScope::new("cell", 1, 1);
+        let second = CallScope::new("cell", 2, 1);
+        let registration = first.registration();
+        let successor = registration.clone();
+        tokio::spawn(async move {
+            successor
+                .scope(async {
+                    add_checkout_wait_ms(13);
+                    timed_compile(async {}).await;
+                })
+                .await;
+        })
+        .await
+        .expect("owned successor");
+        registration.sync_scope(|| add_checkout_hold_ms(17));
+        second
+            .run(async {
+                add_checkout_wait_ms(23);
+            })
+            .await;
+        add_checkout_wait_ms(29);
+        assert_eq!(first.totals.checkout_wait_ms.load(Ordering::Relaxed), 13);
+        assert_eq!(first.totals.checkout_hold_ms.load(Ordering::Relaxed), 17);
+        assert_eq!(first.compile_count(), 1);
+        assert_eq!(second.totals.checkout_wait_ms.load(Ordering::Relaxed), 23);
+        assert_eq!(second.compile_count(), 0);
     }
 }
