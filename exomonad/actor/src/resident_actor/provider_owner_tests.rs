@@ -25,15 +25,26 @@ fn forest() -> (Forest, tempfile::TempDir) {
 }
 
 async fn path_workbench(forest: &Forest, policy: crate::ActorPersistencePolicy) -> LocalActorRef {
+    workbench_with_parent(forest, policy, None).await
+}
+
+async fn workbench_with_parent(
+    forest: &Forest,
+    policy: crate::ActorPersistencePolicy,
+    parent: Option<ActorRef>,
+) -> LocalActorRef {
     let placement = forest
         .environment
         .runner
         .provision_root_scope(forest.session)
         .await
         .expect("actual root placement");
-    let descriptor = ActorDescriptor::new("owner fixture", placement)
+    let mut descriptor = ActorDescriptor::new("owner fixture", placement)
         .with_actor_path(crate::ActorPath::parse("root").expect("canonical root"))
         .with_persistence_policy(policy);
+    if let Some(parent) = parent {
+        descriptor = descriptor.with_creator(parent);
+    }
     let behavior = ResidentKernelBehavior::with_boot(
         descriptor,
         forest.environment.clone(),
@@ -133,4 +144,30 @@ async fn provider_admission_is_bound_to_the_original_forest_owner() {
     assert!(!Arc::ptr_eq(&admission.owner, &other.owner));
     forest_a.shutdown().await;
     forest_b.shutdown().await;
+}
+
+#[tokio::test]
+async fn unscoped_program_child_of_durable_actor_cannot_gain_provider_attachment() {
+    let (forest, _root) = forest();
+    let parent = path_workbench(&forest, crate::ActorPersistencePolicy::Durable).await;
+    let child = workbench_with_parent(
+        &forest,
+        crate::ActorPersistencePolicy::Ephemeral,
+        Some(parent.identity()),
+    )
+    .await;
+    assert!(forest
+        .authorize_provider_attachment(child.identity())
+        .is_err());
+    // The program's own ephemeral plane remains valid for provider-free work;
+    // attachment alone must not fabricate a durable path or inherited owner.
+    let records = forest.environment.actors.lock();
+    assert!(records[&child.identity()]
+        .public_owner
+        .ready()
+        .unwrap()
+        .durable()
+        .is_none());
+    drop(records);
+    forest.shutdown().await;
 }

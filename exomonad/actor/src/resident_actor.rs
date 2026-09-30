@@ -10457,6 +10457,7 @@ where
         actor: ActorRef,
     ) -> Result<Arc<ActorProviderAdmission>, ResidentActorWorkbenchError> {
         let records = self.environment.actors.lock();
+        Self::validate_provider_lineage(actor, &records)?;
         let owner = records
             .get(&actor)
             .and_then(|record| record.public_owner.ready())
@@ -10493,6 +10494,7 @@ where
             return Err(refuse());
         }
         let records = self.environment.actors.lock();
+        Self::validate_provider_lineage(actor, &records)?;
         let record = records.get(&actor).ok_or_else(refuse)?;
         if record.terminal.is_some()
             || record.descriptor.placement() != context.placement
@@ -10502,6 +10504,31 @@ where
                 .is_none_or(|owner| !Arc::ptr_eq(owner, &admission.owner))
         {
             return Err(refuse());
+        }
+        Ok(())
+    }
+
+    fn validate_provider_lineage(
+        actor: ActorRef,
+        records: &std::collections::HashMap<ActorRef, ResidentActorRecord>,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        let record = records.get(&actor).ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "provider actor has no registered lineage admission".into(),
+            )
+        })?;
+        if record.descriptor.persistence_policy() == crate::ActorPersistencePolicy::Ephemeral
+            && record.descriptor.fork_group().is_none()
+            && record.descriptor.creator().is_some_and(|parent| {
+                records.get(&parent).is_none_or(|parent| {
+                    parent.descriptor.persistence_policy() == crate::ActorPersistencePolicy::Durable
+                })
+            })
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "provider child requires explicit durable lineage admission before attachment"
+                    .into(),
+            ));
         }
         Ok(())
     }
