@@ -1,1 +1,6 @@
-buildscript.run = true
+[buildscript.run]
+rustc_link_lib = true
+rustc_link_search = true
+
+[buildscript.run.env]
+DEP_AWS_LC_0_44_0_INCLUDE = "$(location :aws-lc-sys-0.44-build-script-main-run[out_dir])/include"

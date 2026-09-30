@@ -752,11 +752,14 @@ tidepool_buildscript_run(
         "CARGO_PKG_VERSION_MINOR": "18",
         "CARGO_PKG_VERSION_PATCH": "0",
         "CARGO_PKG_VERSION_PRE": "",
+        "DEP_AWS_LC_0_44_0_INCLUDE": "$(location :aws-lc-sys-0.44-build-script-main-run[out_dir])/include",
     },
     features = [
         "aws-lc-sys",
         "prebuilt-nasm",
     ],
+    rustc_link_lib = True,
+    rustc_link_search = True,
     version = "1.18.0",
 )
 
