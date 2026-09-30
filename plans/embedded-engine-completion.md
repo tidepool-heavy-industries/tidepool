@@ -480,3 +480,44 @@ An investigation of replacing an already-linked quasiquoter observed retained
 old compile-time behavior in the evidence probe. A fresh-module negative fixture
 now proves dependent-file refusal; changed-result hot-reload semantics remain an
 unconfirmed finding requiring an independent test, not a claimed repair.
+
+### 2026-09-30 authoritative snapshots and joined harness checkpoint
+
+Compiler `2f135b37e` adds typed class/associated-family inventories and v3 wire
+goldens; `048dfc9cf` resolves exact hidden package globals through the existing
+package witness owner and retains failed compiler evidence. Runtime `1e8dfe092`
+makes visibility snapshots uniformly authoritative, including hidden bindings
+and machine incarnation. Model-facing binding filtering remains separate.
+Joined engine `feb87b0d34` passes 12 runtime publication/scope tests and seven
+declaration protocol tests. This includes real normal/display stale-install
+refusal after hidden bindings change. Exact multi-turn context hydration and
+paired declaration publication remain in progress.
+
+Harness `763d38d57691da31d2bf3c3c7493ca9910067540` joins durable output
+acknowledgment, settlement during stalled provider streams, cancellation head
+retention, addressed browser commands, atomic host projection, and bounded
+handoff receipts. Its library runs 214 passing tests (two ignored), and all
+workspace targets compile. Matching web sources pass 30 tests, typechecking,
+and production build. Receipts distinguish admission/control requests from
+completion and retain at most 128 entries across live events and reconnects.
+The application pin and immutable packaged asset pin are still being joined;
+these checks do not establish full browser/application acceptance.
+
+Native Buck `bca12b1e2` builds the Rust compiler frontend and Haskell worker as
+separate declared inputs. Isolated test execution passes 104 extractor-command
+and 108 toolchain cases (two ignored), with 20 generator tests passing under
+the pinned toolchain. Buck reports 146 local commands and no cache hits for this
+gate; this is not warm-cache evidence. Codex remains excluded from Buck.
+
+The embedded-only feature boundary is committed at `53ba06d015`: default and
+no-default targets compile and five boundary tests pass. Its old-pin production
+test times out during a held provider round; it must be rerun with the joined
+harness and host acknowledgment wiring. Capture/child, browser routing, and
+awaitWatch application gates remain open. The watch fixture investigation also
+showed that expression fallback can obscure the original effectful type error;
+retain this diagnostic-quality issue for compiler follow-up.
+
+Logs are retained under `target/completion-evidence/accepted-20260930/`.
+Source/WIP snapshots are under
+`target/completion-evidence/active-wip/20260930T012142Z`. No provider trial,
+backend-default change, or remote publication occurred at this checkpoint.
