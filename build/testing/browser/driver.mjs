@@ -114,6 +114,35 @@ async function runJourney(ready) {
   const context = await browser.newContext();
   const page = await context.newPage();
   page.setDefaultTimeout(30_000);
+  const hostOperations = [];
+  const hostOperationWaiters = [];
+  page.on('websocket', (socket) => socket.on('framesent', ({ payload }) => {
+    if (typeof payload !== 'string') return;
+    let frame;
+    try { frame = JSON.parse(payload); } catch { return; }
+    if (frame.type !== 'host_command') return;
+    hostOperations.push(frame);
+    for (let index = hostOperationWaiters.length - 1; index >= 0; index -= 1) {
+      const waiter = hostOperationWaiters[index];
+      if (hostOperations.length < waiter.count) continue;
+      hostOperationWaiters.splice(index, 1);
+      clearTimeout(waiter.timer);
+      waiter.resolve();
+    }
+  }));
+  const waitForHostOperations = (count, timeoutMs = 15_000) => {
+    if (hostOperations.length >= count) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const waiter = { count, resolve, reject, timer: undefined };
+      waiter.timer = setTimeout(() => {
+        const index = hostOperationWaiters.indexOf(waiter);
+        if (index >= 0) hostOperationWaiters.splice(index, 1);
+        reject(new Error('browser operation did not reach the host socket'));
+      }, timeoutMs);
+      hostOperationWaiters.push(waiter);
+    });
+  };
+  let lastOperation;
   try {
     await signIn(page, { baseUrl, value: sessionSecret });
     const sessionCookie = (await context.cookies(baseUrl)).find((cookie) => cookie.name === 'harness_session');
@@ -131,7 +160,18 @@ async function runJourney(ready) {
     for (const step of scenario.steps) {
       if (step.action === 'input') {
         const text = requireString(step.text, 'scenario input text');
+        const sentBeforeInput = hostOperations.length;
         await sendHostInput(page, text);
+        const retained = await page.evaluate(() => JSON.parse(sessionStorage.getItem('harness.embeddedCommands.v1') ?? '[]'));
+        lastOperation = [...retained].reverse().find((record) => record?.submission?.command?.action === 'input' && record.submission.command.text === text)?.submission;
+        if (!lastOperation || typeof lastOperation.operation_id !== 'string') {
+          throw new Error('submitted browser input was not retained with an operation ID');
+        }
+        await waitForHostOperations(sentBeforeInput + 1);
+        const sent = hostOperations.find((operation) => operation.operation_id === lastOperation.operation_id);
+        if (!sent || JSON.stringify(sent.command) !== JSON.stringify(lastOperation.command)) {
+          throw new Error('browser did not send the exact retained host operation');
+        }
         const barriers = step.provider_barriers ?? [{ phase: step.barrier, expected_request_text: text }];
         if (!Array.isArray(barriers) || barriers.length === 0) throw new Error('input step must declare provider barriers');
         for (const barrier of barriers) {
@@ -157,10 +197,25 @@ async function runJourney(ready) {
         await page.getByText('Retire requested').last().waitFor({ timeout: 30_000 });
         await page.getByText('retired', { exact: true }).last().waitFor({ timeout: 60_000 });
       } else if (step.action === 'reload') {
+        const sentBeforeReload = hostOperations.length;
         await page.reload({ waitUntil: 'domcontentloaded' });
         await page.getByRole('status', { name: 'Session authenticated' }).waitFor({ timeout: 30_000 });
         await page.getByRole('heading', { name: 'Tree' }).waitFor({ timeout: 30_000 });
         await selectHostActor(page, actor);
+        if (step.expect_no_replay !== false && hostOperations.length !== sentBeforeReload) {
+          throw new Error('reconnect replayed a retained browser operation automatically');
+        }
+      } else if (step.action === 'retry') {
+        if (!lastOperation) throw new Error('retry step has no earlier retained browser operation');
+        const operation = page.locator(`[data-operation-id="${lastOperation.operation_id}"]`);
+        await operation.waitFor({ timeout: 30_000 });
+        const before = hostOperations.length;
+        await operation.getByRole('button', { name: 'Retry same operation' }).click();
+        await waitForHostOperations(before + 1);
+        const retried = hostOperations.at(-1);
+        if (retried?.operation_id !== lastOperation.operation_id || JSON.stringify(retried.command) !== JSON.stringify(lastOperation.command)) {
+          throw new Error('explicit retry changed the retained operation ID or command');
+        }
       } else {
         throw new Error('scenario contains an unsupported browser action');
       }
