@@ -1857,14 +1857,14 @@ impl SessionLib {
             || !staged.import_modules.is_empty()
             || !staged.inject_modules.is_empty()
             || !staged.visible_values.is_empty()
-            || !certified.instances.classes.is_empty()
-            || !certified.instances.families.is_empty()
-            || !certified.family_closure.is_empty()
+            || !certified.instances().classes.is_empty()
+            || !certified.instances().families.is_empty()
+            || !certified.family_closure().is_empty()
         {
             return Err(invalid("authored recovery evidence has unsupported ancestry, live, or instance dependencies"));
         }
-        if certified.product.source_sha256() != Some(certified.source_sha256)
-            || certified.product.owner().module != staged.module.module_name()
+        if certified.product().source_sha256() != Some(certified.source_sha256())
+            || certified.product().owner().module != staged.module.module_name()
         {
             return Err(invalid(
                 "authored recovery product does not match validated source",
@@ -1876,11 +1876,11 @@ impl SessionLib {
             .ok_or_else(|| invalid("recovery manifest has no parent"))?;
         let refs = tidepool_toolchain::recovery_artifacts::materialize_certified_products(
             root,
-            certified.toolchain_identity_sha256,
-            &certified.recovery_products,
+            certified.toolchain_identity_sha256(),
+            certified.recovery_products(),
         )
         .map_err(|error| invalid(&error.to_string()))?;
-        let own = certified.product.owner();
+        let own = certified.product().owner();
         if refs
             .iter()
             .filter(|reference| {
@@ -1897,7 +1897,7 @@ impl SessionLib {
                 "authored recovery closure lacks its exact declaration owner",
             ));
         }
-        if certified.exports.iter().any(|export| {
+        if certified.introduced_exports().iter().any(|export| {
             export.head.unit != own.unit
                 || export.head.module != own.module
                 || export
@@ -1910,7 +1910,7 @@ impl SessionLib {
             ));
         }
         let exports = certified
-            .exports
+            .introduced_exports()
             .iter()
             .map(|export| {
                 Ok(recovery::RecoveryExport {

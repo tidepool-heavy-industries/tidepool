@@ -264,7 +264,7 @@ impl PersistentSession {
     /// into this lexical scope. Rejection returns every original token so the
     /// installing checkout can release all roots and retire its unpublished
     /// candidates without a partially visible source instance.
-    pub fn register_source_instances_in(
+    fn register_source_instances_in(
         &mut self,
         scope: ScopeId,
         tokens: Vec<SourceInstanceLease>,

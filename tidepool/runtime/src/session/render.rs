@@ -277,7 +277,7 @@ impl DeclLog {
         turn: DeclTurn,
         evidence: tidepool_toolchain::declaration_join::CertifiedAuthoredDeclaration,
     ) -> bool {
-        if evidence.product.owner().module != SessionModule::lib(generation).module_name()
+        if evidence.product().owner().module != SessionModule::lib(generation).module_name()
             || !self.commit_reserved_authored(generation, turn.clone())
         {
             return false;
