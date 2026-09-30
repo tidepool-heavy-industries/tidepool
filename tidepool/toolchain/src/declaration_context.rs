@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::certified_products::{
-    certify_inherited_products_with_validation, InheritedProductInput, PendingCertifiedGroup,
+    certify_inherited_products, certify_inherited_products_with_validation, InheritedProductInput,
+    PendingCertifiedGroup,
 };
 use crate::declaration_join::{
     AcceptedJoin, CertifiedAuthoredDeclaration, DeclarationArtifact, ExactIfaceArtifact,
@@ -794,24 +795,6 @@ impl ExactDeclarationContext {
             },
             references,
         ))
-    }
-
-    pub(crate) fn inherited_groups(
-        &self,
-        root: &Path,
-    ) -> Result<Vec<PendingCertifiedGroup>, CompileError> {
-        if self.products.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut validation = PackageInterfaceValidation::default();
-        let references = recovery_artifacts::materialize_certified_products_with_validation(
-            root,
-            self.producer,
-            &self.products,
-            &mut validation,
-        )
-        .map_err(failure)?;
-        self.materialized_groups(root, &references, &mut validation)
     }
 
     fn materialized_groups(
