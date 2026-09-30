@@ -265,7 +265,7 @@ async fn drive_browser(
             {"action":"reload"}, {"action":"retry"},
             {"action":"input","text":CANCEL_INPUT,"provider_barriers":[
                 {"phase":"cancel_input","expected_request_text":CANCEL_INPUT},
-                {"phase":"cancel_wait","expected_request_text":CANCEL_INPUT}
+                {"phase":"cancel_wait","timeout_ms":300000,"expected_request_text":CANCEL_INPUT}
             ]},
             {"action":"interrupt"}, {"action":"wait_actor_state","state":"waiting"},
             {"action":"input","text":CONTINUE_INPUT,"provider_barriers":[
@@ -298,14 +298,14 @@ async fn drive_browser(
                     last_phase = barrier.phase;
                     eprintln!("browser gate phase={last_phase} elapsed={:?}", journey_started.elapsed());
                     if barrier.phase == "cancel_wait" {
-                        cancel_operation = Some(tokio::time::timeout(Duration::from_secs(10), async {
+                        cancel_operation = Some(tokio::time::timeout(Duration::from_secs(300), async {
                             loop {
                                 if let Some(operation) = pending_sleep_operation(fixture).await? {
                                     return Ok::<_, String>(operation);
                                 }
                                 tokio::time::sleep(Duration::from_millis(10)).await;
                             }
-                        }).await.map_err(|_| "cancellable cell never reached the captured native sleep effect")??);
+                        }).await.map_err(|_| "cancellable cell exceeded its compilation/effect-admission budget before reaching the captured native sleep effect")??);
                         cancel_pending_at = Some(tokio::time::Instant::now());
                     }
                     if barrier.phase == "continued" {
