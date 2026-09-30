@@ -4525,11 +4525,14 @@ async fn run_interactive_applications(
                     tracing::warn!(?actor, "embedded child attachment has no notification owner");
                     continue;
                 };
-                if !binding.is_live() || binding.identity() != conversation.identity() {
+                if !binding.is_live() {
                     tracing::warn!(?actor, "embedded child attachment identity is no longer admitted");
                     continue;
                 }
-                binding.set_conversation(Arc::clone(&conversation));
+                if let Err(error) = binding.set_conversation(Arc::clone(&conversation)) {
+                    tracing::warn!(?actor, ?error, "embedded child attachment was not accepted");
+                    continue;
+                }
                 schedule_embedded_notification_drain(actor, binding.clone(), &mut notifications);
                 let mut activation_error = None;
                 for activation in activations {
@@ -4779,17 +4782,28 @@ async fn run_interactive_applications(
                                 )),
                             };
                             let root_conversation = Arc::clone(&embedded.conversation);
-                            embedded_projection
-                                .attached(actor, root_conversation.identity());
                             let binding = embedded_conversations
                                 .get_mut(&actor)
                                 .expect("embedded notification owner was opened before attach");
-                            assert_eq!(
-                                binding.identity(),
-                                root_conversation.identity(),
-                                "embedded binding must match the attached host identity"
-                            );
-                            binding.set_conversation(Arc::clone(&root_conversation));
+                            let Ok(attachment_admission) = local_actor.admit_transaction() else {
+                                binding.mark_retired();
+                                embedded.cancellation.send_replace(true);
+                                continue;
+                            };
+                            match binding.set_conversation(Arc::clone(&root_conversation)) {
+                                Ok(()) => {}
+                                Err(embedded_harness::ConversationAttachError::Retired) => {
+                                    embedded.cancellation.send_replace(true);
+                                    continue;
+                                }
+                                Err(embedded_harness::ConversationAttachError::IdentityMismatch) => {
+                                    break Some(format!(
+                                        "embedded conversation identity does not match actor {actor:?}"
+                                    ));
+                                }
+                            }
+                            embedded_projection
+                                .attached(actor, root_conversation.identity());
                             if let Some(binding) = embedded_conversations.get(&actor).cloned() {
                                 schedule_embedded_notification_drain(
                                     actor,
@@ -4878,6 +4892,7 @@ async fn run_interactive_applications(
                                     })
                                     .ok();
                             }
+                            drop(attachment_admission);
                             continue;
                         }
                         #[cfg(feature = "codex-compat")]

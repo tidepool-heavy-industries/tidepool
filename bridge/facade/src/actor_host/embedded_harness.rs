@@ -243,6 +243,12 @@ pub(super) struct EmbeddedActorBinding {
     live: Arc<AtomicBool>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ConversationAttachError {
+    Retired,
+    IdentityMismatch,
+}
+
 impl EmbeddedActorBinding {
     pub(super) fn new(
         identity: HostIdentity,
@@ -269,11 +275,12 @@ impl EmbeddedActorBinding {
     }
 
     pub(super) fn mark_retired(&self) {
-        self.live.store(false, Ordering::Release);
-        self.conversation
+        let mut conversation = self
+            .conversation
             .lock()
-            .expect("embedded conversation lock poisoned")
-            .take();
+            .expect("embedded conversation lock poisoned");
+        self.live.store(false, Ordering::Release);
+        conversation.take();
     }
 
     pub(super) fn conversation(&self) -> Option<Arc<Conversation>> {
@@ -283,16 +290,27 @@ impl EmbeddedActorBinding {
             .clone()
     }
 
-    pub(super) fn set_conversation(&self, conversation: Arc<Conversation>) {
+    pub(super) fn set_conversation(
+        &self,
+        conversation: Arc<Conversation>,
+    ) -> Result<(), ConversationAttachError> {
+        let mut current = self
+            .conversation
+            .lock()
+            .expect("embedded conversation lock poisoned");
+        if !self.is_live() {
+            return Err(ConversationAttachError::Retired);
+        }
+        if conversation.identity() != &self.identity {
+            return Err(ConversationAttachError::IdentityMismatch);
+        }
         *self
             .observer
             .lock()
             .expect("embedded observer lock poisoned") =
             Some(Arc::new(conversation.input_observer()));
-        *self
-            .conversation
-            .lock()
-            .expect("embedded conversation lock poisoned") = Some(conversation);
+        *current = Some(conversation);
+        Ok(())
     }
 
     pub(super) fn input_observer(&self) -> Option<Arc<harness::embedding::InputObserver>> {

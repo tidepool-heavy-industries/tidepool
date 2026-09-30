@@ -229,6 +229,19 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
         Some(conversation.clone()),
     )
     .unwrap();
+    assert_eq!(binding.set_conversation(Arc::clone(&conversation)), Ok(()));
+    let mut wrong_identity = conversation.identity().clone();
+    wrong_identity.actor = harness::model::AgentPath("/different".into());
+    let wrong_binding = embedded_harness::EmbeddedActorBinding::new(
+        wrong_identity,
+        Arc::clone(&binding.inbox),
+        binding.inbox_key.clone(),
+        None,
+    );
+    assert_eq!(
+        wrong_binding.set_conversation(Arc::clone(&conversation)),
+        Err(embedded_harness::ConversationAttachError::IdentityMismatch)
+    );
     let (lifecycle, _lifecycle_rx) = super::embedded_projection::LifecycleSender::channel();
     let runtime = Arc::clone(&service.runtime);
     let engine_settings = settings.clone();
@@ -351,9 +364,14 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
         .unwrap()
         .unwrap();
     assert!(matches!(engine_result, Err(ref error) if error == "engine cancelled"));
+    let binding_alias = binding.clone();
     binding.mark_retired();
-    assert!(binding.conversation().is_none());
-    let observer = binding
+    assert!(binding_alias.conversation().is_none());
+    assert_eq!(
+        binding_alias.set_conversation(Arc::clone(&conversation)),
+        Err(embedded_harness::ConversationAttachError::Retired)
+    );
+    let observer = binding_alias
         .input_observer()
         .expect("retirement keeps read-only observer");
     assert!(matches!(
