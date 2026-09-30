@@ -16,6 +16,7 @@ ROOT_NAMES = (
     "tidepool-atomic-write", "tidepool-repr", "tidepool-heap",
     "tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen",
     "tidepool-extract-cmd", "tidepool-extract-report", "tidepool-toolchain",
+    "tidepool-bridge-derive", "tidepool-runtime",
 )
 
 
@@ -73,7 +74,8 @@ print(open(os.environ['FAKE_METADATA']).read())
             "blake3": "1.8.2", "serde": "1.0.228",
             "proptest": "1.11.0", "num-bigint": "0.4.8", "serde_json": "1.0.151",
             "chrono": "0.4.45", "libc": "0.2.189", "frunk": "0.5.0",
-            "serial_test": "3.2.0",
+            "serial_test": "3.2.0", "syn": "2.0.0", "quote": "1.0.0",
+            "proc-macro2": "1.0.0",
             "parking_lot": "0.12.5", "cranelift-codegen": "0.129.1",
             "bridge-dev-only": "1.0.0", "effect-dev-only": "1.0.0",
             "cc": "1.0.0", "windows-only": "1.0.0",
@@ -150,6 +152,15 @@ print(open(os.environ['FAKE_METADATA']).read())
                 ("tidepool-repr", None, None, True, []),
                 ("serial_test", "dev", None, True, []),
             ],
+            "tidepool-bridge-derive": [
+                ("syn", None, None, True, ["extra-traits"]),
+                ("quote", None, None, True, []),
+                ("proc-macro2", None, None, True, []),
+            ],
+            "tidepool-runtime": [
+                ("tidepool-toolchain", None, None, True, []),
+                ("thiserror", None, None, True, []),
+            ],
         }
         edges_by_root = {}
         for root_name, deps in declarations.items():
@@ -175,7 +186,7 @@ print(open(os.environ['FAKE_METADATA']).read())
             })
             edges_by_root[root_id] = edges
 
-        for name in ("tidepool-bridge-derive", "tidepool-test-data"):
+        for name in ("tidepool-test-data",):
             packages.append({
                 "id": local_ids[name], "name": name, "version": "0.1.0", "source": None,
                 "manifest_path": f"/fixture/{name}/Cargo.toml", "features": {},

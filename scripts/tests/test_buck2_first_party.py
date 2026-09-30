@@ -66,6 +66,25 @@ class FirstPartySources(unittest.TestCase):
         self.write("tidepool/extract-cmd/Cargo.toml", "[package]\nname = 'tidepool-extract-cmd'\n")
         self.write("tidepool/extract-cmd/src/lib.rs", "pub fn frontend() {}\n")
         self.write("tidepool/extract-cmd/src/main.rs", "fn main() {}\n")
+        self.write("tidepool/bridge-derive/Cargo.toml", "[package]\nname = 'tidepool-bridge-derive'\n")
+        self.write("tidepool/bridge-derive/src/lib.rs", "extern crate proc_macro;\n")
+        self.write("tidepool/runtime/Cargo.toml", "[package]\nname = 'tidepool-runtime'\n")
+        self.write("tidepool/runtime/src/lib.rs",
+                   'const SESSION: &str = include_str!("../../../bridge/haskell/src/Tidepool/Session.hs");\n')
+        self.write("bridge/haskell/src/Tidepool/Session.hs", "module Tidepool.Session where\n")
+        fixtures = (
+            "join-v2.cbor", "join-v2.json", "inventory-v2.cbor", "inventory-v2.json",
+            "join-v3.cbor", "join-v3.json", "join-typed-v3.cbor", "join-typed-v3.json",
+            "inventory-v3.cbor", "inventory-v3.json",
+        )
+        includes = "\n".join(
+            f'const FIXTURE_{index}: &[u8] = include_bytes!("../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/{name}");'
+            for index, name in enumerate(fixtures)
+        )
+        self.write("tidepool/toolchain/Cargo.toml", "[package]\nname = 'tidepool-toolchain'\n")
+        self.write("tidepool/toolchain/src/lib.rs", includes + "\n")
+        for name in fixtures:
+            self.write(f"bridge/haskell/test-cell-splitter/fixtures/declaration-join/{name}", name)
         self.packages = [self.package("tidepool-repr", "tidepool/repr", [
             ("tidepool_repr", "lib", "src/lib.rs"), ("repr", "test", "tests/suites/repr.rs")]),
             self.package("tidepool-atomic-write", "bridge/atomic-write", [
@@ -81,7 +100,13 @@ class FirstPartySources(unittest.TestCase):
                 ("prepared_control", "test", "tests/prepared_control.rs")]),
             self.package("tidepool-extract-cmd", "tidepool/extract-cmd", [
                 ("tidepool_extract_cmd", "lib", "src/lib.rs"),
-                ("tidepool-extract", "bin", "src/main.rs")])]
+                ("tidepool-extract", "bin", "src/main.rs")]),
+            self.package("tidepool-bridge-derive", "tidepool/bridge-derive", [
+                ("tidepool_bridge_derive", "proc-macro", "src/lib.rs")]),
+            self.package("tidepool-runtime", "tidepool/runtime", [
+                ("tidepool_runtime", "lib", "src/lib.rs")]),
+            self.package("tidepool-toolchain", "tidepool/toolchain", [
+                ("tidepool_toolchain", "lib", "src/lib.rs")])]
         self.metadata = self.base / "metadata.json"
         self.metadata.write_text(json.dumps({"packages": self.packages,
             "workspace_members": [package["id"] for package in self.packages],
@@ -108,6 +133,9 @@ class FirstPartySources(unittest.TestCase):
                                "--package", "tidepool-heap",
                                "--package", "tidepool-codegen",
                                "--package", "tidepool-extract-cmd",
+                               "--package", "tidepool-bridge-derive",
+                               "--package", "tidepool-runtime",
+                               "--package", "tidepool-toolchain",
                                *args], cwd=self.root, env=env, capture_output=True, text=True)
 
     def groups(self, path):
@@ -137,6 +165,37 @@ class FirstPartySources(unittest.TestCase):
         self.assertEqual(
             groups["tidepool-extract_sources"]["src/main.rs"],
             "tidepool/extract-cmd/src/main.rs",
+        )
+
+    def test_runtime_and_proc_macro_support_leaf_generate_as_native_library_targets(self):
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        runtime, groups = self.groups("tidepool/runtime")
+        self.assertIn('name = "tidepool_runtime"', runtime)
+        self.assertNotIn("tidepool_runtime_unit_tests", runtime)
+        self.assertNotIn("bridge/haskell/src/Tidepool/Session.hs", groups["tidepool_runtime_sources"].values())
+        derive, _ = self.groups("tidepool/bridge-derive")
+        self.assertIn("proc_macro = True", derive)
+
+    def test_toolchain_unit_target_declares_legacy_and_v3_join_fixtures(self):
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        _, groups = self.groups("tidepool/toolchain")
+        unit = groups["tidepool_toolchain_unit_tests_sources"]
+        self.assertEqual(
+            {source: mapped for source, mapped in unit.items() if source.startswith("//bridge/haskell:declaration_")},
+            {
+                "//bridge/haskell:declaration_join_v2_cbor_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v2.cbor",
+                "//bridge/haskell:declaration_join_v2_json_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v2.json",
+                "//bridge/haskell:declaration_inventory_v2_cbor_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v2.cbor",
+                "//bridge/haskell:declaration_inventory_v2_json_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v2.json",
+                "//bridge/haskell:declaration_join_v3_cbor_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v3.cbor",
+                "//bridge/haskell:declaration_join_v3_json_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v3.json",
+                "//bridge/haskell:declaration_join_typed_v3_cbor_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-typed-v3.cbor",
+                "//bridge/haskell:declaration_join_typed_v3_json_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-typed-v3.json",
+                "//bridge/haskell:declaration_inventory_v3_cbor_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.cbor",
+                "//bridge/haskell:declaration_inventory_v3_json_fixture": "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.json",
+            },
         )
 
     def test_source_tree_preserves_fixture_layout_and_target_inputs(self):

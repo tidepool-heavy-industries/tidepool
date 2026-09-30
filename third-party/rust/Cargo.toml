@@ -20,9 +20,12 @@ path = "empty.rs"
 "frunk" = { package = "frunk", version = "=0.5.0", default-features = true, features = [] }
 "inventory" = { package = "inventory", version = "=0.3.24", default-features = true, features = [] }
 "libc" = { package = "libc", version = "=0.2.189", default-features = true, features = [] }
+"log" = { package = "log", version = "=0.4.33", default-features = true, features = [] }
 "num-bigint" = { package = "num-bigint", version = "=0.4.8", default-features = true, features = [] }
 "parking_lot" = { package = "parking_lot", version = "=0.12.5", default-features = true, features = [] }
+"proc-macro2" = { package = "proc-macro2", version = "=1.0.107", default-features = true, features = [] }
 "proptest" = { package = "proptest", version = "=1.11.0", default-features = true, features = [] }
+"quote" = { package = "quote", version = "=1.0.47", default-features = true, features = [] }
 "recursion" = { package = "recursion", version = "=0.5.4", default-features = true, features = [] }
 "schemars" = { package = "schemars", version = "=1.2.2", default-features = true, features = [] }
 "serde" = { package = "serde", version = "=1.0.229", default-features = true, features = ["derive"] }
@@ -31,9 +34,12 @@ path = "empty.rs"
 "sha2" = { package = "sha2", version = "=0.10.9", default-features = true, features = [] }
 "stacker" = { package = "stacker", version = "=0.1.25", default-features = true, features = [] }
 "static_assertions" = { package = "static_assertions", version = "=1.1.0", default-features = true, features = [] }
+"syn" = { package = "syn", version = "=3.0.3", default-features = true, features = ["extra-traits", "full"] }
 "tempfile" = { package = "tempfile", version = "=3.27.0", default-features = true, features = [] }
 "thiserror" = { package = "thiserror", version = "=2.0.20", default-features = true, features = [] }
+"tokio" = { package = "tokio", version = "=1.53.1", default-features = true, features = ["macros", "rt", "sync", "time"] }
 "tracing" = { package = "tracing", version = "=0.1.44", default-features = true, features = [] }
 "tracing-appender" = { package = "tracing-appender", version = "=0.2.5", default-features = true, features = [] }
 "tracing-subscriber" = { package = "tracing-subscriber", version = "=0.3.23", default-features = true, features = ["env-filter", "json"] }
+"uuid" = { package = "uuid", version = "=1.24.1", default-features = true, features = ["v4"] }
 "which" = { package = "which", version = "=8.0.5", default-features = true, features = [] }

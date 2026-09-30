@@ -31,7 +31,9 @@ EXTRACTOR_LIBRARY_PACKAGES = [
 EXTRACTOR_BINARY_PACKAGES = [
     "ghc",
     "bytestring",
+    "cborg",
     "containers",
+    "cryptohash-sha256",
     "filepath",
     "directory",
     "text",

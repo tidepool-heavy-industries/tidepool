@@ -3644,6 +3644,12 @@ cargo.rust_library(
     deps = [":scopeguard-1"],
 )
 
+alias(
+    name = "log",
+    actual = ":log-0.4",
+    visibility = ["PUBLIC"],
+)
+
 http_archive(
     name = "log-0.4.33.crate",
     sha256 = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad",
@@ -4228,6 +4234,12 @@ cargo.rust_library(
     deps = [":zerocopy-0.8"],
 )
 
+alias(
+    name = "proc-macro2",
+    actual = ":proc-macro2-1",
+    visibility = ["PUBLIC"],
+)
+
 http_archive(
     name = "proc-macro2-1.0.107.crate",
     sha256 = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9",
@@ -4504,6 +4516,12 @@ cargo.rust_library(
         "CARGO_PKG_VERSION_PRE": "",
     },
     visibility = [],
+)
+
+alias(
+    name = "quote",
+    actual = ":quote-1",
+    visibility = ["PUBLIC"],
 )
 
 http_archive(
@@ -6191,6 +6209,12 @@ cargo.rust_library(
     ],
 )
 
+alias(
+    name = "syn",
+    actual = ":syn-3",
+    visibility = ["PUBLIC"],
+)
+
 http_archive(
     name = "syn-3.0.3.crate",
     sha256 = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3",
@@ -6226,6 +6250,8 @@ cargo.rust_library(
         "clone-impls",
         "default",
         "derive",
+        "extra-traits",
+        "full",
         "parsing",
         "printing",
         "proc-macro",
@@ -6625,6 +6651,98 @@ cargo.rust_library(
         "CARGO_PKG_VERSION_PRE": "",
     },
     visibility = [],
+)
+
+alias(
+    name = "tokio",
+    actual = ":tokio-1",
+    visibility = ["PUBLIC"],
+)
+
+http_archive(
+    name = "tokio-1.53.1.crate",
+    sha256 = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed",
+    strip_prefix = "tokio-1.53.1",
+    urls = ["https://static.crates.io/crates/tokio/1.53.1/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "tokio-1",
+    srcs = [":tokio-1.53.1.crate"],
+    crate = "tokio",
+    crate_root = "tokio-1.53.1.crate/src/lib.rs",
+    edition = "2021",
+    env = {
+        "CARGO_BIN_NAME": "tokio",
+        "CARGO_CRATE_NAME": "tokio",
+        "CARGO_MANIFEST_DIR": "tokio-1.53.1.crate",
+        "CARGO_PKG_AUTHORS": "Tokio Contributors <team@tokio.rs>",
+        "CARGO_PKG_DESCRIPTION": "An event-driven, non-blocking I/O platform for writing asynchronous I/O\nbacked applications.\n",
+        "CARGO_PKG_HOMEPAGE": "https://tokio.rs",
+        "CARGO_PKG_NAME": "tokio",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/tokio-rs/tokio",
+        "CARGO_PKG_RUST_VERSION": "1.71",
+        "CARGO_PKG_VERSION": "1.53.1",
+        "CARGO_PKG_VERSION_MAJOR": "1",
+        "CARGO_PKG_VERSION_MINOR": "53",
+        "CARGO_PKG_VERSION_PATCH": "1",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    features = [
+        "default",
+        "macros",
+        "rt",
+        "sync",
+        "time",
+        "tokio-macros",
+    ],
+    visibility = [],
+    deps = [
+        ":pin-project-lite-0.2",
+        ":tokio-macros-2",
+    ],
+)
+
+http_archive(
+    name = "tokio-macros-2.7.2.crate",
+    sha256 = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e",
+    strip_prefix = "tokio-macros-2.7.2",
+    urls = ["https://static.crates.io/crates/tokio-macros/2.7.2/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "tokio-macros-2",
+    srcs = [":tokio-macros-2.7.2.crate"],
+    crate = "tokio_macros",
+    crate_root = "tokio-macros-2.7.2.crate/src/lib.rs",
+    edition = "2021",
+    env = {
+        "CARGO_BIN_NAME": "tokio_macros",
+        "CARGO_CRATE_NAME": "tokio_macros",
+        "CARGO_MANIFEST_DIR": "tokio-macros-2.7.2.crate",
+        "CARGO_PKG_AUTHORS": "Tokio Contributors <team@tokio.rs>",
+        "CARGO_PKG_DESCRIPTION": "Tokio's proc macros.\n",
+        "CARGO_PKG_HOMEPAGE": "https://tokio.rs",
+        "CARGO_PKG_NAME": "tokio-macros",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/tokio-rs/tokio",
+        "CARGO_PKG_RUST_VERSION": "1.71",
+        "CARGO_PKG_VERSION": "2.7.2",
+        "CARGO_PKG_VERSION_MAJOR": "2",
+        "CARGO_PKG_VERSION_MINOR": "7",
+        "CARGO_PKG_VERSION_PATCH": "2",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    proc_macro = True,
+    visibility = [],
+    deps = [
+        ":proc-macro2-1",
+        ":quote-1",
+        ":syn-3",
+    ],
 )
 
 alias(
@@ -7097,6 +7215,53 @@ cargo.rust_library(
     },
     features = ["default"],
     visibility = [],
+)
+
+alias(
+    name = "uuid",
+    actual = ":uuid-1",
+    visibility = ["PUBLIC"],
+)
+
+http_archive(
+    name = "uuid-1.24.1.crate",
+    sha256 = "2cefc03fd367c0c6d4305de1b312cf00248c4114f4a0418ce6a6af769e3b0bd9",
+    strip_prefix = "uuid-1.24.1",
+    urls = ["https://static.crates.io/crates/uuid/1.24.1/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "uuid-1",
+    srcs = [":uuid-1.24.1.crate"],
+    crate = "uuid",
+    crate_root = "uuid-1.24.1.crate/src/lib.rs",
+    edition = "2021",
+    env = {
+        "CARGO_BIN_NAME": "uuid",
+        "CARGO_CRATE_NAME": "uuid",
+        "CARGO_MANIFEST_DIR": "uuid-1.24.1.crate",
+        "CARGO_PKG_AUTHORS": "Ashley Mannix<ashleymannix@live.com.au>:Dylan DPC<dylan.dpc@gmail.com>:Hunar Roop Kahlon<hunar.roop@gmail.com>",
+        "CARGO_PKG_DESCRIPTION": "A library to generate and parse UUIDs.",
+        "CARGO_PKG_HOMEPAGE": "https://github.com/uuid-rs/uuid",
+        "CARGO_PKG_NAME": "uuid",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/uuid-rs/uuid",
+        "CARGO_PKG_RUST_VERSION": "1.85.0",
+        "CARGO_PKG_VERSION": "1.24.1",
+        "CARGO_PKG_VERSION_MAJOR": "1",
+        "CARGO_PKG_VERSION_MINOR": "24",
+        "CARGO_PKG_VERSION_PATCH": "1",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    features = [
+        "default",
+        "rng",
+        "std",
+        "v4",
+    ],
+    visibility = [],
+    deps = [":getrandom-0.4"],
 )
 
 http_archive(

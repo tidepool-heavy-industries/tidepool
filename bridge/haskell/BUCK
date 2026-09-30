@@ -8,7 +8,7 @@ load(
 )
 
 # Native Haskell components. The extractor library deliberately stays one
-# component so GHC builds its 40-module home unit once for the worker and tests.
+# component so GHC builds its home unit once for the worker and tests.
 haskell_library(
     name = "tidepool_extract_internal",
     srcs = {
@@ -30,6 +30,7 @@ haskell_library(
         "Tidepool/Metadata.hs": "src/Tidepool/Metadata.hs",
         "Tidepool/ModuleCandidates.hs": "src/Tidepool/ModuleCandidates.hs",
         "Tidepool/CertifiedProducts.hs": "src/Tidepool/CertifiedProducts.hs",
+        "Tidepool/PackageWitness.hs": "src/Tidepool/PackageWitness.hs",
         "Tidepool/PrimOps.hs": "src/Tidepool/PrimOps.hs",
         "Tidepool/PreparedStg.hs": "src/Tidepool/PreparedStg.hs",
         "Tidepool/PreparedRecovery.hs": "src/Tidepool/PreparedRecovery.hs",
@@ -181,5 +182,41 @@ export_file(
 export_file(
     name = "declaration_inventory_v2_json_fixture",
     src = "test-cell-splitter/fixtures/declaration-join/inventory-v2.json",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "declaration_join_v3_cbor_fixture",
+    src = "test-cell-splitter/fixtures/declaration-join/join-v3.cbor",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "declaration_join_v3_json_fixture",
+    src = "test-cell-splitter/fixtures/declaration-join/join-v3.json",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "declaration_join_typed_v3_cbor_fixture",
+    src = "test-cell-splitter/fixtures/declaration-join/join-typed-v3.cbor",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "declaration_join_typed_v3_json_fixture",
+    src = "test-cell-splitter/fixtures/declaration-join/join-typed-v3.json",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "declaration_inventory_v3_cbor_fixture",
+    src = "test-cell-splitter/fixtures/declaration-join/inventory-v3.cbor",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "declaration_inventory_v3_json_fixture",
+    src = "test-cell-splitter/fixtures/declaration-join/inventory-v3.json",
     visibility = ["PUBLIC"],
 )

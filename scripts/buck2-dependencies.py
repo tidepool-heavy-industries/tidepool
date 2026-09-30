@@ -29,7 +29,7 @@ TEST_ROOTS = {
 }
 LIBRARY_ROOTS = {
     "tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen",
-    "tidepool-extract-report",
+    "tidepool-extract-report", "tidepool-bridge-derive", "tidepool-runtime",
 }
 ROOTS = TEST_ROOTS | LIBRARY_ROOTS
 LINUX_TARGETS = {None, "cfg(unix)"}
