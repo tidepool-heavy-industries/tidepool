@@ -5,6 +5,7 @@ import Control.Monad (forM_, unless, void)
 import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
+import Data.List (sort)
 import GHC
 import GHC.Builtin.Types (doubleTy)
 import GHC.Core.InstEnv (instEnvElts, is_dfun_name, is_tys)
@@ -33,16 +34,19 @@ main = getArgs >>= \case
   ["--next-consumer", root] -> recoveredNextConsumer root
   ["--wire-fixture", root] -> do
     let input = emptyWireInput
-    BS.writeFile (root </> "join-v2.cbor") (encodeDeclarationJoin input)
-    writeFile (root </> "join-v2.json") (renderDeclarationJoinOutcome
+    BS.writeFile (root </> "join-v3.cbor") (encodeDeclarationJoin input)
+    writeFile (root </> "join-v3.json") (renderDeclarationJoinOutcome
       (DeclarationJoinOutcome input (Just (ModuleSnapshot "Join" "/scratch/Join.hi" (replicate 64 '0'))) JoinAccepted))
-    BS.writeFile (root </> "inventory-v2.cbor") (encodeDeclarationInventory [])
-    writeFile (root </> "inventory-v2.json") (renderDeclarationInventoryOutcome
+    BS.writeFile (root </> "inventory-v3.cbor") (encodeDeclarationInventory [])
+    writeFile (root </> "inventory-v3.json") (renderDeclarationInventoryOutcome
       (DeclarationInventoryOutcome [] (Right [])))
+    BS.writeFile (root </> "join-typed-v3.cbor") (encodeDeclarationJoin typedWireInput)
+    writeFile (root </> "join-typed-v3.json") (renderDeclarationJoinOutcome
+      (DeclarationJoinOutcome typedWireInput (Just (ModuleSnapshot "Join" "/scratch/Join.hi" (replicate 64 '0'))) JoinAccepted))
   [] -> bracket temporary removeDirectoryRecursive $ \root -> do
-    golden <- BS.readFile "test-cell-splitter/fixtures/declaration-join/join-v2.cbor"
+    golden <- BS.readFile "test-cell-splitter/fixtures/declaration-join/join-v3.cbor"
     unless (golden == encodeDeclarationJoin emptyWireInput) (fail "join CBOR differs from cross-language fixture")
-    expectedReceipt <- readFile "test-cell-splitter/fixtures/declaration-join/join-v2.json"
+    expectedReceipt <- readFile "test-cell-splitter/fixtures/declaration-join/join-v3.json"
     unless (expectedReceipt == renderDeclarationJoinOutcome (DeclarationJoinOutcome emptyWireInput
       (Just (ModuleSnapshot "Join" "/scratch/Join.hi" (replicate 64 '0'))) JoinAccepted))
       (fail "join receipt differs from cross-language fixture")
@@ -52,7 +56,8 @@ main = getArgs >>= \case
     -- Each defining module is compiled once in its original lexical context.
     -- Old and Public deliberately have incompatible dictionaries; they are
     -- combined only through a selected interface, never an import wrapper.
-    forM_ ["Old", "Public", "Conflict", "AssociatedConflict", "DataConflict", "InjectiveConflict"] $ \target ->
+    forM_ ["Old", "Public", "Conflict", "AssociatedConflict", "DataConflict", "InjectiveConflict",
+      "FamilyOnly", "RichInventory", "AmbiguousInventory"] $ \target ->
       runGhc (Just libdir) $ do
         configure root
         guessed <- guessTarget (root </> target ++ ".hs") Nothing Nothing
@@ -66,6 +71,7 @@ main = getArgs >>= \case
       artifacts <- liftIO (mapM (artifact root) ["Common", "Old", "Public"])
       loaded <- liftIO (readExactIfaceArtifacts fresh artifacts >>= either fail pure)
       hydrated <- liftIO (hydrateExactScope fresh loaded)
+      originalInventories <- liftIO (mapM (\(_, iface) -> interfaceInventory hydrated iface >>= either fail pure) loaded)
       let ifaces = map snd loaded
           oldHmi = requireHmi hydrated "Old"
           publicIface = requireIface ifaces "Public"
@@ -74,8 +80,9 @@ main = getArgs >>= \case
           doubleInstances = [i | i <- instEnvElts (md_insts (hm_details oldHmi)),
             any (`eqType` doubleTy) (is_tys i)]
           selected = InstanceInventory
-            (map (exportIdentity . ifDFun) (mi_insts publicIface)
-              ++ map (exportIdentity . is_dfun_name) doubleInstances)
+            [record | inventory <- originalInventories, record <- inventoryClasses inventory,
+              instanceDfun record `elem` (map (exportIdentity . ifDFun) (mi_insts publicIface)
+                ++ map (exportIdentity . is_dfun_name) doubleInstances)]
             (map (exportIdentity . ifFamInstAxiom) (mi_fam_insts publicIface))
           fullFamilies = [exportIdentity (ifFamInstAxiom i) | iface <- ifaces, i <- mi_fam_insts iface]
           joined = mkModule (stringToUnit "main") (mkModuleName "Joined")
@@ -88,9 +95,29 @@ main = getArgs >>= \case
       inspected <- liftIO (inspectDeclarationArtifacts initial declarationArtifacts)
       liftIO $ case inspectionResult inspected of
         Right inventories | map inventoryArtifact inventories == declarationArtifacts
-          , map inventoryInstances inventories == map (interfaceInventory . snd) loaded -> pure ()
+          , map inventoryInstances inventories == originalInventories -> pure ()
         other -> fail ("original interface inventory was not retained: " ++ show other)
       liftIO $ writeFile (root </> "inventory-receipt.json") (renderDeclarationInventoryOutcome inspected)
+      liftIO $ do
+        forM_ ["FamilyOnly", "RichInventory"] $ \name -> do
+          extra <- artifact root name
+          outcome <- inspectDeclarationArtifacts initial
+            (declarationArtifacts ++ [DeclarationArtifact extra Nothing])
+          case inspectionResult outcome of
+            Right inventories -> case [inventoryInstances entry | entry <- inventories,
+              exactModule (artifactInterface (inventoryArtifact entry)) == name] of
+              [inventory] | name == "FamilyOnly", null (inventoryClasses inventory),
+                length (inventoryFamilies inventory) == 2 -> pure ()
+              [inventory] | name == "RichInventory", length (inventoryClasses inventory) == 2,
+                sort (map (length . instanceSelectedAxioms) (inventoryClasses inventory)) == [1,3],
+                length (inventoryFamilies inventory) == 4 -> pure ()
+              other -> fail ("rich original inventory incomplete: " ++ show other)
+            other -> fail ("rich original inventory rejected: " ++ show other)
+        ambiguous <- artifact root "AmbiguousInventory"
+        outcome <- inspectDeclarationArtifacts initial [DeclarationArtifact ambiguous Nothing]
+        case inspectionResult outcome of
+          Left (Unprovable, _) -> pure ()
+          other -> fail ("ambiguous associated axiom owner was admitted: " ++ show other)
       exports <- liftIO $ (++) <$> interfaceExports hydrated commonIface <*> interfaceExports hydrated oldIface
       let input = DeclarationJoinInput "paired-public-snapshot" Nothing Nothing Nothing []
             (ReservedJoin "main" "Joined" (root </> "Joined.hi")) exports selected
@@ -104,6 +131,37 @@ main = getArgs >>= \case
         JoinAccepted | outcomeInput outcome == input, Just _ <- outcomeArtifact outcome -> pure ()
         rejected -> fail ("sound isolation join rejected: " ++ show rejected)
       liftIO $ writeFile (root </> "join-receipt.json") (renderDeclarationJoinOutcome outcome)
+      -- A previous Join can retain the same dfun with fewer selected axioms.
+      -- The next Join combines its lexical anchor with original implementations
+      -- and restores the requested family selection without duplicating dfuns.
+      let partialSelected = InstanceInventory
+            [record { instanceSelectedAxioms = [] } | record <- inventoryClasses selected] []
+          partialOwner = mkModule (stringToUnit "main") (mkModuleName "PartialJoined")
+      partial <- liftIO $ buildJoinedInterface hydrated partialOwner (root </> "PartialJoined.hi")
+        ifaces exports partialSelected fullFamilies
+      liftIO $ case partial of
+        Right _ -> pure ()
+        other -> fail ("partial family Join rejected: " ++ show other)
+      partialArtifact <- liftIO (artifact root "PartialJoined")
+      combinedLoaded <- liftIO $ readExactIfaceArtifacts fresh (artifacts ++ [partialArtifact]) >>= either fail pure
+      combinedEnv <- liftIO (hydrateExactScope fresh combinedLoaded)
+      secondJoin <- liftIO $ buildJoinedInterface combinedEnv
+        (mkModule (stringToUnit "main") (mkModuleName "JoinedAgain")) (root </> "JoinedAgain.hi")
+        (map snd combinedLoaded) exports selected fullFamilies
+      liftIO $ case secondJoin of
+        Right _ -> pure ()
+        other -> fail ("repeated dfun with different selected-axiom subset rejected: " ++ show other)
+      case inventoryClasses selected of
+        record : rest -> do
+          let wrongClass = (instanceClass record) { exportOccurrence = "WrongClass" }
+              forged = selected { inventoryClasses = record : record { instanceClass = wrongClass } : rest }
+          rejected <- liftIO $ buildJoinedInterface hydrated
+            (mkModule (stringToUnit "main") (mkModuleName "WrongClassJoin")) (root </> "WrongClassJoin.hi")
+            ifaces exports forged fullFamilies
+          liftIO $ case rejected of
+            Left (InstanceMismatch, _) -> pure ()
+            other -> fail ("one dfun was merged across different classes: " ++ show other)
+        [] -> liftIO (fail "selected class inventory unexpectedly empty")
       -- Rejection echoes the same paired version and exact request provenance.
       rejectedInput <- case implementationArtifacts input of
         entry : rest -> pure input { implementationArtifacts = entry
@@ -283,7 +341,7 @@ requireIface ifaces name = case [iface | iface <- ifaces, moduleName (mi_module 
 
 sourceFiles :: [String]
 sourceFiles = map (++ ".hs")
-  ["Common", "Old", "Public", "Conflict", "AssociatedConflict", "DataConflict", "InjectiveConflict", "Consumer", "BadClass", "BadFamily", "BadAssociated", "BadFD", "Next", "NextConsumer", "BadRetraction", "BadNextClass", "BadNextFamily"]
+  ["Common", "Old", "Public", "Conflict", "AssociatedConflict", "DataConflict", "InjectiveConflict", "FamilyOnly", "RichInventory", "AmbiguousInventory", "Consumer", "BadClass", "BadFamily", "BadAssociated", "BadFD", "Next", "NextConsumer", "BadRetraction", "BadNextClass", "BadNextFamily"]
 
 temporary :: IO FilePath
 temporary = do
@@ -297,3 +355,16 @@ temporary = do
 emptyWireInput :: DeclarationJoinInput
 emptyWireInput = DeclarationJoinInput "paired-snapshot" Nothing Nothing Nothing []
   (ReservedJoin "main" "Join" "/scratch/Join.hi") [] (InstanceInventory [] []) [] []
+
+typedWireInput :: DeclarationJoinInput
+typedWireInput = emptyWireInput
+  { expectedInstances = InstanceInventory
+      [ClassInstanceEvidence (identity ValueNamespace "$fClassInt") (identity TypeNamespace "Class") [selected]]
+      [selected, standalone]
+  , retainedFamilyClosure = [selected, standalone, hidden]
+  }
+  where
+    identity namespace occurrence = ExportIdentity "main" "Original" namespace occurrence Nothing
+    selected = identity TypeNamespace "AssociatedAxiom"
+    standalone = identity TypeNamespace "StandaloneAxiom"
+    hidden = identity TypeNamespace "HiddenAxiom"

@@ -2,7 +2,7 @@
 -- dependencies while contributing only the selected lexical instance inventory.
 module Tidepool.DeclarationJoin
   ( ModuleSnapshot(..), ExportNamespace(..), DeclarationKind(..), ExportIdentity(..), DeclarationExport(..)
-  , InstanceInventory(..), JoinDecision(..), JoinRejection(..)
+  , ClassInstanceEvidence(..), InstanceInventory(..), JoinDecision(..), JoinRejection(..)
   , buildJoinedInterface, validateRetainedFamilyInstances
   , exportIdentity, interfaceExports, interfaceInventory
   , ReservedJoin(..), DeclarationArtifact(..), DeclarationWrite(..)
@@ -22,14 +22,16 @@ import Control.Monad (forM, replicateM, unless, when)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
-import Data.List (intercalate, nubBy, sort, sortBy, tails)
+import Data.List (elemIndex, intercalate, nubBy, sort, sortBy, tails)
 import Data.Maybe (catMaybes, isJust)
 import Data.Text qualified as T
 import Data.Word (Word64)
 import GHC.Core.FamInstEnv
 import GHC.Core.InstEnv
-import GHC.Core.TyCon (isClassTyCon, tyConInjectivityInfo, Injectivity(..))
-import GHC.Core.Coercion.Axiom (coAxiomName)
+import GHC.Core.Class (classTyVars)
+import GHC.Core.TyCon (isClassTyCon, tyConInjectivityInfo, Injectivity(..), tyConAssoc_maybe, tyConName, tyConTyVars)
+import GHC.Core.Coercion (etaExpandCoAxBranch)
+import GHC.Core.Coercion.Axiom (coAxiomName, coAxiomTyCon, coAxiomSingleBranch)
 import GHC.Core.Unify (tcMatchTys, tcUnifyTys)
 import GHC.Data.FastString (unpackFS)
 import GHC.Driver.Env (HscEnv, lookupType, hscEPS, hsc_HUG, hsc_dflags)
@@ -82,8 +84,13 @@ data DeclarationExport = DeclarationExport
   { exportKind :: DeclarationKind, exportHead :: ExportIdentity, exportChildren :: [ExportIdentity]
   } deriving (Eq, Ord, Show)
 
+data ClassInstanceEvidence = ClassInstanceEvidence
+  { instanceDfun :: ExportIdentity, instanceClass :: ExportIdentity
+  , instanceSelectedAxioms :: [ExportIdentity]
+  } deriving (Eq, Ord, Show)
+
 data InstanceInventory = InstanceInventory
-  { inventoryClasses :: [ExportIdentity], inventoryFamilies :: [ExportIdentity]
+  { inventoryClasses :: [ClassInstanceEvidence], inventoryFamilies :: [ExportIdentity]
   } deriving (Eq, Show)
 
 data JoinRejection = ArtifactChanged | ExportMismatch | ClassInstanceConflict
@@ -107,19 +114,21 @@ buildJoinedInterface
   -> IO (Either (JoinRejection, String) ModuleSnapshot)
 buildJoinedInterface hsc joined path originals exports selected familyClosure = do
   exportChoices <- mapM selectExport exports
-  case sequence exportChoices of
-    Left diagnostic -> pure (Left (ExportMismatch, diagnostic))
-    Right avails
+  inventories <- mapM (interfaceInventory hsc) originals
+  case (sequence exportChoices, sequence inventories) of
+    (Left diagnostic, _) -> pure (Left (ExportMismatch, diagnostic))
+    (_, Left diagnostic) -> pure (Left (Unprovable, diagnostic))
+    (Right avails, Right actualInventories)
       | any ((== joined) . mi_module) originals ->
           pure (Left (ArtifactChanged, "reserved Join module already exists in implementation closure"))
-      | normalizeInventory selected /= actualSelected ->
+      | normalizeInventory selected /= actualSelected actualInventories ->
           pure (Left (InstanceMismatch, "selected dfun or axiom is absent from the exact implementation closure"))
       | sort (nubBy (==) familyClosure) /= actualFamilies ->
           pure (Left (InstanceMismatch, "retained family inventory differs from the exact implementation closure"))
       | otherwise -> do
           let hmis = [hmi | hpt <- unitEnv_hpts (hsc_HUG hsc), hmi <- eltsHpt hpt]
               allFamilies = concatMap (md_fam_insts . hm_details) hmis
-              selectedClassNames = inventoryClasses selected
+              selectedClassNames = map instanceDfun (inventoryClasses selected)
               selectedClasses = [i | hmi <- hmis, i <- instEnvElts (md_insts (hm_details hmi))
                   , exportIdentity (is_dfun_name i) `elem` selectedClassNames]
               selectedFamilyNames = inventoryFamilies selected
@@ -171,12 +180,16 @@ buildJoinedInterface hsc joined path originals exports selected familyClosure = 
   where
     originalAvails = concatMap mi_exports originals
     instances = nubBy (\a b -> ifDFun a == ifDFun b)
-      [i | iface <- originals, i <- mi_insts iface, exportIdentity (ifDFun i) `elem` inventoryClasses selected]
+      [i | iface <- originals, i <- mi_insts iface,
+          exportIdentity (ifDFun i) `elem` map instanceDfun (inventoryClasses selected)]
     families = nubBy (\a b -> ifFamInstAxiom a == ifFamInstAxiom b)
       [i | iface <- originals, i <- mi_fam_insts iface,
           exportIdentity (ifFamInstAxiom i) `elem` inventoryFamilies selected]
-    actualSelected = normalizeInventory $ InstanceInventory
-      (map (exportIdentity . ifDFun) instances) (map (exportIdentity . ifFamInstAxiom) families)
+    actualSelected inventories = normalizeInventory $ InstanceInventory
+      [record { instanceSelectedAxioms = filter (`elem` inventoryFamilies selected) (instanceSelectedAxioms record) }
+        | inventory <- inventories, record <- inventoryClasses inventory,
+          instanceDfun record `elem` map (exportIdentity . ifDFun) instances]
+      (map (exportIdentity . ifFamInstAxiom) families)
     actualFamilies = sort (nubBy (==)
       [exportIdentity (ifFamInstAxiom i) | iface <- originals, i <- mi_fam_insts iface])
     selectExport requested = case
@@ -217,10 +230,52 @@ normalizeExport e = e { exportChildren = sort (exportChildren e) }
 
 -- | Local additions only. A persisted Join reports its selected inventory;
 -- authored interfaces report their original local dfuns and family axioms.
-interfaceInventory :: ModIface -> InstanceInventory
-interfaceInventory iface = normalizeInventory $ InstanceInventory
-  (map (exportIdentity . ifDFun) (mi_insts iface))
-  (map (exportIdentity . ifFamInstAxiom) (mi_fam_insts iface))
+interfaceInventory :: HscEnv -> ModIface -> IO (Either String InstanceInventory)
+interfaceInventory hsc iface = pure $ do
+  unless (sort (map (exportIdentity . coAxiomName . fi_axiom) localFamilies)
+      == sort (map (exportIdentity . ifFamInstAxiom) (mi_fam_insts iface)))
+    (Left "original family inventory is incomplete after hydration")
+  unless (sort (map (exportIdentity . is_dfun_name) localClasses)
+      == sort (map (exportIdentity . ifDFun) (mi_insts iface)))
+    (Left "original class inventory is incomplete after hydration")
+  associations <- mapM associatedOwner localFamilies
+  pure $ normalizeInventory $ InstanceInventory
+    [ClassInstanceEvidence (exportIdentity (ifDFun instance_))
+      (exportIdentity (ifInstCls instance_))
+      [axiom | (axiom, Just dfun) <- associations, dfun == exportIdentity (ifDFun instance_)]
+      | instance_ <- mi_insts iface]
+    (map (exportIdentity . ifFamInstAxiom) (mi_fam_insts iface))
+  where
+    hmis = [hmi | hpt <- unitEnv_hpts (hsc_HUG hsc), hmi <- eltsHpt hpt]
+    implementationClasses = nubBy (\a b -> is_dfun_name a == is_dfun_name b)
+      [instance_ | hmi <- hmis, instance_ <- instEnvElts (md_insts (hm_details hmi))]
+    localClasses = [instance_ | instance_ <- implementationClasses,
+      exportIdentity (is_dfun_name instance_) `elem` map (exportIdentity . ifDFun) (mi_insts iface)]
+    localFamilies = nubBy (\a b -> fi_axiom a == fi_axiom b)
+      [family | hmi <- hmis, family <- md_fam_insts (hm_details hmi),
+      exportIdentity (coAxiomName (fi_axiom family)) `elem`
+        map (exportIdentity . ifFamInstAxiom) (mi_fam_insts iface)]
+    -- GHC's consistency check projects the family parameters shared with its
+    -- enclosing class. Interfaces retain that structural relation, but do not
+    -- retain a pointer from an associated axiom to its particular dfun.
+    associatedOwner family = case tyConAssoc_maybe (coAxiomTyCon (fi_axiom family)) of
+      Nothing -> Right (axiom, Nothing)
+      Just parent -> case [exportIdentity (is_dfun_name instance_)
+        | instance_ <- implementationClasses, is_cls_nm instance_ == tyConName parent,
+          nameModule (is_dfun_name instance_) == nameModule (coAxiomName (fi_axiom family)),
+          sameInstantiation instance_ family] of
+        [dfun] -> Right (axiom, Just dfun)
+        [] -> Left "associated axiom has no provable original class-instance owner"
+        _ -> Left "associated axiom has ambiguous original class-instance owners"
+      where axiom = exportIdentity (coAxiomName (fi_axiom family))
+    sameInstantiation instance_ family =
+      let (_, arguments, _) = etaExpandCoAxBranch (coAxiomSingleBranch (fi_axiom family))
+          shared = [(is_tys instance_ !! index, argument)
+            | (variable, argument) <- zip (tyConTyVars (coAxiomTyCon (fi_axiom family))) arguments,
+              Just index <- [elemIndex variable (classTyVars (is_cls instance_))]]
+          (classArguments, familyArguments) = unzip shared
+      in isJust (tcMatchTys classArguments familyArguments)
+        && isJust (tcMatchTys familyArguments classArguments)
 
 interfaceExports :: HscEnv -> ModIface -> IO [DeclarationExport]
 interfaceExports hsc = exportsFromAvails hsc . mi_exports
@@ -250,7 +305,11 @@ exportIdentity name = case nameModule_maybe name of
       | otherwise = ValueNamespace
 
 normalizeInventory :: InstanceInventory -> InstanceInventory
-normalizeInventory (InstanceInventory classes families) = InstanceInventory (sort (nubBy (==) classes)) (sort (nubBy (==) families))
+normalizeInventory (InstanceInventory classes families) = InstanceInventory
+  (sort [record { instanceSelectedAxioms = sort (nubBy (==)
+      (concatMap instanceSelectedAxioms (filter (sameOwner record) classes))) }
+    | record <- nubBy sameOwner classes]) (sort (nubBy (==) families))
+  where sameOwner a b = instanceDfun a == instanceDfun b && instanceClass a == instanceClass b
 
 validateInstances :: InstEnvs -> FamInstEnvs -> JoinDecision
 validateInstances classes families
@@ -321,7 +380,7 @@ decodeDeclarationJoin = do
   array 12
   magic <- text
   version <- text
-  unless (magic == "TPDJOIN" && version == "2") (fail "unsupported declaration join")
+  unless (magic == "TPDJOIN" && version == "3") (fail "unsupported declaration join")
   DeclarationJoinInput <$> text <*> optional snapshot <*> optional snapshot
     <*> optional snapshot <*> vector write <*> reservation <*> vector declarationExport
     <*> inventory <*> vector artifact <*> vector identity
@@ -334,7 +393,8 @@ decodeDeclarationJoin = do
     write = array 4 >> DeclarationWrite <$> decodeWord64 <*> snapshot
       <*> vector declarationExport <*> vector identity
     declarationExport = array 3 >> DeclarationExport <$> kind <*> identity <*> vector identity
-    inventory = array 2 >> InstanceInventory <$> vector identity <*> vector identity
+    inventory = array 2 >> InstanceInventory <$> vector classInstance <*> vector identity
+    classInstance = array 3 >> ClassInstanceEvidence <$> identity <*> identity <*> vector identity
     identity = array 5 >> ExportIdentity <$> nonempty <*> nonempty <*> namespace
       <*> nonempty <*> optional text
     namespace = text >>= \case
@@ -372,7 +432,7 @@ optional item = peekTokenType >>= \case
 
 encodeDeclarationJoin :: DeclarationJoinInput -> BS.ByteString
 encodeDeclarationJoin input = toStrictByteString $
-  encodeListLen 12 <> wireText "TPDJOIN" <> wireText "2" <> wireText (expectedPublicVersion input)
+  encodeListLen 12 <> wireText "TPDJOIN" <> wireText "3" <> wireText (expectedPublicVersion input)
   <> wireOptional wireSnapshot (publicModule input) <> wireOptional wireSnapshot (privateBase input)
   <> wireOptional wireSnapshot (privateTip input) <> wireList wireWrite (declarationWrites input)
   <> wireReservation (joinReservation input) <> wireList wireExport (expectedExports input)
@@ -399,8 +459,10 @@ wireExport :: DeclarationExport -> Encoding
 wireExport value = encodeListLen 3 <> wireText (kindWire (exportKind value))
   <> wireIdentity (exportHead value) <> wireList wireIdentity (exportChildren value)
 wireInventory :: InstanceInventory -> Encoding
-wireInventory value = encodeListLen 2 <> wireList wireIdentity (inventoryClasses value)
+wireInventory value = encodeListLen 2 <> wireList wireClass (inventoryClasses value)
   <> wireList wireIdentity (inventoryFamilies value)
+  where wireClass record = encodeListLen 3 <> wireIdentity (instanceDfun record)
+          <> wireIdentity (instanceClass record) <> wireList wireIdentity (instanceSelectedAxioms record)
 wireWrite :: DeclarationWrite -> Encoding
 wireWrite value = encodeListLen 4 <> encodeWord64 (writeGeneration value)
   <> wireSnapshot (writeModule value) <> wireList wireExport (writeExports value)
@@ -473,7 +535,7 @@ artifactsUnchanged artifacts = and <$> forM artifacts (\artifact -> do
 -- rejection. Runtime alone compares the echoed paired snapshot for staleness.
 renderDeclarationJoinOutcome :: DeclarationJoinOutcome -> String
 renderDeclarationJoinOutcome outcome = object
-  [ ("version", "2"), ("expected_public_version", jsonString (expectedPublicVersion input))
+  [ ("version", "3"), ("expected_public_version", jsonString (expectedPublicVersion input))
   , ("request_sha256", jsonString (sha256 (encodeDeclarationJoin input)))
   , ("reserved", object [("unit", jsonString (reservedUnit reserved)), ("module", jsonString (reservedModule reserved))
       , ("path", jsonString (reservedPath reserved))])
@@ -535,7 +597,7 @@ readDeclarationOperation path = do
       array 3
       magic <- text
       version <- text
-      unless (magic == "TPDINVENTORY" && version == "2") (fail "unsupported declaration inventory")
+      unless (magic == "TPDINVENTORY" && version == "3") (fail "unsupported declaration inventory")
       vector artifact
     artifact = array 2 >> DeclarationArtifact <$> exact <*> optional snapshot
     exact = array 5 >> ExactIfaceArtifact <$> nonempty <*> nonempty <*> absolutePath
@@ -548,7 +610,7 @@ readDeclarationOperation path = do
 
 encodeDeclarationInventory :: [DeclarationArtifact] -> BS.ByteString
 encodeDeclarationInventory artifacts = toStrictByteString $
-  encodeListLen 3 <> wireText "TPDINVENTORY" <> wireText "2" <> wireList wireArtifact artifacts
+  encodeListLen 3 <> wireText "TPDINVENTORY" <> wireText "3" <> wireList wireArtifact artifacts
 
 inspectDeclarationArtifacts :: HscEnv -> [DeclarationArtifact] -> IO DeclarationInventoryOutcome
 inspectDeclarationArtifacts initial artifacts = do
@@ -561,15 +623,19 @@ inspectDeclarationArtifacts initial artifacts = do
       Left diagnostic -> rejected diagnostic
       Right verified -> do
         hydrated <- hydrateExactScope fresh verified
-        inventories <- forM (zip artifacts verified) $ \(artifact, (_, iface)) ->
-          DeclarationInventory artifact <$> interfaceExports hydrated iface <*> pure (interfaceInventory iface)
+        inventories <- forM (zip artifacts verified) $ \(artifact, (_, iface)) -> do
+          exports <- interfaceExports hydrated iface
+          fmap (DeclarationInventory artifact exports) <$> interfaceInventory hydrated iface
         unchangedAfter <- artifactsUnchanged artifacts
         if not unchangedAfter then rejected "implementation artifacts changed during inspection"
-          else pure (DeclarationInventoryOutcome artifacts (Right inventories))
+          else pure (DeclarationInventoryOutcome artifacts
+            (case sequence inventories of
+              Left diagnostic -> Left (Unprovable, diagnostic)
+              Right values -> Right values))
 
 renderDeclarationInventoryOutcome :: DeclarationInventoryOutcome -> String
 renderDeclarationInventoryOutcome outcome = jsonObject
-  [ ("version", "2")
+  [ ("version", "3")
   , ("request_sha256", jsonString (sha256 (encodeDeclarationInventory artifacts)))
   , ("implementation_sha256", jsonString (sha256 (toStrictByteString (wireList wireArtifact artifacts))))
   , ("inventories", either (const "null") (jsonArray . map inventoryJson) result)
@@ -601,8 +667,11 @@ exportJson :: DeclarationExport -> String
 exportJson value = jsonObject [("kind", jsonString (kindWire (exportKind value))), ("head", identityJson (exportHead value))
   , ("children", jsonArray (map identityJson (exportChildren value)))]
 instancesJson :: InstanceInventory -> String
-instancesJson value = jsonObject [("classes", jsonArray (map identityJson (inventoryClasses value)))
+instancesJson value = jsonObject [("classes", jsonArray (map classJson (inventoryClasses value)))
   , ("families", jsonArray (map identityJson (inventoryFamilies value)))]
+  where classJson record = jsonObject [("dfun", identityJson (instanceDfun record))
+          , ("class", identityJson (instanceClass record))
+          , ("selected_axioms", jsonArray (map identityJson (instanceSelectedAxioms record)))]
 artifactJson :: DeclarationArtifact -> String
 artifactJson artifact = jsonObject [("interface", jsonObject
   [("unit", jsonString (exactUnit iface)), ("module", jsonString (exactModule iface)), ("path", jsonString (exactPath iface))

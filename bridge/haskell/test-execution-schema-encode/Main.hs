@@ -28,33 +28,29 @@ candidateManifestChecks = do
     (\(path, handle) -> do
       hClose handle
       let digest = T.pack (replicate 64 'a')
-          candidate = encodeListLen 11
+          candidate sourcePath = encodeListLen 13
             <> encodeString "main" <> encodeString "Fixture"
-            <> encodeString "/tmp/Fixture.hs" <> encodeString digest
+            <> encodeString sourcePath <> encodeString digest
             <> encodeString "/tmp/Fixture.hi" <> encodeString digest
             <> encodeString digest <> encodeString digest <> encodeString digest
             <> encodeListLen 0 <> encodeListLen 0
+            <> encodeString "/tmp/Fixture.hi.packages" <> encodeString digest
           manifest items = toStrictByteString
-            (encodeListLen 3 <> encodeString "TPMCAN" <> encodeString "4"
+            (encodeListLen 3 <> encodeString "TPMCAN" <> encodeString "5"
               <> encodeListLen (fromIntegral (length items)) <> mconcat items)
-      BS.writeFile path (manifest [candidate])
+      BS.writeFile path (manifest [candidate "/tmp/Fixture.hs"])
       valid <- readModuleCandidates path
       assert (case valid of Right [_] -> True; _ -> False)
         "bounded module candidate manifest did not decode"
-      BS.writeFile path (BS.snoc (manifest [candidate]) 0)
+      BS.writeFile path (BS.snoc (manifest [candidate "/tmp/Fixture.hs"]) 0)
       trailing <- readModuleCandidates path
       assert (case trailing of Left _ -> True; _ -> False)
         "candidate manifest accepted trailing bytes"
-      BS.writeFile path (manifest [candidate, candidate])
+      BS.writeFile path (manifest [candidate "/tmp/Fixture.hs", candidate "/tmp/Fixture.hs"])
       duplicate <- readModuleCandidates path
       assert (case duplicate of Left _ -> True; _ -> False)
         "candidate manifest accepted duplicate owners"
-      BS.writeFile path (manifest [encodeListLen 11
-        <> encodeString "main" <> encodeString "Fixture"
-        <> encodeString "relative.hs" <> encodeString digest
-        <> encodeString "/tmp/Fixture.hi" <> encodeString digest
-        <> encodeString digest <> encodeString digest <> encodeString digest
-        <> encodeListLen 0 <> encodeListLen 0])
+      BS.writeFile path (manifest [candidate "relative.hs"])
       relative <- readModuleCandidates path
       assert (case relative of Left _ -> True; _ -> False)
         "candidate manifest accepted a relative source path")

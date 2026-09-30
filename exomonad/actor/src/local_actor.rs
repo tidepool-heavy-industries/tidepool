@@ -2386,6 +2386,7 @@ mod tests {
         workbench_panics: bool,
         owned_workbench: bool,
         owned_cleanup: Option<Arc<Notify>>,
+        owned_finish_fails: bool,
         dispatch_panics: bool,
     }
 
@@ -2629,7 +2630,7 @@ mod tests {
 
         fn dispatch_workbench(
             &mut self,
-            _context: &KernelContext,
+            context: &KernelContext,
             invocation: crate::ActorWorkbenchInvocation,
             control: Option<Arc<crate::WorkbenchExecutionControl>>,
         ) -> WorkbenchDispatch<Self> {
@@ -2646,6 +2647,8 @@ mod tests {
             let gate = self.workbench_gate.clone();
             let panics = self.workbench_panics;
             let cleanup = self.owned_cleanup.clone();
+            let finish_fails = self.owned_finish_fails;
+            let actor = context.identity;
             WorkbenchDispatch::Owned(OwnedWorkbenchTask::new(Box::pin(async move {
                 let guard =
                     cleanup.map(|cleanup| WorkbenchAbandonGuard::new(move || cleanup.notify_one()));
@@ -2659,6 +2662,12 @@ mod tests {
                 }
                 let completion = OwnedWorkbenchCompletion::new(move |behavior: &mut Self| {
                     behavior.calls.lock().push("workbench-end");
+                    if finish_fails {
+                        return Err(KernelInvocationFailure::Failed {
+                            actor,
+                            detail: "owned completion probe failed".into(),
+                        });
+                    }
                     Ok(KernelStep::Continue(WorkbenchResponse {
                         status: WorkbenchRunStatus::Committed,
                         summary: None,
@@ -2853,6 +2862,7 @@ mod tests {
                 workbench_panics: false,
                 owned_workbench: false,
                 owned_cleanup: None,
+                owned_finish_fails: false,
                 dispatch_panics: false,
             },
             calls,
@@ -3414,6 +3424,39 @@ mod tests {
             crate::CleanupComponentOutcome::Unconfirmed(_)
         ));
         assert_eq!(&*fixture.calls.lock(), &["workbench-start"]);
+    }
+
+    #[tokio::test]
+    async fn execution_owned_finalizer_failure_releases_cleanup_claim() {
+        let mut fixture = behavior(false);
+        fixture.behavior.owned_workbench = true;
+        fixture.behavior.owned_finish_fails = true;
+        let cleaned = Arc::new(Notify::new());
+        fixture.behavior.owned_cleanup = Some(Arc::clone(&cleaned));
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let reply = send_workbench(&actor).await.expect("workbench reply");
+        assert!(matches!(
+            reply,
+            Err(KernelInvocationFailure::Failed { detail, .. })
+                if detail == "owned completion probe failed"
+        ));
+        tokio::time::timeout(Duration::from_secs(2), cleaned.notified())
+            .await
+            .expect("failed finalizer's execution guard cleaned up");
+        assert_eq!(
+            &*fixture.calls.lock(),
+            &["workbench-start", "workbench-end"]
+        );
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "done".into(),
+            })
+            .await
+            .expect("shutdown");
+        task.await.expect("actor task");
     }
 
     #[tokio::test]

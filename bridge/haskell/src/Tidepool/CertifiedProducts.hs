@@ -21,11 +21,8 @@ import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
 import qualified Data.Text as T
 import Data.Word (Word64)
 import GHC.Driver.Env (HscEnv)
-import GHC.Types.PkgQual (PkgQual(..))
-import GHC.Unit.Finder (FindResult(..), findImportedModule)
-import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit, mkModuleName)
-import GHC.Unit.Module.Location (ml_hi_file)
-import GHC.Unit.Types (stringToUnitId, unitString)
+import GHC.Unit.Module (mkModule, mkModuleName)
+import GHC.Unit.Types (stringToUnit)
 import GHC.Iface.Env (lookupOrig)
 import GHC.Iface.Load (importDecl)
 import GHC.Tc.Utils.Monad (initIfaceLoad)
@@ -42,6 +39,8 @@ import Tidepool.ExecutionSchema
   , SymbolIdentity(..), WireProgram(..) )
 import Tidepool.ModuleCandidates
   ( CandidateGlobal(..), CandidateGroup(..), ModuleCandidate(..) )
+import Tidepool.PackageWitness
+  ( PackageImportRoot(..), packageImportRoot, validatePackageImportRoot )
 
 data Product = Product
   { productOrigin :: T.Text
@@ -230,35 +229,38 @@ packageOwner :: HscEnv -> IORef [PackageWitness] -> SymbolIdentity
   -> IO (Either String Encoding)
 packageOwner env packageRef identity
   | symbolNamespace identity /= "value" =
-      pure (Left "unsupported external global namespace")
+      pure (Left (refusal "unsupported external global namespace"))
   | otherwise = do
       let unit = T.unpack (symbolUnit identity)
           name = T.unpack (symbolModule identity)
-      found <- findImportedModule env (mkModuleName name)
-        (OtherPkg (stringToUnitId unit))
+          owner = mkModule (stringToUnit unit) (mkModuleName name)
+      -- Compiled globals identify their defining module, which can be hidden
+      -- from source imports. The shared package witness owner resolves that
+      -- exact module in the pinned package closure, without an exposure filter.
+      found <- packageImportRoot env owner
       case found of
-        Found location owner
-          | unitString (moduleUnit owner) == unit
-          , moduleNameString (moduleName owner) == name -> do
-              original <- initIfaceLoad env (lookupOrig owner
-                (mkVarOcc (T.unpack (symbolOccurrence identity))))
-              selected <- initIfaceLoad env (importDecl original)
-              case selected of
-                Failed _ -> pure (Left "selected package global is absent from loaded interface")
-                Succeeded _ -> do
-                  readBack <- try (BS.readFile (ml_hi_file location))
-                    :: IO (Either IOException BS.ByteString)
-                  case readBack of
-                    Left _ -> pure (Left "selected package interface unavailable")
-                    Right iface -> do
-                      let sha = digest iface
-                      modifyIORef' packageRef ((symbolUnit identity,
-                        symbolModule identity, ml_hi_file location, sha) :)
-                      pure (Right (array
-                        [encodeString "package", encodeString (symbolUnit identity)
-                        , encodeString (symbolModule identity)
-                        , encodeString sha, encodeIdentity identity]))
-        _ -> pure (Left "exact package owner was not selected")
+        Left reason -> pure (Left (refusal reason))
+        Right witness -> do
+          original <- initIfaceLoad env (lookupOrig owner
+            (mkVarOcc (T.unpack (symbolOccurrence identity))))
+          selected <- initIfaceLoad env (importDecl original)
+          case selected of
+            Failed _ -> pure (Left (refusal "selected package global is absent from loaded interface"))
+            Succeeded _ -> do
+              unchanged <- validatePackageImportRoot env witness
+              case unchanged of
+                Left reason -> pure (Left (refusal reason))
+                Right () -> do
+                  let sha = T.pack (packageSha256 witness)
+                  modifyIORef' packageRef ((symbolUnit identity,
+                    symbolModule identity, packagePath witness, sha) :)
+                  pure (Right (array
+                    [encodeString "package", encodeString (symbolUnit identity)
+                    , encodeString (symbolModule identity)
+                    , encodeString sha, encodeIdentity identity]))
+  where
+    refusal reason = reason ++ ": " ++ T.unpack (symbolUnit identity) ++ ":"
+      ++ T.unpack (symbolModule identity) ++ "." ++ T.unpack (symbolOccurrence identity)
 
 encodeModule :: Product -> [(Word, [Encoding])] -> Encoding
 encodeModule product groups = array

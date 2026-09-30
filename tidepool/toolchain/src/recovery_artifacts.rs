@@ -1,8 +1,9 @@
 //! Run-owned retention of exact compiler artifacts. The compile cache can be
 //! regenerated; recovery manifests refer only to this fsynced closure.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,10 @@ pub struct RecoveryArtifactRef {
     pub skinny_iface_sha256: [u8; 32],
     pub product_sha256: [u8; 32],
     pub interface_path: PathBuf,
+    pub package_imports_path: PathBuf,
+    pub package_imports_sha256: [u8; 32],
+    pub certification_path: PathBuf,
+    pub certification_sha256: [u8; 32],
     pub product_path: PathBuf,
 }
 
@@ -30,6 +35,8 @@ pub struct RecoveryJoinRef {
     pub module: String,
     pub skinny_iface_sha256: [u8; 32],
     pub interface_path: PathBuf,
+    pub package_imports_path: PathBuf,
+    pub package_imports_sha256: [u8; 32],
 }
 
 pub struct RecoveryArtifactInput<'a> {
@@ -38,12 +45,69 @@ pub struct RecoveryArtifactInput<'a> {
     pub product_source: &'a Path,
 }
 
+/// Exact original module bytes and Rust-admitted ownership, retained across a
+/// temporary worker directory's lifetime. Only compiler certification creates
+/// this bundle; materialization rechecks every member before publication.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CertifiedRecoveryProduct {
+    owner: CachedHomeOwner,
+    source_sha256: Option<[u8; 32]>,
+    interface_bytes: Vec<u8>,
+    product_bytes: Vec<u8>,
+    package_imports_bytes: Vec<u8>,
+    certification_bytes: Vec<u8>,
+}
+
+impl CertifiedRecoveryProduct {
+    pub(crate) fn from_certification(
+        owner: CachedHomeOwner,
+        interface_bytes: Vec<u8>,
+        product_bytes: Vec<u8>,
+        package_imports_bytes: Vec<u8>,
+        certification_bytes: Vec<u8>,
+    ) -> Self {
+        Self {
+            owner,
+            source_sha256: None,
+            interface_bytes,
+            product_bytes,
+            package_imports_bytes,
+            certification_bytes,
+        }
+    }
+
+    pub fn owner(&self) -> &CachedHomeOwner {
+        &self.owner
+    }
+
+    pub fn source_sha256(&self) -> Option<[u8; 32]> {
+        self.source_sha256
+    }
+
+    pub fn interface_bytes(&self) -> &[u8] {
+        &self.interface_bytes
+    }
+
+    pub fn product_bytes(&self) -> &[u8] {
+        &self.product_bytes
+    }
+
+    pub(crate) fn with_source_sha256(mut self, source_sha256: [u8; 32]) -> Self {
+        self.source_sha256 = Some(source_sha256);
+        self
+    }
+}
+
 #[derive(Debug)]
 pub struct VerifiedRecoveryArtifact {
     pub reference: RecoveryArtifactRef,
     pub interface_path: PathBuf,
+    pub package_imports_path: PathBuf,
     pub product_path: PathBuf,
     pub interface_bytes: Vec<u8>,
+    pub package_imports_bytes: Vec<u8>,
+    pub certification_path: PathBuf,
+    pub certification_bytes: Vec<u8>,
     pub product_bytes: Vec<u8>,
 }
 
@@ -51,7 +115,9 @@ pub struct VerifiedRecoveryArtifact {
 pub struct VerifiedRecoveryJoin {
     pub reference: RecoveryJoinRef,
     pub interface_path: PathBuf,
+    pub package_imports_path: PathBuf,
     pub interface_bytes: Vec<u8>,
+    pub package_imports_bytes: Vec<u8>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -62,6 +128,14 @@ pub enum RecoveryArtifactError {
     Unavailable(PathBuf),
     #[error("recovery artifact checksum mismatch: {0}")]
     DigestMismatch(PathBuf),
+    #[error("invalid package import witness: {0}")]
+    InvalidPackageImports(PathBuf),
+    #[error("home certification unavailable: {0}")]
+    CertifiedOwnersUnavailable(PathBuf),
+    #[error("home certification checksum mismatch: {0}")]
+    CertifiedOwnersDigestMismatch(PathBuf),
+    #[error("invalid home certification: {0}")]
+    InvalidCertifiedOwners(PathBuf),
     #[error("recovery artifact I/O: {0}")]
     Io(#[from] io::Error),
 }
@@ -72,6 +146,246 @@ fn hex(digest: &[u8; 32]) -> String {
         let _ = write!(text, "{byte:02x}");
         text
     })
+}
+
+const PACKAGE_IMPORTS_LIMIT: u64 = 4 * 1024 * 1024;
+const PACKAGE_IMPORT_ROOT_LIMIT: usize = 16_384;
+const PACKAGE_INTERFACE_LIMIT: u64 = 32 * 1024 * 1024;
+const CERTIFICATION_LIMIT: u64 = 4 * 1024 * 1024;
+
+fn package_sidecar_path(interface_path: &Path) -> PathBuf {
+    let mut path = interface_path.as_os_str().to_os_string();
+    path.push(".packages");
+    PathBuf::from(path)
+}
+
+fn certification_sidecar_path(interface_path: &Path) -> PathBuf {
+    let mut path = interface_path.as_os_str().to_os_string();
+    path.push(".owners");
+    PathBuf::from(path)
+}
+
+fn home_interface_path(owner: &CachedHomeOwner) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update((owner.unit.len() as u64).to_be_bytes());
+    hasher.update(owner.unit.as_bytes());
+    hasher.update((owner.module.len() as u64).to_be_bytes());
+    hasher.update(owner.module.as_bytes());
+    hasher.update(owner.module_version.0);
+    hasher.update(owner.skinny_iface_sha256);
+    hasher.update(owner.product_sha256);
+    let identity: [u8; 32] = hasher.finalize().into();
+    PathBuf::from("artifacts").join(format!("{}.hi", hex(&identity)))
+}
+
+fn home_product_path(owner: &CachedHomeOwner) -> PathBuf {
+    PathBuf::from("artifacts").join(format!("{}.products.cbor", hex(&owner.product_sha256)))
+}
+
+fn ref_owner(reference: &RecoveryArtifactRef) -> CachedHomeOwner {
+    CachedHomeOwner {
+        unit: reference.unit.clone(),
+        module: reference.module.clone(),
+        module_version: tidepool_repr::execution_schema::ModuleVersion(reference.module_version),
+        skinny_iface_sha256: reference.skinny_iface_sha256,
+        product_sha256: reference.product_sha256,
+    }
+}
+
+fn read_certification(
+    path: &Path,
+    expected_sha256: Option<&[u8; 32]>,
+    owner: &CachedHomeOwner,
+) -> Result<Vec<u8>, RecoveryArtifactError> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            RecoveryArtifactError::CertifiedOwnersUnavailable(path.to_path_buf())
+        } else {
+            RecoveryArtifactError::Io(error)
+        }
+    })?;
+    if !metadata.is_file() || metadata.len() > CERTIFICATION_LIMIT {
+        return Err(RecoveryArtifactError::InvalidCertifiedOwners(
+            path.to_path_buf(),
+        ));
+    }
+    let bytes = fs::read(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            RecoveryArtifactError::CertifiedOwnersUnavailable(path.to_path_buf())
+        } else {
+            RecoveryArtifactError::Io(error)
+        }
+    })?;
+    if bytes.len() as u64 > CERTIFICATION_LIMIT {
+        return Err(RecoveryArtifactError::InvalidCertifiedOwners(
+            path.to_path_buf(),
+        ));
+    }
+    if expected_sha256.is_some_and(|expected| Sha256::digest(&bytes).as_slice() != expected) {
+        return Err(RecoveryArtifactError::CertifiedOwnersDigestMismatch(
+            path.to_path_buf(),
+        ));
+    }
+    crate::certified_products::validate_home_certification(&bytes, owner)
+        .map_err(|_| RecoveryArtifactError::InvalidCertifiedOwners(path.to_path_buf()))?;
+    Ok(bytes)
+}
+
+fn read_package_imports(
+    path: &Path,
+    expected_sha256: Option<&[u8; 32]>,
+    unit: &str,
+    module: &str,
+    skinny_iface_sha256: &[u8; 32],
+) -> Result<Vec<u8>, RecoveryArtifactError> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            RecoveryArtifactError::Unavailable(path.to_path_buf())
+        } else {
+            RecoveryArtifactError::Io(error)
+        }
+    })?;
+    if !metadata.is_file() || metadata.len() > PACKAGE_IMPORTS_LIMIT {
+        return Err(RecoveryArtifactError::InvalidPackageImports(
+            path.to_path_buf(),
+        ));
+    }
+    let bytes = fs::read(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            RecoveryArtifactError::Unavailable(path.to_path_buf())
+        } else {
+            RecoveryArtifactError::Io(error)
+        }
+    })?;
+    if bytes.len() as u64 > PACKAGE_IMPORTS_LIMIT {
+        return Err(RecoveryArtifactError::InvalidPackageImports(
+            path.to_path_buf(),
+        ));
+    }
+    if let Some(expected) = expected_sha256 {
+        if Sha256::digest(&bytes).as_slice() != expected {
+            return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
+        }
+    }
+    validate_package_imports(&bytes, unit, module, skinny_iface_sha256, path)?;
+    Ok(bytes)
+}
+
+pub(crate) fn validate_package_imports(
+    bytes: &[u8],
+    unit: &str,
+    module: &str,
+    skinny_iface_sha256: &[u8; 32],
+    sidecar_path: &Path,
+) -> Result<BTreeMap<(String, String), (PathBuf, String)>, RecoveryArtifactError> {
+    use ciborium::value::Value;
+
+    let invalid = || RecoveryArtifactError::InvalidPackageImports(sidecar_path.to_path_buf());
+    let witness: Value = ciborium::de::from_reader(bytes).map_err(|_| invalid())?;
+    let mut canonical = Vec::new();
+    ciborium::ser::into_writer(&witness, &mut canonical).map_err(|_| invalid())?;
+    if canonical != bytes {
+        return Err(invalid());
+    }
+    let Value::Array(fields) = witness else {
+        return Err(invalid());
+    };
+    if fields.len() != 4
+        || fields[0].as_text() != Some("TPPKGROOTS")
+        || fields[1].as_text() != Some("1")
+    {
+        return Err(invalid());
+    }
+    let Value::Array(owner) = &fields[2] else {
+        return Err(invalid());
+    };
+    if owner.len() != 3
+        || owner[0].as_text() != Some(unit)
+        || owner[1].as_text() != Some(module)
+        || owner[2].as_text() != Some(hex(skinny_iface_sha256).as_str())
+    {
+        return Err(invalid());
+    }
+    let Value::Array(roots) = &fields[3] else {
+        return Err(invalid());
+    };
+    if roots.len() > PACKAGE_IMPORT_ROOT_LIMIT {
+        return Err(invalid());
+    }
+    let mut selected = BTreeMap::new();
+    for root in roots {
+        let Value::Array(fields) = root else {
+            return Err(invalid());
+        };
+        if fields.len() != 4 {
+            return Err(invalid());
+        }
+        let Some(package_unit) = fields[0].as_text().filter(|text| !text.is_empty()) else {
+            return Err(invalid());
+        };
+        let Some(package_module) = fields[1].as_text().filter(|text| !text.is_empty()) else {
+            return Err(invalid());
+        };
+        let Some(package_path) = fields[2].as_text() else {
+            return Err(invalid());
+        };
+        let package_path = Path::new(package_path);
+        let Some(package_sha256) = fields[3].as_text() else {
+            return Err(invalid());
+        };
+        if !package_path.is_absolute()
+            || package_sha256.len() != 64
+            || !package_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(invalid());
+        }
+        if selected
+            .insert(
+                (package_unit.to_owned(), package_module.to_owned()),
+                (package_path.to_path_buf(), package_sha256.to_owned()),
+            )
+            .is_some()
+        {
+            return Err(invalid());
+        }
+        let path_metadata = fs::metadata(package_path).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                RecoveryArtifactError::Unavailable(package_path.to_path_buf())
+            } else {
+                RecoveryArtifactError::Io(error)
+            }
+        })?;
+        if !path_metadata.is_file() || path_metadata.len() > PACKAGE_INTERFACE_LIMIT {
+            return Err(invalid());
+        }
+        let package_file = File::open(package_path).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                RecoveryArtifactError::Unavailable(package_path.to_path_buf())
+            } else {
+                RecoveryArtifactError::Io(error)
+            }
+        })?;
+        let metadata = package_file.metadata()?;
+        if !metadata.is_file() || metadata.len() > PACKAGE_INTERFACE_LIMIT {
+            return Err(invalid());
+        }
+        let mut package_bytes = Vec::new();
+        package_file
+            .take(PACKAGE_INTERFACE_LIMIT + 1)
+            .read_to_end(&mut package_bytes)?;
+        if package_bytes.len() as u64 > PACKAGE_INTERFACE_LIMIT {
+            return Err(invalid());
+        }
+        let package_digest: [u8; 32] = Sha256::digest(&package_bytes).into();
+        if hex(&package_digest) != package_sha256 {
+            return Err(RecoveryArtifactError::DigestMismatch(
+                package_path.to_path_buf(),
+            ));
+        }
+    }
+    Ok(selected)
 }
 
 fn checked_relative(path: &Path) -> bool {
@@ -100,6 +414,15 @@ fn resolve_owned(recovery_root: &Path, relative: &Path) -> Result<PathBuf, Recov
     Ok(canonical)
 }
 
+fn classify_certification_path_error(error: RecoveryArtifactError) -> RecoveryArtifactError {
+    match error {
+        RecoveryArtifactError::Unavailable(path) => {
+            RecoveryArtifactError::CertifiedOwnersUnavailable(path)
+        }
+        other => other,
+    }
+}
+
 fn read_checked(path: &Path, expected: &[u8; 32]) -> Result<Vec<u8>, RecoveryArtifactError> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
@@ -115,19 +438,51 @@ fn read_checked(path: &Path, expected: &[u8; 32]) -> Result<Vec<u8>, RecoveryArt
 }
 
 fn durable_copy(path: &Path, bytes: &[u8], digest: &[u8; 32]) -> Result<(), RecoveryArtifactError> {
-    if path.exists() && read_checked(path, digest).is_ok() {
-        return Ok(());
-    }
-    let parent = path
-        .parent()
-        .ok_or(RecoveryArtifactError::InvalidReference)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    temporary.write_all(bytes)?;
-    temporary.as_file().sync_all()?;
-    temporary.persist(path).map_err(|error| error.error)?;
-    File::open(parent)?.sync_all()?;
+    reject_symlink(path)?;
+    tidepool_atomic_write::write_durable_new(path, bytes).map_err(io::Error::from)?;
+    reject_symlink(path)?;
     read_checked(path, digest)?;
     Ok(())
+}
+
+fn reject_symlink(path: &Path) -> Result<(), RecoveryArtifactError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(RecoveryArtifactError::InvalidReference)
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// The run owner controls this directory while publishing; checking its
+/// canonical identity before writing rejects preexisting redirects.
+fn prepare_owned_directory(recovery_root: &Path) -> Result<PathBuf, RecoveryArtifactError> {
+    let canonical_root = fs::canonicalize(recovery_root)?;
+    let owned = recovery_root.join("artifacts");
+    match fs::symlink_metadata(&owned) {
+        Ok(metadata) if !metadata.file_type().is_dir() => {
+            return Err(RecoveryArtifactError::InvalidReference);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => match fs::create_dir(&owned) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        },
+        Err(error) => return Err(error.into()),
+    }
+    let metadata = fs::symlink_metadata(&owned)?;
+    if !metadata.file_type().is_dir() {
+        return Err(RecoveryArtifactError::InvalidReference);
+    }
+    let canonical_owned = fs::canonicalize(&owned)?;
+    if canonical_owned != canonical_root.join("artifacts") {
+        return Err(RecoveryArtifactError::InvalidReference);
+    }
+    File::open(&canonical_root)?.sync_all()?;
+    Ok(canonical_owned)
 }
 
 /// Seal a validated source-less Joined interface in the run's durable root.
@@ -143,15 +498,36 @@ pub fn materialize_joined_interface(
         return Err(RecoveryArtifactError::InvalidReference);
     }
     let bytes = read_checked(interface_source, &skinny_iface_sha256)?;
-    let owned = recovery_root.join("artifacts");
-    fs::create_dir_all(&owned)?;
-    File::open(recovery_root)?.sync_all()?;
+    let package_imports_source = package_sidecar_path(interface_source);
+    let package_imports = read_package_imports(
+        &package_imports_source,
+        None,
+        unit,
+        module,
+        &skinny_iface_sha256,
+    )?;
+    let package_imports_sha256: [u8; 32] = Sha256::digest(&package_imports).into();
+    let owned = prepare_owned_directory(recovery_root)?;
     let interface_path =
         PathBuf::from("artifacts").join(format!("{}.joined.hi", hex(&skinny_iface_sha256)));
+    let package_imports_path = package_sidecar_path(&interface_path);
     durable_copy(
-        &recovery_root.join(&interface_path),
+        &owned.join(
+            interface_path
+                .file_name()
+                .ok_or(RecoveryArtifactError::InvalidReference)?,
+        ),
         &bytes,
         &skinny_iface_sha256,
+    )?;
+    durable_copy(
+        &owned.join(
+            package_imports_path
+                .file_name()
+                .ok_or(RecoveryArtifactError::InvalidReference)?,
+        ),
+        &package_imports,
+        &package_imports_sha256,
     )?;
     File::open(&owned)?.sync_all()?;
     Ok(RecoveryJoinRef {
@@ -160,43 +536,98 @@ pub fn materialize_joined_interface(
         module: module.to_owned(),
         skinny_iface_sha256,
         interface_path,
+        package_imports_path,
+        package_imports_sha256,
     })
 }
 
-/// Materialize complete checksum-verified pairs before a recovery manifest is
-/// staged. Paths in the returned refs are relative to the supplied run root.
-pub fn materialize_recovery_closure(
+/// Materialize compiler-certified original module products into the run-owned
+/// closure. The bundle owns its bytes, so no worker scratch path survives here.
+pub fn materialize_certified_products(
     recovery_root: &Path,
     toolchain_identity_sha256: [u8; 32],
-    artifacts: &[RecoveryArtifactInput<'_>],
+    products: &[CertifiedRecoveryProduct],
 ) -> Result<Vec<RecoveryArtifactRef>, RecoveryArtifactError> {
     if toolchain_identity_sha256 == [0; 32] {
         return Err(RecoveryArtifactError::InvalidReference);
     }
-    let owned = recovery_root.join("artifacts");
-    fs::create_dir_all(&owned)?;
-    File::open(recovery_root)?.sync_all()?;
-    let mut refs = Vec::with_capacity(artifacts.len());
-    for artifact in artifacts {
-        let owner = artifact.owner;
+    let owned = prepare_owned_directory(recovery_root)?;
+    let mut refs = Vec::with_capacity(products.len());
+    for product in products {
+        let owner = &product.owner;
         if owner.unit.is_empty() || owner.module.is_empty() {
             return Err(RecoveryArtifactError::InvalidReference);
         }
-        let interface = read_checked(artifact.interface_source, &owner.skinny_iface_sha256)?;
-        let product = read_checked(artifact.product_source, &owner.product_sha256)?;
-        let interface_path =
-            PathBuf::from("artifacts").join(format!("{}.hi", hex(&owner.skinny_iface_sha256)));
-        let product_path = PathBuf::from("artifacts")
-            .join(format!("{}.products.cbor", hex(&owner.product_sha256)));
+        if Sha256::digest(&product.interface_bytes).as_slice() != owner.skinny_iface_sha256
+            || Sha256::digest(&product.product_bytes).as_slice() != owner.product_sha256
+        {
+            return Err(RecoveryArtifactError::DigestMismatch(home_interface_path(
+                owner,
+            )));
+        }
+        let interface_path = home_interface_path(owner);
+        let package_imports_path = package_sidecar_path(&interface_path);
+        let certification_path = certification_sidecar_path(&interface_path);
+        let product_path = home_product_path(owner);
+        if product.package_imports_bytes.len() as u64 > PACKAGE_IMPORTS_LIMIT {
+            return Err(RecoveryArtifactError::InvalidPackageImports(
+                package_imports_path,
+            ));
+        }
+        validate_package_imports(
+            &product.package_imports_bytes,
+            &owner.unit,
+            &owner.module,
+            &owner.skinny_iface_sha256,
+            &package_imports_path,
+        )?;
+        if product.certification_bytes.len() as u64 > CERTIFICATION_LIMIT {
+            return Err(RecoveryArtifactError::InvalidCertifiedOwners(
+                certification_path,
+            ));
+        }
+        crate::certified_products::validate_home_certification(&product.certification_bytes, owner)
+            .map_err(|_| {
+                RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone())
+            })?;
+        let package_imports_sha256: [u8; 32] =
+            Sha256::digest(&product.package_imports_bytes).into();
+        let certification_sha256: [u8; 32] = Sha256::digest(&product.certification_bytes).into();
         durable_copy(
-            &recovery_root.join(&interface_path),
-            &interface,
+            &owned.join(
+                interface_path
+                    .file_name()
+                    .ok_or(RecoveryArtifactError::InvalidReference)?,
+            ),
+            &product.interface_bytes,
             &owner.skinny_iface_sha256,
         )?;
         durable_copy(
-            &recovery_root.join(&product_path),
-            &product,
+            &owned.join(
+                product_path
+                    .file_name()
+                    .ok_or(RecoveryArtifactError::InvalidReference)?,
+            ),
+            &product.product_bytes,
             &owner.product_sha256,
+        )?;
+        durable_copy(
+            &owned.join(
+                package_imports_path
+                    .file_name()
+                    .ok_or(RecoveryArtifactError::InvalidReference)?,
+            ),
+            &product.package_imports_bytes,
+            &package_imports_sha256,
+        )?;
+        durable_copy(
+            &owned.join(
+                certification_path
+                    .file_name()
+                    .ok_or(RecoveryArtifactError::InvalidReference)?,
+            ),
+            &product.certification_bytes,
+            &certification_sha256,
         )?;
         refs.push(RecoveryArtifactRef {
             toolchain_identity_sha256,
@@ -206,11 +637,53 @@ pub fn materialize_recovery_closure(
             skinny_iface_sha256: owner.skinny_iface_sha256,
             product_sha256: owner.product_sha256,
             interface_path,
+            package_imports_path,
+            package_imports_sha256,
+            certification_path,
+            certification_sha256,
             product_path,
         });
     }
     File::open(&owned)?.sync_all()?;
     Ok(refs)
+}
+
+/// Read legacy path inputs into owned bundles, then use the same immutable
+/// validation and publication path as compiler-certified products.
+pub fn materialize_recovery_closure(
+    recovery_root: &Path,
+    toolchain_identity_sha256: [u8; 32],
+    artifacts: &[RecoveryArtifactInput<'_>],
+) -> Result<Vec<RecoveryArtifactRef>, RecoveryArtifactError> {
+    let mut products = Vec::with_capacity(artifacts.len());
+    for artifact in artifacts {
+        let owner = artifact.owner;
+        if owner.unit.is_empty() || owner.module.is_empty() {
+            return Err(RecoveryArtifactError::InvalidReference);
+        }
+        let interface_bytes = read_checked(artifact.interface_source, &owner.skinny_iface_sha256)?;
+        let product_bytes = read_checked(artifact.product_source, &owner.product_sha256)?;
+        let package_imports_bytes = read_package_imports(
+            &package_sidecar_path(artifact.interface_source),
+            None,
+            &owner.unit,
+            &owner.module,
+            &owner.skinny_iface_sha256,
+        )?;
+        let certification_bytes = read_certification(
+            &certification_sidecar_path(artifact.interface_source),
+            None,
+            owner,
+        )?;
+        products.push(CertifiedRecoveryProduct::from_certification(
+            owner.clone(),
+            interface_bytes,
+            product_bytes,
+            package_imports_bytes,
+            certification_bytes,
+        ));
+    }
+    materialize_certified_products(recovery_root, toolchain_identity_sha256, &products)
 }
 
 /// Verify path confinement and both immutable bytes before using a durable
@@ -223,19 +696,48 @@ pub fn verify_materialized_ref(
         || reference.unit.is_empty()
         || reference.module.is_empty()
         || !checked_relative(&reference.interface_path)
+        || !checked_relative(&reference.package_imports_path)
+        || !checked_relative(&reference.certification_path)
         || !checked_relative(&reference.product_path)
+        || reference.package_imports_path != package_sidecar_path(&reference.interface_path)
+        || reference.certification_path != certification_sidecar_path(&reference.interface_path)
+    {
+        return Err(RecoveryArtifactError::InvalidReference);
+    }
+    let owner = ref_owner(reference);
+    if reference.interface_path != home_interface_path(&owner)
+        || reference.product_path != home_product_path(&owner)
     {
         return Err(RecoveryArtifactError::InvalidReference);
     }
     let interface_path = resolve_owned(recovery_root, &reference.interface_path)?;
     let product_path = resolve_owned(recovery_root, &reference.product_path)?;
     let interface_bytes = read_checked(&interface_path, &reference.skinny_iface_sha256)?;
+    let package_imports_path = resolve_owned(recovery_root, &reference.package_imports_path)?;
+    let package_imports_bytes = read_package_imports(
+        &package_imports_path,
+        Some(&reference.package_imports_sha256),
+        &reference.unit,
+        &reference.module,
+        &reference.skinny_iface_sha256,
+    )?;
+    let certification_path = resolve_owned(recovery_root, &reference.certification_path)
+        .map_err(classify_certification_path_error)?;
+    let certification_bytes = read_certification(
+        &certification_path,
+        Some(&reference.certification_sha256),
+        &owner,
+    )?;
     let product_bytes = read_checked(&product_path, &reference.product_sha256)?;
     Ok(VerifiedRecoveryArtifact {
         reference: reference.clone(),
         interface_path,
+        package_imports_path,
         product_path,
         interface_bytes,
+        package_imports_bytes,
+        certification_path,
+        certification_bytes,
         product_bytes,
     })
 }
@@ -249,15 +751,28 @@ pub fn verify_materialized_join(
     if reference.toolchain_identity_sha256 == [0; 32]
         || reference.unit.is_empty()
         || reference.module.is_empty()
+        || !checked_relative(&reference.interface_path)
+        || !checked_relative(&reference.package_imports_path)
+        || reference.package_imports_path != package_sidecar_path(&reference.interface_path)
     {
         return Err(RecoveryArtifactError::InvalidReference);
     }
     let interface_path = resolve_owned(recovery_root, &reference.interface_path)?;
     let interface_bytes = read_checked(&interface_path, &reference.skinny_iface_sha256)?;
+    let package_imports_path = resolve_owned(recovery_root, &reference.package_imports_path)?;
+    let package_imports_bytes = read_package_imports(
+        &package_imports_path,
+        Some(&reference.package_imports_sha256),
+        &reference.unit,
+        &reference.module,
+        &reference.skinny_iface_sha256,
+    )?;
     Ok(VerifiedRecoveryJoin {
         reference: reference.clone(),
         interface_path,
+        package_imports_path,
         interface_bytes,
+        package_imports_bytes,
     })
 }
 
@@ -266,21 +781,74 @@ mod tests {
     use super::*;
     use tidepool_repr::execution_schema::ModuleVersion;
 
+    fn text(value: impl Into<String>) -> ciborium::value::Value {
+        ciborium::value::Value::Text(value.into())
+    }
+
+    fn package_witness(
+        unit: &str,
+        module: &str,
+        iface_sha256: &[u8; 32],
+        roots: Vec<[String; 4]>,
+    ) -> Vec<u8> {
+        let root_values = roots
+            .into_iter()
+            .map(|root| ciborium::value::Value::Array(root.into_iter().map(text).collect()))
+            .collect();
+        let value = ciborium::value::Value::Array(vec![
+            text("TPPKGROOTS"),
+            text("1"),
+            ciborium::value::Value::Array(vec![text(unit), text(module), text(hex(iface_sha256))]),
+            ciborium::value::Value::Array(root_values),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+        bytes
+    }
+
+    fn write_interface_and_sidecar(
+        interface: &Path,
+        unit: &str,
+        module: &str,
+        contents: &[u8],
+    ) -> [u8; 32] {
+        fs::write(interface, contents).unwrap();
+        let iface_sha256: [u8; 32] = Sha256::digest(contents).into();
+        fs::write(
+            package_sidecar_path(interface),
+            package_witness(unit, module, &iface_sha256, Vec::new()),
+        )
+        .unwrap();
+        iface_sha256
+    }
+
+    fn write_certification(interface: &Path, owner: &CachedHomeOwner) -> Vec<u8> {
+        let bytes = crate::certified_products::encode_home_certification(
+            owner,
+            &[],
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        fs::write(certification_sidecar_path(interface), &bytes).unwrap();
+        bytes
+    }
+
     #[test]
     fn materialized_pair_is_confined_and_checksum_verified() {
         let run = tempfile::tempdir().unwrap();
         let source = tempfile::tempdir().unwrap();
         let iface = source.path().join("A.hi");
         let product = source.path().join("products.cbor");
-        fs::write(&iface, b"iface").unwrap();
+        let iface_sha256 = write_interface_and_sidecar(&iface, "home", "A", b"iface");
         fs::write(&product, b"product").unwrap();
         let owner = CachedHomeOwner {
             unit: "home".into(),
             module: "A".into(),
             module_version: ModuleVersion([3; 32]),
-            skinny_iface_sha256: Sha256::digest(b"iface").into(),
+            skinny_iface_sha256: iface_sha256,
             product_sha256: Sha256::digest(b"product").into(),
         };
+        write_certification(&iface, &owner);
         let refs = materialize_recovery_closure(
             run.path(),
             [1; 32],
@@ -293,10 +861,36 @@ mod tests {
         .unwrap();
         let verified = verify_materialized_ref(run.path(), &refs[0]).unwrap();
         assert_eq!(verified.interface_bytes, b"iface");
+        assert!(!verified.package_imports_bytes.is_empty());
+        assert!(!verified.certification_bytes.is_empty());
+        assert!(verified
+            .reference
+            .certification_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".hi.owners")));
+        assert!(verified
+            .reference
+            .package_imports_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".hi.packages")));
         let mut escaped = refs[0].clone();
         escaped.product_path = PathBuf::from("../outside");
         assert!(matches!(
             verify_materialized_ref(run.path(), &escaped),
+            Err(RecoveryArtifactError::InvalidReference)
+        ));
+        let mut misplaced = refs[0].clone();
+        misplaced.product_path = PathBuf::from("artifacts/other.products.cbor");
+        assert!(matches!(
+            verify_materialized_ref(run.path(), &misplaced),
+            Err(RecoveryArtifactError::InvalidReference)
+        ));
+        misplaced = refs[0].clone();
+        misplaced.certification_path = PathBuf::from("artifacts/other.hi.owners");
+        assert!(matches!(
+            verify_materialized_ref(run.path(), &misplaced),
             Err(RecoveryArtifactError::InvalidReference)
         ));
         fs::write(&verified.product_path, b"tampered").unwrap();
@@ -304,6 +898,200 @@ mod tests {
             verify_materialized_ref(run.path(), &refs[0]),
             Err(RecoveryArtifactError::DigestMismatch(_))
         ));
+        fs::write(&verified.package_imports_path, b"tampered").unwrap();
+        assert!(matches!(
+            verify_materialized_ref(run.path(), &refs[0]),
+            Err(RecoveryArtifactError::DigestMismatch(_))
+        ));
+        fs::write(
+            &verified.package_imports_path,
+            &verified.package_imports_bytes,
+        )
+        .unwrap();
+        fs::write(&verified.product_path, &verified.product_bytes).unwrap();
+        fs::remove_file(&verified.certification_path).unwrap();
+        assert!(matches!(
+            verify_materialized_ref(run.path(), &refs[0]),
+            Err(RecoveryArtifactError::CertifiedOwnersUnavailable(_))
+        ));
+        fs::write(&verified.certification_path, &verified.certification_bytes).unwrap();
+        fs::write(&verified.certification_path, b"tampered").unwrap();
+        assert!(matches!(
+            verify_materialized_ref(run.path(), &refs[0]),
+            Err(RecoveryArtifactError::CertifiedOwnersDigestMismatch(_))
+        ));
+        let mut legacy = serde_json::to_value(&refs[0]).unwrap();
+        let record = legacy.as_object_mut().unwrap();
+        record.remove("certification_path");
+        record.remove("certification_sha256");
+        assert!(serde_json::from_value::<RecoveryArtifactRef>(legacy).is_err());
+    }
+
+    #[test]
+    fn same_interface_bytes_keep_distinct_home_owner_certificates() {
+        let run = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let iface = source.path().join("A.hi");
+        let iface_sha256 = write_interface_and_sidecar(&iface, "home", "A", b"same iface");
+        let first_product = source.path().join("first.products.cbor");
+        let second_product = source.path().join("second.products.cbor");
+        fs::write(&first_product, b"first product").unwrap();
+        fs::write(&second_product, b"second product").unwrap();
+        let first = CachedHomeOwner {
+            unit: "home".into(),
+            module: "A".into(),
+            module_version: ModuleVersion([3; 32]),
+            skinny_iface_sha256: iface_sha256,
+            product_sha256: Sha256::digest(b"first product").into(),
+        };
+        let second = CachedHomeOwner {
+            module_version: ModuleVersion([4; 32]),
+            ..first.clone()
+        };
+        let third = CachedHomeOwner {
+            product_sha256: Sha256::digest(b"second product").into(),
+            ..first.clone()
+        };
+        assert_ne!(
+            home_interface_path(&first),
+            home_interface_path(&CachedHomeOwner {
+                unit: "other-home".into(),
+                ..first.clone()
+            })
+        );
+        assert_ne!(
+            home_interface_path(&first),
+            home_interface_path(&CachedHomeOwner {
+                module: "Other".into(),
+                ..first.clone()
+            })
+        );
+        let first_certification = crate::certified_products::encode_home_certification(
+            &first,
+            &[],
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        fs::write(certification_sidecar_path(&iface), &first_certification).unwrap();
+        let first_ref = materialize_recovery_closure(
+            run.path(),
+            [1; 32],
+            &[RecoveryArtifactInput {
+                owner: &first,
+                interface_source: &iface,
+                product_source: &first_product,
+            }],
+        )
+        .unwrap()
+        .remove(0);
+        assert!(verify_materialized_ref(run.path(), &first_ref).is_ok());
+
+        let second_certification = crate::certified_products::encode_home_certification(
+            &second,
+            &[],
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        fs::write(certification_sidecar_path(&iface), &second_certification).unwrap();
+        let second_ref = materialize_recovery_closure(
+            run.path(),
+            [1; 32],
+            &[RecoveryArtifactInput {
+                owner: &second,
+                interface_source: &iface,
+                product_source: &first_product,
+            }],
+        )
+        .unwrap()
+        .remove(0);
+        assert!(verify_materialized_ref(run.path(), &second_ref).is_ok());
+        assert_ne!(first_ref.interface_path, second_ref.interface_path);
+        assert_ne!(first_ref.certification_path, second_ref.certification_path);
+        assert_eq!(
+            verify_materialized_ref(run.path(), &first_ref)
+                .unwrap()
+                .certification_bytes,
+            first_certification
+        );
+
+        write_certification(&iface, &third);
+        let third_ref = materialize_recovery_closure(
+            run.path(),
+            [1; 32],
+            &[RecoveryArtifactInput {
+                owner: &third,
+                interface_source: &iface,
+                product_source: &second_product,
+            }],
+        )
+        .unwrap()
+        .remove(0);
+        assert!(verify_materialized_ref(run.path(), &third_ref).is_ok());
+        assert_ne!(first_ref.interface_path, third_ref.interface_path);
+        assert!(verify_materialized_ref(run.path(), &first_ref).is_ok());
+        assert!(verify_materialized_ref(run.path(), &second_ref).is_ok());
+    }
+
+    #[test]
+    fn conflicting_witness_cannot_replace_an_existing_owner_reference() {
+        let run = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let iface = source.path().join("A.hi");
+        let iface_sha256 = write_interface_and_sidecar(&iface, "home", "A", b"same iface");
+        let product = source.path().join("A.products.cbor");
+        fs::write(&product, b"same product").unwrap();
+        let owner = CachedHomeOwner {
+            unit: "home".into(),
+            module: "A".into(),
+            module_version: ModuleVersion([3; 32]),
+            skinny_iface_sha256: iface_sha256,
+            product_sha256: Sha256::digest(b"same product").into(),
+        };
+        write_certification(&iface, &owner);
+        let input = [RecoveryArtifactInput {
+            owner: &owner,
+            interface_source: &iface,
+            product_source: &product,
+        }];
+        let first = materialize_recovery_closure(run.path(), [1; 32], &input)
+            .unwrap()
+            .remove(0);
+        let original = verify_materialized_ref(run.path(), &first).unwrap();
+        assert_eq!(
+            materialize_recovery_closure(run.path(), [1; 32], &input)
+                .unwrap()
+                .remove(0),
+            first
+        );
+
+        let package_iface = source.path().join("base.hi");
+        fs::write(&package_iface, b"package interface").unwrap();
+        let package_sha256: [u8; 32] = Sha256::digest(b"package interface").into();
+        fs::write(
+            package_sidecar_path(&iface),
+            package_witness(
+                "home",
+                "A",
+                &iface_sha256,
+                vec![[
+                    "base-unit".into(),
+                    "Data.Base".into(),
+                    package_iface.display().to_string(),
+                    hex(&package_sha256),
+                ]],
+            ),
+        )
+        .unwrap();
+        assert!(matches!(
+            materialize_recovery_closure(run.path(), [1; 32], &input),
+            Err(RecoveryArtifactError::DigestMismatch(_))
+        ));
+        let retained = verify_materialized_ref(run.path(), &first).unwrap();
+        assert_eq!(
+            retained.package_imports_bytes,
+            original.package_imports_bytes
+        );
+        assert_eq!(retained.certification_bytes, original.certification_bytes);
     }
 
     #[test]
@@ -311,19 +1099,199 @@ mod tests {
         let run = tempfile::tempdir().unwrap();
         let source = tempfile::tempdir().unwrap();
         let iface = source.path().join("Join.hi");
-        fs::write(&iface, b"joined").unwrap();
-        let digest = Sha256::digest(b"joined").into();
+        let digest = write_interface_and_sidecar(&iface, "home", "Joined", b"joined");
         let reference =
             materialize_joined_interface(run.path(), [1; 32], "home", "Joined", &iface, digest)
                 .unwrap();
         let verified = verify_materialized_join(run.path(), &reference).unwrap();
         assert_eq!(verified.interface_bytes, b"joined");
+        assert!(!verified.package_imports_bytes.is_empty());
         assert_eq!(reference.interface_path.extension().unwrap(), "hi");
         let mut escaped = reference.clone();
         escaped.interface_path = PathBuf::from("../outside");
         assert!(matches!(
             verify_materialized_join(run.path(), &escaped),
             Err(RecoveryArtifactError::InvalidReference)
+        ));
+        fs::write(&verified.package_imports_path, b"corrupt").unwrap();
+        assert!(matches!(
+            verify_materialized_join(run.path(), &reference),
+            Err(RecoveryArtifactError::DigestMismatch(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialization_rejects_redirected_artifact_directory_before_writing() {
+        use std::os::unix::fs::symlink;
+
+        let run = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        symlink(outside.path(), run.path().join("artifacts")).unwrap();
+
+        let iface = source.path().join("A.hi");
+        let iface_sha256 = write_interface_and_sidecar(&iface, "home", "A", b"iface");
+        let product_path = source.path().join("A.products.cbor");
+        fs::write(&product_path, b"product").unwrap();
+        let owner = CachedHomeOwner {
+            unit: "home".into(),
+            module: "A".into(),
+            module_version: ModuleVersion([3; 32]),
+            skinny_iface_sha256: iface_sha256,
+            product_sha256: Sha256::digest(b"product").into(),
+        };
+        let certification = write_certification(&iface, &owner);
+        let product = CertifiedRecoveryProduct::from_certification(
+            owner.clone(),
+            b"iface".to_vec(),
+            b"product".to_vec(),
+            fs::read(package_sidecar_path(&iface)).unwrap(),
+            certification,
+        );
+        assert!(matches!(
+            materialize_certified_products(run.path(), [1; 32], &[product]),
+            Err(RecoveryArtifactError::InvalidReference)
+        ));
+        assert!(matches!(
+            materialize_recovery_closure(
+                run.path(),
+                [1; 32],
+                &[RecoveryArtifactInput {
+                    owner: &owner,
+                    interface_source: &iface,
+                    product_source: &product_path,
+                }],
+            ),
+            Err(RecoveryArtifactError::InvalidReference)
+        ));
+        assert!(matches!(
+            materialize_joined_interface(run.path(), [1; 32], "home", "A", &iface, iface_sha256),
+            Err(RecoveryArtifactError::InvalidReference)
+        ));
+        assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn package_sidecar_binds_owner_and_selected_package_bytes() {
+        let run = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let iface = source.path().join("A.hi");
+        fs::write(&iface, b"iface").unwrap();
+        let iface_sha256: [u8; 32] = Sha256::digest(b"iface").into();
+        let package_iface = source.path().join("base.hi");
+        fs::write(&package_iface, b"package interface").unwrap();
+        let package_sha256: [u8; 32] = Sha256::digest(b"package interface").into();
+        let package_root = [
+            "base-unit".to_owned(),
+            "Data.Base".to_owned(),
+            package_iface.display().to_string(),
+            hex(&package_sha256),
+        ];
+        fs::write(
+            package_sidecar_path(&iface),
+            package_witness("home", "A", &iface_sha256, vec![package_root]),
+        )
+        .unwrap();
+        let product = source.path().join("products.cbor");
+        fs::write(&product, b"product").unwrap();
+        let owner = CachedHomeOwner {
+            unit: "home".into(),
+            module: "A".into(),
+            module_version: ModuleVersion([3; 32]),
+            skinny_iface_sha256: iface_sha256,
+            product_sha256: Sha256::digest(b"product").into(),
+        };
+        let certification = write_certification(&iface, &owner);
+        let input = [RecoveryArtifactInput {
+            owner: &owner,
+            interface_source: &iface,
+            product_source: &product,
+        }];
+        let refs = materialize_recovery_closure(run.path(), [1; 32], &input).unwrap();
+        assert!(verify_materialized_ref(run.path(), &refs[0]).is_ok());
+
+        fs::remove_file(certification_sidecar_path(&iface)).unwrap();
+        assert!(matches!(
+            materialize_recovery_closure(run.path(), [1; 32], &input),
+            Err(RecoveryArtifactError::CertifiedOwnersUnavailable(_))
+        ));
+        let mut wrong_owner = owner.clone();
+        wrong_owner.module_version = ModuleVersion([9; 32]);
+        write_certification(&iface, &wrong_owner);
+        assert!(matches!(
+            materialize_recovery_closure(run.path(), [1; 32], &input),
+            Err(RecoveryArtifactError::InvalidCertifiedOwners(_))
+        ));
+        fs::write(certification_sidecar_path(&iface), &certification).unwrap();
+
+        fs::write(
+            &source.path().join("A.hi.owners"),
+            certification.iter().copied().chain([0]).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(matches!(
+            materialize_recovery_closure(run.path(), [1; 32], &input),
+            Err(RecoveryArtifactError::InvalidCertifiedOwners(_))
+        ));
+
+        fs::write(&package_iface, b"changed package interface").unwrap();
+        assert!(matches!(
+            verify_materialized_ref(run.path(), &refs[0]),
+            Err(RecoveryArtifactError::DigestMismatch(_))
+        ));
+        assert!(matches!(
+            materialize_recovery_closure(run.path(), [1; 32], &input),
+            Err(RecoveryArtifactError::DigestMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn missing_or_wrong_owner_package_sidecar_cannot_be_recovered() {
+        let run = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let iface = source.path().join("A.hi");
+        fs::write(&iface, b"iface").unwrap();
+        let product = source.path().join("products.cbor");
+        fs::write(&product, b"product").unwrap();
+        let owner = CachedHomeOwner {
+            unit: "home".into(),
+            module: "A".into(),
+            module_version: ModuleVersion([3; 32]),
+            skinny_iface_sha256: Sha256::digest(b"iface").into(),
+            product_sha256: Sha256::digest(b"product").into(),
+        };
+        write_certification(&iface, &owner);
+        assert!(matches!(
+            materialize_recovery_closure(
+                run.path(),
+                [1; 32],
+                &[RecoveryArtifactInput {
+                    owner: &owner,
+                    interface_source: &iface,
+                    product_source: &product,
+                }]
+            ),
+            Err(RecoveryArtifactError::Unavailable(_))
+        ));
+
+        let wrong_owner: [u8; 32] = owner.skinny_iface_sha256;
+        fs::write(
+            package_sidecar_path(&iface),
+            package_witness("other-unit", "A", &wrong_owner, Vec::new()),
+        )
+        .unwrap();
+        assert!(matches!(
+            materialize_recovery_closure(
+                run.path(),
+                [1; 32],
+                &[RecoveryArtifactInput {
+                    owner: &owner,
+                    interface_source: &iface,
+                    product_source: &product,
+                }]
+            ),
+            Err(RecoveryArtifactError::InvalidPackageImports(_))
         ));
     }
 }

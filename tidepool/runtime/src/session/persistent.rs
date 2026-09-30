@@ -12,8 +12,8 @@ use std::sync::Arc;
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BindingTipId, SourceLeaseKey};
 use tidepool_codegen::machine::{CancelHandle, MachineDisposition};
 use tidepool_codegen::prepared_program::{
-    DemandedImage, InheritedSourceDemand, PreparedHandle, ProgramId, ResidencyCounts,
-    SourceBinder, SourceInstanceLease,
+    DemandedImage, ImageRegistry, InheritedSourceDemand, PendingGroupInventory, ProgramId,
+    ResidencyCounts, SourceBinder, SourceGroupOutline, SourceInstanceLease,
 };
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
 use tidepool_codegen::suspension::{ContinuationId, RealmId};
@@ -21,15 +21,20 @@ use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::{DataCon, DataConTable, Generation, SessionModule, SessionVarId, VarId};
 
 use tidepool_codegen::binding_table::BoundValue;
-use tidepool_repr::execution_schema::{CachedHomeOwner, ImportOwner, PreparedProgram, SymbolIdentity};
+use tidepool_repr::execution_schema::{
+    CachedHomeOwner, CertifiedGroup, GlobalDecl, ImportOwner, PreparedProgram, SymbolIdentity,
+};
+use tidepool_toolchain::certified_products::PendingImportOwner;
 
 use super::binding_table::{BindRecord, BindingIndex};
 use super::prepared::{
     CertifiedTargetImage, InstallSnapshot, PreparedEngine, PreparedRuntimeError,
 };
+use super::turn::TurnCertification;
 use super::{
-    DeclarationCandidateRender, ExactExportError, ExactExportSurface, SessionCompileView,
-    SessionError, SessionLib, SourceImports,
+    DeclarationCandidateRender, ExactExportError, ExactExportSurface, PublicManifestBase,
+    PublicManifestCommit, PublicationDecision, RecoveryPublicOwner, SessionCompileView,
+    SessionError, SessionLib, SourceImports, StagedPublicManifest,
 };
 
 /// Render the unqualified imports for the exact names visible from each live
@@ -41,6 +46,16 @@ use super::{
 /// import specs its render pulls in, and the live-value environment (var id,
 /// module name) a later adopt must still match.
 type DeclarationStagingContext = (SourceImports, Vec<String>, Vec<(SessionVarId, String)>);
+
+/// Exact compiler owners after retained names have been resolved through one
+/// live lexical scope. Native installation rechecks the handles under the
+/// final checkout; this record carries no permission to publish a binding.
+pub(crate) struct ResolvedCertifiedTurn {
+    pub groups: Vec<CertifiedGroup>,
+    pub target_owners: Vec<ImportOwner>,
+    pub source_evidence: BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
+    pub inherited_needed: Vec<InheritedSourceDemand>,
+}
 
 fn value_import_specs(entries: impl IntoIterator<Item = (String, SessionModule)>) -> Vec<String> {
     let mut grouped = Vec::<(SessionModule, Vec<String>)>::new();
@@ -82,6 +97,9 @@ pub struct PersistentSession {
     /// `Some` when idle/suspended, and moved out onto the eval thread for a
     /// turn's duration (stowed-XOR-running).
     machine: Option<PreparedEngine>,
+    /// Names native instance IDs within the exact machine lifetime, including
+    /// while the engine is temporarily moved into a machine lease.
+    machine_incarnation: Option<tidepool_repr::SessionId>,
     /// The image registry the machine installs through, held here so a
     /// registry given before the first turn reaches the bootstrap install.
     image_registry: Option<Arc<tidepool_codegen::prepared_program::ImageRegistry>>,
@@ -114,6 +132,7 @@ pub struct PersistentSession {
     /// this scope live", and a scoped decl and a scoped binding would drift.
     /// [`ScopeId::ROOT`] is the flat session every pre-C2 caller lives in.
     scopes: ScopeTree,
+    public_visibility_epochs: HashMap<ScopeId, u64>,
     /// How requests interact with the handlers installed for this checkout.
     effect_policy: EffectRunPolicy,
     /// Live-value crossing policy paired with the current effect stack.
@@ -174,6 +193,7 @@ impl PersistentSession {
     pub fn new(lib: Option<SessionLib>, nursery_size: usize) -> Self {
         PersistentSession {
             machine: None,
+            machine_incarnation: None,
             image_registry: None,
             session_table: DataConTable::new(),
             lib,
@@ -181,6 +201,7 @@ impl PersistentSession {
             binding_index: BindingIndex::new(),
             val_gen: Generation(0),
             scopes: ScopeTree::new(),
+            public_visibility_epochs: HashMap::new(),
             effect_policy: EffectRunPolicy::HandleOrSuspend,
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             nursery_size,
@@ -252,6 +273,182 @@ impl PersistentSession {
             .register_source_instances_in(&self.scopes, scope, tokens)
     }
 
+    /// Resolve the worker's retained imports against the exact inherited
+    /// lexical view, before native compilation. The worker never supplies a
+    /// `SessionVarId`; spelling or the globally newest binding cannot choose
+    /// a mutable value owned by another scope.
+    pub(crate) fn resolve_certification_in(
+        &self,
+        scope: ScopeId,
+        prepared: &PreparedProgram,
+        certification: &TurnCertification,
+    ) -> Result<ResolvedCertifiedTurn, PreparedRuntimeError> {
+        if !self.scopes.is_live(scope) {
+            return Err(PreparedRuntimeError::SourceScopeAdmission);
+        }
+        let mut source_evidence = BTreeMap::new();
+        let mut resolve = |globals: &[GlobalDecl], pending: &[PendingImportOwner]| {
+            if globals.len() != pending.len() {
+                return Err(PreparedRuntimeError::CertifiedTargetOwners);
+            }
+            globals
+                .iter()
+                .zip(pending)
+                .map(|(global, owner)| {
+                    if let PendingImportOwner::Source {
+                        owner,
+                        original_ordinal,
+                        binder,
+                    } = owner
+                    {
+                        if binder != &global.identity {
+                            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                        }
+                        let source = SourceBinder {
+                            version: owner.module_version.clone(),
+                            binder: binder.clone(),
+                        };
+                        let exact = (owner.clone(), *original_ordinal);
+                        if source_evidence
+                            .insert(source.clone(), exact.clone())
+                            .is_some_and(|prior| prior != exact)
+                        {
+                            return Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(source));
+                        }
+                        return Ok(ImportOwner::Source {
+                            version: owner.module_version.clone(),
+                            binder: binder.clone(),
+                        });
+                    }
+                    if let PendingImportOwner::Retained {
+                        identity,
+                        generation,
+                    } = owner
+                    {
+                        if identity != &global.identity
+                            || global.required_generation != Some(*generation)
+                        {
+                            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                        }
+                        let entry = self
+                            .bindings
+                            .resolve_exact_prepared_in(&self.scopes, scope, identity, *generation)
+                            .ok_or_else(|| PreparedRuntimeError::MissingRetainedCertifiedOwner {
+                                identity: identity.clone(),
+                                generation: *generation,
+                            })?;
+                        return Ok(ImportOwner::Retained {
+                            id: entry.id,
+                            generation: *generation,
+                        });
+                    }
+                    let PendingImportOwner::Package {
+                        unit,
+                        module,
+                        binder,
+                        interface_digest,
+                    } = owner
+                    else {
+                        unreachable!("all pending owner variants handled")
+                    };
+                    if binder != &global.identity {
+                        return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                    }
+                    Ok(ImportOwner::Package {
+                        unit: unit.clone(),
+                        module: module.clone(),
+                        binder: binder.clone(),
+                        interface_digest: *interface_digest,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        };
+        let target_owners = resolve(prepared.globals(), &certification.target_owners)?;
+        let outlines = certification
+            .groups
+            .iter()
+            .map(|pending| {
+                if pending.group().globals().len() != pending.imports().len() {
+                    return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                }
+                let source_imports = pending
+                    .group()
+                    .globals()
+                    .iter()
+                    .zip(pending.imports())
+                    .filter_map(|(global, owner)| match owner {
+                        PendingImportOwner::Source { owner, binder, .. } => {
+                            Some(if binder == &global.identity {
+                                Ok(SourceBinder {
+                                    version: owner.module_version.clone(),
+                                    binder: binder.clone(),
+                                })
+                            } else {
+                                Err(PreparedRuntimeError::CertifiedTargetOwners)
+                            })
+                        }
+                        PendingImportOwner::Retained { .. }
+                        | PendingImportOwner::Package { .. } => None,
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(SourceGroupOutline::from_projected(
+                    pending.owner().clone(),
+                    pending.group(),
+                    source_imports,
+                )?)
+            })
+            .collect::<Result<Vec<_>, PreparedRuntimeError>>()?;
+        let mut inherited = BTreeMap::<SourceBinder, SourceInstanceLease>::new();
+        let mut anchors = HashMap::<(CachedHomeOwner, u32), SourceInstanceLease>::new();
+        for lease in self.bindings.source_instances_in(&self.scopes, scope) {
+            let group = (lease.owner().clone(), lease.original_ordinal());
+            if anchors
+                .insert(group.clone(), lease.clone())
+                .is_some_and(|previous| previous.instance() != lease.instance())
+            {
+                return Err(PreparedRuntimeError::AmbiguousSourceGroup {
+                    owner: group.0,
+                    ordinal: group.1,
+                });
+            }
+            let binder = lease.binder().clone();
+            if inherited
+                .insert(binder.clone(), lease.clone())
+                .is_some_and(|previous| {
+                    previous.instance() != lease.instance() || previous.handle() != lease.handle()
+                })
+            {
+                return Err(PreparedRuntimeError::AmbiguousSourceInstance(binder));
+            }
+        }
+        let roots = target_owners.iter().filter_map(|owner| match owner {
+            ImportOwner::Source { version, binder } => Some(SourceBinder {
+                version: version.clone(),
+                binder: binder.clone(),
+            }),
+            ImportOwner::Retained { .. } | ImportOwner::Package { .. } => None,
+        });
+        let selected = PendingGroupInventory::new(outlines)?
+            .seal_with_inherited(roots, &inherited, &anchors)?;
+        let (indices, inherited_needed) = selected.into_parts();
+        let mut groups = Vec::with_capacity(indices.len());
+        for index in indices {
+            let pending = &certification.groups[index];
+            let imports = resolve(pending.group().globals(), pending.imports())?;
+            groups.push(CertifiedGroup::admit(
+                pending.owner().clone(),
+                pending.group().clone(),
+                imports,
+            )?);
+        }
+        Ok(ResolvedCertifiedTurn {
+            groups,
+            target_owners,
+            source_evidence,
+            inherited_needed,
+        })
+    }
+
     /// Install a certified target against this exact lexical view and place
     /// every newly materialized source root under its scope before returning
     /// the executable target. The machine batch is unpublished until the
@@ -264,8 +461,7 @@ impl PersistentSession {
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
         demanded: Vec<DemandedImage>,
         inherited_needed: &[InheritedSourceDemand],
-        package_external: &HashMap<ImportOwner, PreparedHandle>,
-    ) -> Result<(ProgramId, bool), PreparedRuntimeError> {
+    ) -> Result<(ProgramId, Vec<SourceLeaseKey>), PreparedRuntimeError> {
         if !self.scopes.is_live(scope) {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
         }
@@ -292,11 +488,7 @@ impl PersistentSession {
                 return Err(PreparedRuntimeError::AmbiguousSourceInstance(binder));
             }
         }
-        let mut exact_external = package_external
-            .iter()
-            .filter(|(owner, _)| matches!(owner, ImportOwner::Package { .. }))
-            .map(|(owner, handle)| (owner.clone(), *handle))
-            .collect::<HashMap<_, _>>();
+        let mut exact_external = HashMap::new();
         for (globals, owners) in std::iter::once((target.globals(), target_owners)).chain(
             demanded.iter().map(|selected| {
                 (
@@ -320,10 +512,18 @@ impl PersistentSession {
                 exact_external.insert(owner.clone(), entry.value.handle);
             }
         }
-        let engine = self
-            .machine
+        let mut bootstrap = if self.machine.is_none() {
+            Some(PreparedEngine::empty_certified(
+                self.nursery_size,
+                self.image_registry.clone(),
+            )?)
+        } else {
+            None
+        };
+        let engine = bootstrap
             .as_mut()
-            .ok_or(PreparedRuntimeError::MachineNotInstalled)?;
+            .or(self.machine.as_mut())
+            .expect("certified machine exists or was constructed");
         let mut staged = engine.install_certified_turn(
             target,
             target_owners,
@@ -337,22 +537,40 @@ impl PersistentSession {
         let tokens = std::mem::take(&mut staged.leases);
         match self.register_source_instances_in(scope, tokens) {
             Ok(keys) => {
-                let engine = self
-                    .machine
+                let engine = bootstrap
                     .as_mut()
+                    .or(self.machine.as_mut())
                     .expect("certified machine remains installed");
                 let target = engine.commit_certified_turn(staged);
-                Ok((target, !keys.is_empty()))
+                if let Some(engine) = bootstrap {
+                    self.machine = Some(engine);
+                    self.machine_incarnation = Some(super::registry::fresh_session_id());
+                }
+                Ok((target, keys))
             }
             Err(tokens) => {
-                let engine = self
-                    .machine
+                let engine = bootstrap
                     .as_mut()
+                    .or(self.machine.as_mut())
                     .expect("certified machine remains installed");
                 engine.abort_certified_turn(staged, tokens)?;
                 Err(PreparedRuntimeError::SourceScopeAdmission)
             }
         }
+    }
+
+    /// Release only the source roots first introduced by a failed turn.
+    /// Captured tips retain independent shares until their final owner drains.
+    pub(crate) fn retire_failed_turn_source_instances(
+        &mut self,
+        scope: ScopeId,
+        keys: &[SourceLeaseKey],
+    ) -> bool {
+        let Some(released) = self.bindings.retire_source_instances_in(scope, keys) else {
+            return false;
+        };
+        self.release_source_instance_roots(released);
+        true
     }
 
     /// Keep eight automatic observations per scope. Explicit persistent code
@@ -494,6 +712,17 @@ impl PersistentSession {
             engine.set_image_registry(Arc::clone(&registry));
         }
         self.image_registry = Some(registry);
+    }
+
+    /// One shared immutable-code cache for this session's certified turns,
+    /// including the first turn before its machine exists.
+    pub(crate) fn certified_image_registry(&mut self) -> Arc<ImageRegistry> {
+        if let Some(registry) = &self.image_registry {
+            return Arc::clone(registry);
+        }
+        let registry = Arc::new(ImageRegistry::new());
+        self.set_image_registry(Arc::clone(&registry));
+        registry
     }
 
     /// The prepared engine, once the first prepared turn has installed it.
@@ -653,6 +882,7 @@ impl PersistentSession {
                     self.image_registry.clone(),
                 )?;
                 self.machine = Some(engine);
+                self.machine_incarnation = Some(super::registry::fresh_session_id());
                 Ok(program)
             }
             Some(engine) => engine.install(prepared, &self.bindings, &self.binding_index),
@@ -1012,10 +1242,10 @@ impl PersistentSession {
     }
 
     /// Render and validate the exact next declaration module against the
-    /// actor's source layer without changing the live log, scope tip,
-    /// recovery manifest, or binding store.
+    /// actor's source layer without changing the live scope tip or binding
+    /// store. Attached-v2 sessions first burn the module identity durably.
     pub fn stage_declarations_in(
-        &self,
+        &mut self,
         scope: ScopeId,
         receipt: &super::DeclarationReceipt,
         external: &SourceImports,
@@ -1024,15 +1254,16 @@ impl PersistentSession {
         let (persistent_imports, import_modules, visible_values) =
             self.declaration_staging_context_in(scope, receipt, external)?;
         #[allow(clippy::expect_used, reason = "decl plane present")]
-        let lib = self.lib.as_ref().expect("decl plane present");
+        let live_modules = self.live_val_modules();
+        let lib = self.lib.as_mut().expect("decl plane present");
         let candidate = lib
-            .render_candidate_in(
+            .render_admitted_candidate_in(
                 scope,
                 &persistent_imports,
                 receipt,
                 &import_modules,
-                &self.live_val_modules(),
-            )
+                &live_modules,
+            )?
             .with_source_layer(source_layer);
         super::validate_declaration_candidate(candidate, &lib.root)
             .map(|staged| staged.with_visible_values(visible_values))
@@ -1040,14 +1271,15 @@ impl PersistentSession {
 
     /// The pure half of a split cell preparation's declaration staging:
     /// render the next candidate module and capture the exact live-value
-    /// environment it must still match at adopt time, without writing to
-    /// disk, invoking GHC, or changing any live session state. Pair with
+    /// environment it must still match at adopt time. Attached-v2 sessions
+    /// reserve its identity durably before the candidate leaves the checkout;
+    /// the render itself invokes no compiler. Pair with
     /// [`super::validate_declaration_candidate`] off-checkout (attach the
     /// returned `visible_values` to its `StagedDeclaration` via
     /// [`super::StagedDeclaration::with_visible_values`]) and
     /// [`Self::adopt_staged_declaration_in`] on a later checkout.
     pub fn render_declaration_candidate_in(
-        &self,
+        &mut self,
         scope: ScopeId,
         receipt: &super::DeclarationReceipt,
         external: &SourceImports,
@@ -1055,14 +1287,15 @@ impl PersistentSession {
         let (persistent_imports, import_modules, visible_values) =
             self.declaration_staging_context_in(scope, receipt, external)?;
         #[allow(clippy::expect_used, reason = "decl plane present")]
-        let lib = self.lib.as_ref().expect("decl plane present");
-        let candidate = lib.render_candidate_in(
+        let live_modules = self.live_val_modules();
+        let lib = self.lib.as_mut().expect("decl plane present");
+        let candidate = lib.render_admitted_candidate_in(
             scope,
             &persistent_imports,
             receipt,
             &import_modules,
-            &self.live_val_modules(),
-        );
+            &live_modules,
+        )?;
         Ok((candidate, visible_values))
     }
 
@@ -1078,6 +1311,7 @@ impl PersistentSession {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
+        let next_epoch = self.prepare_public_visibility_advance(scope)?;
         let mut replaced_names: Vec<String> = staged
             .items()
             .iter()
@@ -1106,21 +1340,26 @@ impl PersistentSession {
             .map(|(id, _)| id.var())
             .collect::<Vec<_>>();
         let items = staged.items().to_vec();
-        let generation = self
+        let admitted = self
             .lib
             .as_mut()
             .ok_or(SessionError::StaleStagedDeclaration)?
-            .adopt_staged_batch_with_receipt_and_vals_in(staged, &visible_values)?;
-        self.bindings.preserve_observations(&captured_values);
-        for name in &replaced_names {
-            self.bindings.remove_current_in(scope, name);
-        }
-        Ok(DeclarationPlaneCommit {
-            generation,
-            module: SessionModule::lib(generation),
-            items,
-            evicted_values,
-        })
+            .admit_staged_declaration_in(staged, &visible_values)?;
+        admitted
+            .map_commit(|generation| {
+                self.bindings.preserve_observations(&captured_values);
+                for name in &replaced_names {
+                    self.bindings.remove_current_in(scope, name);
+                }
+                self.public_visibility_epochs.insert(scope, next_epoch);
+                DeclarationPlaneCommit {
+                    generation,
+                    module: SessionModule::lib(generation),
+                    items,
+                    evicted_values,
+                }
+            })
+            .into_result()
     }
 
     pub fn discard_staged_declaration(&self, staged: &super::StagedDeclaration) {
@@ -1233,6 +1472,204 @@ impl PersistentSession {
     /// frames and roots are released in the same step as the tree edge.
     pub fn scope_tree(&self) -> &ScopeTree {
         &self.scopes
+    }
+
+    pub(super) fn advance_public_visibility(&mut self, scope: ScopeId) {
+        let next = self
+            .prepare_public_visibility_advance(scope)
+            .expect("public visibility epoch exhausted");
+        self.public_visibility_epochs.insert(scope, next);
+    }
+
+    /// Reserve map capacity and check exhaustion before an authoritative
+    /// manifest rename. Finalization only updates this existing entry.
+    fn prepare_public_visibility_advance(&mut self, scope: ScopeId) -> Result<u64, SessionError> {
+        let path = self
+            .lib
+            .as_ref()
+            .map_or_else(PathBuf::new, |lib| lib.root.clone());
+        self.public_visibility_epochs
+            .entry(scope)
+            .or_default()
+            .checked_add(1)
+            .ok_or_else(|| SessionError::RecoveryManifest {
+                path,
+                detail: "public visibility epoch exhausted".into(),
+            })
+    }
+
+    /// Full internal identity of the paired lexical view. Observation may
+    /// filter host names, but those filters never authorize publication.
+    pub fn public_visibility_snapshot_in(
+        &self,
+        scope: ScopeId,
+    ) -> Option<super::PublicVisibilitySnapshot> {
+        if !self.scopes.is_live(scope) {
+            return None;
+        }
+        let lib = self.lib.as_ref()?;
+        let mut bindings: Vec<_> = self
+            .bindings
+            .iter_current_in(&self.scopes, scope)
+            .into_iter()
+            .map(|(name, entry)| (name.0.clone(), entry.id))
+            .collect();
+        bindings.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut source_instances: Vec<_> = self
+            .bindings
+            .source_instance_keys_in(&self.scopes, scope)
+            .into_iter()
+            .collect();
+        source_instances.sort();
+        Some(super::PublicVisibilitySnapshot {
+            scope,
+            epoch: self
+                .public_visibility_epochs
+                .get(&scope)
+                .copied()
+                .unwrap_or(0),
+            declaration_tip: lib.scope_tip(scope),
+            machine_incarnation: self.machine_incarnation,
+            bindings,
+            source_instances,
+        })
+    }
+
+    /// Admit one exact actor incarnation as the durable public owner of a
+    /// minted lexical scope. The scope forest is the liveness authority;
+    /// SessionLib only records the checked owner-to-scope association.
+    pub fn bind_durable_public_scope(
+        &mut self,
+        owner: RecoveryPublicOwner,
+        scope: ScopeId,
+    ) -> Result<(), SessionError> {
+        if !self.scopes.is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
+        self.lib
+            .as_mut()
+            .ok_or(SessionError::MissingDeclarationLibrary)?
+            .bind_durable_public_scope(owner, scope)
+    }
+
+    /// Capture a binding-only publication against one exact private and public
+    /// lexical view. Caller stages its bytes after releasing this checkout.
+    pub fn snapshot_binding_publication(
+        &self,
+        owner: RecoveryPublicOwner,
+        public_scope: ScopeId,
+        private_scope: ScopeId,
+        write_ids: Vec<SessionVarId>,
+    ) -> Result<PublicManifestBase, SessionError> {
+        if !self.scopes.is_live(public_scope) {
+            return Err(SessionError::DeadScope(public_scope));
+        }
+        if !self.scopes.is_live(private_scope) {
+            return Err(SessionError::DeadScope(private_scope));
+        }
+        self.bindings
+            .prepare_exact_publication_in(
+                &self.scopes,
+                private_scope,
+                public_scope,
+                &write_ids,
+                &[],
+            )
+            .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        let expected_public = self
+            .public_visibility_snapshot_in(public_scope)
+            .ok_or(SessionError::MissingDeclarationLibrary)?;
+        let expected_private = self
+            .public_visibility_snapshot_in(private_scope)
+            .ok_or(SessionError::MissingDeclarationLibrary)?;
+        let mut final_by_name: BTreeMap<String, SessionVarId> =
+            expected_public.bindings.iter().cloned().collect();
+        for id in &write_ids {
+            let entry =
+                self.bindings
+                    .get(*id)
+                    .ok_or(SessionError::InvalidPublicBindingPromotion(
+                    tidepool_codegen::binding_table::BindingPromotionError::MissingOrForeignBinding,
+                ))?;
+            final_by_name.insert(entry.name.0.clone(), *id);
+        }
+        self.lib
+            .as_ref()
+            .ok_or(SessionError::MissingDeclarationLibrary)?
+            .snapshot_public_manifest(
+                owner,
+                public_scope,
+                private_scope,
+                write_ids,
+                expected_public,
+                expected_private,
+                final_by_name.into_iter().collect(),
+            )
+    }
+
+    /// Compare and rename under the same exclusive session checkout. A stale
+    /// candidate never claims the execution's publication decision.
+    pub fn publish_staged_public_manifest(
+        &mut self,
+        ticket: StagedPublicManifest,
+        decision: &Arc<PublicationDecision>,
+    ) -> Result<PublicManifestCommit, SessionError> {
+        let lib = self
+            .lib
+            .as_ref()
+            .ok_or(SessionError::MissingDeclarationLibrary)?;
+        let graph_is_current = lib.public_manifest_ticket_is_current(&ticket)?;
+        if !self.scopes.is_live(ticket.public_scope) || !self.scopes.is_live(ticket.private_scope) {
+            return Ok(PublicManifestCommit::Stale);
+        }
+        if !graph_is_current
+            || self
+                .public_visibility_snapshot_in(ticket.public_scope)
+                .as_ref()
+                != Some(&ticket.expected_public)
+            || self
+                .public_visibility_snapshot_in(ticket.private_scope)
+                .as_ref()
+                != Some(&ticket.expected_private)
+        {
+            return Ok(PublicManifestCommit::Stale);
+        }
+        let next_epoch = self.prepare_public_visibility_advance(ticket.public_scope)?;
+        let prepared = self
+            .bindings
+            .prepare_exact_publication_in(
+                &self.scopes,
+                ticket.private_scope,
+                ticket.public_scope,
+                &ticket.write_ids,
+                &[],
+            )
+            .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        let Some(claim) = decision.claim_commit() else {
+            return Ok(PublicManifestCommit::Cancelled);
+        };
+        let public_scope = ticket.public_scope;
+        let outcome = self
+            .lib
+            .as_mut()
+            .expect("manifest preflight found library")
+            .publish_staged_public_manifest_unchecked(ticket);
+        match &outcome {
+            PublicManifestCommit::BeforeRename { .. } => {
+                claim.before_rename_failure();
+            }
+            PublicManifestCommit::Durable
+            | PublicManifestCommit::PublishedDurabilityUnconfirmed { .. } => {
+                self.bindings.commit_exact_binding_promotion(prepared);
+                self.public_visibility_epochs
+                    .insert(public_scope, next_epoch);
+                claim.published();
+            }
+            PublicManifestCommit::Stale | PublicManifestCommit::Cancelled => {
+                unreachable!("preflight and claim resolved these outcomes")
+            }
+        }
+        Ok(outcome)
     }
 
     /// Record a materialized value binding in `scope`'s frame.
@@ -1424,6 +1861,11 @@ impl PersistentSession {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
+        if self.lib().durable_graph.is_some() {
+            let staged = self.stage_declarations_in(scope, receipt, external, &[])?;
+            return self.adopt_staged_declaration_in(staged);
+        }
+        let next_epoch = self.prepare_public_visibility_advance(scope)?;
         let mut persistent_imports = external.clone();
         persistent_imports.extend(&self.workbench_imports_in(scope));
         let mut replaced_names: Vec<String> = receipt
@@ -1486,6 +1928,7 @@ impl PersistentSession {
         for name in &replaced_names {
             self.bindings.remove_current_in(scope, name);
         }
+        self.public_visibility_epochs.insert(scope, next_epoch);
         Ok(DeclarationPlaneCommit {
             generation,
             module: SessionModule::lib(generation),
@@ -1704,6 +2147,413 @@ pub struct ScopeRetirement {
 #[cfg(test)]
 mod checkpoint_scope_tests {
     use super::*;
+
+    fn public_owner(path: &str) -> RecoveryPublicOwner {
+        RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse(path).unwrap(), 1).unwrap()
+    }
+
+    fn publication_session(root: &Path, id: u64) -> PersistentSession {
+        let mut lib = SessionLib::open(
+            tidepool_repr::SessionId(id),
+            root.join(format!("session-{id}")),
+            super::super::ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        lib.attach_recovery_graph_v2(root.join("declarations.json"))
+            .unwrap();
+        PersistentSession::new(Some(lib), 1024)
+    }
+
+    #[test]
+    fn staged_sibling_publications_restage_without_erasing_the_other_actor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = publication_session(dir.path(), 72);
+        let public_a = session.mint_scope(ScopeId::ROOT).unwrap();
+        let public_b = session.mint_scope(ScopeId::ROOT).unwrap();
+        let private_a = session.mint_detached_scope(public_a).unwrap();
+        let private_b = session.mint_detached_scope(public_b).unwrap();
+        let actor_a = public_owner("root/a");
+        let actor_b = public_owner("root/b");
+        session
+            .bind_durable_public_scope(actor_a.clone(), public_a)
+            .unwrap();
+        session
+            .bind_durable_public_scope(actor_b.clone(), public_b)
+            .unwrap();
+        let staged_a = session
+            .snapshot_binding_publication(actor_a.clone(), public_a, private_a, vec![])
+            .unwrap()
+            .stage()
+            .unwrap();
+        let staged_b = session
+            .snapshot_binding_publication(actor_b.clone(), public_b, private_b, vec![])
+            .unwrap()
+            .stage()
+            .unwrap();
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(staged_b, &PublicationDecision::new())
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+        assert_eq!(
+            session
+                .public_visibility_snapshot_in(public_b)
+                .unwrap()
+                .epoch,
+            1
+        );
+        assert_eq!(
+            session
+                .public_visibility_snapshot_in(public_a)
+                .unwrap()
+                .epoch,
+            0
+        );
+        let a_decision = PublicationDecision::new();
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(staged_a, &a_decision)
+                .unwrap(),
+            PublicManifestCommit::Stale
+        );
+        assert_eq!(a_decision.phase(), super::super::PublicationPhase::Running);
+        let restaged_a = session
+            .snapshot_binding_publication(actor_a.clone(), public_a, private_a, vec![])
+            .unwrap()
+            .stage()
+            .unwrap();
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(restaged_a, &a_decision)
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+        assert_eq!(
+            session
+                .public_visibility_snapshot_in(public_a)
+                .unwrap()
+                .epoch,
+            1
+        );
+        let restored =
+            super::super::recovery::read_v2(&dir.path().join("declarations.json"), dir.path())
+                .unwrap()
+                .unwrap()
+                .graph;
+        assert_eq!(restored.public_surfaces.len(), 2);
+        assert_eq!(
+            restored
+                .public_surfaces
+                .iter()
+                .filter(|surface| surface.owner == actor_a)
+                .count(),
+            1
+        );
+        assert_eq!(
+            restored
+                .public_surfaces
+                .iter()
+                .filter(|surface| surface.owner == actor_b)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn private_revision_invalidates_stage_before_cancellation_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = publication_session(dir.path(), 72);
+        let public = ScopeId::ROOT;
+        let private = session.mint_detached_scope(public).unwrap();
+        let owner = public_owner("root");
+        session
+            .bind_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        let public_base = session.public_visibility_snapshot_in(public).unwrap();
+        let stage = session
+            .snapshot_binding_publication(owner.clone(), public, private, vec![])
+            .unwrap()
+            .stage()
+            .unwrap();
+        // Native instance-only progress may leave the declaration tip and
+        // materialized names unchanged. Its owning revision still fences it.
+        session.advance_public_visibility(private);
+        assert_eq!(
+            session.public_visibility_snapshot_in(public).unwrap(),
+            public_base
+        );
+        let decision = PublicationDecision::new();
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(stage, &decision)
+                .unwrap(),
+            PublicManifestCommit::Stale
+        );
+        assert_eq!(decision.phase(), super::super::PublicationPhase::Running);
+        assert!(!dir.path().join("declarations.json").exists());
+        let retry = session
+            .snapshot_binding_publication(owner, public, private, vec![])
+            .unwrap()
+            .stage()
+            .unwrap();
+        decision.request_cancellation();
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(retry, &decision)
+                .unwrap(),
+            PublicManifestCommit::Cancelled
+        );
+        assert_eq!(
+            session.public_visibility_snapshot_in(public).unwrap(),
+            public_base
+        );
+        assert!(!dir.path().join("declarations.json").exists());
+    }
+
+    #[test]
+    fn public_revision_invalidates_stage_and_retry_advances_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = publication_session(dir.path(), 72);
+        let public = ScopeId::ROOT;
+        let private = session.mint_detached_scope(public).unwrap();
+        let owner = public_owner("root");
+        session
+            .bind_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        let stage = session
+            .snapshot_binding_publication(owner.clone(), public, private, vec![])
+            .unwrap()
+            .stage()
+            .unwrap();
+        session.advance_public_visibility(public);
+        let decision = PublicationDecision::new();
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(stage, &decision)
+                .unwrap(),
+            PublicManifestCommit::Stale
+        );
+        assert_eq!(decision.phase(), super::super::PublicationPhase::Running);
+        let retry = session
+            .snapshot_binding_publication(owner, public, private, vec![])
+            .unwrap()
+            .stage()
+            .unwrap();
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(retry, &decision)
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+        assert_eq!(decision.phase(), super::super::PublicationPhase::Published);
+        assert_eq!(
+            session.public_visibility_snapshot_in(public).unwrap().epoch,
+            2
+        );
+    }
+
+    #[test]
+    fn exhausted_public_revision_refuses_before_manifest_and_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = publication_session(dir.path(), 72);
+        let public = ScopeId::ROOT;
+        let private = session.mint_detached_scope(public).unwrap();
+        let owner = public_owner("root");
+        session
+            .bind_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        session.public_visibility_epochs.insert(public, u64::MAX);
+        let stage = session
+            .snapshot_binding_publication(owner, public, private, vec![])
+            .unwrap()
+            .stage()
+            .unwrap();
+        let decision = PublicationDecision::new();
+        assert!(matches!(
+            session.publish_staged_public_manifest(stage, &decision),
+            Err(SessionError::RecoveryManifest { .. })
+        ));
+        assert_eq!(decision.phase(), super::super::PublicationPhase::Running);
+        assert!(!dir.path().join("declarations.json").exists());
+    }
+
+    #[test]
+    fn staged_publication_refuses_retired_scope_and_foreign_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut first = publication_session(dir.path(), 72);
+        let mut second = publication_session(dir.path(), 73);
+        let public = first.mint_scope(ScopeId::ROOT).unwrap();
+        let private = first.mint_detached_scope(public).unwrap();
+        let owner = public_owner("root/a");
+        first
+            .bind_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        second
+            .bind_durable_public_scope(owner.clone(), ScopeId::ROOT)
+            .unwrap();
+        let foreign = first
+            .snapshot_binding_publication(owner.clone(), public, private, vec![])
+            .unwrap()
+            .stage()
+            .unwrap();
+        assert!(matches!(
+            second.publish_staged_public_manifest(foreign, &PublicationDecision::new()),
+            Err(SessionError::WrongPublicManifestTicket)
+        ));
+        let retired = first
+            .snapshot_binding_publication(owner, public, private, vec![])
+            .unwrap()
+            .stage()
+            .unwrap();
+        first.retire_scope(public);
+        let decision = PublicationDecision::new();
+        assert_eq!(
+            first
+                .publish_staged_public_manifest(retired, &decision)
+                .unwrap(),
+            PublicManifestCommit::Stale
+        );
+        assert_eq!(decision.phase(), super::super::PublicationPhase::Running);
+        assert!(!dir.path().join("declarations.json").exists());
+    }
+
+    #[test]
+    fn staged_publication_refuses_foreign_owner_and_changed_graph_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = publication_session(dir.path(), 72);
+        let public_a = session.mint_scope(ScopeId::ROOT).unwrap();
+        let public_b = session.mint_scope(ScopeId::ROOT).unwrap();
+        let private_a = session.mint_detached_scope(public_a).unwrap();
+        let actor_a = public_owner("root/a");
+        let actor_b = public_owner("root/b");
+        session
+            .bind_durable_public_scope(actor_a.clone(), public_a)
+            .unwrap();
+        session
+            .bind_durable_public_scope(actor_b.clone(), public_b)
+            .unwrap();
+        let mut foreign = session
+            .snapshot_binding_publication(actor_a.clone(), public_a, private_a, vec![])
+            .unwrap()
+            .stage()
+            .unwrap();
+        foreign.owner = actor_b;
+        assert!(matches!(
+            session.publish_staged_public_manifest(foreign, &PublicationDecision::new()),
+            Err(SessionError::WrongPublicManifestTicket)
+        ));
+
+        let stage = session
+            .snapshot_binding_publication(actor_a, public_a, private_a, vec![])
+            .unwrap()
+            .stage()
+            .unwrap();
+        session.lib_mut().reserve_join_generation_durable().unwrap();
+        let decision = PublicationDecision::new();
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(stage, &decision)
+                .unwrap(),
+            PublicManifestCommit::Stale
+        );
+        assert_eq!(decision.phase(), super::super::PublicationPhase::Running);
+    }
+
+    #[test]
+    fn cancellation_and_pre_rename_failure_do_not_publish() {
+        let cancelled_dir = tempfile::tempdir().unwrap();
+        let mut cancelled = publication_session(cancelled_dir.path(), 72);
+        let private = cancelled.mint_detached_scope(ScopeId::ROOT).unwrap();
+        let owner = public_owner("root");
+        cancelled
+            .bind_durable_public_scope(owner.clone(), ScopeId::ROOT)
+            .unwrap();
+        let stage = cancelled
+            .snapshot_binding_publication(owner.clone(), ScopeId::ROOT, private, vec![])
+            .unwrap()
+            .stage()
+            .unwrap();
+        let decision = PublicationDecision::new();
+        decision.request_cancellation();
+        assert_eq!(
+            cancelled
+                .publish_staged_public_manifest(stage, &decision)
+                .unwrap(),
+            PublicManifestCommit::Cancelled
+        );
+        assert!(!cancelled_dir.path().join("declarations.json").exists());
+
+        let failed_dir = tempfile::tempdir().unwrap();
+        let mut failed = publication_session(failed_dir.path(), 73);
+        let private = failed.mint_detached_scope(ScopeId::ROOT).unwrap();
+        failed
+            .bind_durable_public_scope(owner.clone(), ScopeId::ROOT)
+            .unwrap();
+        let stage = failed
+            .snapshot_binding_publication(owner, ScopeId::ROOT, private, vec![])
+            .unwrap()
+            .stage()
+            .unwrap();
+        std::fs::create_dir(failed_dir.path().join("declarations.json")).unwrap();
+        let decision = PublicationDecision::new();
+        assert!(matches!(
+            failed
+                .publish_staged_public_manifest(stage, &decision)
+                .unwrap(),
+            PublicManifestCommit::BeforeRename { .. }
+        ));
+        assert_eq!(decision.phase(), super::super::PublicationPhase::Terminated);
+        assert!(failed
+            .lib()
+            .durable_graph
+            .as_ref()
+            .unwrap()
+            .graph
+            .public_surfaces
+            .is_empty());
+    }
+
+    #[test]
+    fn durable_public_owners_require_live_minted_scopes() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("declarations.json");
+        let mut lib = SessionLib::open(
+            tidepool_repr::SessionId(72),
+            dir.path().join("session"),
+            super::super::ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        lib.attach_recovery_graph_v2(&manifest).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024);
+        let first = session.mint_scope(ScopeId::ROOT).unwrap();
+        let second = session.mint_scope(ScopeId::ROOT).unwrap();
+        let actor = |path: &str| {
+            RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse(path).unwrap(), 1).unwrap()
+        };
+        session
+            .bind_durable_public_scope(actor("root/first"), first)
+            .unwrap();
+        session
+            .bind_durable_public_scope(actor("root/second"), second)
+            .unwrap();
+        let unknown = ScopeId(u64::MAX);
+        assert!(matches!(
+            session.bind_durable_public_scope(actor("root/unknown"), unknown),
+            Err(SessionError::DeadScope(scope)) if scope == unknown
+        ));
+        session.retire_scope(first);
+        assert!(matches!(
+            session.bind_durable_public_scope(actor("root/replacement"), first),
+            Err(SessionError::DeadScope(scope)) if scope == first
+        ));
+        assert!(session
+            .bind_durable_public_scope(actor("root/second"), first)
+            .is_err());
+        assert!(session
+            .bind_durable_public_scope(actor("root/first"), second)
+            .is_err());
+    }
 
     #[test]
     fn detached_capture_survives_issuer_retirement_and_can_seed_later_child() {

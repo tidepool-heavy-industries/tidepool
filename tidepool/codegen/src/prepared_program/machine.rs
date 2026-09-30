@@ -139,6 +139,14 @@ impl GroupInstanceId {
     pub fn program(self) -> ProgramId {
         self.0
     }
+
+    /// A read-only machine-local number for lost-owner evidence. It is not a
+    /// persistent instance identity: another machine may issue the same
+    /// number, and callers cannot reconstruct a live instance from it.
+    #[must_use]
+    pub fn raw(self) -> u32 {
+        self.program().0
+    }
 }
 
 /// One installation's code custody, instance identity, machine-local roots,

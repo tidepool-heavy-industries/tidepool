@@ -577,6 +577,18 @@ impl ExtractCmd {
         self
     }
 
+    /// Require executable products for every home module in this compile.
+    /// Used by authored declaration certification, including empty modules.
+    pub fn certify_home_products(&mut self) -> &mut Self {
+        self.request.certify_home_products();
+        self
+    }
+
+    pub fn session_artifacts(&mut self, path: &Path) -> &mut Self {
+        self.request.session_artifacts(path);
+        self
+    }
+
     pub fn declaration_join(&mut self, path: &Path) -> &mut Self {
         self.request.declaration_join(path);
         self
