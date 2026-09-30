@@ -101,6 +101,7 @@ impl ExactCompilationRequest {
         &self,
         source_path: &Path,
         source: &str,
+        fresh_evidence: &[u8],
     ) -> Result<ExactSourceAdmission, CompileError> {
         use sha2::Digest;
         let expected: [u8; 32] = sha2::Sha256::digest(source.as_bytes()).into();
@@ -113,8 +114,13 @@ impl ExactCompilationRequest {
         .find(|admitted| {
             admitted.witness.source_path() == source_path
                 && admitted.witness.source_sha256() == &expected
+                && admitted
+                    .validate_ineligible_evidence(fresh_evidence)
+                    .is_ok()
         })
-        .ok_or_else(|| failure("source lacks its exact consumed source receipt"))
+        .ok_or_else(|| {
+            failure("source and final product evidence lack their exact consumed receipt")
+        })
     }
     pub(crate) fn validate_outputs(
         &self,

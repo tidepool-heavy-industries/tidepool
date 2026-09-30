@@ -599,7 +599,11 @@ impl ModuleCandidateOffer {
         }
         // The exact original source transaction was issued before enriching the
         // checking scope. It therefore validates only against the captured baseline.
-        let admission = exact.admit_source(&source_path, source)?;
+        let admission = exact.admit_source(
+            &source_path,
+            source,
+            &crate::checked_cell::read(directory.join("dependencies.json"), 32 * 1024 * 1024)?,
+        )?;
         let requirements = crate::prepared_artifact::production_requirements()?;
         let target = Arc::new(
             tidepool_repr::execution_schema::parse_program(
@@ -812,7 +816,7 @@ pub fn seal_turn_outputs(
     let exact_source = offer
         .exact
         .as_ref()
-        .map(|request| request.admit_source(source_path, source))
+        .map(|request| request.admit_source(source_path, source, &evidence_bytes))
         .transpose()?;
     let exact = offer
         .exact
@@ -1275,7 +1279,7 @@ fn compile_invocation_inner(
             std::fs::read(temp_dir.path().join("module-package-imports.cbor"))?;
         let exact_source = exact_request
             .as_ref()
-            .map(|request| request.admit_source(&input_path, inv.source))
+            .map(|request| request.admit_source(&input_path, inv.source, &evidence_bytes))
             .transpose()?;
         let exact = exact_request
             .as_ref()
@@ -1578,6 +1582,14 @@ fn retain_failed_compiler_artifacts(
             }
         }
     }
+    for (source, destination) in [
+        (directory.to_path_buf(), retained.path().to_path_buf()),
+        (planned, retained.path().join("planned-declaration")),
+    ] {
+        if let Err(failure) = retain_exact_compile_receipts(&source, &destination) {
+            tracing::warn!(%failure, "could not retain exact compilation receipts");
+        }
+    }
     if let Ok(bytes) = std::fs::read(directory.join("dependencies.json")) {
         if let Ok(evidence) = serde_json::from_slice::<cache::DependencyEvidence>(&bytes) {
             let sources = retained.path().join("consumed-sources");
@@ -1596,6 +1608,40 @@ fn retain_failed_compiler_artifacts(
         }
     }
     Ok(retained.keep())
+}
+
+fn retain_exact_compile_receipts(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let source = source.join(".exact-compilations");
+    if !source.try_exists()? {
+        return Ok(());
+    }
+    let mut entries = std::fs::read_dir(&source)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    let destination = destination.join(".exact-compilations");
+    std::fs::create_dir_all(&destination)?;
+    let mut remaining = 64 * 1024 * 1024_u64;
+    if entries.len() > 4096 {
+        return Err(std::io::Error::other("excessive exact receipt diagnostics"));
+    }
+    for entry in entries {
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let output = destination.join(entry.file_name());
+        std::fs::create_dir(&output)?;
+        for name in ["receipt.cbor", "source.hs"] {
+            let input = entry.path().join(name);
+            let metadata = std::fs::symlink_metadata(&input)?;
+            if !metadata.is_file() || metadata.len() > remaining {
+                return Err(std::io::Error::other(
+                    "exact receipt diagnostics exceed bound",
+                ));
+            }
+            remaining -= metadata.len();
+            std::fs::copy(input, output.join(name))?;
+        }
+    }
+    Ok(())
 }
 
 enum CompileAttempt<T> {
