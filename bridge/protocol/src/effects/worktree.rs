@@ -863,7 +863,7 @@ fn errors() -> ErrorAdt {
             ErrorVariant {
                 ctor: "GitRepositoryIdentityMismatch",
                 fields: vec![text_field("repositoryPath"), text_field("identityDetail")],
-                doc: "a nested checkout resolves to ancestor or unexpected Git metadata; the operation refuses before changing repository state",
+                doc: "a nested checkout resolves to ancestor or unexpected Git metadata; normalization and origin updates are refused",
             },
             ErrorVariant {
                 ctor: "WorktreeLost",
