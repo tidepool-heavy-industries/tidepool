@@ -212,15 +212,62 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         facade, facade_groups = self.groups("bridge/facade")
         self.assertIn("src/lib.rs", facade_groups["tidepool_sources"])
         self.assertNotIn("src/main.rs", facade_groups["tidepool_sources"])
-        self.assertEqual(
-            set(facade_groups["tidepool_bin_sources"]), {"Cargo.toml", "src/main.rs"}
-        )
+        self.assertIn("src/main.rs", facade_groups["tidepool_bin_sources"])
         agent, groups = self.groups("exomonad/agent")
         self.assertNotIn('"codex-compat"', agent)
         self.assertIn("src/backend/mod.rs", groups["exomonad_agent_sources"])
         self.assertNotIn("src/backend/codex/mod.rs", groups["exomonad_agent_sources"])
         check = self.generate("--package", "tidepool", "--package", "exomonad-agent", "--check")
         self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_binary_sources_preserve_module_layouts_and_their_includes(self):
+        metadata = json.loads(self.metadata.read_text())
+        facade = next(package for package in metadata["packages"] if package["name"] == "tidepool")
+        binary = next(target for target in facade["targets"] if target["name"] == "exomonad")
+        binary["src_path"] = str(self.root / "bridge/facade/src/bin/exomonad.rs")
+        self.metadata.write_text(json.dumps(metadata))
+        self.write("bridge/facade/src/main.rs", "pub mod helper;\nmod tree;\nfn main() {}\n")
+        self.write("bridge/facade/src/helper.rs", "pub fn answer() -> i32 { 42 }\n")
+        self.write("bridge/facade/src/tree/mod.rs", "mod child;\n")
+        self.write("bridge/facade/src/tree/child.rs", 'const VALUE: &str = include_str!("value.txt");\n')
+        self.write("bridge/facade/src/tree/value.txt", "nested module input\n")
+        self.write("bridge/facade/src/bin/exomonad.rs", "mod sibling;\nfn main() {}\n")
+        self.write("bridge/facade/src/bin/sibling.rs", 'const VALUE: &str = include_str!("sibling.txt");\n')
+        self.write("bridge/facade/src/bin/sibling.txt", "binary module input\n")
+
+        result = self.generate("--package", "tidepool")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        _, groups = self.groups("bridge/facade")
+        for group, sources in {
+            "tidepool_bin_sources": (
+                "src/helper.rs", "src/tree/mod.rs", "src/tree/child.rs", "src/tree/value.txt",
+            ),
+            "exomonad_sources": (
+                "src/bin/exomonad.rs", "src/bin/sibling.rs", "src/bin/sibling.txt",
+            ),
+        }.items():
+            for source in sources:
+                self.assertIn(source, groups[group])
+
+    def test_later_validation_failure_preserves_every_existing_graph(self):
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        previous = {path: path.read_bytes() for path in self.root.rglob("BUCK")}
+        self.assertNotIn(b"new_source.rs", previous[self.root / "tidepool/repr/BUCK"])
+        self.write("tidepool/repr/src/new_source.rs", "pub fn added() {}\n")
+        # Repr renders before atomic-write in this metadata. Its changed graph
+        # must not publish if the later package has an invalid input closure.
+        self.write("bridge/atomic-write/src/lib.rs", 'const MISSING: &str = include_str!("missing.txt");\n')
+
+        result = self.generate()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing compile-time input", result.stderr)
+        for path, contents in previous.items():
+            self.assertEqual(path.read_bytes(), contents, path)
+        self.assertEqual(set(self.root.rglob("BUCK")), set(previous))
+        self.assertFalse(list(self.root.rglob(".BUCK.*.tmp")))
 
     def test_facade_buildscript_declares_embedded_sources_and_out_dir(self):
         metadata = json.loads(self.metadata.read_text())

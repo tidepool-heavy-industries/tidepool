@@ -3,10 +3,13 @@
 
 import argparse
 import json
+import os
 import pathlib
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 import tomllib
 
 from buck2_cargo_features import (
@@ -352,10 +355,7 @@ def source_inputs(package, target, features=()):
     sources = {directory / "Cargo.toml"}
     external = {}
     if source_root.is_relative_to(directory / "src"):
-        if "bin" in target["kind"]:
-            sources.add(source_root)
-        else:
-            sources.update((directory / "src").rglob("*.rs"))
+        sources.update((directory / "src").rglob("*.rs"))
         if package["name"] == "tidepool":
             sources = {
                 source for source in sources
@@ -398,9 +398,6 @@ def source_inputs(package, target, features=()):
                     raise SystemExit(f"missing integration source {source}")
                 sources.add(source)
     includes = re.compile(r'include_(?:str|bytes)!\s*\(\s*"([^\"]+)"')
-    module_declarations = re.compile(
-        r'(?m)^\s*(?:#\[path\s*=\s*"([^\"]+)"\]\s*)?mod\s+([A-Za-z_]\w*)\s*;'
-    )
     pending = [path for path in sources if path.suffix == ".rs"]
     external_labels = {
         "bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor": "//bridge/haskell:m3_vertical_fixture",
@@ -450,20 +447,6 @@ def source_inputs(package, target, features=()):
         source = pending.pop()
         contents = source.read_text()
         relatives = list(includes.findall(contents))
-        if "bin" in target["kind"] and source_root.is_relative_to(directory / "src"):
-            for explicit, name in module_declarations.findall(contents):
-                if explicit:
-                    relatives.append(explicit)
-                    continue
-                if source == source_root:
-                    module_root = source.parent / source.stem if source.parent.name == "bin" else source.parent
-                else:
-                    module_root = source.parent / source.stem
-                candidates = (module_root / (name + ".rs"), module_root / name / "mod.rs")
-                module = next((candidate for candidate in candidates if candidate.is_file()), None)
-                if module is None:
-                    raise SystemExit(f"missing Rust module {name} declared in {source}")
-                relatives.append(str(module.relative_to(source.parent)))
         for relative in relatives:
             included = (source.parent / relative).resolve()
             if (
@@ -549,6 +532,7 @@ load("@prelude//:rules.bzl", "cxx_library", "export_file")
 load("@prelude//rust:sources.bzl", "rust_filegroup")
 '''
 
+outputs = {}
 for package_name, package in local.items():
     if package_name not in selected:
         continue
@@ -698,9 +682,34 @@ cxx_library(
 ''')
     output = "\n".join(rules)
     output_path = ROOT / CURRENT_DIR / "BUCK"
-    if options.check:
+    outputs[output_path] = output
+
+if options.check:
+    stale = False
+    for output_path, output in outputs.items():
         if not output_path.is_file() or output_path.read_text() != output:
             print(f"stale or missing Buck target graph: {output_path.relative_to(ROOT)}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        output_path.write_text(output)
+            stale = True
+    if stale:
+        sys.exit(1)
+else:
+    # All package validation finishes before publication. Each replacement is
+    # atomic; interruption between files leaves complete, reviewable graphs.
+    for output_path, output in outputs.items():
+        replacement = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=output_path.parent,
+                prefix=".BUCK.", suffix=".tmp", delete=False,
+            ) as staged:
+                replacement = pathlib.Path(staged.name)
+                staged.write(output)
+                mode = (
+                    stat.S_IMODE(output_path.stat().st_mode)
+                    if output_path.exists() else 0o644
+                )
+                os.fchmod(staged.fileno(), mode)
+            os.replace(replacement, output_path)
+        finally:
+            if replacement is not None:
+                replacement.unlink(missing_ok=True)
