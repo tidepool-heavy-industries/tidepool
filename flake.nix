@@ -200,6 +200,15 @@
             cargo = rust;
             rustc = rust;
           };
+          # Cargo and browser assets consume one hash-verified harness tree.
+          # The lockfile must select its exact revision; unrelated workspace
+          # submodules are not inputs to either package.
+          matchedCargoDeps = import ./nix/matched-cargo-deps.nix {
+            rustPlatform = tidepoolRustPlatform;
+            inherit (pkgs) fetchgit;
+            harnessSource = harnessWeb;
+            lockFile = ./Cargo.lock;
+          };
           # One Haskell package universe for both development and the deployed
           # extractor. The worker loads Tidepool modules at runtime, so a bare
           # compiler is not a usable development toolchain even when it can
@@ -378,8 +387,7 @@
                 pname = "tidepool-extract-frontend";
                 version = "0.1.0";
                 src = exomonadSource;
-                cargoLock.lockFile = ./Cargo.lock;
-                cargoLock.outputHashes."harness-0.1.0" = "sha256-+ifradrlSEhX7Koj7kQeiHutocIyR5a5n4LAbzj/UUk=";
+                cargoDeps = matchedCargoDeps;
                 cargoBuildFlags = [
                   "-p"
                   "tidepool-extract-cmd"
@@ -414,8 +422,7 @@
             pname = "exomonad-unwrapped";
             version = "0.1.0";
             src = exomonadSource;
-            cargoLock.lockFile = ./Cargo.lock;
-            cargoLock.outputHashes."harness-0.1.0" = "sha256-+ifradrlSEhX7Koj7kQeiHutocIyR5a5n4LAbzj/UUk=";
+            cargoDeps = matchedCargoDeps;
             cargoBuildFlags = [
               "-p"
               "tidepool"
