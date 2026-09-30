@@ -10182,6 +10182,46 @@ where
             .map(|context| context.placement.session)
     }
 
+    /// Bind recovery evidence to an actually admitted canonical root. The
+    /// durable journal revalidates this placement before certifying transfer.
+    pub fn root_recovery_placement(
+        &self,
+        actor: ActorRef,
+    ) -> Result<crate::RootRecoveryPlacement, ResidentActorWorkbenchError> {
+        let refuse = |detail: &str| ResidentActorWorkbenchError::ActorProtocol(detail.into());
+        let context = self
+            .directory
+            .session_context(actor)
+            .ok_or_else(|| refuse("root recovery actor has no admitted session context"))?;
+        let records = self.environment.actors.lock();
+        let record = records
+            .get(&actor)
+            .ok_or_else(|| refuse("root recovery actor has no registered descriptor"))?;
+        if context.actor != actor
+            || context.placement != record.descriptor.placement()
+            || !record.scheduler_root
+            || record.terminal.is_some()
+            || record.descriptor.creator().is_some()
+            || record.descriptor.supervisor_parent().is_some()
+            || record.descriptor.context_parent().is_some()
+        {
+            return Err(refuse(
+                "root recovery requires the exact live admitted root placement",
+            ));
+        }
+        let path = record
+            .descriptor
+            .actor_path()
+            .ok_or_else(|| refuse("root recovery requires a registered canonical actor path"))?;
+        let owner = tidepool_runtime::session::RecoveryPublicOwner::new(path, actor.incarnation.0)
+            .ok_or_else(|| refuse("root recovery incarnation is invalid"))?;
+        Ok(crate::RootRecoveryPlacement::new(
+            actor,
+            owner,
+            context.placement,
+        ))
+    }
+
     /// Whether `session` is still live in the shared machine registry — for
     /// asserting a dedicated child session's teardown
     /// (`ResidentActorRunner::retire_child_session`) actually happened,
