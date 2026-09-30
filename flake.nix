@@ -138,6 +138,12 @@
             src = ./nix/browser-test;
             hash = "sha256-OHK/Hwr1gq5XxODSXX+zmRM8v0WQqJkkJQ82zzvoJAM=";
           };
+          matchedHarnessSource = pkgs.runCommand "tidepool-matched-harness-source" {
+            nativeBuildInputs = [ pkgs.coreutils ];
+          } ''
+            mkdir -p "$out"
+            cp -a "${harnessWeb}/." "$out/"
+          '';
           playwrightChromium = harnessPkgs.playwright-driver.browsers.override {
             withFirefox = false;
             withWebkit = false;
@@ -477,6 +483,7 @@
           packages.buck-browser-node = harnessPkgs.nodejs_24;
           packages.buck-browser-npm-cache = browserTestNpmCache;
           packages.buck-playwright-browsers = playwrightChromium;
+          packages.buck-matched-harness-source = matchedHarnessSource;
           packages.buck-bash = pkgs.bash;
           packages.buck-test-git = pkgs.git;
           packages.buck-coreutils = pkgs.coreutils;
@@ -513,6 +520,7 @@
               harnessPkgs.nodejs_24
               browserTestNpmCache
               playwrightChromium
+              matchedHarnessSource
               pkgs.git
             ];
           };

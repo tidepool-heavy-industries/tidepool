@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise staged Buck dependency generation with controlled tool boundaries."""
+import json
 import os
 from pathlib import Path
 import shutil
@@ -56,6 +57,11 @@ elif os.environ.get('MATCHED_HARNESS'):
              '    repo = "https://github.com/tidepool-heavy-industries/exomonad-harness.git",\\n'
              '    rev = "0123456789abcdef0123456789abcdef01234567",\\n'
              '    visibility = [],\\n'
+             ')\\n'
+             'cargo.rust_library(\\n'
+             '    name = "harness-0.1",\\n'
+             '    srcs = [":harness-source.git"],\\n'
+             '    crate_root = "harness-source/crates/harness/src/lib.rs",\\n'
              ')\\n')
 else:
     value = 'generated buck' + chr(10)
@@ -77,6 +83,21 @@ Path('BUCK').write_text(value)
     def contents(self):
         rust = self.root / "third-party/rust"
         return {name: (rust / name).read_bytes() for name in ("Cargo.toml", "Cargo.lock", "BUCK")}
+
+    def prepare_local_harness_fixture(self, **env):
+        rev = "0123456789abcdef0123456789abcdef01234567"
+        (self.root / "Cargo.lock").write_text(
+            '[[package]]\nname = "harness"\nversion = "0.1.0"\n'
+            f'source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev={rev}#{rev}"\n'
+        )
+        pin = {"type": "github", "owner": "tidepool-heavy-industries", "repo": "exomonad-harness", "rev": rev}
+        (self.root / "flake.lock").write_text(
+            json.dumps({"nodes": {"harnessWeb": {"flake": False, "original": pin, "locked": pin}}})
+        )
+        (self.root / ".buckconfig.local").write_text(
+            "[nix]\nmatched_harness_source = /nix/store/00000000000000000000000000000000-tidepool-matched-harness-source\n"
+        )
+        return self.run_script("--local-harness-source", MATCHED_HARNESS="1", **env)
 
     def test_check_compares_staged_result_without_changing_outputs(self):
         result = self.run_script("--check")
@@ -145,5 +166,69 @@ Path('BUCK').write_text(value)
 
         result = self.run_script("--check", MATCHED_HARNESS="1")
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_opt_in_source_mode_replaces_fetch_and_preserves_generated_labels(self):
+        result = self.prepare_local_harness_fixture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        buck = (self.root / "third-party/rust/BUCK").read_text()
+        self.assertNotIn("git_fetch(", buck)
+        self.assertIn('load("root//toolchains:tidepool.bzl", "nix_directory")', buck)
+        self.assertIn('name = "harness-source",', buck)
+        self.assertIn('store_path = read_root_config("nix", "matched_harness_source")', buck)
+        self.assertIn('name = "harness-source.git",', buck)
+        self.assertIn('srcs = [":harness-source"]', buck)
+        self.assertIn('srcs = [":harness-source.git"]', buck)
+        self.assertIn('crate_root = "harness-source/crates/harness/src/lib.rs"', buck)
+        self.assertIn('name = "matched_harness_source"', buck)
+        self.assertIn('source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=0123456789abcdef0123456789abcdef01234567#0123456789abcdef0123456789abcdef01234567"', (self.root / "Cargo.lock").read_text())
+
+    def test_default_mode_retains_standard_git_fetch(self):
+        result = self.run_script(MATCHED_HARNESS="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        buck = (self.root / "third-party/rust/BUCK").read_text()
+        self.assertIn("git_fetch(", buck)
+        self.assertNotIn('load("root//toolchains:tidepool.bzl", "nix_directory")', buck)
+
+    def test_source_lock_mismatch_refuses_without_publishing(self):
+        self.prepare_local_harness_fixture()
+        before = self.contents()
+        lock = json.loads((self.root / "flake.lock").read_text())
+        lock["nodes"]["harnessWeb"]["locked"]["rev"] = "f" * 40
+        (self.root / "flake.lock").write_text(json.dumps(lock))
+        result = self.run_script("--local-harness-source", MATCHED_HARNESS="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("flake.lock harnessWeb locked pin does not match", result.stderr)
+        self.assertEqual(self.contents(), before)
+
+    def test_generated_fetch_revision_mismatch_refuses_without_publishing(self):
+        self.prepare_local_harness_fixture()
+        before = self.contents()
+        reindeer = self.root / "bin/reindeer"
+        reindeer.write_text(reindeer.read_text().replace("0123456789abcdef0123456789abcdef01234567", "f" * 40))
+        result = self.run_script("--local-harness-source", MATCHED_HARNESS="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("generated git_fetch revision does not match", result.stderr)
+        self.assertEqual(self.contents(), before)
+
+    def test_missing_or_non_store_source_refuses_without_publishing(self):
+        self.prepare_local_harness_fixture()
+        before = self.contents()
+        (self.root / ".buckconfig.local").write_text("[nix]\nmatched_harness_source = /tmp/harness\n")
+        result = self.run_script("--local-harness-source", MATCHED_HARNESS="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not the declared pinned Nix output", result.stderr)
+        self.assertEqual(self.contents(), before)
+
+    def test_multiple_matching_candidates_refuse_without_publishing(self):
+        self.prepare_local_harness_fixture()
+        before = self.contents()
+        reindeer = self.root / "bin/reindeer"
+        source = reindeer.read_text()
+        source = source.replace("Path('BUCK').write_text(value)", "Path('BUCK').write_text(value + value[value.index('git_fetch('):value.index('cargo.rust_library(')])")
+        reindeer.write_text(source)
+        result = self.run_script("--local-harness-source", MATCHED_HARNESS="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expected one generated git_fetch candidate, found 2", result.stderr)
+        self.assertEqual(self.contents(), before)
 if __name__ == "__main__":
     unittest.main()
