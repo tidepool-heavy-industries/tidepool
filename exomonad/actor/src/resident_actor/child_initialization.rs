@@ -6,6 +6,73 @@ use tidepool_runtime::session::{RuntimeLexicalScopeLease, WorkbenchForkBoundary}
 
 use crate::{ActorDescriptor, ActorRef};
 
+pub(super) struct ChildInitializationFrame {
+    pub context: crate::ActorSessionContext,
+    pub boot: super::ResidentBoot,
+    pub lexical: Arc<RuntimeLexicalScopeLease>,
+    pub checkpoint: Option<(
+        crate::CheckpointLease,
+        Option<crate::HostedCheckpointAttachment>,
+    )>,
+}
+
+pub(super) enum ChildWorkspacePreparation {
+    None,
+    Retained(Arc<dyn crate::ForkWorkspaceCustody>),
+    Prepared(crate::PreparedForkWorkspace),
+    Bound {
+        admission: crate::fork_workspace::SharedForkWorkspaceAdmission,
+        worktree: String,
+        role: crate::ActorRole,
+    },
+}
+
+pub(super) struct PreparedChildWorkspace {
+    pub frame: ChildInitializationFrame,
+    pub result:
+        Result<Option<Arc<dyn crate::ForkWorkspaceCustody>>, crate::ResidentActorWorkbenchError>,
+}
+
+pub(super) async fn prepare_workspace(
+    frame: ChildInitializationFrame,
+    preparation: ChildWorkspacePreparation,
+) -> PreparedChildWorkspace {
+    let actor = frame.context.actor;
+    let result = match preparation {
+        ChildWorkspacePreparation::None => Ok(None),
+        ChildWorkspacePreparation::Retained(custody) => Ok(Some(custody)),
+        ChildWorkspacePreparation::Prepared(prepared) => install_workspace(
+            tidepool_runtime::spawn_blocking_in_span(move || prepared.install(actor)).await,
+        ),
+        ChildWorkspacePreparation::Bound {
+            admission,
+            worktree,
+            role,
+        } => install_workspace(
+            tidepool_runtime::spawn_blocking_in_span(move || {
+                admission.install_custody(actor, &worktree, role)
+            })
+            .await,
+        ),
+    };
+    PreparedChildWorkspace { frame, result }
+}
+
+fn install_workspace(
+    result: Result<
+        Result<
+            Arc<dyn crate::ForkWorkspaceCustody>,
+            crate::fork_workspace::ForkWorkspaceAdmissionError,
+        >,
+        tokio::task::JoinError,
+    >,
+) -> Result<Option<Arc<dyn crate::ForkWorkspaceCustody>>, crate::ResidentActorWorkbenchError> {
+    result
+        .map_err(crate::ResidentActorWorkbenchError::Join)?
+        .map(Some)
+        .map_err(|error| crate::ResidentActorWorkbenchError::ActorProtocol(error.to_string()))
+}
+
 /// One non-cloneable release of an already admitted child. The original
 /// allocation and committed group authority travel with the runtime-owned
 /// lexical share; a scope identifier alone cannot release a resident child.

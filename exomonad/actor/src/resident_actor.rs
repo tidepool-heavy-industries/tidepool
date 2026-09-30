@@ -6048,6 +6048,147 @@ where
         Ok(())
     }
 
+    fn advance_child_release(
+        &mut self,
+        kernel: &KernelContext,
+        release: ForkChildRelease,
+    ) -> Result<crate::ActorAdvance<Self, ()>, KernelInvocationFailure> {
+        let refuse = |detail: &str| KernelInvocationFailure::Failed {
+            actor: kernel.identity(),
+            detail: detail.into(),
+        };
+        if !release.matches(kernel.identity(), &self.descriptor) {
+            return Err(refuse(
+                "child allocation changed before release application",
+            ));
+        }
+        if let Some(terminal) = kernel.requested_shutdown() {
+            return Ok(crate::ActorAdvance::Complete(KernelStep::Stop {
+                output: (),
+                terminal,
+            }));
+        }
+        let preparation =
+            match (
+                self.worktree_custody.as_ref(),
+                self.prepared_workspace.take(),
+            ) {
+                (Some(custody), None) => {
+                    child_initialization::ChildWorkspacePreparation::Retained(Arc::clone(custody))
+                }
+                (None, Some(prepared)) => {
+                    child_initialization::ChildWorkspacePreparation::Prepared(prepared)
+                }
+                (None, None) => match self.launch_worktrees.as_slice() {
+                    [] => child_initialization::ChildWorkspacePreparation::None,
+                    [worktree] => child_initialization::ChildWorkspacePreparation::Bound {
+                        admission: self.environment.fork_workspaces.clone().ok_or_else(|| {
+                            refuse("pre-bootstrap worktree custody is unavailable")
+                        })?,
+                        worktree: worktree.clone(),
+                        role: self.descriptor.effective_role().role(),
+                    },
+                    _ => return Err(refuse("actor bootstrap requires at most one worktree")),
+                },
+                (Some(_), Some(_)) => {
+                    return Err(refuse(
+                        "child has both prepared and installed workspace custody",
+                    ))
+                }
+            };
+        let boot = self
+            .boot
+            .take()
+            .ok_or_else(|| refuse("deferred fork was already released"))?;
+        let lexical = release.into_lexical();
+        self.descriptor.set_lexical_scope(lexical.scope());
+        self.child_scope_lease = Some(Arc::clone(&lexical));
+        let context = self.context(kernel.identity());
+        kernel
+            .install_session_context(context.clone())
+            .map_err(|error| refuse(&error.to_string()))?;
+        if let Some(record) = self.environment.actors.lock().get_mut(&context.actor) {
+            record.descriptor = self.descriptor.clone();
+            if matches!(record.public_owner, ActorPublicOwnerPlane::Ephemeral(_)) {
+                record.public_owner = ActorPublicOwnerPlane::Ephemeral(
+                    WorkbenchPublicOwner::issue(&context, &self.descriptor, None)
+                        .map_err(|error| refuse(&error.to_string()))?,
+                );
+            }
+        } else {
+            return Err(refuse("released child has no registered allocation"));
+        }
+        let frame = child_initialization::ChildInitializationFrame {
+            context,
+            boot,
+            lexical,
+            checkpoint: self.admitted_checkpoint.clone(),
+        };
+        Ok(crate::ActorAdvance::Park(crate::OwnedActorTask::new(
+            Box::pin(async move {
+                let prepared = child_initialization::prepare_workspace(frame, preparation).await;
+                crate::OwnedActorCompletion::advance(move |behavior: &mut Self, kernel| {
+                    behavior.advance_prepared_child(kernel, prepared)
+                })
+            }),
+        )))
+    }
+
+    fn advance_prepared_child(
+        &mut self,
+        kernel: &KernelContext,
+        prepared: child_initialization::PreparedChildWorkspace,
+    ) -> Result<crate::ActorAdvance<Self, ()>, KernelInvocationFailure> {
+        let child_initialization::PreparedChildWorkspace { frame, result } = prepared;
+        let refuse = |detail: &str| KernelInvocationFailure::Failed {
+            actor: kernel.identity(),
+            detail: detail.into(),
+        };
+        if self.context(kernel.identity()).placement != frame.context.placement
+            || self
+                .child_scope_lease
+                .as_ref()
+                .is_none_or(|lease| !Arc::ptr_eq(lease, &frame.lexical))
+        {
+            return Err(refuse(
+                "child placement changed during workspace preparation",
+            ));
+        }
+        self.worktree_custody = result.map_err(|error| refuse(&error.to_string()))?;
+        if let Some(terminal) = kernel.requested_shutdown() {
+            self.boot = Some(frame.boot);
+            return Ok(crate::ActorAdvance::Complete(KernelStep::Stop {
+                output: (),
+                terminal,
+            }));
+        }
+        // Native boot stabilization still uses its original serial driver.
+        // Its workspace and entry are already captured; this cannot replay
+        // release admission or select another public/captured context.
+        Ok(crate::ActorAdvance::Park(crate::OwnedActorTask::serial(
+            move |mut behavior: Self, kernel| {
+                Box::pin(async move {
+                    let child_initialization::ChildInitializationFrame {
+                        context,
+                        boot,
+                        lexical,
+                        checkpoint,
+                    } = frame;
+                    let result =
+                        behavior
+                            .initialize(&kernel, &context, boot)
+                            .await
+                            .map_err(|error| KernelInvocationFailure::Failed {
+                                actor: context.actor,
+                                detail: error.to_string(),
+                            });
+                    drop((lexical, checkpoint));
+                    (behavior, crate::OwnedActorCompletion::new(move |_| result))
+                })
+            },
+        )))
+    }
+
     async fn initialize(
         &mut self,
         kernel: &KernelContext,
@@ -9471,48 +9612,33 @@ where
         })
     }
 
-    fn release_fork<'a>(
-        &'a mut self,
-        kernel: &'a KernelContext,
+    fn dispatch_release_fork(
+        &mut self,
+        kernel: &KernelContext,
         release: ForkChildRelease,
-    ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
-        Box::pin(async move {
-            if !release.matches(kernel.identity(), &self.descriptor) {
-                return Err(Self::failure(
-                    "fork release does not match this child's admitted allocation",
-                ));
-            }
-            let selected_context = self
-                .descriptor
-                .clone()
-                .with_lexical_scope(release.lexical().scope())
-                .session_context(kernel.identity());
-            self.environment
-                .runner
-                .validate_fork_child_scope(selected_context, Arc::clone(release.lexical()))
-                .await
-                .map_err(Self::failure)?;
-            if let Some(terminal) = kernel.requested_shutdown() {
-                return Ok(KernelStep::Stop {
-                    output: (),
-                    terminal,
-                });
-            }
-            let boot = self.boot.take().ok_or_else(|| KernelBehaviorError {
-                detail: "deferred fork was already released".into(),
-            })?;
-            let lexical = release.into_lexical();
-            self.descriptor.set_lexical_scope(lexical.scope());
-            self.child_scope_lease = Some(lexical);
-            let context = self.context(kernel.identity());
-            kernel.install_session_context(context.clone())?;
-            if let Some(record) = self.environment.actors.lock().get_mut(&context.actor) {
-                record.descriptor = self.descriptor.clone();
-            }
-            self.initialize(kernel, &context, boot)
-                .await
-                .map_err(Self::failure)
-        })
+    ) -> Result<crate::OwnedActorTask<Self, ()>, KernelBehaviorError> {
+        if !release.matches(kernel.identity(), &self.descriptor) || self.boot.is_none() {
+            return Err(Self::failure(
+                "fork release does not match this child's pending allocation",
+            ));
+        }
+        let context = self
+            .descriptor
+            .clone()
+            .with_lexical_scope(release.lexical().scope())
+            .session_context(kernel.identity());
+        let runner = self.environment.runner.clone();
+        let lexical = Arc::clone(release.lexical());
+        Ok(crate::OwnedActorTask::new(Box::pin(async move {
+            let result = runner.validate_fork_child_scope(context, lexical).await;
+            crate::OwnedActorCompletion::advance(move |behavior: &mut Self, kernel| {
+                result.map_err(|error| KernelInvocationFailure::Failed {
+                    actor: kernel.identity(),
+                    detail: error.to_string(),
+                })?;
+                behavior.advance_child_release(kernel, release)
+            })
+        })))
     }
 
     fn cast<'a>(
