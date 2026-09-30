@@ -5261,7 +5261,7 @@ mod tests {
             admission_digest: [0; 32],
             cell_source: "let value = RootChoice.value".into(),
             template_source: include_str!("fixtures/checked-fold-outcome-template.hs")
-                .replace("{{CELL_IMPORTS}}", "import qualified RootChoice"),
+                .replace("{{CELL_IMPORTS}}", "{{CELL_IMPORTS}}\nimport qualified RootChoice"),
             turn_templates: Vec::new(),
             injected_modules: Vec::new(),
             reserved_declaration_modules: Vec::new(),
