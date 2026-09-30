@@ -107,6 +107,8 @@ impl WorkbenchExecutionControl {
     }
 
     pub(crate) fn arm_sleep(&self) {
+        self.sleep_outcome
+            .store(SLEEP_NONE, std::sync::atomic::Ordering::Release);
         #[allow(
             clippy::expect_used,
             reason = "arm_sleep is called once per workbench execution's own \
@@ -271,6 +273,12 @@ impl WorkbenchExecutionControl {
         execution: WorkbenchExecutionId,
         reply: crate::KernelWorkbenchReply,
     ) -> WorkbenchCancellationOutcome {
+        if matches!(
+            self.publication.phase(),
+            PublicationPhase::CommitClaimed { .. }
+        ) {
+            return WorkbenchCancellationOutcome::Unconfirmed { execution };
+        }
         let phase = self.phase.load(std::sync::atomic::Ordering::Acquire);
         match self
             .sleep_outcome
@@ -1226,6 +1234,42 @@ mod tests {
         assert!(matches!(
             control.cancellation_outcome(execution, control.settled().await),
             WorkbenchCancellationOutcome::PublicationSettled { reply: Err(_), .. }
+        ));
+    }
+
+    #[test]
+    fn lost_publication_claim_stays_unconfirmed_after_terminal_transport_failure() {
+        let control = WorkbenchExecutionControl::untracked();
+        let claim = control.publication_decision().claim_commit().unwrap();
+        assert_eq!(
+            control.admit_cancellation().1,
+            Some(PublicationCancellation::PendingCommitOutcome)
+        );
+        drop(claim);
+        control.mark_unconfirmed();
+        let actor = crate::ActorRef::first(crate::ActorId(1));
+        let reply = Err(crate::KernelInvocationFailure::ActorExited(actor));
+        control.settle(reply.clone());
+        assert!(matches!(
+            control.cancellation_outcome(WorkbenchExecutionId::from_digest([9; 16]), reply),
+            WorkbenchCancellationOutcome::Unconfirmed { .. }
+        ));
+    }
+
+    #[test]
+    fn later_wait_does_not_reuse_an_earlier_expiry_as_abort_evidence() {
+        let control = WorkbenchExecutionControl::untracked();
+        control.arm_sleep();
+        assert!(control.claim_expiry());
+        control.finish_sleep();
+        control.arm_sleep();
+        assert!(control.request_cancellation());
+        assert!(matches!(
+            control.cancellation_outcome(
+                WorkbenchExecutionId::from_digest([10; 16]),
+                terminal_reply(),
+            ),
+            WorkbenchCancellationOutcome::Unconfirmed { .. }
         ));
     }
 
