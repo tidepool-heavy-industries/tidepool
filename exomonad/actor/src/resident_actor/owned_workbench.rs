@@ -334,7 +334,12 @@ where
                                 unreachable!("effect wait handled above")
                             }
                         });
-                        Self::finish_owned(behavior, owned, result).await
+                        let completion = OwnedWorkbenchCompletion::advance(
+                            move |behavior: &mut Self, _kernel| {
+                                Self::begin_owned_finalization(behavior, owned, result)
+                            },
+                        );
+                        (behavior, completion)
                     }
                 }
             })
@@ -422,43 +427,71 @@ where
         owned: OwnedExecution<H, O>,
         result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     ) -> OwnedWorkbenchTask<Self> {
-        OwnedWorkbenchTask::serial(move |behavior, _kernel| {
-            Box::pin(Self::finish_owned(behavior, owned, result))
+        OwnedWorkbenchTask::new(Box::pin(async move {
+            OwnedWorkbenchCompletion::advance(move |behavior: &mut Self, _kernel| {
+                Self::begin_owned_finalization(behavior, owned, result)
+            })
+        }))
+    }
+
+    fn begin_owned_finalization(
+        behavior: &mut Self,
+        owned: OwnedExecution<H, O>,
+        result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+    ) -> Result<WorkbenchAdvance<Self>, KernelInvocationFailure> {
+        let (timing, cleanup) = owned.scopes();
+        timing.sync_scope(|| {
+            cleanup.sync_scope(|| {
+                let finalization = behavior.begin_workbench_finalization(&owned.state, result);
+                Ok(WorkbenchAdvance::Park(
+                    Self::settle_owned_finalization_task(
+                        owned,
+                        behavior.environment.clone(),
+                        finalization,
+                    ),
+                ))
+            })
         })
     }
 
-    async fn finish_owned(
-        mut behavior: Self,
+    fn settle_owned_finalization_task(
         mut owned: OwnedExecution<H, O>,
-        result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
-    ) -> (Self, OwnedWorkbenchCompletion<Self>) {
-        let outcome = match &result {
-            Ok(
-                KernelStep::Continue(response)
-                | KernelStep::ContinueLater(response)
-                | KernelStep::Stop {
-                    output: response, ..
-                },
-            ) => format!("{:?}", response.status),
-            Err(_) => "error".into(),
-        };
-        let (timing, cleanup) = owned.scopes();
-        let result = timing
-            .scope(cleanup.scope(behavior.finalize_workbench_execution(&mut owned.state, result)))
-            .await;
-        owned
-            .timing
-            .take()
-            .expect("one terminal timing owner")
-            .finish(&outcome);
-        (
-            behavior,
-            OwnedWorkbenchCompletion::new(move |_behavior| {
-                // Keep exact cleanup custody through the fenced mailbox join.
-                let _owned = owned;
-                result
-            }),
-        )
+        environment: ResidentEnvironment<H, O>,
+        finalization: WorkbenchFinalization,
+    ) -> OwnedWorkbenchTask<Self> {
+        OwnedWorkbenchTask::new(Box::pin(async move {
+            let (timing, cleanup) = owned.scopes();
+            let result = timing
+                .scope(cleanup.scope(settle_workbench_finalization(environment, finalization)))
+                .await;
+            OwnedWorkbenchCompletion::new(move |behavior: &mut Self| {
+                let (timing, cleanup) = owned.scopes();
+                timing.sync_scope(|| {
+                    cleanup.sync_scope(|| {
+                        let result =
+                            behavior.complete_workbench_finalization(&mut owned.state, result);
+                        let outcome = match &result {
+                            Ok(
+                                KernelStep::Continue(response)
+                                | KernelStep::ContinueLater(response)
+                                | KernelStep::Stop {
+                                    output: response, ..
+                                },
+                            ) => format!("{:?}", response.status),
+                            Err(_) => "error".into(),
+                        };
+                        owned
+                            .timing
+                            .take()
+                            .expect("one terminal timing owner")
+                            .finish(&outcome);
+                        // Exact resources and continuation custody cross the last fence.
+                        let _owned = owned;
+                        result
+                    })
+                })
+            })
+        }))
     }
 }
 

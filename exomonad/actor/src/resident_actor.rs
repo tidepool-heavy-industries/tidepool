@@ -1150,6 +1150,86 @@ fn install_cell_preparation(
     Ok(None)
 }
 
+struct WorkbenchFinalization {
+    context: ActorSessionContext,
+    reservation_owner: RequestReservationOwner,
+    result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+    rejected: bool,
+    retire_scopes: Option<Vec<tidepool_codegen::scope::ScopeId>>,
+}
+
+async fn settle_workbench_finalization<H, O>(
+    environment: ResidentEnvironment<H, O>,
+    finalization: WorkbenchFinalization,
+) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    let WorkbenchFinalization {
+        context,
+        reservation_owner,
+        result,
+        rejected,
+        retire_scopes,
+    } = finalization;
+    let checkpoint_cleanup_failure = match retire_scopes {
+        Some(scopes) => environment
+            .runner
+            .retire_fork_scopes(context.clone(), scopes)
+            .await
+            .err()
+            .map(|failure| format!("failed checkpoint cleanup: {failure}")),
+        None => None,
+    };
+    if rejected || checkpoint_cleanup_failure.is_some() {
+        let (aborted, notifications) = environment
+            .requests
+            .abort_unsubmitted(context.actor, &reservation_owner);
+        publish_request_notifications(
+            &environment.requests,
+            &environment.deployments,
+            notifications,
+        )
+        .await;
+        if !aborted.is_empty() {
+            tracing::debug!(actor = ?context.actor, requests = ?aborted, "aborted unpublished request reservations after rejected workbench input");
+        }
+    }
+    let result = match (result, checkpoint_cleanup_failure) {
+        (result, None) => result,
+        (Err(failure), Some(cleanup)) => Err(WorkbenchExecutionFailure {
+            receipts: failure.receipts,
+            failed_index: failure.failed_index,
+            total: failure.total,
+            source: ResidentActorWorkbenchError::ActorProtocol(format!(
+                "{}; {cleanup}",
+                failure.source
+            )),
+        }),
+        (
+            Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response)),
+            Some(cleanup),
+        )
+        | (
+            Ok(KernelStep::Stop {
+                output: response, ..
+            }),
+            Some(cleanup),
+        ) => Err(failed_checkpoint_cleanup_response(response, cleanup)),
+    };
+    let result = result.map_err(|failure| {
+        KernelInvocationFailure::Workbench(crate::KernelWorkbenchFailure {
+            actor: context.actor,
+            receipts: failure.receipts,
+            failed_index: failure.failed_index,
+            total: failure.total,
+            detail: failure.source.to_string(),
+        })
+    });
+    result
+}
+
 struct WorkbenchEffectState {
     park_effects: bool,
     context: ActorSessionContext,
@@ -8101,13 +8181,12 @@ where
         })
     }
 
-    async fn finalize_workbench_execution(
+    fn begin_workbench_finalization(
         &mut self,
-        execution_state: &mut WorkbenchExecutionState,
+        execution_state: &WorkbenchExecutionState,
         result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
-    ) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure> {
+    ) -> WorkbenchFinalization {
         let context = execution_state.effects.context.clone();
-        let execution = execution_state.request.execution_id().cloned();
         let checkpoint_boundary = execution_state.request.fork_boundary().cloned();
         self.fork_publication = ForkPublication::Resident;
         match &result {
@@ -8162,73 +8241,35 @@ where
                 )
             }
         };
-        let checkpoint_cleanup_failure = if checkpoint_failed {
-            if let Some(boundary) = checkpoint_boundary.as_ref() {
-                let retired =
-                    self.environment
-                        .fork_groups
-                        .settle_checkpoints(context.actor, boundary, false);
+        let retire_scopes = if checkpoint_failed {
+            checkpoint_boundary.as_ref().map(|boundary| {
                 self.environment
-                    .runner
-                    .retire_fork_scopes(
-                        context.clone(),
-                        retired
-                            .into_iter()
-                            .filter_map(|(session, scope)| {
-                                (session == context.placement.session).then_some(scope)
-                            })
-                            .collect(),
-                    )
-                    .await
-                    .err()
-                    .map(|failure| format!("failed checkpoint cleanup: {failure}"))
-            } else {
-                None
-            }
+                    .fork_groups
+                    .settle_checkpoints(context.actor, boundary, false)
+                    .into_iter()
+                    .filter_map(|(session, scope)| {
+                        (session == context.placement.session).then_some(scope)
+                    })
+                    .collect()
+            })
         } else {
             None
         };
-        if rejected || checkpoint_cleanup_failure.is_some() {
-            let (aborted, notifications) = self
-                .environment
-                .requests
-                .abort_unsubmitted(context.actor, &execution_state.effects.reservation_owner);
-            self.publish_watch_notifications(notifications).await;
-            if !aborted.is_empty() {
-                tracing::debug!(actor = ?context.actor, requests = ?aborted, "aborted unpublished request reservations after rejected workbench input");
-            }
+        WorkbenchFinalization {
+            context,
+            reservation_owner: execution_state.effects.reservation_owner.clone(),
+            result,
+            rejected,
+            retire_scopes,
         }
-        let result = match (result, checkpoint_cleanup_failure) {
-            (result, None) => result,
-            (Err(failure), Some(cleanup)) => Err(WorkbenchExecutionFailure {
-                receipts: failure.receipts,
-                failed_index: failure.failed_index,
-                total: failure.total,
-                source: ResidentActorWorkbenchError::ActorProtocol(format!(
-                    "{}; {cleanup}",
-                    failure.source
-                )),
-            }),
-            (
-                Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response)),
-                Some(cleanup),
-            )
-            | (
-                Ok(KernelStep::Stop {
-                    output: response, ..
-                }),
-                Some(cleanup),
-            ) => Err(failed_checkpoint_cleanup_response(response, cleanup)),
-        };
-        let result = result.map_err(|failure| {
-            KernelInvocationFailure::Workbench(crate::KernelWorkbenchFailure {
-                actor: context.actor,
-                receipts: failure.receipts,
-                failed_index: failure.failed_index,
-                total: failure.total,
-                detail: failure.source.to_string(),
-            })
-        });
+    }
+
+    fn complete_workbench_finalization(
+        &mut self,
+        execution_state: &mut WorkbenchExecutionState,
+        result: Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
+    ) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure> {
+        let execution = execution_state.request.execution_id().cloned();
         if let (Some(execution), Some(request)) = (execution, execution_state.replay_request.take())
         {
             let reply = match &result {
@@ -8256,6 +8297,18 @@ where
             );
         }
         result
+    }
+
+    // Builtin and unconverted ingress retain their serial driver until their
+    // owned-step conversion. Hosted authored executions use the sync advances.
+    async fn finalize_serial_workbench_execution(
+        &mut self,
+        execution_state: &mut WorkbenchExecutionState,
+        result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+    ) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure> {
+        let finalization = self.begin_workbench_finalization(execution_state, result);
+        let result = settle_workbench_finalization(self.environment.clone(), finalization).await;
+        self.complete_workbench_finalization(execution_state, result)
     }
 
     async fn abort_unpublished_groups(
@@ -9412,7 +9465,7 @@ where
                 Err(_) => "error".to_string(),
             };
             call_scope.finish(&call_outcome);
-            self.finalize_workbench_execution(&mut execution_state, result)
+            self.finalize_serial_workbench_execution(&mut execution_state, result)
                 .await
         })
     }
