@@ -183,7 +183,7 @@ fn conversation_state(lifecycle: HostActorLifecycle) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exomonad_actor::{ActorId, Incarnation};
+    use exomonad_actor::{ActorId, ActorTerminal, Incarnation};
 
     fn actor(id: u64) -> ActorRef {
         ActorRef {
@@ -242,6 +242,52 @@ mod tests {
         assert_eq!(actors[1].identity, child_identity);
         assert_eq!(actors[1].parent, Some(actors[0].identity.clone()));
         assert_eq!(conversations.len(), 1);
+    }
+
+    #[test]
+    fn terminal_root_remains_projected_with_a_live_child() {
+        let mut projection = EmbeddedProjection::default();
+        let root_identity = HostIdentity {
+            run: "run".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "1".into(),
+        };
+        let child_identity = HostIdentity {
+            run: "run".into(),
+            actor: AgentPath("/root/1".into()),
+            incarnation: "1".into(),
+        };
+        projection.attached(actor(1), &root_identity);
+        projection.attached(actor(2), &child_identity);
+
+        let mut root = node(1, None, true);
+        root.terminal = Some(ActorTerminal {
+            kind: ActorExitKind::Completed,
+            summary: "root completed".into(),
+        });
+        let child = node(2, Some(actor(1)), true);
+        let (actors, conversations) =
+            projection.projection("run", &[root, child], &LifecycleState::default());
+
+        assert_eq!(actors.len(), 2);
+        let projected_root = actors
+            .iter()
+            .find(|projected| projected.identity == root_identity)
+            .expect("terminal root remains visible in the host graph");
+        assert_eq!(projected_root.lifecycle, HostActorLifecycle::Retired);
+        let projected_child = actors
+            .iter()
+            .find(|projected| projected.identity == child_identity)
+            .expect("live child remains visible after its parent terminates");
+        assert_eq!(projected_child.parent, Some(root_identity));
+        assert_eq!(projected_child.lifecycle, HostActorLifecycle::Waiting);
+        assert_eq!(conversations.len(), 2);
+        assert!(conversations.iter().any(|conversation| {
+            conversation["id"] == "/root" && conversation["state"] == "cancelled"
+        }));
+        assert!(conversations.iter().any(|conversation| {
+            conversation["id"] == "/root/1" && conversation["state"] == "idle"
+        }));
     }
 
     #[test]

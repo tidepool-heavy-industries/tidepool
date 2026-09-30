@@ -1,8 +1,8 @@
 use std::{
     path::Path,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -28,7 +28,7 @@ use harness::{
     store::Store,
     turn::JobScheduler,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 
 use super::embedded_policy::{EmbeddedPolicyInstallation, EmbeddedPolicySnapshot};
@@ -515,7 +515,7 @@ mod tests {
     use super::*;
     use crate::actor_host::embedded_projection::{EmbeddedProjection, LifecycleState};
     use crate::actor_host::embedded_service::{
-        attach_actor, drive_conversation_with_transport, submit_browser_command, EmbeddedService,
+        EmbeddedService, attach_actor, drive_conversation_with_transport, submit_browser_command,
     };
     use crate::actor_host::test_campaign::TestCampaign;
     use async_trait::async_trait;
@@ -667,23 +667,27 @@ mod tests {
             incarnation: "wrong-incarnation".into(),
             ..identity.clone()
         };
-        assert!(service
-            .runtime
-            .attach(wrong, campaign.actor.clone(), installation.clone(), None)
-            .is_err());
+        assert!(
+            service
+                .runtime
+                .attach(wrong, campaign.actor.clone(), installation.clone(), None)
+                .is_err()
+        );
         let wrong_run = HostIdentity {
             run: "another-run".into(),
             ..identity.clone()
         };
-        assert!(service
-            .runtime
-            .attach(
-                wrong_run,
-                campaign.actor.clone(),
-                installation.clone(),
-                None
-            )
-            .is_err());
+        assert!(
+            service
+                .runtime
+                .attach(
+                    wrong_run,
+                    campaign.actor.clone(),
+                    installation.clone(),
+                    None
+                )
+                .is_err()
+        );
 
         let transport = ParkUntilInput {
             entered: Arc::new(tokio::sync::Notify::new()),
@@ -762,10 +766,11 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
         let command = service.commands.recv().await.unwrap();
-        let receipt = submit_browser_command(command, &conversation, &service.control)
+        let command_id = command.command_id.clone();
+        let input_receipt = submit_browser_command(command, &conversation, &service.control)
             .await
             .unwrap();
-        assert!(receipt.wake_error.is_none(), "{receipt:?}");
+        assert!(input_receipt.wake_error.is_none(), "{input_receipt:?}");
         let store = service.runtime.store();
         let call = harness::model::CallId("raw-cell-1".into());
         let host_identity = conversation.identity().clone();
@@ -866,7 +871,9 @@ mod tests {
             requests[2].input
         );
         assert!(matches!(
-            conversation.input_observation(receipt.envelope_id).unwrap(),
+            conversation
+                .input_observation(input_receipt.envelope_id)
+                .unwrap(),
             InputObservation::Included(_)
         ));
         drop(requests);
@@ -878,6 +885,7 @@ mod tests {
             &campaign.forest.inspect_host_graph(),
             &LifecycleState::default(),
         );
+        let mut reconnect_identity = None;
         for _ in 0..2 {
             let mut request = format!("ws://{}/api/ws", service.address)
                 .into_client_request()
@@ -896,6 +904,26 @@ mod tests {
             assert_eq!(frame["snapshot"]["actors"].as_array().unwrap().len(), 1);
             assert_eq!(frame["snapshot"]["actors"][0]["modelConversation"], "/root");
             assert_eq!(frame["snapshot"]["conversations"][0]["path"], "/root");
+            let actor_identity = frame["snapshot"]["actors"][0]["identity"].clone();
+            if let Some(previous) = reconnect_identity.as_ref() {
+                assert_eq!(
+                    &actor_identity, previous,
+                    "actor identity changed on reconnect"
+                );
+            } else {
+                reconnect_identity = Some(actor_identity);
+            }
+            let command_receipts = frame["snapshot"]["commandReceipts"]
+                .as_array()
+                .expect("reconnect snapshot retains command receipts");
+            assert!(
+                command_receipts.iter().any(|command_receipt| {
+                    command_receipt["commandId"] == command_id
+                        && command_receipt["outcome"] == "admitted"
+                        && command_receipt["envelopeId"] == input_receipt.envelope_id.to_string()
+                }),
+                "reconnect snapshot lost the admitted browser input receipt: {command_receipts:?}"
+            );
             socket.close(None).await.unwrap();
         }
         service.shutdown().await.unwrap();
