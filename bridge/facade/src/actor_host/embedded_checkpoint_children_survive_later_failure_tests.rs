@@ -218,7 +218,7 @@ async fn embedded_checkpoint_children_survive_a_later_parent_cell_failure() {
         exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
-            config.backend = crate::exomonad::ExomonadBackend::Embedded;
+            config.backend = crate::exomonad::HostBackendOptions::Embedded;
             config.embedded = Some(settings.clone());
         },
     )
@@ -297,7 +297,7 @@ async fn embedded_checkpoint_children_survive_a_later_parent_cell_failure() {
         config: campaign.config.clone(),
         run_root: campaign.config.run_root.clone(),
         tmux: TmuxSession::new(&campaign.config.tmux_session).unwrap(),
-        backend: native_interactive_backend(campaign.config.interactive_agent.clone()),
+        backend: HostRuntimeMode::Embedded,
         worktrees: campaign.worktrees.clone(),
         bindings: campaign.bindings.clone(),
         readiness: readiness_tx,
@@ -312,6 +312,10 @@ async fn embedded_checkpoint_children_survive_a_later_parent_cell_failure() {
         .unwrap(),
         recovered_threads: Arc::new(BTreeMap::new()),
         recovered_root_predecessor: None,
+        host_graph: {
+            let forest = campaign.forest.clone();
+            Arc::new(move || forest.inspect_host_graph())
+        },
     };
     let host = tokio::spawn(run_interactive_applications(
         lifecycle_rx,

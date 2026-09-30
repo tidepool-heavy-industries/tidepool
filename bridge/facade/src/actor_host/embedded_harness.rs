@@ -1,8 +1,8 @@
 use std::{
     path::Path,
     sync::{
-        Arc,
         atomic::{AtomicU64, Ordering},
+        Arc,
     },
 };
 
@@ -28,7 +28,7 @@ use harness::{
     store::Store,
     turn::JobScheduler,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch};
 
 use super::embedded_policy::{EmbeddedPolicyInstallation, EmbeddedPolicySnapshot};
@@ -116,12 +116,14 @@ impl EmbeddedHarnessRuntime {
         }
         let parent = captured.checkpoint.origin().clone();
         let (wakes, incoming) = mpsc::unbounded_channel();
+        let round_control = Arc::new(EmbeddedRoundControl::default());
         let host = Arc::new(EmbeddedHostActor::new(
             identity,
             actor,
             installation,
             self.store.clone(),
             wakes,
+            round_control.clone(),
         )?);
         // The embedded root also records an empty contract. This installation
         // has no authoritative checkout revision to record for the child.
@@ -136,6 +138,7 @@ impl EmbeddedHarnessRuntime {
         Ok(EmbeddedConversation {
             conversation,
             incoming,
+            round_control,
         })
     }
 
@@ -585,7 +588,7 @@ mod tests {
     use super::*;
     use crate::actor_host::embedded_projection::{EmbeddedProjection, LifecycleState};
     use crate::actor_host::embedded_service::{
-        EmbeddedService, attach_actor, drive_conversation_with_transport, submit_browser_command,
+        attach_actor, drive_conversation_with_transport, submit_browser_command, EmbeddedService,
     };
     use crate::actor_host::test_campaign::TestCampaign;
     use async_trait::async_trait;
@@ -737,27 +740,23 @@ mod tests {
             incarnation: "wrong-incarnation".into(),
             ..identity.clone()
         };
-        assert!(
-            service
-                .runtime
-                .attach(wrong, campaign.actor.clone(), installation.clone(), None)
-                .is_err()
-        );
+        assert!(service
+            .runtime
+            .attach(wrong, campaign.actor.clone(), installation.clone(), None)
+            .is_err());
         let wrong_run = HostIdentity {
             run: "another-run".into(),
             ..identity.clone()
         };
-        assert!(
-            service
-                .runtime
-                .attach(
-                    wrong_run,
-                    campaign.actor.clone(),
-                    installation.clone(),
-                    None
-                )
-                .is_err()
-        );
+        assert!(service
+            .runtime
+            .attach(
+                wrong_run,
+                campaign.actor.clone(),
+                installation.clone(),
+                None
+            )
+            .is_err());
 
         let transport = ParkUntilInput {
             entered: Arc::new(tokio::sync::Notify::new()),
