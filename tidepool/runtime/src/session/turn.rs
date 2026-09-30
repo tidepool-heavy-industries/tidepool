@@ -5975,7 +5975,7 @@ mod tests {
         let view = admission.view();
         let include = view.include_paths(effects.include_paths());
         let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        let failure = check_cell_admitted(
+        let outcome = check_cell_admitted(
             CellCheckRequest {
                 exact_context: view.exact_declaration_context().cloned(),
                 session_id: Some(view.session()),
@@ -5990,8 +5990,11 @@ mod tests {
             admission.clone(),
             &[],
             None,
-        )
-        .unwrap_err();
+        );
+        let failure = match outcome {
+            Err(failure) => failure,
+            Ok(_) => panic!("interleaved declaration order was admitted before ordered planning"),
+        };
         assert!(matches!(failure.error, CompileError::Diagnostics(_)));
         assert_eq!(
             crate::failclass::classify_compile(&failure.error).class,

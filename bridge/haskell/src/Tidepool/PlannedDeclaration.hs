@@ -35,7 +35,7 @@ import Tidepool.CheckedPrefixImports
   ( CompletedValueImports, refineOriginalDeclarationImports
   , refineOriginalDeclarationImportsWithCompleted )
 import Tidepool.Binders
-  ( CellSourcePlan(..), CellAnalysisItem(..), CellSourceSpan(..)
+  ( CellSourcePlan(..), CellAnalysisItem(..), CellAnalysisSourceItem(..), CellSourceSpan(..)
   , StmtBinders(..), TurnKind(..), ExportItem(..), LocatedImport(..)
   , SourcePrologue(..), DeclarationSource(..), renderDeclarationForTemplate )
 import Tidepool.DeclarationJoin
@@ -110,7 +110,10 @@ preparePlannedDeclaration reserved wrapper plan = do
     item : rest
       | sbKind (cellAnalysisVerdict item) == KDecl
       , not (cellAnalysisPrologueOnly item)
-      , all ((/= KDecl) . sbKind . cellAnalysisVerdict) rest -> Right item
+      , all ((/= KDecl) . sbKind . cellAnalysisVerdict) rest
+      , and [cellAnalysisSourceOrdinal declaration < cellAnalysisSourceOrdinal executable
+            | declaration <- cellAnalysisSourceItems item
+            , executable <- concatMap cellAnalysisSourceItems rest] -> Right item
     _ -> Left UnsupportedDeclarationOrder
   unless (occurrences "{{TURN}}" wrapper == 1)
     (Left InvalidTurnPlaceholder)
