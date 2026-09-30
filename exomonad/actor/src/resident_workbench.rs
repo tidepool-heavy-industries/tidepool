@@ -9803,6 +9803,21 @@ where
             .await
     }
 
+    /// Retain the committed fork's exact lexical surface before replacing
+    /// its provisional child placement. The lease's detached scope is the
+    /// mutable child target; token release cannot retire it prematurely.
+    pub(crate) async fn retain_fork_release_scope(
+        &self,
+        session_id: tidepool_repr::SessionId,
+        scope: ScopeId,
+    ) -> Result<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>, ResidentActorWorkbenchError> {
+        self.access
+            .with_host_machine("retain-fork-release-scope", session_id, None, move |session, _| {
+                session.retain_lexical_scope(scope).map_err(Into::into)
+            })
+            .await
+    }
+
     pub(crate) async fn close_realm(
         &self,
         context: crate::ActorSessionContext,
