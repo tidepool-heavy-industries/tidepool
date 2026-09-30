@@ -2441,7 +2441,7 @@ fn forward_extract_timing(stderr: &str, prefix: &str) {
 /// check, once per cell. The other is `run_turn`'s per-input-unit compile.
 #[tracing::instrument(name = "cell_check", level = "info", skip_all, fields(cell_bytes = req.cell_text.len()))]
 pub fn check_cell(req: CellCheckRequest<'_>) -> Result<CellCheck, CellCheckFailure> {
-    check_cell_impl(req, None, None).map(|(checked, _folded)| checked)
+    check_cell_impl(req, None, None, None).map(|(checked, _folded)| checked)
 }
 
 /// The single-item fold materials for [`check_cell_with_fold`]: the SAME
@@ -2473,7 +2473,7 @@ pub fn check_cell_with_fold(
     req: CellCheckRequest<'_>,
     fold: CellFoldTurn<'_>,
 ) -> Result<(CellCheck, Option<TurnResult>), CellCheckFailure> {
-    check_cell_impl(req, Some(fold), None)
+    check_cell_impl(req, Some(fold), None, None)
 }
 
 /// Check against the runtime's retained view and interface bytes. The compiler
@@ -2481,6 +2481,7 @@ pub fn check_cell_with_fold(
 pub fn check_cell_admitted(
     req: CellCheckRequest<'_>,
     admission: Arc<super::RuntimeCellAdmission>,
+    templates: &[TurnTemplate],
     fold: Option<CellFoldTurn<'_>>,
 ) -> Result<(CellCheck, Option<TurnResult>), CellCheckFailure> {
     let view = admission.view();
@@ -2510,13 +2511,26 @@ pub fn check_cell_admitted(
         )
         .into());
     }
-    check_cell_impl(req, fold, Some(admission))
+    if fold.as_ref().is_some_and(|fold| {
+        fold.templates.len() != templates.len()
+            || fold
+                .templates
+                .iter()
+                .zip(templates)
+                .any(|(a, b)| a.kind != b.kind || a.source != b.source)
+    }) {
+        return Err(
+            CompileError::ExtractFailed("checked fold has another compiler recipe".into()).into(),
+        );
+    }
+    check_cell_impl(req, fold, Some(admission), Some(templates))
 }
 
 fn check_cell_impl(
     req: CellCheckRequest<'_>,
     fold: Option<CellFoldTurn<'_>>,
     admission: Option<Arc<super::RuntimeCellAdmission>>,
+    admitted_templates: Option<&[TurnTemplate]>,
 ) -> Result<(CellCheck, Option<TurnResult>), CellCheckFailure> {
     let temp = TempDir::new()?;
     let cell_path = temp.path().join("cell.txt");
@@ -2557,31 +2571,29 @@ fn check_cell_impl(
         cmd.cell_fold_turn()
             .turn_out(&turn_out_path)
             .bind_gen(fold.gen);
-        for (i, tmpl) in fold.templates.iter().enumerate() {
-            let path = temp.path().join(format!("fold-template-{i}.hs"));
-            std::fs::write(&path, &tmpl.source)?;
-            cmd.turn_template(tmpl.kind.wire_name(), &path);
-        }
         for (identity, generation) in fold.retained_imports {
             cmd.retained_generation(extract_identity(identity), *generation);
+        }
+    }
+    if let Some(templates) = admitted_templates.or_else(|| fold.as_ref().map(|fold| fold.templates))
+    {
+        for (i, tmpl) in templates.iter().enumerate() {
+            let path = temp.path().join(format!("checked-template-{i}.hs"));
+            std::fs::write(&path, &tmpl.source)?;
+            cmd.turn_template(tmpl.kind.wire_name(), &path);
         }
     }
     let endpoint = cmd.bind().map_err(map_notfound)?;
     let include: Vec<_> = req.include.iter().map(|path| path.to_path_buf()).collect();
     let offer = if let Some(admission) = &admission {
-        let context = req.exact_context.clone().ok_or_else(|| {
-            CompileError::ExtractFailed(
-                "runtime-admitted cell requires a protected exact context".into(),
-            )
-        })?;
+        let context = req.exact_context.clone();
         let specification = CheckedCellSpecification {
             admission_digest: admission.digest(),
             cell_source: req.cell_text.into(),
             template_source: req.template.into(),
-            turn_templates: fold
-                .as_ref()
-                .map(|fold| {
-                    fold.templates
+            turn_templates: admitted_templates
+                .map(|templates| {
+                    templates
                         .iter()
                         .map(|template| (template.kind.wire_name().into(), template.source.clone()))
                         .collect()
@@ -3035,11 +3047,7 @@ fn run_turn_with_pin(
             endpoint.identity().producer_bytes(),
             &include,
             temp.path(),
-            req.exact_context.clone().ok_or_else(|| {
-                CompileError::ExtractFailed(
-                    "checked item requires protected exact declarations".into(),
-                )
-            })?,
+            req.exact_context.clone(),
             admission.item().clone(),
             admission.snapshot().compiler_prefix().clone(),
             admission.digest(),
@@ -4710,6 +4718,7 @@ mod tests {
             .log
             .certified_authored_arc_at(original_generation)
             .unwrap();
+        session.retract_in(private, "HiddenResult").unwrap();
         let CertifiedDeclarationPublication::Accepted(accepted) = session
             .snapshot_declaration_publication(owner, &admitted, private, vec![], vec![])
             .unwrap()
@@ -4792,6 +4801,7 @@ mod tests {
             InspectionQuery::ScopeBrowse,
             InspectionQuery::TypeOf("missingOriginalName".into()),
             InspectionQuery::TypeOf("answer (41 :: Int)".into()),
+            InspectionQuery::TypeOf("(undefined :: HiddenResult)".into()),
         ];
         let mixed = run_inspections(InspectionRequest {
             exact_context: Some(context.clone()),
@@ -4808,6 +4818,10 @@ mod tests {
         assert!(matches!(&mixed[1], InspectionResult::Browse { .. }));
         assert!(matches!(&mixed[2], InspectionResult::Rejected { .. }));
         assert!(matches!(&mixed[3], InspectionResult::Type { display, .. } if display == "Int"));
+        assert!(
+            matches!(&mixed[4], InspectionResult::Rejected { .. }),
+            "hidden nominal head entered lexical scope"
+        );
         let batch_queries = [
             InspectionQuery::TypeOf("answer".into()),
             InspectionQuery::TypeOf("answer (42 :: Int)".into()),
@@ -4830,7 +4844,7 @@ mod tests {
         let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
         let admission_specification = CheckedCellSpecification {
             admission_digest: [0; 32],
-            cell_source: "let result = answer (41 :: Int)".into(),
+            cell_source: "let result = makeResult (41 :: Int)".into(),
             template_source: template.clone(),
             turn_templates: templates
                 .iter()
@@ -4852,7 +4866,7 @@ mod tests {
             CellCheckRequest {
                 exact_context: Some(context.clone()),
                 session_id: Some(view.session()),
-                cell_text: "let result = answer (41 :: Int)",
+                cell_text: "let result = makeResult (41 :: Int)",
                 template: &template,
                 include: &include,
                 session_root: view.session_root(),
@@ -4861,6 +4875,7 @@ mod tests {
                 compile_view_evidence: "",
             },
             admission.clone(),
+            &templates,
             Some(CellFoldTurn {
                 templates: &templates,
                 gen: view.next_value_generation().0,
@@ -4879,7 +4894,7 @@ mod tests {
         assert_eq!(item.signatures().len(), 1);
         assert!(item
             .validate_observations(
-                "let result = answer (0 :: Int)",
+                "let result = makeResult (0 :: Int)",
                 tidepool_toolchain::checked_cell::CheckedItemKind::Bind,
                 item.binders(),
                 &[],
@@ -4887,7 +4902,12 @@ mod tests {
             )
             .is_err());
         let pins = checked.pins_for_item(0).unwrap();
-        assert_eq!(pins[0].ty, "Int");
+        assert!(pins[0].ty.ends_with("HiddenResult"), "{}", pins[0].ty);
+        assert!(item.signatures()[0]
+            .names()
+            .iter()
+            .any(|name| name.module() == original.product().owner().module
+                && name.occurrence() == "HiddenResult"));
         let prefix = session
             .begin_checked_prefix(admission.clone(), item.clone())
             .unwrap();
@@ -4915,7 +4935,11 @@ mod tests {
             panic!("source-hidden Join consumer must be a bind");
         };
         assert_eq!(bound[0].name, "result");
-        assert_eq!(bound[0].type_display, "Int");
+        assert!(
+            bound[0].type_display.ends_with("HiddenResult"),
+            "{}",
+            bound[0].type_display
+        );
         let certification = compiled.certification.unwrap();
         certification
             .validate_checked_bind(&compiled.prepared, view.next_value_generation().0, &bound)
@@ -4932,6 +4956,104 @@ mod tests {
                 .any(|group| group.owner() == original.product().owner()),
             "consumer must retain the original owned group identity"
         );
+        let mut edited_check = checked.clone();
+        edited_check.pins[0].ty = "Int".into();
+        assert!(edited_check.checked_item(0).is_err());
+        let mut edited_check = checked.clone();
+        edited_check.items[0].source = "let result = makeResult (0 :: Int)".into();
+        assert!(edited_check.checked_item(0).is_err());
+        let expression_view = session.compile_view_in(public).unwrap();
+        let expression_source = "makeResult (42 :: Int)";
+        let expression_specification = CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: expression_source.into(),
+            template_source: template.clone(),
+            turn_templates: templates
+                .iter()
+                .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                .collect(),
+            injected_modules: injected.clone(),
+            reserved_declaration_modules: Vec::new(),
+        };
+        let expression_admission = session
+            .admit_cell_in(
+                public,
+                0,
+                Arc::new(expression_specification.clone()),
+                expression_specification.specification_digest(),
+                [0; 32],
+            )
+            .unwrap();
+        let (expression_check, expression_fold) = check_cell_admitted(
+            CellCheckRequest {
+                exact_context: Some(context.clone()),
+                session_id: Some(view.session()),
+                cell_text: expression_source,
+                template: &template,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                compile_generation: expression_view.next_value_generation().0,
+                compile_view_evidence: "",
+            },
+            expression_admission.clone(),
+            &templates,
+            None,
+        )
+        .unwrap();
+        assert!(expression_fold.is_none());
+        let expression_item = expression_check.checked_item(0).unwrap();
+        assert!(expression_item.signatures()[0]
+            .names()
+            .iter()
+            .any(|name| name.module() == original.product().owner().module
+                && name.occurrence() == "HiddenResult"));
+        let expression_prefix = session
+            .begin_checked_prefix(expression_admission, expression_item.clone())
+            .unwrap();
+        let expression_reservation = session
+            .admit_checked_item(expression_prefix, expression_item)
+            .unwrap();
+        let expression_request = |templates: &[TurnTemplate]| {
+            run_checked_item(
+                TurnRequest {
+                    exact_context: Some(context.clone()),
+                    session_id: Some(view.session()),
+                    turn_text: expression_source,
+                    templates,
+                    include: &include,
+                    session_root: view.session_root(),
+                    inject_modules: &injected,
+                    gen: expression_reservation.generation().0,
+                    verdict: Some(expression_check.items[0].verdict.clone()),
+                    target: None,
+                    retained_imports: &[],
+                },
+                expression_reservation.clone(),
+            )
+        };
+        let mut edited_templates = templates.clone();
+        edited_templates[0].source.push_str("\n-- edited wrapper\n");
+        assert!(expression_request(&edited_templates).is_err());
+        let TurnResult::Expr {
+            variant,
+            compiled: expression_compiled,
+            ..
+        } = expression_request(&templates).unwrap()
+        else {
+            panic!("checked expression must compile its certified recipe");
+        };
+        assert_eq!(
+            variant, 1,
+            "hidden nominal pure expression must retain the rendered plan"
+        );
+        assert!(expression_compiled
+            .certification
+            .as_ref()
+            .unwrap()
+            .checked_execution()
+            .unwrap()
+            .matches_target(&expression_compiled.prepared));
         assert!(!original_path.exists());
         assert!(view.is_current_for(&session.compile_view_in(public).unwrap()));
     }

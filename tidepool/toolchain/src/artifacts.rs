@@ -265,6 +265,17 @@ pub struct ModuleCandidateOffer {
     checked_item: Option<crate::checked_cell::CheckedItemOffer>,
 }
 
+fn checked_offer_context(
+    context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
+    match context {
+        Some(context) => Ok(context),
+        None => Ok(Arc::new(
+            crate::declaration_join::ExactDeclarationContext::new(&[], &[], Vec::new())?,
+        )),
+    }
+}
+
 impl ModuleCandidateOffer {
     pub fn select(producer: &[u8], include: &[PathBuf], scratch: &Path) -> Self {
         Self {
@@ -297,10 +308,11 @@ impl ModuleCandidateOffer {
         producer: &[u8],
         include: &[PathBuf],
         scratch: &Path,
-        context: Arc<crate::declaration_join::ExactDeclarationContext>,
+        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
         specification: crate::checked_cell::CheckedCellSpecification,
     ) -> Result<Self, CompileError> {
         let authorization = specification.manifest_value()?;
+        let context = checked_offer_context(context)?;
         Ok(Self {
             selected: None,
             producer: producer.to_vec(),
@@ -319,13 +331,14 @@ impl ModuleCandidateOffer {
         producer: &[u8],
         include: &[PathBuf],
         scratch: &Path,
-        context: Arc<crate::declaration_join::ExactDeclarationContext>,
+        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
         item: crate::checked_cell::ExactCheckedItem,
         prefix: crate::checked_cell::ExactCompiledPrefix,
         runtime_prefix_digest: [u8; 32],
         generation: u64,
         templates: &[(String, String)],
     ) -> Result<Self, CompileError> {
+        let context = checked_offer_context(context)?;
         let checked_item = crate::checked_cell::CheckedItemOffer {
             item,
             prefix,

@@ -775,9 +775,16 @@ impl ExactDeclarationContext {
         authorization: Option<Value>,
     ) -> Result<ExactCompilationRequest, CompileError> {
         use sha2::Digest;
+        let admitted_empty = authorization.is_some()
+            && self.producer == [0; 32]
+            && self.products.is_empty()
+            && self.joins.is_empty()
+            && self.interfaces.is_empty()
+            && self.lexical.is_empty();
         if !root.is_absolute()
-            || self.producer == [0; 32]
-            || self.producer != <[u8; 32]>::from(sha2::Sha256::digest(producer))
+            || (!admitted_empty
+                && (self.producer == [0; 32]
+                    || self.producer != <[u8; 32]>::from(sha2::Sha256::digest(producer))))
         {
             return Err(failure(
                 "compile request has a different producer or invalid root",
