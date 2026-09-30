@@ -8,7 +8,14 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from buck2_cargo_features import metadata_feature_args, resolve
+from buck2_cargo_features import (
+    effective_feature_selection,
+    metadata_feature_args,
+    reject_forbidden_closure,
+    resolve,
+)
+
+PROFILE = Path(__file__).resolve().parents[1] / "native-profile.toml"
 
 
 class CargoFeatureGraph(unittest.TestCase):
@@ -96,6 +103,8 @@ class CargoFeatureGraph(unittest.TestCase):
         (root / "agent/src").mkdir(parents=True)
         (root / "facade/src").mkdir(parents=True)
         (root / "protocol/src").mkdir(parents=True)
+        (root / "scripts").mkdir()
+        (root / "scripts/native-profile.toml").write_bytes(PROFILE.read_bytes())
         (root / "Cargo.toml").write_text(
             "[workspace]\nmembers=['agent','facade','protocol']\nresolver='2'\n"
         )
@@ -127,9 +136,12 @@ class CargoFeatureGraph(unittest.TestCase):
         agent_id = next(p["id"] for p in default_graph["packages"] if p["name"] == "exomonad-agent")
         self.assertIn("codex-compat", default_nodes[agent_id]["features"])
 
-        disabled = {"tidepool", "exomonad-agent"}
+        disabled, overrides = effective_feature_selection(
+            root, {"tidepool", "exomonad-agent", "codex-shoal-protocol"}, set(), {}
+        )
+        self.assertEqual(disabled, {"tidepool", "exomonad-agent"})
         command = [*base, "--no-default-features"]
-        command.extend(metadata_feature_args(baseline, disabled))
+        command.extend(metadata_feature_args(baseline, disabled, overrides))
         embedded_graph = json.loads(subprocess.check_output(command, cwd=root, text=True))
         packages = {package["id"]: package for package in embedded_graph["packages"]}
         nodes = {node["id"]: node for node in embedded_graph["resolve"]["nodes"]}
@@ -139,6 +151,19 @@ class CargoFeatureGraph(unittest.TestCase):
         self.assertNotIn("codex-compat", nodes[agent["id"]]["features"])
         self.assertFalse(any(edge["pkg"] == protocol_id for edge in nodes[agent["id"]]["deps"]))
         self.assertFalse(any(edge["pkg"] == protocol_id for edge in nodes[facade["id"]]["deps"]))
+        reject_forbidden_closure(embedded_graph, {"tidepool", "exomonad-agent"})
+
+        _, compatibility = effective_feature_selection(
+            root,
+            {"tidepool", "exomonad-agent", "codex-shoal-protocol"},
+            set(),
+            {"tidepool": {"default"}},
+        )
+        command = [*base, "--no-default-features"]
+        command.extend(metadata_feature_args(baseline, disabled, compatibility))
+        compatibility_graph = json.loads(subprocess.check_output(command, cwd=root, text=True))
+        with self.assertRaisesRegex(ValueError, "forbidden Codex package codex-shoal-protocol"):
+            reject_forbidden_closure(compatibility_graph, {"tidepool", "exomonad-agent"})
 
 
 if __name__ == "__main__":

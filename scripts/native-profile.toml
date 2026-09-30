@@ -1,0 +1,5 @@
+profile = "embedded-native"
+
+# These package roots default to the embedded backend surface for native Buck.
+# Cargo builds and compatibility callers keep Cargo's own defaults.
+no-default-features = ["tidepool", "exomonad-agent"]

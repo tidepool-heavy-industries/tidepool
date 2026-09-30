@@ -11,6 +11,7 @@ import tomllib
 
 SCRIPT = Path(__file__).resolve().parents[1] / "buck2-dependencies.py"
 FEATURES = SCRIPT.with_name("buck2_cargo_features.py")
+PROFILE = SCRIPT.with_name("native-profile.toml")
 REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
 ROOT_NAMES = (
     "tidepool-atomic-write", "tidepool-repr", "tidepool-heap",
@@ -39,6 +40,7 @@ class DependencyManifest(unittest.TestCase):
         self.script.write_bytes(SCRIPT.read_bytes())
         self.script.chmod(0o755)
         (self.root / "scripts/buck2_cargo_features.py").write_bytes(FEATURES.read_bytes())
+        (self.root / "scripts/native-profile.toml").write_bytes(PROFILE.read_bytes())
         self.metadata_path = self.root / "metadata.json"
         self.cargo_lock = self.root / "Cargo.lock"
         metadata, lock_packages = self.fixture_metadata()
@@ -238,6 +240,9 @@ print(open(os.environ['FAKE_METADATA']).read())
         # local-only edges. The generator should skip local edges and use Buck labels.
         nodes = [{"id": package_id, "deps": edges_by_root.get(package_id, [])}
                  for package_id in local_ids.values()]
+        node_ids = {node["id"] for node in nodes}
+        nodes.extend({"id": package["id"], "deps": []}
+                     for package in packages if package["id"] not in node_ids)
         return {
             "packages": packages,
             "workspace_members": list(local_ids.values()),
@@ -331,10 +336,12 @@ print(open(os.environ['FAKE_METADATA']).read())
             "source": REGISTRY, "features": {}, "dependencies": [], "targets": [],
         })
         node = next(n for n in metadata["resolve"]["nodes"] if n["id"] == package["id"])
-        node["deps"].append({
+        codex_edge = {
             "name": "codex_proto", "pkg": vendor_id,
             "dep_kinds": [{"kind": None, "target": None}],
-        })
+        }
+        node["deps"].append(codex_edge)
+        node["deps"].remove(codex_edge)
         result = self.run_generator(
             metadata, "--no-default-features", "tidepool-codegen",
             "--features", "tidepool-codegen=embedded",
@@ -342,16 +349,13 @@ print(open(os.environ['FAKE_METADATA']).read())
         self.assertEqual(result.returncode, 0, result.stderr)
         manifest = tomllib.loads((self.output / "Cargo.toml").read_text())
         self.assertNotIn("codex-shoal-protocol", manifest["dependencies"])
-
+        previous = (self.output / "Cargo.toml").read_bytes()
+        node["deps"].append(codex_edge)
         result = self.run_generator(metadata)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        manifest = tomllib.loads((self.output / "Cargo.toml").read_text())
-        self.assertIn("codex-shoal-protocol", manifest["dependencies"])
-        self.assertEqual(
-            manifest["dependencies"]["codex-shoal-protocol"]["features"],
-            ["json", "transport"],
-        )
-
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forbidden Codex package codex-shoal-protocol", result.stderr)
+        self.assertEqual((self.output / "Cargo.toml").read_bytes(), previous)
+        node["deps"].remove(codex_edge)
         result = self.run_generator(
             metadata, "--no-default-features", "tidepool-codegen",
             "--features", "tidepool-codegen=weak-only",
@@ -359,6 +363,42 @@ print(open(os.environ['FAKE_METADATA']).read())
         self.assertEqual(result.returncode, 0, result.stderr)
         manifest = tomllib.loads((self.output / "Cargo.toml").read_text())
         self.assertNotIn("codex-shoal-protocol", manifest["dependencies"])
+
+    def test_plain_shared_profile_rejects_transitive_codex_closure_without_publishing(self):
+        metadata, _ = self.fixture_metadata()
+        tidepool = next(p for p in metadata["packages"] if p["name"] == "tidepool")
+        codex_id = "registry+fixture#codex-shoal-protocol@1.0.0"
+        metadata["packages"].append({
+            "id": codex_id, "name": "codex-shoal-protocol", "version": "1.0.0",
+            "source": REGISTRY, "features": {}, "dependencies": [], "targets": [],
+        })
+        transitive_id = "registry+fixture#profile-transitive@1.0.0"
+        metadata["packages"].append({
+            "id": transitive_id, "name": "profile-transitive", "version": "1.0.0",
+            "source": REGISTRY, "features": {}, "dependencies": [], "targets": [],
+        })
+        tidepool_node = next(n for n in metadata["resolve"]["nodes"] if n["id"] == tidepool["id"])
+        tidepool_node["deps"].append({
+            "name": "profile_transitive", "pkg": transitive_id,
+            "dep_kinds": [{"kind": None, "target": None}],
+        })
+        metadata["resolve"]["nodes"].append({
+            "id": transitive_id, "deps": [{
+                "name": "codex_shoal_protocol", "pkg": codex_id,
+                "dep_kinds": [{"kind": None, "target": None}],
+            }],
+        })
+        metadata["resolve"]["nodes"].append({"id": codex_id, "deps": []})
+        self.output.mkdir()
+        (self.output / "Cargo.toml").write_text("previous manifest\n")
+        (self.output / "Cargo.lock").write_text("previous lock\n")
+
+        result = self.run_generator(metadata)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forbidden Codex package codex-shoal-protocol", result.stderr)
+        self.assertEqual((self.output / "Cargo.toml").read_text(), "previous manifest\n")
+        self.assertEqual((self.output / "Cargo.lock").read_text(), "previous lock\n")
 
     def test_locked_https_git_source_and_same_version_registry_identity_are_preserved(self):
         result = self.run_generator()

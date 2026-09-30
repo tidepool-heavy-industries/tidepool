@@ -15,6 +15,7 @@ import unittest
 
 GENERATOR = Path(__file__).resolve().parents[1] / "buck2-first-party.py"
 FEATURES = GENERATOR.with_name("buck2_cargo_features.py")
+PROFILE = GENERATOR.with_name("native-profile.toml")
 
 
 class FirstPartySources(unittest.TestCase):
@@ -26,6 +27,7 @@ class FirstPartySources(unittest.TestCase):
         (self.root / "scripts").mkdir(parents=True)
         shutil.copyfile(GENERATOR, self.root / "scripts/buck2-first-party.py")
         shutil.copyfile(FEATURES, self.root / "scripts/buck2_cargo_features.py")
+        shutil.copyfile(PROFILE, self.root / "scripts/native-profile.toml")
         self.bin = self.base / "bin"
         self.bin.mkdir()
         cargo = self.bin / "cargo"
@@ -72,6 +74,10 @@ class FirstPartySources(unittest.TestCase):
         self.write("tidepool/runtime/src/lib.rs",
                    'const SESSION: &str = include_str!("../../../bridge/haskell/src/Tidepool/Session.hs");\n')
         self.write("bridge/haskell/src/Tidepool/Session.hs", "module Tidepool.Session where\n")
+        self.write("exomonad/agent/Cargo.toml", "[package]\nname = 'exomonad-agent'\n")
+        self.write("exomonad/agent/src/lib.rs", "mod backend;\n")
+        self.write("exomonad/agent/src/backend/mod.rs", "#[cfg(feature = \"codex-compat\")] mod codex;\n")
+        self.write("exomonad/agent/src/backend/codex/mod.rs", "pub fn backend() {}\n")
         self.write("third-party/rust/Cargo.toml", """
 [dependencies]
 codex-shoal-protocol = { package = "codex-shoal-protocol", version = "=0.1.0" }
@@ -121,7 +127,11 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                 ("exomonad", "bin", "src/exomonad.rs"),
                 ("exomonad-view-helper", "bin", "src/view_helper.rs"),
                 ("tidepool-compile-report", "bin", "src/compile_report_main.rs"),
+            ]),
+            self.package("exomonad-agent", "exomonad/agent", [
+                ("exomonad_agent", "lib", "src/lib.rs"),
             ])]
+        self.packages[-2]["features"] = {"default": ["codex-compat"], "codex-compat": []}
         self.packages[-1]["features"] = {"default": ["codex-compat"], "codex-compat": []}
         self.write("bridge/facade/build.rs", "fn main() {}\n")
         for source in ("src/lib.rs", "src/main.rs", "src/exomonad.rs", "src/view_helper.rs",
@@ -146,6 +156,13 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         target.write_text(contents)
 
     def generate(self, *args):
+        metadata = json.loads(self.metadata.read_text())
+        node_ids = {node["id"] for node in metadata["resolve"]["nodes"]}
+        metadata["resolve"]["nodes"].extend(
+            {"id": package["id"], "deps": []}
+            for package in metadata["packages"] if package["id"] not in node_ids
+        )
+        self.metadata.write_text(json.dumps(metadata))
         env = os.environ | {"PATH": f"{self.bin}:{os.environ['PATH']}",
                             "BUCK_TEST_METADATA": str(self.metadata)}
         return subprocess.run([sys.executable, str(self.root / "scripts/buck2-first-party.py"),
@@ -186,6 +203,24 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             groups["tidepool-extract_sources"]["src/main.rs"],
             "tidepool/extract-cmd/src/main.rs",
         )
+
+    def test_plain_profile_disables_both_roots_and_omits_codex_source_tree(self):
+        result = self.generate("--package", "tidepool", "--package", "exomonad-agent")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        facade = (self.root / "bridge/facade/BUCK").read_text()
+        self.assertNotIn('"codex-compat"', facade)
+        facade, facade_groups = self.groups("bridge/facade")
+        self.assertIn("src/lib.rs", facade_groups["tidepool_sources"])
+        self.assertNotIn("src/main.rs", facade_groups["tidepool_sources"])
+        self.assertEqual(
+            set(facade_groups["tidepool_bin_sources"]), {"Cargo.toml", "src/main.rs"}
+        )
+        agent, groups = self.groups("exomonad/agent")
+        self.assertNotIn('"codex-compat"', agent)
+        self.assertIn("src/backend/mod.rs", groups["exomonad_agent_sources"])
+        self.assertNotIn("src/backend/codex/mod.rs", groups["exomonad_agent_sources"])
+        check = self.generate("--package", "tidepool", "--package", "exomonad-agent", "--check")
+        self.assertEqual(check.returncode, 0, check.stderr)
 
     def test_facade_buildscript_declares_embedded_sources_and_out_dir(self):
         metadata = json.loads(self.metadata.read_text())
@@ -431,12 +466,15 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
             "source": "registry+https://github.com/rust-lang/crates.io-index",
         })
         node = next(n for n in metadata["resolve"]["nodes"] if n["id"] == package["id"])
-        node["deps"].append({
+        codex_edge = {
             "name": "codex_shoal_protocol", "pkg": vendor_id,
             "dep_kinds": [{"kind": None, "target": None}],
-        })
+        }
+        node["deps"].append(codex_edge)
         self.metadata.write_text(json.dumps(metadata))
 
+        node["deps"].remove(codex_edge)
+        self.metadata.write_text(json.dumps(metadata))
         embedded = self.generate(
             "--no-default-features", "tidepool-repr",
             "--features", "tidepool-repr=embedded",
@@ -446,11 +484,13 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         self.assertNotIn("codex-shoal-protocol", buck)
         self.assertIn('features = [\n        "embedded",\n    ]', buck)
 
-        default = self.generate()
-        self.assertEqual(default.returncode, 0, default.stderr)
-        buck = (self.root / "tidepool/repr/BUCK").read_text()
-        self.assertIn("//third-party/rust:codex-shoal-protocol", buck)
-        self.assertIn('"codex-compat"', buck)
+        node["deps"].append(codex_edge)
+        self.metadata.write_text(json.dumps(metadata))
+        previous = (self.root / "tidepool/repr/BUCK").read_bytes()
+        activated = self.generate("--features", "tidepool-repr=default")
+        self.assertNotEqual(activated.returncode, 0)
+        self.assertIn("forbidden Codex package codex-shoal-protocol", activated.stderr)
+        self.assertEqual((self.root / "tidepool/repr/BUCK").read_bytes(), previous)
 
     def test_registry_dependency_labels_follow_resolved_package_versions(self):
         metadata = json.loads(self.metadata.read_text())

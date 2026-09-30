@@ -10,8 +10,10 @@ from buck2_cargo_features import (
     CRATES_IO_SOURCE,
     FeatureSelectionError,
     dependency_aliases,
+    effective_feature_selection,
     metadata_feature_args,
     parse_locked_git_source,
+    reject_forbidden_closure,
     resolve as resolve_cargo_features,
 )
 
@@ -60,9 +62,12 @@ workspace_packages = {
     for package in baseline["packages"]
     if package["id"] in baseline["workspace_members"]
 }
-unknown = (no_default | set(feature_overrides)) - workspace_packages
-if unknown:
-    raise SystemExit("feature selection names an unknown workspace package: " + ", ".join(sorted(unknown)))
+try:
+    no_default, feature_overrides = effective_feature_selection(
+        ROOT, workspace_packages, no_default, feature_overrides
+    )
+except FeatureSelectionError as error:
+    raise SystemExit(str(error)) from error
 metadata_command.append("--no-default-features")
 metadata_command.extend(metadata_feature_args(baseline, no_default, feature_overrides))
 metadata = json.loads(subprocess.check_output(metadata_command, cwd=ROOT))
@@ -71,6 +76,10 @@ nodes = {p["id"]: p for p in metadata["resolve"]["nodes"]}
 selected = [p for p in packages.values() if p["name"] in ROOTS and p["source"] is None]
 if len(selected) != len(ROOTS) or {p["name"] for p in selected} != ROOTS:
     raise SystemExit("Missing migrated Cargo package")
+try:
+    reject_forbidden_closure(metadata, ROOTS)
+except FeatureSelectionError as error:
+    raise SystemExit(str(error)) from error
 
 
 dependencies = {}

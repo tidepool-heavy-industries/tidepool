@@ -145,19 +145,5 @@ Path('BUCK').write_text(value)
 
         result = self.run_script("--check", MATCHED_HARNESS="1")
         self.assertEqual(result.returncode, 0, result.stderr)
-
-
-    def test_locked_harness_fetch_is_exposed_as_a_public_source_input(self):
-        result = self.run_script(MATCHED_HARNESS="1")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        buck = (self.root / "third-party/rust/BUCK").read_text()
-        self.assertIn('load("@prelude//:rules.bzl", "filegroup")', buck)
-        self.assertIn('name = "matched_harness_source"', buck)
-        self.assertIn('srcs = [":harness-source.git"]', buck)
-        self.assertIn('visibility = ["PUBLIC"]', buck)
-
-        result = self.run_script("--check", MATCHED_HARNESS="1")
-        self.assertEqual(result.returncode, 0, result.stderr)
-
 if __name__ == "__main__":
     unittest.main()

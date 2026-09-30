@@ -12,8 +12,11 @@ import tomllib
 from buck2_cargo_features import (
     CRATES_IO_SOURCE,
     FeatureSelectionError,
+    effective_feature_selection,
+    load_profile,
     metadata_feature_args,
     parse_locked_git_source,
+    reject_forbidden_closure,
     resolve as resolve_cargo_features,
 )
 
@@ -81,10 +84,12 @@ def parse_feature_options(workspace_packages):
         if len(features) != len(set(features)):
             raise SystemExit(f"duplicate Cargo feature in --features {value!r}")
         feature_overrides.setdefault(package_name, set()).update(features)
-    unknown = (no_default | set(feature_overrides)) - workspace_packages
-    if unknown:
-        raise SystemExit("feature selection names an unknown workspace package: " + ", ".join(sorted(unknown)))
-    return no_default, feature_overrides
+    try:
+        return effective_feature_selection(
+            ROOT, workspace_packages, no_default, feature_overrides
+        )
+    except FeatureSelectionError as error:
+        raise SystemExit(str(error)) from error
 
 metadata_command = [
     "cargo", "metadata", "--locked", "--format-version", "1",
@@ -110,6 +115,12 @@ local = {
     if package["id"] in metadata["workspace_members"]
 }
 resolved_nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
+try:
+    reject_forbidden_closure(
+        metadata, selected | NO_DEFAULT_FEATURES | set(FEATURE_OVERRIDES)
+    )
+except FeatureSelectionError as error:
+    raise SystemExit(str(error)) from error
 
 
 def feature_plan(package):
@@ -332,14 +343,19 @@ CODEGEN_TEST_ONLY_SOURCES = {
     "retention_tests.rs", "settlement_tests.rs", "tests.rs",
 }
 
+NO_DEFAULT_PROFILE = load_profile(ROOT)
 
-def source_inputs(package, target):
+
+def source_inputs(package, target, features=()):
     directory = ROOT / CURRENT_DIR
     source_root = pathlib.Path(target["src_path"]).resolve()
     sources = {directory / "Cargo.toml"}
     external = {}
     if source_root.is_relative_to(directory / "src"):
-        sources.update((directory / "src").rglob("*.rs"))
+        if "bin" in target["kind"]:
+            sources.add(source_root)
+        else:
+            sources.update((directory / "src").rglob("*.rs"))
         if package["name"] == "tidepool":
             sources = {
                 source for source in sources
@@ -347,6 +363,13 @@ def source_inputs(package, target):
                 and not source.stem.endswith("_tests")
                 and source.stem != "test_campaign"
             }
+        if (
+            package["name"] == "exomonad-agent"
+            and package["name"] in NO_DEFAULT_PROFILE
+            and "codex-compat" not in features
+        ):
+            codex_sources = directory / "src/backend/codex"
+            sources = {source for source in sources if not source.is_relative_to(codex_sources)}
         if "lib" in target["kind"] or "proc-macro" in target["kind"]:
             binary_roots = {
                 pathlib.Path(candidate["src_path"]).resolve()
@@ -375,6 +398,9 @@ def source_inputs(package, target):
                     raise SystemExit(f"missing integration source {source}")
                 sources.add(source)
     includes = re.compile(r'include_(?:str|bytes)!\s*\(\s*"([^\"]+)"')
+    module_declarations = re.compile(
+        r'(?m)^\s*(?:#\[path\s*=\s*"([^\"]+)"\]\s*)?mod\s+([A-Za-z_]\w*)\s*;'
+    )
     pending = [path for path in sources if path.suffix == ".rs"]
     external_labels = {
         "bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor": "//bridge/haskell:m3_vertical_fixture",
@@ -422,7 +448,23 @@ def source_inputs(package, target):
     }
     while pending:
         source = pending.pop()
-        for relative in includes.findall(source.read_text()):
+        contents = source.read_text()
+        relatives = list(includes.findall(contents))
+        if "bin" in target["kind"] and source_root.is_relative_to(directory / "src"):
+            for explicit, name in module_declarations.findall(contents):
+                if explicit:
+                    relatives.append(explicit)
+                    continue
+                if source == source_root:
+                    module_root = source.parent / source.stem if source.parent.name == "bin" else source.parent
+                else:
+                    module_root = source.parent / source.stem
+                candidates = (module_root / (name + ".rs"), module_root / name / "mod.rs")
+                module = next((candidate for candidate in candidates if candidate.is_file()), None)
+                if module is None:
+                    raise SystemExit(f"missing Rust module {name} declared in {source}")
+                relatives.append(str(module.relative_to(source.parent)))
+        for relative in relatives:
             included = (source.parent / relative).resolve()
             if (
                 package["name"] == "tidepool"
@@ -472,7 +514,7 @@ def render_rule(rule, name, target, package, deps, named, extra="", features=())
     ]
     lines.extend(
         "        " + json.dumps(source) + ": " + json.dumps(mapped) + ","
-        for source, mapped in source_inputs(package, target).items()
+        for source, mapped in source_inputs(package, target, features).items()
     )
     lines.extend([
         "    },",

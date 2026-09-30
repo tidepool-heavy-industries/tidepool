@@ -1,7 +1,9 @@
 """Resolve Cargo feature syntax for the native Buck generator slices."""
 
 import hashlib
+from pathlib import Path
 import re
+import tomllib
 
 
 CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
@@ -58,6 +60,74 @@ def dependency_aliases(identities):
 
 class FeatureSelectionError(ValueError):
     pass
+
+
+PROFILE_NAME = "embedded-native"
+
+
+def load_profile(root):
+    """Load the checked-in feature selection shared by the Buck generators."""
+    path = Path(root) / "scripts/native-profile.toml"
+    try:
+        profile = tomllib.loads(path.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise FeatureSelectionError(f"cannot load native Cargo profile {path}: {error}") from error
+    if profile.get("profile") != PROFILE_NAME:
+        raise FeatureSelectionError(f"unsupported native Cargo profile in {path}")
+    packages = profile.get("no-default-features")
+    if not isinstance(packages, list) or not all(isinstance(item, str) for item in packages):
+        raise FeatureSelectionError(f"invalid no-default-features list in {path}")
+    return frozenset(packages)
+
+
+def effective_feature_selection(root, workspace_packages, no_default_features, feature_overrides):
+    """Combine the checked-in profile with explicit generator overrides."""
+    profile_defaults = load_profile(root)
+    no_default = set(no_default_features) | set(profile_defaults)
+    unknown = (no_default | set(feature_overrides)) - set(workspace_packages)
+    if unknown:
+        raise FeatureSelectionError(
+            "feature selection names an unknown workspace package: " + ", ".join(sorted(unknown))
+        )
+    return no_default, feature_overrides
+
+
+def reject_forbidden_closure(metadata, root_names):
+    """Reject activated Codex packages anywhere below selected Cargo roots."""
+    packages = {package["id"]: package for package in metadata["packages"]}
+    workspace_ids = set(metadata.get("workspace_members", []))
+    by_name = {
+        package["name"]: package
+        for package in metadata["packages"]
+        if package["id"] in workspace_ids and package.get("source") is None
+    }
+    nodes = {node["id"]: node for node in metadata.get("resolve", {}).get("nodes", [])}
+    roots = [by_name[name] for name in root_names if name in by_name]
+    pending = [package["id"] for package in roots]
+    visited = set()
+    while pending:
+        package_id = pending.pop()
+        if package_id in visited:
+            continue
+        visited.add(package_id)
+        package = packages.get(package_id)
+        if package is None:
+            raise FeatureSelectionError(f"Cargo resolve references missing package {package_id}")
+        manifest = package.get("manifest_path", "").replace("\\", "/")
+        name = package["name"].lower().replace("_", "-")
+        codex_package = name.startswith("codex-") or "/vendor/codex/" in manifest
+        codex_target = any(
+            target.get("name", "").lower().replace("-", "_").startswith("codex_")
+            for target in package.get("targets", [])
+        )
+        if codex_package or codex_target:
+            raise FeatureSelectionError(
+                f"embedded-native Cargo closure reaches forbidden Codex package {package['name']}"
+            )
+        node = nodes.get(package_id)
+        if node is None:
+            raise FeatureSelectionError(f"Cargo resolve is missing node for {package['name']}")
+        pending.extend(edge["pkg"] for edge in node.get("deps", []))
 
 
 def dependency_key(dependency):
