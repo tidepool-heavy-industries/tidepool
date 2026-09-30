@@ -5144,6 +5144,93 @@ mod tests {
     }
 
     #[test]
+    fn substituted_checked_specification_refuses_before_claiming_prefix() {
+        use crate::session::{ModuleEnv, PersistentSession, SessionLib};
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_repr::SessionId;
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let lib =
+            SessionLib::open(SessionId(999), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut state = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = state.mint_scope(ScopeId::ROOT).unwrap();
+        let execution = Arc::new(state.begin_private_execution(public).unwrap());
+        let specification = CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: "let value = (42 :: Int)".into(),
+            template_source: include_str!("fixtures/checked-fold-outcome-template.hs").into(),
+            turn_templates: Vec::new(),
+            injected_modules: Vec::new(),
+            reserved_declaration_modules: Vec::new(),
+        };
+        let admission = state
+            .admit_cell_for_execution(
+                execution,
+                0,
+                Arc::new(specification.clone()),
+                specification.specification_digest(),
+                [1; 32],
+            )
+            .unwrap();
+        let compile_public_offer = |mut specification: CheckedCellSpecification| {
+            let temp = TempDir::new().unwrap();
+            let source = temp.path().join("cell.txt");
+            let template = temp.path().join("CellCheckTemplate.hs");
+            std::fs::write(&source, &specification.cell_source).unwrap();
+            std::fs::write(&template, &specification.template_source).unwrap();
+            specification.admission_digest = admission.digest();
+            let mut cmd = extract_cmd().unwrap();
+            cmd.input(&source)
+                .cell()
+                .cell_template(&template)
+                .cell_out(temp.path().join("cell.cbor"))
+                .output_dir(temp.path())
+                .session_incarnation(admission.view().session().0.to_string());
+            let endpoint = cmd.bind().unwrap();
+            let offer = ModuleCandidateOffer::select_checked_cell(
+                endpoint.identity().producer_bytes(),
+                &[],
+                temp.path(),
+                admission.view().exact_declaration_context().cloned(),
+                specification,
+                Vec::new(),
+            )
+            .unwrap();
+            cmd.session_root(offer.checked_value_root().unwrap())
+                .session_artifacts(offer.exact_scope_path().unwrap());
+            crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
+            let run = endpoint.execute(&cmd).unwrap();
+            assert!(
+                run.success(),
+                "{}",
+                String::from_utf8_lossy(&run.output.stderr)
+            );
+            let cell = offer.admit_checked_cell(temp.path()).unwrap();
+            (temp, cell.item(0).unwrap())
+        };
+        let mut alternate = specification.clone();
+        alternate.cell_source = "let value = (43 :: Int)".into();
+        let (_alternate_artifacts, alternate) = compile_public_offer(alternate);
+        assert_eq!(alternate.admission_digest(), admission.digest());
+        assert_ne!(
+            alternate.specification_digest(),
+            admission.specification_digest()
+        );
+        assert!(state
+            .begin_checked_prefix(admission.clone(), alternate)
+            .is_err());
+        let (_legitimate_artifacts, legitimate) = compile_public_offer(specification);
+        assert_eq!(
+            legitimate.specification_digest(),
+            admission.specification_digest()
+        );
+        let prefix = state
+            .begin_checked_prefix(admission, legitimate)
+            .expect("refused alternate specification must not claim the one-shot prefix");
+        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
+    }
+
+    #[test]
     fn empty_checked_context_reuses_immutable_support_and_invalidates_changed_source() {
         use crate::session::{
             resident_cell_check_template, resident_workbench_templates, ModuleEnv,
