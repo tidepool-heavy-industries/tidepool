@@ -3154,17 +3154,25 @@ fn run_turn_with_pin(
     if let Some(pin) = pin {
         cmd.turn_pin(pin);
     }
-    let retained = snapshot.map_or(req.retained_imports, |snapshot| {
-        snapshot.admitted_retained_imports()
-    });
-    for (identity, generation) in retained {
-        cmd.retained_generation(extract_identity(identity), *generation);
-    }
     if let Some(snapshot) = &snapshot {
-        for (identity, generation) in snapshot.compiler_prefix().retained_imports() {
-            cmd.retained_generation(extract_identity(&identity), generation);
+        for (identity, generation) in snapshot.actual_retained_imports() {
+            cmd.retained_generation(extract_identity(identity), generation);
+        }
+    } else {
+        for (identity, generation) in req.retained_imports {
+            cmd.retained_generation(extract_identity(identity), *generation);
         }
     }
+    let settled_bindings = snapshot
+        .map(|snapshot| {
+            snapshot
+                .settled_native_bindings()
+                .map(|(name, identity, generation, id)| {
+                    (name.to_owned(), identity.clone(), generation, id)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
     let endpoint = cmd.bind().map_err(map_notfound)?;
     let include: Vec<_> = req.include.iter().map(|path| path.to_path_buf()).collect();
@@ -3180,6 +3188,7 @@ fn run_turn_with_pin(
             admission.digest(),
             admission.budget() as u64,
             admission.presented().to_vec(),
+            settled_bindings,
         )?
     } else if let Some(admission) = &checked {
         ModuleCandidateOffer::select_checked_item(
@@ -3196,6 +3205,7 @@ fn run_turn_with_pin(
                 .iter()
                 .map(|template| (template.kind.wire_name().into(), template.source.clone()))
                 .collect::<Vec<_>>(),
+            settled_bindings,
         )?
     } else {
         select_module_candidate_offer(

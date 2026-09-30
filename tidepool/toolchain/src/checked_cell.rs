@@ -508,6 +508,65 @@ impl CompletedCheckedItem {
     }
 }
 
+type SettledNativeBinding = (
+    String,
+    tidepool_repr::execution_schema::SymbolIdentity,
+    u64,
+    u64,
+);
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CheckedSettledValues {
+    rows: Vec<SettledNativeBinding>,
+    imports: Vec<(String, Vec<String>)>,
+    authorization: Vec<Value>,
+}
+
+impl CheckedSettledValues {
+    fn validate<'a>(
+        &self,
+        actual: impl IntoIterator<
+            Item = (
+                &'a str,
+                &'a tidepool_repr::execution_schema::SymbolIdentity,
+                u64,
+                u64,
+            ),
+        >,
+    ) -> Result<(), CompileError> {
+        let mut actual = actual.into_iter();
+        for (name, identity, generation, id) in &self.rows {
+            let Some((actual_name, actual_identity, actual_generation, actual_id)) = actual.next()
+            else {
+                return Err(failure(
+                    "compiled lexical selection lacks actual protected native settlement",
+                ));
+            };
+            if name != actual_name
+                || identity != actual_identity
+                || *generation != actual_generation
+                || *id != actual_id
+            {
+                return Err(failure(
+                    "compiled lexical selection differs from actual protected native settlement",
+                ));
+            }
+        }
+        if actual.next().is_some() {
+            return Err(failure(
+                "compiled lexical selection omits actual protected native settlement",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+enum CheckedExecutionAdmission {
+    InitialFold([u8; 32]),
+    RuntimeItem([u8; 32]),
+}
+
 /// A checked recipe and its exact prepared target, issued together by the
 /// product-sealing entry point. Compiling alone makes no execution claim.
 #[derive(Debug)]
@@ -519,6 +578,8 @@ pub struct ExactCompiledItem {
     generation: u64,
     bound_binders: Vec<Value>,
     observation_name: Option<String>,
+    admission: CheckedExecutionAdmission,
+    settled_values: CheckedSettledValues,
 }
 
 #[derive(Debug)]
@@ -530,9 +591,23 @@ pub struct ExactCompiledDisplay {
     admission_digest: [u8; 32],
     bound_binders: Vec<Value>,
     value_interface: Arc<CheckedValueArtifact>,
+    settled_values: CheckedSettledValues,
 }
 
 impl ExactCompiledDisplay {
+    pub fn validate_settled_native_bindings<'a>(
+        &self,
+        actual: impl IntoIterator<
+            Item = (
+                &'a str,
+                &'a tidepool_repr::execution_schema::SymbolIdentity,
+                u64,
+                u64,
+            ),
+        >,
+    ) -> Result<(), CompileError> {
+        self.settled_values.validate(actual)
+    }
     pub fn target_definition_identities(
         &self,
     ) -> impl Iterator<Item = &tidepool_repr::execution_schema::SymbolIdentity> {
@@ -580,6 +655,7 @@ pub(crate) struct CheckedDisplayOffer {
     pub(crate) admission_digest: [u8; 32],
     pub(crate) budget: u64,
     pub(crate) presented: Vec<String>,
+    pub(crate) settled_values: CheckedSettledValues,
 }
 
 impl CheckedDisplayOffer {
@@ -629,8 +705,8 @@ impl CheckedDisplayOffer {
             ),
             Value::Array(self.prefix.injected_modules().iter().map(text).collect()),
             Value::Array(
-                self.prefix
-                    .value_imports()
+                self.settled_values
+                    .imports
                     .iter()
                     .map(|(module, names)| {
                         array([text(module), Value::Array(names.iter().map(text).collect())])
@@ -642,7 +718,7 @@ impl CheckedDisplayOffer {
                 CheckedExpressionPresentation::Opaque => "opaque",
             }),
             self.prefix.planned_authorization(),
-            self.prefix.completed_value_authorization()?,
+            Value::Array(self.settled_values.authorization.clone()),
             self.prefix.value_interface_authorization()?,
         ]))
     }
@@ -710,11 +786,46 @@ impl CheckedDisplayOffer {
             admission_digest: self.admission_digest,
             bound_binders: bound,
             value_interface: interface,
+            settled_values: self.settled_values.clone(),
         }))
     }
 }
 
 impl ExactCompiledItem {
+    pub fn validate_runtime_admission(
+        &self,
+        item_digest: [u8; 32],
+        cell_digest: [u8; 32],
+    ) -> Result<(), CompileError> {
+        let valid = match self.admission {
+            CheckedExecutionAdmission::RuntimeItem(digest) => digest == item_digest,
+            CheckedExecutionAdmission::InitialFold(digest) => {
+                digest == cell_digest
+                    && self.item.index() == 0
+                    && self.item.kind() == CheckedItemKind::Bind
+                    && self.settled_values.rows.is_empty()
+            }
+        };
+        if !valid {
+            return Err(failure(
+                "compiled item has another protected runtime admission",
+            ));
+        }
+        Ok(())
+    }
+    pub fn validate_settled_native_bindings<'a>(
+        &self,
+        actual: impl IntoIterator<
+            Item = (
+                &'a str,
+                &'a tidepool_repr::execution_schema::SymbolIdentity,
+                u64,
+                u64,
+            ),
+        >,
+    ) -> Result<(), CompileError> {
+        self.settled_values.validate(actual)
+    }
     pub fn target_definition_identities(
         &self,
     ) -> impl Iterator<Item = &tidepool_repr::execution_schema::SymbolIdentity> {
@@ -980,39 +1091,6 @@ impl ExactCompiledPrefix {
                 )
             }))
     }
-    /// Exact native identities retained by actual completed items and display
-    /// bundles. Historical definitions remain reachable by already compiled
-    /// references even when a later item replaces their lexical spelling.
-    pub fn retained_imports(&self) -> Vec<(tidepool_repr::execution_schema::SymbolIdentity, u64)> {
-        let mut retained = std::collections::BTreeMap::new();
-        let rows = self
-            .completed
-            .iter()
-            .filter_map(CompletedCheckedItem::native)
-            .map(|item| (item.generation, item.bound_binders.as_slice()))
-            .chain(
-                self.displays
-                    .iter()
-                    .map(|display| (display.generation, display.bound_binders.as_slice())),
-            );
-        for (generation, rows) in rows {
-            for value in rows {
-                // Issuance validated these immutable seven-field rows.
-                let fields = row(value, 7).expect("sealed native binder row");
-                retained.insert(
-                    tidepool_repr::execution_schema::SymbolIdentity {
-                        unit: "main".into(),
-                        module: string(&fields[2]).expect("sealed binder owner").into(),
-                        namespace: "value".into(),
-                        occurrence: string(&fields[0]).expect("sealed binder name").into(),
-                        record_parent: None,
-                    },
-                    generation,
-                );
-            }
-        }
-        retained.into_iter().collect()
-    }
     fn value_artifacts(&self) -> Result<BTreeMap<&str, &CheckedValueArtifact>, CompileError> {
         let mut inputs = self
             .cell
@@ -1048,81 +1126,116 @@ impl ExactCompiledPrefix {
                 .collect(),
         ))
     }
-    fn completed_value_authorization(&self) -> Result<Value, CompileError> {
-        let mut executions = BTreeMap::new();
-        for execution in self
+    pub(crate) fn select_settled_values(
+        &self,
+        rows: Vec<SettledNativeBinding>,
+    ) -> Result<CheckedSettledValues, CompileError> {
+        let mut sealed = BTreeMap::new();
+        let native = self
             .completed
             .iter()
             .filter_map(CompletedCheckedItem::native)
-        {
-            let Some(artifact) = execution.value_interface.as_ref() else {
-                continue;
-            };
-            let mut binders = BTreeMap::new();
-            for binder in &execution.bound_binders {
+            .filter_map(|item| {
+                item.value_interface.as_ref().map(|artifact| {
+                    (
+                        item.generation,
+                        artifact,
+                        item.bound_binders.as_slice(),
+                        false,
+                    )
+                })
+            });
+        let displays = self.displays.iter().map(|display| {
+            (
+                display.generation,
+                &display.value_interface,
+                display.bound_binders.as_slice(),
+                true,
+            )
+        });
+        for (generation, artifact, binders, display) in native.chain(displays) {
+            for (index, binder) in binders.iter().enumerate() {
+                // The display metadata row is consumed by rendering, never a lexical binding.
+                if display && index == 1 {
+                    continue;
+                }
                 let fields = row(binder, 7)?;
-                if binders.insert(string(&fields[0])?, &fields[1]).is_some() {
-                    return Err(failure("completed value has duplicate binder identities"));
+                let name = string(&fields[0])?;
+                let id = match &fields[1] {
+                    Value::Integer(id) => u64::try_from(*id)
+                        .map_err(|_| failure("sealed binder identity is not unsigned"))?,
+                    _ => return Err(failure("sealed binder identity is not an integer")),
+                };
+                if sealed
+                    .insert((artifact.module.as_str(), name), (generation, id, artifact))
+                    .is_some()
+                {
+                    return Err(failure("duplicate sealed completed native binding"));
                 }
             }
-            if executions
-                .insert(artifact.module.as_str(), (artifact, binders))
-                .is_some()
-            {
-                return Err(failure("duplicate completed value interface"));
-            }
         }
-        let values = self
-            .value_imports()
+        let mut seen = BTreeSet::new();
+        let mut winners = BTreeMap::new();
+        for (name, identity, generation, id) in &rows {
+            if identity.unit != "main"
+                || identity.namespace != "value"
+                || identity.record_parent.is_some()
+                || identity.occurrence != *name
+                || !seen.insert((identity, generation, id))
+            {
+                return Err(failure(
+                    "actual native selection has a duplicate or foreign identity",
+                ));
+            }
+            let (expected_generation, expected_id, artifact) = sealed
+                .get(&(identity.module.as_str(), name.as_str()))
+                .ok_or_else(|| failure("actual native selection has no same-cell sealed binder"))?;
+            if generation != expected_generation || id != expected_id {
+                return Err(failure(
+                    "actual native selection differs from its sealed binder",
+                ));
+            }
+            winners.insert(name.as_str(), (*artifact, *id));
+        }
+        let mut by_module = BTreeMap::<&str, (&CheckedValueArtifact, Vec<(&str, u64)>)>::new();
+        for (name, (artifact, id)) in winners {
+            by_module
+                .entry(&artifact.module)
+                .or_insert_with(|| (artifact, Vec::new()))
+                .1
+                .push((name, id));
+        }
+        let imports = by_module
+            .iter()
+            .map(|(module, (_, names))| {
+                (
+                    (*module).to_owned(),
+                    names.iter().map(|(name, _)| (*name).to_owned()).collect(),
+                )
+            })
+            .collect();
+        let authorization = by_module
             .into_iter()
-            .map(|(module, names)| {
-                let (artifact, binder_ids) = executions
-                    .get(module.as_str())
-                    .ok_or_else(|| failure("completed value has no exact native proof"))?;
-                let binders = names
-                    .iter()
-                    .map(|name| {
-                        let selected = binder_ids.get(name.as_str()).ok_or_else(|| {
-                            failure("completed value lacks exact binder identity")
-                        })?;
-                        Ok(array([text(name), (*selected).clone()]))
-                    })
-                    .collect::<Result<Vec<_>, CompileError>>()?;
-                Ok(array([
+            .map(|(module, (artifact, names))| {
+                array([
                     text("main"),
                     text(module),
                     text(artifact.path.to_string_lossy()),
                     text(&artifact.digest),
-                    Value::Array(binders),
-                ]))
+                    Value::Array(
+                        names
+                            .into_iter()
+                            .map(|(name, id)| array([text(name), Value::Integer(id.into())]))
+                            .collect(),
+                    ),
+                ])
             })
-            .collect::<Result<Vec<_>, CompileError>>()?;
-        Ok(Value::Array(values))
-    }
-    fn value_imports(&self) -> Vec<(String, Vec<String>)> {
-        let mut winners = std::collections::BTreeMap::new();
-        for completed in self
-            .completed
-            .iter()
-            .filter_map(CompletedCheckedItem::native)
-        {
-            if let Some((module, _)) = completed.value_interface() {
-                for name in completed
-                    .item
-                    .binders()
-                    .iter()
-                    .map(String::as_str)
-                    .chain(completed.observation_name())
-                {
-                    winners.insert(name.to_owned(), module.to_owned());
-                }
-            }
-        }
-        let mut imports = std::collections::BTreeMap::<String, Vec<String>>::new();
-        for (name, module) in winners {
-            imports.entry(module).or_default().push(name);
-        }
-        imports.into_iter().collect()
+            .collect();
+        Ok(CheckedSettledValues {
+            rows,
+            imports,
+            authorization,
+        })
     }
 }
 
@@ -1134,6 +1247,9 @@ impl PartialEq for ExactCheckedItem {
 impl Eq for ExactCheckedItem {}
 
 impl ExactCheckedItem {
+    pub fn specification_digest(&self) -> [u8; 32] {
+        self.cell.specification.specification_digest()
+    }
     pub fn input_work(&self) -> CheckedInputWork {
         self.cell.value_inputs.work()
     }
@@ -1284,6 +1400,8 @@ pub(crate) fn seal_checked_fold(
         runtime_prefix_digest: cell.admission_digest(),
         generation,
         observation_name: None,
+        is_fold: true,
+        settled_values: CheckedSettledValues::default(),
     }
     .seal(root, request, source, target)
 }
@@ -1295,6 +1413,8 @@ pub(crate) struct CheckedItemOffer {
     pub(crate) runtime_prefix_digest: [u8; 32],
     pub(crate) generation: u64,
     pub(crate) observation_name: Option<String>,
+    pub(crate) is_fold: bool,
+    pub(crate) settled_values: CheckedSettledValues,
 }
 
 impl CheckedItemOffer {
@@ -1360,8 +1480,8 @@ impl CheckedItemOffer {
             Value::Integer(self.generation.into()),
             text(hex(&self.runtime_prefix_digest)),
             Value::Array(
-                self.prefix
-                    .value_imports()
+                self.settled_values
+                    .imports
                     .iter()
                     .map(|(module, names)| {
                         array([text(module), Value::Array(names.iter().map(text).collect())])
@@ -1370,7 +1490,7 @@ impl CheckedItemOffer {
             ),
             self.observation_name.as_ref().map_or(Value::Null, text),
             self.prefix.planned_authorization(),
-            self.prefix.completed_value_authorization()?,
+            Value::Array(self.settled_values.authorization.clone()),
             self.prefix.value_interface_authorization()?,
         ]))
     }
@@ -1471,6 +1591,12 @@ impl CheckedItemOffer {
             generation: self.generation,
             bound_binders,
             observation_name: self.observation_name.clone(),
+            admission: if self.is_fold {
+                CheckedExecutionAdmission::InitialFold(self.runtime_prefix_digest)
+            } else {
+                CheckedExecutionAdmission::RuntimeItem(self.runtime_prefix_digest)
+            },
+            settled_values: self.settled_values.clone(),
         }))
     }
 }

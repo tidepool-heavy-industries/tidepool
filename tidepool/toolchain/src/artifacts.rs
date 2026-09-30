@@ -385,14 +385,23 @@ impl ModuleCandidateOffer {
         generation: u64,
         observation_name: Option<&str>,
         templates: &[(String, String)],
+        settled_bindings: Vec<(
+            String,
+            tidepool_repr::execution_schema::SymbolIdentity,
+            u64,
+            u64,
+        )>,
     ) -> Result<Self, CompileError> {
         let context = checked_offer_context(context)?;
+        let settled_values = prefix.select_settled_values(settled_bindings)?;
         let checked_item = crate::checked_cell::CheckedItemOffer {
             item,
             prefix,
             runtime_prefix_digest,
             generation,
             observation_name: observation_name.map(str::to_owned),
+            is_fold: false,
+            settled_values,
         };
         checked_item.validate_templates(templates)?;
         checked_item.validate_include(include)?;
@@ -424,6 +433,12 @@ impl ModuleCandidateOffer {
         admission_digest: [u8; 32],
         budget: u64,
         presented: Vec<String>,
+        settled_bindings: Vec<(
+            String,
+            tidepool_repr::execution_schema::SymbolIdentity,
+            u64,
+            u64,
+        )>,
     ) -> Result<Self, CompileError> {
         let context = checked_offer_context(context)?;
         if include != capture.item().cell_include() {
@@ -431,6 +446,7 @@ impl ModuleCandidateOffer {
                 "checked display include search order changed".into(),
             ));
         }
+        let settled_values = prefix.select_settled_values(settled_bindings)?;
         let display = crate::checked_cell::CheckedDisplayOffer {
             capture,
             prefix,
@@ -438,6 +454,7 @@ impl ModuleCandidateOffer {
             admission_digest,
             budget,
             presented,
+            settled_values,
         };
         let authorization = display.authorization(producer, context.semantic_sha256())?;
         Ok(Self {
