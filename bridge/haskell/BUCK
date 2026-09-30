@@ -114,7 +114,7 @@ sh_test(
     name = "source_boot_product_reuse",
     test = "test-source-boot-product-reuse.sh",
     args = [
-        "$(location :source_boot_product_reuse_test)",
+        "$(exe :source_boot_product_reuse_test)",
         "$(location :source_boot_cache_even)",
         "$(location :source_boot_cache_even_boot)",
         "$(location :source_boot_cache_odd)",
