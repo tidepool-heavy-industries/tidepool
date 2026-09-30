@@ -645,3 +645,47 @@ currently ignores an error even if it makes the machine unavailable. All such
 fallible retentions must be staged before publication, with exact cleanup on
 failure; commit must remain infallible. This is not yet established as the cause
 of the invalid pointer.
+
+### 2026-09-30 protected hydration and native package gates
+
+Product `47bee6df3` includes the original-group package fixed point, native
+literal-root classification, independently staged first-declaration rebase,
+and exact live native-export ownership. The last ownership repair is under
+focused test; it must not be counted as accepted yet. Native literal promotion
+and retirement passes one executed regression; paired rebase passes two actual
+compiler-backed tests and four export-rendering tests. Logs:
+`/tmp/native-root-regression2.log`, `/tmp/paired-rebase-gate.log`,
+`/tmp/export-head-render-gate.log`.
+
+The compiler's held exact-context producer passes its real source-hidden test,
+including downstream G4 compilation through the ordinary protected frontdoor
+and refusal of cache-promoted evidence (`/tmp/hydration-source-hidden-gate3.log`,
+one executed test). Protected inherited products retain their original identity
+and bytes; they do not acquire fabricated fresh source graph nodes. Runtime
+check, inspection and turn consumers remain a separate candidate awaiting the
+joined source-hidden gate.
+
+Captured-unfold admission passes three actor tests and two facade ancestry
+checks (`/tmp/captured-api-compile-gate2.log`,
+`/tmp/captured-context-gate3.log`). Actual resident children finishing before
+failure of the same unfinished parent cell remain unaccepted. The read-only
+harness InputObserver passes one native Buck test after Conversation teardown
+(`/tmp/harness-native-observer-gate.log`); its matching application pin and
+retirement consumer are being integrated.
+
+Main `214b8cccd9` builds the matched web and runtime bundle with native Buck
+(12 local actions). Its executed smoke test fails because the copied Haskell
+worker lacks its project shared library. This is a packaging closure defect,
+not package acceptance. Evidence: `/tmp/native-package-offline-gate3.log`.
+The exact local Git override is restored after each gate; remote fetching is
+still unverified. Codex is excluded.
+
+Actual actor acceptance remains blocked: the latest watch diagnostic run fails
+before watch registration because its program lacks settlement-constructor
+facts; a preceding run reached a watch timeout. Notification tests compile but
+fail TestCampaign startup on retained native-export admission. Both are being
+investigated at their owning boundaries. Optional export staging has source
+review but its abort regression still needs descriptor-lifetime reconciliation.
+Do not infer M1, M2 or compiler completion from the focused successes above.
+WIP is retained at `target/completion-evidence/active-wip/20260930T035527Z`.
+No push, live provider trial or backend-default change occurred.
