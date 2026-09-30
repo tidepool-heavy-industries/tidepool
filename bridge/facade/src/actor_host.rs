@@ -4529,7 +4529,7 @@ async fn run_interactive_applications(
                     tracing::warn!(?actor, "embedded child attachment identity is no longer admitted");
                     continue;
                 }
-                binding.conversation = Some(Arc::clone(&conversation));
+                binding.set_conversation(Arc::clone(&conversation));
                 schedule_embedded_notification_drain(actor, binding.clone(), &mut notifications);
                 let mut activation_error = None;
                 for activation in activations {
