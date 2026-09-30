@@ -1584,6 +1584,8 @@ pub struct CompiledTurn {
 pub struct TurnCertification {
     pub groups: Vec<PendingCertifiedGroup>,
     pub target_owners: Vec<PendingImportOwner>,
+    pub package_interfaces:
+        tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces,
     /// Exact owned compiler products for recovery publication after admission.
     pub recovery_products: Vec<CertifiedRecoveryProduct>,
 }
@@ -2691,6 +2693,7 @@ fn read_compiled_turn(
         certification: sealed.map(|sealed| TurnCertification {
             groups: sealed.certified_groups,
             target_owners: sealed.pending_imports,
+            package_interfaces: sealed.package_interfaces,
             recovery_products: sealed.recovery_products,
         }),
     })

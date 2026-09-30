@@ -965,9 +965,12 @@ impl PendingPreparedSource {
                 registry,
                 ..
             } => {
-                let target =
-                    super::prepared::CertifiedTargetImage::compile(prepared.clone(), registry)
-                        .map_err(PreparedRuntimeError::Compile)?;
+                let target = super::prepared::CertifiedTargetImage::compile_certified(
+                    prepared.clone(),
+                    registry,
+                    resolved.package_interfaces.clone(),
+                )
+                .map_err(PreparedRuntimeError::Compile)?;
                 let demanded = resolved
                     .groups
                     .iter()
@@ -3267,8 +3270,12 @@ where
                 .state
                 .resolve_certification_in(scope, &prepared, certification)?;
             let registry = self.state.certified_image_registry();
-            let target = super::prepared::CertifiedTargetImage::compile(prepared, &registry)
-                .map_err(PreparedRuntimeError::Compile)?;
+            let target = super::prepared::CertifiedTargetImage::compile_certified(
+                prepared,
+                &registry,
+                resolved.package_interfaces.clone(),
+            )
+            .map_err(PreparedRuntimeError::Compile)?;
             let demanded = resolved
                 .groups
                 .into_iter()
@@ -3783,8 +3790,12 @@ where
                 self.state
                     .resolve_certification_in(lexical_scope, &prepared, certification)?;
             let registry = self.state.certified_image_registry();
-            let target = super::prepared::CertifiedTargetImage::compile(prepared, &registry)
-                .map_err(PreparedRuntimeError::Compile)?;
+            let target = super::prepared::CertifiedTargetImage::compile_certified(
+                prepared,
+                &registry,
+                resolved.package_interfaces.clone(),
+            )
+            .map_err(PreparedRuntimeError::Compile)?;
             let demanded = resolved
                 .groups
                 .into_iter()
@@ -4312,8 +4323,12 @@ where
                 self.state
                     .resolve_certification_in(lexical_scope, &prepared, certification)?;
             let registry = self.state.certified_image_registry();
-            let target = super::prepared::CertifiedTargetImage::compile(prepared, &registry)
-                .map_err(PreparedRuntimeError::Compile)?;
+            let target = super::prepared::CertifiedTargetImage::compile_certified(
+                prepared,
+                &registry,
+                resolved.package_interfaces.clone(),
+            )
+            .map_err(PreparedRuntimeError::Compile)?;
             let demanded = resolved
                 .groups
                 .into_iter()

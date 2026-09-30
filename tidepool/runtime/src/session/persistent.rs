@@ -53,6 +53,8 @@ type DeclarationStagingContext = (SourceImports, Vec<String>, Vec<(SessionVarId,
 pub(crate) struct ResolvedCertifiedTurn {
     pub groups: Vec<CertifiedGroup>,
     pub target_owners: Vec<ImportOwner>,
+    pub package_interfaces:
+        tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces,
     pub source_evidence: BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
     pub inherited_needed: Vec<InheritedSourceDemand>,
 }
@@ -444,6 +446,7 @@ impl PersistentSession {
         Ok(ResolvedCertifiedTurn {
             groups,
             target_owners,
+            package_interfaces: certification.package_interfaces.clone(),
             source_evidence,
             inherited_needed,
         })
