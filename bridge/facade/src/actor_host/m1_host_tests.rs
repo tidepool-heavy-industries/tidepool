@@ -231,7 +231,7 @@ async fn production_host_runs_browser_haskell_reconnects_without_replay_and_reti
         exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
-            config.backend = crate::exomonad::ExomonadBackend::Embedded;
+            config.backend = crate::exomonad::HostBackendOptions::Embedded;
             config.embedded = Some(settings.clone());
         },
     )
@@ -276,7 +276,7 @@ async fn production_host_runs_browser_haskell_reconnects_without_replay_and_reti
         config: campaign.config.clone(),
         run_root: campaign.config.run_root.clone(),
         tmux: TmuxSession::new(&campaign.config.tmux_session).unwrap(),
-        backend: native_interactive_backend(campaign.config.interactive_agent.clone()),
+        backend: HostRuntimeMode::Embedded,
         worktrees: campaign.worktrees.clone(),
         bindings: campaign.bindings.clone(),
         readiness: readiness_tx,
@@ -550,7 +550,7 @@ async fn host_cancellation_stops_a_real_running_haskell_cell() {
         exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
-            config.backend = crate::exomonad::ExomonadBackend::Embedded;
+            config.backend = crate::exomonad::HostBackendOptions::Embedded;
             config.embedded = Some(settings.clone());
         },
     )
@@ -645,7 +645,7 @@ async fn production_host_marks_embedded_root_ready_and_retires_invalid_auth_fail
         exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
-            config.backend = crate::exomonad::ExomonadBackend::Embedded;
+            config.backend = crate::exomonad::HostBackendOptions::Embedded;
             config.embedded = Some(settings.clone());
         },
     )
@@ -683,7 +683,7 @@ async fn production_host_marks_embedded_root_ready_and_retires_invalid_auth_fail
         config: campaign.config.clone(),
         run_root: campaign.config.run_root.clone(),
         tmux: TmuxSession::new(&campaign.config.tmux_session).unwrap(),
-        backend: native_interactive_backend(campaign.config.interactive_agent.clone()),
+        backend: HostRuntimeMode::Embedded,
         worktrees: campaign.worktrees.clone(),
         bindings: campaign.bindings.clone(),
         readiness: readiness_tx,

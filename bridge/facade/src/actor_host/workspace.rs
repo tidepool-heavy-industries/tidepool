@@ -59,6 +59,7 @@ pub(super) struct RootImport {
 }
 
 #[derive(Clone)]
+#[cfg(feature = "codex-compat")]
 pub(super) struct WorkspaceLayout {
     pub(super) run_namespace: String,
     pub(super) source_root: PathBuf,
@@ -199,6 +200,8 @@ impl PreparedWorkspace {
     }
 }
 
+#[cfg(feature = "codex-compat")]
+#[cfg(feature = "codex-compat")]
 impl WorkspaceLayout {
     fn helper_root(&self) -> PathBuf {
         self.worktrees
@@ -772,6 +775,7 @@ fn copy_helper_tree(source: &Path, destination: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "codex-compat")]
 impl NativeForkAdmission {
     pub(super) async fn prepare_workspace(
         &self,
@@ -1143,6 +1147,7 @@ impl BoundWorkspace {
     }
 }
 
+#[cfg(feature = "codex-compat")]
 impl WorkspaceLayout {
     fn capture(
         &self,
@@ -1462,6 +1467,6 @@ impl WorkspaceLayout {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 #[path = "workspace_tests.rs"]
 mod tests;

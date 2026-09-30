@@ -57,7 +57,7 @@ rust-version = "1.89"
 [workspace.dependencies]
 codex-shoal-protocol = { path = "vendor/codex/codex-rs/shoal-protocol" }
 exomonad-actor = { version = "0.1.0", path = "exomonad/actor" }
-exomonad-agent = { version = "0.1.0", path = "exomonad/agent" }
+exomonad-agent = { version = "0.1.0", path = "exomonad/agent", default-features = false }
 tidepool-atomic-write = { path = "bridge/atomic-write" }
 tidepool-bignum = { version = "0.1.0", path = "tidepool/bignum" }
 tidepool-bridge = { version = "0.1.0", path = "tidepool/bridge" }

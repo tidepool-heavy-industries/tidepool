@@ -95,7 +95,7 @@ pub(crate) struct LaunchObservation {
     pub(crate) pinned_workspace: String,
     pub(crate) workspace: WorkspaceRevision,
     /// Resolved executable and version, or the resolution error.
-    pub(crate) codex: Result<(PathBuf, String), String>,
+    pub(crate) codex: Option<Result<(PathBuf, String), String>>,
     /// The extractor the run's own daemon executes and its producer identity.
     pub(crate) extractor: Result<(PathBuf, String), String>,
     pub(crate) persistent_socket: PathBuf,
@@ -105,7 +105,7 @@ pub(crate) struct LaunchObservation {
 impl LaunchObservation {
     pub(crate) fn observe(
         workspace: &Path,
-        codex: Result<&exomonad_agent::InteractiveAgentInstallation, String>,
+        codex: Option<Result<(PathBuf, String), String>>,
     ) -> Self {
         let persistent_socket = tidepool_toolchain::paths::persistent_compile_daemon_socket();
         let persistent = if !persistent_socket.exists() {
@@ -131,7 +131,7 @@ impl LaunchObservation {
         Self {
             pinned_workspace: DEFAULT_WORKSPACE_REV.to_owned(),
             workspace: observe_workspace(workspace, DEFAULT_WORKSPACE_REV),
-            codex: codex.map(|agent| (agent.executable().to_owned(), agent.version().to_owned())),
+            codex,
             extractor,
             persistent_socket,
             persistent,
@@ -236,7 +236,7 @@ pub(crate) fn assess(observation: &LaunchObservation, mode: PreflightMode) -> Ve
             )
         }
     };
-    let codex = match &observation.codex {
+    let codex = observation.codex.as_ref().map(|codex| match codex {
         Ok((executable, version)) => (
             Verdict::Ok,
             format!(
@@ -245,7 +245,7 @@ pub(crate) fn assess(observation: &LaunchObservation, mode: PreflightMode) -> Ve
             ),
         ),
         Err(error) => (Verdict::Fail, error.clone()),
-    };
+    });
     let socket = observation.persistent_socket.display();
     let compiler = match &observation.extractor {
         Err(error) => (Verdict::Fail, format!("no extractor for the run: {error}")),
@@ -274,21 +274,20 @@ pub(crate) fn assess(observation: &LaunchObservation, mode: PreflightMode) -> Ve
             }
         }
     };
-    [
-        ("workspace", workspace),
-        ("codex", codex),
-        ("compiler", compiler),
-    ]
-    .into_iter()
-    .map(|(check, (verdict, detail))| PreflightLine {
-        check,
-        verdict: match (verdict, mode) {
-            (Verdict::Warn, PreflightMode::Strict) => Verdict::Fail,
-            (verdict, _) => verdict,
-        },
-        detail,
-    })
-    .collect()
+    let mut checks = vec![("workspace", workspace)];
+    checks.extend(codex.map(|result| ("codex", result)));
+    checks.push(("compiler", compiler));
+    checks
+        .into_iter()
+        .map(|(check, (verdict, detail))| PreflightLine {
+            check,
+            verdict: match (verdict, mode) {
+                (Verdict::Warn, PreflightMode::Strict) => Verdict::Fail,
+                (verdict, _) => verdict,
+            },
+            detail,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -306,7 +305,10 @@ mod tests {
                 revision: PINNED.into(),
                 recency: Recency::Same,
             },
-            codex: Ok(("/nix/store/codex/bin/codex".into(), "codex-cli 1.0".into())),
+            codex: Some(Ok((
+                "/nix/store/codex/bin/codex".into(),
+                "codex-cli 1.0".into(),
+            ))),
             extractor: Ok(("/run/tidepool-extract".into(), PRODUCER.into())),
             persistent_socket: "/cache/battery-daemon/extract.sock".into(),
             persistent: PersistentDaemon::Live {
@@ -327,6 +329,18 @@ mod tests {
             lines[0].to_string(),
             "preflight workspace: ok checkout 46de15cfe528 matches pinned 46de15cfe528"
         );
+    }
+
+    #[test]
+    fn embedded_launch_does_not_preflight_a_native_executable() {
+        let mut observation = healthy();
+        observation.codex = None;
+        let lines = assess(&observation, PreflightMode::Strict);
+        assert_eq!(
+            lines.iter().map(|line| line.check).collect::<Vec<_>>(),
+            ["workspace", "compiler"]
+        );
+        assert_eq!(verdicts(&lines), [Verdict::Ok; 2]);
     }
 
     #[test]
@@ -353,8 +367,9 @@ mod tests {
     #[test]
     fn missing_codex_or_extractor_fails_in_every_mode() {
         let mut observation = healthy();
-        observation.codex =
-            Err("EXOMONAD_INTERACTIVE_CODEX_BIN must explicitly name the pinned interactive Codex executable".into());
+        observation.codex = Some(Err(
+            "EXOMONAD_INTERACTIVE_CODEX_BIN must explicitly name the pinned interactive Codex executable".into(),
+        ));
         observation.extractor = Err("tidepool-extract not found".into());
         let lines = assess(&observation, PreflightMode::Warn);
         assert_eq!(

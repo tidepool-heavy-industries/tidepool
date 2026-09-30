@@ -8,6 +8,7 @@ use crate::seam::{
     AgentBackendError, BackendThreadId, CycleSpec, ThreadSpec, ToolReply, TurnEvent,
 };
 
+#[cfg(feature = "codex-compat")]
 pub mod codex;
 pub mod mock;
 
@@ -81,7 +82,7 @@ pub trait AgentBackend {
     /// a caller that forgot) — it is not made redundant by this method.
     ///
     /// Default: a no-op. Correct for a backend with nothing to reap (an
-    /// in-process one, [`codex::replay`](crate::backend::codex::replay), and
+    /// in-process one, a transcript replay backend, and
     /// [`mock::MockBackend`](crate::backend::mock::MockBackend)) — same
     /// reasoning as [`canceller`](Self::canceller)'s default.
     fn shutdown(self: Box<Self>) -> Result<(), AgentBackendError> {
@@ -99,7 +100,7 @@ pub trait AgentBackend {
     /// request the blocked thread cannot read.
     ///
     /// Default: a no-op canceller. Correct for a backend with nothing to reap
-    /// (an in-process one, and [`codex::replay`], which pumps a transcript with
+    /// (an in-process one, and a replay backend, which pumps a transcript with
     /// no process behind it) — and what keeps every such backend compiling.
     fn canceller(&self) -> Box<dyn BackendCanceller> {
         Box::new(NoopCanceller)

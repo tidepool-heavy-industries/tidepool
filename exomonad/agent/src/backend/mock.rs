@@ -11,7 +11,7 @@
 //! you one of two things: the seam is in the wrong place and the behavior
 //! belongs in the adapter where the real path exercises it, or the test wants a
 //! RECORDED transcript replayed through the real adapter
-//! ([`super::codex::replay`]) rather than an imitation.
+//! (the optional native replay backend) rather than an imitation.
 //!
 //! A script is arrange-step input — "given exactly these events, the loop does
 //! X" — not a simulation of a model. Realistic backend behavior comes from
@@ -322,12 +322,12 @@ impl AgentBackend for MockBackend {
                         "reply names call {} but {} is the parked call",
                         reply.call.0, parked.0
                     ),
-                })
+                });
             }
             None => {
                 return Err(AgentBackendError::ProtocolRejected {
                     detail: format!("reply names call {} but no call is parked", reply.call.0),
-                })
+                });
             }
         }
         self.replies.push(reply);
