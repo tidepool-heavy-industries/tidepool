@@ -1065,6 +1065,93 @@ mod tests {
     use tidepool_repr::execution_schema::ModuleVersion;
 
     #[test]
+    #[ignore = "requires an exact retained original declaration packet"]
+    fn retained_original_durable_copy_cost() {
+        use std::time::Instant;
+
+        fn io_counters() -> (u64, u64, u64) {
+            let counters = fs::read_to_string("/proc/thread-self/io").unwrap();
+            let value = |key: &str| {
+                counters
+                    .lines()
+                    .find_map(|line| line.strip_prefix(key))
+                    .unwrap()
+                    .trim()
+                    .parse::<u64>()
+                    .unwrap()
+            };
+            (value("wchar:"), value("syscw:"), value("write_bytes:"))
+        }
+
+        let packet = PathBuf::from(std::env::var_os("TIDEPOOL_PACKAGE_VALIDATION_PACKET").unwrap());
+        for (name, repetitions) in [
+            ("original.hi", vec![1, 10, 100]),
+            ("module-products.cbor", vec![2]),
+        ] {
+            let bytes = fs::read(packet.join(name)).unwrap();
+            let digest: [u8; 32] = Sha256::digest(&bytes).into();
+            for count in repetitions {
+                let root = tempfile::tempdir().unwrap();
+                let destination = root.path().join(name);
+                durable_copy(&destination, &bytes, &digest).unwrap();
+                let before = io_counters();
+                let started = Instant::now();
+                for _ in 0..count {
+                    durable_copy(&destination, &bytes, &digest).unwrap();
+                }
+                let elapsed = started.elapsed();
+                let after = io_counters();
+                assert_eq!(fs::read(&destination).unwrap(), bytes);
+                assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+                println!(
+                    "DURABLE_COPY_COST {}",
+                    serde_json::json!({
+                        "artifact": name, "artifact_sha256": hex(&digest), "artifact_bytes": bytes.len(),
+                        "existing_repetitions": count, "nanoseconds": elapsed.as_nanos(),
+                        "thread_wchar": after.0-before.0, "thread_write_syscalls": after.1-before.1,
+                        "thread_write_bytes": after.2-before.2,
+                        "qualification": "actual captured payload; first publication excluded, exact existing path reused; no compiler/native authority issued"
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn durable_copy_existing_payload_refuses_wrong_digest_bytes_and_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("owned.cbor");
+        let digest: [u8; 32] = Sha256::digest(b"owned").into();
+        durable_copy(&path, b"owned", &digest).unwrap();
+        durable_copy(&path, b"owned", &digest).unwrap();
+        assert!(matches!(
+            durable_copy(&path, b"owned", &[0; 32]),
+            Err(RecoveryArtifactError::DigestMismatch(_))
+        ));
+        fs::write(&path, b"other").unwrap();
+        assert!(matches!(
+            durable_copy(&path, b"owned", &digest),
+            Err(RecoveryArtifactError::DigestMismatch(_))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"other");
+        fs::write(&path, b"different-length").unwrap();
+        assert!(durable_copy(&path, b"owned", &digest).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"different-length");
+        #[cfg(unix)]
+        {
+            let target = root.path().join("target.cbor");
+            fs::write(&target, b"owned").unwrap();
+            fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            assert!(matches!(
+                durable_copy(&path, b"owned", &digest),
+                Err(RecoveryArtifactError::InvalidReference)
+            ));
+            assert_eq!(fs::read(&target).unwrap(), b"owned");
+        }
+    }
+
+    #[test]
     fn package_validation_stage_keeps_one_capture_and_refuses_conflicting_digest() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("package.hi");
