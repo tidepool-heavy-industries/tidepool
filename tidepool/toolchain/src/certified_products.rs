@@ -1046,6 +1046,16 @@ pub fn validate_home_certification(bytes: &[u8], owner: &CachedHomeOwner) -> Cer
     verify_home_witness(bytes, owner).map(|_| ())
 }
 
+pub(crate) fn certified_home_requirements(
+    bytes: &[u8],
+    owner: &CachedHomeOwner,
+) -> CertResult<Vec<CachedHomeOwner>> {
+    Ok(verify_home_witness(bytes, owner)?
+        .sources
+        .into_values()
+        .collect())
+}
+
 fn verify_home_witness(bytes: &[u8], owner: &CachedHomeOwner) -> CertResult<HomeCertification> {
     let witness = decode_home_witness(bytes)?;
     if &witness.owner != owner {

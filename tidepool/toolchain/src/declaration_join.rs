@@ -12,6 +12,10 @@ use crate::{
     cache::ProductAvailability, recovery_artifacts::CertifiedRecoveryProduct, CompileError,
 };
 
+pub use crate::declaration_context::{
+    ExactDeclarationContext, MaterializedExactDeclarationContext,
+};
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleSnapshot {
@@ -142,15 +146,64 @@ fn validate_instance_inventory(inventory: &InstanceInventory) -> Result<(), Comp
 /// workflow. No worker or inventory scratch path is retained by this value.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CertifiedAuthoredDeclaration {
-    pub product: CertifiedRecoveryProduct,
+    product: CertifiedRecoveryProduct,
     /// Every owned home dependency inspected with the declaration, including G.
-    pub recovery_products: Vec<CertifiedRecoveryProduct>,
-    pub exports: Vec<DeclarationExport>,
-    pub instances: InstanceInventory,
-    pub family_closure: Vec<ExportIdentity>,
-    pub source_sha256: [u8; 32],
+    recovery_products: Vec<CertifiedRecoveryProduct>,
+    lexical_exports: Vec<DeclarationExport>,
+    introduced_exports: Vec<DeclarationExport>,
+    instances: InstanceInventory,
+    family_closure: Vec<ExportIdentity>,
+    source_sha256: [u8; 32],
     /// SHA-256 of the bound compiler producer identity used for these bytes.
-    pub toolchain_identity_sha256: [u8; 32],
+    toolchain_identity_sha256: [u8; 32],
+    pub(crate) interfaces: Vec<ExactInterfaceOwner>,
+}
+
+impl CertifiedAuthoredDeclaration {
+    pub fn product(&self) -> &CertifiedRecoveryProduct {
+        &self.product
+    }
+    pub fn recovery_products(&self) -> &[CertifiedRecoveryProduct] {
+        &self.recovery_products
+    }
+    pub fn lexical_exports(&self) -> &[DeclarationExport] {
+        &self.lexical_exports
+    }
+    pub fn introduced_exports(&self) -> &[DeclarationExport] {
+        &self.introduced_exports
+    }
+    pub fn instances(&self) -> &InstanceInventory {
+        &self.instances
+    }
+    pub fn family_closure(&self) -> &[ExportIdentity] {
+        &self.family_closure
+    }
+    pub fn source_sha256(&self) -> [u8; 32] {
+        self.source_sha256
+    }
+    pub fn toolchain_identity_sha256(&self) -> [u8; 32] {
+        self.toolchain_identity_sha256
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct ExactModuleIdentity {
+    pub unit: String,
+    pub module: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExactLexicalNode {
+    pub owner: ExactModuleIdentity,
+    pub imports: Vec<ExactModuleIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExactInterfaceOwner {
+    pub(crate) owner: ExactModuleIdentity,
+    pub(crate) requirements: Vec<ExactModuleIdentity>,
 }
 
 /// Certify the reserved G module after strict GHC inspection of `exact_source`.
@@ -281,7 +334,12 @@ pub fn certify_authored_declaration(
             }),
         });
     }
-    let outcome = inspect_declaration_artifacts(&artifacts, includes, session_root)?;
+    let outcome = inspect_declaration_artifacts_with_producer(
+        &artifacts,
+        includes,
+        session_root,
+        Some(toolchain_identity_sha256),
+    )?;
     let inventories = match outcome.decision {
         JoinDecision::Accepted => outcome
             .inventories
@@ -302,14 +360,48 @@ pub fn certify_authored_declaration(
     let family_closure = outcome
         .family_closure
         .ok_or_else(|| contract("accepted authored family closure is empty"))?;
+    if std::fs::read(source_path)? != exact_source.as_bytes() {
+        return Err(contract(
+            "authored source changed during inventory certification",
+        ));
+    }
+    let introduced_exports = inventory
+        .exports
+        .iter()
+        .filter(|export| {
+            export.head.unit == selected.owner().unit
+                && export.head.module == selected.owner().module
+        })
+        .cloned()
+        .collect();
+    let interfaces = artifacts
+        .iter()
+        .map(|artifact| ExactInterfaceOwner {
+            owner: ExactModuleIdentity {
+                unit: artifact.interface.unit.clone(),
+                module: artifact.interface.module.clone(),
+            },
+            requirements: artifact
+                .interface
+                .requirements
+                .iter()
+                .map(|(unit, module)| ExactModuleIdentity {
+                    unit: unit.clone(),
+                    module: module.clone(),
+                })
+                .collect(),
+        })
+        .collect();
     Ok(CertifiedAuthoredDeclaration {
         product: selected.clone(),
         recovery_products: products,
-        exports: inventory.exports,
+        lexical_exports: inventory.exports,
+        introduced_exports,
         instances: inventory.instances,
         family_closure,
         source_sha256,
         toolchain_identity_sha256,
+        interfaces,
     })
 }
 
@@ -388,6 +480,191 @@ pub struct DeclarationJoinOutcome {
     pub decision: JoinDecision,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CertifiedDeclarationJoin {
+    Accepted(AcceptedJoin),
+    Rejected(RejectedJoin),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AcceptedJoin {
+    input: DeclarationJoinInput,
+    outcome: DeclarationJoinOutcome,
+    interface: crate::recovery_artifacts::CertifiedJoinedInterface,
+    context: ExactDeclarationContext,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RejectedJoin {
+    input: DeclarationJoinInput,
+    outcome: DeclarationJoinOutcome,
+    producer: [u8; 32],
+}
+
+pub struct MaterializedDeclarationJoin {
+    pub join: crate::recovery_artifacts::RecoveryJoinRef,
+    pub products: Vec<crate::recovery_artifacts::RecoveryArtifactRef>,
+    pub anchors: Vec<crate::recovery_artifacts::RecoveryJoinRef>,
+}
+
+impl AcceptedJoin {
+    pub fn input(&self) -> &DeclarationJoinInput {
+        &self.input
+    }
+    pub fn outcome(&self) -> &DeclarationJoinOutcome {
+        &self.outcome
+    }
+    pub fn reserved(&self) -> &ReservedJoin {
+        &self.input.reserved
+    }
+    pub fn expected_public_version(&self) -> &str {
+        &self.input.expected_public_version
+    }
+    pub fn request_sha256(&self) -> &str {
+        &self.outcome.request_sha256
+    }
+    pub fn exports(&self) -> &[DeclarationExport] {
+        &self.input.expected_exports
+    }
+    pub fn instances(&self) -> &InstanceInventory {
+        &self.input.expected_instances
+    }
+    pub fn family_closure(&self) -> &[ExportIdentity] {
+        &self.input.family_closure
+    }
+    pub fn interface_bytes(&self) -> &[u8] {
+        self.interface.interface_bytes()
+    }
+    pub fn package_imports_bytes(&self) -> &[u8] {
+        self.interface.package_imports_bytes()
+    }
+    pub fn recovery_products(&self) -> &[CertifiedRecoveryProduct] {
+        self.context.recovery_products()
+    }
+    pub fn toolchain_identity_sha256(&self) -> [u8; 32] {
+        self.interface.toolchain_identity_sha256()
+    }
+    pub(crate) fn context(&self) -> &ExactDeclarationContext {
+        &self.context
+    }
+    pub(crate) fn interface(&self) -> &crate::recovery_artifacts::CertifiedJoinedInterface {
+        &self.interface
+    }
+    pub fn materialize(
+        &self,
+        root: &Path,
+    ) -> Result<MaterializedDeclarationJoin, crate::recovery_artifacts::RecoveryArtifactError> {
+        let products = crate::recovery_artifacts::materialize_certified_products(
+            root,
+            self.toolchain_identity_sha256(),
+            self.recovery_products(),
+        )?;
+        let anchors = self
+            .context
+            .joined_interfaces()
+            .iter()
+            .map(|join| join.materialize(root))
+            .collect::<Result<Vec<_>, _>>()?;
+        let join = self.interface.materialize(root)?;
+        Ok(MaterializedDeclarationJoin {
+            join,
+            products,
+            anchors,
+        })
+    }
+}
+
+impl RejectedJoin {
+    pub fn input(&self) -> &DeclarationJoinInput {
+        &self.input
+    }
+    pub fn outcome(&self) -> &DeclarationJoinOutcome {
+        &self.outcome
+    }
+    pub fn reserved(&self) -> &ReservedJoin {
+        &self.input.reserved
+    }
+    pub fn expected_public_version(&self) -> &str {
+        &self.input.expected_public_version
+    }
+    pub fn request_sha256(&self) -> &str {
+        &self.outcome.request_sha256
+    }
+    pub fn toolchain_identity_sha256(&self) -> [u8; 32] {
+        self.producer
+    }
+}
+
+/// Validate the exact owned implementation closure and retain a sealed result.
+/// Rejection is also bound to the request; runtime owns its staleness decision.
+pub fn certify_declaration_join(
+    input: DeclarationJoinInput,
+    context: &ExactDeclarationContext,
+    includes: &[PathBuf],
+    session_root: &Path,
+) -> Result<CertifiedDeclarationJoin, CompileError> {
+    context.validate_artifacts(&input.artifacts)?;
+    for (index, write) in input.writes.iter().enumerate() {
+        if write.generation == 0
+            || SessionModule::lib(tidepool_repr::Generation(write.generation)).module_name()
+                != write.module.module
+            || index > 0 && input.writes[index - 1].generation >= write.generation
+        {
+            return Err(contract(
+                "authored writes are not an ordered original generation suffix",
+            ));
+        }
+    }
+    let encoded = encode_declaration_join(&input)?;
+    let execution = execute_declaration_operation(
+        &encoded,
+        includes,
+        session_root,
+        &[],
+        Some(context.toolchain_identity_sha256()),
+    )?;
+    let outcome = decode_declaration_join_outcome(&input, &execution.receipt)?;
+    context.validate_artifacts(&input.artifacts)?;
+    match outcome.decision {
+        JoinDecision::Accepted => {
+            let output = outcome
+                .artifact
+                .as_ref()
+                .ok_or_else(|| contract("accepted join has no interface"))?;
+            let bytes = std::fs::read(&output.path)?;
+            if sha256(&bytes) != output.sha256 {
+                return Err(contract(
+                    "joined interface changed after compiler validation",
+                ));
+            }
+            let mut packages = output.path.as_os_str().to_os_string();
+            packages.push(".packages");
+            let packages = std::fs::read(PathBuf::from(packages))?;
+            let interface =
+                crate::recovery_artifacts::CertifiedJoinedInterface::from_certification(
+                    execution.producer,
+                    input.reserved.unit.clone(),
+                    input.reserved.module.clone(),
+                    bytes,
+                    packages,
+                )
+                .map_err(|error| contract(format!("joined package witness rejected: {error}")))?;
+            context.validate_artifacts(&input.artifacts)?;
+            Ok(CertifiedDeclarationJoin::Accepted(AcceptedJoin {
+                input,
+                outcome,
+                interface,
+                context: context.clone(),
+            }))
+        }
+        JoinDecision::Rejected { .. } => Ok(CertifiedDeclarationJoin::Rejected(RejectedJoin {
+            input,
+            outcome,
+            producer: execution.producer,
+        })),
+    }
+}
+
 /// Use the existing bound compiler process boundary and diagnostic policy.
 /// This operation never compiles an executable or executes authored effects.
 pub fn validate_declaration_join(
@@ -397,8 +674,9 @@ pub fn validate_declaration_join(
     inject_modules: &[String],
 ) -> Result<DeclarationJoinOutcome, CompileError> {
     let encoded = encode_declaration_join(input)?;
-    let bytes = execute_declaration_operation(&encoded, includes, session_root, inject_modules)?;
-    decode_declaration_join_outcome(input, &bytes)
+    let execution =
+        execute_declaration_operation(&encoded, includes, session_root, inject_modules, None)?;
+    decode_declaration_join_outcome(input, &execution.receipt)
 }
 
 /// Canonical definite-length CBOR arrays shared with the worker. Keeping the
@@ -873,12 +1151,18 @@ mod tests {
     }
 }
 
+struct DeclarationExecution {
+    receipt: Vec<u8>,
+    producer: [u8; 32],
+}
+
 fn execute_declaration_operation(
     encoded: &[u8],
     includes: &[PathBuf],
     session_root: &Path,
     inject_modules: &[String],
-) -> Result<Vec<u8>, CompileError> {
+    expected_producer: Option<[u8; 32]>,
+) -> Result<DeclarationExecution, CompileError> {
     let scratch = tempfile::tempdir()?;
     let manifest = scratch.path().join("declaration-join.cbor");
     let receipt = scratch.path().join("declaration-join.json");
@@ -896,6 +1180,12 @@ fn execute_declaration_operation(
     let endpoint = command
         .bind()
         .map_err(|error| CompileError::Io(crate::extract_spawn_error(error.source)))?;
+    let producer: [u8; 32] = Sha256::digest(endpoint.identity().producer_bytes()).into();
+    if expected_producer.is_some_and(|expected| expected != producer) {
+        return Err(contract(
+            "declaration operation producer differs from owned artifact producer",
+        ));
+    }
     crate::paths::apply_build_products_dir(&mut command, &endpoint);
     let run = endpoint
         .execute(&command)
@@ -905,7 +1195,10 @@ fn execute_declaration_operation(
         &run.output.stdout,
         &run.output.stderr,
     )?;
-    Ok(std::fs::read(receipt)?)
+    Ok(DeclarationExecution {
+        receipt: std::fs::read(receipt)?,
+        producer,
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -947,9 +1240,19 @@ pub fn inspect_declaration_artifacts(
     includes: &[PathBuf],
     session_root: &Path,
 ) -> Result<DeclarationInventoryOutcome, CompileError> {
+    inspect_declaration_artifacts_with_producer(artifacts, includes, session_root, None)
+}
+
+fn inspect_declaration_artifacts_with_producer(
+    artifacts: &[DeclarationArtifact],
+    includes: &[PathBuf],
+    session_root: &Path,
+    expected_producer: Option<[u8; 32]>,
+) -> Result<DeclarationInventoryOutcome, CompileError> {
     let encoded = encode_declaration_inventory(artifacts)?;
-    let bytes = execute_declaration_operation(&encoded, includes, session_root, &[])?;
-    decode_declaration_inventory_outcome(artifacts, &bytes)
+    let execution =
+        execute_declaration_operation(&encoded, includes, session_root, &[], expected_producer)?;
+    decode_declaration_inventory_outcome(artifacts, &execution.receipt)
 }
 
 pub fn decode_declaration_inventory_outcome(
@@ -1050,7 +1353,7 @@ mod authored_tests {
         .unwrap();
         assert_eq!(result.product.owner().module, module.module_name());
         assert_eq!(result.product.source_sha256(), Some(result.source_sha256));
-        assert!(result.exports.is_empty());
+        assert!(result.lexical_exports().is_empty());
         assert!(result.instances.classes.is_empty());
         assert!(result.instances.families.is_empty());
     }
@@ -1082,7 +1385,7 @@ mod authored_tests {
             }));
         }
         assert!(result
-            .exports
+            .introduced_exports()
             .iter()
             .any(|export| export.head.occurrence == "answer"));
         let durable = tempfile::tempdir().unwrap();
@@ -1097,5 +1400,154 @@ mod authored_tests {
                 .iter()
                 .any(|reference| reference.module == module.module_name()));
         }
+    }
+
+    #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
+    fn owned_join_retains_original_products_and_recovers_after_all_request_scratch_is_deleted() {
+        use std::sync::Arc;
+        let source_root = tempfile::tempdir().unwrap();
+        let module = SessionModule::lib(Generation(1));
+        let source = include_str!("../tests/fixtures/owned-declaration/G1.hs");
+        let path = source_root.path().join(module.relative_hs_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, source).unwrap();
+        let certificate = Arc::new(
+            certify_authored_declaration(
+                module,
+                &path,
+                source,
+                &[source_root.path().to_path_buf()],
+                source_root.path(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(certificate.instances().classes.len(), 1);
+        assert_eq!(
+            certificate.instances().classes[0].class.occurrence,
+            "Choice"
+        );
+        assert_eq!(certificate.instances().classes[0].selected_axioms.len(), 1);
+        assert_eq!(certificate.instances().families.len(), 2);
+        let owner = ExactModuleIdentity {
+            unit: certificate.product().owner().unit.clone(),
+            module: module.module_name(),
+        };
+        let context = ExactDeclarationContext::new(
+            &[certificate.clone()],
+            &[],
+            vec![ExactLexicalNode {
+                owner: owner.clone(),
+                imports: Vec::new(),
+            }],
+        )
+        .unwrap();
+        let worker_root = tempfile::tempdir().unwrap();
+        let materialized = context.materialize(worker_root.path()).unwrap();
+        let original = materialized
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.interface.module == owner.module)
+            .unwrap();
+        let anchor = ModuleSnapshot {
+            module: owner.module.clone(),
+            path: original.interface.path.clone(),
+            sha256: original.interface.sha256.clone(),
+        };
+        let joined_module = SessionModule::lib(Generation(2)).module_name();
+        let input = DeclarationJoinInput {
+            expected_public_version: "paired-public-version".into(),
+            public_module: None,
+            private_base: None,
+            private_tip: Some(anchor.clone()),
+            writes: vec![DeclarationWrite {
+                generation: 1,
+                module: anchor,
+                exports: certificate.introduced_exports().to_vec(),
+                retractions: Vec::new(),
+            }],
+            reserved: ReservedJoin {
+                unit: owner.unit.clone(),
+                module: joined_module.clone(),
+                path: worker_root.path().join("joined.hi"),
+            },
+            artifacts: materialized.artifacts,
+            family_closure: certificate.family_closure().to_vec(),
+            expected_exports: certificate.lexical_exports().to_vec(),
+            expected_instances: certificate.instances().clone(),
+        };
+        let expected_request = sha256(&encode_declaration_join(&input).unwrap());
+        let expected_producer = context.toolchain_identity_sha256();
+        let mut rejected_input = input.clone();
+        rejected_input.reserved.module = SessionModule::lib(Generation(3)).module_name();
+        rejected_input.reserved.path = worker_root.path().join("rejected.hi");
+        rejected_input.expected_exports[0]
+            .head
+            .occurrence
+            .push_str("Missing");
+        let CertifiedDeclarationJoin::Rejected(rejected) = certify_declaration_join(
+            rejected_input.clone(),
+            &context,
+            &[source_root.path().to_path_buf()],
+            source_root.path(),
+        )
+        .unwrap() else {
+            panic!("expected fenced rejection")
+        };
+        assert_eq!(rejected.input(), &rejected_input);
+        assert_eq!(rejected.expected_public_version(), "paired-public-version");
+        assert_eq!(
+            rejected.request_sha256(),
+            sha256(&encode_declaration_join(&rejected_input).unwrap())
+        );
+        assert_eq!(rejected.toolchain_identity_sha256(), expected_producer);
+        let CertifiedDeclarationJoin::Accepted(accepted) = certify_declaration_join(
+            input,
+            &context,
+            &[source_root.path().to_path_buf()],
+            source_root.path(),
+        )
+        .unwrap() else {
+            panic!("expected accepted owned join")
+        };
+        assert_eq!(accepted.request_sha256(), expected_request);
+        assert_eq!(accepted.expected_public_version(), "paired-public-version");
+        assert_eq!(accepted.toolchain_identity_sha256(), expected_producer);
+        assert!(!accepted.package_imports_bytes().is_empty());
+        drop(worker_root);
+        drop(source_root);
+        let durable = tempfile::tempdir().unwrap();
+        let stored = accepted.materialize(durable.path()).unwrap();
+        let verified =
+            crate::recovery_artifacts::verify_materialized_join(durable.path(), &stored.join)
+                .unwrap();
+        assert_eq!(verified.interface_bytes, accepted.interface_bytes());
+        let lexical = vec![ExactLexicalNode {
+            owner: ExactModuleIdentity {
+                unit: owner.unit,
+                module: joined_module,
+            },
+            imports: Vec::new(),
+        }];
+        let recovered = ExactDeclarationContext::capture_recovery(
+            durable.path(),
+            &stored.products,
+            &[stored.join],
+            lexical.clone(),
+        )
+        .unwrap();
+        assert_eq!(recovered.toolchain_identity_sha256(), expected_producer);
+        let extended = recovered
+            .extend(&[certificate], &[Arc::new(accepted)], lexical)
+            .unwrap();
+        let next_worker = tempfile::tempdir().unwrap();
+        let exact = extended.materialize(next_worker.path()).unwrap();
+        extended.validate_artifacts(&exact.artifacts).unwrap();
+        let mut corrupted = exact.artifacts.clone();
+        corrupted.pop();
+        assert!(extended.validate_artifacts(&corrupted).is_err());
+        let artifact = &exact.artifacts[0];
+        std::fs::write(&artifact.interface.path, b"changed").unwrap();
+        assert!(extended.validate_artifacts(&exact.artifacts).is_err());
     }
 }
