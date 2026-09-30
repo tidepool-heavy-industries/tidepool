@@ -9,19 +9,28 @@
 //! this crate depends on, not the reverse.
 
 use crate::session::SessionError;
+use crate::session::prepared::PreparedFailureStage;
 use crate::{CompileError, RuntimeError};
 
-pub use tidepool_toolchain::failclass::{classify_compile, FailureClass, FailureEnvelope, Phase};
+pub use tidepool_toolchain::failclass::{FailureClass, FailureEnvelope, Phase, classify_compile};
 
 /// Dispatch [`classify_compile`] over the unified [`RuntimeError`]: a JIT error
-/// is always a run-phase runtime failure; a compile error defers to the one
+/// is a run-phase runtime failure, while a prepared error keeps the stage
+/// recorded by its owning operation. Compile errors defer to the one
 /// classifier above.
 #[must_use]
 pub fn classify(err: &RuntimeError) -> FailureEnvelope {
     match err {
         RuntimeError::Compile(c) => classify_compile(c),
-        RuntimeError::Jit(_) | RuntimeError::Prepared(_) => {
+        RuntimeError::Jit(_) => {
             FailureEnvelope::new(FailureClass::Runtime, Phase::Run, err.to_string())
+        }
+        RuntimeError::Prepared(prepared) => {
+            let phase = match prepared.stage() {
+                PreparedFailureStage::Install => Phase::Install,
+                PreparedFailureStage::Run => Phase::Run,
+            };
+            FailureEnvelope::new(FailureClass::Runtime, phase, err.to_string())
         }
     }
 }
@@ -80,7 +89,11 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::PreparedRuntimeError;
     use std::path::PathBuf;
+    use tidepool_codegen::prepared_program::{
+        CompileError as PreparedCompileError, ExecutionError,
+    };
     use tidepool_repr::serial::ReadError;
 
     /// The session decl lane agrees with the eval lane: an unparseable
@@ -137,5 +150,29 @@ mod tests {
             SessionError::Compile(CompileError::Asks(_))
         ));
         assert_eq!(classify_session(&asks).class, FailureClass::VersionSkew);
+    }
+
+    #[test]
+    fn prepared_install_failures_keep_install_phase() {
+        let compile = RuntimeError::Prepared(PreparedRuntimeError::Compile(
+            PreparedCompileError::RootBlock,
+        ));
+        let env = classify(&compile);
+        assert_eq!(env.class, FailureClass::Runtime);
+        assert_eq!(env.phase, Phase::Install);
+
+        let install =
+            RuntimeError::Prepared(PreparedRuntimeError::Install(ExecutionError::NotQuiescent));
+        let env = classify(&install);
+        assert_eq!(env.class, FailureClass::Runtime);
+        assert_eq!(env.phase, Phase::Install);
+    }
+
+    #[test]
+    fn prepared_execution_failures_keep_run_phase() {
+        let err = RuntimeError::Prepared(PreparedRuntimeError::Run(ExecutionError::NotQuiescent));
+        let env = classify(&err);
+        assert_eq!(env.class, FailureClass::Runtime);
+        assert_eq!(env.phase, Phase::Run);
     }
 }
