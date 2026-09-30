@@ -481,6 +481,45 @@ pub fn log_module_timings(modules: &[(String, u64)]) {
     }
 }
 
+/// Keep the worker's bounded interface I/O counters observable for direct
+/// submissions as well as daemon requests. Other stderr remains private to
+/// the owning diagnostic result; these counters never affect compilation.
+pub fn log_interface_counts(stderr: &[u8]) {
+    if std::env::var(TIMING_ENV).as_deref() != Ok("1") {
+        return;
+    }
+    for (name, count) in interface_counts(&String::from_utf8_lossy(stderr)) {
+        eprintln!("tidepool-count name={name} count={count}");
+    }
+}
+
+fn interface_counts(stderr: &str) -> impl Iterator<Item = (&str, u64)> {
+    stderr.lines().filter_map(|line| {
+        let rest = line.strip_prefix("tidepool-count name=")?;
+        let (name, count) = rest.split_once(" count=")?;
+        if name.len() > 512
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_'))
+            || ![
+                "exact_iface_read_calls.",
+                "exact_iface_read_bytes.",
+                "exact_iface_capture_write_bytes.",
+                "exact_iface_decode_reads.",
+                "session_iface_decode_reads.",
+            ]
+            .iter()
+            .any(|prefix| {
+                name.strip_prefix(prefix)
+                    .is_some_and(|owner| !owner.is_empty())
+            })
+        {
+            return None;
+        }
+        Some((name, count.parse().ok()?))
+    })
+}
+
 /// Log a parsed [`CompileSummary`] at INFO — the one place this crate emits
 /// compile attribution without requiring `TIDEPOOL_TIMING` or a `debug`-level
 /// subscriber filter. Called once per fresh (non-memo-hit) extract spawn.
@@ -513,6 +552,31 @@ pub fn log_compile_summary(summary: &CompileSummary) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interface_counts_retain_only_closed_bounded_counter_lines() {
+        let stderr = "private source diagnostic\n\
+tidepool-count name=exact_iface_read_calls.Tidepool.Session.Val.G1 count=1\n\
+tidepool-count name=exact_iface_read_bytes.Tidepool.Session.Val.G1 count=191\n\
+tidepool-count name=unknown.private count=42\n\
+tidepool-count name=exact_iface_read_bytes. count=42\n\
+tidepool-count name=exact_iface_read_bytes.Owner count=-1\n\
+tidepool-count name=exact_iface_read_bytes.Owner count=18446744073709551616\n\
+tidepool-count name=exact_iface_read_bytes.Owner count=1 private-source\n";
+        assert_eq!(
+            interface_counts(stderr).collect::<Vec<_>>(),
+            [
+                ("exact_iface_read_calls.Tidepool.Session.Val.G1", 1),
+                ("exact_iface_read_bytes.Tidepool.Session.Val.G1", 191)
+            ]
+        );
+        assert!(interface_counts(&format!(
+            "tidepool-count name=exact_iface_read_bytes.{} count=1",
+            "A".repeat(512)
+        ))
+        .next()
+        .is_none());
+    }
 
     #[test]
     fn render_node_renders_no_node_as_bootstrap_not_u64_max() {

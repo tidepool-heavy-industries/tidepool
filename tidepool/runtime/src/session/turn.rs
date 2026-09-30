@@ -2743,6 +2743,7 @@ fn check_cell_impl(
     crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
     let run = endpoint.execute(&cmd).map_err(map_notfound)?;
     let output = &run.output;
+    timing::log_interface_counts(&output.stderr);
     let report =
         match crate::diag::decode_extract_result(run.success(), &output.stdout, &output.stderr) {
             Ok(report) => report,
@@ -3296,6 +3297,7 @@ fn run_turn_with_pin(
         0,
     );
     let output = &run.output;
+    timing::log_interface_counts(&output.stderr);
     let stderr = run.stderr_lossy();
     // A failed compile is still a real spawn — attribute its extract phases
     // the same as a successful one, before the early return below.
