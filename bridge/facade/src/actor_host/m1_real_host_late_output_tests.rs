@@ -337,7 +337,11 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
         .expect("provider dropped late-output request");
     let outputs = output_for_call(&late_request).collect::<Vec<_>>();
     assert_eq!(outputs.len(), 1, "late output must be retained once");
-    assert!(outputs[0].0.to_string().contains("42"));
+    assert!(
+        cell_output_matches(outputs[0], CELL_CALL_ID, "42"),
+        "late output must retain the completed cell's exact committed value: {:?}",
+        outputs[0],
+    );
     let claims = host
         .runtime
         .store()
