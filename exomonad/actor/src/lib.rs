@@ -74,7 +74,7 @@ pub use conversation::{ConversationFuture, ConversationReader, ConversationUnava
 // installs one has to be able to name what it yields. `ActorRole` and
 // `EffectiveRole` are this crate's own; a conversation's speaker is the
 // provider's, hence the alias.
-pub use descriptor::ActorDescriptor;
+pub use descriptor::{ActorDescriptor, ActorPersistencePolicy};
 pub use exomonad_model::{ConversationTurn, Role as ConversationRole, TurnItem};
 pub use external_application::{
     ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,

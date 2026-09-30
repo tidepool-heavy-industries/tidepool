@@ -5,6 +5,15 @@ use crate::{
     EffectiveRole,
 };
 
+/// The host or lineage owner chooses persistence independently of actor names
+/// and paths. Durable actors require an initialized public surface before use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ActorPersistencePolicy {
+    #[default]
+    Ephemeral,
+    Durable,
+}
+
 /// Immutable execution attributes selected before an actor is spawned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorDescriptor {
@@ -19,6 +28,7 @@ pub struct ActorDescriptor {
     supervisor_parent: Option<ActorRef>,
     context_parent: Option<ActorRef>,
     actor_path: Option<tidepool_repr::ActorPath>,
+    persistence_policy: ActorPersistencePolicy,
     fork_group: Option<crate::ForkGroupId>,
     fork_effort: Option<crate::ForkEffort>,
     model: Option<crate::Model>,
@@ -44,6 +54,7 @@ impl ActorDescriptor {
             supervisor_parent: None,
             context_parent: None,
             actor_path: None,
+            persistence_policy: ActorPersistencePolicy::Ephemeral,
             fork_group: None,
             fork_effort: None,
             model: None,
@@ -58,6 +69,17 @@ impl ActorDescriptor {
     #[must_use]
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    #[must_use]
+    pub fn persistence_policy(&self) -> ActorPersistencePolicy {
+        self.persistence_policy
+    }
+
+    #[must_use]
+    pub fn with_persistence_policy(mut self, policy: ActorPersistencePolicy) -> Self {
+        self.persistence_policy = policy;
+        self
     }
 
     #[must_use]
