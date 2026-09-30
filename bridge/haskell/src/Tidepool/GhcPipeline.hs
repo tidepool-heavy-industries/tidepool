@@ -183,6 +183,7 @@ data PipelineSelection result where
   PreparedStg :: PipelineSelection PreparedPipelineResult
   PreparedProducts :: Maybe FilePath -> PipelineSelection PreparedPipelineResult
   CheckedEnvironment :: PipelineSelection CheckedEnvironmentResult
+  CheckedEnvironmentProducts :: FilePath -> PipelineSelection CheckedEnvironmentResult
 
 data PreparationKind = CheckOnly | PrepareStg
 
@@ -253,6 +254,7 @@ selectionKind :: PipelineSelection result -> PreparationKind
 selectionKind PreparedStg = PrepareStg
 selectionKind (PreparedProducts _) = PrepareStg
 selectionKind CheckedEnvironment = CheckOnly
+selectionKind (CheckedEnvironmentProducts _) = CheckOnly
 
 capturesProductInterfaces :: PipelineSelection result -> Bool
 capturesProductInterfaces (PreparedProducts _) = True
@@ -1309,13 +1311,16 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
         captureProducts = capturesProductInterfaces selection
         candidateManifest = case selection of
           PreparedProducts candidatePath -> candidatePath
+          CheckedEnvironmentProducts candidatePath -> Just candidatePath
           _ -> Nothing
         exactCycle = isJust candidateManifest || isJust (pvExactScope variant)
         -- An exact hydration transaction cannot borrow mutable interface or
         -- Core memo state from a preceding lexical environment.
         mCache = if exactCycle then Nothing else mCacheInput
         mMemoRef = if exactCycle then Nothing else mMemoRefInput
-    when (isJust candidateManifest && isJust (pvExactScope variant)) $
+    when (isJust candidateManifest && maybe False (\scope ->
+        not (null (scopeInterfaces scope) && null (scopeProducts scope) && null (scopeLexical scope)))
+        (pvExactScope variant)) $
       liftIO $ ioError $ userError "ordinary source candidates cannot accompany exact declaration owners"
     when exactCycle $ do
       current <- getSession
@@ -1432,8 +1437,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           ms { ms_hspp_opts = canonicalizeRepresentationFlags (ms_hspp_opts ms) }
     targetName <- liftIO (targetModuleNameFor path)
     let plannedLoadGraph = cpLoadGraph plan
-        (loadGraph, loadHowMuch) = case selection of
-          CheckedEnvironment ->
+        (loadGraph, loadHowMuch) = case preparation of
+          CheckOnly ->
             -- Keep the graph intact and ask GHC for the target's dependencies.
             -- Removing the source node by hand also invalidates its hs-boot
             -- cycle; LoadDependenciesOf retains the boot interface without
@@ -1456,7 +1461,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
     -- else. FLAT — see 'ghc_setup' above; the two rows partition the work,
     -- they do not nest inside each other.
     liftIO (emitPhase timing "ghc_load" (elapsedMs loadT0 loadT1))
-    when (timing && case selection of CheckedEnvironment -> True; _ -> False) $ do
+    when (timing && case preparation of CheckOnly -> True; _ -> False) $ do
       loadedEnv <- getSession
       forM_ (mgModSummaries' loadGraph) $ \node -> case node of
           ModuleNode _ summary
@@ -2266,6 +2271,102 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 | (observation, facts) <- zip observations moduleFacts
                 , case observation of HydratedObservation _ _ -> False; _ -> True]
           pure (pipelineResult, preparedModules, dependencies, productInterfaces, packageRoots)
+    let compileChecked :: Ghc CheckedEnvironmentResult
+        compileChecked = do
+          -- load' may need executable dependencies for TH; it never sees the
+          -- metadata target. Restore the full graph for instance visibility.
+          environment <- getSession
+          when (isNothing (pvExactScope variant)) $
+            setSession environment { hsc_mod_graph = modGraphRaw }
+          -- The list is topologically ordered, so only an unprocessed source
+          -- module can consume an interface we build here. Completed modules no
+          -- longer consult the HPT, while the returned target environment owns
+          -- its types and reader scope directly.
+          checkedFactsRef <- liftIO (newIORef [])
+          checked <- forM (zip summaries (homeInterfaceConsumers summaries)) $ \(summary, laterConsumers) -> do
+            cpBeforeModule plan summary
+            current <- getSession
+            let isTarget = ms_mod_name summary == targetName
+                loaded = lookupHpt (hsc_HPT current) (ms_mod_name summary)
+            if not isTarget && not (isNothing loaded)
+                && (isNothing (pvExactScope variant) || ms_mod_name summary `Map.member` acceptedCandidates)
+              then do
+                forM_ loaded $ \hmi -> do
+                  facts <- liftIO (observationFacts (HydratedObservation summary hmi))
+                  liftIO (modifyIORef' checkedFactsRef ((ms_mod_name summary, facts) :))
+                pure Nothing
+              else do
+                liftIO $ hPutStrLn stderr $
+                  "tidepool-checked module=" ++ moduleNameString (ms_mod_name summary)
+                    ++ " target=" ++ show isTarget
+                parsed <- parseModule summary
+                origins <- liftIO (classifyQuasiQuoteOrigins current parsed)
+                transformed <- liftIO (pvTransformParsed variant current summary parsed)
+                typed <- typecheckModule transformed
+                familyEnvironment <- getSession
+                liftIO (validateCompilationFamilies familyEnvironment (fst (tm_internals_ typed)))
+                let tcg = fst (tm_internals_ typed)
+                    inspectionProbes = capturedInspectionProbes typed tcg
+                    retainInterface reason = do
+                      -- A later source module's normal home import resolves via
+                      -- this HPT entry. A source-less Val interface injected before
+                      -- a later module can also mention an earlier generated Lib
+                      -- without importing it from source. SOURCE imports keep using
+                      -- the boot iface installed by GHC's load phase, and no returned
+                      -- metadata consumer reads the target back through HPT.
+                      env <- scopeRetainedHscEnv (ms_mod summary) <$> getSession
+                      details <- liftIO (mkBootModDetailsTc (hsc_logger env) tcg)
+                      (iface, _ifaceMs) <- liftIO $ measureModuleInterface timing requestIdentity
+                        (moduleNameString (ms_mod_name summary)) CheckedEnvironmentInterface HptMiss $
+                          mkIfaceTc env Sf_None details summary Nothing tcg
+                      let hmi = HomeModInfo iface details emptyHomeModInfoLinkable
+                      setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name summary) hmi) env)
+                      when timing $ liftIO $ hPutStrLn stderr $
+                        "tidepool-checked-interface-retained module="
+                          ++ moduleNameString (ms_mod_name summary) ++ reason
+                dependentFiles <- liftIO (readIORef (tcg_dependent_files tcg))
+                liftIO (modifyIORef' checkedFactsRef ((ms_mod_name summary, ModuleFacts
+                  { moduleFactTyCons = typeEnvTyCons (tcg_type_env tcg)
+                  , moduleFactReferences = Set.empty
+                  , moduleFactPackageRoots = []
+                  , moduleFactHasDependentFiles = not (null dependentFiles)
+                  , moduleFactQuasiQuoteOrigins = origins }) :))
+                case homeInterfaceUse summary laterConsumers of
+                  HomeInterfaceLeaf -> when timing $ liftIO $ hPutStrLn stderr $
+                    "tidepool-checked-interface-elided module="
+                      ++ moduleNameString (ms_mod_name summary)
+                      ++ " reason=no-later-home-importer"
+                  HomeInterfaceNeededBy consumer ->
+                    retainInterface (" consumer=" ++ moduleNameString consumer)
+                  HomeInterfaceNeededForSessionInjection ->
+                    retainInterface " reason=session-value-interface"
+                pure (if isTarget then Just (tcg, inspectionProbes) else Nothing)
+          errors <- liftIO (nub . reverse <$> readIORef errorRef)
+          warnings <- liftIO (nub . reverse <$> readIORef warnRef)
+          cpBeforeMerge plan loadFlag errors
+          case [(tcg, probes) | Just (tcg, probes) <- checked] of
+            [(tcg, probes)] -> do
+              env <- getSession
+              valid <- liftIO (revalidateAcceptedCandidates (Map.elems acceptedCandidates))
+              unless valid $ liftIO $ ioError $ userError
+                "accepted metadata candidate changed before checked receipt"
+              forM_ exactCompilation $ \compilation -> do
+                captured <- liftIO (captureDependencySources modGraphRaw)
+                facts <- liftIO (readIORef checkedFactsRef)
+                evidence <- liftIO (dependencyEvidenceFor env captured freshGraph facts)
+                verified <- liftIO (revalidateExactScope env (compilationScope compilation))
+                either (liftIO . ioError . userError) pure verified
+                liftIO (writeExactCompilation compilation evidence)
+              pure CheckedEnvironmentResult
+                { crHscEnv = cpFinalEnv plan env
+                , crTargetTcGblEnv = tcg
+                , crTargetRdrEnv = tcg_rdr_env tcg
+                , crInspectionProbes = probes
+                , crResultType = foldr (<|>) Nothing [capturedBindingType name tcg | name <- cpResultBinders plan]
+                , crCheckedBinderPins = capturedCellBinderPins (cpFinalEnv plan env) tcg
+                , crWarnings = map snd warnings
+                }
+            _ -> liftIO $ ioError $ userError "metadata target missing from checked module graph"
     case selection of
       PreparedStg -> do
         (result, modules, dependencies, productInterfaces, packageRoots) <- compileExecutable
@@ -2292,93 +2393,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           , pprAcceptedCandidates = Map.elems acceptedCandidates
           , pprExactCompilation = exactCompilation
           }
-      CheckedEnvironment -> do
-        -- load' may need executable dependencies for TH; it never sees the
-        -- metadata target. Restore the full graph for instance visibility.
-        environment <- getSession
-        when (isNothing (pvExactScope variant)) $
-          setSession environment { hsc_mod_graph = modGraphRaw }
-        -- The list is topologically ordered, so only an unprocessed source
-        -- module can consume an interface we build here. Completed modules no
-        -- longer consult the HPT, while the returned target environment owns
-        -- its types and reader scope directly.
-        checkedFactsRef <- liftIO (newIORef [])
-        checked <- forM (zip summaries (homeInterfaceConsumers summaries)) $ \(summary, laterConsumers) -> do
-          cpBeforeModule plan summary
-          current <- getSession
-          let isTarget = ms_mod_name summary == targetName
-              loaded = lookupHpt (hsc_HPT current) (ms_mod_name summary)
-          if not isTarget && not (isNothing loaded) && isNothing (pvExactScope variant)
-            then pure Nothing
-            else do
-              liftIO $ hPutStrLn stderr $
-                "tidepool-checked module=" ++ moduleNameString (ms_mod_name summary)
-                  ++ " target=" ++ show isTarget
-              parsed <- parseModule summary
-              origins <- liftIO (classifyQuasiQuoteOrigins current parsed)
-              transformed <- liftIO (pvTransformParsed variant current summary parsed)
-              typed <- typecheckModule transformed
-              familyEnvironment <- getSession
-              liftIO (validateCompilationFamilies familyEnvironment (fst (tm_internals_ typed)))
-              let tcg = fst (tm_internals_ typed)
-                  inspectionProbes = capturedInspectionProbes typed tcg
-                  retainInterface reason = do
-                    -- A later source module's normal home import resolves via
-                    -- this HPT entry. A source-less Val interface injected before
-                    -- a later module can also mention an earlier generated Lib
-                    -- without importing it from source. SOURCE imports keep using
-                    -- the boot iface installed by GHC's load phase, and no returned
-                    -- metadata consumer reads the target back through HPT.
-                    env <- scopeRetainedHscEnv (ms_mod summary) <$> getSession
-                    details <- liftIO (mkBootModDetailsTc (hsc_logger env) tcg)
-                    (iface, _ifaceMs) <- liftIO $ measureModuleInterface timing requestIdentity
-                      (moduleNameString (ms_mod_name summary)) CheckedEnvironmentInterface HptMiss $
-                        mkIfaceTc env Sf_None details summary Nothing tcg
-                    let hmi = HomeModInfo iface details emptyHomeModInfoLinkable
-                    setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name summary) hmi) env)
-                    when timing $ liftIO $ hPutStrLn stderr $
-                      "tidepool-checked-interface-retained module="
-                        ++ moduleNameString (ms_mod_name summary) ++ reason
-              dependentFiles <- liftIO (readIORef (tcg_dependent_files tcg))
-              liftIO (modifyIORef' checkedFactsRef ((ms_mod_name summary, ModuleFacts
-                { moduleFactTyCons = typeEnvTyCons (tcg_type_env tcg)
-                , moduleFactReferences = Set.empty
-                , moduleFactPackageRoots = []
-                , moduleFactHasDependentFiles = not (null dependentFiles)
-                , moduleFactQuasiQuoteOrigins = origins }) :))
-              case homeInterfaceUse summary laterConsumers of
-                HomeInterfaceLeaf -> when timing $ liftIO $ hPutStrLn stderr $
-                  "tidepool-checked-interface-elided module="
-                    ++ moduleNameString (ms_mod_name summary)
-                    ++ " reason=no-later-home-importer"
-                HomeInterfaceNeededBy consumer ->
-                  retainInterface (" consumer=" ++ moduleNameString consumer)
-                HomeInterfaceNeededForSessionInjection ->
-                  retainInterface " reason=session-value-interface"
-              pure (if isTarget then Just (tcg, inspectionProbes) else Nothing)
-        errors <- liftIO (nub . reverse <$> readIORef errorRef)
-        warnings <- liftIO (nub . reverse <$> readIORef warnRef)
-        cpBeforeMerge plan loadFlag errors
-        case [(tcg, probes) | Just (tcg, probes) <- checked] of
-          [(tcg, probes)] -> do
-            env <- getSession
-            forM_ exactCompilation $ \compilation -> do
-              captured <- liftIO (captureDependencySources modGraphRaw)
-              facts <- liftIO (readIORef checkedFactsRef)
-              evidence <- liftIO (dependencyEvidenceFor env captured freshGraph facts)
-              verified <- liftIO (revalidateExactScope env (compilationScope compilation))
-              either (liftIO . ioError . userError) pure verified
-              liftIO (writeExactCompilation compilation evidence)
-            pure CheckedEnvironmentResult
-              { crHscEnv = cpFinalEnv plan env
-              , crTargetTcGblEnv = tcg
-              , crTargetRdrEnv = tcg_rdr_env tcg
-              , crInspectionProbes = probes
-              , crResultType = foldr (<|>) Nothing [capturedBindingType name tcg | name <- cpResultBinders plan]
-              , crCheckedBinderPins = capturedCellBinderPins (cpFinalEnv plan env) tcg
-              , crWarnings = map snd warnings
-              }
-          _ -> liftIO $ ioError $ userError "metadata target missing from checked module graph"
+      CheckedEnvironment -> compileChecked
+      CheckedEnvironmentProducts _ -> compileChecked
 
 -- | Hash every source and compare it with the fingerprint captured by GHC's
 -- downsweep. A mismatch makes the evidence incomplete; publication re-hashes

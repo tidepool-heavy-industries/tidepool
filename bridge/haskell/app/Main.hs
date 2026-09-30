@@ -1112,6 +1112,8 @@ runCellMode compiler caches args cellPath = do
             Just <$> prepareOriginalCellDeclaration compiler caches args template outDir scope exact admission initialPlan
       _ -> pure Nothing
     let checkPurpose = maybe GeneralCompile (\(_,_,inventory,exact) -> PlannedDeclarationCheck inventory exact) preparedDeclaration
+        checkedSelection = if isJust preparedDeclaration then CheckedEnvironment else
+          maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args)
         checkPlan plan = maybe plan (\(_,planned,_,_) -> plannedCheckPlan planned) preparedDeclaration
     (analyzed, provisional) <- checkCellInstances (\plan -> do
       let effective = checkPlan plan
@@ -1120,7 +1122,7 @@ runCellMode compiler caches args cellPath = do
       -- Preserve the latest plan for failure diagnostics without encoding and
       -- writing a provisional result before every successful check attempt.
       writeIORef provisionalOutput (Just (out, plan, rendered))
-      compiler CheckedEnvironment Set.empty checkPurpose scope modulePath (requestIncludes args) (requestBuildProductsDir args))
+      compiler checkedSelection Set.empty checkPurpose scope modulePath (requestIncludes args) (requestBuildProductsDir args))
         (maybe initialPlan (\(plan,_,_,_) -> plan) preparedDeclaration)
     checkedSource <- either fail pure (renderCellCheckSource template (checkPlan analyzed))
     (finalPlan, finalSource, compiled) <- if isJust preparedDeclaration || null (cellPlanDisplayTargets analyzed)
@@ -1130,12 +1132,12 @@ runCellMode compiler caches args cellPath = do
         let contextual = installCellDisplayDeclarations contextDeclarations analyzed
         contextualSource <- either fail pure (renderCellCheckSource template contextual)
         writeFile modulePath contextualSource
-        contextChecked <- compiler CheckedEnvironment Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
+        contextChecked <- compiler (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args)) Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
         declarations <- cellDisplayDeclarations DisplayInstanceFields contextChecked analyzed
         let finalized = installCellDisplayDeclarations declarations analyzed
         finalizedSource <- either fail pure (renderCellCheckSource template finalized)
         writeFile modulePath finalizedSource
-        finalizedResult <- compiler CheckedEnvironment Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
+        finalizedResult <- compiler (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args)) Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
         pure (finalized, finalizedSource, finalizedResult)
     -- Statement preparation checks these rendered pins in their actual value
     -- modules before any declaration commits or effect runs.

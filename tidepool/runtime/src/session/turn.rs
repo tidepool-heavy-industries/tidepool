@@ -2692,7 +2692,7 @@ fn check_cell_impl(
     if let Some(manifest) = offer.exact_scope_path() {
         cmd.session_artifacts(manifest);
     }
-    if let (Some(_), Some(manifest)) = (&fold, offer.manifest_path()) {
+    if let Some(manifest) = offer.manifest_path() {
         cmd.module_candidates(manifest);
     }
     crate::paths::apply_build_products_dir(&mut cmd, &endpoint);

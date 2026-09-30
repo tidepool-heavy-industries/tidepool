@@ -277,6 +277,24 @@ fn checked_offer_context(
     }
 }
 
+fn empty_exact_context(context: &crate::declaration_join::ExactDeclarationContext) -> bool {
+    context.recovery_products().is_empty()
+        && context.joined_interfaces().is_empty()
+        && context.lexical_graph().is_empty()
+        && context.interface_owners().is_empty()
+}
+
+fn immutable_candidates_in_context(
+    context: &crate::declaration_join::ExactDeclarationContext,
+    producer: &[u8],
+    include: &[PathBuf],
+    scratch: &Path,
+) -> Option<module_candidates::CandidateSet> {
+    empty_exact_context(context)
+        .then(|| module_candidates::select(producer, include, scratch))
+        .flatten()
+}
+
 impl ModuleCandidateOffer {
     pub fn select(producer: &[u8], include: &[PathBuf], scratch: &Path) -> Self {
         Self {
@@ -317,7 +335,7 @@ impl ModuleCandidateOffer {
         let authorization = specification.manifest_value()?;
         let context = checked_offer_context(context)?;
         Ok(Self {
-            selected: None,
+            selected: immutable_candidates_in_context(&context, producer, include, scratch),
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation_with_authorization(
@@ -355,7 +373,7 @@ impl ModuleCandidateOffer {
         checked_item.validate_include(include)?;
         let authorization = checked_item.authorization(producer, context.semantic_sha256())?;
         Ok(Self {
-            selected: None,
+            selected: immutable_candidates_in_context(&context, producer, include, scratch),
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation_with_authorization(
@@ -397,7 +415,7 @@ impl ModuleCandidateOffer {
         };
         let authorization = display.authorization(producer, context.semantic_sha256())?;
         Ok(Self {
-            selected: None,
+            selected: immutable_candidates_in_context(&context, producer, include, scratch),
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation_with_authorization(
@@ -781,7 +799,11 @@ pub fn seal_turn_outputs(
     let package_interfaces =
         certified_products::certify_target_package_interfaces(prepared, &package_closure)
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-    if offer.exact.is_none() {
+    if offer
+        .exact
+        .as_ref()
+        .is_none_or(|exact| empty_exact_context(&exact.context))
+    {
         module_candidates::publish(
             &offer.producer,
             &offer.include,
