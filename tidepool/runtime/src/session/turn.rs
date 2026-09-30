@@ -4907,12 +4907,14 @@ mod tests {
             }
             let execution = Arc::new(session.begin_private_execution(public).unwrap());
             let view = execution.view();
-            let imports = view.turn_imports(&crate::session::SourceImports::new());
+            let imports = view.turn_imports(&crate::session::SourceImports::from_specs([
+                "qualified CheckedTiny",
+            ]));
             let template =
                 resident_cell_check_template(effects.preamble(), effects.row(), &imports);
             let templates =
                 resident_workbench_templates(effects.preamble(), effects.row(), &imports);
-            let source = "import qualified CheckedTiny\nlet tiny = CheckedTiny.tinyValue";
+            let source = "let tiny = CheckedTiny.tinyValue";
             let specification = CheckedCellSpecification {
                 admission_digest: [0; 32],
                 cell_source: source.into(),
