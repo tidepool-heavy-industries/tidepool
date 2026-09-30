@@ -16,6 +16,7 @@ extra-source-files:
   test-cell-splitter/fixtures/declaration-join/*/*.hs
   test-source-boot/fixtures/*.hs
   test-source-boot/fixtures/*.hs-boot
+  test-planned-declaration/fixtures/*.hs
 
 -- Internal (unexposed) sub-library: the genuinely shared extractor
 -- implementation, compiled ONCE per configuration instead of once per
@@ -50,6 +51,7 @@ library tidepool-extract-internal
     Tidepool.Metadata
     Tidepool.ModuleCandidates
     Tidepool.OriginalProductRoots
+    Tidepool.PlannedDeclaration
     Tidepool.PackageWitness
     Tidepool.CertifiedProducts
     Tidepool.PrimOps
@@ -277,6 +279,19 @@ test-suite execution-corpus-projection
   default-language: GHC2024
   default-extensions: OverloadedStrings
   ghc-options:      -Wall
+
+test-suite planned-declaration-test
+  type:             exitcode-stdio-1.0
+  main-is:          Main.hs
+  hs-source-dirs:   test-planned-declaration
+  build-depends:
+    base >= 4.20 && < 5,
+    containers,
+    directory,
+    filepath,
+    tidepool-extract-internal
+  default-language: GHC2024
+  ghc-options: -Wall
 
 test-suite source-boot-product-reuse-test
   type:             exitcode-stdio-1.0

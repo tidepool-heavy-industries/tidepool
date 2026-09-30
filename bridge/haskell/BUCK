@@ -37,6 +37,7 @@ haskell_library(
         "Tidepool/CheckedCell.hs": "src/Tidepool/CheckedCell.hs",
         "Tidepool/CompileInputPolicy.hs": "src/Tidepool/CompileInputPolicy.hs",
         "Tidepool/PackageWitness.hs": "src/Tidepool/PackageWitness.hs",
+        "Tidepool/PlannedDeclaration.hs": "src/Tidepool/PlannedDeclaration.hs",
         "Tidepool/PrimOps.hs": "src/Tidepool/PrimOps.hs",
         "Tidepool/PreparedStg.hs": "src/Tidepool/PreparedStg.hs",
         "Tidepool/PreparedRecovery.hs": "src/Tidepool/PreparedRecovery.hs",
