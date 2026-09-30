@@ -1,16 +1,22 @@
 //! Prepare one complete workspace before deferred actor/native startup.
 
-use super::overlay_resource::{
-    selected_inventory, selected_manifest, SourceManifest, SourceSelection, SourceStamp,
-};
+#[cfg(feature = "codex-compat")]
+use super::overlay_resource::{selected_inventory, selected_manifest};
+use super::overlay_resource::{SourceManifest, SourceSelection, SourceStamp};
 use super::workspace_publication::WorkspacePublication;
 use super::*;
+#[cfg(feature = "codex-compat")]
+use exomonad_agent::InteractiveAgentBackend;
 use exomonad_node::MountNamespace;
-use exomonad_worktree::{PreparedSourceWorktree, WorktreeSource};
+use exomonad_worktree::PreparedSourceWorktree;
+#[cfg(feature = "codex-compat")]
+use exomonad_worktree::WorktreeSource;
 use std::ffi::OsString;
 use std::io;
 use tidepool_bridge_effects::WtWorktreeHandle;
+#[cfg(feature = "codex-compat")]
 use tidepool_handlers::handlers::worktree::{handle_to_wire, AuthorizedForkWorkspace};
+#[cfg(feature = "codex-compat")]
 use workspace_publication::Admission;
 
 const SOURCE_CAPTURE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -40,7 +46,9 @@ impl SourceFallback {
             Self::Unavailable(detail) => format!("source capture unavailable: {detail}"),
             Self::ImportFailed(detail) => format!("source import failed: {detail}"),
         };
-        format!("Working files were not inherited ({reason}). This checkout starts at the source's committed HEAD; build-cache inheritance is independent.")
+        format!(
+            "Working files were not inherited ({reason}). This checkout starts at the source's committed HEAD; build-cache inheritance is independent."
+        )
     }
 }
 
@@ -1221,7 +1229,7 @@ impl WorkspaceLayout {
                         })?)
                     }
                     exomonad_node::OverlayRotationOutcome::Unconfirmed(detail) => {
-                        return Err(io::Error::other(detail))
+                        return Err(io::Error::other(detail));
                     }
                     exomonad_node::OverlayRotationOutcome::Busy => Err(SourceFallback::Busy),
                     outcome => Err(SourceFallback::Unavailable(format!("{outcome:?}"))),
