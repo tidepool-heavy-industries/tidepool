@@ -389,7 +389,7 @@ impl DeclarationAdmission<DeclarationPlaneCommit> {
 }
 
 /// Exact public lexical view captured under one resident-machine checkout.
-/// The epoch is resident-session owned and distinct from compiler allocation
+/// The epoch is persistent-session owned and distinct from compiler allocation
 /// generations; the declaration tip and full binding identities also permit
 /// exact stale checks while concurrent publication is being introduced.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -397,6 +397,7 @@ pub struct PublicVisibilitySnapshot {
     pub scope: ScopeId,
     pub epoch: u64,
     pub declaration_tip: Generation,
+    pub machine_incarnation: Option<SessionId>,
     pub bindings: Vec<(String, SessionVarId)>,
     pub source_instances: Vec<SourceLeaseKey>,
 }
@@ -410,8 +411,8 @@ pub struct PublicManifestBase {
     public_scope: ScopeId,
     private_scope: ScopeId,
     write_ids: Vec<SessionVarId>,
-    expected_bindings: Vec<(String, SessionVarId)>,
-    expected_declaration_tip: Generation,
+    expected_public: PublicVisibilitySnapshot,
+    expected_private: PublicVisibilitySnapshot,
     final_bindings: Vec<(String, SessionVarId)>,
     graph: recovery::RecoveryGraph,
 }
@@ -425,8 +426,8 @@ pub struct StagedPublicManifest {
     public_scope: ScopeId,
     private_scope: ScopeId,
     write_ids: Vec<SessionVarId>,
-    expected_bindings: Vec<(String, SessionVarId)>,
-    expected_declaration_tip: Generation,
+    expected_public: PublicVisibilitySnapshot,
+    expected_private: PublicVisibilitySnapshot,
     base_checksum: String,
     base_high_water: Generation,
     staged: recovery::StagedRecoveryManifest,
@@ -492,8 +493,8 @@ impl PublicManifestBase {
             public_scope: self.public_scope,
             private_scope: self.private_scope,
             write_ids: self.write_ids,
-            expected_bindings: self.expected_bindings,
-            expected_declaration_tip: self.expected_declaration_tip,
+            expected_public: self.expected_public,
+            expected_private: self.expected_private,
             base_checksum: self.graph.checksum,
             base_high_water: self.graph.high_water,
             staged,
@@ -881,8 +882,8 @@ impl SessionLib {
         public_scope: ScopeId,
         private_scope: ScopeId,
         write_ids: Vec<SessionVarId>,
-        expected_bindings: Vec<(String, SessionVarId)>,
-        expected_declaration_tip: Generation,
+        expected_public: PublicVisibilitySnapshot,
+        expected_private: PublicVisibilitySnapshot,
         final_bindings: Vec<(String, SessionVarId)>,
     ) -> Result<PublicManifestBase, SessionError> {
         let state = self
@@ -904,8 +905,8 @@ impl SessionLib {
             public_scope,
             private_scope,
             write_ids,
-            expected_bindings,
-            expected_declaration_tip,
+            expected_public,
+            expected_private,
             final_bindings,
             graph: state.graph.clone(),
         })

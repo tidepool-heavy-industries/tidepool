@@ -1789,7 +1789,6 @@ pub struct ResidentSession<H, O> {
     /// merge + fragment-run primitives all live in the session state, shared with the
     /// repl's resident session.
     state: PersistentSession,
-    public_visibility_epochs: HashMap<ScopeId, u64>,
     /// The effect handler stack, borrowed by each turn's eval thread.
     handlers: H,
     /// The console-output buffer turns write into.
@@ -1844,7 +1843,6 @@ where
         let state = PersistentSession::new(lib, nursery_size);
         ResidentSession {
             state,
-            public_visibility_epochs: HashMap::new(),
             handlers,
             captured,
             cont_id_issuer: MonotonicIdIssuer::new("scont"),
@@ -1869,64 +1867,17 @@ where
     }
 
     fn advance_public_visibility(&mut self, scope: ScopeId) {
-        let epoch = self.public_visibility_epochs.entry(scope).or_default();
-        *epoch = epoch
-            .checked_add(1)
-            .expect("public visibility epoch exhausted");
+        self.state.advance_public_visibility(scope);
     }
 
-    fn finish_declaration_admission<T>(
-        &mut self,
-        scope: ScopeId,
-        outcome: Result<T, SessionError>,
-    ) -> Result<T, SessionError> {
-        if outcome.is_ok()
-            || outcome
-                .as_ref()
-                .is_err_and(|error| error.published_declaration_commit().is_some())
-        {
-            self.advance_public_visibility(scope);
-        }
-        outcome
-    }
-
-    /// Capture the actor's declaration, binding and source-instance view under
-    /// the caller's machine checkout. `epoch` is not a compiler generation;
-    /// exact identities remain the stale authority.
+    /// Capture the full declaration, binding and source-instance authority
+    /// under the caller's machine checkout. Model-visible filtering belongs
+    /// to [`Self::workbench_bindings_in`] and never changes this identity.
     pub fn public_visibility_snapshot_in(
         &self,
         scope: ScopeId,
     ) -> Option<super::PublicVisibilitySnapshot> {
-        if !self.state.scope_tree().is_live(scope) || !self.state.has_lib() {
-            return None;
-        }
-        let mut bindings: Vec<_> = self
-            .state
-            .bindings()
-            .iter_current_in(self.state.scope_tree(), scope)
-            .into_iter()
-            .filter(|(_, entry)| !self.hidden_host_bindings.contains_key(&entry.id))
-            .map(|(name, entry)| (name.0.clone(), entry.id))
-            .collect();
-        bindings.sort_by(|left, right| left.0.cmp(&right.0));
-        let mut source_instances: Vec<_> = self
-            .state
-            .bindings()
-            .source_instance_keys_in(self.state.scope_tree(), scope)
-            .into_iter()
-            .collect();
-        source_instances.sort();
-        Some(super::PublicVisibilitySnapshot {
-            scope,
-            epoch: self
-                .public_visibility_epochs
-                .get(&scope)
-                .copied()
-                .unwrap_or(0),
-            declaration_tip: self.state.lib().scope_tip(scope),
-            bindings,
-            source_instances,
-        })
+        self.state.public_visibility_snapshot_in(scope)
     }
 
     /// Publish the exact roots acquired by one native installation into the
@@ -2032,8 +1983,7 @@ where
         scope: ScopeId,
         decls: &[&str],
     ) -> Result<tidepool_repr::Generation, SessionError> {
-        let outcome = self.state.define_scoped_in(scope, decls);
-        self.finish_declaration_admission(scope, outcome)
+        self.state.define_scoped_in(scope, decls)
     }
 
     /// Commit declarations against frontend-owned imports without recording
@@ -2044,10 +1994,8 @@ where
         decls: &[&str],
         imports: &SourceImports,
     ) -> Result<tidepool_repr::Generation, SessionError> {
-        let outcome = self
-            .state
-            .define_scoped_with_imports_in(scope, decls, imports);
-        self.finish_declaration_admission(scope, outcome)
+        self.state
+            .define_scoped_with_imports_in(scope, decls, imports)
     }
 
     pub fn stage_declarations_in(
@@ -2085,19 +2033,15 @@ where
         receipt: &super::DeclarationReceipt,
         imports: &SourceImports,
     ) -> Result<super::DeclarationPlaneCommit, SessionError> {
-        let outcome = self
-            .state
-            .commit_declaration_receipt_in(scope, receipt, imports);
-        self.finish_declaration_admission(scope, outcome)
+        self.state
+            .commit_declaration_receipt_in(scope, receipt, imports)
     }
 
     pub fn adopt_staged_declaration_in(
         &mut self,
         staged: super::StagedDeclaration,
     ) -> Result<super::DeclarationPlaneCommit, SessionError> {
-        let scope = staged.scope();
-        let outcome = self.state.adopt_staged_declaration_in(staged);
-        self.finish_declaration_admission(scope, outcome)
+        self.state.adopt_staged_declaration_in(staged)
     }
 
     pub fn discard_staged_declaration(&self, staged: &super::StagedDeclaration) {
@@ -3973,6 +3917,7 @@ where
         let lexical_scope = self.run_context.lexical_scope;
         let snapshot = if let Some(certification) = code.certification.as_ref() {
             let admitted_public = self
+                .state
                 .public_visibility_snapshot_in(lexical_scope)
                 .ok_or(PreparedRuntimeError::SourceScopeAdmission)?;
             let resolved =
@@ -4049,7 +3994,10 @@ where
                 },
                 CompiledPreparedKind::Certified { target, demanded },
             ) => {
-                if self.public_visibility_snapshot_in(lexical_scope).as_ref()
+                if self
+                    .state
+                    .public_visibility_snapshot_in(lexical_scope)
+                    .as_ref()
                     != Some(&admitted_public)
                 {
                     return Ok(None);
@@ -4437,6 +4385,7 @@ where
         let lexical_scope = self.run_context.lexical_scope;
         let snapshot = if let Some(certification) = code.certification.as_ref() {
             let admitted_public = self
+                .state
                 .public_visibility_snapshot_in(lexical_scope)
                 .ok_or(PreparedRuntimeError::SourceScopeAdmission)?;
             let resolved =
@@ -4500,7 +4449,10 @@ where
                 },
                 CompiledPreparedKind::Certified { target, demanded },
             ) => {
-                if self.public_visibility_snapshot_in(lexical_scope).as_ref()
+                if self
+                    .state
+                    .public_visibility_snapshot_in(lexical_scope)
+                    .as_ref()
                     != Some(&admitted_public)
                 {
                     return Ok(None);
@@ -5554,6 +5506,119 @@ mod authored_publication_tests {
         session.state.mark_stub_generation(Generation(71));
         session.state.lib_mut().fail_authored_durability_once = true;
         session
+    }
+
+    #[test]
+    fn certified_install_fences_hidden_binding_replacement_in_both_paths() {
+        use crate::session::{resident_workbench_templates, run_turn, TurnRequest, TurnResult};
+        use tidepool_testing::effect_surface::TestEffectSurface;
+
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let effects = TestEffectSurface::minimal(&[]).unwrap();
+        let lib =
+            SessionLib::open(SessionId(992), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut session =
+            ResidentSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(lib));
+        let binding = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session.state,
+            "requestCarrier",
+            201,
+        );
+        let old_id = binding.id;
+        session.state.bind(binding);
+        session.hidden_host_bindings.insert(old_id, ());
+        let templates = resident_workbench_templates(effects.preamble(), effects.row(), "");
+        let mut includes = effects.include_paths().to_vec();
+        includes.push(root.path().to_path_buf());
+        let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        let TurnResult::Bind { bound, compiled, .. } = run_turn(TurnRequest {
+            session_id: None,
+            turn_text: "let (page, metadata, cellDisplay) = ((42 :: Int), (\"page\", False, False), (42 :: Int))",
+            templates: &templates,
+            include: &includes,
+            session_root: root.path(),
+            inject_modules: &[],
+            gen: 1,
+            verdict: None,
+            target: None,
+            retained_imports: &[],
+        }).unwrap() else {
+            panic!("expected compiler-owned display binders");
+        };
+        assert!(compiled.certification.is_some());
+        let page = bound.iter().find(|binder| binder.name == "page").unwrap();
+        let metadata = bound
+            .iter()
+            .find(|binder| binder.name == "metadata")
+            .unwrap();
+        let alias = bound
+            .iter()
+            .find(|binder| binder.name == "cellDisplay")
+            .unwrap();
+        let code = compiled.into_code();
+        let mut pending = session
+            .snapshot_run_prepared(code.clone(), PendingPreparedMode::Value, None)
+            .unwrap();
+        let mut display = session
+            .snapshot_display_bundle(code, page, metadata, alias, Generation(1))
+            .unwrap();
+        let compiled = pending.compile_off_checkout().unwrap();
+        let compiled_display = display.compile_off_checkout().unwrap();
+        let admitted = session
+            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .unwrap();
+        let internal = session
+            .state
+            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .unwrap();
+        assert_eq!(admitted, internal);
+        assert!(session.workbench_bindings_in(ScopeId::ROOT).is_empty());
+        assert_eq!(internal.bindings, vec![("requestCarrier".into(), old_id)]);
+        assert!(internal.machine_incarnation.is_some());
+
+        let replacement = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session.state,
+            "requestCarrier",
+            202,
+        );
+        let new_id = replacement.id;
+        session.state.bind(replacement);
+        session.hidden_host_bindings.insert(new_id, ());
+        // Exact identities fence low-level native updates independently of
+        // the displayed names or the notification epoch.
+        assert!(session.workbench_bindings_in(ScopeId::ROOT).is_empty());
+        let current = session
+            .state
+            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .unwrap();
+        assert_eq!(current.epoch, internal.epoch);
+        assert_eq!(current.machine_incarnation, internal.machine_incarnation);
+        assert_ne!(current.bindings, internal.bindings);
+        assert_eq!(
+            session
+                .public_visibility_snapshot_in(ScopeId::ROOT)
+                .unwrap(),
+            current
+        );
+        let residency = session.residency();
+        assert!(session
+            .revalidate_and_run_prepared(pending, compiled)
+            .unwrap()
+            .is_none());
+        assert!(session
+            .revalidate_and_run_display_bundle(display, compiled_display, page, alias)
+            .unwrap()
+            .is_none());
+        assert_eq!(session.residency(), residency);
+        assert_eq!(
+            session
+                .state
+                .resolve_in(ScopeId::ROOT, "requestCarrier")
+                .unwrap()
+                .id,
+            new_id
+        );
     }
 
     fn assert_published_and_confirm_only(

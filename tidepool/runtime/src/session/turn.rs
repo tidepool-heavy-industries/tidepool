@@ -2531,12 +2531,37 @@ fn run_turn_with_pin(
     {
         let attempted_source = std::fs::read_to_string(temp.path().join("turn-attempt.hs")).ok();
         return Err(TurnFailure {
-            error,
+            error: tidepool_toolchain::artifacts::retain_compiler_failure(
+                temp.path(),
+                &output.stderr,
+                error,
+            ),
             attempted_source,
         });
     }
 
-    decode_turn_output_dir(temp.path(), &offer).map_err(Into::into)
+    decode_turn_output_dir(temp.path(), &offer).map_err(|error| TurnFailure {
+        error: tidepool_toolchain::artifacts::retain_compiler_failure(
+            temp.path(),
+            &output.stderr,
+            match error {
+                CompileError::ExtractFailed(detail) if !stderr.trim().is_empty() => {
+                    CompileError::ExtractFailed(format!("{detail}\nworker stderr:\n{stderr}"))
+                }
+                other => other,
+            },
+        ),
+        attempted_source: std::fs::read_to_string(temp.path().join("turn-attempt.hs"))
+            .ok()
+            .or_else(|| {
+                let bytes = std::fs::read(temp.path().join("turn.cbor")).ok()?;
+                match decode_turn_out(&bytes).ok()? {
+                    DecodedTurnOut::Bind { wrapped_source, .. }
+                    | DecodedTurnOut::Expr { wrapped_source, .. } => Some(wrapped_source),
+                    DecodedTurnOut::Decl { .. } => None,
+                }
+            }),
+    })
 }
 
 /// Decode one item's full output directory into a [`TurnResult`]: the
