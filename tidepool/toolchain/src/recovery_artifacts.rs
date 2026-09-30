@@ -159,6 +159,14 @@ impl CertifiedJoinedInterface {
         self.toolchain_identity_sha256
     }
     pub fn materialize(&self, root: &Path) -> Result<RecoveryJoinRef, RecoveryArtifactError> {
+        self.materialize_with_validation(root, &mut PackageInterfaceValidation::default())
+    }
+
+    pub(crate) fn materialize_with_validation(
+        &self,
+        root: &Path,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<RecoveryJoinRef, RecoveryArtifactError> {
         materialize_owned_join(
             root,
             self.toolchain_identity_sha256,
@@ -166,6 +174,7 @@ impl CertifiedJoinedInterface {
             &self.module,
             &self.interface_bytes,
             &self.package_imports_bytes,
+            validation,
         )
     }
 }
@@ -225,6 +234,88 @@ const PACKAGE_IMPORT_ROOT_LIMIT: usize = 16_384;
 const PACKAGE_INTERFACE_LIMIT: u64 = 32 * 1024 * 1024;
 const CERTIFICATION_LIMIT: u64 = 4 * 1024 * 1024;
 
+// Captures belong to one validation stage, never to a later filesystem check.
+// Limit retained bytes without rejecting an otherwise valid large closure:
+// interfaces beyond the budget keep the existing read-and-verify behavior.
+const PACKAGE_VALIDATION_RETAIN_LIMIT: usize = 64 * 1024 * 1024;
+
+#[derive(Default)]
+pub(crate) struct PackageInterfaceValidation {
+    captured: BTreeMap<PathBuf, CapturedPackageInterface>,
+    retained_bytes: usize,
+}
+
+struct CapturedPackageInterface {
+    _bytes: Vec<u8>,
+    sha256: [u8; 32],
+}
+
+impl PackageInterfaceValidation {
+    pub(crate) fn verify(
+        &mut self,
+        path: &Path,
+        expected_sha256: &[u8; 32],
+    ) -> Result<(), RecoveryArtifactError> {
+        self.verify_with_budget(path, expected_sha256, PACKAGE_VALIDATION_RETAIN_LIMIT)
+    }
+
+    fn verify_with_budget(
+        &mut self,
+        path: &Path,
+        expected_sha256: &[u8; 32],
+        retain_limit: usize,
+    ) -> Result<(), RecoveryArtifactError> {
+        if !path.is_absolute() {
+            return Err(RecoveryArtifactError::InvalidPackageImports(
+                path.to_path_buf(),
+            ));
+        }
+        if let Some(captured) = self.captured.get(path) {
+            return if &captured.sha256 == expected_sha256 {
+                Ok(())
+            } else {
+                Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()))
+            };
+        }
+        let file = File::open(path).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                RecoveryArtifactError::Unavailable(path.to_path_buf())
+            } else {
+                RecoveryArtifactError::Io(error)
+            }
+        })?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.len() > PACKAGE_INTERFACE_LIMIT {
+            return Err(RecoveryArtifactError::InvalidPackageImports(
+                path.to_path_buf(),
+            ));
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
+        file.take(PACKAGE_INTERFACE_LIMIT + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > PACKAGE_INTERFACE_LIMIT {
+            return Err(RecoveryArtifactError::InvalidPackageImports(
+                path.to_path_buf(),
+            ));
+        }
+        let sha256 = Sha256::digest(&bytes).into();
+        if &sha256 != expected_sha256 {
+            return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
+        }
+        if bytes.len() <= retain_limit.saturating_sub(self.retained_bytes) {
+            self.retained_bytes += bytes.len();
+            self.captured.insert(
+                path.to_path_buf(),
+                CapturedPackageInterface {
+                    _bytes: bytes,
+                    sha256,
+                },
+            );
+        }
+        Ok(())
+    }
+}
+
 fn package_sidecar_path(interface_path: &Path) -> PathBuf {
     let mut path = interface_path.as_os_str().to_os_string();
     path.push(".packages");
@@ -268,6 +359,7 @@ fn read_certification(
     path: &Path,
     expected_sha256: Option<&[u8; 32]>,
     owner: &CachedHomeOwner,
+    validation: &mut PackageInterfaceValidation,
 ) -> Result<Vec<u8>, RecoveryArtifactError> {
     let metadata = fs::metadata(path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
@@ -298,8 +390,10 @@ fn read_certification(
             path.to_path_buf(),
         ));
     }
-    crate::certified_products::validate_home_certification(&bytes, owner)
-        .map_err(|_| RecoveryArtifactError::InvalidCertifiedOwners(path.to_path_buf()))?;
+    crate::certified_products::validate_home_certification_with_validation(
+        &bytes, owner, validation,
+    )
+    .map_err(|_| RecoveryArtifactError::InvalidCertifiedOwners(path.to_path_buf()))?;
     Ok(bytes)
 }
 
@@ -309,6 +403,7 @@ fn read_package_imports(
     unit: &str,
     module: &str,
     skinny_iface_sha256: &[u8; 32],
+    validation: &mut PackageInterfaceValidation,
 ) -> Result<Vec<u8>, RecoveryArtifactError> {
     let metadata = fs::metadata(path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
@@ -339,7 +434,14 @@ fn read_package_imports(
             return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
         }
     }
-    validate_package_imports(&bytes, unit, module, skinny_iface_sha256, path)?;
+    validate_package_imports_with_validation(
+        &bytes,
+        unit,
+        module,
+        skinny_iface_sha256,
+        path,
+        validation,
+    )?;
     Ok(bytes)
 }
 
@@ -349,6 +451,24 @@ pub(crate) fn validate_package_imports(
     module: &str,
     skinny_iface_sha256: &[u8; 32],
     sidecar_path: &Path,
+) -> Result<BTreeMap<(String, String), (PathBuf, String)>, RecoveryArtifactError> {
+    validate_package_imports_with_validation(
+        bytes,
+        unit,
+        module,
+        skinny_iface_sha256,
+        sidecar_path,
+        &mut PackageInterfaceValidation::default(),
+    )
+}
+
+pub(crate) fn validate_package_imports_with_validation(
+    bytes: &[u8],
+    unit: &str,
+    module: &str,
+    skinny_iface_sha256: &[u8; 32],
+    sidecar_path: &Path,
+    validation: &mut PackageInterfaceValidation,
 ) -> Result<BTreeMap<(String, String), (PathBuf, String)>, RecoveryArtifactError> {
     use ciborium::value::Value;
 
@@ -422,40 +542,26 @@ pub(crate) fn validate_package_imports(
         {
             return Err(invalid());
         }
-        let path_metadata = fs::metadata(package_path).map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                RecoveryArtifactError::Unavailable(package_path.to_path_buf())
-            } else {
-                RecoveryArtifactError::Io(error)
-            }
-        })?;
-        if !path_metadata.is_file() || path_metadata.len() > PACKAGE_INTERFACE_LIMIT {
-            return Err(invalid());
+        let mut expected = [0; 32];
+        for (index, pair) in package_sha256.as_bytes().chunks_exact(2).enumerate() {
+            let digit = |byte: u8| {
+                if byte <= b'9' {
+                    byte - b'0'
+                } else {
+                    byte - b'a' + 10
+                }
+            };
+            expected[index] = digit(pair[0]) * 16 + digit(pair[1]);
         }
-        let package_file = File::open(package_path).map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                RecoveryArtifactError::Unavailable(package_path.to_path_buf())
-            } else {
-                RecoveryArtifactError::Io(error)
-            }
-        })?;
-        let metadata = package_file.metadata()?;
-        if !metadata.is_file() || metadata.len() > PACKAGE_INTERFACE_LIMIT {
-            return Err(invalid());
-        }
-        let mut package_bytes = Vec::new();
-        package_file
-            .take(PACKAGE_INTERFACE_LIMIT + 1)
-            .read_to_end(&mut package_bytes)?;
-        if package_bytes.len() as u64 > PACKAGE_INTERFACE_LIMIT {
-            return Err(invalid());
-        }
-        let package_digest: [u8; 32] = Sha256::digest(&package_bytes).into();
-        if hex(&package_digest) != package_sha256 {
-            return Err(RecoveryArtifactError::DigestMismatch(
-                package_path.to_path_buf(),
-            ));
-        }
+        validation
+            .verify(package_path, &expected)
+            .map_err(|error| {
+                if matches!(error, RecoveryArtifactError::InvalidPackageImports(_)) {
+                    invalid()
+                } else {
+                    error
+                }
+            })?;
     }
     Ok(selected)
 }
@@ -566,6 +672,26 @@ pub fn materialize_joined_interface(
     interface_source: &Path,
     skinny_iface_sha256: [u8; 32],
 ) -> Result<RecoveryJoinRef, RecoveryArtifactError> {
+    materialize_joined_interface_with_validation(
+        recovery_root,
+        toolchain_identity_sha256,
+        unit,
+        module,
+        interface_source,
+        skinny_iface_sha256,
+        &mut PackageInterfaceValidation::default(),
+    )
+}
+
+pub(crate) fn materialize_joined_interface_with_validation(
+    recovery_root: &Path,
+    toolchain_identity_sha256: [u8; 32],
+    unit: &str,
+    module: &str,
+    interface_source: &Path,
+    skinny_iface_sha256: [u8; 32],
+    validation: &mut PackageInterfaceValidation,
+) -> Result<RecoveryJoinRef, RecoveryArtifactError> {
     if toolchain_identity_sha256 == [0; 32] || unit.is_empty() || module.is_empty() {
         return Err(RecoveryArtifactError::InvalidReference);
     }
@@ -577,6 +703,7 @@ pub fn materialize_joined_interface(
         unit,
         module,
         &skinny_iface_sha256,
+        validation,
     )?;
     materialize_owned_join(
         recovery_root,
@@ -585,6 +712,7 @@ pub fn materialize_joined_interface(
         module,
         &bytes,
         &package_imports,
+        validation,
     )
 }
 
@@ -595,17 +723,19 @@ fn materialize_owned_join(
     module: &str,
     bytes: &[u8],
     package_imports: &[u8],
+    validation: &mut PackageInterfaceValidation,
 ) -> Result<RecoveryJoinRef, RecoveryArtifactError> {
     if toolchain_identity_sha256 == [0; 32] || unit.is_empty() || module.is_empty() {
         return Err(RecoveryArtifactError::InvalidReference);
     }
     let skinny_iface_sha256: [u8; 32] = Sha256::digest(bytes).into();
-    validate_package_imports(
+    validate_package_imports_with_validation(
         package_imports,
         unit,
         module,
         &skinny_iface_sha256,
         Path::new("owned-join.hi.packages"),
+        validation,
     )?;
     let package_imports_sha256: [u8; 32] = Sha256::digest(&package_imports).into();
     let owned = prepare_owned_directory(recovery_root)?;
@@ -649,6 +779,20 @@ pub fn materialize_certified_products(
     toolchain_identity_sha256: [u8; 32],
     products: &[CertifiedRecoveryProduct],
 ) -> Result<Vec<RecoveryArtifactRef>, RecoveryArtifactError> {
+    materialize_certified_products_with_validation(
+        recovery_root,
+        toolchain_identity_sha256,
+        products,
+        &mut PackageInterfaceValidation::default(),
+    )
+}
+
+pub(crate) fn materialize_certified_products_with_validation(
+    recovery_root: &Path,
+    toolchain_identity_sha256: [u8; 32],
+    products: &[CertifiedRecoveryProduct],
+    validation: &mut PackageInterfaceValidation,
+) -> Result<Vec<RecoveryArtifactRef>, RecoveryArtifactError> {
     if toolchain_identity_sha256 == [0; 32] {
         return Err(RecoveryArtifactError::InvalidReference);
     }
@@ -675,22 +819,25 @@ pub fn materialize_certified_products(
                 package_imports_path,
             ));
         }
-        validate_package_imports(
+        validate_package_imports_with_validation(
             &product.package_imports_bytes,
             &owner.unit,
             &owner.module,
             &owner.skinny_iface_sha256,
             &package_imports_path,
+            validation,
         )?;
         if product.certification_bytes.len() as u64 > CERTIFICATION_LIMIT {
             return Err(RecoveryArtifactError::InvalidCertifiedOwners(
                 certification_path,
             ));
         }
-        crate::certified_products::validate_home_certification(&product.certification_bytes, owner)
-            .map_err(|_| {
-                RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone())
-            })?;
+        crate::certified_products::validate_home_certification_with_validation(
+            &product.certification_bytes,
+            owner,
+            validation,
+        )
+        .map_err(|_| RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone()))?;
         let package_imports_sha256: [u8; 32] =
             Sha256::digest(&product.package_imports_bytes).into();
         let certification_sha256: [u8; 32] = Sha256::digest(&product.certification_bytes).into();
@@ -756,6 +903,7 @@ pub fn materialize_recovery_closure(
     toolchain_identity_sha256: [u8; 32],
     artifacts: &[RecoveryArtifactInput<'_>],
 ) -> Result<Vec<RecoveryArtifactRef>, RecoveryArtifactError> {
+    let mut validation = PackageInterfaceValidation::default();
     let mut products = Vec::with_capacity(artifacts.len());
     for artifact in artifacts {
         let owner = artifact.owner;
@@ -770,11 +918,13 @@ pub fn materialize_recovery_closure(
             &owner.unit,
             &owner.module,
             &owner.skinny_iface_sha256,
+            &mut validation,
         )?;
         let certification_bytes = read_certification(
             &certification_sidecar_path(artifact.interface_source),
             None,
             owner,
+            &mut validation,
         )?;
         products.push(CertifiedRecoveryProduct::from_certification(
             owner.clone(),
@@ -784,7 +934,12 @@ pub fn materialize_recovery_closure(
             certification_bytes,
         ));
     }
-    materialize_certified_products(recovery_root, toolchain_identity_sha256, &products)
+    materialize_certified_products_with_validation(
+        recovery_root,
+        toolchain_identity_sha256,
+        &products,
+        &mut validation,
+    )
 }
 
 /// Verify path confinement and both immutable bytes before using a durable
@@ -792,6 +947,18 @@ pub fn materialize_recovery_closure(
 pub fn verify_materialized_ref(
     recovery_root: &Path,
     reference: &RecoveryArtifactRef,
+) -> Result<VerifiedRecoveryArtifact, RecoveryArtifactError> {
+    verify_materialized_ref_with_validation(
+        recovery_root,
+        reference,
+        &mut PackageInterfaceValidation::default(),
+    )
+}
+
+pub(crate) fn verify_materialized_ref_with_validation(
+    recovery_root: &Path,
+    reference: &RecoveryArtifactRef,
+    validation: &mut PackageInterfaceValidation,
 ) -> Result<VerifiedRecoveryArtifact, RecoveryArtifactError> {
     if reference.toolchain_identity_sha256 == [0; 32]
         || reference.unit.is_empty()
@@ -821,6 +988,7 @@ pub fn verify_materialized_ref(
         &reference.unit,
         &reference.module,
         &reference.skinny_iface_sha256,
+        validation,
     )?;
     let certification_path = resolve_owned(recovery_root, &reference.certification_path)
         .map_err(classify_certification_path_error)?;
@@ -828,6 +996,7 @@ pub fn verify_materialized_ref(
         &certification_path,
         Some(&reference.certification_sha256),
         &owner,
+        validation,
     )?;
     let product_bytes = read_checked(&product_path, &reference.product_sha256)?;
     Ok(VerifiedRecoveryArtifact {
@@ -849,6 +1018,18 @@ pub fn verify_materialized_join(
     recovery_root: &Path,
     reference: &RecoveryJoinRef,
 ) -> Result<VerifiedRecoveryJoin, RecoveryArtifactError> {
+    verify_materialized_join_with_validation(
+        recovery_root,
+        reference,
+        &mut PackageInterfaceValidation::default(),
+    )
+}
+
+pub(crate) fn verify_materialized_join_with_validation(
+    recovery_root: &Path,
+    reference: &RecoveryJoinRef,
+    validation: &mut PackageInterfaceValidation,
+) -> Result<VerifiedRecoveryJoin, RecoveryArtifactError> {
     if reference.toolchain_identity_sha256 == [0; 32]
         || reference.unit.is_empty()
         || reference.module.is_empty()
@@ -867,6 +1048,7 @@ pub fn verify_materialized_join(
         &reference.unit,
         &reference.module,
         &reference.skinny_iface_sha256,
+        validation,
     )?;
     Ok(VerifiedRecoveryJoin {
         reference: reference.clone(),
@@ -881,6 +1063,92 @@ pub fn verify_materialized_join(
 mod tests {
     use super::*;
     use tidepool_repr::execution_schema::ModuleVersion;
+
+    #[test]
+    fn package_validation_stage_keeps_one_capture_and_refuses_conflicting_digest() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("package.hi");
+        fs::write(&path, b"first").unwrap();
+        let first: [u8; 32] = Sha256::digest(b"first").into();
+        let second: [u8; 32] = Sha256::digest(b"second").into();
+        let mut stage = PackageInterfaceValidation::default();
+        stage.verify(&path, &first).unwrap();
+        fs::write(&path, b"second").unwrap();
+        stage.verify(&path, &first).unwrap();
+        assert_eq!(stage.captured[&path]._bytes, b"first");
+        assert!(matches!(
+            stage.verify(&path, &second),
+            Err(RecoveryArtifactError::DigestMismatch(_))
+        ));
+        assert!(PackageInterfaceValidation::default()
+            .verify(&path, &first)
+            .is_err());
+        PackageInterfaceValidation::default()
+            .verify(&path, &second)
+            .unwrap();
+    }
+
+    #[test]
+    fn package_validation_new_stage_rechecks_path_and_inode_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("package.hi");
+        let replacement = root.path().join("replacement.hi");
+        fs::write(&path, b"first").unwrap();
+        fs::write(&replacement, b"other").unwrap();
+        let first: [u8; 32] = Sha256::digest(b"first").into();
+        let mut stage = PackageInterfaceValidation::default();
+        stage.verify(&path, &first).unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        stage.verify(&path, &first).unwrap();
+        assert!(PackageInterfaceValidation::default()
+            .verify(&path, &first)
+            .is_err());
+        #[cfg(unix)]
+        {
+            fs::write(&replacement, b"first").unwrap();
+            fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(&replacement, &path).unwrap();
+            PackageInterfaceValidation::default()
+                .verify(&path, &first)
+                .unwrap();
+            fs::write(&replacement, b"other").unwrap();
+            assert!(PackageInterfaceValidation::default()
+                .verify(&path, &first)
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn package_validation_budget_falls_back_to_fresh_reads() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("package.hi");
+        fs::write(&path, b"first").unwrap();
+        let first: [u8; 32] = Sha256::digest(b"first").into();
+        let mut stage = PackageInterfaceValidation::default();
+        stage.verify_with_budget(&path, &first, 0).unwrap();
+        assert!(stage.captured.is_empty());
+        fs::write(&path, b"other").unwrap();
+        assert!(stage.verify_with_budget(&path, &first, 0).is_err());
+        assert_eq!(stage.retained_bytes, 0);
+    }
+
+    #[test]
+    fn package_validation_keeps_regular_file_and_size_bounds() {
+        let root = tempfile::tempdir().unwrap();
+        let mut stage = PackageInterfaceValidation::default();
+        assert!(stage.verify(root.path(), &[0; 32]).is_err());
+        assert!(stage.verify(Path::new("relative.hi"), &[0; 32]).is_err());
+        assert!(stage
+            .verify(&root.path().join("absent.hi"), &[0; 32])
+            .is_err());
+        let path = root.path().join("oversized.hi");
+        File::create(&path)
+            .unwrap()
+            .set_len(PACKAGE_INTERFACE_LIMIT + 1)
+            .unwrap();
+        assert!(stage.verify(&path, &[0; 32]).is_err());
+        assert!(stage.captured.is_empty());
+    }
 
     fn text(value: impl Into<String>) -> ciborium::value::Value {
         ciborium::value::Value::Text(value.into())
