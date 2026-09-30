@@ -117,7 +117,7 @@ pub use profile::ActorEffectProfile;
 pub use prompt_catalog::hosted_prompt_fingerprint as exomonad_hosted_prompt_fingerprint;
 pub use recovery::{
     ActorRecoveryJournal, DurableActorAdmission, DurableActorApplication, DurableActorRecord,
-    DurableActorTerminal,
+    DurableActorTerminal, DurableRootSuccessorAdmission, RootRecoveryPlacement,
 };
 pub use request::{
     AbandonResponseOutcome, ActorEventSequence, CancelRequestOutcome, CancellationReason,

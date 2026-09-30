@@ -5,11 +5,11 @@
 //! a restarted host reports those as lost instead of pretending to serialize
 //! the resident heap.
 
-use crate::{ActorDescriptor, ActorExitKind, ActorRef};
+use crate::{ActorDescriptor, ActorExitKind, ActorPlacement, ActorRef};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tidepool_repr::jsonl::{SyncPolicy, TailPolicy};
 
@@ -17,6 +17,115 @@ use tidepool_repr::jsonl::{SyncPolicy, TailPolicy};
 // owner from missing recovery evidence. Version 1 is rejected rather than
 // silently treating an old or lost journal as an empty current run.
 const VERSION: u32 = 2;
+
+/// Issued by the Forest after checking its existing descriptor and directory.
+/// The process-local placement is deliberately absent from durable rows.
+#[derive(Clone, Debug)]
+pub struct RootRecoveryPlacement {
+    actor: ActorRef,
+    owner: tidepool_runtime::session::RecoveryPublicOwner,
+    placement: ActorPlacement,
+}
+
+impl RootRecoveryPlacement {
+    pub(crate) fn new(
+        actor: ActorRef,
+        owner: tidepool_runtime::session::RecoveryPublicOwner,
+        placement: ActorPlacement,
+    ) -> Self {
+        Self {
+            actor,
+            owner,
+            placement,
+        }
+    }
+    pub fn actor(&self) -> ActorRef {
+        self.actor
+    }
+    pub fn owner(&self) -> &tidepool_runtime::session::RecoveryPublicOwner {
+        &self.owner
+    }
+    pub fn placement(&self) -> ActorPlacement {
+        self.placement
+    }
+    pub fn matches(
+        &self,
+        session: tidepool_repr::SessionId,
+        target: tidepool_codegen::scope::ScopeId,
+    ) -> bool {
+        self.placement.session == session && self.placement.lexical_scope == target
+    }
+}
+
+/// Opaque proof of the actual journal's complete predecessor and durably
+/// prepared successor. A copied admission DTO cannot create this receipt.
+pub struct DurableRootSuccessorAdmission {
+    journal: Arc<ActorRecoveryJournal>,
+    predecessor: ActorRef,
+    successor: RootRecoveryPlacement,
+    source: Option<String>,
+    binding_path: PathBuf,
+}
+
+impl DurableRootSuccessorAdmission {
+    pub fn predecessor(&self) -> ActorRef {
+        self.predecessor
+    }
+    pub fn successor(&self) -> &RootRecoveryPlacement {
+        &self.successor
+    }
+    pub fn validate_successor(
+        &self,
+        run_root: &Path,
+        predecessor: &tidepool_runtime::session::RecoveryPublicOwner,
+        successor: &tidepool_runtime::session::RecoveryPublicOwner,
+        session: tidepool_repr::SessionId,
+        target: tidepool_codegen::scope::ScopeId,
+    ) -> std::io::Result<bool> {
+        if !self.successor.matches(session, target) || self.successor.owner() != successor {
+            return Ok(false);
+        }
+        let run_root = run_root.canonicalize()?;
+        if self
+            .journal
+            .path
+            .parent()
+            .map(Path::canonicalize)
+            .transpose()?
+            .as_ref()
+            != Some(&run_root)
+            || self.journal.path.canonicalize()?
+                != run_root.join(
+                    self.journal
+                        .path
+                        .file_name()
+                        .ok_or_else(|| std::io::Error::other("journal has no file name"))?,
+                )
+        {
+            return Ok(false);
+        }
+        let state = self.journal.state.lock();
+        self.journal.validate_root_successor(
+            &state,
+            self.predecessor,
+            &self.successor,
+            self.source.as_deref(),
+            &self.binding_path,
+        )?;
+        let old = state
+            .records
+            .get(&self.predecessor)
+            .ok_or_else(|| std::io::Error::other("predecessor admission is absent"))?;
+        Ok(owner_for_admission(&old.admission).as_ref() == Some(predecessor))
+    }
+}
+
+fn owner_for_admission(
+    admission: &DurableActorAdmission,
+) -> Option<tidepool_runtime::session::RecoveryPublicOwner> {
+    let path: tidepool_repr::ActorPath = admission.actor_path.as_ref()?.parse().ok()?;
+    tidepool_runtime::session::RecoveryPublicOwner::new(&path, admission.actor.incarnation.0)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -129,6 +238,104 @@ pub struct ActorRecoveryJournal {
 }
 
 impl ActorRecoveryJournal {
+    pub fn certify_root_successor(
+        self: &Arc<Self>,
+        predecessor: ActorRef,
+        successor: RootRecoveryPlacement,
+        expected_source: Option<&str>,
+        canonical_binding_path: &Path,
+    ) -> std::io::Result<Arc<DurableRootSuccessorAdmission>> {
+        let state = self.state.lock();
+        self.validate_root_successor(
+            &state,
+            predecessor,
+            &successor,
+            expected_source,
+            canonical_binding_path,
+        )?;
+        Ok(Arc::new(DurableRootSuccessorAdmission {
+            journal: Arc::clone(self),
+            predecessor,
+            successor,
+            source: expected_source.map(str::to_owned),
+            binding_path: canonical_binding_path.to_owned(),
+        }))
+    }
+
+    fn validate_root_successor(
+        &self,
+        state: &State,
+        predecessor: ActorRef,
+        successor: &RootRecoveryPlacement,
+        expected_source: Option<&str>,
+        binding_path: &Path,
+    ) -> std::io::Result<()> {
+        ensure_writable(state)?;
+        // Observe the actual file without tail repair; another append or a torn
+        // write cannot be hidden by this process's retained in-memory records.
+        let (rows, torn) = tidepool_repr::jsonl::read_tail(
+            &self.path,
+            |line| parse_row(line).map_err(|error| error.to_string()),
+            TailPolicy::Observe,
+        )
+        .map_err(std::io::Error::other)?;
+        let (records, sequence, created) = replay(rows)?;
+        if torn.is_some() || !created || sequence != state.next_sequence || records != state.records
+        {
+            return Err(std::io::Error::other(
+                "root successor journal changed or has uncertain durable evidence",
+            ));
+        }
+        let old = records
+            .get(&predecessor)
+            .ok_or_else(|| std::io::Error::other("root predecessor admission is absent"))?;
+        let new = records
+            .get(&successor.actor)
+            .ok_or_else(|| std::io::Error::other("root successor admission is absent"))?;
+        let is_root = |record: &DurableActorRecord| {
+            record.admission.role == "root"
+                && record.admission.creator.is_none()
+                && record.admission.supervisor_parent.is_none()
+                && record.admission.context_parent.is_none()
+        };
+        if !is_root(old)
+            || !is_root(new)
+            || old.terminal.is_some()
+            || new.terminal.is_some()
+            || predecessor.id != successor.actor.id
+            || predecessor.incarnation.0.checked_add(1) != Some(successor.actor.incarnation.0)
+            || owner_for_admission(&new.admission).as_ref() != Some(successor.owner())
+            || old.admission.actor_path != new.admission.actor_path
+            || records.values().any(|record| {
+                is_root(record)
+                    && (record.admission.actor.id != predecessor.id && record.application.is_some()
+                        || record.admission.actor.id == predecessor.id
+                            && record.admission.actor.incarnation > successor.actor.incarnation)
+            })
+        {
+            return Err(std::io::Error::other(
+                "root successor is not the exact latest admitted application owner",
+            ));
+        }
+        let old_app = old
+            .application
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("root predecessor has no prepared application"))?;
+        let new_app = new.application.as_ref().ok_or_else(|| {
+            std::io::Error::other("root successor has no durably prepared application")
+        })?;
+        if old_app.conversation.is_none()
+            || old_app.accepted_source.as_deref() != expected_source
+            || new_app.accepted_source.as_deref() != expected_source
+            || old_app.binding_path != binding_path
+            || new_app.binding_path != binding_path
+        {
+            return Err(std::io::Error::other(
+                "root successor application or accepted source differs from its predecessor",
+            ));
+        }
+        Ok(())
+    }
     pub fn open(path: impl Into<PathBuf>) -> std::io::Result<Arc<Self>> {
         Self::open_with_mode(path.into(), false)
     }
