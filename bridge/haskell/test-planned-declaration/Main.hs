@@ -38,6 +38,7 @@ import Tidepool.GhcPipeline
   , PipelineResult(..), CheckedEnvironmentResult(..), runPipelineSessionSelected
   , cellCheckedBinderSignatures )
 import Tidepool.CheckedPrefixImports
+import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.Identity (stableVarId)
 import Tidepool.PlannedDeclaration
 import Tidepool.ExtractUtil (getLibdir)
@@ -174,6 +175,7 @@ main = withScratch $ \work -> do
 checkCompletedValueRefinement :: FilePath -> HscEnv -> PlannedDeclarationInventory -> IO ()
 checkCompletedValueRefinement work baseEnv original = do
   let owner = SessionModule ValMod (Generation 9)
+      dependencyOwner = SessionModule ValMod (Generation 8)
       ownerName = sessionModuleString owner
       occurrence = mkVarOcc "id"
       binderIdentity = stableVarId (sessionBinderName baseEnv owner occurrence)
@@ -181,14 +183,22 @@ checkCompletedValueRefinement work baseEnv original = do
   unless (mi_iface_hash (mi_final_exts thin) == Fingerprint 0 0) $
     fail "thin value fixture does not exercise the zero fingerprint case"
   writeSessionIface baseEnv work owner thin
+  dependencyThin <- mkThinSessionIface baseEnv dependencyOwner [(mkVarOcc "older", intTy)]
+  writeSessionIface baseEnv work dependencyOwner dependencyThin
   previousEnv <- injectSessionIface work owner baseEnv
   bytes <- BS.readFile (sessionHiPath work owner)
-  let digest = concatMap (\byte -> let digits = showHex byte ""
-        in replicate (2 - length digits) '0' ++ digits) (BS.unpack (SHA256.hash bytes))
+  dependencyBytes <- BS.readFile (sessionHiPath work dependencyOwner)
+  let digestOf input = concatMap (\byte -> let digits = showHex byte ""
+        in replicate (2 - length digits) '0' ++ digits) (BS.unpack (SHA256.hash input))
+      digest = digestOf bytes
       requested = CompletedValueImport (fst (plannedOriginalOwner original)) ownerName
         (sessionHiPath work owner) digest [("id", binderIdentity)]
+      dependency = ExactIfaceArtifact (fst (plannedOriginalOwner original))
+        (sessionModuleString dependencyOwner) (sessionHiPath work dependencyOwner)
+        (digestOf dependencyBytes) []
       target = work </> "PrefixCheck.hs"
-  (hydrated, completed) <- hydrateCompletedValueImports [requested] previousEnv >>= either fail pure
+  (hydrated, completed) <- hydrateCompletedValueImportsWithDependencies [dependency]
+    [requested] previousEnv >>= either fail pure
   source <- readFile "test-planned-declaration/fixtures/prefix-check.hs"
   writeFile target source
   checkCompletedImports target hydrated original completed
@@ -202,6 +212,13 @@ checkCompletedValueRefinement work baseEnv original = do
   duplicated <- hydrateCompletedValueImports [requested, requested] previousEnv
   unless (case duplicated of Left _ -> True; Right _ -> False) $
     fail "duplicate completed value winners were admitted"
+  forM_ [[dependency {exactSha256 = replicate 64 '0'}]
+    , [dependency, dependency]
+    , [ExactIfaceArtifact (completedValueUnit requested) ownerName
+        (completedValueIfacePath requested) digest []]] $ \invalidDependencies -> do
+      refused <- hydrateCompletedValueImportsWithDependencies invalidDependencies [requested] previousEnv
+      unless (case refused of Left _ -> True; Right _ -> False) $
+        fail "changed or duplicate dependency bytes admitted completed value hydration"
   -- Identical owner, bytes and fingerprint0 still do not authorize the HPT
   -- allocation from an earlier injection or a separately reconstructed read.
   (recreated, _) <- hydrateCompletedValueImports [requested] hydrated >>= either fail pure
@@ -223,7 +240,7 @@ checkCompletedImports file env original completed = do
     setSession env
     target <- guessTarget file Nothing Nothing
     setTargets [target]
-    graph <- depanal [mkModuleName "Tidepool.Session.Val.G9"] False
+    graph <- depanal [mkModuleName "Tidepool.Session.Val.G8", mkModuleName "Tidepool.Session.Val.G9"] False
     summary <- case [item | item <- mgModSummaries graph, moduleNameString (ms_mod_name item) == "PrefixCheck"] of
       [item] -> pure item
       _ -> fail "completed-prefix checking module absent"
@@ -233,6 +250,8 @@ checkCompletedImports file env original completed = do
     -- location in the consuming request, as the session pipeline does.
     liftIO (registerSessionInterfaceLocation (sessionHiPath (takeDirectory file)
       (SessionModule ValMod (Generation 9))) (SessionModule ValMod (Generation 9)) current)
+    liftIO (registerSessionInterfaceLocation (sessionHiPath (takeDirectory file)
+      (SessionModule ValMod (Generation 8))) (SessionModule ValMod (Generation 8)) current)
     transformed <- liftIO (transformPlannedDeclarationImportsWithCompleted original completed current parsed)
     typed <- typecheckModule transformed
     let (tcg, _) = tm_internals_ typed
@@ -242,6 +261,7 @@ checkCompletedImports file env original completed = do
           , Just owner <- [nameModule_maybe (greName entry)]]
     unless (owners (mkRdrUnqual (mkVarOcc "id")) == ["Tidepool.Session.Val.G9"]
         && owners (Qual (mkModuleName "Tidepool.Session.Lib.G7") (mkVarOcc "id")) == ["Tidepool.Session.Lib.G7"]
+        && owners (Qual (mkModuleName "Tidepool.Session.Val.G8") (mkVarOcc "older")) == ["Tidepool.Session.Val.G8"]
         && owners (Qual (mkModuleName "Foreign") (mkVarOcc "hidden")) == ["Foreign"]) $
       fail "completed value refinement lost native replacement or preserved qualification"
 

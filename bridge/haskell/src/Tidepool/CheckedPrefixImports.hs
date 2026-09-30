@@ -2,7 +2,8 @@
 -- completed-prefix value interfaces read and installed in this request.
 module Tidepool.CheckedPrefixImports
   ( CompletedValueImport(..), CompletedValueImports
-  , hydrateCompletedValueImports, transformCompletedValueImports
+  , hydrateCompletedValueImports, hydrateCompletedValueImportsWithDependencies
+  , transformCompletedValueImports
   , refineOriginalDeclarationImports, refineOriginalDeclarationImportsWithCompleted
   ) where
 
@@ -65,28 +66,39 @@ data RefinementOwner = RefinementOwner
 hydrateCompletedValueImports
   :: [CompletedValueImport] -> HscEnv
   -> IO (Either String (HscEnv, CompletedValueImports))
-hydrateCompletedValueImports requested env
-  | null requested = pure (Right (env, CompletedValueImports []))
+hydrateCompletedValueImports = hydrateCompletedValueImportsWithDependencies []
+
+-- Read dependencies and completed owners once, installing one HPT knot. The
+-- completed cap retains exactly the interface allocations installed by this
+-- batch, including when a selected value's type depends on another input.
+hydrateCompletedValueImportsWithDependencies
+  :: [ExactIfaceArtifact] -> [CompletedValueImport] -> HscEnv
+  -> IO (Either String (HscEnv, CompletedValueImports))
+hydrateCompletedValueImportsWithDependencies dependencies requested env
+  | null artifacts = pure (Right (env, CompletedValueImports []))
   | any invalidOwner requested = pure (Left "completed values require canonical Val owners and nonempty selections")
+  | any invalidDependency dependencies = pure (Left "completed value dependencies require canonical Val owners")
   | length winners /= length (nub winners) = pure (Left "completed value selections contain duplicate lexical winners")
+  | length owners /= length (nub owners) = pure (Left "completed value hydration contains duplicate interface owners")
   | otherwise = do
       decoded <- readExactIfaceArtifacts env artifacts
       case decoded of
         Left diagnostic -> pure (Left diagnostic)
         Right interfaces -> do
-          case sequence (zipWith selectedNames requested interfaces) of
+          let completedInterfaces = drop (length dependencies) interfaces
+          case sequence (zipWith selectedNames requested completedInterfaces) of
             Left diagnostic -> pure (Left diagnostic)
             Right selections -> do
               hydrated <- hydrateExactScope env interfaces
-              forM_ requested $ \value -> case parseSessionModule (completedValueModule value) of
-                Just owner -> registerSessionInterfaceLocation (completedValueIfacePath value) owner hydrated
+              forM_ artifacts $ \artifact -> case parseSessionModule (exactModule artifact) of
+                Just owner -> registerSessionInterfaceLocation (exactPath artifact) owner hydrated
                 Nothing -> fail "completed value owner ceased to be canonical"
-              owners <- forM (zip interfaces selections) $ \((_, iface), names) -> do
+              refinements <- forM (zip completedInterfaces selections) $ \((_, iface), names) -> do
                 forced <- evaluate iface
                 stable <- makeStableName forced
                 pure (RefinementOwner (mi_module forced) (mi_iface_hash (mi_final_exts forced))
                   (map exportIdentity names) (CompletedValues names) (Just (forced, stable)))
-              pure (Right (hydrated, CompletedValueImports owners))
+              pure (Right (hydrated, CompletedValueImports refinements))
   where
     invalidOwner value = null (completedValueBinders value)
       || any ((== scaffoldTargetName) . fst) (completedValueBinders value)
@@ -94,7 +106,11 @@ hydrateCompletedValueImports requested env
         Just owner -> smKind owner /= ValMod || sessionModuleString owner /= completedValueModule value
         Nothing -> True
     winners = concatMap (map fst . completedValueBinders) requested
-    artifacts = [ExactIfaceArtifact (completedValueUnit value) (completedValueModule value)
+    invalidDependency artifact = case parseSessionModule (exactModule artifact) of
+      Just owner -> smKind owner /= ValMod || sessionModuleString owner /= exactModule artifact
+      Nothing -> True
+    owners = map exactModule artifacts
+    artifacts = dependencies ++ [ExactIfaceArtifact (completedValueUnit value) (completedValueModule value)
       (completedValueIfacePath value) (completedValueIfaceSha256 value) [] | value <- requested]
     selectedNames value (_, iface) = mapM select (completedValueBinders value)
       where

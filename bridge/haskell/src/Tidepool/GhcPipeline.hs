@@ -136,7 +136,7 @@ import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.PlannedDeclaration
   ( PlannedDeclarationInventory, transformPlannedDeclarationImports, transformPlannedDeclarationImportsWithCompleted, hydratePlannedDeclarationInventory )
 import Tidepool.CheckedPrefixImports
-  ( CompletedValueImport, CompletedValueImports, hydrateCompletedValueImports, transformCompletedValueImports )
+  ( CompletedValueImport(..), CompletedValueImports, hydrateCompletedValueImportsWithDependencies, transformCompletedValueImports )
 import Tidepool.FamilyConsistency (validateCompilationFamilies)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
@@ -3251,14 +3251,15 @@ sessionVariant purpose scope path = do
                     , moduleName `Set.member` directImports
                     , moduleName `Set.notMember` injected
                     ]
-              when (not (null needed)) $ do
+                  captureCompleted = ms_mod_name modSum == targetModName' && not (null completedValues)
+              when (not (null needed) || captureCompleted) $ do
                 -- Inject only the value modules this source module imports.
                 -- Declaration and value generations form one chronological
                 -- dependency DAG: an older Lib may need an older Val, while
                 -- a newer Val's type may mention that Lib. Eagerly injecting
                 -- every live Val before the first deferred Lib creates a
                 -- false cycle and makes GHC reject the still-unloaded Lib.
-                (hscInjected, injectMs) <- timeSection $ do
+                ((hscInjected, completedCap), injectMs) <- timeSection $ do
                   hsc0 <- getSession
                   case exact of
                     Just admitted | isJust (scopeCheckedCell admitted) || isJust (scopeCheckedItem admitted)
@@ -3267,27 +3268,39 @@ sessionVariant purpose scope path = do
                           artifacts = [value | value <- scopeValueInterfaces admitted, exactModule value `elem` wanted]
                       when (length artifacts /= length needed) $ liftIO $ ioError $ userError
                         "checked value injection lacks exact captured input bytes"
-                      readback <- liftIO (readExactIfaceArtifacts hsc0 artifacts)
-                      captured <- either (liftIO . ioError . userError) pure readback
-                      hydrated <- liftIO (hydrateExactScope hsc0 captured)
-                      liftIO $ forM_ needed $ \owner -> case
-                          [artifact | artifact <- artifacts,
-                            exactModule artifact == moduleNameString (renderSessionModule owner)] of
-                        [artifact] -> registerSessionInterfaceLocation (exactPath artifact) owner hydrated
-                        _ -> fail "checked finder owner differs from captured interface"
-                      pure hydrated
-                    _ -> injectSessionScope (scope { ssValIfaces = needed }) hsc0
+                      if captureCompleted
+                        then do
+                          -- The target's completed winners and remaining
+                          -- direct dependencies share one verified read and
+                          -- hydration knot. Only this cap's exact installed
+                          -- allocations authorize thin-interface refinement.
+                          let completedOwners = map completedValueModule completedValues
+                              dependencies = filter ((`notElem` completedOwners) . exactModule) artifacts
+                          readback <- liftIO (hydrateCompletedValueImportsWithDependencies dependencies completedValues hsc0)
+                          (hydrated, captured) <- either (liftIO . ioError . userError) pure readback
+                          pure (hydrated, Just captured)
+                        else do
+                          readback <- liftIO (readExactIfaceArtifacts hsc0 artifacts)
+                          captured <- either (liftIO . ioError . userError) pure readback
+                          hydrated <- liftIO (hydrateExactScope hsc0 captured)
+                          liftIO $ forM_ needed $ \owner -> case
+                              [artifact | artifact <- artifacts,
+                                exactModule artifact == moduleNameString (renderSessionModule owner)] of
+                            [artifact] -> registerSessionInterfaceLocation (exactPath artifact) owner hydrated
+                            _ -> fail "checked finder owner differs from captured interface"
+                          pure (hydrated, Nothing)
+                    _ | captureCompleted -> liftIO $ ioError $ userError
+                      "completed value injection lacks its protected request"
+                      | otherwise -> do
+                          hydrated <- injectSessionScope (scope { ssValIfaces = needed }) hsc0
+                          pure (hydrated, Nothing)
                 setSession hscInjected
                 liftIO $ do
+                  forM_ completedCap $ \captured -> writeIORef completedValuesRef (Just captured)
                   modifyIORef' injectedRef
-                    (`Set.union` Set.fromList (map renderSessionModule needed))
+                    (`Set.union` Set.fromList (map renderSessionModule needed
+                      ++ [mkModuleName (completedValueModule value) | captureCompleted, value <- completedValues]))
                   modifyIORef' injectMsRef (+ injectMs)
-              when (ms_mod_name modSum == targetModName' && not (null completedValues)) $ do
-                current <- getSession
-                readback <- liftIO (hydrateCompletedValueImports completedValues current)
-                (hydrated, captured) <- either (liftIO . ioError . userError) pure readback
-                setSession hydrated
-                liftIO (writeIORef completedValuesRef (Just captured))
         , cpTier = OptimizeEveryModule
         , cpBeforeMerge =
             liftIO (readIORef injectMsRef >>= emitPhase timing "inject")
