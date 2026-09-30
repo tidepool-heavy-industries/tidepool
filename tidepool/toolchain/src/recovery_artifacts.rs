@@ -1156,7 +1156,21 @@ mod tests {
             for count in repetitions {
                 let root = tempfile::tempdir().unwrap();
                 let destination = root.path().join(name);
+                let creation_before = io_counters();
+                let creation_started = Instant::now();
                 durable_copy(&destination, &bytes, &digest).unwrap();
+                let creation_elapsed = creation_started.elapsed();
+                let creation_after = io_counters();
+                println!(
+                    "DURABLE_COPY_CREATE_COST {}",
+                    serde_json::json!({
+                        "artifact": name, "artifact_sha256": hex(&digest), "artifact_bytes": bytes.len(),
+                        "following_existing_repetitions": count, "nanoseconds": creation_elapsed.as_nanos(),
+                        "thread_wchar": creation_after.0-creation_before.0, "thread_write_syscalls": creation_after.1-creation_before.1,
+                        "thread_write_bytes": creation_after.2-creation_before.2,
+                        "qualification": "first creation plus full verification and durability, measured separately from reuse"
+                    })
+                );
                 let before = io_counters();
                 let started = Instant::now();
                 for _ in 0..count {
