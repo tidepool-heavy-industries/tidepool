@@ -1,4 +1,10 @@
-load("@prelude//:rules.bzl", "genrule")
+load("@prelude//:rules.bzl", "export_file", "genrule")
+
+export_file(
+    name = "driver.mjs",
+    src = "driver.mjs",
+    visibility = ["PUBLIC"],
+)
 
 # Keep browser dependency installation content-addressed by its npm manifests.
 genrule(

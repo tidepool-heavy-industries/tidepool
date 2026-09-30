@@ -1,4 +1,4 @@
-load("@prelude//:rules.bzl", "filegroup")
+load("@prelude//:rules.bzl", "export_file")
 
-filegroup(name = "package_json", srcs = ["package.json"], visibility = ["PUBLIC"])
-filegroup(name = "package_lock", srcs = ["package-lock.json"], visibility = ["PUBLIC"])
+export_file(name = "package_json", src = "package.json", out = "package.json", visibility = ["PUBLIC"])
+export_file(name = "package_lock", src = "package-lock.json", out = "package-lock.json", visibility = ["PUBLIC"])
