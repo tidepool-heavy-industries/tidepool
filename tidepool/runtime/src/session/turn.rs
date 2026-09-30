@@ -1824,12 +1824,58 @@ impl TurnCertification {
         self.checked_prefix.as_ref()
     }
 
+    pub(crate) fn validate_checked_table(&self, table: &DataConTable) -> Result<(), CompileError> {
+        if let Some(execution) = &self.checked_execution {
+            execution.validate_table(table)?;
+        }
+        if let Some(display) = &self.checked_display {
+            display.validate_table(table)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_checked_display(
+        &self,
+        target: &PreparedProgram,
+        generation: u64,
+        bound: &[BoundBinder],
+    ) -> Result<(), CompileError> {
+        let (Some(display), Some(admission)) =
+            (&self.checked_display, &self.checked_display_admission)
+        else {
+            return Err(CompileError::ExtractFailed(
+                "checked display lacks its owning runtime admission".into(),
+            ));
+        };
+        if !display.matches_target(target)
+            || generation != display.generation()
+            || generation != admission.generation().0
+            || display.admission_digest() != admission.digest()
+            || !Arc::ptr_eq(display.capture(), admission.execution())
+        {
+            return Err(CompileError::ExtractFailed(
+                "checked display target or runtime owner was edited".into(),
+            ));
+        }
+        display.validate_bound_binders(
+            &bound
+                .iter()
+                .map(encode_bound_binder_authority)
+                .collect::<Vec<_>>(),
+        )
+    }
+
     pub(crate) fn validate_checked_bind(
         &self,
         target: &PreparedProgram,
         generation: u64,
         bound: &[BoundBinder],
     ) -> Result<(), CompileError> {
+        if self.checked_display.is_some() {
+            return Err(CompileError::ExtractFailed(
+                "checked display requires its dedicated owning consumer".into(),
+            ));
+        }
         let Some(execution) = self.checked_execution.as_ref() else {
             if self.checked_item.is_some() {
                 return Err(CompileError::ExtractFailed(
@@ -2616,7 +2662,11 @@ fn check_cell_impl(
                 })
                 .unwrap_or_default(),
             injected_modules: req.inject_modules.to_vec(),
-            reserved_declaration_modules: Vec::new(),
+            reserved_declaration_modules: admission
+                .reserved_generations()
+                .iter()
+                .map(|generation| tidepool_repr::SessionModule::lib(*generation).module_name())
+                .collect(),
         };
         if specification.specification_digest() != admission.specification_digest() {
             return Err(CompileError::ExtractFailed(
@@ -2791,7 +2841,7 @@ fn check_cell_impl(
 /// When `req.verdict` is supplied, a missing template for the verdict's
 /// selector is caught here, before any process is spawned.
 pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
-    run_turn_with_pin(req, None, false, None)
+    run_turn_with_pin(req, None, false, None, None)
 }
 
 /// Compile only the next item of a runtime-owned completed prefix. Body,
@@ -2829,7 +2879,76 @@ pub fn run_checked_item(
         )
         .into());
     }
-    run_turn_with_pin(req, None, false, Some(item_admission))
+    run_turn_with_pin(req, None, false, Some(item_admission), None)
+}
+
+/// Compile the closed deferred display recipe for the actual completed native
+/// observation. All source, alias, page inputs and native owner come from its
+/// immutable runtime admission and original checked cell.
+pub fn run_checked_display(
+    admission: Arc<super::RuntimeCheckedDisplayAdmission>,
+    include: &[&Path],
+) -> Result<TurnResult, TurnFailure> {
+    let snapshot = admission.snapshot();
+    let view = snapshot.view();
+    let templates = admission
+        .execution()
+        .item()
+        .turn_templates()
+        .iter()
+        .map(|(kind, source)| {
+            let kind = match kind.as_str() {
+                "decl" => TemplateSelector::Decl,
+                "bind" => TemplateSelector::Bind,
+                "binddiscard" => TemplateSelector::BindDiscard,
+                "expr" => TemplateSelector::Expr,
+                _ => {
+                    return Err(CompileError::ExtractFailed(
+                        "checked display template kind is unknown".into(),
+                    ))
+                }
+            };
+            Ok(TurnTemplate {
+                kind,
+                source: source.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?;
+    let injected = snapshot.compiler_prefix().injected_modules();
+    let binder = admission.captured_binding();
+    let retained = [(
+        SymbolIdentity {
+            unit: "main".into(),
+            module: binder.module.clone(),
+            namespace: "value".into(),
+            occurrence: binder.name.clone(),
+            record_parent: None,
+        },
+        admission.execution().generation(),
+    )];
+    let generation = admission.generation().0;
+    let req = TurnRequest {
+        exact_context: view.exact_declaration_context().cloned(),
+        session_id: Some(view.session()),
+        turn_text: "",
+        templates: &templates,
+        include,
+        session_root: view.session_root(),
+        inject_modules: &injected,
+        gen: generation,
+        verdict: Some(TurnClassification {
+            kind: TurnKind::Bind,
+            binders: vec![
+                format!("__tidepoolPage{generation}"),
+                format!("__tidepoolMetadata{generation}"),
+                "cellDisplay".into(),
+            ],
+            items: Vec::new(),
+        }),
+        target: None,
+        retained_imports: &retained,
+    };
+    run_turn_with_pin(req, None, false, None, Some(admission.clone()))
 }
 
 /// Compile the internal input-mount/preview module. Its bind shape is known
@@ -2843,7 +2962,7 @@ pub fn run_activation_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailu
         )
         .into());
     }
-    run_turn_with_pin(req, None, true, None)
+    run_turn_with_pin(req, None, true, None, None)
 }
 
 /// One module supplies the mount's checked type and an independently callable
@@ -2941,6 +3060,7 @@ pub fn run_turn_pinned(
         Some(&pin),
         false,
         None,
+        None,
     )
 }
 
@@ -2980,6 +3100,7 @@ fn run_turn_with_pin(
     pin: Option<&str>,
     activation_preview: bool,
     checked: Option<Arc<super::RuntimeCheckedItemAdmission>>,
+    display: Option<Arc<super::RuntimeCheckedDisplayAdmission>>,
 ) -> Result<TurnResult, TurnFailure> {
     let verdict_arg = match &req.verdict {
         Some(TurnClassification { kind, binders, .. }) => {
@@ -3003,7 +3124,10 @@ fn run_turn_with_pin(
     };
 
     let temp = TempDir::new()?;
-    let snapshot = checked.as_ref().map(|admission| admission.snapshot());
+    let snapshot = checked
+        .as_ref()
+        .map(|admission| admission.snapshot())
+        .or_else(|| display.as_ref().map(|admission| admission.snapshot()));
     let admitted_root = temp.path().join("admitted-values");
     let input_root = if let Some(snapshot) = &snapshot {
         std::fs::create_dir_all(&admitted_root)?;
@@ -3058,7 +3182,20 @@ fn run_turn_with_pin(
 
     let endpoint = cmd.bind().map_err(map_notfound)?;
     let include: Vec<_> = req.include.iter().map(|path| path.to_path_buf()).collect();
-    let offer = if let Some(admission) = &checked {
+    let offer = if let Some(admission) = &display {
+        ModuleCandidateOffer::select_checked_display(
+            endpoint.identity().producer_bytes(),
+            &include,
+            temp.path(),
+            req.exact_context.clone(),
+            admission.execution().clone(),
+            admission.snapshot().compiler_prefix().clone(),
+            admission.generation().0,
+            admission.digest(),
+            admission.budget() as u64,
+            admission.presented().to_vec(),
+        )?
+    } else if let Some(admission) = &checked {
         ModuleCandidateOffer::select_checked_item(
             endpoint.identity().producer_bytes(),
             &include,
@@ -3152,6 +3289,34 @@ fn run_turn_with_pin(
                 }
             }),
     })?;
+    if let Some(admission) = display {
+        let TurnResult::Bind {
+            compiled, bound, ..
+        } = &mut result
+        else {
+            return Err(CompileError::ExtractFailed(
+                "checked display is not its binding bundle".into(),
+            )
+            .into());
+        };
+        let certification = compiled.certification.as_mut().ok_or_else(|| {
+            CompileError::ExtractFailed("checked display lacks sealed products".into())
+        })?;
+        certification.checked_display_admission = Some(admission.clone());
+        certification.validate_checked_display(&compiled.prepared, req.gen, bound)?;
+        let display = certification
+            .checked_display
+            .as_ref()
+            .expect("validated display proof");
+        let (_, bytes) = display.value_interface_owned();
+        let output = req
+            .session_root
+            .join(tidepool_repr::SessionModule::val(admission.generation()).relative_hi_path());
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(output, bytes)?;
+    }
     if let Some(admission) = checked {
         let compiled = match &mut result {
             TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => compiled,
@@ -3311,7 +3476,7 @@ fn read_compiled_turn(
         PREPARED_SCAFFOLD_TARGET,
     )?;
 
-    Ok(CompiledTurn {
+    let compiled = CompiledTurn {
         table,
         warnings,
         asks,
@@ -3327,7 +3492,9 @@ fn read_compiled_turn(
             checked_display: sealed.checked_display,
             checked_display_admission: None,
         }),
-    })
+    };
+    if let Some(certification) = &compiled.certification { certification.validate_checked_table(&compiled.table)?; }
+    Ok(compiled)
 }
 
 /// Read the prepared-STG program the worker wrote for this turn. A requested
@@ -3594,7 +3761,7 @@ fn decode_asks(v: &CborValue) -> Result<Vec<YieldSite>, CompileError> {
         .collect()
 }
 
-fn decode_source_prologue(value: &CborValue) -> Result<SourcePrologue, CompileError> {
+pub(super) fn decode_source_prologue(value: &CborValue) -> Result<SourcePrologue, CompileError> {
     let fields = cbor_expect_array_len(value, 2, "source prologue")?;
     let pragmas = cbor_expect_array(&fields[0], "source pragmas")?
         .iter()
@@ -4685,6 +4852,109 @@ mod ambiguity_advice_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn admitted_cell_certifies_original_local_declaration_before_its_bind_and_expression() {
+        use crate::session::{
+            resident_cell_check_template, resident_workbench_templates, ModuleEnv,
+            PersistentSession, SessionLib,
+        };
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_repr::{SessionId, SessionModule};
+        use tidepool_testing::effect_surface::TestEffectSurface;
+        tidepool_testing::eval_harness::require_extract();
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let root = tempfile::tempdir().unwrap();
+        let effects = TestEffectSurface::minimal(&[]).unwrap();
+        let lib = SessionLib::open(SessionId(995), root.path(), ModuleEnv::standalone_default())
+            .unwrap()
+            .with_validation_include(effects.include_paths().to_vec());
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let execution = Arc::new(session.begin_private_execution(public).unwrap());
+        let view = execution.view();
+        let imports = view.turn_imports(&crate::session::SourceImports::new());
+        let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
+        let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
+        let source = include_str!("fixtures/checked-local-declaration.hs");
+        let specification = CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: source.into(),
+            template_source: template.clone(),
+            turn_templates: templates
+                .iter()
+                .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                .collect(),
+            injected_modules: view.injected_module_names(),
+            reserved_declaration_modules: vec![],
+        };
+        let admission = session
+            .admit_cell_for_execution(
+                execution.clone(),
+                1,
+                Arc::new(specification.clone()),
+                specification.specification_digest(),
+                [1; 32],
+            )
+            .unwrap();
+        let view = admission.view();
+        let include = view.include_paths(effects.include_paths());
+        let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        let injected = view.injected_module_names();
+        let (checked, fold) = check_cell_admitted(
+            CellCheckRequest {
+                exact_context: view.exact_declaration_context().cloned(),
+                session_id: Some(view.session()),
+                cell_text: source,
+                template: &template,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                compile_generation: admission.initial_value_generation().0,
+                compile_view_evidence: "",
+            },
+            admission.clone(),
+            &templates,
+            None,
+        )
+        .unwrap();
+        assert!(fold.is_none());
+        assert_eq!(checked.items.len(), 3);
+        let declaration = checked.checked_item(0).unwrap();
+        let certificate = declaration
+            .planned_declaration()
+            .expect("same-offer original declaration certificate");
+        let module = SessionModule::lib(admission.reserved_generations()[0]).module_name();
+        assert_eq!(certificate.product().owner().module, module);
+        assert!(declaration
+            .planned_declaration_source()
+            .unwrap()
+            .contains("module "));
+        assert!(certificate
+            .lexical_exports()
+            .iter()
+            .any(|export| export.head.occurrence == "LocalBox" && export.head.module == module));
+        assert!(certificate
+            .instances()
+            .classes
+            .iter()
+            .any(|instance| instance.class.occurrence == "LocalClass"
+                && instance.class.module == module));
+        assert!(!certificate.instances().families.is_empty());
+        let binding = checked.checked_item(1).unwrap();
+        assert!(binding.signatures()[0]
+            .names()
+            .iter()
+            .any(|name| name.module() == module && name.occurrence() == "LocalBox"));
+        let expression = checked.checked_item(2).unwrap();
+        assert!(expression.expression_presentation().unwrap().is_some());
+        let prefix = declaration.initial_prefix().unwrap();
+        assert!(prefix.append_declaration(binding).is_err());
+        let prefix = prefix.append_declaration(declaration.clone()).unwrap();
+        assert_eq!(prefix.next_item(), 1);
+        assert_eq!(prefix.completed_declaration(0), Some(&declaration));
+        assert!(prefix.append_declaration(declaration).is_err());
+    }
+
     #[test]
     fn paired_join_compiles_source_hidden_checked_bind_in_fresh_worker() {
         use crate::session::{

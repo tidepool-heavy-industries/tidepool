@@ -238,6 +238,7 @@ impl CompletedCheckedItem {
 pub struct ExactCompiledItem {
     item: ExactCheckedItem,
     target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
+    table: tidepool_repr::DataConTable,
     value_interface: Option<(String, Arc<[u8]>)>,
     generation: u64,
     bound_binders: Vec<Value>,
@@ -248,6 +249,7 @@ pub struct ExactCompiledItem {
 pub struct ExactCompiledDisplay {
     capture: Arc<ExactCompiledItem>,
     target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
+    table: tidepool_repr::DataConTable,
     generation: u64,
     admission_digest: [u8; 32],
     bound_binders: Vec<Value>,
@@ -255,6 +257,12 @@ pub struct ExactCompiledDisplay {
 }
 
 impl ExactCompiledDisplay {
+    pub fn validate_table(&self, table: &tidepool_repr::DataConTable) -> Result<(), CompileError> {
+        if table != &self.table {
+            return Err(failure("compiled display constructor metadata was edited"));
+        }
+        Ok(())
+    }
     pub fn value_interface_owned(&self) -> (&str, &Arc<[u8]>) {
         (&self.value_interface.0, &self.value_interface.1)
     }
@@ -411,6 +419,7 @@ impl CheckedDisplayOffer {
         Ok(Arc::new(ExactCompiledDisplay {
             capture: self.capture.clone(),
             target: target.clone(),
+            table: read_table(root)?,
             generation: self.generation,
             admission_digest: self.admission_digest,
             bound_binders: bound,
@@ -420,6 +429,12 @@ impl CheckedDisplayOffer {
 }
 
 impl ExactCompiledItem {
+    pub fn validate_table(&self, table: &tidepool_repr::DataConTable) -> Result<(), CompileError> {
+        if table != &self.table {
+            return Err(failure("compiled item constructor metadata was edited"));
+        }
+        Ok(())
+    }
     pub fn shares_target(
         &self,
         target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
@@ -592,6 +607,9 @@ impl PartialEq for ExactCheckedItem {
 impl Eq for ExactCheckedItem {}
 
 impl ExactCheckedItem {
+    pub fn cell_observations(&self) -> &[u8] {
+        &self.cell.observations
+    }
     pub fn planned_declaration(
         &self,
     ) -> Option<&Arc<crate::declaration_join::CertifiedAuthoredDeclaration>> {
@@ -895,12 +913,19 @@ impl CheckedItemOffer {
         Ok(Arc::new(ExactCompiledItem {
             item: self.item.clone(),
             target: target.clone(),
+            table: read_table(root)?,
             value_interface,
             generation: self.generation,
             bound_binders,
             observation_name: self.observation_name.clone(),
         }))
     }
+}
+
+fn read_table(root: &Path) -> Result<tidepool_repr::DataConTable, CompileError> {
+    let (table, _) =
+        tidepool_repr::serial::read_metadata(&read(root.join("meta.cbor"), 32 * 1024 * 1024)?)?;
+    Ok(table)
 }
 
 fn encode_signature(signature: &ExactCheckedSignature) -> Value {
