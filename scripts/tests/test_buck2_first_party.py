@@ -205,6 +205,8 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         result = self.generate("--package", "tidepool", "--no-default-features", "tidepool")
         self.assertEqual(result.returncode, 0, result.stderr)
         buck, groups = self.groups("bridge/facade")
+        self.assertIn('name = "facade_cargo_manifest"', buck)
+        self.assertIn('src = "Cargo.toml"', buck)
         self.assertIn('name = "tidepool_build_script"', buck)
         build_rule = buck.split('name = "tidepool_build_script",', 1)[1].split('\n)\n', 1)[0]
         self.assertIn("//tidepool/toolchain:tidepool_toolchain", build_rule)

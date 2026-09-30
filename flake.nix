@@ -130,6 +130,10 @@
           ];
           pkgs = import nixpkgs { inherit system overlays; };
           harnessPkgs = import harnessNixpkgs { inherit system; };
+          embeddedWebNpmCache = harnessPkgs.fetchNpmDeps {
+            src = "${harnessWeb}/web";
+            hash = "sha256-yJrPGaSazF06w91mddpNlOyoB6d1cYKXumyaoeWCfeU=";
+          };
           # rust-toolchain.toml is the single source of truth for the Rust
           # version + components; the flake reads it rather than pinning
           # `stable.latest` (which drifts silently on every flake.lock update).
@@ -459,6 +463,7 @@
           packages.buck-cc = pkgs.stdenv.cc;
           packages.buck-binutils = pkgs.binutils;
           packages.buck-node = pkgs.nodejs_24;
+          packages.buck-npm-cache = embeddedWebNpmCache;
           packages.buck-bash = pkgs.bash;
           packages.buck-coreutils = pkgs.coreutils;
           packages.buck-tar = pkgs.gnutar;
@@ -476,6 +481,7 @@
               pkgs.stdenv.cc
               pkgs.binutils
               pkgs.nodejs_24
+              embeddedWebNpmCache
               pkgs.bash
               pkgs.coreutils
               pkgs.gnutar
@@ -575,9 +581,7 @@
             tidepool-extract = self.packages.${system}.tidepool-extract;
 
             embedded-web-provenance = pkgs.runCommand "embedded-web-provenance" { } ''
-              revision=0331cc3a783a40e65611a776d4c880b42431fe2a
-              grep -Fq "$revision" ${./Cargo.lock}
-              grep -Fq "$revision" ${./flake.nix}
+              ${pkgs.python3}/bin/python3 ${./scripts/embedded_web_provenance.py} --self-test --check --root ${./.}
               test -s ${embeddedWebAssets}/share/exomonad/web/index.html
               touch "$out"
             '';

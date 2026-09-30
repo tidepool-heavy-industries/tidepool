@@ -47,7 +47,18 @@ import os
 from pathlib import Path
 if os.environ.get('FAIL_REINDEER'):
     raise SystemExit(19)
-value = str(Path.cwd()) if os.environ.get('LEAK_STAGE') else 'generated buck' + chr(10)
+if os.environ.get('LEAK_STAGE'):
+    value = str(Path.cwd())
+elif os.environ.get('MATCHED_HARNESS'):
+    value = ('load("@prelude//rust:cargo_package.bzl", "cargo")\\n'
+             'git_fetch(\\n'
+             '    name = "harness-source.git",\\n'
+             '    repo = "https://github.com/tidepool-heavy-industries/exomonad-harness.git",\\n'
+             '    rev = "0123456789abcdef0123456789abcdef01234567",\\n'
+             '    visibility = [],\\n'
+             ')\\n')
+else:
+    value = 'generated buck' + chr(10)
 Path('BUCK').write_text(value)
 """
         )
@@ -123,6 +134,30 @@ Path('BUCK').write_text(value)
             "['--no-default-features', 'tidepool', '--no-default-features', 'exomonad-agent', '--features', 'tidepool=other']",
         )
 
+    def test_locked_harness_fetch_is_exposed_as_a_public_source_input(self):
+        result = self.run_script(MATCHED_HARNESS="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        buck = (self.root / "third-party/rust/BUCK").read_text()
+        self.assertIn('load("@prelude//:rules.bzl", "filegroup")', buck)
+        self.assertIn('name = "matched_harness_source"', buck)
+        self.assertIn('srcs = [":harness-source.git"]', buck)
+        self.assertIn('visibility = ["PUBLIC"]', buck)
+
+        result = self.run_script("--check", MATCHED_HARNESS="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+    def test_locked_harness_fetch_is_exposed_as_a_public_source_input(self):
+        result = self.run_script(MATCHED_HARNESS="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        buck = (self.root / "third-party/rust/BUCK").read_text()
+        self.assertIn('load("@prelude//:rules.bzl", "filegroup")', buck)
+        self.assertIn('name = "matched_harness_source"', buck)
+        self.assertIn('srcs = [":harness-source.git"]', buck)
+        self.assertIn('visibility = ["PUBLIC"]', buck)
+
+        result = self.run_script("--check", MATCHED_HARNESS="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 if __name__ == "__main__":
     unittest.main()

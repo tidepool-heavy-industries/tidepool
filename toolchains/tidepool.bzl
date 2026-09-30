@@ -70,3 +70,20 @@ nix_tool = rule(
     impl = _nix_tool_impl,
     attrs = {"executable": attrs.string()},
 )
+
+
+def _nix_directory_impl(ctx):
+    output = ctx.actions.declare_output(ctx.label.name, dir = True)
+    ctx.actions.run(
+        cmd_args([ctx.attrs.cp, "-a", ctx.attrs.store_path + "/.", output.as_output()]),
+        category = "nix_directory",
+    )
+    return [DefaultInfo(default_output = output)]
+
+nix_directory = rule(
+    impl = _nix_directory_impl,
+    attrs = {
+        "cp": attrs.string(),
+        "store_path": attrs.string(),
+    },
+)

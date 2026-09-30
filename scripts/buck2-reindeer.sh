@@ -56,6 +56,35 @@ with tempfile.TemporaryDirectory(prefix='tidepool-buck-deps-') as temporary:
         'reindeer', '-c', 'reindeer.toml', 'buckify'
     ], cwd=stage, check=True)
 
+    # Keep the matched harness source available to the embedded web action.
+    # The generated Rust crate target remains private; this public filegroup
+    # only forwards the exact locked checkout as a declared source input.
+    buck = (stage / 'BUCK').read_text()
+    harness_fetch = next(
+        (
+            (re.search(r'name = "([^"]+)"', stanza).group(1))
+            for stanza in re.findall(r'git_fetch\(\n(.*?)\n\)', buck, re.DOTALL)
+            if 'repo = "https://github.com/tidepool-heavy-industries/exomonad-harness.git"' in stanza
+        ),
+        None,
+    )
+    if harness_fetch:
+        if 'load("@prelude//:rules.bzl", "filegroup")' not in buck:
+            buck = buck.replace(
+                'load("@prelude//rust:cargo_package.bzl", "cargo")',
+                'load("@prelude//rust:cargo_package.bzl", "cargo")\n'
+                'load("@prelude//:rules.bzl", "filegroup")',
+                1,
+            )
+        buck += (
+            '\nfilegroup(\n'
+            '    name = "matched_harness_source",\n'
+            f'    srcs = [":{harness_fetch}"],\n'
+            '    visibility = ["PUBLIC"],\n'
+            ')\n'
+        )
+        (stage / 'BUCK').write_text(buck)
+
     names = re.findall(r'^alias\(\n    name = "([^"]+)"', (stage / 'BUCK').read_text(), re.MULTILINE)
     if len(names) != len(set(names)):
         raise SystemExit('Versioned dependency aliases require explicit first-party mappings')

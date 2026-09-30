@@ -537,6 +537,12 @@ load("//build/rust:facade_build_inputs.bzl", "tidepool_facade_build_inputs")
         unit_deps, unit_named = normal_deps, normal_named
     targets = package["targets"]
     if package_name == "tidepool":
+        rules.append("""export_file(
+    name = "facade_cargo_manifest",
+    src = "Cargo.toml",
+    visibility = ["PUBLIC"],
+)
+""")
         build_targets = [target for target in targets if "custom-build" in target["kind"]]
         if len(build_targets) != 1:
             raise SystemExit("facade requires exactly one Cargo build.rs target")

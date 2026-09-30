@@ -1,0 +1,70 @@
+load("@prelude//:rules.bzl", "genrule", "sh_test")
+
+genrule(
+    name = "embedded_web_provenance",
+    srcs = [
+        "root//:workspace_cargo_manifest",
+        "root//:workspace_cargo_lock",
+        "root//bridge/facade:facade_cargo_manifest",
+        "root//:workspace_flake_lock",
+        "root//:workspace_flake_nix",
+        "root//:embedded_web_provenance_script",
+    ],
+    out = "harness-source-revision.txt",
+    bash = """set -euo pipefail
+SOURCE="$TMP/provenance-source"
+mkdir -p "$SOURCE/bridge/facade" "$SOURCE/scripts"
+cp "$PWD/$(location root//:workspace_cargo_manifest)" "$SOURCE/Cargo.toml"
+cp "$PWD/$(location root//:workspace_cargo_lock)" "$SOURCE/Cargo.lock"
+cp "$PWD/$(location root//bridge/facade:facade_cargo_manifest)" "$SOURCE/bridge/facade/Cargo.toml"
+cp "$PWD/$(location root//:workspace_flake_lock)" "$SOURCE/flake.lock"
+cp "$PWD/$(location root//:workspace_flake_nix)" "$SOURCE/flake.nix"
+cp "$PWD/$(location root//:embedded_web_provenance_script)" "$SOURCE/scripts/embedded_web_provenance.py"
+"$(exe toolchains//:python)" "$SOURCE/scripts/embedded_web_provenance.py" --check --root "$SOURCE" --output "$PWD/$OUT"
+""",
+    visibility = ["PUBLIC"],
+)
+
+# A reviewable native assembly of the matched runtime and browser output. The
+# existing Nix derivation remains the distribution package owner.
+genrule(
+    name = "matched_runtime_bundle",
+    srcs = [
+        "//bridge/facade:exomonad",
+        "//tidepool/extract-cmd:tidepool-extract",
+        "//bridge/haskell:tidepool_extract_bin",
+        "//web:dist",
+        ":embedded_web_provenance",
+    ],
+    out = "matched-runtime",
+    is_directory = True,
+    bash = """set -euo pipefail
+OUTPUT="$PWD/$OUT"
+mkdir -p "$OUTPUT/bin" "$OUTPUT/share/exomonad/web" "$OUTPUT/share/exomonad"
+GHC="$(exe toolchains//:ghc)"
+"$GHC" --print-libdir > "$OUTPUT/share/exomonad/ghc-libdir.txt"
+"$GHC" --numeric-version > "$OUTPUT/share/exomonad/ghc-version.txt"
+cp -a "$PWD/$(location //bridge/facade:exomonad)" "$OUTPUT/bin/exomonad"
+cp -a "$PWD/$(location //tidepool/extract-cmd:tidepool-extract)" "$OUTPUT/bin/tidepool-extract"
+cp -a "$PWD/$(location //bridge/haskell:tidepool_extract_bin)" "$OUTPUT/bin/tidepool-extract-bin"
+WEB="$PWD/$(location //web:dist)"
+cp -a "$WEB/web/." "$OUTPUT/share/exomonad/web/"
+cp -a "$PWD/$(location :embedded_web_provenance)" "$OUTPUT/share/exomonad/harness-source-revision.txt"
+""",
+    visibility = ["PUBLIC"],
+)
+
+sh_test(
+    name = "matched_runtime_smoke",
+    test = "smoke.sh",
+    args = ["$(location :matched_runtime_bundle)"],
+    resources = [":matched_runtime_bundle"],
+    env = {
+        "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location :matched_runtime_bundle)/share/exomonad/web",
+        "TIDEPOOL_EXTRACT": "$(location :matched_runtime_bundle)/bin/tidepool-extract",
+        "TIDEPOOL_EXTRACT_WORKER": "$(location :matched_runtime_bundle)/bin/tidepool-extract-bin",
+        "TIDEPOOL_GHC_LIBDIR": read_root_config("nix", "ghc_libdir"),
+        "PATH": read_root_config("nix", "bash").rsplit("/", 1)[0],
+    },
+    visibility = ["PUBLIC"],
+)

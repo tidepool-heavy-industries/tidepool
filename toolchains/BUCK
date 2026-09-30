@@ -3,7 +3,7 @@ load("@prelude//toolchains:genrule.bzl", "system_genrule_toolchain")
 load("@prelude//toolchains:python.bzl", "system_python_bootstrap_toolchain")
 load("@prelude//toolchains:remote_test_execution.bzl", "remote_test_execution_toolchain")
 load("@prelude//tests:test_toolchain.bzl", "noop_test_toolchain")
-load(":tidepool.bzl", "nix_haskell_toolchain", "nix_rust_toolchain", "nix_tool")
+load(":tidepool.bzl", "nix_directory", "nix_haskell_toolchain", "nix_rust_toolchain", "nix_tool")
 
 nix_rust_toolchain(
     name = "rust",
@@ -60,5 +60,14 @@ system_python_bootstrap_toolchain(
 
 nix_tool(name = "node", executable = read_root_config("nix", "node"), visibility = ["PUBLIC"])
 nix_tool(name = "npm", executable = read_root_config("nix", "npm"), visibility = ["PUBLIC"])
+nix_tool(name = "python", executable = read_root_config("nix", "python"), visibility = ["PUBLIC"])
 nix_tool(name = "bash", executable = read_root_config("nix", "bash"), visibility = ["PUBLIC"])
+nix_tool(name = "ghc", executable = read_root_config("nix", "ghc"), visibility = ["PUBLIC"])
 nix_tool(name = "coreutils", executable = read_root_config("nix", "coreutils"), visibility = ["PUBLIC"])
+
+nix_directory(
+    name = "npm_cache",
+    cp = read_root_config("nix", "coreutils") + "/cp",
+    store_path = read_root_config("nix", "npm_cache"),
+    visibility = ["PUBLIC"],
+)

@@ -1,0 +1,56 @@
+load("@prelude//:rules.bzl", "genrule")
+
+# Keep dependency installation separate from source compilation: the lockfile
+# and pinned cache define npm's closure, while web source edits only rerun Vite.
+genrule(
+    name = "npm_dependencies",
+    srcs = [
+        "//third-party/rust:matched_harness_source",
+        "toolchains//:npm_cache",
+    ],
+    out = "node_modules",
+    is_directory = True,
+    bash = """set -euo pipefail
+NODE='$(exe toolchains//:node)'
+NPM='$(exe toolchains//:npm)'
+NPM_CACHE="$PWD/$(location toolchains//:npm_cache)"
+SOURCE="$PWD/$(location //third-party/rust:matched_harness_source)/web"
+OUTPUT="$PWD/$OUT"
+export PATH="${NODE%/*}:$PATH"
+export CI=1 TZ=UTC npm_config_update_notifier=false npm_config_logs_dir="$TMP/npm-logs"
+mkdir -p "$TMP/npm"
+cp -a "$SOURCE/." "$TMP/npm/"
+cd "$TMP/npm"
+"$NPM" ci --offline --ignore-scripts --cache "$NPM_CACHE" --no-audit --no-fund
+cp -a node_modules "$OUTPUT"
+""",
+    visibility = ["PUBLIC"],
+)
+
+genrule(
+    name = "dist",
+    srcs = [
+        "//third-party/rust:matched_harness_source",
+        ":npm_dependencies",
+    ],
+    out = "embedded-web",
+    is_directory = True,
+    bash = """set -euo pipefail
+NODE='$(exe toolchains//:node)'
+NPM='$(exe toolchains//:npm)'
+SOURCE="$PWD/$(location //third-party/rust:matched_harness_source)/web"
+NPM_DEPS="$PWD/$(location :npm_dependencies)"
+OUTPUT="$PWD/$OUT"
+export PATH="${NODE%/*}:$PATH"
+export CI=1 TZ=UTC npm_config_update_notifier=false npm_config_logs_dir="$TMP/npm-logs"
+mkdir -p "$TMP/web"
+cp -a "$SOURCE/." "$TMP/web/"
+cp -a "$NPM_DEPS" "$TMP/web/node_modules"
+cd "$TMP/web"
+"$NPM" run build
+mkdir -p "$OUTPUT/web"
+cp -a dist/. "$OUTPUT/web/"
+
+""",
+    visibility = ["PUBLIC"],
+)
