@@ -168,10 +168,10 @@ impl Drop for CheckedNativeDelta {
     fn drop(&mut self) {
         let mut previous = self.previous.take();
         while let Some(parent) = previous {
-            match Arc::try_unwrap(parent) {
-                Ok(mut delta) => previous = delta.previous.take(),
-                Err(_) => break,
-            }
+            let Some(mut delta) = Arc::into_inner(parent) else {
+                break;
+            };
+            previous = delta.previous.take();
         }
     }
 }
@@ -325,10 +325,10 @@ impl Drop for CheckedInterfaceDelta {
     fn drop(&mut self) {
         let mut previous = self.previous.take();
         while let Some(parent) = previous {
-            match Arc::try_unwrap(parent) {
-                Ok(mut delta) => previous = delta.previous.take(),
-                Err(_) => break,
-            }
+            let Some(mut delta) = Arc::into_inner(parent) else {
+                break;
+            };
+            previous = delta.previous.take();
         }
     }
 }
@@ -2165,6 +2165,55 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn settled_delta_release_handles_concurrent_last_readers_on_small_stacks() {
+        let mut native = None;
+        let mut interfaces = None;
+        let mut readers = Vec::new();
+        let bytes: Arc<[u8]> = Arc::from([1]);
+        for generation in 0..50_000 {
+            native = Some(Arc::new(CheckedNativeDelta {
+                previous: native,
+                imports: Vec::new(),
+                bindings: Vec::new(),
+            }));
+            interfaces = Some(Arc::new(CheckedInterfaceDelta {
+                previous: interfaces,
+                interface: AdmittedValueInterface {
+                    module: tidepool_repr::SessionModule::val(Generation(generation)),
+                    bytes: bytes.clone(),
+                },
+            }));
+            readers.push((native.clone(), interfaces.clone()));
+        }
+        let old_native = Arc::downgrade(readers[0].0.as_ref().unwrap());
+        let old_interface = Arc::downgrade(readers[0].1.as_ref().unwrap());
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let release_barrier = barrier.clone();
+        let release = std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(move || {
+                release_barrier.wait();
+                drop(native);
+                drop(interfaces);
+            })
+            .unwrap();
+        let readers = std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(move || {
+                barrier.wait();
+                for reader in readers.into_iter().rev() {
+                    drop(reader);
+                }
+            })
+            .unwrap();
+        release.join().unwrap();
+        readers.join().unwrap();
+        assert!(old_native.upgrade().is_none());
+        assert!(old_interface.upgrade().is_none());
+        assert_eq!(Arc::strong_count(&bytes), 1);
     }
 
     #[test]
