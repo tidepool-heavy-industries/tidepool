@@ -4134,6 +4134,7 @@ fn compile_root(
             ))
         }
     };
+    machine.seal_recovery_initialization_scope(lexical_scope)?;
     let mut descriptor = ActorDescriptor::new(
         "exomonad-root",
         ActorPlacement {
