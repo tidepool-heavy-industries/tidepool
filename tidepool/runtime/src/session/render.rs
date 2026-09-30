@@ -212,6 +212,15 @@ pub(crate) struct JoinedDeclaration {
     pub turn: DeclTurn,
     pub evidence: Arc<tidepool_toolchain::declaration_join::AcceptedJoin>,
     pub context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+    pub surface: AdmittedDeclarationSurface,
+}
+
+/// Explicit source-surface roots and their compiler-resolved import graph.
+/// Implementation requirements and synthetic Join ancestry do not select roots.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) struct AdmittedDeclarationSurface {
+    pub roots: Vec<tidepool_toolchain::declaration_join::ExactModuleIdentity>,
+    pub lexical: Vec<tidepool_toolchain::declaration_join::ExactLexicalNode>,
 }
 
 impl DeclLog {

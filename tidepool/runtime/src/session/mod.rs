@@ -2401,13 +2401,26 @@ pub fn validate_declaration_candidate(
 
     let certified_authored = if candidate.reserved {
         let source_path = primary_root.join(candidate.rendered.module.relative_hs_path());
-        match tidepool_toolchain::declaration_join::certify_authored_declaration(
-            candidate.rendered.module,
-            &source_path,
-            &candidate.rendered.source,
-            &includes,
-            &candidate.root,
-        ) {
+        let certified = match &candidate.exact_context {
+            Some(context) => {
+                tidepool_toolchain::declaration_join::certify_authored_declaration_in_context(
+                    candidate.rendered.module,
+                    &source_path,
+                    &candidate.rendered.source,
+                    &includes,
+                    &candidate.root,
+                    context.clone(),
+                )
+            }
+            None => tidepool_toolchain::declaration_join::certify_authored_declaration(
+                candidate.rendered.module,
+                &source_path,
+                &candidate.rendered.source,
+                &includes,
+                &candidate.root,
+            ),
+        };
+        match certified {
             Ok(certified) => Some(certified),
             Err(error) => {
                 remove_module_artifacts(primary_root, candidate.rendered.module);

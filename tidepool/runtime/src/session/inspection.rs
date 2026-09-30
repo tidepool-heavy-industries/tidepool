@@ -1,7 +1,8 @@
 //! GHC-authoritative inspection of the exact source environment used by a
 //! resident workbench turn.
 
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use ciborium::value::Value as CborValue;
 use serde::Serialize;
@@ -378,11 +379,6 @@ fn run_inspections_with_policy(
     request: InspectionRequest<'_>,
     strict: bool,
 ) -> Result<Vec<InspectionResult>, CompileError> {
-    if request.exact_context.is_some() {
-        return Err(CompileError::ExtractFailed(
-            "exact declaration contexts require exact compiler admission".into(),
-        ));
-    }
     if request.queries.is_empty() {
         return Ok(Vec::new());
     }
@@ -420,6 +416,8 @@ fn run_inspections_with_policy(
                     .any(|expression| expression.contains("__tidepool_inspect_"))
         });
     let mut shared_environment_source = None;
+    let mut sources = BTreeMap::new();
+    let mut query_sources = Vec::with_capacity(request.queries.len());
     for (index, query) in request.queries.iter().enumerate() {
         let query_dir = temp.path().join(format!("query-{index}"));
         std::fs::create_dir(&query_dir)?;
@@ -458,7 +456,9 @@ fn run_inspections_with_policy(
             source.push_str(query);
             source.push_str("\n__tidepool_lookup_query = __tidepool_lookup_query\n");
         }
-        std::fs::write(&source_path, source)?;
+        std::fs::write(&source_path, &source)?;
+        sources.insert(source_path.clone(), source);
+        query_sources.push(source_path.clone());
         command.input(&source_path);
         match query {
             InspectionQuery::TypeOf(expression) => {
@@ -484,6 +484,7 @@ fn run_inspections_with_policy(
             }
         }
     }
+    let mut batch_source = None;
     if let Some(expressions) = type_batch {
         let batch_dir = temp.path().join("type-batch");
         std::fs::create_dir(&batch_dir)?;
@@ -494,11 +495,27 @@ fn run_inspections_with_policy(
             source.push_str(effects);
             source.push_str(")\n__tidepool_lookup_row = Data.Proxy.Proxy\n");
         }
-        std::fs::write(&batch_path, source)?;
+        std::fs::write(&batch_path, &source)?;
+        sources.insert(batch_path.clone(), source);
+        batch_source = Some(batch_path.clone());
         command.inspect_type_batch(&batch_path);
     }
 
     let endpoint = command.bind().map_err(map_spawn)?;
+    let include = request
+        .include
+        .iter()
+        .map(|path| path.to_path_buf())
+        .collect::<Vec<_>>();
+    let offer = super::turn::select_module_candidate_offer(
+        endpoint.identity().producer_bytes(),
+        &include,
+        temp.path(),
+        request.exact_context.clone(),
+    )?;
+    if let Some(manifest) = offer.exact_scope_path() {
+        command.session_artifacts(manifest);
+    }
     crate::paths::apply_build_products_dir(&mut command, &endpoint);
     let run = endpoint.execute(&command).map_err(map_spawn)?;
     timing::record_stage(
@@ -508,7 +525,14 @@ fn run_inspections_with_policy(
         run.elapsed,
         0,
     );
-    crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)?;
+    crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
+        .map_err(|error| {
+            tidepool_toolchain::artifacts::retain_compiler_failure(
+                temp.path(),
+                &run.output.stderr,
+                error,
+            )
+        })?;
     let bytes = std::fs::read(&output_path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             CompileError::MissingOutput(output_path.clone())
@@ -523,6 +547,57 @@ fn run_inspections_with_policy(
             results.len(),
             request.queries.len()
         )));
+    }
+    if request.exact_context.is_some()
+        && results
+            .iter()
+            .any(|result| !matches!(result, InspectionResult::Rejected { .. }))
+    {
+        let validated = (|| {
+            let directories = sources
+                .keys()
+                .filter_map(|path| path.parent())
+                .collect::<BTreeSet<_>>();
+            let mut admitted = BTreeSet::<PathBuf>::new();
+            for directory in directories {
+                if !directory.join(".exact-compilations").try_exists()? {
+                    continue;
+                }
+                for witness in offer.validate_exact_outputs(directory)? {
+                    let path = witness.source_path();
+                    let source = sources.get(path).ok_or_else(|| {
+                        invalid("inspection receipt names another source transaction")
+                    })?;
+                    if !witness.matches_source(path, source) {
+                        return Err(invalid(
+                            "inspection receipt does not match submitted source",
+                        ));
+                    }
+                    admitted.insert(path.to_path_buf());
+                }
+            }
+            let batch_admitted = batch_source
+                .as_ref()
+                .is_some_and(|path| admitted.contains(path));
+            for (index, result) in results.iter().enumerate() {
+                if !matches!(result, InspectionResult::Rejected { .. })
+                    && !admitted.contains(&query_sources[index])
+                    && !batch_admitted
+                {
+                    return Err(invalid(
+                        "inspection result lacks its exact consumed source receipt",
+                    ));
+                }
+            }
+            Ok::<_, CompileError>(())
+        })();
+        validated.map_err(|error| {
+            tidepool_toolchain::artifacts::retain_compiler_failure(
+                temp.path(),
+                &run.output.stderr,
+                error,
+            )
+        })?;
     }
     Ok(request
         .queries

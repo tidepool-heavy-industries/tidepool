@@ -20,7 +20,7 @@
 //! mutable session state (the injected ifaces), so a cache hit would be wrong.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ciborium::value::Value as CborValue;
@@ -2198,12 +2198,6 @@ fn check_cell_impl(
     req: CellCheckRequest<'_>,
     fold: Option<CellFoldTurn<'_>>,
 ) -> Result<(CellCheck, Option<TurnResult>), CellCheckFailure> {
-    if req.exact_context.is_some() {
-        return Err(CompileError::ExtractFailed(
-            "exact declaration contexts require exact compiler admission".into(),
-        )
-        .into());
-    }
     let temp = TempDir::new()?;
     let cell_path = temp.path().join("cell.txt");
     let template_path = temp.path().join("CellCheckTemplate.hs");
@@ -2239,8 +2233,15 @@ fn check_cell_impl(
     }
     let endpoint = cmd.bind().map_err(map_notfound)?;
     let include: Vec<_> = req.include.iter().map(|path| path.to_path_buf()).collect();
-    let offer =
-        ModuleCandidateOffer::select(endpoint.identity().producer_bytes(), &include, temp.path());
+    let offer = select_module_candidate_offer(
+        endpoint.identity().producer_bytes(),
+        &include,
+        temp.path(),
+        req.exact_context.clone(),
+    )?;
+    if let Some(manifest) = offer.exact_scope_path() {
+        cmd.session_artifacts(manifest);
+    }
     if let (Some(_), Some(manifest)) = (&fold, offer.manifest_path()) {
         cmd.module_candidates(manifest);
     }
@@ -2264,7 +2265,14 @@ fn check_cell_impl(
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                     Err(error) => return Err(error.into()),
                 };
-                return Err(CellCheckFailure { error, items });
+                return Err(CellCheckFailure {
+                    error: tidepool_toolchain::artifacts::retain_compiler_failure(
+                        temp.path(),
+                        &output.stderr,
+                        error,
+                    ),
+                    items,
+                });
             }
         };
     let bytes = std::fs::read(&out_path)?;
@@ -2274,6 +2282,30 @@ fn check_cell_impl(
         req.compile_generation,
         req.compile_view_evidence,
     )?;
+    if req.exact_context.is_some() {
+        let validated = (|| {
+            let witnesses = offer.validate_exact_outputs(temp.path())?;
+            let module =
+                extract_module_name(&checked.checked_source).unwrap_or_else(|| "CellCheck".into());
+            let source_path = temp.path().join(format!("{module}.hs"));
+            if !witnesses
+                .iter()
+                .any(|witness| witness.matches_source(&source_path, &checked.checked_source))
+            {
+                return Err(CompileError::ExtractFailed(
+                    "checked cell lacks its exact consumed source receipt".into(),
+                ));
+            }
+            Ok::<_, CompileError>(())
+        })();
+        validated.map_err(|error| {
+            tidepool_toolchain::artifacts::retain_compiler_failure(
+                temp.path(),
+                &output.stderr,
+                error,
+            )
+        })?;
+    }
     checked.warnings = report.diagnostics;
     // The worker writes `turn.cbor` only when it attempted AND succeeded at
     // the fold (`attemptCellFoldTurn` swallows its own failures and simply
@@ -2281,10 +2313,29 @@ fn check_cell_impl(
     // bug, not a fold rejection, so it is a hard decode error rather than a
     // silent fall back.
     let folded = if fold.is_some() && turn_out_path.exists() {
-        Some(decode_turn_output_dir(temp.path(), &offer)?)
+        Some(
+            decode_turn_output_dir(temp.path(), &offer).map_err(|error| {
+                tidepool_toolchain::artifacts::retain_compiler_failure(
+                    temp.path(),
+                    &output.stderr,
+                    error,
+                )
+            })?,
+        )
     } else {
         None
     };
+    if fold.is_some()
+        && folded.is_none()
+        && std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() == Ok("1")
+    {
+        let diagnostic = tidepool_toolchain::artifacts::retain_compiler_failure(
+            temp.path(),
+            &output.stderr,
+            CompileError::ExtractFailed("requested cell fold produced no compiled output".into()),
+        );
+        eprintln!("{diagnostic}");
+    }
     Ok((checked, folded))
 }
 
@@ -2445,12 +2496,6 @@ fn run_turn_with_pin(
     pin: Option<&str>,
     activation_preview: bool,
 ) -> Result<TurnResult, TurnFailure> {
-    if req.exact_context.is_some() {
-        return Err(CompileError::ExtractFailed(
-            "exact declaration contexts require exact compiler admission".into(),
-        )
-        .into());
-    }
     let verdict_arg = match &req.verdict {
         Some(TurnClassification { kind, binders, .. }) => {
             #[allow(
@@ -2513,8 +2558,15 @@ fn run_turn_with_pin(
 
     let endpoint = cmd.bind().map_err(map_notfound)?;
     let include: Vec<_> = req.include.iter().map(|path| path.to_path_buf()).collect();
-    let offer =
-        ModuleCandidateOffer::select(endpoint.identity().producer_bytes(), &include, temp.path());
+    let offer = select_module_candidate_offer(
+        endpoint.identity().producer_bytes(),
+        &include,
+        temp.path(),
+        req.exact_context.clone(),
+    )?;
+    if let Some(manifest) = offer.exact_scope_path() {
+        cmd.session_artifacts(manifest);
+    }
     if let Some(manifest) = offer.manifest_path() {
         cmd.module_candidates(manifest);
     }
@@ -2582,6 +2634,20 @@ fn run_turn_with_pin(
                 }
             }),
     })
+}
+
+pub(super) fn select_module_candidate_offer(
+    producer: &[u8],
+    include: &[PathBuf],
+    scratch: &Path,
+    context: Option<Arc<ExactDeclarationContext>>,
+) -> Result<ModuleCandidateOffer, CompileError> {
+    match context {
+        Some(context) => {
+            ModuleCandidateOffer::select_in_context(producer, include, scratch, context)
+        }
+        None => Ok(ModuleCandidateOffer::select(producer, include, scratch)),
+    }
 }
 
 /// Decode one item's full output directory into a [`TurnResult`]: the
@@ -4049,6 +4115,239 @@ mod ambiguity_advice_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn paired_join_compiles_source_hidden_checked_bind_in_fresh_worker() {
+        use crate::session::{
+            resident_cell_check_template, resident_workbench_templates, run_inspections,
+            CertifiedDeclarationPublication, InspectionQuery, InspectionRequest, InspectionResult,
+            ModuleEnv, PersistentSession, PublicManifestCommit, PublicationDecision,
+            RecoveryPublicOwner, SessionLib, SourceImports,
+        };
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_repr::{SessionId, SessionModule};
+        use tidepool_testing::effect_surface::TestEffectSurface;
+
+        tidepool_testing::eval_harness::require_extract();
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let root = tempfile::tempdir().unwrap();
+        let effects = TestEffectSurface::minimal(&[]).unwrap();
+        let mut lib =
+            SessionLib::open(SessionId(994), root.path(), ModuleEnv::standalone_default())
+                .unwrap()
+                .with_validation_include(effects.include_paths().to_vec());
+        lib.attach_recovery_graph_v2(root.path().join("declarations.json"))
+            .unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let private = session.mint_detached_scope(public).unwrap();
+        let owner = RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/source-hidden").unwrap(),
+            1,
+        )
+        .unwrap();
+        session
+            .bind_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        let admitted = session.public_visibility_snapshot_in(public).unwrap();
+        let receipt = session
+            .lib()
+            .declaration_receipt(&[include_str!("fixtures/exact-join-original.hs")])
+            .unwrap()
+            .unwrap();
+        let (candidate, values) = session
+            .render_declaration_candidate_in(private, &receipt, &SourceImports::new())
+            .unwrap();
+        let staged =
+            crate::session::validate_declaration_candidate(candidate, session.lib().include_dir())
+                .unwrap()
+                .with_visible_values(values);
+        session.adopt_staged_declaration_in(staged).unwrap();
+        let original_generation = session.lib().scope_tip(private);
+        let original = session
+            .lib()
+            .log
+            .certified_authored_arc_at(original_generation)
+            .unwrap();
+        let CertifiedDeclarationPublication::Accepted(accepted) = session
+            .snapshot_declaration_publication(owner, &admitted, private, vec![], vec![])
+            .unwrap()
+            .certify()
+            .unwrap()
+        else {
+            panic!("first authored declaration must be accepted");
+        };
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(
+                    accepted.stage().unwrap(),
+                    &PublicationDecision::new(),
+                )
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+        session.retire_scope(private);
+
+        let original_path = root
+            .path()
+            .join(SessionModule::lib(original_generation).relative_hs_path());
+        assert!(original_path.exists());
+        std::fs::remove_file(&original_path).unwrap();
+        let interface_path = original_path.with_extension("hi");
+        if interface_path.exists() {
+            std::fs::remove_file(&interface_path).unwrap();
+        }
+        let view = session.compile_view_in(public).unwrap();
+        let context = view.exact_declaration_context().unwrap();
+        assert_ne!(
+            view.library(),
+            Some(SessionModule::lib(original_generation))
+        );
+        assert!(context
+            .lexical_graph()
+            .iter()
+            .any(|node| node.owner.module == view.library().unwrap().module_name()));
+        assert!(context
+            .lexical_graph()
+            .iter()
+            .any(|node| node.owner.module == "Tidepool.Data.Text"));
+        assert!(context
+            .lexical_graph()
+            .iter()
+            .all(|node| node.owner.module != original.product().owner().module));
+
+        let imports = view.turn_imports(&SourceImports::new());
+        let include = view.include_paths(effects.include_paths());
+        let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        let injected = view.injected_module_names();
+        let hidden_imports = format!(
+            "{imports}\nqualified {} as HiddenOriginal",
+            original.product().owner().module
+        );
+        let hidden_queries = [InspectionQuery::TypeOf(
+            "HiddenOriginal.answer (41 :: Int)".into(),
+        )];
+        let hidden = run_inspections(InspectionRequest {
+            exact_context: Some(context.clone()),
+            preamble: effects.preamble(),
+            imports: &hidden_imports,
+            include: &include,
+            session_root: view.session_root(),
+            inject_modules: &injected,
+            queries: &hidden_queries,
+            effects: Some(effects.row()),
+        });
+        match hidden {
+            Err(_) => {}
+            Ok(results) => assert!(
+                results
+                    .iter()
+                    .all(|result| matches!(result, InspectionResult::Rejected { .. })),
+                "retained original implementation must remain unavailable to textual imports"
+            ),
+        }
+        let mixed_queries = [
+            InspectionQuery::Info("answer".into()),
+            InspectionQuery::ScopeBrowse,
+            InspectionQuery::TypeOf("missingOriginalName".into()),
+            InspectionQuery::TypeOf("answer (41 :: Int)".into()),
+        ];
+        let mixed = run_inspections(InspectionRequest {
+            exact_context: Some(context.clone()),
+            preamble: effects.preamble(),
+            imports: &imports,
+            include: &include,
+            session_root: view.session_root(),
+            inject_modules: &injected,
+            queries: &mixed_queries,
+            effects: Some(effects.row()),
+        })
+        .unwrap();
+        assert!(matches!(&mixed[0], InspectionResult::Info { entries, .. } if !entries.is_empty()));
+        assert!(matches!(&mixed[1], InspectionResult::Browse { .. }));
+        assert!(matches!(&mixed[2], InspectionResult::Rejected { .. }));
+        assert!(matches!(&mixed[3], InspectionResult::Type { display, .. } if display == "Int"));
+        let batch_queries = [
+            InspectionQuery::TypeOf("answer".into()),
+            InspectionQuery::TypeOf("answer (42 :: Int)".into()),
+        ];
+        let batch = run_inspections(InspectionRequest {
+            exact_context: Some(context.clone()),
+            preamble: effects.preamble(),
+            imports: &imports,
+            include: &include,
+            session_root: view.session_root(),
+            inject_modules: &injected,
+            queries: &batch_queries,
+            effects: Some(effects.row()),
+        })
+        .unwrap();
+        assert!(batch
+            .iter()
+            .all(|result| matches!(result, InspectionResult::Type { .. })));
+        let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
+        let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
+        let (checked, folded) = check_cell_with_fold(
+            CellCheckRequest {
+                exact_context: Some(context.clone()),
+                session_id: Some(view.session()),
+                cell_text: "let result = answer (41 :: Int)",
+                template: &template,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                compile_generation: view.next_value_generation().0,
+                compile_view_evidence: "",
+            },
+            CellFoldTurn {
+                templates: &templates,
+                gen: view.next_value_generation().0,
+                retained_imports: &[],
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(folded, Some(TurnResult::Bind { .. })),
+            "exact single bind must use the same-check fold"
+        );
+        assert_eq!(checked.items.len(), 1);
+        let pins = checked.pins_for_item(0).unwrap();
+        assert_eq!(pins[0].ty, "Int");
+        let TurnResult::Bind {
+            bound, compiled, ..
+        } = run_turn_pinned(
+            TurnRequest {
+                exact_context: Some(context.clone()),
+                session_id: Some(view.session()),
+                turn_text: &checked.items[0].source,
+                templates: &templates,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                gen: view.next_value_generation().0 + 1,
+                verdict: Some(checked.items[0].verdict.clone()),
+                target: None,
+                retained_imports: &[],
+            },
+            &pins,
+        )
+        .unwrap()
+        else {
+            panic!("source-hidden Join consumer must be a bind");
+        };
+        assert_eq!(bound[0].name, "result");
+        assert_eq!(bound[0].type_display, "Int");
+        let certification = compiled.certification.unwrap();
+        assert!(
+            certification
+                .groups
+                .iter()
+                .any(|group| group.owner() == original.product().owner()),
+            "consumer must retain the original owned group identity"
+        );
+        assert!(!original_path.exists());
+        assert!(view.is_current_for(&session.compile_view_in(public).unwrap()));
+    }
+
     use super::*;
 
     #[test]

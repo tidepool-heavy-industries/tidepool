@@ -1,5 +1,6 @@
 //! Owned compiler receipts for the declaration half of a paired publication.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -13,7 +14,9 @@ use tidepool_toolchain::declaration_join::{
 };
 
 use super::persistent::PersistentSession;
-use super::render::{extend_exports_by_head, DeclTurn, JoinedDeclaration};
+use super::render::{
+    extend_exports_by_head, AdmittedDeclarationSurface, DeclTurn, JoinedDeclaration,
+};
 use super::{
     recovery, DeclarationSource, PublicManifestBase, PublicVisibilitySnapshot, RecoveryPublicOwner,
     SessionError, SessionLib, StagedPublicManifest,
@@ -27,6 +30,7 @@ pub struct DeclarationPublicationBase {
     original: Generation,
     authored: Arc<CertifiedAuthoredDeclaration>,
     current_public: Option<JoinedDeclaration>,
+    surface: AdmittedDeclarationSurface,
     turn: DeclTurn,
     includes: Vec<PathBuf>,
     session_root: PathBuf,
@@ -106,6 +110,73 @@ fn paired_version(base: &PublicManifestBase) -> String {
     }))
     .expect("paired baseline contains serializable scalar identities");
     blake3::hash(&bytes).to_hex().to_string()
+}
+
+fn extend_admitted_surface(
+    public: &PublicManifestBase,
+    authored: &CertifiedAuthoredDeclaration,
+    mut prior: AdmittedDeclarationSurface,
+) -> Result<AdmittedDeclarationSurface, SessionError> {
+    // The guarded first-G builder emits only ModuleEnv and trusted external
+    // imports: authored workbench imports, parents and live value imports are
+    // refused before this call. The certificate's source hash fences those
+    // rendered bytes. Its own direct source imports therefore identify the
+    // admitted shared surface; product implementation edges cannot add roots.
+    let original = authored.product().owner();
+    let original = ExactModuleIdentity {
+        unit: original.unit.clone(),
+        module: original.module.clone(),
+    };
+    let imports = authored
+        .original_home_imports()
+        .map(|(owner, imports)| (owner.clone(), imports))
+        .collect::<BTreeMap<_, _>>();
+    let roots = imports.get(&original).ok_or_else(|| {
+        invalid(
+            public,
+            "authored declaration lacks exact original source import evidence",
+        )
+    })?;
+    prior.roots.extend_from_slice(roots);
+    prior.roots.sort();
+    prior.roots.dedup();
+    let mut lexical = prior
+        .lexical
+        .into_iter()
+        .map(|node| (node.owner, node.imports))
+        .collect::<BTreeMap<_, _>>();
+    let mut pending = roots.to_vec();
+    let mut visited = BTreeSet::new();
+    while let Some(owner) = pending.pop() {
+        if !visited.insert(owner.clone()) {
+            continue;
+        }
+        let edges = imports
+            .get(&owner)
+            .ok_or_else(|| {
+                invalid(
+                    public,
+                    "admitted surface root lacks exact original source import evidence",
+                )
+            })?
+            .to_vec();
+        if let Some(previous) = lexical.get(&owner) {
+            if previous != &edges {
+                return Err(invalid(
+                    public,
+                    "admitted surface owner has conflicting original import edges",
+                ));
+            }
+        } else {
+            lexical.insert(owner, edges.clone());
+        }
+        pending.extend(edges);
+    }
+    prior.lexical = lexical
+        .into_iter()
+        .map(|(owner, imports)| ExactLexicalNode { owner, imports })
+        .collect();
+    Ok(prior)
 }
 
 impl PersistentSession {
@@ -217,6 +288,14 @@ impl PersistentSession {
                 "private authored declaration requires unsupported rich evidence",
             ));
         }
+        let surface = extend_admitted_surface(
+            &public,
+            &authored,
+            current_public
+                .as_ref()
+                .map(|joined| joined.surface.clone())
+                .unwrap_or_default(),
+        )?;
         // Reservation changes the complete graph, so the actual paired
         // baseline must be captured again after the identity is durably burned.
         let reserved = self.lib_mut().reserve_join_generation_durable()?;
@@ -246,6 +325,7 @@ impl PersistentSession {
             original,
             authored,
             current_public,
+            surface,
             turn,
             includes: self.lib().extra_include.clone(),
             session_root: self.lib().root.clone(),
@@ -324,6 +404,7 @@ impl DeclarationPublicationBase {
                 imports: Vec::new(),
             });
         }
+        lexical.extend_from_slice(&self.surface.lexical);
         let context = ExactDeclarationContext::new(&[self.authored.clone()], &joins, lexical)?;
         let scratch = tempfile::tempdir()?;
         let materialized = context.materialize(scratch.path())?;
@@ -431,13 +512,15 @@ impl AcceptedDeclarationPublication {
         let context = Arc::new(ExactDeclarationContext::new(
             &[],
             std::slice::from_ref(&receipt),
-            vec![ExactLexicalNode {
+            std::iter::once(ExactLexicalNode {
                 owner: ExactModuleIdentity {
                     unit: receipt.reserved().unit.clone(),
                     module: receipt.reserved().module.clone(),
                 },
                 imports: Vec::new(),
-            }],
+            })
+            .chain(base.surface.lexical.iter().cloned())
+            .collect(),
         )?);
         let checksum = base.public.graph.checksum.clone();
         let high_water = base.public.graph.high_water;
@@ -567,6 +650,7 @@ impl AcceptedDeclarationPublication {
                 turn: base.turn,
                 evidence: receipt,
                 context,
+                surface: base.surface,
             },
         };
         base.public
@@ -848,11 +932,27 @@ mod tests {
         assert!(session.bindings().get(value_b_id).is_some());
         let view = session.compile_view_in(public).unwrap();
         let context = view.exact_declaration_context().unwrap();
-        assert_eq!(context.lexical_graph().len(), 1);
         assert_eq!(
-            context.lexical_graph()[0].owner.module,
-            SessionModule::lib(generation).module_name()
+            context.lexical_graph().len(),
+            1 + session
+                .lib()
+                .log
+                .joined_at(generation)
+                .unwrap()
+                .surface
+                .lexical
+                .len()
         );
+        assert!(context
+            .lexical_graph()
+            .iter()
+            .any(|node| node.owner.module == SessionModule::lib(generation).module_name()));
+        assert!(context
+            .lexical_graph()
+            .iter()
+            .all(|node| ![original_a, original_b]
+                .iter()
+                .any(|original| node.owner.module == SessionModule::lib(*original).module_name())));
         for original in [original_a, original_b] {
             assert!(context.recovery_products().iter().any(|product| {
                 product.owner().module == SessionModule::lib(original).module_name()
@@ -1084,11 +1184,25 @@ mod tests {
             .exact_declaration_context()
             .unwrap()
             .clone();
-        assert_eq!(context.lexical_graph().len(), 1);
         assert_eq!(
-            context.lexical_graph()[0].owner.module,
-            SessionModule::lib(generation).module_name()
+            context.lexical_graph().len(),
+            1 + session
+                .lib()
+                .log
+                .joined_at(generation)
+                .unwrap()
+                .surface
+                .lexical
+                .len()
         );
+        assert!(context
+            .lexical_graph()
+            .iter()
+            .any(|node| node.owner.module == SessionModule::lib(generation).module_name()));
+        assert!(context
+            .lexical_graph()
+            .iter()
+            .all(|node| node.owner.module != authored.product().owner().module));
         assert!(context
             .recovery_products()
             .iter()
