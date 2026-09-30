@@ -436,6 +436,15 @@ impl CheckedDisplayOffer {
 }
 
 impl ExactCompiledItem {
+    /// Only same-check compiled native Value rows may overlay declaration
+    /// spellings in their owning private scope. Their declaration context and
+    /// qualified original owners remain unchanged.
+    pub fn private_value_overlay_binders(&self) -> impl Iterator<Item = &str> {
+        self.bound_binders.iter().map(|binder| {
+            let fields = row(binder, 7).expect("sealed native binder row");
+            string(&fields[0]).expect("sealed native binder name")
+        })
+    }
     pub fn validate_table(&self, table: &tidepool_repr::DataConTable) -> Result<(), CompileError> {
         if table != &self.table {
             return Err(failure("compiled item constructor metadata was edited"));

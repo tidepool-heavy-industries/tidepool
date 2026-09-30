@@ -2633,7 +2633,12 @@ fn check_cell_impl(
         cmd.cell_fold_turn()
             .turn_out(&turn_out_path)
             .bind_gen(fold.gen);
-        for (identity, generation) in fold.retained_imports {
+        let retained = admission
+            .as_ref()
+            .map_or(fold.retained_imports, |admission| {
+                admission.admitted_retained_imports()
+            });
+        for (identity, generation) in retained {
             cmd.retained_generation(extract_identity(identity), *generation);
         }
     }
@@ -3187,7 +3192,10 @@ fn run_turn_with_pin(
     if let Some(pin) = pin {
         cmd.turn_pin(pin);
     }
-    for (identity, generation) in req.retained_imports {
+    let retained = snapshot.map_or(req.retained_imports, |snapshot| {
+        snapshot.admitted_retained_imports()
+    });
+    for (identity, generation) in retained {
         cmd.retained_generation(extract_identity(identity), *generation);
     }
     if let Some(snapshot) = &snapshot {
