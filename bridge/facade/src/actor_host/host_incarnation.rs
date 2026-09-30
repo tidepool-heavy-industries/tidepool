@@ -7,7 +7,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use exomonad_actor::Incarnation;
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,7 @@ struct IncarnationState {
 #[derive(Debug)]
 pub(crate) struct HostIncarnationLease {
     incarnation: Incarnation,
+    run_root: PathBuf,
     _owner_lock: HostRunLock,
 }
 
@@ -85,12 +86,17 @@ impl HostIncarnationLease {
 
         Ok(Self {
             incarnation: Incarnation(next),
+            run_root: fs::canonicalize(run_root)?,
             _owner_lock: owner_lock,
         })
     }
 
     pub(crate) const fn incarnation(&self) -> Incarnation {
         self.incarnation
+    }
+
+    pub(super) fn owns_run(&self, run_root: &Path) -> io::Result<bool> {
+        Ok(self.run_root == fs::canonicalize(run_root)?)
     }
 }
 
@@ -145,6 +151,15 @@ mod tests {
         let _first = HostIncarnationLease::claim(runtime.path()).unwrap();
         let error = HostIncarnationLease::claim(runtime.path()).unwrap_err();
         assert!(error.to_string().contains("already owns"));
+    }
+
+    #[test]
+    fn run_ownership_cannot_authorize_another_run() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let owner = HostIncarnationLease::claim(first.path()).unwrap();
+        assert!(owner.owns_run(first.path()).unwrap());
+        assert!(!owner.owns_run(second.path()).unwrap());
     }
 
     #[test]

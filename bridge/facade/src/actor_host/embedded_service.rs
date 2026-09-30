@@ -21,6 +21,7 @@ use super::{
 use crate::exomonad::EmbeddedLaunchConfig;
 
 pub(super) struct EmbeddedService {
+    _owner: Arc<super::HostIncarnationLease>,
     pub(super) runtime: Arc<EmbeddedHarnessRuntime>,
     pub(super) commands: mpsc::Receiver<QueuedCommand>,
     pub(super) control: ServerControl,
@@ -54,15 +55,26 @@ pub(super) struct EmbeddedActor {
 
 impl EmbeddedService {
     /// Bind the browser and open the sole run Store before admitting an actor.
-    pub(super) async fn prepare(
+    pub(super) async fn prepare_owned(
         run_root: &Path,
         settings: &EmbeddedLaunchConfig,
+        owner: Arc<super::HostIncarnationLease>,
     ) -> Result<Self, String> {
+        if !owner
+            .owns_run(run_root)
+            .map_err(|error| error.to_string())?
+        {
+            return Err("embedded Store recovery requires ownership of this exact run".into());
+        }
         settings.validate().map_err(|error| error.to_string())?;
         let runtime = Arc::new(
             EmbeddedHarnessRuntime::open(run_root, settings.concurrent_jobs)
                 .map_err(|error| error.to_string())?,
         );
+        runtime
+            .store()
+            .recover_embedded_command_claims(&super::runtime_namespace(run_root))
+            .map_err(|error| error.to_string())?;
         let secret = std::fs::read_to_string(&settings.session_secret_file)
             .map_err(|error| error.to_string())?;
         let secret = SessionSecret::new(secret.trim_end_matches(['\r', '\n']).to_owned())
@@ -84,6 +96,7 @@ impl EmbeddedService {
                 .map_err(|error| error.to_string())
         });
         Ok(Self {
+            _owner: owner,
             runtime,
             commands,
             control,
@@ -92,6 +105,16 @@ impl EmbeddedService {
             #[cfg(test)]
             test_transport: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) async fn prepare(
+        run_root: &Path,
+        settings: &EmbeddedLaunchConfig,
+    ) -> Result<Self, String> {
+        let owner =
+            super::HostIncarnationLease::claim(run_root).map_err(|error| error.to_string())?;
+        Self::prepare_owned(run_root, settings, Arc::new(owner)).await
     }
 
     #[cfg(test)]
