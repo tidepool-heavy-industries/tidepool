@@ -257,6 +257,44 @@ impl DeclarationSource {
     }
 }
 
+/// A fold is an optional preparation after successful whole-cell checking.
+/// Ineligible cells remain valid; attempted failures retain their owning stage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CellFoldOutcome {
+    NotRequested,
+    Ineligible(CellFoldIneligibility),
+    AttemptedFailed(CellFoldAttemptFailure),
+    Compiled,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CellFoldIneligibility {
+    EmptyCell,
+    MultipleItems,
+    Expression,
+    Declaration,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CellFoldStage {
+    CheckingEvidence,
+    CompilingTurn,
+    SealingReceipt,
+}
+impl std::fmt::Display for CellFoldStage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::CheckingEvidence => "checking evidence",
+            Self::CompilingTurn => "compiling turn",
+            Self::SealingReceipt => "sealing receipt",
+        })
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("cell fold failed during {stage}: {cause}")]
+pub struct CellFoldAttemptFailure {
+    pub stage: CellFoldStage,
+    pub cause: String,
+}
+
 /// Successful whole-cell preflight result.
 #[derive(Clone, Debug)]
 pub struct CellCheck {
@@ -275,6 +313,7 @@ pub struct CellCheck {
     pub warnings: Vec<crate::diag::ExtractDiag>,
     authority: Option<Arc<ExactCheckedCell>>,
     admission: Option<Arc<super::RuntimeCellAdmission>>,
+    fold_outcome: CellFoldOutcome,
 }
 
 /// Editable diagnostic observations carry no checked execution authority.
@@ -305,11 +344,15 @@ impl From<CellCheckObservations> for CellCheck {
             warnings: observation.warnings,
             authority: None,
             admission: None,
+            fold_outcome: CellFoldOutcome::NotRequested,
         }
     }
 }
 
 impl CellCheck {
+    pub fn fold_outcome(&self) -> &CellFoldOutcome {
+        &self.fold_outcome
+    }
     pub fn checked_item(&self, item_index: usize) -> Result<ExactCheckedItem, CompileError> {
         let authority = self.authority.as_ref().ok_or_else(|| {
             CompileError::ExtractFailed(
@@ -2753,18 +2796,44 @@ fn check_cell_impl(
         );
         checked.admission = Some(admission);
     }
-    // The worker writes `turn.cbor` only when it attempted AND succeeded at
-    // the fold (`attemptCellFoldTurn` swallows its own failures and simply
-    // leaves the file absent) — a malformed file here is a real protocol
-    // bug, not a fold rejection, so it is a hard decode error rather than a
-    // silent fall back.
-    let mut folded = if fold.is_some() && turn_out_path.exists() {
-        Some(
-            decode_turn_output_dir(temp.path(), &offer)
-                .map_err(|error| offer.retain_failure(temp.path(), &output.stderr, error))?,
-        )
-    } else {
-        None
+    let fold_bytes = std::fs::read(temp.path().join("cell-fold.cbor"))?;
+    checked.fold_outcome = decode_cell_fold_outcome(&fold_bytes)
+        .map_err(|error| offer.retain_failure(temp.path(), &output.stderr, error))?;
+    validate_cell_fold_outcome(&checked.fold_outcome, fold.is_some(), &checked.items)
+        .map_err(|error| offer.retain_failure(temp.path(), &output.stderr, error))?;
+    let mut folded = match &checked.fold_outcome {
+        CellFoldOutcome::Compiled => {
+            if !turn_out_path.exists() {
+                return Err(CompileError::ExtractFailed(
+                    "compiled cell fold lacks its turn artifact".into(),
+                )
+                .into());
+            }
+            Some(
+                decode_turn_output_dir(temp.path(), &offer)
+                    .map_err(|error| offer.retain_failure(temp.path(), &output.stderr, error))?,
+            )
+        }
+        CellFoldOutcome::AttemptedFailed(attempt) => {
+            if std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() == Ok("1") {
+                let diagnostic = offer.retain_failure(
+                    temp.path(),
+                    &output.stderr,
+                    CompileError::ExtractFailed(attempt.to_string()),
+                );
+                eprintln!("{diagnostic}");
+            }
+            None
+        }
+        CellFoldOutcome::NotRequested | CellFoldOutcome::Ineligible(_) => {
+            if turn_out_path.exists() {
+                return Err(CompileError::ExtractFailed(
+                    "unattempted cell fold has a turn artifact".into(),
+                )
+                .into());
+            }
+            None
+        }
     };
     if let (
         Some(cell),
@@ -2788,17 +2857,6 @@ fn check_cell_impl(
         })?;
         certification.checked_item = Some(execution.item().clone());
         certification.checked_execution = Some(execution);
-    }
-    if fold.is_some()
-        && folded.is_none()
-        && std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() == Ok("1")
-    {
-        let diagnostic = offer.retain_failure(
-            temp.path(),
-            &output.stderr,
-            CompileError::ExtractFailed("requested cell fold produced no compiled output".into()),
-        );
-        eprintln!("{diagnostic}");
     }
     if checked.authority.is_some() && folded.is_some() {
         if let Some(fold) = &fold {
@@ -3843,7 +3901,113 @@ pub(super) fn decode_cell_out(
         warnings: Vec::new(),
         authority: None,
         admission: None,
+        fold_outcome: CellFoldOutcome::NotRequested,
     })
+}
+
+fn decode_cell_fold_outcome(bytes: &[u8]) -> Result<CellFoldOutcome, CompileError> {
+    if bytes.len() > 16 * 1024 {
+        return Err(CompileError::ExtractFailed(
+            "cell fold outcome exceeds its bounded receipt".into(),
+        ));
+    }
+    let mut cursor = std::io::Cursor::new(bytes);
+    let value: CborValue = ciborium::de::from_reader(&mut cursor)
+        .map_err(|error| CompileError::ExtractFailed(format!("cell fold outcome CBOR: {error}")))?;
+    if cursor.position() != bytes.len() as u64 {
+        return Err(CompileError::ExtractFailed(
+            "cell fold outcome has trailing bytes".into(),
+        ));
+    }
+    let fields = cbor_expect_array_len(&value, 5, "cell fold outcome")?;
+    if cbor_expect_text(&fields[0], "fold magic")? != "TPCELLFOLD"
+        || fields[1] != CborValue::Integer(1.into())
+    {
+        return Err(CompileError::ExtractFailed(
+            "unsupported cell fold outcome schema".into(),
+        ));
+    }
+    let tag = cbor_expect_text(&fields[2], "fold outcome")?;
+    let outcome = match tag {
+        "not-requested" if fields[3] == CborValue::Null && fields[4] == CborValue::Null => {
+            CellFoldOutcome::NotRequested
+        }
+        "compiled" if fields[3] == CborValue::Null && fields[4] == CborValue::Null => {
+            CellFoldOutcome::Compiled
+        }
+        "ineligible" if fields[4] == CborValue::Null => {
+            CellFoldOutcome::Ineligible(match cbor_expect_text(&fields[3], "fold eligibility")? {
+                "empty-cell" => CellFoldIneligibility::EmptyCell,
+                "multiple-items" => CellFoldIneligibility::MultipleItems,
+                "expression" => CellFoldIneligibility::Expression,
+                "declaration" => CellFoldIneligibility::Declaration,
+                _ => {
+                    return Err(CompileError::ExtractFailed(
+                        "unknown cell fold ineligibility".into(),
+                    ))
+                }
+            })
+        }
+        "attempted-failed" => {
+            let stage = match cbor_expect_text(&fields[3], "fold failure stage")? {
+                "checking-evidence" => CellFoldStage::CheckingEvidence,
+                "compiling-turn" => CellFoldStage::CompilingTurn,
+                "sealing-receipt" => CellFoldStage::SealingReceipt,
+                _ => {
+                    return Err(CompileError::ExtractFailed(
+                        "unknown cell fold failure stage".into(),
+                    ))
+                }
+            };
+            let cause = cbor_expect_text(&fields[4], "fold failure cause")?;
+            if cause.is_empty() || cause.chars().count() > 2048 {
+                return Err(CompileError::ExtractFailed(
+                    "invalid bounded cell fold failure cause".into(),
+                ));
+            }
+            CellFoldOutcome::AttemptedFailed(CellFoldAttemptFailure {
+                stage,
+                cause: cause.to_owned(),
+            })
+        }
+        _ => {
+            return Err(CompileError::ExtractFailed(
+                "invalid cell fold outcome fields".into(),
+            ))
+        }
+    };
+    Ok(outcome)
+}
+
+fn validate_cell_fold_outcome(
+    outcome: &CellFoldOutcome,
+    requested: bool,
+    items: &[CellAnalysisItem],
+) -> Result<(), CompileError> {
+    let eligible = items.len() == 1 && items[0].verdict.kind == TurnKind::Bind;
+    let valid = match outcome {
+        CellFoldOutcome::NotRequested => !requested,
+        CellFoldOutcome::Ineligible(reason) => {
+            requested
+                && match reason {
+                    CellFoldIneligibility::EmptyCell => items.is_empty(),
+                    CellFoldIneligibility::MultipleItems => items.len() > 1,
+                    CellFoldIneligibility::Expression => {
+                        items.len() == 1 && items[0].verdict.kind == TurnKind::Expr
+                    }
+                    CellFoldIneligibility::Declaration => {
+                        items.len() == 1 && items[0].verdict.kind == TurnKind::Decl
+                    }
+                }
+        }
+        CellFoldOutcome::AttemptedFailed(_) | CellFoldOutcome::Compiled => requested && eligible,
+    };
+    if !valid {
+        return Err(CompileError::ExtractFailed(
+            "cell fold outcome contradicts the checked cell eligibility".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn decode_checked_expression_plan(
@@ -4850,6 +5014,136 @@ mod ambiguity_advice_tests {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn cell_fold_outcome_separates_ineligibility_failure_and_malformed_protocol() {
+        use super::*;
+        fn encoded(tag: &str, detail: CborValue, cause: CborValue) -> Vec<u8> {
+            let value = CborValue::Array(vec![
+                CborValue::Text("TPCELLFOLD".into()),
+                CborValue::Integer(1.into()),
+                CborValue::Text(tag.into()),
+                detail,
+                cause,
+            ]);
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+            bytes
+        }
+        let cases = [
+            (
+                encoded("not-requested", CborValue::Null, CborValue::Null),
+                CellFoldOutcome::NotRequested,
+            ),
+            (
+                encoded(
+                    "ineligible",
+                    CborValue::Text("expression".into()),
+                    CborValue::Null,
+                ),
+                CellFoldOutcome::Ineligible(CellFoldIneligibility::Expression),
+            ),
+            (
+                encoded(
+                    "attempted-failed",
+                    CborValue::Text("compiling-turn".into()),
+                    CborValue::Text("actual source rejection".into()),
+                ),
+                CellFoldOutcome::AttemptedFailed(CellFoldAttemptFailure {
+                    stage: CellFoldStage::CompilingTurn,
+                    cause: "actual source rejection".into(),
+                }),
+            ),
+            (
+                encoded("compiled", CborValue::Null, CborValue::Null),
+                CellFoldOutcome::Compiled,
+            ),
+        ];
+        for (bytes, expected) in cases {
+            assert_eq!(decode_cell_fold_outcome(&bytes).unwrap(), expected);
+            let mut trailing = bytes;
+            trailing.push(0);
+            assert!(decode_cell_fold_outcome(&trailing).is_err());
+        }
+        for bytes in [
+            encoded(
+                "ineligible",
+                CborValue::Text("unknown".into()),
+                CborValue::Null,
+            ),
+            encoded(
+                "attempted-failed",
+                CborValue::Text("unknown".into()),
+                CborValue::Text("cause".into()),
+            ),
+            encoded(
+                "compiled",
+                CborValue::Text("unexpected".into()),
+                CborValue::Null,
+            ),
+            encoded(
+                "attempted-failed",
+                CborValue::Text("compiling-turn".into()),
+                CborValue::Text(String::new()),
+            ),
+        ] {
+            assert!(decode_cell_fold_outcome(&bytes).is_err());
+        }
+        assert!(validate_cell_fold_outcome(&CellFoldOutcome::NotRequested, false, &[]).is_ok());
+        assert!(validate_cell_fold_outcome(
+            &CellFoldOutcome::Ineligible(CellFoldIneligibility::EmptyCell),
+            true,
+            &[]
+        )
+        .is_ok());
+        assert!(validate_cell_fold_outcome(&CellFoldOutcome::Compiled, true, &[]).is_err());
+        assert!(validate_cell_fold_outcome(&CellFoldOutcome::NotRequested, true, &[]).is_err());
+    }
+
+    #[test]
+    fn checked_cell_reports_expression_skip_and_real_fold_compile_failure() {
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let template = include_str!("fixtures/checked-fold-outcome-template.hs");
+        let request = |source| CellCheckRequest {
+            exact_context: None,
+            session_id: None,
+            cell_text: source,
+            template,
+            include: &[],
+            session_root: root.path(),
+            inject_modules: &[],
+            compile_generation: 0,
+            compile_view_evidence: "",
+        };
+        let fold = || CellFoldTurn {
+            templates: &[],
+            gen: 1,
+            retained_imports: &[],
+        };
+        let (expression, compiled) =
+            check_cell_with_fold(request("40 + 2 :: Int"), fold()).unwrap();
+        assert!(compiled.is_none());
+        assert_eq!(
+            expression.fold_outcome(),
+            &CellFoldOutcome::Ineligible(CellFoldIneligibility::Expression)
+        );
+        let (binding, compiled) =
+            check_cell_with_fold(request("let value = (42 :: Int)"), fold()).unwrap();
+        assert!(compiled.is_none());
+        let CellFoldOutcome::AttemptedFailed(failure) = binding.fold_outcome() else {
+            panic!("eligible bind must record its attempted failure")
+        };
+        assert_eq!(failure.stage, CellFoldStage::CompilingTurn);
+        assert!(!failure.cause.is_empty());
+        assert_eq!(binding.items.len(), 1);
+        assert_eq!(binding.items[0].verdict.kind, TurnKind::Bind);
+        let unchecked_fold = check_cell(request("40 + 2 :: Int")).unwrap();
+        assert_eq!(
+            unchecked_fold.fold_outcome(),
+            &CellFoldOutcome::NotRequested
+        );
+    }
+
+    #[test]
     fn empty_checked_context_reuses_immutable_support_and_invalidates_changed_source() {
         use crate::session::{
             resident_cell_check_template, resident_workbench_templates, ModuleEnv,
@@ -5622,6 +5916,10 @@ mod tests {
         )
         .unwrap();
         assert!(expression_fold.is_none());
+        assert_eq!(
+            expression_check.fold_outcome(),
+            &CellFoldOutcome::Ineligible(CellFoldIneligibility::Expression)
+        );
         let expression_item = expression_check.checked_item(0).unwrap();
         assert!(expression_item.signatures()[0]
             .names()

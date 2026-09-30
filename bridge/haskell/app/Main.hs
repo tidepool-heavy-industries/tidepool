@@ -1170,8 +1170,10 @@ runCellMode compiler caches args cellPath = do
     -- 'attemptCellFoldTurn' catches its own exceptions and simply leaves
     -- '--turn-out' unwritten, which is the caller's documented signal to
     -- fall back to its own separate '--turn' request.
-    when (requestCellFoldTurn args) $
-      attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled admittedScope
+    foldOutcome <- if requestCellFoldTurn args
+      then attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled admittedScope
+      else pure CellFoldNotRequested
+    BS.writeFile (outDir </> "cell-fold.cbor") (encodeCellFoldOutcome foldOutcome)
     pure (crWarnings compiled)
   case res of
     Left _ -> do
@@ -1406,46 +1408,62 @@ writeCheckedItemReceipt root scope admission source = do
         <> text (shaHex (TE.encodeUtf8 (T.pack source))) <> text "tidepool-checked-recipe-2"
   BS.writeFile (root </> "checked-item.cbor") (toStrictByteString receipt)
 
--- | After a successful whole-cell check, attempt ONE further compile in the
--- SAME worker invocation — no separate spawn — when the cell resolved to
--- exactly one item, that item is a bind (@x \<- e@ / @let x = e@, never a
--- bare expression or a declaration), and the caller asked for the fold
--- ('requestCellFoldTurn'). The bind's binder types are already known from
--- this SAME check ('crCheckedBinderPins'): reusing them as an explicit
--- signature (mirroring the Rust runtime's 'run_turn_pinned') is what makes
--- this safe with only ONE typecheck of the statement ever happening, so
--- there is nothing for two independent generalizations to disagree about.
---
--- Deliberately narrower than every fold-eligible shape: an expression item
--- compiles through a Rust-built observation wrapper
--- (`compile_block_off_checkout`'s `assemble_observation_module`) whose
--- generated binder name must avoid every name already visible in scope —
--- resolving that collision-free name is Rust-side session state this
--- worker invocation does not have before the check runs, so an eligible
--- expression-only cell still falls back to the ordinary two-request path.
---
--- A synchronous failure emits a bounded diagnostic and leaves '--turn-out'
--- unwritten; this never touches the successful '--cell-out'. Asynchronous
--- cancellation propagates through the worker's existing exception boundary.
+-- Fold eligibility and attempted compilation are separate from whole-cell
+-- checking. An expression or declaration is a successful ineligible outcome.
+data CellFoldIneligibility
+  = FoldEmptyCell | FoldMultipleItems | FoldExpressionItem | FoldDeclarationItem
+
+data CellFoldStage = FoldCheckingEvidence | FoldCompilingTurn | FoldSealingReceipt
+
+data CellFoldOutcome
+  = CellFoldNotRequested
+  | CellFoldIneligible CellFoldIneligibility
+  | CellFoldAttemptedFailed CellFoldStage String
+  | CellFoldCompiled
+
+encodeCellFoldOutcome :: CellFoldOutcome -> BS.ByteString
+encodeCellFoldOutcome outcome = toStrictByteString $
+  encodeListLen 5 <> text "TPCELLFOLD" <> encodeWord 1 <> case outcome of
+    CellFoldNotRequested -> text "not-requested" <> encodeNull <> encodeNull
+    CellFoldIneligible reason -> text "ineligible" <> text (case reason of
+      FoldEmptyCell -> "empty-cell"; FoldMultipleItems -> "multiple-items"
+      FoldExpressionItem -> "expression"; FoldDeclarationItem -> "declaration") <> encodeNull
+    CellFoldAttemptedFailed stage cause -> text "attempted-failed" <> text (case stage of
+      FoldCheckingEvidence -> "checking-evidence"; FoldCompilingTurn -> "compiling-turn"
+      FoldSealingReceipt -> "sealing-receipt") <> text cause
+    CellFoldCompiled -> text "compiled" <> encodeNull <> encodeNull
+  where text = encodeString . T.pack
+
+-- A synchronous attempted failure preserves the successful whole-cell result.
+-- Asynchronous cancellation propagates through the existing worker boundary.
 attemptCellFoldTurn
   :: Compiler -> RecoveryCaches -> WorkerRequest -> Bool -> FilePath
-  -> CellSourcePlan -> CheckedEnvironmentResult -> Maybe ExactScope -> IO ()
-attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled admittedScope = do
-  result <- trySynchronous attempt
-  case result of
-    Right () -> pure ()
-    Left exception -> hPutStrLn stderr
-      ("cell fold unavailable: " ++ take 8192 (show exception))
+  -> CellSourcePlan -> CheckedEnvironmentResult -> Maybe ExactScope -> IO CellFoldOutcome
+attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled admittedScope =
+  case soleBindItem finalPlan of
+    Nothing -> pure (CellFoldIneligible (case cellPlanItems finalPlan of
+      [] -> FoldEmptyCell
+      [item] -> case sbKind (cellAnalysisVerdict item) of
+        KExpr -> FoldExpressionItem; KDecl -> FoldDeclarationItem
+        KBind -> FoldMultipleItems
+      _ -> FoldMultipleItems))
+    Just item -> do
+      stage <- newIORef FoldCheckingEvidence
+      result <- trySynchronous (attempt stage item)
+      case result of
+        Right () -> pure CellFoldCompiled
+        Left exception -> do
+          failedStage <- readIORef stage
+          pure (CellFoldAttemptedFailed failedStage (take 2048 (show exception)))
   where
-    attempt = case soleBindItem finalPlan of
-      Nothing -> pure ()
-      Just item -> do
+    attempt stage item = do
         outFile <- requireArg "--turn-out" (requestTurnOut args)
         let sb = cellAnalysisVerdict item
             turnSrc = cellAnalysisSource item
             pins = itemBinderPins 0 (sbBinders sb) (crCheckedBinderPins compiled)
         bindersStr <- either fail pure (renderPinnedBinders (sbBinders sb) pins)
         lastAttempt <- newIORef Nothing
+        writeIORef stage FoldCheckingEvidence
         admitted <- case admittedScope >>= scopeCheckedCell of
           Nothing -> pure Nothing
           Just cellAdmission -> do
@@ -1463,7 +1481,9 @@ attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled admitt
             validateCheckedItemAdmission args admission turnSrc sb
             pure (Just admission)
         let typeImports = if isJust admitted then [] else nub (concatMap checkedPinImports [pin | Just pin <- pins])
+        writeIORef stage FoldCompilingTurn
         turnOut <- compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted Nothing lastAttempt
+        writeIORef stage FoldSealingReceipt
         BS.writeFile outFile (encodeTurnOut turnOut)
         forM_ (admittedScope >>= \scope -> (,) scope <$> admitted) $ \(scope,admission) ->
           case turnOut of
