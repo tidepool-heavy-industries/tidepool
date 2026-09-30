@@ -141,7 +141,7 @@
           playwrightChromium = harnessPkgs.playwright-driver.browsers.override {
             withFirefox = false;
             withWebkit = false;
-            withChromiumHeadlessShell = false;
+            withChromiumHeadlessShell = true;
             withFfmpeg = false;
           };
           # rust-toolchain.toml is the single source of truth for the Rust
