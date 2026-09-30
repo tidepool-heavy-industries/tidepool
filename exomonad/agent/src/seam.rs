@@ -3,7 +3,7 @@
 //!
 //! Every type here is deliberately backend-neutral. If adding a field here
 //! requires naming a `codex-codes` type, the field belongs in
-//! [`crate::backend::codex`] instead, projected into a neutral shape on the way
+//! the optional native compatibility backend instead, projected into a neutral shape on the way
 //! out.
 
 use serde::{Deserialize, Serialize};

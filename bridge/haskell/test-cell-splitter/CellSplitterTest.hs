@@ -23,8 +23,11 @@ import Tidepool.Binders
 import Tidepool.TurnSource (spliceTemplate)
 import Tidepool.DiagJson (Diag (..), diagsFromSourceError)
 import Tidepool.ExtractUtil (getLibdir)
+import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.GhcPipeline
-import Tidepool.ExtractRequest (InspectionRequest(..))
+import Tidepool.ExtractRequest
+  ( InspectionRequest(..), RequestField(..), WorkerRequest(..)
+  , workerArgv, workerRequestFromArgv )
 import Tidepool.Introspection (InfoEntry(..), InspectionResult(..), runInspection)
 import Tidepool.DependencyEvidence
 import Tidepool.Session
@@ -34,7 +37,8 @@ import Tidepool.Timing
   ( InterfaceStage(..), InterfaceReuse(..), measureModuleInterface )
 import System.Directory
   ( getTemporaryDirectory, createDirectory, createDirectoryIfMissing
-  , removeFile, removeDirectoryRecursive )
+  , removeFile, removeDirectoryRecursive
+  , getPermissions, setPermissions, setOwnerExecutable )
 import System.FilePath ((</>))
 import System.IO (openTempFile, hClose, hFlush, readFile', stderr)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
@@ -42,6 +46,7 @@ import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 
 main :: IO ()
 main = do
+  certificationRequestValidation
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     flags <- getSessionDynFlags
@@ -75,6 +80,29 @@ main = do
     ["--memo-lifecycle"] -> memoLifecycleCompilation
     ["--structural-display", effectsRoot] -> structuralDisplayCompilation effectsRoot
     _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, --pin-imports, --path-insensitive-witness, --memo-lifecycle, or --structural-display EFFECTS_INCLUDE"
+
+certificationRequestValidation :: IO ()
+certificationRequestValidation = do
+  let valid = [Input "Probe.hs", Targets ["probe"], Include "lib"
+              , SessionRoot "/session", BuildProductsDir "/products"
+              , CertifyHomeProducts]
+  case workerRequestFromArgv (workerArgv valid) of
+    Right (Just request) | requestCertifyHomeProducts request -> pure ()
+    other -> fail ("home-product certification request rejected: " ++ show other)
+  forM_ [ Cell, Classify, Turn, InspectType "Int", InspectTypeBatch "Batch.hs"
+        , DeclarationJoin "join.cbor", BindGen 1, InjectVal "Val1"
+        , ModuleCandidates "candidates.cbor", SessionArtifacts "artifacts.cbor"
+        , ActivationPreview, CellFoldTurn, TargetModuleOnly
+        , RetainedGeneration (SymbolIdentity "main" "Producer" "value" "value" Nothing) 1
+        ] $ \field ->
+    case workerRequestFromArgv (workerArgv (valid ++ [field])) of
+      Left _ -> pure ()
+      other -> fail ("home-product certification accepted incompatible field "
+        ++ show field ++ ": " ++ show other)
+  forM_ [[CertifyHomeProducts], valid ++ [Input "Other.hs"]] $ \fields ->
+    case workerRequestFromArgv (workerArgv fields) of
+      Left _ -> pure ()
+      other -> fail ("home-product certification accepted ambiguous input: " ++ show other)
 
 multilineLetPlacement :: DynFlags -> IO ()
 multilineLetPlacement flags = do
@@ -142,6 +170,13 @@ untrackedCompileTimeCompilation :: IO ()
 untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
   let dependency = root </> "QuasiQuoteDependency.hs"
       templateDependency = root </> "TemplateDependency.hs"
+      cppDependency = root </> "CppDependency.hs"
+      cppUser = root </> "CppUser.hs"
+      externalPreprocessor = root </> "untracked-preprocessor"
+      preprocessorInput = root </> "preprocessor-input.txt"
+      preprocessedDependency = root </> "PreprocessedDependency.hs"
+      preprocessedUser = root </> "PreprocessedUser.hs"
+      noQuoteUser = root </> "NoQuoteUser.hs"
       target = root </> "QuasiQuoteTarget.hs"
       -- A fixture standing in for a real, allowlisted quoter module
       -- ('bridge/haskell/lib/Tidepool/QQ/Label.hs'): 'pureQuasiQuoters'
@@ -178,6 +213,40 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
     , "module TemplateDependency (other) where"
     , "other :: Int"
     , "other = 1"
+    ]
+  writeFile noQuoteUser $ unlines
+    [ "{-# LANGUAGE QuasiQuotes #-}"
+    , "module NoQuoteUser where"
+    , "import QuasiQuoteDependency (value)"
+    , "result = value"
+    ]
+  writeFile cppDependency $ unlines
+    [ "{-# LANGUAGE CPP #-}"
+    , "module CppDependency where"
+    , "value = (42 :: Int)"
+    ]
+  writeFile cppUser $ unlines
+    [ "module CppUser where"
+    , "import CppDependency (value)"
+    , "result = value"
+    ]
+  writeFile preprocessorInput "outside the Haskell source graph"
+  writeFile externalPreprocessor $ unlines
+    [ "#!/usr/bin/env sh"
+    , "cat " ++ show preprocessorInput ++ " >/dev/null"
+    , "cat \"$2\" >\"$3\""
+    ]
+  preprocessorPermissions <- getPermissions externalPreprocessor
+  setPermissions externalPreprocessor (setOwnerExecutable True preprocessorPermissions)
+  writeFile preprocessedDependency $ unlines
+    [ "{-# OPTIONS_GHC -F -pgmF " ++ show externalPreprocessor ++ " #-}"
+    , "module PreprocessedDependency where"
+    , "value = (42 :: Int)"
+    ]
+  writeFile preprocessedUser $ unlines
+    [ "module PreprocessedUser where"
+    , "import PreprocessedDependency (value)"
+    , "result = value"
     ]
   writeFile target $ unlines
     [ "module QuasiQuoteTarget where"
@@ -294,7 +363,13 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
   direct <- runPipelineSelected PreparedStg target [root]
   let evidence = pprDependencies direct
   when (dependencyCacheSafe evidence || dependencySelectionComplete evidence) $
-    fail "QuasiQuotes source produced complete dependency evidence"
+    fail "TemplateHaskell source produced complete dependency evidence"
+  noQuotes <- runPipelineSelected PreparedStg noQuoteUser [root]
+  assertComplete "QuasiQuotes enabled without occurrences" noQuotes
+  cpp <- runPipelineSelected PreparedStg cppUser [root]
+  assertIncomplete "CPP enabled" cpp
+  preprocessed <- runPipelineSelected PreparedStg preprocessedUser [root]
+  assertIncomplete "external preprocessor with an untracked input" preprocessed
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
   previousMemoTrace <- lookupEnv "TIDEPOOL_MEMO_TRACE"
   setEnv "TIDEPOOL_TIMING" "1"
@@ -308,14 +383,24 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
       assertContains "TemplateHaskell source remains conservatively uncacheable"
         "tidepool-memo-miss module=TemplateDependency reason=untracked-compile-time-execution"
         warmLog
+      preprocessedCold <- compile PreparedStg mempty GeneralCompile Nothing preprocessedUser [] Nothing
+      assertIncomplete "external preprocessor, fresh" preprocessedCold
+      (preprocessedWarm, preprocessedWarmLog) <- captureStderr root "preprocessed-warm" $
+        compile PreparedStg mempty GeneralCompile Nothing preprocessedUser [] Nothing
+      assertIncomplete "external preprocessor, repeated" preprocessedWarm
+      assertContains "external preprocessor is never memoized"
+        "tidepool-memo-miss module=PreprocessedDependency reason=untracked-compile-time-execution"
+        preprocessedWarmLog
       -- A dependency module whose only compile-time execution is an
       -- allowlisted, pure quasiquoter reuses the memo on the next
       -- identical compile (the target itself, 'LabelUser', is always
       -- freshly recompiled -- see 'validationMemoCompilation' -- so it is
       -- 'LabelDependency', not 'LabelUser', whose memo status this checks).
-      _ <- compile PreparedStg mempty GeneralCompile Nothing labelUser [] Nothing
-      (_, labelWarmLog) <- captureStderr root "label-warm" $
+      labelCold <- compile PreparedStg mempty GeneralCompile Nothing labelUser [] Nothing
+      assertComplete "allowlisted pure quasiquote, fresh" labelCold
+      (labelWarm, labelWarmLog) <- captureStderr root "label-warm" $
         compile PreparedStg mempty GeneralCompile Nothing labelUser [] Nothing
+      assertComplete "allowlisted pure quasiquote, memoized" labelWarm
       when ("tidepool-memo-miss module=LabelDependency" `isInfixOf` labelWarmLog) $
         fail ("a dependency using only [label|...|] missed the memo: " ++ labelWarmLog)
       -- Same guarantee, reached through an open (no-explicit-list) import of
@@ -323,9 +408,11 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
       -- too -- the ambiguity the old import-list-only heuristic could not
       -- see through (every no-list import "brings everything into scope",
       -- so it bailed out as soon as more than one was present).
-      _ <- compile PreparedStg mempty GeneralCompile Nothing openImportUser [] Nothing
-      (_, openImportWarmLog) <- captureStderr root "open-import-warm" $
+      openCold <- compile PreparedStg mempty GeneralCompile Nothing openImportUser [] Nothing
+      assertComplete "allowlisted pure quasiquote via open import, fresh" openCold
+      (openWarm, openImportWarmLog) <- captureStderr root "open-import-warm" $
         compile PreparedStg mempty GeneralCompile Nothing openImportUser [] Nothing
+      assertComplete "allowlisted pure quasiquote via open import, memoized" openWarm
       when ("tidepool-memo-miss module=OpenImportDependency" `isInfixOf` openImportWarmLog) $
         fail ("a dependency using [label|...|] via an open import missed the memo: "
                 ++ openImportWarmLog)
@@ -333,9 +420,11 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
       -- allowlisted quoter rather than defining it -- resolution must
       -- follow the re-export back to "Tidepool.QQ.Label.label", the
       -- allowlist's key, not stop at "LabelReexport.label".
-      _ <- compile PreparedStg mempty GeneralCompile Nothing reexportUser [] Nothing
-      (_, reexportWarmLog) <- captureStderr root "reexport-warm" $
+      reexportCold <- compile PreparedStg mempty GeneralCompile Nothing reexportUser [] Nothing
+      assertComplete "allowlisted pure quasiquote via reexport, fresh" reexportCold
+      (reexportWarm, reexportWarmLog) <- captureStderr root "reexport-warm" $
         compile PreparedStg mempty GeneralCompile Nothing reexportUser [] Nothing
+      assertComplete "allowlisted pure quasiquote via reexport, memoized" reexportWarm
       when ("tidepool-memo-miss module=ReexportDependency" `isInfixOf` reexportWarmLog) $
         fail ("a dependency using [label|...|] via a re-export missed the memo: "
                 ++ reexportWarmLog)
@@ -344,20 +433,63 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
       -- scope) stays conservatively uncacheable, same as raw QuasiQuotes —
       -- same short TIDEPOOL_TIMING reason — but TIDEPOOL_MEMO_TRACE still
       -- honestly names the unresolved quoter it actually saw.
-      _ <- compile PreparedStg mempty GeneralCompile Nothing localQuoteUser [] Nothing
-      (_, localWarmLog) <- captureStderr root "local-quote-warm" $
+      localCold <- compile PreparedStg mempty GeneralCompile Nothing localQuoteUser [] Nothing
+      assertIncomplete "unlisted quasiquote, fresh" localCold
+      (localWarm, localWarmLog) <- captureStderr root "local-quote-warm" $
         compile PreparedStg mempty GeneralCompile Nothing localQuoteUser [] Nothing
+      assertIncomplete "unlisted quasiquote, memoized" localWarm
       assertContains "an unlisted (locally-defined) quasiquoter remains conservatively uncacheable"
         "tidepool-memo-miss module=LocalQuoteDependency reason=untracked-compile-time-execution"
         localWarmLog
       assertContains "the trace honestly reports the unresolved quoter, not a false allowlist hit"
         "tidepool-memo-trace-miss" localWarmLog
       assertContains "the trace honestly reports the unresolved quoter, not a false allowlist hit"
-        "quasiquotes=untracked:LocalQuoteQuoter.myqq" localWarmLog)
+        "quasiquotes=untracked:LocalQuoteQuoter.myqq" localWarmLog
+      let dependent = root </> "quote-input.txt"
+      writeFile dependent "tracked input"
+      -- Use a fresh quoter identity: reusing an already linked TH provider
+      -- would observe its old bytecode rather than this fixture's implementation.
+      writeFile (qqDir </> "Validate.hs") $ unlines
+        [ "module Tidepool.QQ.Validate (uri) where"
+        , "import Language.Haskell.TH (litE, stringL)"
+        , "import Language.Haskell.TH.Syntax (addDependentFile)"
+        , "import Language.Haskell.TH.Quote (QuasiQuoter(..))"
+        , "uri :: QuasiQuoter"
+        , "uri = QuasiQuoter"
+        , "  { quoteExp = \\source -> addDependentFile " ++ show dependent ++ " >> litE (stringL source)"
+        , "  , quotePat = \\_ -> fail \"label is expression-only\""
+        , "  , quoteType = \\_ -> fail \"label is expression-only\""
+        , "  , quoteDec = \\_ -> fail \"label is expression-only\""
+        , "  }"
+        ]
+      let dependentQuote = root </> "DependentQuote.hs"
+          dependentUser = root </> "DependentUser.hs"
+      writeFile dependentQuote $ unlines
+        [ "{-# LANGUAGE QuasiQuotes #-}"
+        , "module DependentQuote where"
+        , "import Tidepool.QQ.Validate (uri)"
+        , "value :: String"
+        , "value = [uri|tracked|]"
+        ]
+      writeFile dependentUser $ unlines
+        [ "module DependentUser where"
+        , "import DependentQuote (value)"
+        , "result = value"
+        ]
+      withDependentFile <- compile PreparedStg mempty GeneralCompile Nothing dependentUser [] Nothing
+      assertIncomplete "allowlisted origin with a dependent file" withDependentFile)
     `finally` do
       maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
       maybe (unsetEnv "TIDEPOOL_MEMO_TRACE") (setEnv "TIDEPOOL_MEMO_TRACE") previousMemoTrace
   where
+    assertComplete label result = do
+      let evidence = pprDependencies result
+      unless (dependencyCacheSafe evidence && dependencySelectionComplete evidence) $
+        fail (label ++ " did not produce complete dependency evidence")
+    assertIncomplete label result = do
+      let evidence = pprDependencies result
+      when (dependencyCacheSafe evidence || dependencySelectionComplete evidence) $
+        fail (label ++ " produced complete dependency evidence")
     temporary = do
       parent <- getTemporaryDirectory
       (path, handle) <- openTempFile parent "tidepool-untracked-compile-time"
@@ -467,6 +599,7 @@ pathInsensitiveWitnessCompilation = bracket temporary removeDirectoryRecursive $
   let workDir = root </> "work"
       rootA = root </> "rootA"
       rootB = root </> "rootB"
+      sharedRoot = root </> "shared"
       importer = workDir </> "Importer.hs"
       depContent =
         [ "module Dep where"
@@ -476,12 +609,15 @@ pathInsensitiveWitnessCompilation = bracket temporary removeDirectoryRecursive $
       targetContent =
         [ "module Target where"
         , "import Dep (value)"
+        , "import Shared (shared)"
         , "result :: Int"
-        , "result = value + 1"
+        , "result = value + shared"
         ]
   createDirectoryIfMissing True workDir
   createDirectoryIfMissing True rootA
   createDirectoryIfMissing True rootB
+  createDirectoryIfMissing True sharedRoot
+  writeFile (sharedRoot </> "Shared.hs") "module Shared where\nshared = (1 :: Int)\n"
   writeFile (rootA </> "Dep.hs") (unlines depContent)
   writeFile (rootB </> "Dep.hs") (unlines depContent)
   writeFile (rootA </> "Target.hs") (unlines targetContent)
@@ -497,13 +633,20 @@ pathInsensitiveWitnessCompilation = bracket temporary removeDirectoryRecursive $
   (withResidentPipelineSelectedRequests [workDir] (const (pure ())) $ \runRequest ->
       runRequest $ \compile -> do
         (_, coldLog) <- captureStderr root "path-insensitive-cold" $
-          compile PreparedStg mempty GeneralCompile Nothing importer [rootA] Nothing
+          compile PreparedStg mempty GeneralCompile Nothing importer [rootA, sharedRoot] Nothing
         assertContains "cold compile resolves Dep from rootA"
           "tidepool-memo-miss module=Dep reason=absent" coldLog
         assertContains "cold compile resolves Target from rootA"
           "tidepool-memo-miss module=Target reason=dependency-miss:Dep" coldLog
-        (_, warmLog) <- captureStderr root "path-insensitive-warm" $
-          compile PreparedStg mempty GeneralCompile Nothing importer [rootB] Nothing
+        (warm, warmLog) <- captureStderr root "path-insensitive-warm" $
+          compile PreparedStg mempty GeneralCompile Nothing importer [rootB, sharedRoot] Nothing
+        let evidence = pprDependencies warm
+            obsoletePaths = [path | resolution <- dependencyResolutions evidence
+              , path <- dependencyResolutionCandidates resolution, rootA `isPrefixOf` path]
+        unless (null obsoletePaths) $
+          fail ("previous request roots leaked through shared module summary: " ++ show obsoletePaths)
+        unless (dependencyCacheSafe evidence && dependencySelectionComplete evidence) $
+          fail "changed import roots lost complete dependency evidence"
         when ("tidepool-memo-miss module=Target" `isInfixOf` warmLog) $
           fail ("byte-identical Target resolved from a different root missed the memo: " ++ warmLog)
         when ("tidepool-memo-miss module=Dep" `isInfixOf` warmLog) $

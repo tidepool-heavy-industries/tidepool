@@ -1157,6 +1157,7 @@ impl exomonad_actor::KernelBehavior for GatedBehavior {
         &'a mut self,
         _: &'a exomonad_actor::KernelContext,
         _: ToolInvocation,
+        _: Option<Arc<dyn exomonad_actor::HostedCheckpointCapture>>,
     ) -> BoxFuture<
         'a,
         Result<

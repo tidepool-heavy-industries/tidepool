@@ -3,6 +3,7 @@
 //! This is deliberately an integration test: the native input listener is owned
 //! by the packaged Codex TUI, while Tidepool owns the binding and delivery seam.
 
+#![cfg(feature = "codex-compat")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

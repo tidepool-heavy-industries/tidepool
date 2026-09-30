@@ -204,17 +204,21 @@ fn digest_field(digest: &mut Sha256, bytes: &[u8]) {
     digest.update(bytes);
 }
 
+#[cfg(feature = "codex-compat")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InteractiveLaunchId(pub u128);
 
+#[cfg(feature = "codex-compat")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NativeApplicationInstance(pub u128);
 
+#[cfg(feature = "codex-compat")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NativeSessionGeneration(pub NonZeroU64);
 
 /// Freshly challenged binding to one exact native application generation.
 /// Persisted locators may reconstruct this value only after a new handshake.
+#[cfg(feature = "codex-compat")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InteractiveSessionBinding {
     pub launch_id: String,
@@ -278,11 +282,14 @@ pub type InputProducerControlFuture<'a> = Pin<
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueReadyThread {
     thread: BackendThreadId,
+    #[cfg(feature = "codex-compat")]
     input_control_socket: Option<PathBuf>,
+    #[cfg(feature = "codex-compat")]
     session_binding: Option<InteractiveSessionBinding>,
 }
 
 impl QueueReadyThread {
+    #[cfg(feature = "codex-compat")]
     pub(crate) fn new(thread: BackendThreadId) -> Self {
         Self {
             thread,
@@ -291,11 +298,13 @@ impl QueueReadyThread {
         }
     }
 
+    #[cfg(feature = "codex-compat")]
     pub(crate) fn with_input_control(mut self, socket: Option<PathBuf>) -> Self {
         self.input_control_socket = socket;
         self
     }
 
+    #[cfg(feature = "codex-compat")]
     pub(crate) fn input_control_socket(&self) -> Option<&Path> {
         self.input_control_socket.as_deref()
     }
@@ -303,9 +312,17 @@ impl QueueReadyThread {
     /// Whether this exact TUI binding advertises normal active-input delivery.
     #[must_use]
     pub fn supports_active_input(&self) -> bool {
-        self.input_control_socket.is_some()
+        #[cfg(feature = "codex-compat")]
+        {
+            self.input_control_socket.is_some()
+        }
+        #[cfg(not(feature = "codex-compat"))]
+        {
+            false
+        }
     }
 
+    #[cfg(feature = "codex-compat")]
     pub fn with_challenged_session_binding(
         mut self,
         binding: Option<InteractiveSessionBinding>,
@@ -314,6 +331,7 @@ impl QueueReadyThread {
         self
     }
 
+    #[cfg(feature = "codex-compat")]
     pub(crate) fn session_binding(&self) -> Option<&InteractiveSessionBinding> {
         self.session_binding.as_ref()
     }
@@ -330,6 +348,7 @@ impl QueueReadyThread {
 /// value through its private host-process boundary. Every launch and lifecycle
 /// command therefore addresses the same executable rather than consulting
 /// `PATH` again.
+#[cfg(feature = "codex-compat")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InteractiveAgentInstallation {
     executable: PathBuf,
@@ -338,6 +357,7 @@ pub struct InteractiveAgentInstallation {
     package_root: Option<PathBuf>,
 }
 
+#[cfg(feature = "codex-compat")]
 impl InteractiveAgentInstallation {
     pub(crate) fn new(
         executable: PathBuf,

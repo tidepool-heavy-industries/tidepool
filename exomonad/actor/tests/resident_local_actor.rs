@@ -3,7 +3,7 @@
 use exomonad_actor::{
     ActorDescriptor, ActorPlacement, ActorWorkbenchSource, LocalResidentDeployment, ResidentForest,
 };
-use exomonad_tool::{ToolArguments, ToolInvocation};
+use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 use tidepool_bridge::HaskellValue;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
@@ -52,6 +52,198 @@ impl DispatchEffect<TestSink> for NoHandlers {
     }
 }
 
+#[derive(Default)]
+struct DelayedCommandBackend {
+    started: tokio::sync::Notify,
+    completed: tokio::sync::Notify,
+    completion_count: std::sync::atomic::AtomicUsize,
+    output: std::sync::Mutex<std::collections::HashMap<String, String>>,
+}
+
+impl DelayedCommandBackend {
+    fn page(text: String) -> tidepool_bridge_effects::CommandPage {
+        let end = i64::try_from(text.len()).expect("fixture output length");
+        tidepool_bridge_effects::CommandPage {
+            text,
+            start: 0,
+            end,
+            available_end: end,
+            retained_start: 0,
+            lost_bytes: 0,
+            finished: true,
+            lossy: false,
+            leading_fragment: false,
+            trailing_fragment: false,
+        }
+    }
+}
+
+impl exomonad_actor::command_jobs::CommandBackend for DelayedCommandBackend {
+    fn execute<'a>(
+        &'a self,
+        id: &'a str,
+        spec: tidepool_bridge_effects::CommandSpec,
+        phase: tokio::sync::watch::Sender<tidepool_bridge_effects::CommandStatus>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = tidepool_bridge_effects::CommandResult> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let is_probe = spec
+                .argv
+                .get(4)
+                .is_some_and(|script| script.starts_with("pwd\ngit rev-parse"));
+            let seconds = if is_probe {
+                0
+            } else {
+                spec.argv
+                    .last()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(1)
+            };
+            phase.send_replace(tidepool_bridge_effects::CommandStatus::CommandRunning);
+            if is_probe {
+                self.output
+                    .lock()
+                    .expect("backend output lock")
+                    .insert(id.to_owned(), "/test-workspace\n".into());
+            } else {
+                self.started.notify_one();
+                tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+                self.output
+                    .lock()
+                    .expect("backend output lock")
+                    .insert(id.to_owned(), String::new());
+                self.completion_count
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                self.completed.notify_one();
+            }
+            tidepool_bridge_effects::CommandResult {
+                outcome: tidepool_bridge_effects::CommandOutcome::CommandExited(0),
+                cleanup: tidepool_bridge_effects::CommandCleanup::CommandClean,
+            }
+        })
+    }
+
+    fn control<'a>(
+        &'a self,
+        _id: &'a str,
+        _operation: exomonad_actor::command_jobs::CommandControl,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), tidepool_bridge_effects::CommandError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn output<'a>(
+        &'a self,
+        id: &'a str,
+        _bytes: usize,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        tidepool_bridge_effects::CommandOutput,
+                        tidepool_bridge_effects::CommandError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let text = self
+                .output
+                .lock()
+                .expect("backend output lock")
+                .get(id)
+                .cloned()
+                .unwrap_or_default();
+            Ok(tidepool_bridge_effects::CommandOutput {
+                stdout: Self::page(text),
+                stderr: Self::page(String::new()),
+            })
+        })
+    }
+
+    fn read<'a>(
+        &'a self,
+        id: &'a str,
+        stream: tidepool_bridge_effects::CommandStream,
+        _position: tidepool_bridge_effects::CommandPosition,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        tidepool_bridge_effects::CommandPage,
+                        tidepool_bridge_effects::CommandError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let text = if stream == tidepool_bridge_effects::CommandStream::Stdout {
+                self.output
+                    .lock()
+                    .expect("backend output lock")
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            Ok(Self::page(text))
+        })
+    }
+
+    fn cleanup<'a>(
+        &'a self,
+        _id: &'a str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = tidepool_bridge_effects::CommandCleanup> + Send + 'a>,
+    > {
+        Box::pin(async { tidepool_bridge_effects::CommandCleanup::CommandClean })
+    }
+}
+
+async fn supply_command_until_started(
+    deployments: &mut tokio::sync::mpsc::Receiver<LocalResidentDeployment>,
+    backend: std::sync::Arc<DelayedCommandBackend>,
+) {
+    let started = backend.started.notified();
+    tokio::pin!(started);
+    loop {
+        tokio::select! {
+            () = &mut started => return,
+            deployment = deployments.recv() => match deployment {
+                Some(LocalResidentDeployment::CommandBackend(request)) => {
+                    let backend: std::sync::Arc<dyn exomonad_actor::command_jobs::CommandBackend> =
+                        backend.clone();
+                    request.supply(Ok(backend));
+                }
+                Some(other) => panic!("unexpected deployment while awaiting command start: {}", other.kind()),
+                None => panic!("resident forest closed before starting the command"),
+            }
+        }
+    }
+}
+
+async fn wait_for_command_completions(backend: &DelayedCommandBackend, count: usize) {
+    loop {
+        if backend
+            .completion_count
+            .load(std::sync::atomic::Ordering::Acquire)
+            >= count
+        {
+            return;
+        }
+        backend.completed.notified().await;
+    }
+}
+
 #[tokio::test]
 async fn local_actor_owns_resident_policy_children_and_terminal_reply() {
     resident_cleanup_case(false).await;
@@ -60,6 +252,200 @@ async fn local_actor_owns_resident_policy_children_and_terminal_reply() {
 #[tokio::test]
 async fn authored_failed_shutdown_hook_remains_unconfirmed_in_parent_cleanup() {
     resident_cleanup_case(true).await;
+}
+
+#[tokio::test]
+async fn resident_local_actor_await_watch_parks_resumes_and_cancels() {
+    eval_harness::require_extract();
+
+    let session = support::process_unique_session(180);
+    let declarations = [
+        tidepool_mcp::agent_tools_decl(),
+        tidepool_mcp::actor_decl(),
+        tidepool_mcp::actor_kernel_decl(),
+        tidepool_mcp::actor_local_decl(),
+        tidepool_mcp::commands_decl(),
+        tidepool_mcp::fs_read_decl(),
+    ];
+    let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
+    let mut include = effects.include_paths().to_vec();
+    include.push(eval_harness::prelude_path());
+    let preamble = insert_preamble_imports(
+        &tidepool_mcp::build_preamble(&declarations, false),
+        "Tidepool.Agent.Contract",
+    );
+    let preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Watch as Watch");
+    let preamble = format!(
+        "{preamble}\
+         type ActorEffects = '[AgentTools, Actor, Commands, Watch.Watches]\n\
+         data WaitInput = WaitInput {{ delay :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
+         data WaitOutput = WaitOutput {{ settled :: Bool }} deriving (Generic, ToJSON, JsonSchema)\n\
+         data ResidentTools mode = ResidentTools {{ waitForCommand :: mode :- Call WaitInput WaitOutput }} deriving (Generic)\n"
+    );
+    let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
+    let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
+    let session_root = tempfile::tempdir().expect("session root");
+    let lib = SessionLib::open(
+        session,
+        session_root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .expect("declaration plane")
+    .with_validation_include(include.clone());
+    let mut machine =
+        ResidentSession::unbootstrapped(NoHandlers, TestSink, DEFAULT_NURSERY_SIZE, Some(lib));
+    let retained = machine.prepared_retained();
+    let compiled = match run_turn(HaskellTurnRequest {
+        session_id: None,
+        turn_text: include_str!("resident_local_actor/await_watch_policy.hs"),
+        templates: &templates,
+        include: &include_refs,
+        session_root: session_root.path(),
+        inject_modules: &[],
+        gen: 1,
+        verdict: None,
+        target: None,
+        retained_imports: &retained,
+    })
+    .expect("compile awaitWatch policy")
+    {
+        TurnResult::Expr { compiled, .. } => compiled,
+        other => panic!("policy should be an expression, got {other:?}"),
+    };
+    machine.set_effect_execution(
+        EffectRunPolicy::SuspendAll,
+        LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+    );
+    let outcome = machine
+        .run_with_sites("resident_await_watch_policy", compiled.code())
+        .expect("first policy boundary");
+    let descriptor = ActorDescriptor::new(
+        "resident-await-watch",
+        ActorPlacement {
+            session,
+            resource_scope: RealmId::fresh(),
+            lexical_scope: ScopeId::ROOT,
+        },
+    );
+    let (forest, mut deployments) = ResidentForest::new(
+        ActorWorkbenchSource::new(preamble, include),
+        session,
+        machine,
+        None,
+        exomonad_actor::Incarnation::FIRST,
+    );
+    let (actor, task) = forest
+        .admit_root(descriptor, outcome)
+        .await
+        .expect("spawn local resident root");
+    let LocalResidentDeployment::PolicyInstalled(installation) =
+        deployments.recv().await.expect("policy installation")
+    else {
+        panic!("root retired before installing policy");
+    };
+    assert_eq!(installation.actor.identity(), actor.identity());
+
+    let policy = installation.policy;
+    let command_backend = std::sync::Arc::new(DelayedCommandBackend::default());
+    let settled_context = ToolInvocationContext {
+        context_call_id: Some("await-watch-settled".into()),
+        thread_id: "await-watch-test".into(),
+        turn_id: "turn-settled".into(),
+        call_id: "call-settled".into(),
+        namespace: None,
+    };
+    let mut settled_call = {
+        let policy = policy.clone();
+        let context = settled_context.clone();
+        tokio::spawn(async move {
+            policy
+                .dispatch_boxed(ToolInvocation {
+                    context: Some(context),
+                    name: "wait_for_command".into(),
+                    arguments: ToolArguments::Structured(serde_json::json!({"delay": 1})),
+                })
+                .await
+        })
+    };
+    supply_command_until_started(&mut deployments, command_backend.clone()).await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut settled_call)
+            .await
+            .is_err(),
+        "awaitWatch must keep the hosted workbench parked while its exact command is live"
+    );
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(5), settled_call)
+        .await
+        .expect("watch settles")
+        .expect("watch call task")
+        .expect("watch tool call");
+    assert_eq!(settled, serde_json::json!({"settled": true}));
+
+    let cancelled_context = ToolInvocationContext {
+        context_call_id: Some("await-watch-cancelled".into()),
+        thread_id: "await-watch-test".into(),
+        turn_id: "turn-cancelled".into(),
+        call_id: "call-cancelled".into(),
+        namespace: None,
+    };
+    let mut cancelled_call = {
+        let policy = policy.clone();
+        let context = cancelled_context.clone();
+        tokio::spawn(async move {
+            policy
+                .dispatch_boxed(ToolInvocation {
+                    context: Some(context),
+                    name: "wait_for_command".into(),
+                    arguments: ToolArguments::Structured(serde_json::json!({"delay": 3})),
+                })
+                .await
+        })
+    };
+    supply_command_until_started(&mut deployments, command_backend.clone()).await;
+    let cancellation = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match policy
+                .cancel_workbench_boxed(cancelled_context.clone())
+                .await
+                .expect("cancel awaitWatch")
+            {
+                exomonad_actor::WorkbenchCancellationOutcome::NotSleeping { .. } => {
+                    tokio::task::yield_now().await;
+                }
+                outcome => break outcome,
+            }
+        }
+    })
+    .await
+    .expect("awaitWatch cancellation is prompt");
+    assert!(matches!(
+        cancellation,
+        exomonad_actor::WorkbenchCancellationOutcome::Cancelled { .. }
+    ));
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), &mut cancelled_call)
+        .await
+        .expect("cancelled workbench settles")
+        .expect("cancelled workbench task");
+    wait_for_command_completions(&command_backend, 2).await;
+
+    policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "finish_value".into(),
+            arguments: ToolArguments::Structured(serde_json::json!({})),
+        })
+        .await
+        .expect("retire awaitWatch actor");
+    task.await.expect("actor task");
+    assert_eq!(
+        actor.terminal().wait().await.kind,
+        exomonad_actor::ActorExitKind::Completed
+    );
+    assert!(matches!(
+        deployments.recv().await,
+        Some(LocalResidentDeployment::Retired { actor: retired, .. })
+            if retired == actor.identity()
+    ));
 }
 
 async fn resident_cleanup_case(fail_hook: bool) {
@@ -229,6 +615,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
     assert_eq!(sibling_installation.actor.identity(), sibling.identity());
     assert_eq!(sibling_installation.supervisor_parent, None);
     assert_eq!(sibling_installation.context_parent, None);
+
     let changed = sibling_installation
         .policy
         .dispatch_boxed(ToolInvocation {

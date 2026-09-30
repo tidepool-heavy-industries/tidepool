@@ -31,7 +31,13 @@ async fn resource_admission_timeout_and_cancellation_create_no_native_launch() {
         root: actor,
         run_root: config.run_root.clone(),
         tmux: TmuxSession::new("resource-test-must-not-launch").unwrap(),
-        backend: native_interactive_backend(config.interactive_agent.clone()),
+        backend: HostRuntimeMode::Codex(native_interactive_backend(
+            config
+                .backend
+                .interactive_agent()
+                .expect("native campaign uses Codex")
+                .clone(),
+        )),
         worktrees: campaign.worktrees.clone(),
         source_layers: None,
         bindings: campaign.bindings.clone(),

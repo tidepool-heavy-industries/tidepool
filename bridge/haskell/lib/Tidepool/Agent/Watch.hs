@@ -1,6 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 
--- | Typed, nonblocking readiness subscriptions over agent responses.
+-- | Typed readiness subscriptions over agent responses.
 module Tidepool.Agent.Watch
   ( Await
   , Watch
@@ -27,6 +27,7 @@ module Tidepool.Agent.Watch
   , listRoutes
   , forgetRoute
   , pollWatch
+  , awaitWatch
   , ForgetWatchOutcome (..)
   , forgetWatch
   ) where
@@ -49,6 +50,7 @@ import Tidepool.Agent.Watch.Internal
   , awaitAnyProgress
   , awaitAnySettled
   , pollWatch
+  , awaitWatch
   , ForgetWatchOutcome (..)
   , forgetWatch
   , watch

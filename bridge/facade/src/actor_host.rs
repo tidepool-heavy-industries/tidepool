@@ -4,65 +4,72 @@
 //! stock interactive agent is attached to each installed Haskell tool policy;
 //! tmux is process ownership and observability, never message transport.
 
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 mod agent_spec_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 mod background_command_example_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 mod call_timing_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 mod cell_compile_cost_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 pub(crate) mod command_jobs_tests;
 mod commands;
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 mod custody_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 mod documentation_tests;
+#[cfg(test)]
+mod embedded_command_tests;
 mod embedded_harness;
 #[cfg(test)]
 mod embedded_pending_compaction_tests;
 mod embedded_policy;
+mod embedded_projection;
 mod embedded_service;
 mod host_incarnation;
+#[cfg(feature = "codex-compat")]
 mod hosted_retirement;
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 mod hosted_tools_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 mod jev_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 mod lookup_availability_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 mod m1_host_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 mod observation_budget_tests;
 mod overlay_resource;
 pub(crate) use overlay_resource::valid_artifact_path;
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 mod source_reload_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 #[path = "host_dynamic_tools/tui_resource_tests.rs"]
 mod tui_resource_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 #[path = "host_dynamic_tools/tui_sleep_tests.rs"]
 mod tui_sleep_tests;
 mod workspace;
 pub mod workspace_cleanup;
 mod workspace_publication;
+#[cfg(feature = "codex-compat")]
+use workspace::WorkspaceLayout;
 pub(crate) use workspace::{copy_helper_draft, initialize_helper_draft};
-use workspace::{ActiveWorkspace, PreparedWorkspace, WorkspaceLayout};
+use workspace::{ActiveWorkspace, PreparedWorkspace};
 mod model_free;
 mod prompt_catalog;
 pub(crate) mod recipe_checks;
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 mod research_policy_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 mod resource_tests;
 mod scoped_custody;
+#[cfg(feature = "codex-compat")]
 mod socket_directory;
 #[cfg(test)]
 mod test_campaign;
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 mod tests;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -80,12 +87,15 @@ use exomonad_actor::{
     ResidentActorRoot, ResidentForest,
 };
 use exomonad_agent::interactive::InputProducerId;
+#[cfg(feature = "codex-compat")]
 use exomonad_agent::{
     copy_interactive_binding, native_interactive_backend, read_interactive_binding,
-    BackendThreadId, InputOperationId, InputPurpose, InteractiveAgentBackend,
-    InteractiveAgentInstallation, InteractiveAgentSpec, InteractiveInputEnvelope,
-    InteractiveInputMode, InteractiveInputTarget, InteractiveLaunchMode, InteractiveNativeSandbox,
-    InteractiveNativeToolPolicy, InteractivePolicyMount, QueueReadyThread, ReasoningEffort,
+};
+use exomonad_agent::{
+    BackendThreadId, InputOperationId, InputPurpose, InteractiveAgentBackend, InteractiveAgentSpec,
+    InteractiveInputEnvelope, InteractiveInputMode, InteractiveInputTarget, InteractiveLaunchMode,
+    InteractiveNativeSandbox, InteractiveNativeToolPolicy, InteractivePolicyMount,
+    QueueReadyThread, ReasoningEffort,
 };
 use frunk::{hlist, HCons, HNil};
 use futures_util::FutureExt;
@@ -114,15 +124,18 @@ use tidepool_runtime::session::{
     ResidentSessionState, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
+#[cfg(feature = "codex-compat")]
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
+use self::embedded_projection::LifecyclePublisher;
 pub(crate) use self::host_incarnation::HostIncarnationLease;
 use self::overlay_resource::{
     ArtifactInspection, OverlayResourceLease, OverlaySnapshot, SharedOverlayResource,
 };
 use self::prompt_catalog::{FrozenBasePrompt, PromptId};
+#[cfg(feature = "codex-compat")]
 use self::socket_directory::SocketDirectory;
 
 /// Every interactive actor sees its own repository at this path. Bubblewrap
@@ -179,6 +192,7 @@ struct ActorForkWorkspaceAdmission {
     manager: WorktreeManager,
     bindings: Arc<Mutex<BindingTable>>,
     runtime: String,
+    #[cfg(feature = "codex-compat")]
     native: Option<NativeForkAdmission>,
 }
 
@@ -445,6 +459,7 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
             .map_err(|error| ForkWorkspaceAdmissionError {
                 detail: format!("workspace preparation task failed: {error}"),
             })??;
+            #[cfg(feature = "codex-compat")]
             let (handle, workspace, notice) = match &custody.native {
                 Some(native) if native.layout.is_some() => {
                     let prepared = native
@@ -468,6 +483,19 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
                     (handle, None, None)
                 }
             };
+            #[cfg(not(feature = "codex-compat"))]
+            let (handle, workspace, notice) = {
+                let handle =
+                    tidepool_runtime::spawn_blocking_in_span(move || authorized.materialize())
+                        .await
+                        .map_err(|error| ForkWorkspaceAdmissionError {
+                            detail: format!("workspace preparation task failed: {error}"),
+                        })?
+                        .map_err(|error| ForkWorkspaceAdmissionError {
+                            detail: tidepool_handlers::render_worktree_error(&error),
+                        })?;
+                (handle, None, None)
+            };
             let worktree = handle.handle_receipt.tree_id.raw.clone();
             Ok(exomonad_actor::PreparedForkWorkspace::new(
                 handle,
@@ -482,11 +510,12 @@ fn fork_workspace_admission(
     authority: ActorWorktreeAuthority,
     bindings: Arc<Mutex<BindingTable>>,
     runtime: String,
-    native: Option<NativeForkAdmission>,
+    #[cfg(feature = "codex-compat")] native: Option<NativeForkAdmission>,
 ) -> Arc<ActorForkWorkspaceAdmission> {
     Arc::new(ActorForkWorkspaceAdmission {
         bindings,
         runtime,
+        #[cfg(feature = "codex-compat")]
         native,
         manager: worktrees.clone(),
         authority: authority.clone(),
@@ -510,8 +539,7 @@ pub struct ActorHostConfig {
     pub haskell_root: PathBuf,
     pub run_root: PathBuf,
     pub root_binding_path: PathBuf,
-    pub interactive_agent: InteractiveAgentInstallation,
-    pub backend: crate::exomonad::ExomonadBackend,
+    pub backend: crate::exomonad::HostBackendOptions,
     pub embedded: Option<crate::exomonad::EmbeddedLaunchConfig>,
     pub tmux_session: String,
     pub model: String,
@@ -717,6 +745,7 @@ pub(crate) fn stop_predecessor_processes(
     Ok(report)
 }
 
+#[cfg(feature = "codex-compat")]
 fn recovery_role(
     durable: &exomonad_actor::DurableActorAdmission,
     research_policy: exomonad_actor::ResearchPolicy,
@@ -745,6 +774,7 @@ fn operator_effective_role(
     exomonad_actor::EffectiveRole::root().with_research_policy(research_policy)
 }
 
+#[cfg(feature = "codex-compat")]
 fn predecessor_process_was_retired(run_root: &Path, actor: ActorRef) -> bool {
     let path = run_root
         .join(format!("{}-{}", actor.id.0, actor.incarnation.0))
@@ -826,6 +856,7 @@ fn contains_durable_root_admission(records: &[exomonad_actor::DurableActorRecord
     })
 }
 
+#[cfg(feature = "codex-compat")]
 fn latest_recoverable_actor_records(
     records: &[exomonad_actor::DurableActorRecord],
     root: ActorRef,
@@ -861,6 +892,7 @@ fn latest_recoverable_actor_records(
     clippy::too_many_arguments,
     reason = "heterogeneous recovery inputs (forest, paths, actor identity, durable records, compiled program, policy, admission); no natural grouping"
 )]
+#[cfg(feature = "codex-compat")]
 async fn recover_prior_actors(
     forest: &Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
     run_root: &Path,
@@ -1025,6 +1057,7 @@ async fn recover_prior_actors(
     recovered
 }
 
+#[cfg(feature = "codex-compat")]
 fn has_legacy_checkout_source_layer(run_root: &Path, source_layer: &[PathBuf]) -> bool {
     let legacy = run_root.join("workspace/checkouts");
     source_layer.iter().any(|path| path.starts_with(&legacy))
@@ -1231,6 +1264,7 @@ pub enum ActorHostReadiness {
     },
 }
 
+#[cfg(feature = "codex-compat")]
 struct InteractiveDeployment {
     /// Retain the view independently of the bootstrap and native process lifetimes.
     active_workspace: Arc<ActiveWorkspace>,
@@ -1284,46 +1318,93 @@ fn embedded_root_attachment_error(
     None
 }
 
-fn publish_embedded_root_snapshot(
-    control: &harness::server::ServerControl,
-    identity: &harness::embedding::HostIdentity,
-    lifecycle: harness::server::HostActorLifecycle,
-) {
-    let path = identity.actor.0.clone();
-    let conversation_state = match lifecycle {
-        harness::server::HostActorLifecycle::Running => "busy",
-        harness::server::HostActorLifecycle::Waiting => "idle",
-        harness::server::HostActorLifecycle::Retiring => "retiring",
-        harness::server::HostActorLifecycle::Retired => "retired",
-        harness::server::HostActorLifecycle::Lost => "unavailable",
+async fn dispatch_embedded_browser_command(
+    command_id: &str,
+    command: harness::server::ClientCommand,
+    run: &str,
+    nodes: &[exomonad_actor::ActorGraphNode],
+    live: &BTreeSet<ActorRef>,
+    projection: &embedded_projection::EmbeddedProjection,
+    conversations: &HashMap<ActorRef, Arc<harness::embedding::Conversation>>,
+    lifecycle: &embedded_projection::LifecycleSender,
+) -> harness::server::CommandReceiptOutcome {
+    let route = |target: Option<harness::embedding::HostIdentity>, reason: String| {
+        harness::server::CommandReceiptOutcome::Refused { target, reason }
     };
-    control.set_snapshot(harness::server::Snapshot {
-        actors: vec![harness::server::HostActorProjection {
-            identity: harness::server::HostActorIdentity {
-                run: identity.run.clone(),
-                actor: identity.actor.clone(),
-                incarnation: identity.incarnation.clone(),
-            },
-            parent: None,
-            kind: harness::server::HostActorKind::Model,
-            lifecycle,
-            model_conversation: Some(path.clone()),
-        }],
-        conversations: vec![serde_json::json!({
-            "id": path.clone(),
-            "path": path,
-            "state": conversation_state,
-        })],
-        ..harness::server::Snapshot::default()
-    });
-}
 
-fn embedded_lifecycle_update_is_current(
-    update_actor: Option<ActorRef>,
-    root_actor: ActorRef,
-    conversation_attached: bool,
-) -> bool {
-    update_actor == Some(root_actor) && conversation_attached
+    let harness::server::ClientCommand::Host { command } = command else {
+        return route(
+            None,
+            "standalone submit is unavailable while the browser is attached to an embedded host"
+                .into(),
+        );
+    };
+    let target = match &command {
+        harness::server::HostCommand::Input { target, .. }
+        | harness::server::HostCommand::Interrupt { target }
+        | harness::server::HostCommand::Retire { target } => target.clone(),
+    };
+    if target.run != run {
+        return route(
+            Some(target),
+            "target belongs to a different host run".into(),
+        );
+    }
+    let Some(actor) = projection.resolve_identity(run, &target, nodes) else {
+        return route(
+            Some(target),
+            "target actor identity is not present in this host run".into(),
+        );
+    };
+    let is_live = nodes
+        .iter()
+        .find(|node| node.actor == actor)
+        .is_some_and(|node| node.terminal.is_none())
+        && live.contains(&actor);
+    if !is_live {
+        return route(Some(target), "target actor is no longer live".into());
+    }
+    let Some(conversation) = conversations.get(&actor) else {
+        return route(Some(target), "target has no live model conversation".into());
+    };
+
+    match command {
+        harness::server::HostCommand::Input { text, .. } => {
+            match conversation.input(command_id, "browser", &text).await {
+                Ok(receipt) => harness::server::CommandReceiptOutcome::Admitted {
+                    target: Some(target),
+                    envelope_id: receipt.envelope_id.to_string(),
+                    wake_error: receipt.wake_error,
+                },
+                Err(error) => route(Some(target), error.to_string()),
+            }
+        }
+        harness::server::HostCommand::Interrupt { .. } => match conversation
+            .control(harness::embedding::HostControl::Interrupt)
+            .await
+        {
+            Ok(_) => harness::server::CommandReceiptOutcome::ControlRequested {
+                target,
+                control: harness::server::CommandControl::Interrupt,
+            },
+            Err(error) => route(Some(target), error.to_string()),
+        },
+        harness::server::HostCommand::Retire { .. } => {
+            match conversation
+                .control(harness::embedding::HostControl::Retire)
+                .await
+            {
+                Ok(_) => {
+                    lifecycle.publish(actor, harness::server::HostActorLifecycle::Retiring);
+                    harness::server::CommandReceiptOutcome::ControlRequested {
+                        target,
+                        control: harness::server::CommandControl::Retire,
+                    }
+                }
+                Err(error) => route(Some(target), error.to_string()),
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1361,6 +1442,7 @@ impl PendingUpdateReconciliation {
     }
 }
 
+#[cfg(feature = "codex-compat")]
 enum InteractiveConnection {
     // Pane, inbox, tool listener, and cleanup are already owned in this state.
     AwaitingBinding,
@@ -1370,12 +1452,14 @@ enum InteractiveConnection {
     },
 }
 
+#[cfg(feature = "codex-compat")]
 struct InteractiveBindingRequest {
     control: crate::host_dynamic_tools::HostToolControl,
     path: PathBuf,
     expected: Option<BackendThreadId>,
 }
 
+#[cfg(feature = "codex-compat")]
 struct LaunchedInteractiveApplication {
     deployment: InteractiveDeployment,
     binding: InteractiveBindingRequest,
@@ -1685,6 +1769,7 @@ struct InteractiveApplicationOwner {
     fork_gate: Option<exomonad_actor::ForkGroupGate>,
     custody: Option<Arc<dyn exomonad_actor::ForkWorkspaceCustody>>,
     scoped_retention: Option<scoped_custody::ScopedHostRetention>,
+    #[cfg(feature = "codex-compat")]
     hosted: hosted_retirement::HostedSlot,
     embedded_policy: Option<Arc<embedded_policy::EmbeddedPolicyInstallation>>,
     launch: HostLaunchState,
@@ -1732,12 +1817,14 @@ struct BoundWorkspace {
 }
 
 #[derive(Clone)]
+#[cfg(feature = "codex-compat")]
 struct NativeForkAdmission {
     owners: InteractiveOwners,
     backend: Arc<dyn InteractiveAgentBackend>,
     layout: Option<WorkspaceLayout>,
 }
 
+#[cfg(feature = "codex-compat")]
 fn native_tool_policy(
     native_tools: exomonad_actor::NativeToolClass,
 ) -> InteractiveNativeToolPolicy {
@@ -1758,6 +1845,7 @@ fn native_tool_policy(
 /// operator proxy, a context whose application has not started, a retired one
 /// — is `Unbound`; no other actor's conversation, the root's included, stands
 /// in for it.
+#[cfg(feature = "codex-compat")]
 fn conversation_reader(
     owners: InteractiveOwners,
     backend: Arc<dyn InteractiveAgentBackend>,
@@ -1787,6 +1875,7 @@ fn conversation_reader(
     })
 }
 
+#[cfg(feature = "codex-compat")]
 impl NativeForkAdmission {
     async fn build_snapshot(
         &self,
@@ -2044,7 +2133,16 @@ fn handoff_application_owners(
     run_result: Result<(), Box<dyn std::error::Error>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let retained = owners.lock().values().any(|owner| {
-        owner.scoped_retention.is_some() || owner.custody.is_some() || owner.hosted.lock().is_some()
+        owner.scoped_retention.is_some() || owner.custody.is_some() || {
+            #[cfg(feature = "codex-compat")]
+            {
+                owner.hosted.lock().is_some()
+            }
+            #[cfg(not(feature = "codex-compat"))]
+            {
+                false
+            }
+        }
     });
     let unfinished = !task.is_finished();
     if retained || unfinished {
@@ -2158,7 +2256,7 @@ struct InteractiveFleet {
     config: ActorHostConfig,
     run_root: PathBuf,
     tmux: TmuxSession,
-    backend: Arc<dyn InteractiveAgentBackend>,
+    backend: HostRuntimeMode,
     worktrees: WorktreeManager,
     bindings: Arc<Mutex<BindingTable>>,
     /// Readiness events are best-effort notifications: a dropped receiver
@@ -2176,6 +2274,7 @@ struct InteractiveFleet {
     actor_recovery: Arc<exomonad_actor::ActorRecoveryJournal>,
     recovered_threads: Arc<BTreeMap<ActorRef, (ActorRef, QueueReadyThread)>>,
     recovered_root_predecessor: Option<ActorRef>,
+    host_graph: Arc<dyn Fn() -> Vec<exomonad_actor::ActorGraphNode> + Send + Sync>,
 }
 
 #[derive(Clone)]
@@ -2185,12 +2284,29 @@ struct InteractiveLaunchContext {
     config: ActorHostConfig,
     run_root: PathBuf,
     tmux: TmuxSession,
-    backend: Arc<dyn InteractiveAgentBackend>,
+    backend: HostRuntimeMode,
     worktrees: WorktreeManager,
     source_layers: Option<Arc<crate::exomonad::source::ExomonadSourceReload>>,
     bindings: Arc<Mutex<BindingTable>>,
     actor_recovery: Arc<exomonad_actor::ActorRecoveryJournal>,
     recovered_threads: Arc<BTreeMap<ActorRef, (ActorRef, QueueReadyThread)>>,
+}
+
+#[derive(Clone)]
+enum HostRuntimeMode {
+    #[cfg(feature = "codex-compat")]
+    Codex(Arc<dyn InteractiveAgentBackend>),
+    Embedded,
+}
+
+impl HostRuntimeMode {
+    fn codex_backend(&self) -> Option<&Arc<dyn InteractiveAgentBackend>> {
+        match self {
+            #[cfg(feature = "codex-compat")]
+            Self::Codex(backend) => Some(backend),
+            Self::Embedded => None,
+        }
+    }
 }
 
 fn active_source_identity(
@@ -2274,7 +2390,13 @@ pub(crate) async fn run(
             config.tmux_session
         )));
     }
-    let backend = native_interactive_backend(config.interactive_agent.clone());
+    let runtime_backend = match &config.backend {
+        #[cfg(feature = "codex-compat")]
+        crate::exomonad::HostBackendOptions::Codex(installation) => {
+            HostRuntimeMode::Codex(native_interactive_backend(installation.clone()))
+        }
+        crate::exomonad::HostBackendOptions::Embedded => HostRuntimeMode::Embedded,
+    };
     let application_owners: InteractiveOwners = Arc::new(Mutex::new(HashMap::new()));
     let source_layers = source_service(&config, &run_root, worktrees.clone());
     let actor_recovery_path = run_root.join("actor-lifecycle.v2.jsonl");
@@ -2312,12 +2434,10 @@ pub(crate) async fn run(
     )?;
     let accepted_source = active_source_identity(&run_root, config.workspace_inputs.is_some())?;
     let (descriptor, machine, outcome) = root.into_parts();
-    let worktree_admission = fork_workspace_admission(
-        worktrees.clone(),
-        worktree_authority.clone(),
-        bindings.clone(),
-        runtime_namespace(&run_root),
-        Some(NativeForkAdmission {
+    #[cfg(feature = "codex-compat")]
+    let native_fork_admission = match &runtime_backend {
+        #[cfg(feature = "codex-compat")]
+        HostRuntimeMode::Codex(backend) => Some(NativeForkAdmission {
             owners: application_owners.clone(),
             backend: backend.clone(),
             layout: Some(WorkspaceLayout {
@@ -2339,6 +2459,15 @@ pub(crate) async fn run(
                 )?,
             }),
         }),
+        HostRuntimeMode::Embedded => None,
+    };
+    let worktree_admission = fork_workspace_admission(
+        worktrees.clone(),
+        worktree_authority.clone(),
+        bindings.clone(),
+        runtime_namespace(&run_root),
+        #[cfg(feature = "codex-compat")]
+        native_fork_admission,
     );
     let (forest, deployments) = ResidentForest::new_with_launch_resolver(
         source,
@@ -2353,12 +2482,15 @@ pub(crate) async fn run(
             &config.workspace,
         )?)
         .with_recovery_journal(actor_recovery.clone())
-        .with_conversation_reader(conversation_reader(
-            application_owners.clone(),
-            backend.clone(),
-        ))
         .with_child_session_factory(child_session_factory)
         .with_image_registry(image_registry);
+    #[cfg(feature = "codex-compat")]
+    if let HostRuntimeMode::Codex(backend) = &runtime_backend {
+        forest = forest.with_conversation_reader(conversation_reader(
+            application_owners.clone(),
+            backend.clone(),
+        ));
+    }
     // No child bootstrap program: every launch stays on its launching
     // session, as before per-actor machines.
     let _ = &program;
@@ -2375,7 +2507,14 @@ pub(crate) async fn run(
         ));
     }
     let recovered_root_predecessor = recovered_root.map(|(predecessor, _)| predecessor);
-    if let Some(predecessor) = recovered_root_predecessor {
+    #[cfg(feature = "codex-compat")]
+    if let (true, Some(predecessor)) = (
+        matches!(
+            &config.backend,
+            crate::exomonad::HostBackendOptions::Codex(_)
+        ),
+        recovered_root_predecessor,
+    ) {
         crate::host_dynamic_tools::validate_operation_recovery(hosted_operation_journal(
             &run_root,
             predecessor.id,
@@ -2397,7 +2536,7 @@ pub(crate) async fn run(
         .map_err(runtime_error)?;
     // Bind the embedded browser and run Store before the resident root exists.
     // A run that cannot establish both cannot truthfully report readiness.
-    let embedded_service = if config.backend == crate::exomonad::ExomonadBackend::Embedded {
+    let embedded_service = if config.backend.kind() == crate::exomonad::ExomonadBackend::Embedded {
         let settings = config
             .embedded
             .as_ref()
@@ -2418,20 +2557,26 @@ pub(crate) async fn run(
         }
         None => forest.admit_root(descriptor, outcome).await?,
     };
-    let recovered_threads = Arc::new(
-        recover_prior_actors(
-            &forest,
-            &run_root,
-            root_actor.identity(),
-            host_incarnation.incarnation(),
-            &prior_actor_records,
-            program.clone(),
-            config.research_policy,
-            &worktree_admission,
-            accepted_source.as_deref(),
-        )
-        .await,
-    );
+    #[cfg(feature = "codex-compat")]
+    let recovered_threads = Arc::new(match &runtime_backend {
+        HostRuntimeMode::Codex(_) => {
+            recover_prior_actors(
+                &forest,
+                &run_root,
+                root_actor.identity(),
+                host_incarnation.incarnation(),
+                &prior_actor_records,
+                program.clone(),
+                config.research_policy,
+                &worktree_admission,
+                accepted_source.as_deref(),
+            )
+            .await
+        }
+        HostRuntimeMode::Embedded => BTreeMap::new(),
+    });
+    #[cfg(not(feature = "codex-compat"))]
+    let recovered_threads = Arc::new(BTreeMap::new());
     let recovered_predecessors = recovered_threads
         .values()
         .map(|(predecessor, _)| *predecessor)
@@ -2602,6 +2747,8 @@ pub(crate) async fn run(
     let (shutdown, shutdown_rx) = watch::channel(None);
     let (root_config, root_config_rx) = watch::channel(config.clone());
     let watch_forest = Arc::clone(&forest);
+    let host_graph_forest = Arc::clone(&forest);
+    let host_graph = Arc::new(move || host_graph_forest.inspect_host_graph());
     let watch_retention: WatchRetentionCheck =
         Arc::new(move |owner, watch| watch_forest.retains_watch(owner, watch));
     let watch_observation_forest = Arc::clone(&forest);
@@ -2619,7 +2766,7 @@ pub(crate) async fn run(
             config: config.clone(),
             run_root: run_root.clone(),
             tmux: tmux.clone(),
-            backend,
+            backend: runtime_backend,
             worktrees,
             bindings,
             readiness: readiness.clone(),
@@ -2631,6 +2778,7 @@ pub(crate) async fn run(
             actor_recovery: actor_recovery.clone(),
             recovered_threads,
             recovered_root_predecessor,
+            host_graph,
         },
         shutdown_rx,
         root_config_rx,
@@ -2759,25 +2907,41 @@ async fn prepare_root_recovery(
     resident_state: ResidentSessionState,
     recovery: &mut u64,
 ) -> Result<RootRunDisposition, Box<dyn std::error::Error>> {
-    let Some((launch_mode, thread)) =
-        root_recovery_launch_mode(&config.root_binding_path, &terminal, resident_state).await?
-    else {
+    #[cfg(not(feature = "codex-compat"))]
+    {
+        let _ = (config, actor, terminal, resident_state, recovery);
         return Ok(RootRunDisposition::Complete);
-    };
-    *recovery = (*recovery).saturating_add(1);
-    tracing::warn!(
-        ?actor,
-        kind = ?terminal.kind,
-        summary = %terminal.summary,
-        ?resident_state,
-        recovery = *recovery,
-        thread = %thread.id().0,
-        "Exomonad root stopped abnormally; recreating a fresh root incarnation"
-    );
-    config.root_launch_mode = launch_mode;
-    Ok(RootRunDisposition::Recover)
+    }
+    #[cfg(feature = "codex-compat")]
+    if matches!(
+        &config.backend,
+        crate::exomonad::HostBackendOptions::Embedded
+    ) {
+        return Ok(RootRunDisposition::Complete);
+    }
+    #[cfg(feature = "codex-compat")]
+    {
+        let Some((launch_mode, thread)) =
+            root_recovery_launch_mode(&config.root_binding_path, &terminal, resident_state).await?
+        else {
+            return Ok(RootRunDisposition::Complete);
+        };
+        *recovery = (*recovery).saturating_add(1);
+        tracing::warn!(
+            ?actor,
+            kind = ?terminal.kind,
+            summary = %terminal.summary,
+            ?resident_state,
+            recovery = *recovery,
+            thread = %thread.id().0,
+            "Exomonad root stopped abnormally; recreating a fresh root incarnation"
+        );
+        config.root_launch_mode = launch_mode;
+        Ok(RootRunDisposition::Recover)
+    }
 }
 
+#[cfg(feature = "codex-compat")]
 async fn root_recovery_launch_mode(
     binding_path: &Path,
     terminal: &ActorTerminal,
@@ -3708,6 +3872,7 @@ fn render_root_compile_failure(
     ))
 }
 
+#[cfg(feature = "codex-compat")]
 fn spawn_undeployed_hosted_retirement(
     retirements: &mut JoinSet<InteractiveCleanupReceipt>,
     actor: ActorRef,
@@ -3776,6 +3941,7 @@ fn spawn_undeployed_hosted_retirement(
     });
 }
 
+#[cfg(feature = "codex-compat")]
 fn spawn_owned_retirement(
     retirements: &mut JoinSet<InteractiveCleanupReceipt>,
     deployment: InteractiveDeployment,
@@ -3849,6 +4015,7 @@ async fn retire_scoped_process(
     })
 }
 
+#[cfg(feature = "codex-compat")]
 async fn retain_input_custody_and_bind(
     owner: &hosted_retirement::HostedOwner,
     backend: Arc<dyn InteractiveAgentBackend>,
@@ -3898,6 +4065,7 @@ async fn run_interactive_applications(
         actor_recovery,
         recovered_threads,
         recovered_root_predecessor,
+        host_graph,
     } = fleet;
     let base_prompt = FrozenBasePrompt::materialize_selected(
         &run_root,
@@ -3916,36 +4084,58 @@ async fn run_interactive_applications(
         config,
         run_root,
         tmux: tmux.clone(),
-        backend: Arc::clone(&backend),
+        backend: backend.clone(),
         worktrees: worktrees.clone(),
         source_layers: source_layers.clone(),
         bindings: Arc::clone(&bindings),
         actor_recovery,
         recovered_threads: Arc::clone(&recovered_threads),
     };
+    #[cfg(feature = "codex-compat")]
     let mut deployments: Vec<InteractiveDeployment> = Vec::new();
+    #[cfg(feature = "codex-compat")]
     let mut launches = JoinSet::new();
+    #[cfg(not(feature = "codex-compat"))]
+    let mut launches: JoinSet<()> = JoinSet::new();
     let mut embedded_tasks: JoinSet<(ActorRef, LocalActorRef, Result<(), String>)> = JoinSet::new();
     let mut embedded_cancellations = HashMap::new();
     let mut embedded_live = BTreeSet::new();
     let mut embedded_conversations: HashMap<ActorRef, Arc<harness::embedding::Conversation>> =
         HashMap::new();
-    let mut embedded_root: Option<Arc<harness::embedding::Conversation>> = None;
-    let mut embedded_root_identity: Option<harness::embedding::HostIdentity> = None;
-    let (embedded_lifecycle_tx, mut embedded_lifecycle_rx) = watch::channel((
-        None::<ActorRef>,
-        harness::server::HostActorLifecycle::Waiting,
-    ));
+    let (embedded_lifecycle_tx, mut embedded_lifecycle_rx) =
+        embedded_projection::LifecycleSender::channel();
+    let mut embedded_projection = embedded_projection::EmbeddedProjection::default();
+    let embedded_run = runtime_namespace(&launch_context.run_root);
+    #[cfg(feature = "codex-compat")]
     let mut binding_discoveries = JoinSet::new();
+    #[cfg(not(feature = "codex-compat"))]
+    let mut binding_discoveries: JoinSet<()> = JoinSet::new();
+    #[cfg(feature = "codex-compat")]
     let mut retirements = JoinSet::new();
+    #[cfg(not(feature = "codex-compat"))]
+    let mut retirements: JoinSet<()> = JoinSet::new();
     // Supervisors waiting for a stopped actor's release receipt. Served from
     // the receipt slot when it already exists, else when retirement joins.
     let mut release_waiters: HashMap<ActorRef, Vec<Arc<exomonad_actor::ReleaseAwait>>> =
         HashMap::new();
-    let mut notifications = JoinSet::new();
+    let mut notifications: JoinSet<(ActorRef, Result<(), String>)> = JoinSet::new();
+    #[cfg(feature = "codex-compat")]
     let mut publication_retries = JoinSet::new();
+    #[cfg(not(feature = "codex-compat"))]
+    let mut publication_retries: JoinSet<()> = JoinSet::new();
+    #[cfg(feature = "codex-compat")]
     let mut process_observations = JoinSet::new();
+    #[cfg(not(feature = "codex-compat"))]
+    let mut process_observations: JoinSet<()> = JoinSet::new();
     let mut health = tokio::time::interval(Duration::from_secs(1));
+    if let Some(service) = embedded_service.as_ref() {
+        embedded_projection.publish(
+            &service.control,
+            &embedded_run,
+            &(host_graph)(),
+            &embedded_projection::LifecycleState::default(),
+        );
+    }
     let failure = AssertUnwindSafe(async {
         let failure = loop {
         tokio::select! {
@@ -3956,17 +4146,14 @@ async fn run_interactive_applications(
             }
             changed = embedded_lifecycle_rx.changed() => {
                 if changed.is_ok() {
-                    let (actor, lifecycle) = *embedded_lifecycle_rx.borrow_and_update();
-                    if embedded_lifecycle_update_is_current(
-                        actor,
-                        root_identity,
-                        embedded_root.is_some(),
-                    ) {
-                        if let (Some(identity), Some(service)) =
-                            (embedded_root_identity.as_ref(), embedded_service.as_ref())
-                        {
-                            publish_embedded_root_snapshot(&service.control, identity, lifecycle);
-                        }
+                    let states = (*embedded_lifecycle_rx.borrow_and_update()).clone();
+                    if let Some(service) = embedded_service.as_ref() {
+                        embedded_projection.publish(
+                            &service.control,
+                            &embedded_run,
+                            &(host_graph)(),
+                            &states,
+                        );
                     }
                 }
             }
@@ -3979,7 +4166,14 @@ async fn run_interactive_applications(
                         };
                         break Some(format!("embedded browser server failed: {detail}"));
                     }
+                    embedded_projection.publish(
+                        &service.control,
+                        &embedded_run,
+                        &(host_graph)(),
+                        &(*embedded_lifecycle_rx.borrow()).clone(),
+                    );
                 }
+                #[cfg(feature = "codex-compat")]
                 if process_observations.is_empty() {
                     let rows = application_owners.lock();
                     for deployment in deployments.iter().filter(|deployment| {
@@ -4003,23 +4197,27 @@ async fn run_interactive_applications(
                         });
                     }
                 }
-                for deployment in &deployments {
-                    if let Some(thread) = &deployment.thread {
-                        let workspace = deployment.active_workspace.clone();
-                        if let Ok(mut publication) = workspace.publication.clone().try_lock_owned() {
-                            if publication.is_pending() {
-                                let backend = backend.clone();
-                                let owner = BoundWorkspace { workspace, thread: thread.clone() };
-                                let actor = deployment.actor;
-                                publication_retries.spawn(async move {
-                                    if let Err(error) = owner.settle_publication(&mut publication, backend.as_ref()).await {
-                                        tracing::debug!(?actor, %error, "workspace publication recovery remains pending");
-                                    }
-                                });
+                #[cfg(feature = "codex-compat")]
+                if let Some(backend) = backend.codex_backend() {
+                    for deployment in &deployments {
+                        if let Some(thread) = &deployment.thread {
+                            let workspace = deployment.active_workspace.clone();
+                            if let Ok(mut publication) = workspace.publication.clone().try_lock_owned() {
+                                if publication.is_pending() {
+                                    let backend = Arc::clone(backend);
+                                    let owner = BoundWorkspace { workspace, thread: thread.clone() };
+                                    let actor = deployment.actor;
+                                    publication_retries.spawn(async move {
+                                        if let Err(error) = owner.settle_publication(&mut publication, backend.as_ref()).await {
+                                            tracing::debug!(?actor, %error, "workspace publication recovery remains pending");
+                                        }
+                                    });
+                                }
                             }
                         }
                     }
                 }
+                #[cfg(feature = "codex-compat")]
                 for index in 0..deployments.len() {
                     let deployment = &deployments[index];
                     let snapshot = deployment.runtime_observation.snapshot();
@@ -4049,6 +4247,7 @@ async fn run_interactive_applications(
                     deployments[index].notified_provider_failures.insert(key);
                     }
                 }
+                #[cfg(feature = "codex-compat")]
                 if let Some(index) = deployments.iter().position(|deployment| {
                     !deployment.failure_reported
                         && deployment.local_actor.terminal().get().is_none()
@@ -4074,6 +4273,8 @@ async fn run_interactive_applications(
                 }
             }
             Some(observed) = process_observations.join_next(), if !process_observations.is_empty() => {
+                #[cfg(feature = "codex-compat")]
+                {
                 let Ok((actor, Ok(scoped_custody::ScopedProcessObservation::ProcessStopped))) = observed else {
                     continue;
                 };
@@ -4097,6 +4298,7 @@ async fn run_interactive_applications(
                 {
                     break Some(error);
                 }
+                }
             }
             command = async {
                 match embedded_service.as_mut() {
@@ -4108,23 +4310,26 @@ async fn run_interactive_applications(
                     break Some("embedded browser command channel closed".into());
                 };
                 let control = &embedded_service.as_ref().expect("branch requires service").control;
-                let command_id = command.command_id.clone();
-                let Some(root) = embedded_root.as_ref().cloned() else {
-                    let error = "embedded root is unavailable";
-                    tracing::warn!(%error, command_id = %command_id, "embedded browser input was not admitted");
-                    control.publish("command.rejected", serde_json::json!({
-                        "commandId": command_id,
-                        "error": error,
-                    }));
-                    continue;
-                };
-                if let Err(error) = embedded_service::submit_browser_command(command, &root, control).await {
-                    tracing::warn!(%error, command_id = %command_id, "embedded browser input was not admitted");
-                    control.publish("command.rejected", serde_json::json!({
-                        "commandId": command_id,
-                        "error": error,
-                    }));
+                let command_id = command.command_id;
+                let nodes = (host_graph)();
+                let outcome = dispatch_embedded_browser_command(
+                    &command_id,
+                    command.command,
+                    &embedded_run,
+                    &nodes,
+                    &embedded_live,
+                    &embedded_projection,
+                    &embedded_conversations,
+                    &embedded_lifecycle_tx,
+                )
+                .await;
+                if let harness::server::CommandReceiptOutcome::Refused { reason, .. } = &outcome {
+                    tracing::warn!(%reason, command_id = %command_id, "embedded browser command was refused");
                 }
+                control.publish_command_receipt(harness::server::CommandReceipt {
+                    command_id,
+                    outcome,
+                });
             }
             Some(result) = embedded_tasks.join_next(), if !embedded_tasks.is_empty() => {
                 let (actor, local_actor, outcome) = match result {
@@ -4138,19 +4343,9 @@ async fn run_interactive_applications(
                     }
                     Some(ActorExitKind::Failed) | None => harness::server::HostActorLifecycle::Lost,
                 };
-                if actor == root_identity {
-                    embedded_lifecycle_tx.send_replace((Some(actor), lifecycle));
-                    if let (Some(identity), Some(service)) =
-                        (embedded_root_identity.as_ref(), embedded_service.as_ref())
-                    {
-                        publish_embedded_root_snapshot(&service.control, identity, lifecycle);
-                    }
-                }
+                embedded_lifecycle_tx.publish(actor, lifecycle);
                 embedded_cancellations.remove(&actor);
                 embedded_conversations.remove(&actor);
-                if actor == root_identity {
-                    embedded_root = None;
-                }
                 if let Some(waiters) = release_waiters.remove(&actor) {
                     for waiter in waiters {
                         waiter.answer(exomonad_actor::ResourceRelease::Released);
@@ -4201,7 +4396,7 @@ async fn run_interactive_applications(
                             installation.actor.identity().into(),
                             worktree_grant(installation.effective_role.role()),
                         );
-                        if launch_context.config.backend == crate::exomonad::ExomonadBackend::Embedded {
+                        if launch_context.config.backend.kind() == crate::exomonad::ExomonadBackend::Embedded {
                             let Some(service) = embedded_service.as_ref() else {
                                 break Some("embedded backend has no prepared service".into());
                             };
@@ -4278,13 +4473,64 @@ async fn run_interactive_applications(
                                 )),
                             };
                             let root_conversation = Arc::clone(&embedded.conversation);
+                            embedded_projection
+                                .attached(actor, root_conversation.identity());
                             embedded_conversations.insert(actor, Arc::clone(&root_conversation));
                             embedded_cancellations.insert(actor, embedded.cancellation.clone());
                             embedded_live.insert(actor);
+                            let lifecycle = if has_initial_input {
+                                harness::server::HostActorLifecycle::Running
+                            } else {
+                                harness::server::HostActorLifecycle::Waiting
+                            };
+                            embedded_lifecycle_tx.publish(actor, lifecycle);
+                            let lifecycle_states =
+                                (*embedded_lifecycle_rx.borrow()).clone();
+                            embedded_projection.publish(
+                                &service.control,
+                                &embedded_run,
+                                &(host_graph)(),
+                                &lifecycle_states,
+                            );
                             let runtime = Arc::clone(&service.runtime);
+                            #[cfg(test)]
+                            let test_transport = service.test_transport();
                             let embedded_lifecycle = embedded_lifecycle_tx.clone();
                             let embedded_actor = actor;
                             embedded_tasks.spawn(async move {
+                                #[cfg(test)]
+                                let result = if let Some(transport) = test_transport {
+                                    embedded_service::drive_conversation_with_transport::<
+                                        harness::transport::auth::CodexFileAuth,
+                                        _,
+                                    >(
+                                        embedded.driver,
+                                        runtime,
+                                        &settings,
+                                        model,
+                                        effort,
+                                        instructions,
+                                        embedded.cancellation_rx,
+                                        embedded_lifecycle,
+                                        embedded_actor,
+                                        transport,
+                                    )
+                                    .await
+                                } else {
+                                    embedded_service::drive_conversation(
+                                        embedded.driver,
+                                        runtime,
+                                        &settings,
+                                        model,
+                                        effort,
+                                        instructions,
+                                        embedded.cancellation_rx,
+                                        embedded_lifecycle,
+                                        embedded_actor,
+                                    )
+                                    .await
+                                };
+                                #[cfg(not(test))]
                                 let result = embedded_service::drive_conversation(
                                     embedded.driver,
                                     runtime,
@@ -4304,19 +4550,6 @@ async fn run_interactive_applications(
                             // actor-owned readiness boundary; SessionReady below
                             // carries subsequent typed request input only.
                             if is_root {
-                                embedded_root = Some(Arc::clone(&root_conversation));
-                                let lifecycle = if has_initial_input {
-                                    harness::server::HostActorLifecycle::Running
-                                } else {
-                                    harness::server::HostActorLifecycle::Waiting
-                                };
-                                embedded_root_identity = Some(root_conversation.identity().clone());
-                                embedded_lifecycle_tx.send_replace((Some(actor), lifecycle));
-                                publish_embedded_root_snapshot(
-                                    &service.control,
-                                    root_conversation.identity(),
-                                    lifecycle,
-                                );
                                 readiness
                                     .send(ActorHostReadiness::EmbeddedReady {
                                         root: root_identity,
@@ -4326,6 +4559,8 @@ async fn run_interactive_applications(
                             }
                             continue;
                         }
+                        #[cfg(feature = "codex-compat")]
+                        {
                         let fork_parent_thread = match (
                             recovered_threads.contains_key(&installation.actor.identity()),
                             installation.checkpoint.as_ref(),
@@ -4349,8 +4584,11 @@ async fn run_interactive_applications(
                             .and_then(|custody| (custody.as_ref() as &dyn std::any::Any)
                                 .downcast_ref::<ActorWorkspaceCustody>())
                             .is_some_and(|custody| custody.workspace.is_some());
+                        let Some(native_backend) = launch_context.backend.codex_backend().cloned() else {
+                            break Some("Codex actor launch has no native backend adapter".into());
+                        };
                         let native_admission = NativeForkAdmission {
-                            owners: application_owners.clone(), backend: backend.clone(), layout: None,
+                            owners: application_owners.clone(), backend: native_backend.clone(), layout: None,
                         };
                         let context = launch_context.clone();
                         let actor = installation.actor.identity();
@@ -4370,6 +4608,7 @@ async fn run_interactive_applications(
                             fork_gate: installation.fork_gate.clone(),
                             custody: installation.worktree_custody.clone(),
                             scoped_retention: None,
+                            #[cfg(feature = "codex-compat")]
                             hosted: hosted_slot.clone(),
                             embedded_policy: Some(embedded_policy),
                             launch: HostLaunchState::Pending,
@@ -4440,10 +4679,13 @@ async fn run_interactive_applications(
                             }
                             (local_actor, result)
                         });
+                        }
+                        #[cfg(not(feature = "codex-compat"))]
+                        unreachable!("featureless actor host only admits embedded launches");
                     }
                     LocalResidentDeployment::SessionReady { activation } => {
                         let actor = activation.id.actor();
-                        if launch_context.config.backend == crate::exomonad::ExomonadBackend::Embedded {
+                        if launch_context.config.backend.kind() == crate::exomonad::ExomonadBackend::Embedded {
                             let Some(conversation) = embedded_conversations.get(&actor) else {
                                 break Some(format!("embedded actor {actor:?} received an activation before conversation attachment"));
                             };
@@ -4460,6 +4702,8 @@ async fn run_interactive_applications(
                             }
                             continue;
                         }
+                        #[cfg(feature = "codex-compat")]
+                        {
                         let Some(application) = deployments.iter_mut().find(|app| app.actor == actor) else {
                             let mut owners = application_owners.lock();
                             if let Some(owner) = owners.get_mut(&actor) {
@@ -4478,6 +4722,9 @@ async fn run_interactive_applications(
                         if let Err(error) = deliver_session_activation(application, activation).await {
                             break Some(error);
                         }
+                        }
+                        #[cfg(not(feature = "codex-compat"))]
+                        unreachable!("featureless actor host only admits embedded activations");
                     }
 
                     LocalResidentDeployment::Retired { actor, terminal } => {
@@ -4486,20 +4733,12 @@ async fn run_interactive_applications(
                             cancel.send_replace(true);
                         }
                         embedded_conversations.remove(&actor);
-                        if actor == root_identity {
-                            embedded_root = None;
-                            let lifecycle = if terminal.kind == ActorExitKind::Failed {
-                                harness::server::HostActorLifecycle::Lost
-                            } else {
-                                harness::server::HostActorLifecycle::Retired
-                            };
-                            embedded_lifecycle_tx.send_replace((Some(actor), lifecycle));
-                            if let (Some(identity), Some(service)) =
-                                (embedded_root_identity.as_ref(), embedded_service.as_ref())
-                            {
-                                publish_embedded_root_snapshot(&service.control, identity, lifecycle);
-                            }
-                        }
+                        let lifecycle = if terminal.kind == ActorExitKind::Failed {
+                            harness::server::HostActorLifecycle::Lost
+                        } else {
+                            harness::server::HostActorLifecycle::Retired
+                        };
+                        embedded_lifecycle_tx.publish(actor, lifecycle);
                         if let Some(resources) = &launch_context.config.command_resources {
                             let producer = format!("{}-{}", actor.id.0, actor.incarnation.0);
                             if let Err(error) = resources.seal_producer(&producer).await {
@@ -4509,6 +4748,7 @@ async fn run_interactive_applications(
                         if let Some(owner) = application_owners.lock().get_mut(&actor) {
                             owner.retired(terminal);
                         }
+                        #[cfg(feature = "codex-compat")]
                         if let Some(index) = deployments.iter().position(|app| app.actor == actor) {
                             let deployment = deployments.swap_remove(index);
                             spawn_owned_retirement(&mut retirements, deployment, tmux.clone(), &application_owners);
@@ -4544,6 +4784,7 @@ async fn run_interactive_applications(
                             None => release_waiters.entry(actor).or_default().push(request),
                         }
                     }
+                    #[cfg(feature = "codex-compat")]
                     LocalResidentDeployment::CommandBackend(request) => {
                         // An actor with an agent process of its own runs its
                         // commands inside that process's sandbox. One without
@@ -4557,9 +4798,16 @@ async fn run_interactive_applications(
                             .ok_or_else(|| tidepool_bridge_effects::CommandError::CommandUnavailable("this run has no command resource authority".into()))
                             .and_then(|resources| {
                                 match deployments.iter().find(|app| app.actor == request.owner).and_then(|app| app.thread.clone()) {
-                                    Some(thread) => Ok(Arc::new(commands::NativeCommandBackend::new(
-                                        launch_context.backend.clone(), thread, resources, request.owner,
-                                    )) as Arc<dyn exomonad_actor::command_jobs::CommandBackend>),
+                                    Some(thread) => {
+                                        let Some(backend) = launch_context.backend.codex_backend() else {
+                                            return Err(tidepool_bridge_effects::CommandError::CommandUnavailable(
+                                                "native command backend is unavailable for the embedded provider".into(),
+                                            ));
+                                        };
+                                        Ok(Arc::new(commands::NativeCommandBackend::new(
+                                            Arc::clone(backend), thread, resources, request.owner,
+                                        )) as Arc<dyn exomonad_actor::command_jobs::CommandBackend>)
+                                    },
                                     None => {
                                         let bubblewrap = resolve_scope_bubblewrap(
                                             &launch_context.config.pane_environment,
@@ -4586,6 +4834,41 @@ async fn run_interactive_applications(
                             });
                         request.supply(backend);
                     }
+                    #[cfg(not(feature = "codex-compat"))]
+                    LocalResidentDeployment::CommandBackend(request) => {
+                        let backend = launch_context
+                            .config
+                            .command_resources
+                            .clone()
+                            .ok_or_else(|| {
+                                tidepool_bridge_effects::CommandError::CommandUnavailable(
+                                    "this run has no command resource authority".into(),
+                                )
+                            })
+                            .and_then(|resources| {
+                                let bubblewrap = resolve_scope_bubblewrap(
+                                    &launch_context.config.pane_environment,
+                                )
+                                .map_err(|error| {
+                                    tidepool_bridge_effects::CommandError::CommandUnavailable(
+                                        format!("cannot resolve bubblewrap for resident commands: {error}"),
+                                    )
+                                })?;
+                                Ok(Arc::new(commands::HostCommandBackend::new(
+                                    resources,
+                                    request.owner,
+                                    resident_command_roots(
+                                        &worktree_authority,
+                                        &launch_context.worktrees,
+                                        &launch_context.config.workspace,
+                                        request.owner,
+                                    ),
+                                    bubblewrap,
+                                )) as Arc<dyn exomonad_actor::command_jobs::CommandBackend>)
+                            });
+                        request.supply(backend);
+                    }
+                    #[cfg(feature = "codex-compat")]
                     LocalResidentDeployment::NotificationSend(command) => {
                         let target = command.target();
                         let Some(application) = deployments.iter().find(|app| app.actor == target) else {
@@ -4605,6 +4888,11 @@ async fn run_interactive_applications(
                             (target, result)
                         });
                     }
+                    #[cfg(not(feature = "codex-compat"))]
+                    LocalResidentDeployment::NotificationSend(command) => {
+                        command.rejected(exomonad_actor::NotificationError::Unavailable);
+                    }
+                    #[cfg(feature = "codex-compat")]
                     LocalResidentDeployment::NotificationPoll(command) => {
                         let result = deployments.iter()
                             .find(|application| application.actor == command.receipt().target())
@@ -4615,6 +4903,11 @@ async fn run_interactive_applications(
                             ));
                         command.observed(result);
                     }
+                    #[cfg(not(feature = "codex-compat"))]
+                    LocalResidentDeployment::NotificationPoll(command) => {
+                        command.observed(Err(exomonad_actor::NotificationError::Unavailable));
+                    }
+                    #[cfg(feature = "codex-compat")]
                     LocalResidentDeployment::RequestUpdate { delivery } => {
                         let target = delivery.target();
                         let Some(application) = deployments.iter().find(|app| app.actor == target) else {
@@ -4727,11 +5020,23 @@ async fn run_interactive_applications(
                             "request update is durably queued for ordered native delivery".into(),
                         );
                     }
+                    #[cfg(not(feature = "codex-compat"))]
+                    LocalResidentDeployment::RequestUpdate { delivery } => {
+                        if let Some(presentation) = delivery.begin() {
+                            presentation.not_presented(
+                                "request updates require a native interactive conversation".into(),
+                            );
+                        }
+                    }
+                    #[cfg(feature = "codex-compat")]
                     LocalResidentDeployment::ChildExited { notice } => {
                         if let Some(notification) = prepare_owner_notification(&notice, &deployments) {
                             notifications.spawn(publish_owner_notification(notification));
                         }
                     }
+                    #[cfg(not(feature = "codex-compat"))]
+                    LocalResidentDeployment::ChildExited { .. } => {}
+                    #[cfg(feature = "codex-compat")]
                     LocalResidentDeployment::WatchChanged { notification } => {
                         let Some(application) = deployments
                             .iter()
@@ -4747,6 +5052,9 @@ async fn run_interactive_applications(
                             }),
                         ));
                     }
+                    #[cfg(not(feature = "codex-compat"))]
+                    LocalResidentDeployment::WatchChanged { .. } => {}
+                    #[cfg(feature = "codex-compat")]
                     LocalResidentDeployment::SettlementChanged { notification } => {
                         let Some(application) = deployments
                             .iter()
@@ -4762,6 +5070,9 @@ async fn run_interactive_applications(
                             }),
                         ));
                     }
+                    #[cfg(not(feature = "codex-compat"))]
+                    LocalResidentDeployment::SettlementChanged { .. } => {}
+                    #[cfg(feature = "codex-compat")]
                     LocalResidentDeployment::RequestCancellation { notification } => {
                         let Some(application) = deployments
                             .iter()
@@ -4777,6 +5088,8 @@ async fn run_interactive_applications(
                             }),
                         ));
                     }
+                    #[cfg(not(feature = "codex-compat"))]
+                    LocalResidentDeployment::RequestCancellation { .. } => {}
                 }
             }
             recovered = publication_retries.join_next(), if !publication_retries.is_empty() => {
@@ -4785,6 +5098,8 @@ async fn run_interactive_applications(
                 }
             }
             launched = launches.join_next(), if !launches.is_empty() => {
+                #[cfg(feature = "codex-compat")]
+                {
                 match launched {
                     Some(Ok((local_actor, Ok(Some(launched))))) => {
                         let actor = local_actor.identity();
@@ -4915,8 +5230,11 @@ async fn run_interactive_applications(
                     Some(Err(error)) => break Some(format!("interactive launch task: {error}")),
                     None => {}
                 }
+                }
             }
             discovered = binding_discoveries.join_next(), if !binding_discoveries.is_empty() => {
+                #[cfg(feature = "codex-compat")]
+                {
                 match discovered {
                     Some(Ok((actor, Ok(thread)))) => {
                         let Some(deployment) = deployments.iter_mut().find(|app| app.actor == actor) else {
@@ -4933,9 +5251,12 @@ async fn run_interactive_applications(
                                 "interactive application {actor:?} binding could not be journalled: {error}"
                             ));
                         }
+                        let Some(native_backend) = backend.codex_backend().cloned() else {
+                            break Some(format!("native conversation binding for {actor:?} has no Codex backend"));
+                        };
                         if let Err(error) = retain_input_custody_and_bind(
                             &deployment.service,
-                            Arc::clone(&backend),
+                            native_backend.clone(),
                             &thread,
                             &deployment.input_producer,
                         )
@@ -4950,7 +5271,7 @@ async fn run_interactive_applications(
                             actor,
                             Arc::clone(&deployment.inbox),
                             thread.clone(),
-                            Arc::clone(&backend),
+                            native_backend.clone(),
                             deployment.input_producer.clone(),
                             Arc::clone(&deployment.update_reconciliations),
                             deployment.workspace.clone(),
@@ -5015,8 +5336,11 @@ async fn run_interactive_applications(
                     Some(Err(error)) => break Some(format!("interactive binding task: {error}")),
                     None => {}
                 }
+                }
             }
             retired = retirements.join_next(), if !retirements.is_empty() => {
+                #[cfg(feature = "codex-compat")]
+                {
                 match retired {
                     Some(Ok(receipt)) => {
                         let supervisor = application_owners.lock().get_mut(&receipt.actor).and_then(|owner| {
@@ -5057,8 +5381,11 @@ async fn run_interactive_applications(
                     }
                     None => {}
                 }
+                }
             }
             notified = notifications.join_next(), if !notifications.is_empty() => {
+                #[cfg(feature = "codex-compat")]
+                {
                 match notified {
                     Some(Ok((_actor, Ok(())))) => {}
                     Some(Ok((actor, Err(error)))) => {
@@ -5086,6 +5413,7 @@ async fn run_interactive_applications(
                         tracing::warn!(%error, "actor notification task join failed");
                     }
                     None => {}
+                }
                 }
             }
         }
@@ -5139,14 +5467,17 @@ async fn run_interactive_applications(
             .map(|error| format!("embedded browser shutdown: {error}")),
         None => None,
     };
+    #[cfg(feature = "codex-compat")]
     let launch_cleanup =
         drain_launches_for_shutdown(&mut launches, APPLICATION_SHUTDOWN_TIMEOUT).await;
+    #[cfg(feature = "codex-compat")]
     deployments.extend(
         launch_cleanup
             .completed
             .into_iter()
             .map(|launched| launched.deployment),
     );
+    #[cfg(feature = "codex-compat")]
     let launch_failure = if launch_cleanup.failures.is_empty() {
         None
     } else {
@@ -5159,6 +5490,8 @@ async fn run_interactive_applications(
                 .join("; "),
         )
     };
+    #[cfg(not(feature = "codex-compat"))]
+    let launch_failure: Option<String> = None;
     let publication_cleanup = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
         let mut failure = None;
         while let Some(result) = publication_retries.join_next().await {
@@ -5173,28 +5506,31 @@ async fn run_interactive_applications(
         publication_retries.abort_all();
         Some("build publication recovery timed out; durable state and storage retained".into())
     });
-    binding_discoveries.abort_all();
-    while binding_discoveries.join_next().await.is_some() {}
-    let undeployed = application_owners
-        .lock()
-        .keys()
-        .copied()
-        .filter(|actor| {
-            !deployments
-                .iter()
-                .any(|deployment| deployment.actor == *actor)
-        })
-        .collect::<Vec<_>>();
-    for actor in undeployed {
-        spawn_undeployed_hosted_retirement(&mut retirements, actor, &application_owners, &tmux);
-    }
-    for deployment in deployments {
-        spawn_owned_retirement(
-            &mut retirements,
-            deployment,
-            tmux.clone(),
-            &application_owners,
-        );
+    #[cfg(feature = "codex-compat")]
+    {
+        binding_discoveries.abort_all();
+        while binding_discoveries.join_next().await.is_some() {}
+        let undeployed = application_owners
+            .lock()
+            .keys()
+            .copied()
+            .filter(|actor| {
+                !deployments
+                    .iter()
+                    .any(|deployment| deployment.actor == *actor)
+            })
+            .collect::<Vec<_>>();
+        for actor in undeployed {
+            spawn_undeployed_hosted_retirement(&mut retirements, actor, &application_owners, &tmux);
+        }
+        for deployment in deployments {
+            spawn_owned_retirement(
+                &mut retirements,
+                deployment,
+                tmux.clone(),
+                &application_owners,
+            );
+        }
     }
     let notification_cleanup = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
         let mut failure = None;
@@ -5210,6 +5546,7 @@ async fn run_interactive_applications(
     })
     .await
     .unwrap_or_else(|_| Some("owner notification cleanup timed out".into()));
+    #[cfg(feature = "codex-compat")]
     let cleanup_failure = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
         let mut failure = None;
         while let Some(result) = retirements.join_next().await {
@@ -5235,6 +5572,8 @@ async fn run_interactive_applications(
     })
     .await
     .unwrap_or_else(|_| Some("interactive application cleanup timed out".into()));
+    #[cfg(not(feature = "codex-compat"))]
+    let cleanup_failure: Option<String> = None;
     let cleanup_failures = [
         launch_failure,
         embedded_cleanup,
@@ -5325,12 +5664,14 @@ struct InteractiveInheritance {
     build_snapshot: Option<OverlaySnapshot>,
 }
 
+#[cfg(feature = "codex-compat")]
 struct InteractiveLaunchRetention {
     hosted: hosted_retirement::HostedSlot,
     pane: Arc<Mutex<Option<TmuxPaneId>>>,
     process: Arc<Mutex<scoped_custody::ScopedProcessSlot>>,
 }
 
+#[cfg(feature = "codex-compat")]
 async fn launch_interactive_application(
     installation: LocalResidentInstallation,
     context: InteractiveLaunchContext,
@@ -5350,6 +5691,7 @@ async fn launch_interactive_application(
     .await
 }
 
+#[cfg(feature = "codex-compat")]
 fn prepare_actor_worktree(
     installation: &LocalResidentInstallation,
     context: &InteractiveLaunchContext,
@@ -5436,6 +5778,7 @@ fn current_time_ms() -> i64 {
     i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
+#[cfg(feature = "codex-compat")]
 async fn launch_prepared_interactive_application(
     installation: LocalResidentInstallation,
     context: InteractiveLaunchContext,
@@ -5470,6 +5813,21 @@ async fn launch_prepared_interactive_application(
     let fork_gate = installation.fork_gate.clone();
     let runtime_observation = installation.runtime_observation.clone();
     let actor_identity = actor.identity();
+    let Some(backend) = backend.codex_backend().cloned() else {
+        return Err(application_error(
+            actor_identity,
+            InteractiveOperation::BuildCommand,
+            "native interactive launch has no Codex backend adapter",
+        ));
+    };
+    #[cfg(feature = "codex-compat")]
+    let interactive_agent = config.backend.interactive_agent().ok_or_else(|| {
+        application_error(
+            actor_identity,
+            InteractiveOperation::BuildCommand,
+            "native interactive launch has no Codex installation",
+        )
+    })?;
     let _resource_start = match &config.command_resources {
         Some(owner) => {
             tracing::info!(actor = ?actor_identity, "actor waiting for resource admission");
@@ -5734,13 +6092,13 @@ async fn launch_prepared_interactive_application(
     let command = backend.render(&spec).map_err(|error| {
         application_error(actor_identity, InteractiveOperation::BuildCommand, error)
     })?;
+    #[cfg(feature = "codex-compat")]
     runtime_observation.publish_backend_provenance(
-        config
-            .interactive_agent
+        interactive_agent
             .executable()
             .to_string_lossy()
             .into_owned(),
-        config.interactive_agent.version().into(),
+        interactive_agent.version().into(),
         spec.model.clone(),
         spec.effort.map(|effort| format!("{effort:?}")),
     );
@@ -5791,10 +6149,10 @@ async fn launch_prepared_interactive_application(
     );
     // Shell commands must resolve the same verified installation as delivery.
     // An inherited PATH or override can name a different rollout protocol.
+    #[cfg(feature = "codex-compat")]
     launch_environment.set.insert(
         "EXOMONAD_INTERACTIVE_CODEX_BIN".into(),
-        config
-            .interactive_agent
+        interactive_agent
             .executable()
             .to_string_lossy()
             .into_owned(),
@@ -6194,6 +6552,7 @@ async fn launch_prepared_interactive_application(
 }
 
 /// Acquire exclusive path custody before the first fallible preparation step.
+#[cfg(feature = "codex-compat")]
 fn prepare_socket_inbox(
     actor: ActorRef,
     socket_root: PathBuf,
@@ -6229,6 +6588,7 @@ fn prepare_socket_inbox(
     }
 }
 
+#[cfg(feature = "codex-compat")]
 fn socket_cleanup_outcome(socket: SocketDirectory) -> CleanupComponentOutcome {
     match socket.release() {
         Ok(()) => CleanupComponentOutcome::Completed,
@@ -6238,6 +6598,7 @@ fn socket_cleanup_outcome(socket: SocketDirectory) -> CleanupComponentOutcome {
     }
 }
 
+#[cfg(feature = "codex-compat")]
 fn socket_launch_failure(
     actor: ActorRef,
     operation: InteractiveOperation,
@@ -6253,6 +6614,7 @@ fn socket_launch_failure(
     application_error(actor, operation, detail)
 }
 
+#[cfg(feature = "codex-compat")]
 fn socket_launch_cancelled(
     actor: ActorRef,
     cause: impl fmt::Display,
@@ -6264,6 +6626,7 @@ fn socket_launch_cancelled(
     error
 }
 
+#[cfg(feature = "codex-compat")]
 async fn deliver_session_activation(
     application: &mut InteractiveDeployment,
     activation: exomonad_actor::ResidentActivation,
@@ -6298,6 +6661,7 @@ async fn deliver_session_activation(
     Ok(())
 }
 
+#[cfg(feature = "codex-compat")]
 fn accepts_activation(
     deployment: &InteractiveDeployment,
     activation: &exomonad_actor::ResidentActivation,
@@ -7946,6 +8310,7 @@ fn git_drift_at(
     Ok(exomonad_actor::CheckoutGitDrift { head, dirty_files })
 }
 
+#[cfg(feature = "codex-compat")]
 fn prepare_owner_notification(
     notice: &exomonad_actor::ChildExitNotice,
     deployments: &[InteractiveDeployment],
@@ -8011,6 +8376,7 @@ async fn publish_inbox_event(
     Ok(())
 }
 
+#[cfg(feature = "codex-compat")]
 async fn retire_interactive_application_guarded(
     deployment: InteractiveDeployment,
     tmux: &TmuxSession,
@@ -8058,6 +8424,7 @@ fn panicked_cleanup_receipt(actor: ActorRef) -> InteractiveCleanupReceipt {
     }
 }
 
+#[cfg(feature = "codex-compat")]
 async fn retire_interactive_application(
     mut deployment: InteractiveDeployment,
     tmux: &TmuxSession,
@@ -8243,6 +8610,7 @@ fn mark_process_recovery_retired(path: &Path) -> std::io::Result<()> {
 
 /// Account for exact resident cleanup before draining the original HTTP task.
 /// Namespace/native and external-handler domains remain independently unknown.
+#[cfg(feature = "codex-compat")]
 async fn stop_retired_tool_service(
     actor: ActorRef,
     service: &mut hosted_retirement::HostedOwner,
@@ -8334,6 +8702,7 @@ async fn retire_pane_artifact(
     }
 }
 
+#[cfg(feature = "codex-compat")]
 async fn discover_interactive_binding(
     actor: ActorRef,
     request: InteractiveBindingRequest,

@@ -42,6 +42,7 @@ library tidepool-extract-internal
     Tidepool.Introspection
     Tidepool.Metadata
     Tidepool.ModuleCandidates
+    Tidepool.PackageWitness
     Tidepool.CertifiedProducts
     Tidepool.PrimOps
     Tidepool.PreparedStg
@@ -187,7 +188,9 @@ executable tidepool-extract-bin
     ghc  >= 9.12 && < 9.13,
     tidepool-extract-internal,
     bytestring,
+    cborg,
     containers,
+    cryptohash-sha256,
     filepath,
     directory,
     text

@@ -6,8 +6,11 @@ use std::{
     },
 };
 
+use parking_lot::Mutex as ParkingMutex;
+
 use exomonad_actor::{
-    ActorAdmissionLease, ActorExitKind, ActorTerminal, LocalActorRef, ResidentToolError,
+    ActorAdmissionLease, ActorExitKind, ActorTerminal, HostedCheckpointAttachment,
+    HostedCheckpointCapture, HostedCheckpointCaptureError, LocalActorRef, ResidentToolError,
     WorkbenchCancellationOutcome,
 };
 use exomonad_tool::{ToolArguments, ToolInvocationContext};
@@ -26,7 +29,7 @@ use harness::{
     turn::JobScheduler,
 };
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::embedded_policy::{EmbeddedPolicyInstallation, EmbeddedPolicySnapshot};
 
@@ -72,11 +75,14 @@ impl EmbeddedHarnessRuntime {
             ));
         }
         let (wakes, incoming) = mpsc::unbounded_channel();
+        let round_control = Arc::new(EmbeddedRoundControl::default());
         let host = Arc::new(EmbeddedHostActor::new(
             identity,
             actor,
             installation,
+            self.store.clone(),
             wakes,
+            round_control.clone(),
         )?);
         let conversation = Arc::new(Conversation::attach(
             self.store.clone(),
@@ -86,6 +92,7 @@ impl EmbeddedHarnessRuntime {
         Ok(EmbeddedConversation {
             conversation,
             incoming,
+            round_control,
         })
     }
 
@@ -101,6 +108,80 @@ impl EmbeddedHarnessRuntime {
 pub(super) struct EmbeddedConversation {
     pub(super) conversation: Arc<Conversation>,
     pub(super) incoming: mpsc::UnboundedReceiver<DurableMailboxWake>,
+    pub(super) round_control: Arc<EmbeddedRoundControl>,
+}
+
+/// The host and its single Engine driver share one exact active-round slot.
+/// A handle can signal only the watch instance created for its own round.
+#[derive(Default)]
+pub(super) struct EmbeddedRoundControl {
+    active: ParkingMutex<Option<RoundCancellationHandle>>,
+}
+
+#[derive(Clone)]
+pub(super) struct RoundCancellationHandle {
+    sender: watch::Sender<bool>,
+}
+
+pub(super) struct EmbeddedRoundLease {
+    control: Arc<EmbeddedRoundControl>,
+    handle: RoundCancellationHandle,
+    receiver: watch::Receiver<bool>,
+}
+
+impl EmbeddedRoundControl {
+    pub(super) fn begin(self: &Arc<Self>) -> Result<EmbeddedRoundLease, String> {
+        let mut active = self.active.lock();
+        if active.is_some() {
+            return Err("an embedded Engine round is already active".into());
+        }
+        let (sender, receiver) = watch::channel(false);
+        let handle = RoundCancellationHandle { sender };
+        *active = Some(handle.clone());
+        Ok(EmbeddedRoundLease {
+            control: self.clone(),
+            handle,
+            receiver,
+        })
+    }
+
+    pub(super) fn interrupt_current(&self) -> Result<(), String> {
+        let handle = self
+            .active
+            .lock()
+            .clone()
+            .ok_or_else(|| "no embedded Engine round is active".to_owned())?;
+        handle.cancel();
+        Ok(())
+    }
+}
+
+impl RoundCancellationHandle {
+    pub(super) fn cancel(&self) {
+        self.sender.send_replace(true);
+    }
+}
+
+impl EmbeddedRoundLease {
+    pub(super) fn cancellation(&self) -> watch::Receiver<bool> {
+        self.receiver.clone()
+    }
+
+    pub(super) fn cancel(&self) {
+        self.handle.cancel();
+    }
+}
+
+impl Drop for EmbeddedRoundLease {
+    fn drop(&mut self) {
+        let mut active = self.control.active.lock();
+        if active
+            .as_ref()
+            .is_some_and(|current| current.sender.same_channel(&self.handle.sender))
+        {
+            *active = None;
+        }
+    }
 }
 
 /// The exact actor and installation used by one bound harness conversation.
@@ -110,7 +191,9 @@ pub(super) struct EmbeddedHostActor {
     identity: HostIdentity,
     actor: LocalActorRef,
     installation: Arc<EmbeddedPolicyInstallation>,
+    store: Arc<Store>,
     wakes: mpsc::UnboundedSender<DurableMailboxWake>,
+    round_control: Arc<EmbeddedRoundControl>,
     next_surface: AtomicU64,
 }
 
@@ -119,7 +202,9 @@ impl EmbeddedHostActor {
         identity: HostIdentity,
         actor: LocalActorRef,
         installation: Arc<EmbeddedPolicyInstallation>,
+        store: Arc<Store>,
         wakes: mpsc::UnboundedSender<DurableMailboxWake>,
+        round_control: Arc<EmbeddedRoundControl>,
     ) -> Result<Self, EmbeddedError> {
         let exact_actor = actor.identity();
         if installation.actor() != exact_actor
@@ -134,7 +219,9 @@ impl EmbeddedHostActor {
             identity,
             actor,
             installation,
+            store,
             wakes,
+            round_control,
             next_surface: AtomicU64::new(1),
         })
     }
@@ -174,6 +261,7 @@ impl HostActor for EmbeddedHostActor {
         let dispatcher: Arc<dyn Provider> = Arc::new(EmbeddedDispatcher {
             identity: self.identity.clone(),
             snapshot,
+            store: self.store.clone(),
         });
         Ok(Arc::new(ToolSurface::new(version, tools, dispatcher)?))
     }
@@ -196,9 +284,10 @@ impl HostActor for EmbeddedHostActor {
                     .map_err(|error| error.to_string())?;
                 Ok(json!({"requested":true}))
             }
-            HostControl::Interrupt => Err(
-                "interrupt requires an exact operation; use the bound cancellation owner".into(),
-            ),
+            HostControl::Interrupt => self
+                .round_control
+                .interrupt_current()
+                .map(|()| json!({"requested":true})),
         }
     }
 }
@@ -207,6 +296,64 @@ impl HostActor for EmbeddedHostActor {
 struct EmbeddedDispatcher {
     identity: HostIdentity,
     snapshot: Arc<EmbeddedPolicySnapshot>,
+    store: Arc<Store>,
+}
+
+/// Host-owned durable half of a Haskell checkpoint. The actor retains this
+/// value on its existing checkpoint lease and revokes it with that lease.
+pub(super) struct EmbeddedHostedCheckpoint {
+    pub(super) checkpoint: harness::checkpoint::Checkpoint<()>,
+}
+
+struct EmbeddedCheckpointCapture {
+    store: Arc<Store>,
+    identity: HostIdentity,
+    operation: OperationId,
+    thread_id: String,
+}
+
+impl HostedCheckpointCapture for EmbeddedCheckpointCapture {
+    fn capture(
+        &self,
+        name: &str,
+        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> Result<HostedCheckpointAttachment, HostedCheckpointCaptureError> {
+        let exact_origin = matches!(
+            &self.operation.origin,
+            ConversationIdentity::Embedded {
+                run,
+                actor,
+                incarnation,
+            } if run == &self.identity.run
+                && actor == &self.identity.actor
+                && incarnation == &self.identity.incarnation
+        );
+        if !exact_origin
+            || boundary.thread_id != self.thread_id
+            || boundary.call_id != self.operation.call.0
+            || name.is_empty()
+        {
+            return Err(HostedCheckpointCaptureError::CaptureFailed);
+        }
+
+        let metadata = json!({
+            "name": name,
+            "operation": self.operation,
+        });
+        let checkpoint = self
+            .store
+            .capture_checkpoint(
+                self.operation.origin.actor(),
+                &self.operation.request,
+                &self.operation.call,
+                &metadata,
+                Arc::new(()),
+            )
+            .map_err(|_| HostedCheckpointCaptureError::CaptureFailed)?;
+        Ok(HostedCheckpointAttachment::new(Arc::new(
+            EmbeddedHostedCheckpoint { checkpoint },
+        )))
+    }
 }
 
 impl EmbeddedDispatcher {
@@ -222,7 +369,7 @@ impl EmbeddedDispatcher {
             _ => return Err(ProviderError::Tool("foreign embedded operation".into())),
         }
         Ok(ToolInvocationContext {
-            context_call_id: None,
+            context_call_id: Some(operation.call.0.clone()),
             thread_id: format!("{}:{}", self.identity.run, self.identity.actor.0),
             turn_id: operation.request.0.clone(),
             call_id: operation.call.0.clone(),
@@ -235,6 +382,7 @@ impl EmbeddedDispatcher {
         name: &str,
         arguments: ToolArguments,
         context: CallContext,
+        capture_checkpoints: bool,
     ) -> Result<Value, ProviderError> {
         let operation = context.operation.as_ref().ok_or_else(|| {
             ProviderError::Tool("embedded dispatch requires an exact operation".into())
@@ -245,8 +393,22 @@ impl EmbeddedDispatcher {
         {
             return Err(ProviderError::Tool("foreign embedded call context".into()));
         }
+        let invocation_context = self.context(operation)?;
+        let checkpoint_capture = (capture_checkpoints && name == "haskell").then(|| {
+            Arc::new(EmbeddedCheckpointCapture {
+                store: self.store.clone(),
+                identity: self.identity.clone(),
+                operation: operation.clone(),
+                thread_id: invocation_context.thread_id.clone(),
+            }) as Arc<dyn HostedCheckpointCapture>
+        });
         self.snapshot
-            .dispatch(name.to_owned(), arguments, self.context(operation)?)
+            .dispatch(
+                name.to_owned(),
+                arguments,
+                invocation_context,
+                checkpoint_capture,
+            )
             .await
             .map_err(|error| ProviderError::Tool(error.to_string()))
     }
@@ -274,7 +436,7 @@ impl Provider for EmbeddedDispatcher {
         arguments: Value,
         context: CallContext,
     ) -> Result<Value, ProviderError> {
-        self.dispatch(name, ToolArguments::Structured(arguments), context)
+        self.dispatch(name, ToolArguments::Structured(arguments), context, false)
             .await
     }
 
@@ -284,7 +446,7 @@ impl Provider for EmbeddedDispatcher {
         input: String,
         context: CallContext,
     ) -> Result<Value, ProviderError> {
-        self.dispatch(name, ToolArguments::Raw(input), context)
+        self.dispatch(name, ToolArguments::Raw(input), context, true)
             .await
     }
 }
@@ -320,12 +482,41 @@ impl CancellationOwner for EmbeddedDispatcher {
 }
 
 #[cfg(test)]
+mod round_control_tests {
+    use super::*;
+
+    #[test]
+    fn interrupt_requires_an_active_round_and_stale_handles_do_not_retarget() {
+        let control = Arc::new(EmbeddedRoundControl::default());
+        assert!(control.interrupt_current().is_err());
+
+        let first = control.begin().expect("first round");
+        let mut first_receiver = first.cancellation();
+        let old_handle = first.handle.clone();
+        control.interrupt_current().expect("interrupt first round");
+        assert!(*first_receiver.borrow_and_update());
+        drop(first);
+        assert!(control.interrupt_current().is_err());
+
+        let second = control.begin().expect("second round");
+        old_handle.cancel();
+        let second_receiver = second.cancellation();
+        assert!(
+            !*second_receiver.borrow(),
+            "an old cancellation handle must signal only its own watch instance"
+        );
+        control.interrupt_current().expect("interrupt second round");
+        assert!(*second_receiver.borrow());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actor_host::embedded_projection::{EmbeddedProjection, LifecycleState};
     use crate::actor_host::embedded_service::{
         attach_actor, drive_conversation_with_transport, submit_browser_command, EmbeddedService,
     };
-    use crate::actor_host::publish_embedded_root_snapshot;
     use crate::actor_host::test_campaign::TestCampaign;
     use async_trait::async_trait;
     use futures_util::StreamExt;
@@ -409,22 +600,18 @@ mod tests {
                 requests.len()
             };
             let items = if round == 1 {
-                vec![
-                    Item(json!({
-                        "type":"custom_tool_call", "call_id":"raw-cell-1",
-                        "name":"haskell", "input":"40 + 2 :: Int"
-                    })),
-                    Item(json!({
-                        "type":"function_call", "call_id":"wait-for-cell",
-                        "name":"wait_agent", "arguments":"{}"
-                    })),
-                ]
+                vec![Item(json!({
+                    "type":"custom_tool_call", "call_id":"raw-cell-1",
+                    "name":"haskell", "input":"40 + 2 :: Int"
+                }))]
             } else if round == 2 {
                 self.entered.notify_one();
                 self.release.notified().await;
+                // Keep the round nonfinal after settlement so the next boundary compacts.
                 vec![Item(json!({
-                    "type":"message", "role":"assistant", "phase":"final_answer",
-                    "content":[{"type":"output_text","text":"cell finished"}]
+                    "type":"custom_tool_call", "call_id":"raw-cell-2",
+                    "name":"haskell",
+                    "input":include_str!("embedded_checkpoint_capture.hs")
                 }))]
             } else {
                 self.completed.notify_one();
@@ -437,7 +624,7 @@ mod tests {
                 response_id: format!("park-{round}"),
                 items,
                 usage: harness::transport::Usage {
-                    input_tokens: if round == 1 { 100_001 } else { 0 },
+                    input_tokens: if round == 2 { 100_001 } else { 0 },
                     ..Default::default()
                 },
             })
@@ -445,7 +632,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_embedded_service_authenticates_browser_and_wakes_real_actor_engine() {
+    async fn production_embedded_engine_compacts_and_publishes_checkpoint_effect() {
         let campaign = TestCampaign::start().await;
         let actor = campaign.actor.identity();
         let installation = Arc::new(EmbeddedPolicyInstallation::from_installation(
@@ -579,10 +766,76 @@ mod tests {
             .await
             .unwrap();
         assert!(receipt.wake_error.is_none(), "{receipt:?}");
+        let store = service.runtime.store();
+        let call = harness::model::CallId("raw-cell-1".into());
+        let host_identity = conversation.identity().clone();
+        let embedded_origin = ConversationIdentity::Embedded {
+            run: host_identity.run.clone(),
+            actor: host_identity.actor.clone(),
+            incarnation: host_identity.incarnation.clone(),
+        };
+        let claim = store
+            .claims(&call)
+            .unwrap()
+            .into_iter()
+            .find(|claim| claim.operation.origin == embedded_origin)
+            .expect("the real Engine call must retain its exact embedded operation");
+        let output = tokio::time::timeout(
+            Duration::from_secs(30),
+            service.runtime.scheduler().wait(&claim.operation),
+        )
+        .await
+        .expect("real Haskell output did not settle while the scripted round was held")
+        .unwrap();
+        assert!(
+            matches!(output, harness::turn::JobOutput::Completed(Ok(_))),
+            "real Haskell call did not settle successfully: {output:?}"
+        );
         transport.release.notify_one();
         tokio::time::timeout(Duration::from_secs(5), transport.completed.notified())
             .await
             .unwrap();
+        let checkpoint_call = harness::model::CallId("raw-cell-2".into());
+        let checkpoint_claim = store
+            .claims(&checkpoint_call)
+            .unwrap()
+            .into_iter()
+            .find(|claim| claim.operation.origin == embedded_origin)
+            .expect("the real Engine checkpoint call must retain its exact operation");
+        let checkpoint_output = tokio::time::timeout(
+            Duration::from_secs(30),
+            service
+                .runtime
+                .scheduler()
+                .wait(&checkpoint_claim.operation),
+        )
+        .await
+        .expect("real Haskell checkpoint effect did not settle")
+        .unwrap();
+        let checkpoint_response = match checkpoint_output {
+            harness::turn::JobOutput::Completed(Ok(response)) => response,
+            other => panic!("real Haskell checkpoint effect failed: {other:?}"),
+        };
+        let committed_run =
+            serde_json::to_value(tidepool_runtime::session::WorkbenchRunStatus::Committed).unwrap();
+        let committed_item =
+            serde_json::to_value(tidepool_runtime::session::WorkbenchItemStatus::Committed)
+                .unwrap();
+        assert_eq!(
+            checkpoint_response["status"], committed_run,
+            "{checkpoint_response}"
+        );
+        let checkpoint_items = checkpoint_response["items"]
+            .as_array()
+            .expect("WorkbenchResponse.items must be an array");
+        let checkpoint_item = checkpoint_items
+            .last()
+            .expect("checkpoint workbench response must contain the result item");
+        assert_eq!(
+            checkpoint_item["status"], committed_item,
+            "{checkpoint_response}"
+        );
+        assert_eq!(checkpoint_item["output"], "True", "{checkpoint_response}");
         cancellation.send_replace(true);
         let engine_result = tokio::time::timeout(Duration::from_secs(5), running)
             .await
@@ -605,19 +858,11 @@ mod tests {
             1
         );
         assert!(
-            requests[1]
-                .input
-                .iter()
-                .any(|item| item.0.to_string().contains("42")),
-            "settled Haskell result was not present in the next request: {:#?}",
-            requests[1].input
-        );
-        assert!(
             requests[2]
                 .input
                 .iter()
                 .any(|item| item.0.to_string().contains("42")),
-            "raw-cell result was not retained: {:#?}",
+            "post-compaction history lost the settled Haskell result: {:#?}",
             requests[2].input
         );
         assert!(matches!(
@@ -625,10 +870,13 @@ mod tests {
             InputObservation::Included(_)
         ));
         drop(requests);
-        publish_embedded_root_snapshot(
+        let mut projection = EmbeddedProjection::default();
+        projection.attached(actor, conversation.identity());
+        projection.publish(
             &service.control,
-            conversation.identity(),
-            harness::server::HostActorLifecycle::Waiting,
+            &conversation.identity().run,
+            &campaign.forest.inspect_host_graph(),
+            &LifecycleState::default(),
         );
         for _ in 0..2 {
             let mut request = format!("ws://{}/api/ws", service.address)
@@ -702,11 +950,15 @@ mod tests {
             incarnation: actor.incarnation.0.to_string(),
         };
         let (wakes, _incoming) = mpsc::unbounded_channel();
+        let scratch = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(scratch.path().join("store.sqlite")).unwrap());
         let host = EmbeddedHostActor::new(
             identity,
             campaign.actor.clone(),
             installation.clone(),
+            store,
             wakes,
+            Arc::new(EmbeddedRoundControl::default()),
         )
         .unwrap();
         let held_store_transaction = campaign.actor.admit_transaction().unwrap();

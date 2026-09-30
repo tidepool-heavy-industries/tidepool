@@ -161,9 +161,9 @@ enum Command {
         #[arg(long)]
         root_binding_path: PathBuf,
         #[arg(long, hide = true)]
-        interactive_agent_bin: PathBuf,
+        interactive_agent_bin: Option<PathBuf>,
         #[arg(long, hide = true)]
-        interactive_agent_version: String,
+        interactive_agent_version: Option<String>,
         #[arg(long)]
         resume_root: bool,
         #[arg(long, hide = true)]
@@ -311,9 +311,13 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_millis()
                 .try_into()?;
+            #[cfg(feature = "codex-compat")]
+            let codex_home = exomonad_agent::backend::codex::isolation::codex_home().ok();
+            #[cfg(not(feature = "codex-compat"))]
+            let codex_home = None;
             let observation = tidepool::run_map::Observation {
                 now_unix_ms,
-                codex_home: exomonad_agent::backend::codex::isolation::codex_home().ok(),
+                codex_home,
                 slowest_calls: slowest,
             };
             let report = tidepool::run_map::read_observed_run(
@@ -428,7 +432,8 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             // trace appender's flush channel and the JSONL file stops growing.
             let (_log_path, _trace_guard) =
                 tidepool::exomonad::init_host_tracing(&workspace, &run_id)?;
-            let interactive_agent = exomonad_agent::native_interactive_agent_from_parts(
+            let backend = tidepool::exomonad::HostBackendOptions::from_parts(
+                backend.into(),
                 interactive_agent_bin,
                 interactive_agent_version,
             )?;
@@ -439,13 +444,12 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 run_root,
                 status_path,
                 root_binding_path,
-                interactive_agent,
+                backend,
                 resume_root,
                 agent: ExomonadAgentDefaults {
                     model,
                     effort: effort.into(),
                 },
-                backend: backend.into(),
             })
             .await
         }

@@ -39,7 +39,7 @@ pub(crate) async fn run(
             (Err(error), Err(cleanup)) => {
                 return Err(runtime_error(format!(
                     "{error}; resident cleanup also failed: {cleanup}"
-                )))
+                )));
             }
             (Err(error), _) | (_, Err(error)) => return Err(error),
             (Ok(()), Ok(())) => {}
@@ -157,12 +157,7 @@ impl Driver {
             workspace: repository.path().to_path_buf(),
             run_root: runtime.path().join("selection-0"),
             root_binding_path: runtime.path().join("unused-native-binding.json"),
-            // Used only as launch-preview metadata; no native launch consumer exists here.
-            interactive_agent: exomonad_agent::native_interactive_agent_from_parts(
-                std::env::current_exe()?,
-                "model-free recipe check".into(),
-            )?,
-            backend: crate::exomonad::ExomonadBackend::Codex,
+            backend: crate::exomonad::HostBackendOptions::Embedded,
             embedded: None,
             tmux_session: "unused-in-recipe-check".into(),
             model: defaults.defaults.model,

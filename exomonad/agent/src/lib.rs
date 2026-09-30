@@ -6,7 +6,8 @@
 //! backend exists. Two rules make that structural rather than aspirational:
 //!
 //! 1. `codex-codes`, app-server JSON-RPC types, and the word "Codex" appear
-//!    ONLY under [`backend::codex`]. Every other module — and every other
+//!    ONLY under `backend::codex` when the `codex-compat` feature is enabled.
+//!    Every other module — and every other
 //!    crate — speaks the vocabulary in [`seam`].
 //! 2. Nothing in [`seam`] may be defined in terms of a backend type. A seam
 //!    type that is a re-export or a newtype of a `codex-codes` type has already
@@ -18,24 +19,31 @@ pub mod interactive;
 pub mod seam;
 pub mod spawn;
 
+#[cfg(feature = "codex-compat")]
 pub use backend::codex::node::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION;
+#[cfg(feature = "codex-compat")]
 pub use backend::codex::node::{
     read_bounded_usage as read_native_usage, BoundedUsageRecord, BoundedUsageReport,
     UsageDiagnostic, UsageIssue, UsageLimit, UsageProvenance, UsageReadLimits, UsageSelection,
     UsageSourceCoverage, UsageSourceState,
 };
+#[cfg(feature = "codex-compat")]
 pub use backend::codex::trust_interactive_project;
 pub use backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
 pub use interactive::{
     InputAdmission, InputEnvelopeError, InputOperationId, InputProducerControlFuture,
     InputProducerControlOutcome, InputProducerId, InputPurpose, InteractiveAgentBackend,
-    InteractiveAgentCommand, InteractiveAgentInstallation, InteractiveAgentSpec, InteractiveFuture,
-    InteractiveGoalPolicy, InteractiveInputEnvelope, InteractiveInputError, InteractiveInputFuture,
-    InteractiveInputMode, InteractiveInputTarget, InteractiveLaunchId, InteractiveLaunchMode,
-    InteractiveNativeSandbox, InteractiveNativeToolPolicy, InteractivePolicyMount,
-    InteractiveSessionBinding, InteractiveShellTools, NativeApplicationInstance,
-    NativeCommandOperation, NativeCommandReply, NativeSessionGeneration, QueueReadyThread,
-    INPUT_CONTROL_DEADLINE, MAX_INTERACTIVE_INPUT_BYTES,
+    InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture, InteractiveGoalPolicy,
+    InteractiveInputEnvelope, InteractiveInputError, InteractiveInputFuture, InteractiveInputMode,
+    InteractiveInputTarget, InteractiveLaunchMode, InteractiveNativeSandbox,
+    InteractiveNativeToolPolicy, InteractivePolicyMount, InteractiveShellTools,
+    NativeCommandOperation, NativeCommandReply, QueueReadyThread, INPUT_CONTROL_DEADLINE,
+    MAX_INTERACTIVE_INPUT_BYTES,
+};
+#[cfg(feature = "codex-compat")]
+pub use interactive::{
+    InteractiveAgentInstallation, InteractiveLaunchId, InteractiveSessionBinding,
+    NativeApplicationInstance, NativeSessionGeneration,
 };
 pub use seam::{
     AgentBackendError, AgentId, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
@@ -51,6 +59,7 @@ pub use spawn::{
 /// Construct the installed native interactive-agent adapter behind its
 /// backend-neutral seam.
 #[must_use]
+#[cfg(feature = "codex-compat")]
 pub fn native_interactive_backend(
     installation: InteractiveAgentInstallation,
 ) -> std::sync::Arc<dyn InteractiveAgentBackend> {
@@ -58,12 +67,14 @@ pub fn native_interactive_backend(
 }
 
 /// Resolve and behaviorally verify the interactive agent installed for Exomonad.
+#[cfg(feature = "codex-compat")]
 pub async fn resolve_native_interactive_agent(
 ) -> Result<InteractiveAgentInstallation, AgentBackendError> {
     backend::codex::node::resolve_installation().await
 }
 
 /// Restore the exact installation passed through Exomonad's private host launch.
+#[cfg(feature = "codex-compat")]
 pub fn native_interactive_agent_from_parts(
     executable: std::path::PathBuf,
     version: String,
@@ -73,6 +84,7 @@ pub fn native_interactive_agent_from_parts(
 
 /// Read and validate the opaque conversation binding established by the
 /// interactive host-tools session callback.
+#[cfg(feature = "codex-compat")]
 pub async fn read_interactive_binding(
     path: &std::path::Path,
 ) -> Result<QueueReadyThread, AgentBackendError> {
@@ -82,6 +94,7 @@ pub async fn read_interactive_binding(
 /// Accept the hosted-session protocol claim and durably retain the exact
 /// conversation. Queue-readiness proof is restored only by reading that
 /// current binding through [`read_interactive_binding`].
+#[cfg(feature = "codex-compat")]
 pub async fn accept_interactive_session_binding(
     path: &std::path::Path,
     protocol_version: u32,
@@ -99,6 +112,7 @@ pub async fn accept_interactive_session_binding(
 
 /// Copy a previously certified queue-ready conversation binding to another
 /// durable location without weakening it back to an unproven thread id.
+#[cfg(feature = "codex-compat")]
 pub async fn copy_interactive_binding(
     path: &std::path::Path,
     thread: &QueueReadyThread,

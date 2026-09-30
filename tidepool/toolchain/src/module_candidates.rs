@@ -17,7 +17,122 @@ use crate::cache::{DependencyEvidence, ProductAvailability};
 const RECORD_LIMIT: usize = 32 << 20;
 const MANIFEST_LIMIT: usize = 4 << 20;
 const CANDIDATE_LIMIT: usize = 128;
-const RECORD_DIR: &str = "module-candidates-v4";
+const RECORD_DIR: &str = "module-candidates-v6";
+const PACKAGE_BUNDLE_LIMIT: usize = 16 << 20;
+// A measured 33,955,557-byte ordinary resident display graph exceeds 32 MiB.
+// This is the aggregate worker sidecar limit; each durable module record
+// remains independently capped by RECORD_LIMIT after exact row splitting.
+pub(crate) const PRODUCT_MAX_BYTES: usize = 64 << 20;
+
+pub(crate) fn product_decode_limits() -> DecodeLimits {
+    DecodeLimits {
+        max_bytes: PRODUCT_MAX_BYTES,
+        ..DecodeLimits::default()
+    }
+}
+
+/// Preserve each original TPMOD row in its own bounded sidecar. A module's
+/// product identity must not change when an unrelated module is compiled in
+/// the same worker request.
+pub(crate) fn split_module_product_bytes(
+    bytes: &[u8],
+    products: &[RawModuleProduct],
+) -> Option<Vec<Vec<u8>>> {
+    if bytes.len() > PRODUCT_MAX_BYTES {
+        return None;
+    }
+    let Value::Array(header) = ciborium::de::from_reader::<Value, _>(bytes).ok()? else {
+        return None;
+    };
+    let [
+        Value::Text(magic),
+        Value::Integer(version),
+        Value::Array(rows),
+    ] = <[Value; 3]>::try_from(header).ok()?
+    else {
+        return None;
+    };
+    if magic != "TPMOD" || version != 1.into() || rows.len() != products.len() {
+        return None;
+    }
+    rows.into_iter()
+        .zip(products)
+        .map(|(row, product)| {
+            let Value::Array(fields) = &row else {
+                return None;
+            };
+            if !matches!(fields.as_slice(),
+                [Value::Text(unit), Value::Text(module), Value::Bytes(_), Value::Array(_)]
+                if unit == &product.unit && module == &product.module)
+            {
+                return None;
+            }
+            let sidecar = Value::Array(vec![
+                Value::Text("TPMOD".into()),
+                Value::Integer(1.into()),
+                Value::Array(vec![row]),
+            ]);
+            let mut encoded = Vec::new();
+            ciborium::ser::into_writer(&sidecar, &mut encoded).ok()?;
+            (encoded.len() <= RECORD_LIMIT).then_some(encoded)
+        })
+        .collect()
+}
+
+/// The worker emits one sealed package-import witness for each fresh product.
+/// Keep its original bytes: candidate identity and recovery must bind the same
+/// direct selections that GHC actually loaded in this transaction.
+pub(crate) fn split_package_imports(
+    bytes: &[u8],
+    products: &[RawModuleProduct],
+) -> Option<BTreeMap<(String, String), Vec<u8>>> {
+    if bytes.len() > PACKAGE_BUNDLE_LIMIT {
+        return None;
+    }
+    let value: Value = ciborium::de::from_reader(bytes).ok()?;
+    let mut canonical = Vec::new();
+    ciborium::ser::into_writer(&value, &mut canonical).ok()?;
+    if canonical != bytes {
+        return None;
+    }
+    let Value::Array(fields) = value else {
+        return None;
+    };
+    let [
+        Value::Text(magic),
+        Value::Integer(version),
+        Value::Array(rows),
+    ] = <[Value; 3]>::try_from(fields).ok()?
+    else {
+        return None;
+    };
+    if magic != "TPPKGBUNDLES" || version != 1.into() || rows.len() != products.len() {
+        return None;
+    }
+    let mut by_owner = BTreeMap::new();
+    for row in rows {
+        let Value::Array(fields) = row else {
+            return None;
+        };
+        let [
+            Value::Text(unit),
+            Value::Text(module),
+            Value::Bytes(sidecar),
+        ] = <[Value; 3]>::try_from(fields).ok()?
+        else {
+            return None;
+        };
+        if sidecar.len() > (4 << 20)
+            || !products
+                .iter()
+                .any(|product| product.unit == unit && product.module == module)
+            || by_owner.insert((unit, module), sidecar).is_some()
+        {
+            return None;
+        }
+    }
+    Some(by_owner)
+}
 
 fn identity_value(identity: &SymbolIdentity) -> Value {
     Value::Array(vec![
@@ -85,6 +200,9 @@ pub(crate) struct CandidateBundle {
     pub source_sha256: String,
     pub iface_path: PathBuf,
     pub iface_sha256: String,
+    pub package_imports_path: PathBuf,
+    pub package_imports_sha256: String,
+    pub package_imports_bytes: Vec<u8>,
     pub product_bytes: Vec<u8>,
     pub evidence: DependencyEvidence,
     pub target_source: String,
@@ -109,6 +227,7 @@ struct Record {
     source: PathBuf,
     source_sha256: String,
     interface: Vec<u8>,
+    package_imports: Vec<u8>,
     target_source: String,
 }
 
@@ -150,6 +269,7 @@ pub(crate) fn publish(
     evidence: &DependencyEvidence,
     products: &[RawModuleProduct],
     product_bytes: &[u8],
+    package_bundle_bytes: &[u8],
     target_source: &str,
 ) {
     let Some(include) = context_paths(include) else {
@@ -157,7 +277,7 @@ pub(crate) fn publish(
     };
     if endpoint_identity.is_empty()
         || endpoint_identity.len() > 4096
-        || product_bytes.len() > RECORD_LIMIT / 2
+        || product_bytes.len() > PRODUCT_MAX_BYTES
         || !evidence.valid(target_source)
         || !evidence.selection_complete
     {
@@ -169,18 +289,41 @@ pub(crate) fn publish(
     let Ok(parsed) = tidepool_repr::execution_schema::parse_module_products(
         product_bytes,
         &requirements,
-        DecodeLimits::default(),
+        product_decode_limits(),
     ) else {
         return;
     };
     if parsed != products {
         return;
     }
+    let Some(per_module_bytes) = split_module_product_bytes(product_bytes, products) else {
+        return;
+    };
+    let Some(mut package_imports) = split_package_imports(package_bundle_bytes, products) else {
+        return;
+    };
     let dir = record_dir(endpoint_identity, &include);
     if fs::create_dir_all(&dir).is_err() {
         return;
     }
-    for product in products {
+    for (product, module_bytes) in products.iter().zip(per_module_bytes) {
+        let Some(package_imports_bytes) =
+            package_imports.remove(&(product.unit.clone(), product.module.clone()))
+        else {
+            continue;
+        };
+        let iface_sha: [u8; 32] = Sha256::digest(&product.interface).into();
+        if crate::recovery_artifacts::validate_package_imports(
+            &package_imports_bytes,
+            &product.unit,
+            &product.module,
+            &iface_sha,
+            Path::new("module-package-imports.cbor"),
+        )
+        .is_err()
+        {
+            continue;
+        }
         if product.unit.is_empty()
             || product.module.is_empty()
             || product.interface.is_empty()
@@ -224,16 +367,17 @@ pub(crate) fn publish(
         }
         let record = Record {
             tag: "TPMCAN".into(),
-            version: 4,
+            version: 6,
             endpoint: endpoint_identity.to_vec(),
             include: include.clone(),
             evidence: evidence.clone(),
-            products: product_bytes.to_vec(),
+            products: module_bytes,
             unit: product.unit.clone(),
             module: product.module.clone(),
             source,
             source_sha256,
             interface: product.interface.clone(),
+            package_imports: package_imports_bytes,
             target_source: target_source.to_owned(),
         };
         let mut bytes = Vec::new();
@@ -263,7 +407,7 @@ fn version_hash(record: &Record) -> [u8; 32] {
         &record.source_sha256,
         &record.interface,
         &record.products,
-        &record.evidence,
+        &record.package_imports,
     )
     .0
 }
@@ -275,10 +419,10 @@ pub(crate) fn module_version_for_product(
     source_sha256: &str,
     interface: &[u8],
     products: &[u8],
-    evidence: &DependencyEvidence,
+    package_imports: &[u8],
 ) -> ModuleVersion {
     let mut h = Sha256::new();
-    h.update(b"tidepool-module-candidate-v4\0");
+    h.update(b"tidepool-module-candidate-v6\0");
     h.update(endpoint_identity);
     for path in include {
         h.update(path.as_os_str().as_encoded_bytes());
@@ -287,9 +431,7 @@ pub(crate) fn module_version_for_product(
     h.update(source_sha256);
     h.update(interface);
     h.update(products);
-    if let Ok(encoded) = serde_json::to_vec(evidence) {
-        h.update(encoded);
-    }
+    h.update(package_imports);
     ModuleVersion(h.finalize().into())
 }
 
@@ -301,12 +443,15 @@ pub(crate) fn select(
 ) -> Option<CandidateSet> {
     let include = context_paths(include)?;
     let dir = record_dir(endpoint_identity, &include);
-    let mut paths: Vec<_> = fs::read_dir(dir)
-        .ok()?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "cbor"))
-        .collect();
+    let mut paths: Vec<_> = match fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "cbor"))
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return None,
+    };
     paths.sort();
     paths.truncate(CANDIDATE_LIMIT);
     let requirements = crate::prepared_artifact::production_requirements().ok()?;
@@ -315,7 +460,7 @@ pub(crate) fn select(
     fs::create_dir_all(scratch).ok()?;
     let scratch = absolute(scratch)?;
     for path in paths {
-        let Ok(bytes) = fs::read(path) else { continue };
+        let Ok(bytes) = fs::read(&path) else { continue };
         if bytes.len() > RECORD_LIMIT {
             continue;
         }
@@ -323,7 +468,7 @@ pub(crate) fn select(
             continue;
         };
         if record.tag != "TPMCAN"
-            || record.version != 4
+            || record.version != 6
             || record.endpoint != endpoint_identity
             || record.include != include
             || record.source.is_relative()
@@ -342,7 +487,7 @@ pub(crate) fn select(
         let Ok(parsed) = tidepool_repr::execution_schema::parse_module_products(
             &record.products,
             &requirements,
-            DecodeLimits::default(),
+            product_decode_limits(),
         ) else {
             continue;
         };
@@ -378,6 +523,18 @@ pub(crate) fn select(
             continue;
         }
         let iface_sha = Sha256::digest(&record.interface);
+        let iface_sha_array: [u8; 32] = iface_sha.into();
+        if crate::recovery_artifacts::validate_package_imports(
+            &record.package_imports,
+            &record.unit,
+            &record.module,
+            &iface_sha_array,
+            &path,
+        )
+        .is_err()
+        {
+            continue;
+        }
         let product_sha: [u8; 32] = Sha256::digest(&record.products).into();
         let Ok(evidence_bytes) = serde_json::to_vec(&record.evidence) else {
             continue;
@@ -422,6 +579,12 @@ pub(crate) fn select(
         if tidepool_atomic_write::write_best_effort(&iface_path, &record.interface).is_err() {
             continue;
         }
+        let package_imports_path = PathBuf::from(format!("{}.packages", iface_path.display()));
+        if tidepool_atomic_write::write_best_effort(&package_imports_path, &record.package_imports)
+            .is_err()
+        {
+            continue;
+        }
         let bundle = CandidateBundle {
             owner: owner.clone(),
             product: matching.into_iter().next()?,
@@ -429,6 +592,9 @@ pub(crate) fn select(
             source_sha256: record.source_sha256.clone(),
             iface_path: iface_path.clone(),
             iface_sha256: sha(&record.interface),
+            package_imports_path: package_imports_path.clone(),
+            package_imports_sha256: sha(&record.package_imports),
+            package_imports_bytes: record.package_imports.clone(),
             product_bytes: record.products.clone(),
             evidence: record.evidence.clone(),
             target_source: record.target_source.clone(),
@@ -452,11 +618,13 @@ pub(crate) fn select(
             Value::Text(evidence_sha),
             Value::Array(imports),
             Value::Array(selected_product.groups.iter().map(group_inventory).collect()),
+            Value::Text(package_imports_path.to_string_lossy().into_owned()),
+            Value::Text(sha(&record.package_imports)),
         ]));
     }
     let value = Value::Array(vec![
         Value::Text("TPMCAN".into()),
-        Value::Text("4".into()),
+        Value::Text("5".into()),
         Value::Array(manifest),
     ]);
     let mut encoded = Vec::new();
@@ -505,6 +673,134 @@ mod tests {
         bytes
     }
 
+    fn package_imports(unit: &str, module: &str, iface: &[u8]) -> Vec<u8> {
+        let value = Value::Array(vec![
+            Value::Text("TPPKGROOTS".into()),
+            Value::Text("1".into()),
+            Value::Array(vec![
+                Value::Text(unit.into()),
+                Value::Text(module.into()),
+                Value::Text(sha(iface)),
+            ]),
+            Value::Array(vec![]),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+        bytes
+    }
+
+    fn package_bundle(unit: &str, module: &str, iface: &[u8]) -> Vec<u8> {
+        let value = Value::Array(vec![
+            Value::Text("TPPKGBUNDLES".into()),
+            Value::Integer(1.into()),
+            Value::Array(vec![Value::Array(vec![
+                Value::Text(unit.into()),
+                Value::Text(module.into()),
+                Value::Bytes(package_imports(unit, module, iface)),
+            ])]),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn unrelated_module_does_not_change_product_owner() {
+        let first = product_bytes("u", "Library", &[0x42]);
+        let second = product_bytes("u", "Unrelated", &[0x43]);
+        let Value::Array(one) = ciborium::de::from_reader::<Value, _>(first.as_slice()).unwrap()
+        else {
+            unreachable!()
+        };
+        let Value::Array(two) = ciborium::de::from_reader::<Value, _>(second.as_slice()).unwrap()
+        else {
+            unreachable!()
+        };
+        let Value::Array(mut first_rows) = one[2].clone() else {
+            unreachable!()
+        };
+        let Value::Array(second_rows) = two[2].clone() else {
+            unreachable!()
+        };
+        first_rows.extend(second_rows);
+        let mut combined = Vec::new();
+        ciborium::ser::into_writer(
+            &Value::Array(vec![
+                Value::Text("TPMOD".into()),
+                Value::Integer(1.into()),
+                Value::Array(first_rows),
+            ]),
+            &mut combined,
+        )
+        .unwrap();
+        let requirements = crate::prepared_artifact::production_requirements().unwrap();
+        let parsed = tidepool_repr::execution_schema::parse_module_products(
+            &combined,
+            &requirements,
+            product_decode_limits(),
+        )
+        .unwrap();
+        let split = split_module_product_bytes(&combined, &parsed).unwrap();
+        assert_eq!(split[0], first);
+        assert_eq!(split[1], second);
+        assert_eq!(
+            module_version_for_product(
+                b"compiler",
+                &[],
+                "source-sha",
+                &[0x42],
+                &split[0],
+                &package_imports("u", "Library", &[0x42])
+            ),
+            module_version_for_product(
+                b"compiler",
+                &[],
+                "source-sha",
+                &[0x42],
+                &first,
+                &package_imports("u", "Library", &[0x42])
+            ),
+        );
+    }
+
+    #[test]
+    fn aggregate_product_bound_admits_measured_display_graph_but_rejects_over_limit() {
+        assert!(product_decode_limits().max_bytes >= 33_955_557);
+        assert!(split_module_product_bytes(&vec![0; PRODUCT_MAX_BYTES + 1], &[]).is_none());
+        assert_eq!(RECORD_LIMIT, 32 << 20);
+    }
+
+    #[test]
+    fn package_bundle_requires_exact_owner_pair_and_changes_module_version() {
+        let product = product_bytes("u", "Library", &[0x42]);
+        let requirements = crate::prepared_artifact::production_requirements().unwrap();
+        let parsed = tidepool_repr::execution_schema::parse_module_products(
+            &product,
+            &requirements,
+            product_decode_limits(),
+        )
+        .unwrap();
+        let bundle = package_bundle("u", "Library", &[0x42]);
+        let selected = split_package_imports(&bundle, &parsed).unwrap();
+        let roots = &selected[&("u".into(), "Library".into())];
+        let original =
+            module_version_for_product(b"compiler", &[], "source-sha", &[0x42], &product, roots);
+        let altered_roots = package_imports("u", "Library", &[0x43]);
+        let altered = module_version_for_product(
+            b"compiler",
+            &[],
+            "source-sha",
+            &[0x42],
+            &product,
+            &altered_roots,
+        );
+        assert_ne!(original, altered);
+        assert!(split_package_imports(&package_bundle("u", "Other", &[0x42]), &parsed).is_none());
+        let mut trailing = bundle;
+        trailing.push(0);
+        assert!(split_package_imports(&trailing, &parsed).is_none());
+    }
+
     fn write_record(root: &Path, source: &Path, unit: &str, module: &str, products: Vec<u8>) {
         let source = fs::canonicalize(source).unwrap();
         let source_bytes = fs::read(&source).unwrap();
@@ -536,7 +832,7 @@ mod tests {
         };
         let record = Record {
             tag: "TPMCAN".into(),
-            version: 4,
+            version: 6,
             endpoint: b"endpoint".to_vec(),
             include: vec![],
             evidence,
@@ -546,6 +842,7 @@ mod tests {
             source: source.clone(),
             source_sha256: digest(&source_bytes),
             interface: vec![0x42],
+            package_imports: package_imports(unit, module, &[0x42]),
             target_source,
         };
         let mut bytes = Vec::new();
@@ -569,6 +866,21 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn cold_store_still_offers_empty_manifest_for_product_emission() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let selected = select_in(root.path(), scratch.path()).unwrap();
+        assert!(selected.by_owner.is_empty());
+        let manifest = fs::read(&selected.manifest_path).unwrap();
+        let Value::Array(fields) = ciborium::de::from_reader::<Value, _>(manifest.as_slice()).unwrap()
+        else { panic!("candidate manifest envelope") };
+        assert_eq!(fields[0].as_text(), Some("TPMCAN"));
+        assert_eq!(fields[1].as_text(), Some("5"));
+        assert_eq!(fields[2], Value::Array(vec![]));
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn selection_rejects_changed_source_and_corrupt_product_pair() {
         let root = tempfile::tempdir().unwrap();
         let scratch = tempfile::tempdir().unwrap();
@@ -582,10 +894,12 @@ mod tests {
             product_bytes("u", "Library", &[0x42]),
         );
         fs::write(&source, "module Library where\nchanged").unwrap();
-        assert!(select_in(root.path(), scratch.path())
-            .unwrap()
-            .by_owner
-            .is_empty());
+        assert!(
+            select_in(root.path(), scratch.path())
+                .unwrap()
+                .by_owner
+                .is_empty()
+        );
 
         fs::write(&source, "module Library where").unwrap();
         let dir = root.path().join(RECORD_DIR).join(sha(b"endpoint"));
@@ -600,10 +914,44 @@ mod tests {
             "Library",
             b"broken cbor".to_vec(),
         );
-        assert!(select_in(root.path(), scratch.path())
-            .unwrap()
-            .by_owner
-            .is_empty());
+        assert!(
+            select_in(root.path(), scratch.path())
+                .unwrap()
+                .by_owner
+                .is_empty()
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn selection_rejects_mispaired_package_import_witness() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let source = root.path().join("Library.hs");
+        fs::write(&source, "module Library where").unwrap();
+        write_record(
+            root.path(),
+            &source,
+            "u",
+            "Library",
+            product_bytes("u", "Library", &[0x42]),
+        );
+        unsafe {
+            std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", root.path());
+        }
+        let dir = root.path().join(RECORD_DIR).join(sha(b"endpoint"));
+        let path = fs::read_dir(dir).unwrap().next().unwrap().unwrap().path();
+        let mut record: Record = ciborium::de::from_reader(fs::File::open(&path).unwrap()).unwrap();
+        record.package_imports = package_imports("u", "Other", &[0x42]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&record, &mut bytes).unwrap();
+        fs::write(path, bytes).unwrap();
+        assert!(
+            select_in(root.path(), scratch.path())
+                .unwrap()
+                .by_owner
+                .is_empty()
+        );
     }
 
     #[test]
@@ -632,7 +980,7 @@ mod tests {
         let products = tidepool_repr::execution_schema::parse_module_products(
             &record.products,
             &requirements,
-            DecodeLimits::default(),
+            product_decode_limits(),
         )
         .unwrap();
         unsafe {
@@ -644,12 +992,15 @@ mod tests {
             &record.evidence,
             &products,
             &record.products,
+            &package_bundle("u", "Library", &[0x42]),
             &record.target_source,
         );
         let selected = select_in(root.path(), scratch.path()).unwrap();
-        assert!(selected
-            .by_owner
-            .contains_key(&("u".into(), "Library".into())));
+        assert!(
+            selected
+                .by_owner
+                .contains_key(&("u".into(), "Library".into()))
+        );
     }
 
     #[test]

@@ -34,6 +34,8 @@ data ModuleCandidate = ModuleCandidate
   , candidateEvidenceSha256 :: String
   , candidateImports :: [CandidateImport]
   , candidateGroups :: [CandidateGroup]
+  , candidatePackageImports :: FilePath
+  , candidatePackageImportsSha256 :: String
   } deriving (Eq, Show)
 
 data CandidateGroup = CandidateGroup
@@ -94,7 +96,7 @@ decodeManifest = do
   magic <- decodeString
   unless (magic == "TPMCAN") (fail "candidate manifest has wrong magic")
   version <- decodeString
-  unless (version == "4") (fail "unsupported candidate manifest version")
+  unless (version == "5") (fail "unsupported candidate manifest version")
   total <- decodeListLen
   when (total > maxCandidates) (fail "too many module candidates")
   candidates <- replicateM total decodeCandidate
@@ -105,11 +107,11 @@ decodeManifest = do
 decodeCandidate :: Decoder s ModuleCandidate
 decodeCandidate = do
   count <- decodeListLen
-  unless (count == 11) (fail "module candidate must have eleven fields")
+  unless (count == 13) (fail "module candidate must have thirteen fields")
   let text = T.unpack <$> decodeString
   candidate <- ModuleCandidate <$> text <*> text <*> text
     <*> text <*> text <*> text <*> text <*> text <*> text
-    <*> decodeImports <*> decodeGroups
+    <*> decodeImports <*> decodeGroups <*> text <*> text
   unless (not (null (candidateUnit candidate))
       && not (null (candidateModule candidate))
       && isAbsolute (candidateSource candidate)
@@ -118,7 +120,9 @@ decodeCandidate = do
       && isDigest (candidateInterfaceSha256 candidate)
       && isDigest (candidateModuleVersion candidate)
       && isDigest (candidateProductSha256 candidate)
-      && isDigest (candidateEvidenceSha256 candidate))
+      && isDigest (candidateEvidenceSha256 candidate)
+      && isAbsolute (candidatePackageImports candidate)
+      && isDigest (candidatePackageImportsSha256 candidate))
     (fail "invalid module candidate identity or digest")
   pure candidate
 

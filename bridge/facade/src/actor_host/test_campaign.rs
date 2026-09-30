@@ -246,12 +246,7 @@ impl TestCampaign {
             workspace: repository.path().to_path_buf(),
             run_root: runtime.path().join("run"),
             root_binding_path: runtime.path().join("root-binding.json"),
-            interactive_agent: exomonad_agent::native_interactive_agent_from_parts(
-                std::env::current_exe().unwrap(),
-                "test installation".into(),
-            )
-            .unwrap(),
-            backend: crate::exomonad::ExomonadBackend::Codex,
+            backend: test_backend_options(),
             embedded: None,
             tmux_session: "unused-in-resident-test".into(),
             model: "test-model".into(),
@@ -298,6 +293,23 @@ impl TestCampaign {
             pending: std::collections::VecDeque::new(),
             root_installation,
         }
+    }
+}
+
+fn test_backend_options() -> crate::exomonad::HostBackendOptions {
+    #[cfg(feature = "codex-compat")]
+    {
+        crate::exomonad::HostBackendOptions::Codex(
+            exomonad_agent::native_interactive_agent_from_parts(
+                std::env::current_exe().unwrap(),
+                "test installation".into(),
+            )
+            .unwrap(),
+        )
+    }
+    #[cfg(not(feature = "codex-compat"))]
+    {
+        crate::exomonad::HostBackendOptions::Embedded
     }
 }
 

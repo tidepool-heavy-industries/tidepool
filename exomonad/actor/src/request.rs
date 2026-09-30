@@ -426,6 +426,7 @@ struct WatchRecord {
     /// When this watch last left `Pending`, unix ms. `None` while still
     /// pending.
     transitioned_at_unix_ms: Option<u64>,
+    waiters: HashMap<u64, tokio::sync::oneshot::Sender<()>>,
 }
 
 #[derive(Clone)]
@@ -452,6 +453,7 @@ struct RequestStateTable {
     next_request: u64,
     received_requests: HashMap<ActorRef, u64>,
     next_watch: u64,
+    next_watch_waiter: u64,
     next_event_by_actor: HashMap<ActorRef, u64>,
     cleanup_revision: HashMap<ActorRef, u64>,
     cleaning: std::collections::HashSet<ActorRef>,
@@ -466,6 +468,34 @@ struct RequestStateTable {
 #[derive(Default)]
 pub(crate) struct RequestRegistry {
     state: Mutex<RequestStateTable>,
+}
+
+/// A cancellable subscription to one retained watch's readiness transition.
+/// The watch and its dependencies outlive this value.
+pub(crate) struct WatchWaitSubscription {
+    registry: std::sync::Weak<RequestRegistry>,
+    owner: ActorRef,
+    watch: WatchId,
+    waiter: u64,
+    receiver: Option<tokio::sync::oneshot::Receiver<()>>,
+}
+
+impl WatchWaitSubscription {
+    pub(crate) async fn wait(mut self) -> Result<WatchObservation, ReplyError> {
+        if let Some(receiver) = self.receiver.take() {
+            let _ = receiver.await;
+        }
+        let registry = self.registry.upgrade().ok_or(ReplyError::Stale)?;
+        registry.observe_subscribed_watch(self.owner, self.watch)
+    }
+}
+
+impl Drop for WatchWaitSubscription {
+    fn drop(&mut self) {
+        if let Some(registry) = self.registry.upgrade() {
+            registry.unsubscribe_watch_waiter(self.watch, self.waiter);
+        }
+    }
 }
 
 pub(crate) struct ActorRequestStatus {
@@ -624,6 +654,78 @@ impl Drop for RequestCleanupGuard {
 }
 
 impl RequestRegistry {
+    /// Wait for one retained watch to become terminal. A readiness wake is a
+    /// prompt to inspect the state again; a pending observation subscribes
+    /// afresh under the same exact-owner check.
+    pub(crate) async fn await_watch(
+        self: &std::sync::Arc<Self>,
+        owner: ActorRef,
+        watch: WatchId,
+    ) -> Result<WatchObservation, ReplyError> {
+        loop {
+            let observation = self.subscribe_watch(owner, watch)?.wait().await?;
+            if !matches!(observation, WatchObservation::Pending(_)) {
+                return Ok(observation);
+            }
+        }
+    }
+
+    /// Atomically subscribe to one watch and inspect its current state. The
+    /// returned lease owns only this waiter; dropping it never changes the
+    /// request or the watch itself.
+    pub(crate) fn subscribe_watch(
+        self: &std::sync::Arc<Self>,
+        owner: ActorRef,
+        watch: WatchId,
+    ) -> Result<WatchWaitSubscription, ReplyError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let mut state = self.state.lock();
+        let record = state.watches.get(&watch).ok_or(ReplyError::Stale)?;
+        if record.owner != owner {
+            return Err(identity_error(record.owner, owner));
+        }
+        state.next_watch_waiter = state
+            .next_watch_waiter
+            .checked_add(1)
+            .ok_or(ReplyError::Stale)?;
+        let waiter = state.next_watch_waiter;
+        let record = state.watches.get_mut(&watch).ok_or(ReplyError::Stale)?;
+        let already_ready = record.state != WatchState::Pending;
+        record.waiters.insert(waiter, sender);
+        if already_ready {
+            if let Some(sender) = record.waiters.remove(&waiter) {
+                let _ = sender.send(());
+            }
+        }
+        Ok(WatchWaitSubscription {
+            registry: std::sync::Arc::downgrade(self),
+            owner,
+            watch,
+            waiter,
+            receiver: Some(receiver),
+        })
+    }
+
+    fn unsubscribe_watch_waiter(&self, watch: WatchId, waiter: u64) {
+        if let Some(record) = self.state.lock().watches.get_mut(&watch) {
+            record.waiters.remove(&waiter);
+        }
+    }
+
+    fn observe_subscribed_watch(
+        &self,
+        owner: ActorRef,
+        watch: WatchId,
+    ) -> Result<WatchObservation, ReplyError> {
+        let mut state = self.state.lock();
+        let record = state.watches.get(&watch).ok_or(ReplyError::Stale)?;
+        if record.owner != owner {
+            return Err(identity_error(record.owner, owner));
+        }
+        let observation = observe_watch_locked(&mut state, owner, watch)?;
+        Ok(observation)
+    }
+
     /// Replacement moves request/watch ownership, not the immutable actor a
     /// request was originally submitted to. Existing handles keep their IDs.
     pub(crate) fn transfer_owner(&self, predecessor: ActorRef, successor: &crate::LocalActorRef) {
@@ -640,6 +742,7 @@ impl RequestRegistry {
             .iter_mut()
             .filter(|(_, watch)| watch.owner == predecessor)
         {
+            wake_watch_waiters(watch);
             watch.owner = successor.identity();
             if let Some(route) = &mut watch.route {
                 route.transfer_owner(successor.clone(), *id);
@@ -811,6 +914,7 @@ impl RequestRegistry {
             {
                 outcome.pending_watches.push(watch);
             } else {
+                wake_watch_waiters(state.watches.get_mut(&watch).expect("watch checked"));
                 state.watches.remove(&watch);
                 outcome.forgotten_watches.push(watch);
             }
@@ -1830,6 +1934,7 @@ impl RequestRegistry {
                 observed_ready_at: None,
                 registered_at_unix_ms: unix_time_ms(),
                 transitioned_at_unix_ms: None,
+                waiters: HashMap::new(),
             },
         );
         for request in named {
@@ -1873,61 +1978,8 @@ impl RequestRegistry {
         watch: WatchId,
     ) -> Result<WatchObservation, ReplyError> {
         let mut state = self.state.lock();
-        let record = state.watches.get(&watch).ok_or(ReplyError::Stale)?;
-        let observation = match &record.state {
-            WatchState::Pending => WatchObservation::Pending(PendingProgress {
-                actor_terminal: None,
-                provider_turn: None,
-                last_activity_unix_ms: None,
-                progress_revision: first_pending_dependency(&state, record)
-                    .and_then(|request| state.requests.get(&request))
-                    .and_then(|dependency_record| dependency_record.progress.as_ref())
-                    .map(|snapshot| snapshot.revision),
-                // Polling this observation is itself the registered watch;
-                // its own settlement always wakes the caller.
-                watched: true,
-            }),
-            WatchState::Ready => WatchObservation::Ready(
-                record
-                    .dependencies
-                    .iter()
-                    .filter_map(|dependency| {
-                        let request = state.requests.get(&dependency.request)?;
-                        match &request.owner_state {
-                            OwnerState::Unavailable(failure) => {
-                                Some((dependency.request, failure.clone()))
-                            }
-                            OwnerState::Abandoned => {
-                                Some((dependency.request, ResponseFailure::Abandoned))
-                            }
-                            _ => None,
-                        }
-                    })
-                    .collect(),
-            ),
-            WatchState::Unavailable { request, failure } => WatchObservation::Unavailable {
-                request: *request,
-                failure: failure.clone(),
-            },
-        };
-        // A watch observed Ready or Unavailable has already delivered its
-        // settled state to the owner through this call's return value.
-        // Record when, so a queued `WatchChanged` notice describing a
-        // transition the owner already observed can be acknowledged without
-        // prompting instead of re-announcing state the owner already has.
-        if matches!(
-            observation,
-            WatchObservation::Ready(_) | WatchObservation::Unavailable { .. }
-        ) {
-            if let Some(record) = state
-                .watches
-                .get_mut(&watch)
-                .filter(|record| record.owner == owner)
-            {
-                record.observed_ready_at = Some(unix_time_ms());
-            }
-        }
-        Ok(observation)
+        state.watches.get(&watch).ok_or(ReplyError::Stale)?;
+        observe_watch_locked(&mut state, owner, watch)
     }
 
     /// Whether `owner` has observed `watch` (via `observe_watch`) already
@@ -1968,6 +2020,7 @@ impl RequestRegistry {
         {
             return Ok(ForgetWatchOutcome::StillPending);
         }
+        wake_watch_waiters(state.watches.get_mut(&watch).expect("watch checked"));
         state.watches.remove(&watch);
         release_settled_commands(&mut state);
         Ok(ForgetWatchOutcome::Forgotten)
@@ -2062,7 +2115,14 @@ impl RequestRegistry {
         if !requests.is_empty() || !watches.is_empty() {
             return Err((requests, watches));
         }
-        state.watches.retain(|_, record| record.owner != actor);
+        state.watches.retain(|_, record| {
+            if record.owner == actor {
+                wake_watch_waiters(record);
+                false
+            } else {
+                true
+            }
+        });
         let released = state
             .requests
             .iter()
@@ -2331,6 +2391,67 @@ fn invalidate_response_watches(
     notifications
 }
 
+fn observe_watch_locked(
+    state: &mut RequestStateTable,
+    owner: ActorRef,
+    watch: WatchId,
+) -> Result<WatchObservation, ReplyError> {
+    let record = state.watches.get(&watch).ok_or(ReplyError::Stale)?;
+    let observation = match &record.state {
+        WatchState::Pending => WatchObservation::Pending(PendingProgress {
+            actor_terminal: None,
+            provider_turn: None,
+            last_activity_unix_ms: None,
+            progress_revision: first_pending_dependency(state, record)
+                .and_then(|request| state.requests.get(&request))
+                .and_then(|dependency_record| dependency_record.progress.as_ref())
+                .map(|snapshot| snapshot.revision),
+            watched: true,
+        }),
+        WatchState::Ready => WatchObservation::Ready(
+            record
+                .dependencies
+                .iter()
+                .filter_map(|dependency| {
+                    let request = state.requests.get(&dependency.request)?;
+                    match &request.owner_state {
+                        OwnerState::Unavailable(failure) => {
+                            Some((dependency.request, failure.clone()))
+                        }
+                        OwnerState::Abandoned => {
+                            Some((dependency.request, ResponseFailure::Abandoned))
+                        }
+                        _ => None,
+                    }
+                })
+                .collect(),
+        ),
+        WatchState::Unavailable { request, failure } => WatchObservation::Unavailable {
+            request: *request,
+            failure: failure.clone(),
+        },
+    };
+    if matches!(
+        observation,
+        WatchObservation::Ready(_) | WatchObservation::Unavailable { .. }
+    ) {
+        if let Some(record) = state
+            .watches
+            .get_mut(&watch)
+            .filter(|record| record.owner == owner)
+        {
+            record.observed_ready_at = Some(unix_time_ms());
+        }
+    }
+    Ok(observation)
+}
+
+fn wake_watch_waiters(watch: &mut WatchRecord) {
+    for (_, waiter) in std::mem::take(&mut watch.waiters) {
+        let _ = waiter.send(());
+    }
+}
+
 fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
     let mut settlements = Vec::new();
     for (request, record) in &mut state.requests {
@@ -2500,6 +2621,7 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
             }
         };
         watch.state = next_state;
+        wake_watch_waiters(watch);
         let occurred_at_unix_ms = unix_time_ms();
         watch.transitioned_at_unix_ms = Some(occurred_at_unix_ms);
         if let Some(route) = &mut watch.route {
@@ -3301,6 +3423,132 @@ mod tests {
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].watch, watch);
         assert_eq!(notifications[0].transition, WatchTransition::Ready);
+    }
+
+    #[tokio::test]
+    async fn watch_wait_subscription_observes_settlement_before_and_after_subscribe() {
+        let registry = std::sync::Arc::new(RequestRegistry::default());
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
+
+        let before_settlement = registry.subscribe_watch(owner, watch).unwrap();
+        registry.begin_reply(target, request).unwrap();
+        registry.finish_reply(request, None);
+        assert_eq!(
+            before_settlement.wait().await,
+            Ok(WatchObservation::Ready(Vec::new()))
+        );
+
+        // The state check and subscription share the registry lock, so a
+        // subscription made after the transition is immediately signalled.
+        assert_eq!(
+            registry.subscribe_watch(owner, watch).unwrap().wait().await,
+            Ok(WatchObservation::Ready(Vec::new()))
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_wait_subscription_preserves_unavailable_state_and_checks_owner() {
+        let registry = std::sync::Arc::new(RequestRegistry::default());
+        let owner = actor(1);
+        let target = actor(2);
+        let intruder = actor(3);
+        let replacement = ActorRef {
+            id: owner.id,
+            incarnation: Incarnation(owner.incarnation.0 + 1),
+        };
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
+
+        assert_eq!(
+            registry.subscribe_watch(intruder, watch).err(),
+            Some(ReplyError::Unauthorized)
+        );
+        assert_eq!(
+            registry.subscribe_watch(replacement, watch).err(),
+            Some(ReplyError::WrongIncarnation)
+        );
+        let waiting = registry.subscribe_watch(owner, watch).unwrap();
+        registry.abandon_response(owner, request).unwrap();
+        assert_eq!(
+            waiting.wait().await,
+            Ok(WatchObservation::Unavailable {
+                request,
+                failure: ResponseFailure::Abandoned,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_watch_wait_subscription_leaves_watch_registered() {
+        let registry = std::sync::Arc::new(RequestRegistry::default());
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
+
+        let waiting = registry.subscribe_watch(owner, watch).unwrap();
+        drop(waiting);
+        assert!(registry.retains_watch(owner, watch));
+        assert!(registry
+            .state
+            .lock()
+            .watches
+            .get(&watch)
+            .is_some_and(|record| record.waiters.is_empty()));
+
+        registry.begin_reply(target, request).unwrap();
+        registry.finish_reply(request, None);
+        assert_eq!(
+            registry.observe_watch(owner, watch),
+            Ok(WatchObservation::Ready(Vec::new()))
+        );
+    }
+
+    #[tokio::test]
+    async fn forgotten_watch_refuses_a_waiter_without_retaining_it() {
+        let registry = std::sync::Arc::new(RequestRegistry::default());
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
+        registry.begin_reply(target, request).unwrap();
+        registry.finish_reply(request, None);
+
+        let waiting = registry.subscribe_watch(owner, watch).unwrap();
+        assert_eq!(
+            registry.forget_watch(owner, watch),
+            Ok(ForgetWatchOutcome::Forgotten)
+        );
+        assert_eq!(waiting.wait().await, Err(ReplyError::Stale));
+    }
+
+    #[tokio::test]
+    async fn retired_owner_wakes_and_refuses_a_settled_watch_waiter() {
+        let registry = std::sync::Arc::new(RequestRegistry::default());
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
+        registry.begin_reply(target, request).unwrap();
+        registry.finish_reply(request, None);
+
+        let waiting = registry.subscribe_watch(owner, watch).unwrap();
+        registry.forget_terminal_actor_metadata(owner).unwrap();
+        assert!(!registry.retains_watch(owner, watch));
+        assert_eq!(waiting.wait().await, Err(ReplyError::Stale));
     }
 
     #[test]

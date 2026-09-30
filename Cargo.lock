@@ -1166,7 +1166,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "parking_lot",
- "reqwest 0.13.4",
  "rustix",
  "serde",
  "serde_json",
@@ -1585,7 +1584,7 @@ dependencies = [
 [[package]]
 name = "harness"
 version = "0.1.0"
-source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=c485edb9b697ffc671b22c9ef25a73fc84763d76#c485edb9b697ffc671b22c9ef25a73fc84763d76"
+source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=763d38d57691da31d2bf3c3c7493ca9910067540#763d38d57691da31d2bf3c3c7493ca9910067540"
 dependencies = [
  "async-trait",
  "axum",

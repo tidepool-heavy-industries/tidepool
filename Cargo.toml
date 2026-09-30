@@ -57,7 +57,7 @@ rust-version = "1.89"
 [workspace.dependencies]
 codex-shoal-protocol = { path = "vendor/codex/codex-rs/shoal-protocol" }
 exomonad-actor = { version = "0.1.0", path = "exomonad/actor" }
-exomonad-agent = { version = "0.1.0", path = "exomonad/agent" }
+exomonad-agent = { version = "0.1.0", path = "exomonad/agent", default-features = false }
 tidepool-atomic-write = { path = "bridge/atomic-write" }
 tidepool-bignum = { version = "0.1.0", path = "tidepool/bignum" }
 tidepool-bridge = { version = "0.1.0", path = "tidepool/bridge" }
@@ -74,7 +74,7 @@ exomonad-model-output = { version = "0.1.0", path = "exomonad/model-output" }
 exomonad-model = { version = "0.1.0", path = "exomonad/model" }
 exomonad-node = { version = "0.1.0", path = "exomonad/node" }
 exomonad-tool = { version = "0.1.0", path = "exomonad/tool" }
-harness = { git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "c485edb9b697ffc671b22c9ef25a73fc84763d76", package = "harness" }
+harness = { git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "763d38d57691da31d2bf3c3c7493ca9910067540", package = "harness" }
 tidepool-protocol = { version = "0.1.0", path = "bridge/protocol" }
 tidepool-repr = { version = "0.1.0", path = "tidepool/repr" }
 tidepool-runtime = { version = "0.1.0", path = "tidepool/runtime" }

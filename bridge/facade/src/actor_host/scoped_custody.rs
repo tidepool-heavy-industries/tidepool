@@ -524,5 +524,5 @@ pub(super) enum ScopedCleanupObservation {
     },
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 mod tests;
