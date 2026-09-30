@@ -74,7 +74,7 @@ exomonad-model-output = { version = "0.1.0", path = "exomonad/model-output" }
 exomonad-model = { version = "0.1.0", path = "exomonad/model" }
 exomonad-node = { version = "0.1.0", path = "exomonad/node" }
 exomonad-tool = { version = "0.1.0", path = "exomonad/tool" }
-harness = { git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "0331cc3a783a40e65611a776d4c880b42431fe2a", package = "harness" }
+harness = { git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "2f6edc79ac2be758de809610cc807122cab1562d", package = "harness" }
 tidepool-protocol = { version = "0.1.0", path = "bridge/protocol" }
 tidepool-repr = { version = "0.1.0", path = "tidepool/repr" }
 tidepool-runtime = { version = "0.1.0", path = "tidepool/runtime" }
