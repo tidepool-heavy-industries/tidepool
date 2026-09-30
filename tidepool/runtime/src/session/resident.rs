@@ -2558,8 +2558,7 @@ where
         self.settle_dropped_custody();
         let retained = self
             .state
-            .bindings_mut()
-            .acquire_leases(referenced.iter().copied().map(SessionVarId::from_var))
+            .acquire_binding_leases(referenced.iter().copied().map(SessionVarId::from_var))
             .into_iter()
             .collect();
         BindingLease {
@@ -5890,9 +5889,9 @@ where
         let leases = std::mem::take(&mut *self.custody_cleanup.binding_leases.lock());
         let mut released = Vec::new();
         for retained in leases {
-            released.extend(self.state.bindings_mut().release_leases(retained));
+            released.extend(self.state.release_binding_leases(retained));
         }
-        released.extend(self.state.bindings_mut().collect_observations());
+        released.extend(self.state.collect_binding_observations());
         let changed_scopes: HashSet<_> = released.iter().map(|entry| entry.scope).collect();
         let binding_count = self.state.release_binding_roots(released);
         for scope in changed_scopes {

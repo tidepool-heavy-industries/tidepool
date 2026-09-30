@@ -302,7 +302,28 @@ impl PersistentSession {
     }
     /// The persistent binding table (mutate).
     pub fn bindings_mut(&mut self) -> &mut BindingTable {
+        // A mutable owner borrow also permits replacing the whole table.
+        // Per-table revisions cannot witness that replacement.
+        self.compile_views.get_mut().clear();
         &mut self.bindings
+    }
+
+    pub(super) fn acquire_binding_leases(
+        &mut self,
+        ids: impl IntoIterator<Item = SessionVarId>,
+    ) -> std::collections::HashSet<SessionVarId> {
+        self.bindings.acquire_leases(ids)
+    }
+
+    pub(super) fn release_binding_leases(
+        &mut self,
+        ids: impl IntoIterator<Item = SessionVarId>,
+    ) -> Vec<BindingEntry> {
+        self.bindings.release_leases(ids)
+    }
+
+    pub(super) fn collect_binding_observations(&mut self) -> Vec<BindingEntry> {
+        self.bindings.collect_observations()
     }
 
     /// Transfer the exact machine-created source roots from one native batch
@@ -3031,6 +3052,41 @@ mod checkpoint_scope_tests {
         let replaced = session.scoped_compile_view_in(scope).unwrap();
         assert!(!Arc::ptr_eq(&declared, &replaced));
         assert_ne!(declared.digest, replaced.digest);
+    }
+
+    #[test]
+    fn scoped_view_refuses_equal_revision_binding_owner_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = publication_session(dir.path(), 413);
+        let original = super::super::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "original",
+            413,
+        );
+        session.bind(original).unwrap();
+        let scope = ScopeId::ROOT;
+        let cached = session.scoped_compile_view_in(scope).unwrap();
+        let before = session
+            .bindings
+            .scope_witness(&session.scopes, scope)
+            .unwrap();
+        let different = super::super::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "different",
+            414,
+        );
+        let mut replacement = BindingTable::new();
+        replacement.bind(different).unwrap();
+        assert_eq!(
+            replacement.scope_witness(&session.scopes, scope),
+            Some(before)
+        );
+        let original = std::mem::replace(session.bindings_mut(), replacement);
+        let replaced = session.scoped_compile_view_in(scope).unwrap();
+        assert!(!Arc::ptr_eq(&cached, &replaced));
+        assert_ne!(cached.digest, replaced.digest);
+        assert_eq!(replaced.view.visible_value_names[0].1, ["different"]);
+        drop(original);
     }
 
     #[test]

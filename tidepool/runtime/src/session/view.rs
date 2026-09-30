@@ -167,6 +167,7 @@ pub struct SessionCompileView {
 impl SessionCompileView {
     /// Canonical runtime view identity; rendered diagnostic observations never
     /// participate in compiler admission authority.
+    #[cfg(test)]
     pub(super) fn admission_digest(&self) -> [u8; 32] {
         self.admission_commitment().0
     }
