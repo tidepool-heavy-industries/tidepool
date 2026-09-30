@@ -66,13 +66,31 @@ function assertRequestIncludes(summary, expected, phase) {
   if (!rendered.includes(expected)) throw new Error(`provider barrier ${phase} did not contain its expected input`);
 }
 
-async function releaseBarrier(phase, expectedInput) {
-  const barrier = await receive('provider_barrier', 120_000);
-  if (barrier.phase !== phase || typeof barrier.id !== 'string' || barrier.id.length === 0) {
-    throw new Error(`unexpected provider barrier; expected ${phase}`);
+async function releaseBarrier(spec, defaultExpectedInput) {
+  const finalPhase = spec.until_phase ?? spec.phase;
+  if (typeof finalPhase !== 'string' || finalPhase.length === 0) {
+    throw new Error('provider barrier must declare phase or until_phase');
   }
-  assertRequestIncludes(barrier.request_summary, expectedInput, phase);
-  send({ type: 'provider_release', id: barrier.id });
+  const intermediate = spec.allowed_intermediate_phases ?? [];
+  if (!Array.isArray(intermediate) || intermediate.some((phase) => typeof phase !== 'string' || phase.length === 0)) {
+    throw new Error('allowed_intermediate_phases must be an array of phase names');
+  }
+  for (let index = 0; index < 8; index += 1) {
+    const barrier = await receive('provider_barrier', 120_000);
+    if (typeof barrier.id !== 'string' || barrier.id.length === 0) {
+      throw new Error('provider barrier is missing its release ID');
+    }
+    if (barrier.phase === finalPhase) {
+      assertRequestIncludes(barrier.request_summary, spec.expected_request_text ?? defaultExpectedInput, finalPhase);
+      send({ type: 'provider_release', id: barrier.id });
+      return;
+    }
+    if (!intermediate.includes(barrier.phase)) {
+      throw new Error(`unexpected provider barrier ${String(barrier.phase)}; expected ${finalPhase}`);
+    }
+    send({ type: 'provider_release', id: barrier.id });
+  }
+  throw new Error(`provider did not reach ${finalPhase} within eight barrier releases`);
 }
 
 async function signIn(page, secret) {
@@ -175,7 +193,7 @@ async function runJourney(ready) {
         const barriers = step.provider_barriers ?? [{ phase: step.barrier, expected_request_text: text }];
         if (!Array.isArray(barriers) || barriers.length === 0) throw new Error('input step must declare provider barriers');
         for (const barrier of barriers) {
-          await releaseBarrier(barrier.phase, barrier.expected_request_text ?? text);
+          await releaseBarrier(barrier, text);
         }
         if (step.wait_for_receipt !== false) {
           await page.getByRole('list', { name: 'Command handoff receipts' }).waitFor({ timeout: 30_000 });

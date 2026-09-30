@@ -20,7 +20,7 @@ ROOT_NAMES = (
     "tidepool-bridge-derive", "tidepool-runtime",
     "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
     "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-agent",
-    "tidepool-mcp", "tidepool-handlers", "tidepool",
+    "tidepool-mcp", "tidepool-handlers", "tidepool", "tidepool-testing",
 )
 HARNESS_GIT_SOURCE = (
     "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git"
@@ -186,6 +186,19 @@ print(open(os.environ['FAKE_METADATA']).read())
                 ("tidepool-toolchain", "build", None, True, []),
                 ("harness", None, None, True, [], "harness_git", "git"),
                 ("harness", None, None, True, [], "harness_registry", "registry"),
+                ("tidepool-testing", "dev", None, True, []),
+            ],
+            "tidepool-testing": [
+                ("tidepool-repr", None, None, True, []),
+                ("serde_json", None, None, True, ["float_roundtrip"]),
+                ("tidepool-runtime", None, None, True, []),
+                ("tidepool-toolchain", None, None, True, []),
+                ("tidepool-mcp", None, None, True, []),
+                ("tidepool-effect", None, None, True, []),
+                ("tidepool-bridge", None, None, True, []),
+                ("tidepool-bridge-derive", None, None, True, []),
+                ("tidepool-bridge-effects", None, None, True, []),
+                ("frunk", None, None, True, []),
             ],
         }
         edges_by_root = {}
@@ -264,7 +277,7 @@ print(open(os.environ['FAKE_METADATA']).read())
         deps = manifest["dependencies"]
         self.assertEqual(deps["chrono"]["default-features"], False)
         self.assertEqual(deps["chrono"]["features"], ["alloc"])
-        self.assertEqual(deps["serde_json"]["features"], ["arbitrary_precision"])
+        self.assertEqual(deps["serde_json"]["features"], ["arbitrary_precision", "float_roundtrip"])
         self.assertEqual(deps["serde_json"]["default-features"], True)
         self.assertIn("proptest", deps)  # existing repr/atomic test roots retain it
         self.assertNotIn("bridge-dev-only", deps)

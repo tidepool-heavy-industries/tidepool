@@ -30,15 +30,14 @@ DEST.mkdir(parents=True, exist_ok=True)
 # are not part of the native library dependency bundle.
 TEST_ROOTS = {
     "tidepool-atomic-write", "tidepool-repr", "tidepool-heap",
-    "tidepool-extract-cmd", "tidepool-toolchain",
+    "tidepool-extract-cmd", "tidepool-toolchain", "tidepool",
 }
 LIBRARY_ROOTS = {
     "tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen",
     "tidepool-extract-report", "tidepool-bridge-derive", "tidepool-runtime",
     "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
     "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-agent",
-    "tidepool-mcp", "tidepool-handlers",
-    "tidepool",
+    "tidepool-mcp", "tidepool-handlers", "tidepool-testing",
 }
 ROOTS = TEST_ROOTS | LIBRARY_ROOTS
 LINUX_TARGETS = {None, "cfg(unix)"}

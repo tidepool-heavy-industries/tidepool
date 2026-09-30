@@ -98,6 +98,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         for name in fixtures:
             self.write(f"bridge/haskell/test-cell-splitter/fixtures/declaration-join/{name}", name)
         self.write("bridge/facade/Cargo.toml", "[package]\nname = 'tidepool'\n")
+        self.write("bridge/testing/Cargo.toml", "[package]\nname = 'tidepool-testing'\n")
         self.packages = [self.package("tidepool-repr", "tidepool/repr", [
             ("tidepool_repr", "lib", "src/lib.rs"), ("repr", "test", "tests/suites/repr.rs")]),
             self.package("tidepool-atomic-write", "bridge/atomic-write", [
@@ -128,11 +129,15 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                 ("exomonad-view-helper", "bin", "src/view_helper.rs"),
                 ("tidepool-compile-report", "bin", "src/compile_report_main.rs"),
             ]),
+            self.package("tidepool-testing", "bridge/testing", [
+                ("tidepool_testing", "lib", "src/lib.rs"),
+            ]),
             self.package("exomonad-agent", "exomonad/agent", [
                 ("exomonad_agent", "lib", "src/lib.rs"),
             ])]
-        self.packages[-2]["features"] = {"default": ["codex-compat"], "codex-compat": []}
-        self.packages[-1]["features"] = {"default": ["codex-compat"], "codex-compat": []}
+        for package in self.packages:
+            if package["name"] in {"tidepool", "exomonad-agent"}:
+                package["features"] = {"default": ["codex-compat"], "codex-compat": []}
         self.write("bridge/facade/build.rs", "fn main() {}\n")
         for source in ("src/lib.rs", "src/main.rs", "src/exomonad.rs", "src/view_helper.rs",
                        "src/compile_report_main.rs"):
@@ -301,9 +306,49 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertIn('"TIDEPOOL_BUILD_SOURCE_ROOT": "."', buck)
         self.assertIn('haskell_sources = "//bridge/haskell:facade_embedded_sources"', buck)
         self.assertIn('workspace_sources = "//exomonad/examples/workspace:facade_scaffold_sources"', buck)
-        self.assertEqual(buck.count('"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"'), 5)
+        self.assertEqual(buck.count('"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"'), 6)
         self.assertNotIn("codex-shoal-protocol", buck)
         self.assertIn("src/lib.rs", groups["tidepool_sources"])
+
+    def test_facade_unit_root_uses_embedded_profile_support_and_browser_resources(self):
+        metadata = json.loads(self.metadata.read_text())
+        facade = next(package for package in metadata["packages"] if package["name"] == "tidepool")
+        support = next(package for package in metadata["packages"] if package["name"] == "tidepool-testing")
+        facade["dependencies"].append({
+            "name": "tidepool-testing", "rename": None, "kind": "dev",
+            "target": None, "optional": False, "uses_default_features": True,
+            "features": [], "req": "*",
+        })
+        next(node for node in metadata["resolve"]["nodes"] if node["id"] == facade["id"])["deps"].append({
+            "name": "tidepool_testing", "pkg": support["id"],
+            "dep_kinds": [{"kind": "dev", "target": None}],
+        })
+        self.metadata.write_text(json.dumps(metadata))
+        self.write("bridge/facade/src/actor_host.rs", "#[cfg(test)] mod m1_host_tests;\n")
+        self.write("bridge/facade/src/actor_host/m1_host_tests.rs", "#[test] fn browser_gate() {}\n")
+        self.write("bridge/facade/src/actor_host/test_campaign.rs", "pub struct TestCampaign;\n")
+        self.write("bridge/testing/src/lib.rs", "pub struct TestSupport;\n")
+
+        result = self.generate("--package", "tidepool", "--no-default-features", "tidepool")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        facade_buck, groups = self.groups("bridge/facade")
+        self.assertIn('name = "tidepool_unit_tests_sources"', facade_buck)
+        unit_rule = facade_buck.split('tidepool_rust_test(\n    name = "tidepool_unit_tests",', 1)[1].split("\n)\n", 1)[0]
+        for source in ("src/actor_host/m1_host_tests.rs", "src/actor_host/test_campaign.rs"):
+            self.assertIn(source, groups["tidepool_unit_tests_sources"])
+        self.assertIn("//bridge/testing:tidepool_testing", unit_rule)
+        self.assertIn('"EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web"', unit_rule)
+        self.assertIn('"TIDEPOOL_BROWSER_DRIVER": "$(location //build/testing/browser:driver_bundle)/driver.mjs"', unit_rule)
+        self.assertIn('"TIDEPOOL_BROWSER_NODE": "$(exe toolchains//:browser_node)"', unit_rule)
+        self.assertIn('"PLAYWRIGHT_BROWSERS_PATH": "$(location toolchains//:playwright_browsers)"', unit_rule)
+        self.assertIn('"//web:dist"', unit_rule)
+        self.assertIn('"toolchains//:browser_test_closure"', unit_rule)
+        self.assertIn("haskell_worker = True", unit_rule)
+        self.assertNotIn("codex-shoal-protocol", facade_buck)
+        support_buck, support_groups = self.groups("bridge/testing")
+        self.assertIn('name = "tidepool_testing"', support_buck)
+        self.assertIn("src/lib.rs", support_groups["tidepool_testing_sources"])
 
     def test_transitive_reindeer_target_uses_unique_locked_source_identity(self):
         metadata = json.loads(self.metadata.read_text())

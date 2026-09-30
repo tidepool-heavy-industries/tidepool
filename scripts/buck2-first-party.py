@@ -41,6 +41,8 @@ arguments.add_argument(
 arguments.add_argument("--check", action="store_true", help="check generated BUCK files without rewriting them")
 options = arguments.parse_args()
 selected = set(options.package)
+if "tidepool" in selected:
+    selected.add("tidepool-testing")
 SUPPORTED_PACKAGES = {
     "tidepool-atomic-write", "tidepool-repr", "tidepool-heap", "tidepool-bignum",
     "tidepool-bridge", "tidepool-effect", "tidepool-codegen", "tidepool-extract-cmd",
@@ -48,6 +50,7 @@ SUPPORTED_PACKAGES = {
     "tidepool-runtime", "tidepool-mcp", "tidepool-handlers", "tidepool",
     "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
     "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-agent",
+    "tidepool-testing",
 }
 NORMAL_DEPENDENCY_ONLY_PACKAGES = {
     "tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen",
@@ -55,10 +58,11 @@ NORMAL_DEPENDENCY_ONLY_PACKAGES = {
     "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
     "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-agent",
     "tidepool-mcp", "tidepool-handlers", "tidepool",
+    "tidepool-testing",
 }
 UNIT_TEST_PACKAGES = {
     "tidepool-atomic-write", "tidepool-repr", "tidepool-heap", "tidepool-codegen",
-    "tidepool-extract-cmd", "tidepool-toolchain",
+    "tidepool-extract-cmd", "tidepool-toolchain", "tidepool",
 }
 ISOLATED_UNIT_TEST_PACKAGES = {
     "tidepool-codegen", "tidepool-extract-cmd", "tidepool-toolchain",
@@ -356,7 +360,7 @@ def source_inputs(package, target, features=()):
     external = {}
     if source_root.is_relative_to(directory / "src"):
         sources.update((directory / "src").rglob("*.rs"))
-        if package["name"] == "tidepool":
+        if package["name"] == "tidepool" and not target["name"].endswith("_unit_tests"):
             sources = {
                 source for source in sources
                 if source.name != "tests.rs"
@@ -561,6 +565,10 @@ load("//build/rust:facade_build_inputs.bzl", "tidepool_facade_build_inputs")
         if any(dependency["kind"] == "dev" for dependency in package["dependencies"]):
             raise SystemExit("Model codegen dev dependencies before extending its native unit target")
         unit_deps, unit_named = normal_deps, normal_named
+    if package_name == "tidepool":
+        unit_deps, unit_named = dependency_sets(
+            package, enabled_dependencies, forwarded_features, include_dev=True
+        )
     targets = package["targets"]
     if package_name == "tidepool":
         rules.append("""export_file(
@@ -638,6 +646,23 @@ tidepool_buildscript_run(
                 '"TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)"},\n'
                 "    haskell_worker = True,"
             )
+        if package_name == "tidepool":
+            unit_extra = '''    env = {
+        "OUT_DIR": "$(location :tidepool_build_script_run[out_dir])",
+        "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web",
+        "TIDEPOOL_BROWSER_DRIVER": "$(location //build/testing/browser:driver_bundle)/driver.mjs",
+        "TIDEPOOL_BROWSER_NODE": "$(exe toolchains//:browser_node)",
+        "PLAYWRIGHT_BROWSERS_PATH": "$(location toolchains//:playwright_browsers)",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+    },
+    resources = [
+        "//build/testing/browser:driver_bundle",
+        "//web:dist",
+        "toolchains//:browser_test_closure",
+        "toolchains//:playwright_browsers",
+    ],
+    haskell_worker = True,'''
         rules.append(render_rule(unit_rule, unit_target["name"], unit_target, package, unit_deps, unit_named, unit_extra, features=package_features))
     selected_tests = [
         target for target in tests
