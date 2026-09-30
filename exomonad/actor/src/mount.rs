@@ -676,3 +676,101 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod source_authority_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    struct RetainedTree {
+        _tree: Arc<tempfile::TempDir>,
+        identities: Vec<String>,
+        paths: Vec<PathBuf>,
+    }
+
+    impl RetainedSourceLayer for RetainedTree {
+        fn identities(&self) -> &[String] {
+            &self.identities
+        }
+        fn include_paths(&self) -> &[PathBuf] {
+            &self.paths
+        }
+    }
+
+    fn context(paths: Vec<PathBuf>) -> ActorSessionContext {
+        ActorSessionContext {
+            actor: crate::ActorRef::first(crate::ActorId(1)),
+            placement: ActorPlacement {
+                session: SessionId(1),
+                resource_scope: RealmId::ROOT,
+                lexical_scope: ScopeId::ROOT,
+            },
+            effect_policy: EffectRunPolicy::HandleOrSuspend,
+            live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            source_imports: ActorSourceImports::default(),
+            haskell_effects_alias: "[]".into(),
+            source_layer: paths.into(),
+        }
+    }
+
+    #[test]
+    fn unowned_default_cannot_select_nonempty_source() {
+        let source = CheckpointSourceLayer::default();
+        let result = context(vec![PathBuf::from("ambient")]).with_issued_source(&source);
+        assert_eq!(
+            result.unwrap_err(),
+            ActorCompileViewError::UnownedSourceLayer
+        );
+        assert!(context(vec![]).with_issued_source(&source).is_ok());
+    }
+
+    #[test]
+    fn issued_source_preserves_actual_capture_and_immutable_observations() {
+        let tree = Arc::new(tempfile::tempdir().unwrap());
+        let path = tree.path().to_path_buf();
+        let owner: Arc<dyn RetainedSourceLayer> = Arc::new(RetainedTree {
+            _tree: Arc::clone(&tree),
+            identities: vec!["revision:1".into()],
+            paths: vec![path.clone()],
+        });
+        let issuer = SourceLayerIssuer::default();
+        let source = issuer.issue(Arc::clone(&owner));
+        let retained = source.clone();
+        let mut observation = source.include_paths().to_vec();
+        observation.clear();
+        let selected = context(vec![PathBuf::from("ambient")])
+            .with_issued_source(&source)
+            .unwrap();
+        assert_eq!(&*selected.source_layer, &[path.clone()]);
+        assert_eq!(source.include_paths(), &[path.clone()]);
+        drop(selected);
+        drop(source);
+        drop(owner);
+        drop(tree);
+        assert!(path.exists());
+        drop(retained);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn matching_descriptor_does_not_authorize_foreign_source_issuer() {
+        let tree = Arc::new(tempfile::tempdir().unwrap());
+        let owner: Arc<dyn RetainedSourceLayer> = Arc::new(RetainedTree {
+            paths: vec![tree.path().to_path_buf()],
+            _tree: tree,
+            identities: vec!["revision:1".into()],
+        });
+        let issuer = SourceLayerIssuer::default();
+        let foreign = SourceLayerIssuer::default();
+        let source = issuer.issue(Arc::clone(&owner));
+        let clone = source.clone();
+        let other = foreign.issue(owner);
+        assert!(issuer.owns(&clone));
+        assert_eq!(source.semantic_digest(), clone.semantic_digest());
+        assert!(!issuer.owns(&other));
+        assert!(!source.same_revision(&other));
+        assert_eq!(source.identities(), other.identities());
+        assert_eq!(source.include_paths(), other.include_paths());
+        assert_ne!(source.semantic_digest(), other.semantic_digest());
+    }
+}
