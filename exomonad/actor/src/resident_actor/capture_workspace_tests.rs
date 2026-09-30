@@ -165,6 +165,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
             },
             None,
             retained_scope,
+            crate::ActorPersistencePolicy::Ephemeral,
         );
     forest
         .environment

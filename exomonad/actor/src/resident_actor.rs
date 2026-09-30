@@ -3067,6 +3067,13 @@ where
                 role
             };
             descriptor = descriptor.with_effective_role(role);
+            if fork_group.is_some() {
+                let policy = checkpoint_lease.as_ref().map_or_else(
+                    || self.descriptor.persistence_policy(),
+                    |lease| lease.issuer_persistence_policy,
+                );
+                descriptor = descriptor.with_persistence_policy(policy);
+            }
             if let Some(group) = fork_group {
                 let requested = crate::ActorPath::parse(descriptor.label()).map_err(|error| {
                     ResidentActorWorkbenchError::ActorProtocol(error.to_string())
@@ -4343,6 +4350,7 @@ where
                             boundary,
                             attachment,
                             retained_scope,
+                            self.descriptor.persistence_policy(),
                         ))
                 }
                 .await;
