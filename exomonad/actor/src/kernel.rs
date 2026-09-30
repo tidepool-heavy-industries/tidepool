@@ -8,12 +8,14 @@ use ractor::{ActorRef as RactorRef, RpcReplyPort};
 use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse};
 
 /// Exact identity of one actor-owned workbench execution step. The generation
-/// is local to the actor incarnation; the request identity is correlation
-/// metadata and is absent for direct notebook submissions.
+/// changes for every task in the actor incarnation. The admission generation
+/// identifies the execution even for direct notebook submissions; the optional
+/// request identity is transport correlation metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkbenchStepKey {
     actor: ActorRef,
     generation: u64,
+    execution_generation: u64,
     request_execution: Option<tidepool_runtime::session::WorkbenchExecutionId>,
 }
 
@@ -26,8 +28,23 @@ impl WorkbenchStepKey {
         Self {
             actor,
             generation,
+            execution_generation: generation,
             request_execution,
         }
+    }
+
+    /// Keep this execution's admission identity while fencing its next task.
+    pub(crate) fn next_step(&self, generation: u64) -> Self {
+        Self {
+            generation,
+            ..self.clone()
+        }
+    }
+
+    /// The first task generation, retained across all steps of this execution.
+    #[must_use]
+    pub fn execution_generation(&self) -> u64 {
+        self.execution_generation
     }
 
     #[must_use]

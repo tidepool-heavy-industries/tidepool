@@ -102,7 +102,7 @@ pub use local_actor::{
     spawn_local_actor, spawn_local_actor_in_incarnation, ChildExitNotice, KernelBehavior,
     KernelBehaviorError, KernelContext, KernelStep, LocalActor, LocalActorArguments,
     LocalActorDirectory, LocalActorState, OwnedWorkbenchCompletion, OwnedWorkbenchTask,
-    WorkbenchAbandonGuard, WorkbenchDispatch,
+    WorkbenchAbandonGuard, WorkbenchAdvance, WorkbenchDispatch,
 };
 pub use mailbox::MailboxValue;
 pub use mount::{

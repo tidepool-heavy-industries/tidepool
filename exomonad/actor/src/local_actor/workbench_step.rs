@@ -3,22 +3,37 @@
 use futures_util::future::BoxFuture;
 use tidepool_runtime::session::WorkbenchResponse;
 
-use super::{KernelInvocationFailure, KernelStep};
+use super::{KernelContext, KernelInvocationFailure, KernelStep};
 
 /// Work performed outside the actor turn. Its completion returns a typed
 /// finalizer, so actor-owned state is changed only by the matching mailbox
 /// completion after the step key has been checked.
 pub struct OwnedWorkbenchTask<B> {
     run: BoxFuture<'static, OwnedWorkbenchCompletion<B>>,
+    abandon_guard: Option<WorkbenchAbandonGuard>,
 }
 
-impl<B> OwnedWorkbenchTask<B> {
+impl<B: 'static> OwnedWorkbenchTask<B> {
     pub fn new(run: BoxFuture<'static, OwnedWorkbenchCompletion<B>>) -> Self {
-        Self { run }
+        Self {
+            run,
+            abandon_guard: None,
+        }
     }
 
     pub(super) fn into_future(self) -> BoxFuture<'static, OwnedWorkbenchCompletion<B>> {
-        self.run
+        Box::pin(async move {
+            let guard = self.abandon_guard;
+            let mut completion = self.run.await;
+            if let Some(guard) = guard {
+                assert!(
+                    completion.abandon_guard.is_none(),
+                    "one workbench cleanup owner"
+                );
+                completion.abandon_guard = Some(guard);
+            }
+            completion
+        })
     }
 }
 
@@ -51,15 +66,32 @@ impl Drop for WorkbenchAbandonGuard {
     }
 }
 
-/// The task's result and any execution state that must rejoin its owning
-/// behavior. The finalizer runs on the actor, never on the worker task.
-pub struct OwnedWorkbenchCompletion<B> {
-    finish: Option<
+/// A terminal hosted result or the next task of the same admitted execution.
+pub enum WorkbenchAdvance<B> {
+    /// Settle the retained hosted caller and its control.
+    Complete(KernelStep<WorkbenchResponse>),
+    /// Keep the hosted caller pending and transfer ownership to the next task.
+    Park(OwnedWorkbenchTask<B>),
+}
+
+type ActorResume<B> = Box<
+    dyn FnOnce(&mut B, &KernelContext) -> Result<WorkbenchAdvance<B>, KernelInvocationFailure>
+        + Send,
+>;
+
+enum CompletionFinalizer<B> {
+    Immediate(
         Box<
             dyn FnOnce(&mut B) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>
                 + Send,
         >,
-    >,
+    ),
+    Resume(ActorResume<B>),
+}
+
+/// The task result rejoins its owning behavior only after its step is fenced.
+pub struct OwnedWorkbenchCompletion<B> {
+    finish: Option<CompletionFinalizer<B>>,
     abandon_guard: Option<WorkbenchAbandonGuard>,
 }
 
@@ -70,7 +102,20 @@ impl<B> OwnedWorkbenchCompletion<B> {
             + 'static,
     ) -> Self {
         Self {
-            finish: Some(Box::new(finish)),
+            finish: Some(CompletionFinalizer::Immediate(Box::new(finish))),
+            abandon_guard: None,
+        }
+    }
+
+    /// Resume local actor decisions after an exactly fenced owned step.
+    /// Compilation and selected external waits return another owned task.
+    pub(crate) fn advance(
+        finish: impl FnOnce(&mut B, &KernelContext) -> Result<WorkbenchAdvance<B>, KernelInvocationFailure>
+            + Send
+            + 'static,
+    ) -> Self {
+        Self {
+            finish: Some(CompletionFinalizer::Resume(Box::new(finish))),
             abandon_guard: None,
         }
     }
@@ -85,12 +130,27 @@ impl<B> OwnedWorkbenchCompletion<B> {
     pub(super) fn finish(
         mut self,
         behavior: &mut B,
-    ) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure> {
-        let result = self.finish.take().expect("one completion finalizer")(behavior);
-        if result.is_ok() {
-            if let Some(guard) = self.abandon_guard.as_mut() {
-                guard.disarm();
+        context: &KernelContext,
+    ) -> Result<WorkbenchAdvance<B>, KernelInvocationFailure> {
+        let mut result = match self.finish.take().expect("one completion finalizer") {
+            CompletionFinalizer::Immediate(finish) => {
+                finish(behavior).map(WorkbenchAdvance::Complete)
             }
+            CompletionFinalizer::Resume(finish) => finish(behavior, context),
+        };
+        match &mut result {
+            Ok(WorkbenchAdvance::Complete(_)) => {
+                if let Some(guard) = self.abandon_guard.as_mut() {
+                    guard.disarm();
+                }
+            }
+            Ok(WorkbenchAdvance::Park(task)) => {
+                if let Some(guard) = self.abandon_guard.take() {
+                    assert!(task.abandon_guard.is_none(), "one workbench cleanup owner");
+                    task.abandon_guard = Some(guard);
+                }
+            }
+            Err(_) => {}
         }
         result
     }

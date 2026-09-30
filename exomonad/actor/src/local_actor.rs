@@ -22,7 +22,8 @@ use tidepool_runtime::session::WorkbenchResponse;
 
 mod workbench_step;
 pub use workbench_step::{
-    OwnedWorkbenchCompletion, OwnedWorkbenchTask, WorkbenchAbandonGuard, WorkbenchDispatch,
+    OwnedWorkbenchCompletion, OwnedWorkbenchTask, WorkbenchAbandonGuard, WorkbenchAdvance,
+    WorkbenchDispatch,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -1682,6 +1683,20 @@ fn start_workbench<B: KernelBehavior>(
             return;
         }
     };
+    spawn_workbench_task(myself, state, dispatch);
+}
+
+fn spawn_workbench_task<B: KernelBehavior>(
+    myself: &RactorRef<KernelMessage>,
+    state: &mut LocalActorState<B>,
+    dispatch: WorkbenchDispatch<B>,
+) {
+    let step = state
+        .pending_workbench
+        .as_ref()
+        .expect("admitted task")
+        .step
+        .clone();
     let myself = myself.clone();
     let worker = match dispatch {
         WorkbenchDispatch::Owned(task) => tokio::spawn(
@@ -1771,9 +1786,27 @@ async fn complete_workbench<B: KernelBehavior>(
     match outcome {
         WorkbenchTaskOutcome::Owned(completion) => {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                completion.finish(&mut state.behavior)
+                completion.finish(&mut state.behavior, &state.context)
             })) {
-                Ok(Ok(step)) => {
+                Ok(Ok(WorkbenchAdvance::Park(task))) => {
+                    let Some(generation) = state.next_workbench_generation.checked_add(1) else {
+                        drop(task);
+                        fail_unconfirmed_workbench(
+                            myself,
+                            state,
+                            pending,
+                            "workbench step generation exhausted".into(),
+                        );
+                        return;
+                    };
+                    state.next_workbench_generation = generation;
+                    let mut pending = pending;
+                    pending.step = pending.step.next_step(generation);
+                    state.pending_workbench = Some(pending);
+                    spawn_workbench_task(myself, state, WorkbenchDispatch::Owned(task));
+                    return;
+                }
+                Ok(Ok(WorkbenchAdvance::Complete(step))) => {
                     settle_step(myself, state, step, |output| {
                         settle_pending_workbench(pending, Ok(output));
                     })
@@ -2406,6 +2439,8 @@ mod tests {
         owned_workbench: bool,
         owned_cleanup: Option<Arc<Notify>>,
         owned_finish_fails: bool,
+        owned_successor_gate: Option<(Arc<Notify>, Arc<Notify>)>,
+        owned_successor_panics: bool,
         dispatch_panics: bool,
     }
 
@@ -2667,6 +2702,8 @@ mod tests {
             let panics = self.workbench_panics;
             let cleanup = self.owned_cleanup.clone();
             let finish_fails = self.owned_finish_fails;
+            let successor_gate = self.owned_successor_gate.clone();
+            let successor_panics = self.owned_successor_panics;
             let actor = context.identity;
             WorkbenchDispatch::Owned(OwnedWorkbenchTask::new(Box::pin(async move {
                 let guard =
@@ -2678,6 +2715,46 @@ mod tests {
                 }
                 if panics {
                     panic!("owned workbench probe panic");
+                }
+                if let Some((entered, release)) = successor_gate {
+                    let completion =
+                        OwnedWorkbenchCompletion::advance(move |behavior: &mut Self, _context| {
+                            behavior.calls.lock().push("workbench-next-step");
+                            Ok(WorkbenchAdvance::Park(OwnedWorkbenchTask::new(Box::pin(
+                                async move {
+                                    if let Some(control) = &control {
+                                        control.arm_sleep();
+                                    }
+                                    entered.notify_one();
+                                    match &control {
+                                        Some(control) => tokio::select! {
+                                            () = release.notified() => { control.finish_sleep(); }
+                                            () = control.wait_for_cancellation() => {
+                                                control.acknowledge_cancellation();
+                                            }
+                                        },
+                                        None => release.notified().await,
+                                    }
+                                    if successor_panics {
+                                        panic!("owned successor probe panic");
+                                    }
+                                    OwnedWorkbenchCompletion::new(move |behavior: &mut Self| {
+                                        behavior.calls.lock().push("workbench-end");
+                                        Ok(KernelStep::Continue(WorkbenchResponse {
+                                            status: WorkbenchRunStatus::Committed,
+                                            summary: None,
+                                            items: Vec::new(),
+                                            next_index: 0,
+                                            total: 0,
+                                        }))
+                                    })
+                                },
+                            ))))
+                        });
+                    return match guard {
+                        Some(guard) => completion.with_abandon_guard(guard),
+                        None => completion,
+                    };
                 }
                 let completion = OwnedWorkbenchCompletion::new(move |behavior: &mut Self| {
                     behavior.calls.lock().push("workbench-end");
@@ -2882,6 +2959,8 @@ mod tests {
                 owned_workbench: false,
                 owned_cleanup: None,
                 owned_finish_fails: false,
+                owned_successor_gate: None,
+                owned_successor_panics: false,
                 dispatch_panics: false,
             },
             calls,
@@ -3009,6 +3088,120 @@ mod tests {
             .await
             .expect("shutdown");
         task.await.expect("actor task");
+    }
+
+    #[tokio::test]
+    async fn owned_successive_steps_fence_stale_completion_and_retain_terminal_reply() {
+        let mut fixture = behavior(false);
+        fixture.behavior.owned_workbench = true;
+        let first_entered = Arc::new(Notify::new());
+        let first_release = Arc::new(Notify::new());
+        let next_entered = Arc::new(Notify::new());
+        let next_release = Arc::new(Notify::new());
+        let cleaned = Arc::new(Notify::new());
+        fixture.behavior.workbench_gate =
+            Some((Arc::clone(&first_entered), Arc::clone(&first_release)));
+        fixture.behavior.owned_successor_gate =
+            Some((Arc::clone(&next_entered), Arc::clone(&next_release)));
+        fixture.behavior.owned_cleanup = Some(Arc::clone(&cleaned));
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let execution = tidepool_runtime::session::WorkbenchExecutionId::from_digest([79; 16]);
+        let control = crate::WorkbenchExecutionControl::untracked();
+        let mut reply = send_workbench_request(
+            &actor,
+            WorkbenchRequest::from_cell_input("two steps").with_execution_id(execution.clone()),
+            Some(Arc::clone(&control)),
+        );
+        first_entered.notified().await;
+        first_release.notify_one();
+        next_entered.notified().await;
+        assert!(matches!(
+            reply.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(control.terminal_reply().is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), cleaned.notified())
+                .await
+                .is_err()
+        );
+        let stale_dropped = Arc::new(Notify::new());
+        let notify = Arc::clone(&stale_dropped);
+        let stale = OwnedWorkbenchCompletion::new(|_: &mut ProbeBehavior| {
+            panic!("stale finalizer must never execute")
+        })
+        .with_abandon_guard(WorkbenchAbandonGuard::new(move || notify.notify_one()));
+        actor
+            .address()
+            .send_message(KernelMessage::WorkbenchCompleted {
+                step: crate::WorkbenchStepKey::new(actor.identity(), 1, Some(execution.clone())),
+                outcome: Box::new(WorkbenchTaskOutcome::Owned(stale)),
+            })
+            .expect("stale first-step completion");
+        tokio::time::timeout(Duration::from_secs(2), stale_dropped.notified())
+            .await
+            .expect("stale cleanup claim dropped");
+        assert!(control.terminal_reply().is_none());
+        control.request_cancellation();
+        let response = reply
+            .await
+            .expect("terminal reply")
+            .expect("terminal result");
+        assert_eq!(response.status, WorkbenchRunStatus::Committed);
+        assert!(matches!(
+            control.cancellation_outcome(execution, Ok(response)),
+            crate::WorkbenchCancellationOutcome::Cancelled { .. }
+        ));
+        assert_eq!(
+            &*fixture.calls.lock(),
+            &["workbench-start", "workbench-next-step", "workbench-end"]
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), cleaned.notified())
+                .await
+                .is_err()
+        );
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "done".into(),
+            })
+            .await
+            .expect("shutdown");
+        task.await.expect("actor task");
+    }
+
+    #[tokio::test]
+    async fn owned_successor_panic_abandons_transferred_cleanup_claim() {
+        let mut fixture = behavior(false);
+        fixture.behavior.owned_workbench = true;
+        fixture.behavior.owned_successor_panics = true;
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let cleaned = Arc::new(Notify::new());
+        fixture.behavior.owned_successor_gate = Some((Arc::clone(&entered), Arc::clone(&release)));
+        fixture.behavior.owned_cleanup = Some(Arc::clone(&cleaned));
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let reply = send_workbench(&actor);
+        entered.notified().await;
+        release.notify_one();
+        assert!(matches!(
+            reply.await.expect("reply"),
+            Err(KernelInvocationFailure::Failed { .. })
+        ));
+        tokio::time::timeout(Duration::from_secs(2), cleaned.notified())
+            .await
+            .expect("successor drops exact cleanup claim");
+        assert_eq!(actor.terminal().wait().await.kind, ActorExitKind::Failed);
+        task.await.expect("actor task");
+        assert!(matches!(
+            actor.terminal().cleanup().expect("cleanup").hook,
+            crate::CleanupComponentOutcome::Unconfirmed(_)
+        ));
     }
 
     #[tokio::test]
