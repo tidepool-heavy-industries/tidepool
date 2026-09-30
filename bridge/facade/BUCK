@@ -5,6 +5,7 @@ load("@prelude//rust:sources.bzl", "rust_filegroup")
 
 load("//build/rust:buildscript.bzl", "tidepool_buildscript_run")
 load("//build/rust:facade_build_inputs.bzl", "tidepool_facade_build_inputs")
+load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
 
 export_file(
     name = "facade_cargo_manifest",
@@ -74,6 +75,7 @@ rust_filegroup(
         "src/actor_host/overlay_resource.rs": "bridge/facade/src/actor_host/overlay_resource.rs",
         "src/actor_host/overlay_resource/worker.sh": "bridge/facade/src/actor_host/overlay_resource/worker.sh",
         "src/actor_host/prompt_catalog.rs": "bridge/facade/src/actor_host/prompt_catalog.rs",
+        "src/actor_host/provider_attachment.rs": "bridge/facade/src/actor_host/provider_attachment.rs",
         "src/actor_host/recipe_checks.rs": "bridge/facade/src/actor_host/recipe_checks.rs",
         "src/actor_host/root_declaration_recovery.rs": "bridge/facade/src/actor_host/root_declaration_recovery.rs",
         "src/actor_host/scoped_custody.rs": "bridge/facade/src/actor_host/scoped_custody.rs",
@@ -194,6 +196,7 @@ rust_filegroup(
         "src/actor_host/overlay_resource.rs": "bridge/facade/src/actor_host/overlay_resource.rs",
         "src/actor_host/overlay_resource/worker.sh": "bridge/facade/src/actor_host/overlay_resource/worker.sh",
         "src/actor_host/prompt_catalog.rs": "bridge/facade/src/actor_host/prompt_catalog.rs",
+        "src/actor_host/provider_attachment.rs": "bridge/facade/src/actor_host/provider_attachment.rs",
         "src/actor_host/recipe_checks.rs": "bridge/facade/src/actor_host/recipe_checks.rs",
         "src/actor_host/root_declaration_recovery.rs": "bridge/facade/src/actor_host/root_declaration_recovery.rs",
         "src/actor_host/scoped_custody.rs": "bridge/facade/src/actor_host/scoped_custody.rs",
@@ -319,6 +322,7 @@ rust_filegroup(
         "src/actor_host/overlay_resource.rs": "bridge/facade/src/actor_host/overlay_resource.rs",
         "src/actor_host/overlay_resource/worker.sh": "bridge/facade/src/actor_host/overlay_resource/worker.sh",
         "src/actor_host/prompt_catalog.rs": "bridge/facade/src/actor_host/prompt_catalog.rs",
+        "src/actor_host/provider_attachment.rs": "bridge/facade/src/actor_host/provider_attachment.rs",
         "src/actor_host/recipe_checks.rs": "bridge/facade/src/actor_host/recipe_checks.rs",
         "src/actor_host/root_declaration_recovery.rs": "bridge/facade/src/actor_host/root_declaration_recovery.rs",
         "src/actor_host/scoped_custody.rs": "bridge/facade/src/actor_host/scoped_custody.rs",
@@ -444,6 +448,7 @@ rust_filegroup(
         "src/actor_host/overlay_resource.rs": "bridge/facade/src/actor_host/overlay_resource.rs",
         "src/actor_host/overlay_resource/worker.sh": "bridge/facade/src/actor_host/overlay_resource/worker.sh",
         "src/actor_host/prompt_catalog.rs": "bridge/facade/src/actor_host/prompt_catalog.rs",
+        "src/actor_host/provider_attachment.rs": "bridge/facade/src/actor_host/provider_attachment.rs",
         "src/actor_host/recipe_checks.rs": "bridge/facade/src/actor_host/recipe_checks.rs",
         "src/actor_host/root_declaration_recovery.rs": "bridge/facade/src/actor_host/root_declaration_recovery.rs",
         "src/actor_host/scoped_custody.rs": "bridge/facade/src/actor_host/scoped_custody.rs",
@@ -569,6 +574,7 @@ rust_filegroup(
         "src/actor_host/overlay_resource.rs": "bridge/facade/src/actor_host/overlay_resource.rs",
         "src/actor_host/overlay_resource/worker.sh": "bridge/facade/src/actor_host/overlay_resource/worker.sh",
         "src/actor_host/prompt_catalog.rs": "bridge/facade/src/actor_host/prompt_catalog.rs",
+        "src/actor_host/provider_attachment.rs": "bridge/facade/src/actor_host/provider_attachment.rs",
         "src/actor_host/recipe_checks.rs": "bridge/facade/src/actor_host/recipe_checks.rs",
         "src/actor_host/root_declaration_recovery.rs": "bridge/facade/src/actor_host/root_declaration_recovery.rs",
         "src/actor_host/scoped_custody.rs": "bridge/facade/src/actor_host/scoped_custody.rs",
@@ -715,6 +721,7 @@ rust_filegroup(
         "src/actor_host/overlay_resource.rs": "bridge/facade/src/actor_host/overlay_resource.rs",
         "src/actor_host/overlay_resource/worker.sh": "bridge/facade/src/actor_host/overlay_resource/worker.sh",
         "src/actor_host/prompt_catalog.rs": "bridge/facade/src/actor_host/prompt_catalog.rs",
+        "src/actor_host/provider_attachment.rs": "bridge/facade/src/actor_host/provider_attachment.rs",
         "src/actor_host/recipe_checks.rs": "bridge/facade/src/actor_host/recipe_checks.rs",
         "src/actor_host/root_declaration_recovery.rs": "bridge/facade/src/actor_host/root_declaration_recovery.rs",
         "src/actor_host/scoped_custody.rs": "bridge/facade/src/actor_host/scoped_custody.rs",
@@ -762,7 +769,7 @@ rust_filegroup(
     },
 )
 
-tidepool_rust_test(
+tidepool_rust_binary(
     name = "tidepool_unit_tests",
     package_name = "tidepool",
     package_dir = "bridge/facade",
@@ -816,21 +823,149 @@ tidepool_rust_test(
     named_deps = {
         "harness": "//third-party/rust:harness",
     },
+    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
+    rustc_flags = ["--test"],
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
+    name = "facade_process_tests",
+    binary = ":tidepool_unit_tests",
+    exact_tests = [
+        "actor_host::m1_host_tests::browser_process::tests::oversized_unterminated_frame_is_rejected_before_eof",
+        "actor_host::m1_host_tests::browser_process::tests::complete_frames_and_eof_are_observed_without_replay",
+        "actor_host::m1_host_tests::browser_process::tests::eof_with_partial_frame_is_a_protocol_failure",
+        "actor_host::m1_host_tests::browser_process::tests::cancelled_read_retains_partial_frame_for_next_select",
+        "actor_host::m1_host_tests::browser_process::tests::deadline_stops_descendant_and_drains_bounded_redacted_stderr",
+        "actor_host::m1_host_tests::browser_process::tests::successful_leader_exit_also_stops_pipe_holding_descendant",
+    ],
+    expected_count = 6,
+    ignored = False,
+    jobs = 1,
+    timeout = 30,
+    test_rule_timeout_ms = 240000,
     env = {
-        "OUT_DIR": "$(location :tidepool_build_script_run[out_dir])",
-        "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web",
-        "TIDEPOOL_BROWSER_DRIVER": "$(location //build/testing/browser:driver_bundle)/driver.mjs",
-        "TIDEPOOL_BROWSER_NODE": "$(exe toolchains//:browser_node)",
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
         "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
-        "PLAYWRIGHT_BROWSERS_PATH": "$(location toolchains//:playwright_browsers)",
-        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
-        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
     },
     resources = [
-        "//build/testing/browser:driver_bundle",
-        "//web:dist",
         "toolchains//:test_tools_closure",
+    ],
+    haskell_worker = False,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
+    name = "facade_host_tests",
+    binary = ":tidepool_unit_tests",
+    exact_tests = [
+        "actor_host::m1_host_tests::production_host_retains_http_haskell_commands_and_reconnects_without_replay",
+        "actor_host::m1_host_tests::host_cancellation_stops_a_real_running_haskell_cell",
+        "actor_host::m1_host_tests::production_host_marks_embedded_root_ready_and_retires_invalid_auth_failure",
+    ],
+    expected_count = 3,
+    ignored = False,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 1860000,
+    env = {
+        "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
+        "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
+        "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "toolchains//:test_tools_closure",
+        "//web:dist",
+    ],
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
+    name = "facade_late_output_test",
+    binary = ":tidepool_unit_tests",
+    exact_tests = [
+        "actor_host::m1_host_tests::real_host_late_output_tests::real_host_retains_one_late_haskell_output_across_compaction",
+    ],
+    expected_count = 1,
+    ignored = False,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 660000,
+    env = {
+        "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
+        "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
+        "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "toolchains//:test_tools_closure",
+        "//web:dist",
+    ],
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
+    name = "facade_browser_test",
+    binary = ":tidepool_unit_tests",
+    exact_tests = [
+        "actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root",
+    ],
+    expected_count = 1,
+    ignored = True,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 660000,
+    env = {
+        "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
+        "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
+        "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+        "TIDEPOOL_BROWSER_DRIVER": "$(location //build/testing/browser:driver_bundle)/driver.mjs",
+        "TIDEPOOL_BROWSER_NODE": "$(exe toolchains//:browser_node)",
+        "PLAYWRIGHT_BROWSERS_PATH": "$(location toolchains//:playwright_browsers)",
+    },
+    resources = [
+        "toolchains//:test_tools_closure",
+        "//web:dist",
+        "//build/testing/browser:driver_bundle",
+        "toolchains//:browser_test_closure",
+        "toolchains//:playwright_browsers",
+    ],
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
+    name = "tidepool_unit_tests_all",
+    binary = ":tidepool_unit_tests",
+    ignored = False,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 7200000,
+    env = {
+        "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
+        "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
+        "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+        "TIDEPOOL_BROWSER_DRIVER": "$(location //build/testing/browser:driver_bundle)/driver.mjs",
+        "TIDEPOOL_BROWSER_NODE": "$(exe toolchains//:browser_node)",
+        "PLAYWRIGHT_BROWSERS_PATH": "$(location toolchains//:playwright_browsers)",
+    },
+    resources = [
+        "toolchains//:test_tools_closure",
+        "//web:dist",
+        "//build/testing/browser:driver_bundle",
         "toolchains//:browser_test_closure",
         "toolchains//:playwright_browsers",
     ],

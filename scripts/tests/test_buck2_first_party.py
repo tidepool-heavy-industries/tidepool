@@ -347,7 +347,7 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
         self.assertEqual(result.returncode, 0, result.stderr)
         facade_buck, groups = self.groups("bridge/facade")
         self.assertIn('name = "tidepool_unit_tests_sources"', facade_buck)
-        unit_rule = facade_buck.split('tidepool_rust_test(\n    name = "tidepool_unit_tests",', 1)[1].split("\n)\n", 1)[0]
+        unit_rule = facade_buck.split('tidepool_rust_binary(\n    name = "tidepool_unit_tests",', 1)[1].split("\n)\n", 1)[0]
         for source in (
             "src/actor_host/m1_host_tests.rs", "src/actor_host/m1_browser_runner.rs",
             "src/actor_host/test_campaign.rs", "src/exomonad.rs",
@@ -356,16 +356,38 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
         for source in ("src/actor_host/documentation_tests.rs", "src/actor_host/agent_spec_tests.rs"):
             self.assertNotIn(source, groups["tidepool_unit_tests_sources"])
         self.assertIn("//bridge/testing:tidepool_testing", unit_rule)
-        self.assertIn('"EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web"', unit_rule)
-        self.assertIn('"TIDEPOOL_BROWSER_DRIVER": "$(location //build/testing/browser:driver_bundle)/driver.mjs"', unit_rule)
-        self.assertIn('"TIDEPOOL_BROWSER_NODE": "$(exe toolchains//:browser_node)"', unit_rule)
-        self.assertIn('"TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)"', unit_rule)
-        self.assertIn('"TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)"', unit_rule)
-        self.assertIn('"PLAYWRIGHT_BROWSERS_PATH": "$(location toolchains//:playwright_browsers)"', unit_rule)
-        self.assertIn('"toolchains//:test_tools_closure"', unit_rule)
-        self.assertIn('"//web:dist"', unit_rule)
-        self.assertIn('"toolchains//:browser_test_closure"', unit_rule)
-        self.assertIn("haskell_worker = True", unit_rule)
+        self.assertIn('rustc_flags = ["--test"]', unit_rule)
+        for runtime_only in ("TIDEPOOL_EXTRACT", "TIDEPOOL_BROWSER", "//web:dist", "resources ="):
+            self.assertNotIn(runtime_only, unit_rule)
+        cases = {}
+        for name in ("facade_process_tests", "facade_host_tests", "facade_late_output_test",
+                     "facade_browser_test", "tidepool_unit_tests_all"):
+            cases[name] = facade_buck.split(
+                'tidepool_rust_test_cases(\n    name = "' + name + '",', 1
+            )[1].split("\n)\n", 1)[0]
+            self.assertIn('binary = ":tidepool_unit_tests"', cases[name])
+            self.assertIn("jobs = 1", cases[name])
+        process = cases["facade_process_tests"]
+        self.assertIn("expected_count = 6", process)
+        self.assertIn('"TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)"', process)
+        self.assertIn('"TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)"', process)
+        for heavyweight in ("TIDEPOOL_EXTRACT", "TIDEPOOL_BROWSER", "//web:dist", "playwright"):
+            self.assertNotIn(heavyweight, process)
+        host = cases["facade_host_tests"]
+        self.assertIn("expected_count = 3", host)
+        self.assertIn("haskell_worker = True", host)
+        self.assertIn('"TIDEPOOL_EXTRACT_WORKER"', host)
+        self.assertNotIn("TIDEPOOL_BROWSER_DRIVER", host)
+        self.assertNotIn("playwright", host)
+        self.assertIn("expected_count = 1", cases["facade_late_output_test"])
+        browser = cases["facade_browser_test"]
+        self.assertIn("expected_count = 1", browser)
+        self.assertIn("ignored = True", browser)
+        self.assertIn('"EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web"', browser)
+        self.assertIn('"TIDEPOOL_BROWSER_DRIVER": "$(location //build/testing/browser:driver_bundle)/driver.mjs"', browser)
+        self.assertIn('"TIDEPOOL_BROWSER_NODE": "$(exe toolchains//:browser_node)"', browser)
+        self.assertIn('"PLAYWRIGHT_BROWSERS_PATH": "$(location toolchains//:playwright_browsers)"', browser)
+        self.assertIn('"toolchains//:browser_test_closure"', browser)
         self.assertNotIn("codex-shoal-protocol", facade_buck)
         support_buck, support_groups = self.groups("bridge/testing")
         self.assertIn('name = "tidepool_testing"', support_buck)
