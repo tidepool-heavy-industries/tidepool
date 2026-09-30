@@ -5,16 +5,20 @@ module Tidepool.PlannedDeclaration
   ( PlannedDeclaration, plannedModule, plannedSource, plannedCheckPlan
   , preparePlannedDeclaration
   , PlannedDeclarationInventory, plannedExports, plannedInstances
+  , plannedOriginalOwner, plannedInterfaceFingerprint, plannedFamilyClosure
+  , renderPlannedDeclarationInventory
   , certifyPlannedDeclaration
   , transformPlannedDeclarationImports
   ) where
 
 import Control.Monad (forM, unless)
 import Data.Char (isSpace)
-import Data.List (intercalate, isPrefixOf, nub, tails)
+import Data.List (intercalate, isPrefixOf, nub, sort, tails)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import GHC (ParsedModule(..), ModSummary(ms_hspp_opts))
+import GHC.Core.Coercion.Axiom (coAxiomName)
+import GHC.Core.FamInstEnv (FamInst(..))
 import GHC.Data.Maybe (MaybeErr(..))
 import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_HUG, hscEPS, hsc_home_unit, hsc_unit_env)
 import GHC.Driver.Session (xopt)
@@ -48,7 +52,9 @@ import Tidepool.Binders
 import Tidepool.DeclarationJoin
   ( DeclarationExport(..), DeclarationKind(..), ExportIdentity(..), ExportNamespace(..), exportIdentity
   , InstanceInventory(..), ClassInstanceEvidence(..), JoinDecision(..)
-  , interfaceExports, interfaceInventory, validateRetainedFamilyInstances )
+  , interfaceExports, interfaceInventory, validateRetainedFamilyInstances
+  , renderDeclarationSelection )
+import Tidepool.Json (jsonString)
 import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString, scaffoldTargetName )
 
@@ -64,6 +70,7 @@ data PlannedDeclarationInventory = PlannedDeclarationInventory
   , plannedInstances :: InstanceInventory
   , inventoryOwner :: Module
   , inventoryInterface :: Fingerprint
+  , plannedFamilyClosure :: [ExportIdentity]
   } deriving (Eq)
 
 instance Show PlannedDeclarationInventory where
@@ -71,6 +78,25 @@ instance Show PlannedDeclarationInventory where
     (unitString (moduleUnit (inventoryOwner inventory))
     ,moduleNameString (moduleName (inventoryOwner inventory))
     ,plannedExports inventory, plannedInstances inventory, inventoryInterface inventory)
+
+plannedOriginalOwner :: PlannedDeclarationInventory -> (String, String)
+plannedOriginalOwner inventory =
+  (unitString (moduleUnit (inventoryOwner inventory))
+  ,moduleNameString (moduleName (inventoryOwner inventory)))
+
+plannedInterfaceFingerprint :: PlannedDeclarationInventory -> String
+plannedInterfaceFingerprint = show . inventoryInterface
+
+renderPlannedDeclarationInventory :: PlannedDeclarationInventory -> String
+renderPlannedDeclarationInventory inventory = "{" ++ intercalate ","
+  [ jsonString key ++ ":" ++ value
+  | (key, value) <-
+    [("original_unit", jsonString unit), ("original_module", jsonString owner)
+    ,("interface_fingerprint", jsonString (plannedInterfaceFingerprint inventory))
+    ,("selection", renderDeclarationSelection (plannedExports inventory)
+      (plannedInstances inventory) (plannedFamilyClosure inventory))]
+  ] ++ "}"
+  where (unit, owner) = plannedOriginalOwner inventory
 
 -- The wrapper and module reservation are frozen by the caller's offer. The
 -- plan comes from the existing cell parser; source ordinals remain intact in
@@ -172,7 +198,9 @@ certifyPlannedDeclaration planned env = case
               && all (all owns . instanceSelectedAxioms) (inventoryClasses inventory))
             (Left "planned original instance inventory has a foreign owner")
           case familyCheck of
-            JoinAccepted -> Right (PlannedDeclarationInventory exports inventory owner (mi_iface_hash (mi_final_exts iface)))
+            JoinAccepted -> Right (PlannedDeclarationInventory exports inventory owner
+              (mi_iface_hash (mi_final_exts iface))
+              (sort (nub (map (exportIdentity . coAxiomName . fi_axiom) families))))
             JoinRejected _ diagnostic -> Left diagnostic
 
 -- The checking recipe retains historical imports alongside the new original

@@ -1,4 +1,5 @@
 {-# LANGUAGE GADTs, TypeFamilies, FlexibleInstances #-}
+import qualified RetainedFamily
 data Box where
   Box :: Int -> Box
 type family Payload a

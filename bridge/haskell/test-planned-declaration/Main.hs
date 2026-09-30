@@ -42,11 +42,21 @@ main = withScratch $ \work -> do
   let originalFile = work </> "Tidepool/Session/Lib/G7.hs"
       checkFile = work </> "PlannedCheck.hs"
   createDirectoryIfMissing True (work </> "Tidepool/Session/Lib")
+  retainedFamily <- readFile "test-planned-declaration/fixtures/RetainedFamily.hs"
+  writeFile (work </> "RetainedFamily.hs") retainedFamily
   writeFile originalFile (plannedSource planned)
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty
     CertifyHomeProductsCompile Nothing originalFile [work] Nothing
   certified <- certifyPlannedDeclaration planned (prHscEnv (pprPipelineResult original))
     >>= either fail pure
+  unless (snd (plannedOriginalOwner certified) == originalName
+      && not (null (plannedInterfaceFingerprint certified))
+      && all (`elem` plannedFamilyClosure certified) (inventoryFamilies (plannedInstances certified))
+      && any ((== "RetainedFamily") . exportModule) (plannedFamilyClosure certified)
+      && "\"record_parent\":" `isInfixOf` renderPlannedDeclarationInventory certified
+      && "\"family_closure\":" `isInfixOf` renderPlannedDeclarationInventory certified
+      && "\"selected_axioms\":" `isInfixOf` renderPlannedDeclarationInventory certified) $
+    fail "planned original receipt omitted compiler inventory or exact owner evidence"
   unless (all ((== originalName) . exportModule . exportHead) (plannedExports certified)
       && all ((/= "__result") . exportOccurrence . exportHead) (plannedExports certified)
       && not (null (inventoryClasses (plannedInstances certified)))

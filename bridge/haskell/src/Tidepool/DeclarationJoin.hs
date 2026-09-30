@@ -11,6 +11,7 @@ module Tidepool.DeclarationJoin
   , DeclarationInventory(..), DeclarationOperation(..), DeclarationInventoryOutcome(..)
   , readDeclarationOperation, encodeDeclarationInventory, inspectDeclarationArtifacts
   , renderDeclarationInventoryOutcome
+  , renderDeclarationSelection
   ) where
 
 import Codec.CBOR.Decoding
@@ -711,6 +712,15 @@ renderDeclarationInventoryOutcome outcome = jsonObject
       [ ("artifact", artifactJson (inventoryArtifact inventory))
       , ("exports", jsonArray (map exportJson (inventoryExports inventory)))
       , ("instances", instancesJson (inventoryInstances inventory)) ]
+
+-- The same-offer original declaration receipt uses the same identity,
+-- instance and retained-family encoding as source-free artifact inspection.
+renderDeclarationSelection :: [DeclarationExport] -> InstanceInventory -> [ExportIdentity] -> String
+renderDeclarationSelection exports instances families = jsonObject
+  [ ("exports", jsonArray (map exportJson exports))
+  , ("instances", instancesJson instances)
+  , ("family_closure", jsonArray (map identityJson families))
+  ]
 
 jsonObject :: [(String, String)] -> String
 jsonObject pairs = "{" ++ intercalate "," [jsonString key ++ ":" ++ value | (key, value) <- pairs] ++ "}"
