@@ -6537,34 +6537,6 @@ where
             .await
     }
 
-    pub(crate) async fn remint_checkpoint_child_scope(
-        &self,
-        context: crate::ActorSessionContext,
-        checkpoint_scope: tidepool_codegen::scope::ScopeId,
-        provisional_scope: tidepool_codegen::scope::ScopeId,
-    ) -> Result<tidepool_codegen::scope::ScopeId, ResidentActorWorkbenchError> {
-        let source_scope = context.placement.lexical_scope;
-        self.access
-            .with_machine(context, move |session, _, _| {
-                let scope = session
-                    .mint_detached_scope(checkpoint_scope)
-                    .ok_or_else(|| {
-                        ResidentActorWorkbenchError::ActorProtocol(
-                            "checkpoint scope is no longer live".into(),
-                        )
-                    })?;
-                if !session.retain_scope_dependencies(source_scope, scope) {
-                    session.retire_scope(scope);
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "authored entry dependencies were unavailable".into(),
-                    ));
-                }
-                session.retire_scope(provisional_scope);
-                Ok(scope)
-            })
-            .await
-    }
-
     /// Capture the token root and an independently retained runtime capsule
     /// under one checkout. Admission may keep the capsule after token release.
     pub(crate) async fn capture_retained_context_scope(
