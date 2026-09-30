@@ -15,22 +15,23 @@ import qualified Data.ByteString as BS
 import Data.Foldable (fold)
 import Data.List (find)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, mapMaybe)
 import qualified Data.Set as Set
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
 import qualified Data.Text as T
 import Data.Word (Word64)
 import GHC.Driver.Env (HscEnv)
-import GHC.Unit.Module (mkModule, mkModuleName)
-import GHC.Unit.Module.ModIface (mi_decls)
+import GHC.Unit.Module (Module, mkModule, mkModuleName)
+import GHC.Unit.Module.ModIface (ModIface, mi_decls, mi_exports)
 import GHC.Unit.Module.Location (ml_hi_file)
 import GHC.Unit.Types (stringToUnit)
-import GHC.Iface.Syntax (IfaceDecl(..))
-import GHC.Iface.Env (lookupOrig)
+import GHC.Iface.Syntax (IfaceDecl(..), ifaceDeclImplicitBndrs)
 import GHC.Iface.Load (importDecl)
 import GHC.Tc.Utils.Monad (initIfaceLoad)
-import GHC.Types.Name (nameModule_maybe, nameOccName)
-import GHC.Types.Name.Occurrence (mkVarOcc, isVarOcc)
+import GHC.Types.Name (Name, getName, nameModule_maybe, nameOccName, wiredInNameTyThing_maybe)
+import GHC.Types.Name.Occurrence (OccName, mkVarOcc, isVarOcc)
+import GHC.Types.Avail (availNames)
+import GHC.Types.TyThing (TyThing(..), implicitTyThings)
 import GHC.Data.Maybe (MaybeErr(..))
 import Numeric (showHex)
 
@@ -252,27 +253,8 @@ packageOwner env packageRef identity
             Right (iface, location)
               | ml_hi_file location /= packagePath witness -> pure (Failed ())
               | otherwise -> do
-                  let occurrence = mkVarOcc (T.unpack (symbolOccurrence identity))
-                      declarations =
-                        [ original
-                        | (_, IfaceId { ifName = original }) <- mi_decls iface
-                        , nameModule_maybe original == Just owner
-                        , isVarOcc (nameOccName original)
-                        , nameOccName original == occurrence ]
-                  -- Known-key representation bindings are decoded with their
-                  -- canonical GHC Name. Reconstructing one with lookupOrig
-                  -- before loading its interface can mint a different Unique.
-                  original <- case declarations of
-                    [canonical] -> pure (Just canonical)
-                    [] -> Just <$> initIfaceLoad env (lookupOrig owner occurrence)
-                    _ -> pure Nothing
-                  case original of
-                    Nothing -> pure (Failed ())
-                    Just name -> do
-                      result <- initIfaceLoad env (importDecl name)
-                      pure $ case result of
-                        Failed _ -> Failed ()
-                        Succeeded thing -> Succeeded thing
+                  canonicalPackageGlobal env owner iface
+                    (mkVarOcc (T.unpack (symbolOccurrence identity)))
           case selected of
             Failed _ -> pure (Left (refusal "selected package global is absent from loaded interface"))
             Succeeded _ -> do
@@ -290,6 +272,43 @@ packageOwner env packageRef identity
   where
     refusal reason = reason ++ ": " ++ T.unpack (symbolUnit identity) ++ ":"
       ++ T.unpack (symbolModule identity) ++ "." ++ T.unpack (symbolOccurrence identity)
+
+-- The interface supplies canonical Names, including known-key bindings.
+-- An implicit Id is authenticated by its defining parent declaration; wired
+-- parents are authenticated by the exact interface's exported canonical Name.
+-- Reconstructing a Name from Module/OccName can mint a different Unique.
+canonicalPackageGlobal :: HscEnv -> Module -> ModIface -> OccName
+  -> IO (MaybeErr () TyThing)
+canonicalPackageGlobal env owner iface wanted = do
+  let owned name = nameModule_maybe name == Just owner
+      declarations =
+        [ ifName declaration
+        | (_, declaration) <- mi_decls iface
+        , owned (ifName declaration)
+        , nameOccName (ifName declaration) == wanted
+            || wanted `elem` ifaceDeclImplicitBndrs declaration ]
+      wiredParents = mapMaybe wiredInNameTyThing_maybe
+        [ name | available <- mi_exports iface, name <- availNames available, owned name ]
+  parents <- mapM loadCanonical declarations
+  let things = [thing | Succeeded thing <- parents] ++ wiredParents
+      candidates = Map.fromList
+        [ (name, thing)
+        | parent <- things
+        , thing@(AnId _) <- parent : implicitTyThings parent
+        , let name = getName thing
+        , owned name, isVarOcc (nameOccName name), nameOccName name == wanted ]
+  pure $ case Map.elems candidates of
+    [thing] -> Succeeded thing
+    _ -> Failed ()
+  where
+    loadCanonical :: Name -> IO (MaybeErr () TyThing)
+    loadCanonical name = case wiredInNameTyThing_maybe name of
+      Just thing -> pure (Succeeded thing)
+      Nothing -> do
+        result <- initIfaceLoad env (importDecl name)
+        pure $ case result of
+          Failed _ -> Failed ()
+          Succeeded thing -> Succeeded thing
 
 encodeModule :: Product -> [(Word, [Encoding])] -> Encoding
 encodeModule product groups = array
