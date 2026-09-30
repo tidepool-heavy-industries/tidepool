@@ -262,6 +262,7 @@ pub struct ModuleCandidateOffer {
     include: Vec<PathBuf>,
     exact: Option<crate::declaration_context::ExactCompilationRequest>,
     checked_cell: Option<crate::checked_cell::CheckedCellSpecification>,
+    checked_item: Option<crate::checked_cell::CheckedItemOffer>,
 }
 
 impl ModuleCandidateOffer {
@@ -272,6 +273,7 @@ impl ModuleCandidateOffer {
             include: include.to_vec(),
             exact: None,
             checked_cell: None,
+            checked_item: None,
         }
     }
 
@@ -287,6 +289,7 @@ impl ModuleCandidateOffer {
             include: include.to_vec(),
             exact: Some(context.prepare_compilation(&scratch.join("exact-scope"), producer)?),
             checked_cell: None,
+            checked_item: None,
         })
     }
 
@@ -308,6 +311,40 @@ impl ModuleCandidateOffer {
                 Some(authorization),
             )?),
             checked_cell: Some(specification),
+            checked_item: None,
+        })
+    }
+
+    pub fn select_checked_item(
+        producer: &[u8],
+        include: &[PathBuf],
+        scratch: &Path,
+        context: Arc<crate::declaration_join::ExactDeclarationContext>,
+        item: crate::checked_cell::ExactCheckedItem,
+        prefix: crate::checked_cell::ExactCompiledPrefix,
+        runtime_prefix_digest: [u8; 32],
+        generation: u64,
+        templates: &[(String, String)],
+    ) -> Result<Self, CompileError> {
+        let checked_item = crate::checked_cell::CheckedItemOffer {
+            item,
+            prefix,
+            runtime_prefix_digest,
+            generation,
+        };
+        checked_item.validate_templates(templates)?;
+        let authorization = checked_item.authorization(producer, context.semantic_sha256())?;
+        Ok(Self {
+            selected: None,
+            producer: producer.to_vec(),
+            include: include.to_vec(),
+            exact: Some(context.prepare_compilation_with_authorization(
+                &scratch.join("exact-scope"),
+                producer,
+                Some(authorization),
+            )?),
+            checked_cell: None,
+            checked_item: Some(checked_item),
         })
     }
 
@@ -330,6 +367,35 @@ impl ModuleCandidateOffer {
             &exact.request_sha256,
             specification,
             exact.validate_outputs(root)?,
+        )
+    }
+
+    pub fn admit_checked_fold(
+        &self,
+        root: &Path,
+        cell: &Arc<crate::checked_cell::ExactCheckedCell>,
+        generation: u64,
+        source: &str,
+        target: &PreparedProgram,
+    ) -> Result<Arc<crate::checked_cell::ExactCompiledItem>, CompileError> {
+        if self.checked_cell.is_none() {
+            return Err(CompileError::ExtractFailed(
+                "ordinary offer cannot certify a checked fold".into(),
+            ));
+        }
+        let exact = self
+            .exact
+            .as_ref()
+            .ok_or_else(|| CompileError::ExtractFailed("checked fold lacks exact scope".into()))?;
+        crate::checked_cell::seal_checked_fold(
+            root,
+            &self.producer,
+            exact.semantic_sha256,
+            &exact.request_sha256,
+            cell,
+            generation,
+            source,
+            target,
         )
     }
 
@@ -373,6 +439,7 @@ pub struct SealedTurnProducts {
     pub pending_imports: Vec<certified_products::PendingImportOwner>,
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
     pub package_interfaces: certified_products::CertifiedTargetPackageInterfaces,
+    pub checked_execution: Option<Arc<crate::checked_cell::ExactCompiledItem>>,
 }
 
 fn has_ready_home_module(evidence: &cache::DependencyEvidence) -> bool {
@@ -537,6 +604,22 @@ pub fn seal_turn_outputs(
         );
     }
     Ok(Some(SealedTurnProducts {
+        checked_execution: offer
+            .checked_item
+            .as_ref()
+            .map(|item| {
+                item.seal(
+                    output_dir,
+                    &offer
+                        .exact
+                        .as_ref()
+                        .expect("checked offer has exact scope")
+                        .request_sha256,
+                    source,
+                    prepared,
+                )
+            })
+            .transpose()?,
         certified_groups: certified.groups,
         pending_imports,
         recovery_products: certified.recovery_products,

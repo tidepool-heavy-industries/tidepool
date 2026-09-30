@@ -2,7 +2,7 @@
 
 module Tidepool.ExactScope
   ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..)
-  , CheckedCellAdmission(..)
+  , CheckedCellAdmission(..), CheckedItemAdmission(..)
   , readExactScope, revalidateExactScope
   , writeExactCompilation
   ) where
@@ -26,6 +26,7 @@ import System.Directory (getFileSize, createDirectory, createDirectoryIfMissing,
 import System.FilePath (isAbsolute, takeDirectory, (</>))
 import System.IO.Error (isAlreadyExistsError)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
+import Tidepool.CheckedCell (CheckedSignature(..), CheckedSignatureName(..))
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.PackageWitness
   ( readPackageImports, validatePackageImportRoot )
@@ -41,6 +42,7 @@ data ExactScope = ExactScope
   , scopeLexical :: [((String, String), [(String, String)])]
   , scopeProducts :: [ExactProduct]
   , scopeCheckedCell :: Maybe CheckedCellAdmission
+  , scopeCheckedItem :: Maybe CheckedItemAdmission
   } deriving (Eq, Show)
 
 data CheckedCellAdmission = CheckedCellAdmission
@@ -50,6 +52,22 @@ data CheckedCellAdmission = CheckedCellAdmission
   , checkedTurnTemplates :: [(String, String)]
   , checkedInjectedModules :: [String]
   , checkedReservedModules :: [String]
+  } deriving (Eq, Show)
+
+data CheckedItemAdmission = CheckedItemAdmission
+  { itemAdmissionDigest :: String
+  , itemCellReceiptDigest :: String
+  , itemIndex :: Word64
+  , itemSourceDigest :: String
+  , itemKind :: String
+  , itemBinders :: [String]
+  , itemTurnTemplates :: [(String,String)]
+  , itemInjectedModules :: [String]
+  , itemSignatures :: [CheckedSignature]
+  , itemExpressionLift :: Maybe String
+  , itemExpressionPresentation :: Maybe String
+  , itemGeneration :: Word64
+  , itemPrefixDigest :: String
   } deriving (Eq, Show)
 
 data ExactProduct = ExactProduct
@@ -217,17 +235,59 @@ decodeScope = do
           (exactUnit iface, exactModule iface) == (originalUnit originalProduct, originalModule originalProduct)
           && exactSha256 iface == originalIfaceSha256 originalProduct) interfaces) products)
     (fail "incomplete or conflicting exact owner closure")
-  checked <- if version == "1" then pure Nothing else do
-    array 7
+  (checked, checkedItem) <- if version == "1" then pure (Nothing,Nothing) else do
+    authCount <- decodeListLen
     purpose <- string
-    unless (purpose == "cell-check") (fail "unsupported exact compile purpose")
-    admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
-      <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
-      <*> bounded 4096 nonempty <*> bounded 4096 nonempty
-    unique "checked injected modules" (checkedInjectedModules admission)
-    unique "checked reserved modules" (checkedReservedModules admission)
-    pure (Just admission)
-  pure (ExactScope "" "" semantic interfaces lexical products checked)
+    case purpose of
+      "cell-check" -> do
+        unless (authCount == 7) (fail "invalid cell-check admission")
+        admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
+          <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
+          <*> bounded 4096 nonempty <*> bounded 4096 nonempty
+        unique "checked injected modules" (checkedInjectedModules admission)
+        unique "checked reserved modules" (checkedReservedModules admission)
+        pure (Just admission,Nothing)
+      "checked-item" -> do
+        unless (authCount == 13) (fail "invalid checked-item admission")
+        admissionDigest <- digestField
+        receiptDigest <- digestField
+        index <- decodeWord64
+        sourceDigest <- digestField
+        kind <- nonempty
+        unless (kind `elem` ["bind","expr"]) (fail "unsupported checked-item kind")
+        binders <- bounded 65536 nonempty
+        templates <- bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
+        injected <- bounded 4096 nonempty
+        signatures <- bounded 65536 signature
+        unique "checked item binders" binders
+        unique "checked item injected modules" injected
+        unique "checked item signatures" (map signatureKey signatures)
+        token <- peekTokenType
+        (liftPlan,presentation) <- if token == TypeNull then decodeNull >> pure (Nothing,Nothing) else do
+          array 6
+          _key <- nonempty
+          liftPlan <- nonempty
+          presentation <- nonempty
+          unless (kind == "expr" && liftPlan `elem` ["pure","effectful"] && presentation `elem` ["rendered","opaque"])
+            (fail "invalid checked expression plan")
+          _rendering <- string
+          _heads <- bounded 65536 (array 3 >> ((,,) <$> nonempty <*> nonempty <*> nonempty))
+          _imports <- bounded 4096 nonempty
+          pure (Just liftPlan,Just presentation)
+        generation <- decodeWord64
+        prefix <- digestField
+        pure (Nothing, Just (CheckedItemAdmission admissionDigest receiptDigest index sourceDigest kind binders
+          templates injected signatures liftPlan presentation generation prefix))
+      _ -> fail "unsupported exact compile purpose"
+  pure (ExactScope "" "" semantic interfaces lexical products checked checkedItem)
+  where
+    signature = do
+      array 3
+      key <- nonempty
+      rendering <- nonempty
+      names <- bounded 65536 (array 5 >> (CheckedSignatureName <$> nonempty <*> nonempty <*> nonempty <*> nonempty <*> nonempty))
+      unique "checked signature qualifiers" (map signatureQualifier names)
+      pure (CheckedSignature key rendering names)
 
 identity :: Decoder s SymbolIdentity
 identity = do

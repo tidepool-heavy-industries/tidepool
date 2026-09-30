@@ -29,7 +29,7 @@ use tidepool_extract_cmd::{ExtractCmd, SpawnError};
 use tidepool_toolchain::artifacts::{seal_turn_outputs, ModuleCandidateOffer};
 use tidepool_toolchain::certified_products::{PendingCertifiedGroup, PendingImportOwner};
 use tidepool_toolchain::checked_cell::{
-    CheckedCellSpecification, ExactCheckedCell, ExactCheckedItem,
+    CheckedCellSpecification, ExactCheckedCell, ExactCheckedItem, ExactCompiledItem,
 };
 use tidepool_toolchain::declaration_join::ExactDeclarationContext;
 use tidepool_toolchain::extract_module_name;
@@ -1620,12 +1620,73 @@ pub struct TurnCertification {
     /// Exact owned compiler products for recovery publication after admission.
     pub recovery_products: Vec<CertifiedRecoveryProduct>,
     pub(crate) checked_item: Option<ExactCheckedItem>,
+    pub(crate) checked_execution: Option<Arc<ExactCompiledItem>>,
 }
 
 impl TurnCertification {
     pub fn checked_item(&self) -> Option<&ExactCheckedItem> {
         self.checked_item.as_ref()
     }
+    pub fn checked_execution(&self) -> Option<&Arc<ExactCompiledItem>> {
+        self.checked_execution.as_ref()
+    }
+
+    pub(crate) fn validate_checked_bind(
+        &self,
+        target: &PreparedProgram,
+        generation: u64,
+        bound: &[BoundBinder],
+    ) -> Result<(), CompileError> {
+        let Some(execution) = self.checked_execution.as_ref() else {
+            if self.checked_item.is_some() {
+                return Err(CompileError::ExtractFailed(
+                    "checked item lacks a sealed execution recipe".into(),
+                ));
+            }
+            return Ok(());
+        };
+        if !execution.matches_target(target) || execution.generation() != generation {
+            return Err(CompileError::ExtractFailed(
+                "checked execution target or generation was edited".into(),
+            ));
+        }
+        let rows = bound
+            .iter()
+            .map(encode_bound_binder_authority)
+            .collect::<Vec<_>>();
+        execution.validate_bound_binders(&rows)
+    }
+}
+
+fn encode_bound_binder_authority(binder: &BoundBinder) -> CborValue {
+    let text = |value: &str| CborValue::Text(value.into());
+    CborValue::Array(vec![
+        text(&binder.name),
+        CborValue::Integer(binder.var_id.into()),
+        text(&binder.module),
+        text(match binder.tier {
+            ValueTier::ForceData => "ForceData",
+            ValueTier::RetainOpaque => "RetainOpaque",
+        }),
+        text(&binder.type_display),
+        binder
+            .root_head
+            .as_ref()
+            .map(|head| {
+                CborValue::Array(vec![text(&head.unit), text(&head.module), text(&head.name)])
+            })
+            .unwrap_or(CborValue::Null),
+        binder
+            .host_authority
+            .map(|authority| {
+                text(match authority {
+                    HostBindingAuthority::JsonValue => "JsonValue",
+                    HostBindingAuthority::Text => "Text",
+                    HostBindingAuthority::CommandJob => "CommandJob",
+                })
+            })
+            .unwrap_or(CborValue::Null),
+    ])
 }
 
 impl CompiledTurn {
@@ -2257,6 +2318,15 @@ pub fn check_cell_admitted(
         )
         .into());
     }
+    if fold
+        .as_ref()
+        .is_some_and(|fold| fold.gen != view.next_value_generation().0)
+    {
+        return Err(CompileError::ExtractFailed(
+            "checked fold has another runtime generation".into(),
+        )
+        .into());
+    }
     check_cell_impl(req, fold, Some(admission))
 }
 
@@ -2435,7 +2505,7 @@ fn check_cell_impl(
     // leaves the file absent) — a malformed file here is a real protocol
     // bug, not a fold rejection, so it is a hard decode error rather than a
     // silent fall back.
-    let folded = if fold.is_some() && turn_out_path.exists() {
+    let mut folded = if fold.is_some() && turn_out_path.exists() {
         Some(
             decode_turn_output_dir(temp.path(), &offer).map_err(|error| {
                 tidepool_toolchain::artifacts::retain_compiler_failure(
@@ -2448,6 +2518,29 @@ fn check_cell_impl(
     } else {
         None
     };
+    if let (
+        Some(cell),
+        Some(fold),
+        Some(TurnResult::Bind {
+            compiled,
+            wrapped_source,
+            ..
+        }),
+    ) = (&checked.authority, &fold, &mut folded)
+    {
+        let execution = offer.admit_checked_fold(
+            temp.path(),
+            cell,
+            fold.gen,
+            wrapped_source,
+            &compiled.prepared,
+        )?;
+        let certification = compiled.certification.as_mut().ok_or_else(|| {
+            CompileError::ExtractFailed("checked fold lacks sealed target products".into())
+        })?;
+        certification.checked_item = Some(execution.item().clone());
+        certification.checked_execution = Some(execution);
+    }
     if fold.is_some()
         && folded.is_none()
         && std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() == Ok("1")
@@ -2897,6 +2990,7 @@ fn read_compiled_turn(
             package_interfaces: sealed.package_interfaces,
             recovery_products: sealed.recovery_products,
             checked_item: None,
+            checked_execution: sealed.checked_execution,
         }),
     })
 }

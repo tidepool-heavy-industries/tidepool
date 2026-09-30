@@ -8,13 +8,14 @@ module Tidepool.CheckedCell
 
 import Codec.CBOR.Encoding (Encoding, encodeListLen, encodeString)
 import Control.Monad (forM, unless)
+import Data.IORef
 import Data.List (find, nubBy, sortOn)
 import qualified Data.Text as T
 import Data.Generics (everywhereM, mkM)
 import GHC
 import GHC.Core.Type (tyConsOfType)
 import GHC.Core.TyCon (tyConName)
-import GHC.Driver.Env (lookupType)
+import GHC.Driver.Env (lookupType, hsc_home_unit)
 import GHC.Driver.Env.Types (hsc_unit_env)
 import GHC.Iface.Env (lookupOrig)
 import GHC.Iface.Load (importDecl)
@@ -27,6 +28,7 @@ import GHC.Types.Name.Ppr (mkNamePprCtx)
 import GHC.Types.Name.Reader (RdrName(..), GlobalRdrEnv, emptyGlobalRdrEnv, rdrNameOcc)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Unit.Types (stringToUnit, unitString)
+import GHC.Unit.Home (isHomeUnit)
 import GHC.Utils.Outputable hiding ((<>), text)
 
 -- The rendering is parser input. Each external type-level Name has a private
@@ -35,7 +37,7 @@ data CheckedSignature = CheckedSignature
   { signatureKey :: String
   , signatureType :: String
   , signatureNames :: [CheckedSignatureName]
-  } deriving (Eq, Show)
+  } deriving (Eq, Ord, Show)
 
 data CheckedSignatureName = CheckedSignatureName
   { signatureQualifier :: String
@@ -101,23 +103,30 @@ rewriteCheckedAnnotations env annotations parsed = do
       found <- lookupType env name
       exists <- case found of
         Just _ -> pure True
+        Nothing | isHomeUnit (hsc_home_unit env) (moduleUnit owner) -> pure False
         Nothing -> initIfaceLoad env (importDecl name) >>= \loaded -> pure $ case loaded of
           MErr.Succeeded _ -> True
           MErr.Failed _ -> False
       unless exists (fail "checked signature Name is unavailable in the admitted environment")
       pure (entry, name)
     pure (binder, names)
-  rewritten <- everywhereM (mkM (rewriteSignature resolved)) (pm_parsed_source parsed)
+  counts <- newIORef []
+  rewritten <- everywhereM (mkM (rewriteSignature counts resolved)) (pm_parsed_source parsed)
+  seen <- readIORef counts
+  unless (sortOn id seen == sortOn id (map fst annotations))
+    (fail "generated checked annotation is missing or duplicated")
   pure parsed { pm_parsed_source = rewritten }
   where
-    rewriteSignature :: [(String, [(CheckedSignatureName, Name)])] -> Sig GhcPs -> IO (Sig GhcPs)
-    rewriteSignature resolved signature@(TypeSig extension binders ty) =
-      case [names | (binder, names) <- resolved,
+    rewriteSignature :: IORef [String] -> [(String, [(CheckedSignatureName, Name)])] -> Sig GhcPs -> IO (Sig GhcPs)
+    rewriteSignature counts resolved signature@(TypeSig extension binders ty) =
+      case [(binder,names) | (binder, names) <- resolved,
           map (occNameString . rdrNameOcc . unLoc) binders == [binder]] of
         [] -> pure signature
-        [names] -> TypeSig extension binders <$> everywhereM (mkM (rewriteType names)) ty
+        [(binder,names)] -> do
+          modifyIORef' counts (binder :)
+          TypeSig extension binders <$> everywhereM (mkM (rewriteType names)) ty
         _ -> fail "duplicate checked annotation binder"
-    rewriteSignature _ signature = pure signature
+    rewriteSignature _ _ signature = pure signature
 
     rewriteType :: [(CheckedSignatureName, Name)] -> HsType GhcPs -> IO (HsType GhcPs)
     rewriteType names ty@(HsTyVar extension promotion located) = case unLoc located of

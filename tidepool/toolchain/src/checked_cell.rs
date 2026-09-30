@@ -186,6 +186,93 @@ pub struct ExactCheckedItem {
     index: usize,
 }
 
+/// Compiler proofs for an ordered prefix. Runtime completion retains this
+/// value only after the corresponding native installation and execution.
+#[derive(Clone, Debug)]
+pub struct ExactCompiledPrefix {
+    cell: Arc<ExactCheckedCell>,
+    completed: Vec<Arc<ExactCompiledItem>>,
+}
+
+/// A checked recipe and its exact prepared target, issued together by the
+/// product-sealing entry point. Compiling alone makes no execution claim.
+#[derive(Debug)]
+pub struct ExactCompiledItem {
+    item: ExactCheckedItem,
+    target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
+    value_interface: Option<(String, Arc<[u8]>)>,
+    generation: u64,
+    bound_binders: Vec<Value>,
+}
+
+impl ExactCompiledItem {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub fn validate_bound_binders(&self, bound: &[Value]) -> Result<(), CompileError> {
+        if bound != self.bound_binders {
+            return Err(failure(
+                "compiled binder metadata was edited before execution",
+            ));
+        }
+        Ok(())
+    }
+    pub fn item(&self) -> &ExactCheckedItem {
+        &self.item
+    }
+    pub fn matches_target(
+        &self,
+        target: &tidepool_repr::execution_schema::PreparedProgram,
+    ) -> bool {
+        self.target.as_ref() == target
+    }
+    pub fn value_interface(&self) -> Option<(&str, &[u8])> {
+        self.value_interface
+            .as_ref()
+            .map(|(module, bytes)| (module.as_str(), bytes.as_ref()))
+    }
+}
+
+impl ExactCompiledPrefix {
+    pub fn next_item(&self) -> usize {
+        self.completed.len()
+    }
+    pub fn admission_digest(&self) -> [u8; 32] {
+        self.cell.admission_digest()
+    }
+    pub fn append(&self, completed: Arc<ExactCompiledItem>) -> Result<Self, CompileError> {
+        if completed.item.index != self.next_item()
+            || !Arc::ptr_eq(&completed.item.cell, &self.cell)
+        {
+            return Err(failure(
+                "compiled prefix is not the next item of its same cell",
+            ));
+        }
+        let mut next = self.clone();
+        next.completed.push(completed);
+        Ok(next)
+    }
+    pub fn injected_modules(&self) -> Vec<String> {
+        self.cell
+            .specification
+            .injected_modules
+            .iter()
+            .cloned()
+            .chain(self.completed.iter().filter_map(|completed| {
+                completed
+                    .value_interface
+                    .as_ref()
+                    .map(|(module, _)| module.clone())
+            }))
+            .collect()
+    }
+    pub fn completed_interfaces(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        self.completed
+            .iter()
+            .filter_map(|completed| completed.value_interface())
+    }
+}
+
 impl PartialEq for ExactCheckedItem {
     fn eq(&self, other: &Self) -> bool {
         self.index == other.index && Arc::ptr_eq(&self.cell, &other.cell)
@@ -215,8 +302,14 @@ impl ExactCheckedItem {
     pub fn same_cell(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.cell, &other.cell)
     }
-    pub(crate) fn cell(&self) -> &Arc<ExactCheckedCell> {
-        &self.cell
+    pub fn initial_prefix(&self) -> Result<ExactCompiledPrefix, CompileError> {
+        if self.index != 0 {
+            return Err(failure("a prefix must start at item zero"));
+        }
+        Ok(ExactCompiledPrefix {
+            cell: self.cell.clone(),
+            completed: Vec::new(),
+        })
     }
     pub fn validate_observations(
         &self,
@@ -239,6 +332,214 @@ impl ExactCheckedItem {
         }
         Ok(())
     }
+}
+
+pub(crate) fn seal_checked_fold(
+    root: &Path,
+    producer: &[u8],
+    context: [u8; 32],
+    request: &str,
+    cell: &Arc<ExactCheckedCell>,
+    generation: u64,
+    source: &str,
+    target: &tidepool_repr::execution_schema::PreparedProgram,
+) -> Result<Arc<ExactCompiledItem>, CompileError> {
+    cell.revalidate(producer, &context)?;
+    if cell.items.len() != 1
+        || cell.items[0].kind != CheckedItemKind::Bind
+        || hash(&read(root.join("checked-cell.cbor"), 8 * 1024 * 1024)?)
+            != hex(&cell.receipt_digest)
+    {
+        return Err(failure(
+            "fold is not the sole bind of its same checked offer",
+        ));
+    }
+    let item = cell.item(0)?;
+    CheckedItemOffer {
+        prefix: item.initial_prefix()?,
+        item,
+        runtime_prefix_digest: cell.admission_digest(),
+        generation,
+    }
+    .seal(root, request, source, target)
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CheckedItemOffer {
+    pub(crate) item: ExactCheckedItem,
+    pub(crate) prefix: ExactCompiledPrefix,
+    pub(crate) runtime_prefix_digest: [u8; 32],
+    pub(crate) generation: u64,
+}
+
+impl CheckedItemOffer {
+    pub(crate) fn authorization(
+        &self,
+        producer: &[u8],
+        context: [u8; 32],
+    ) -> Result<Value, CompileError> {
+        self.item.cell.revalidate(producer, &context)?;
+        if self.item.index != self.prefix.next_item()
+            || !Arc::ptr_eq(&self.item.cell, &self.prefix.cell)
+            || self.runtime_prefix_digest == [0; 32]
+        {
+            return Err(failure(
+                "checked item has another or incomplete completed prefix",
+            ));
+        }
+        if self.item.kind() == CheckedItemKind::Declaration {
+            return Err(failure(
+                "planned original declaration certificate is unavailable",
+            ));
+        }
+        let expected = &self.item.cell.items[self.item.index];
+        Ok(array([
+            text("checked-item"),
+            text(hex(&self.item.admission_digest())),
+            text(hex(&self.item.cell.receipt_digest)),
+            Value::Integer((self.item.index as u64).into()),
+            text(hash(self.item.source().as_bytes())),
+            text(match self.item.kind() {
+                CheckedItemKind::Bind => "bind",
+                CheckedItemKind::Expression => "expr",
+                CheckedItemKind::Declaration => "decl",
+            }),
+            Value::Array(self.item.binders().iter().map(text).collect()),
+            Value::Array(
+                self.item
+                    .cell
+                    .specification
+                    .turn_templates
+                    .iter()
+                    .map(|(kind, source)| array([text(kind), text(hash(source.as_bytes()))]))
+                    .collect(),
+            ),
+            Value::Array(self.prefix.injected_modules().iter().map(text).collect()),
+            Value::Array(
+                self.item
+                    .signatures()
+                    .iter()
+                    .map(encode_signature)
+                    .collect(),
+            ),
+            expected.expression.clone().unwrap_or(Value::Null),
+            Value::Integer(self.generation.into()),
+            text(hex(&self.runtime_prefix_digest)),
+        ]))
+    }
+    pub(crate) fn validate_templates(
+        &self,
+        templates: &[(String, String)],
+    ) -> Result<(), CompileError> {
+        if templates != &self.item.cell.specification.turn_templates {
+            return Err(failure("checked-item wrapper was edited after admission"));
+        }
+        Ok(())
+    }
+    pub(crate) fn seal(
+        &self,
+        root: &Path,
+        request: &str,
+        source: &str,
+        target: &tidepool_repr::execution_schema::PreparedProgram,
+    ) -> Result<Arc<ExactCompiledItem>, CompileError> {
+        let receipt = decode(&read(root.join("checked-item.cbor"), 4 * 1024 * 1024)?)?;
+        let fields = row(&receipt, 8)?;
+        if string(&fields[0])? != "TPEXACTITEM"
+            || string(&fields[1])? != "1"
+            || string(&fields[2])? != request
+            || string(&fields[3])? != hex(&self.item.admission_digest())
+            || string(&fields[4])? != hex(&self.item.cell.receipt_digest)
+            || fields[5] != Value::Integer((self.item.index as u64).into())
+            || string(&fields[6])? != hash(source.as_bytes())
+            || string(&fields[7])? != "tidepool-checked-recipe-1"
+        {
+            return Err(failure(
+                "checked-item recipe receipt differs from its same compiler offer",
+            ));
+        }
+        let turn = decode(&read(root.join("turn.cbor"), 32 * 1024 * 1024)?)?;
+        let turn = row(&turn, 2)?;
+        let bound_binders = match (self.item.kind(), string(&turn[0])?) {
+            (CheckedItemKind::Bind, "Bind") => {
+                let fields = row(&turn[1], 5)?;
+                if fields[0] != Value::Array(self.item.binders().iter().map(text).collect())
+                    || string(&fields[4])? != source
+                {
+                    return Err(failure(
+                        "compiled bind has another authored verdict or wrapper",
+                    ));
+                }
+                let bound = list(&fields[2], 65536)?.to_vec();
+                if bound.len() != self.item.binders().len() {
+                    return Err(failure("compiled binder inventory differs"));
+                }
+                for (value, binder) in bound.iter().zip(self.item.binders()) {
+                    let fields = row(value, 7)?;
+                    if string(&fields[0])? != binder
+                        || string(&fields[2])?
+                            != tidepool_repr::SessionModule::val(tidepool_repr::Generation(
+                                self.generation,
+                            ))
+                            .module_name()
+                    {
+                        return Err(failure(
+                            "compiled binding has another reserved native generation",
+                        ));
+                    }
+                }
+                bound
+            }
+            (CheckedItemKind::Expression, "Expr") => {
+                if string(&row(&turn[1], 3)?[2])? != source {
+                    return Err(failure("compiled expression wrapper differs"));
+                }
+                Vec::new()
+            }
+            _ => return Err(failure("compiled turn kind differs from checked item")),
+        };
+        let value_interface =
+            if self.item.kind() == CheckedItemKind::Bind && !self.item.binders().is_empty() {
+                let module =
+                    tidepool_repr::SessionModule::val(tidepool_repr::Generation(self.generation));
+                let bytes = read(
+                    root.join("admitted-values").join(module.relative_hi_path()),
+                    32 * 1024 * 1024,
+                )?;
+                Some((module.module_name(), bytes.into()))
+            } else {
+                None
+            };
+        Ok(Arc::new(ExactCompiledItem {
+            item: self.item.clone(),
+            target: Arc::new(target.clone()),
+            value_interface,
+            generation: self.generation,
+            bound_binders,
+        }))
+    }
+}
+
+fn encode_signature(signature: &ExactCheckedSignature) -> Value {
+    array([
+        text(&signature.key),
+        text(&signature.source),
+        Value::Array(
+            signature
+                .names
+                .iter()
+                .map(|name| {
+                    array([
+                        text(&name.qualifier),
+                        text(&name.unit),
+                        text(&name.module),
+                        text(&name.namespace),
+                        text(&name.occurrence),
+                    ])
+                })
+                .collect(),
+        ),
+    ])
 }
 
 pub(crate) fn admit_checked_cell(

@@ -130,7 +130,7 @@ import Data.Generics (everything, mkQ)
 import Data.Foldable (toList)
 import Data.Word (Word64)
 import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellDisplayTarget(..), CellGenericDeclaration(..), CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), omitCellGenericDeclarations, omitCellDisplayDeclarations)
-import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature)
+import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
 import Tidepool.Introspection (normalizeLookupWildcards)
@@ -669,6 +669,7 @@ data PipelineVariant = PipelineVariant
   }
 
 data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile
+  | CheckedItemCompile [(String,CheckedSignature)]
   deriving (Eq, Ord, Show)
 
 transformFor :: CompilePurpose -> ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
@@ -676,6 +677,9 @@ transformFor GeneralCompile _ _ _ = pure
 transformFor CertifyHomeProductsCompile _ _ _ = pure
 transformFor LookupTypeCompile target _ summary
   | ms_mod_name summary == target = pure . normalizeLookupWildcards
+  | otherwise = pure
+transformFor (CheckedItemCompile annotations) target env summary
+  | ms_mod_name summary == target = rewriteCheckedAnnotations env annotations
   | otherwise = pure
 
 -- | The seam values for one run, derived from the downsweep graph.
