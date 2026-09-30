@@ -28,7 +28,6 @@ import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Types.Avail (availNames)
 import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache)
 import GHC.Iface.Make (mkIfaceTc)
-import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
 import GHC.Unit.Module.ModIface (set_mi_extra_decls)
 import GHC.Unit.Module.Deps (imp_mods)
 import GHC.Unit.Finder (FindResult(Found), findImportedModule)
@@ -131,6 +130,7 @@ import Data.Foldable (toList)
 import Data.Word (Word64)
 import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellDisplayTarget(..), CellGenericDeclaration(..), CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), omitCellGenericDeclarations, omitCellDisplayDeclarations)
 import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations)
+import Tidepool.HomeProducts (hydrateCandidateHomeProducts)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
 import Tidepool.Introspection (normalizeLookupWildcards)
@@ -2391,6 +2391,13 @@ certifyModuleCandidates manifest graph targetPath = do
             [ (dependencyModuleName node, node)
             | node <- dependencyModules current
             , not (dependencyModuleBoot node) ]
+          bootSummaries = Map.fromList
+            [ (ms_mod_name summary,summary)
+            | ModuleNode _ summary <- mgModSummaries' graph
+            , ms_hsc_src summary == HsBootFile ]
+          bootModules = Map.fromList
+            [ (mkModuleName (dependencyModuleName node),node)
+            | node <- dependencyModules current, dependencyModuleBoot node ]
           candidateImportsMatch candidate node =
             sort (map importTuple (candidateImports candidate)) ==
               sort (map evidenceTuple (dependencyModuleImports node))
@@ -2457,13 +2464,19 @@ certifyModuleCandidates manifest graph targetPath = do
           requiredHome node =
             [ mkModuleName (dependencyImportName imported)
             | imported <- dependencyModuleImports node
-            , isJust (dependencyImportSelected imported)
-            , not (dependencyImportBoot imported) ]
-          noBootHome node = all (\imported ->
-            not (dependencyImportBoot imported && isJust (dependencyImportSelected imported)))
-            (dependencyModuleImports node)
+            , isJust (dependencyImportSelected imported) ]
+          requiredBoot node =
+            [ mkModuleName (dependencyImportName imported)
+            | imported <- dependencyModuleImports node
+            , isJust (dependencyImportSelected imported), dependencyImportBoot imported ]
+          bootClosed selected name = Map.member name bootSummaries
+            && case Map.lookup name bootModules of
+              Just node -> all (`Map.member` selected) (requiredHome node)
+                && all (`Map.member` bootSummaries) (requiredBoot node)
+              Nothing -> False
           shrink selected = Map.filter (\(_, _, node) ->
-            noBootHome node && all (`Map.member` selected) (requiredHome node)) selected
+            all (`Map.member` selected) (requiredHome node)
+              && all (bootClosed selected) (requiredBoot node)) selected
           closed selected = let smaller = shrink selected in
             if Map.keysSet smaller == Map.keysSet selected then smaller else closed smaller
           admitted = closed initial
@@ -2482,38 +2495,15 @@ certifyModuleCandidates manifest graph targetPath = do
             Right interfaces
               | any (mi_used_th . snd) interfaces -> pure Map.empty
               | otherwise -> do
-                  hydratedResult <- liftIO $ tryCandidateIO
-                    (hydrateExactScope env interfaces)
+                  let selectedBoots = [summary | (name,summary) <- Map.toList bootSummaries,
+                        Map.member name admitted]
+                  hydratedResult <- hydrateCandidateHomeProducts env interfaces
+                    [summary | (_,summary,_) <- Map.elems admitted] selectedBoots
                   case hydratedResult of
                     Left _ -> pure Map.empty
                     Right hydrated -> do
-                      let byName = Map.fromList
-                            [(exactModule artifact', iface)
-                            | (artifact', iface) <- interfaces]
-                      checked <- liftIO $ tryCandidateIO $ forM
-                        (Map.toList admitted) $ \(_, (_, summary, _)) -> do
-                          case Map.lookup (moduleNameString (ms_mod_name summary)) byName of
-                            Nothing -> pure False
-                            Just interface -> do
-                              decision <- checkOldIface
-                                (scopeRetainedHscEnv (ms_mod summary) hydrated)
-                                summary (Just interface)
-                              pure $ case decision of
-                                UpToDateItem _ -> True
-                                OutOfDateItem _ _ -> False
-                      case checked of
-                        Right results | and results -> do
-                          setSession hydrated
-                          pure (Map.map (\(candidate, _, _) -> candidate) admitted)
-                        _ -> pure Map.empty
-
-tryCandidateIO :: IO a -> IO (Either SomeException a)
-tryCandidateIO action = do
-  result <- try action
-  case result of
-    Left failure | Just (_ :: SomeAsyncException) <- fromException failure ->
-      throwIO failure
-    _ -> pure result
+                      setSession hydrated
+                      pure (Map.map (\(candidate, _, _) -> candidate) admitted)
 
 revalidateAcceptedCandidates :: [ModuleCandidate] -> IO Bool
 revalidateAcceptedCandidates candidates = and <$> forM candidates (\candidate -> do
