@@ -427,6 +427,10 @@ impl CertifiedTargetImage {
         })
     }
 
+    pub(crate) fn prepared(&self) -> &PreparedProgram {
+        &self.prepared
+    }
+
     pub(crate) fn globals(&self) -> &[tidepool_repr::execution_schema::GlobalDecl] {
         self.prepared.globals()
     }
@@ -2335,6 +2339,7 @@ impl PreparedEngine {
         program: ProgramId,
         exports: Vec<(SymbolIdentity, ValueId, Option<Signature>)>,
         required: &BTreeMap<SymbolIdentity, (ValueId, [u8; 32])>,
+        certified_exports: &BTreeMap<SymbolIdentity, [u8; 32]>,
     ) -> Result<BTreeMap<SymbolIdentity, CodeExport>, PreparedRuntimeError> {
         let mut staged = BTreeMap::<SymbolIdentity, CodeExport>::new();
         for (identity, value, entry) in exports {
@@ -2359,7 +2364,13 @@ impl PreparedEngine {
                     return Err(PreparedRuntimeError::Run(error));
                 }
             };
-            let interface_digest = required.get(&identity).map(|(_, digest)| *digest);
+            // Recovered package definitions may have no incoming edge in this
+            // target. Their export provenance comes from this same sealed
+            // target's package closure, before a later target imports them.
+            let interface_digest = certified_exports
+                .get(&identity)
+                .copied()
+                .or_else(|| required.get(&identity).map(|(_, digest)| *digest));
             staged.insert(
                 identity,
                 CodeExport {
@@ -2384,21 +2395,25 @@ impl PreparedEngine {
         self.machine
             .pin(program)
             .map_err(PreparedRuntimeError::Run)?;
-        let exports = match self.stage_code_exports(program, exports, &BTreeMap::new()) {
-            Ok(exports) => exports,
-            Err(error) => {
-                assert!(self.unpin(program), "refused install retains its pin");
-                // Integrity failures keep native code/heap custody intact.
-                // Cleanup must neither collect an unavailable machine nor
-                // replace the first retention failure with a cleanup failure.
-                if self.machine.disposition() == MachineDisposition::Reusable {
-                    if let Err(cleanup) = self.quiesce_and_collect_now() {
-                        tracing::warn!(?cleanup, "failed to collect refused export installation");
+        let exports =
+            match self.stage_code_exports(program, exports, &BTreeMap::new(), &BTreeMap::new()) {
+                Ok(exports) => exports,
+                Err(error) => {
+                    assert!(self.unpin(program), "refused install retains its pin");
+                    // Integrity failures keep native code/heap custody intact.
+                    // Cleanup must neither collect an unavailable machine nor
+                    // replace the first retention failure with a cleanup failure.
+                    if self.machine.disposition() == MachineDisposition::Reusable {
+                        if let Err(cleanup) = self.quiesce_and_collect_now() {
+                            tracing::warn!(
+                                ?cleanup,
+                                "failed to collect refused export installation"
+                            );
+                        }
                     }
+                    return Err(error);
                 }
-                return Err(error);
-            }
-        };
+            };
         self.programs.insert(program, facts);
         self.publish_evidence(program, plan);
         self.code_exports.extend(exports);
@@ -2781,6 +2796,20 @@ impl PreparedEngine {
             .collect();
         let mut target_packages = BTreeMap::new();
         let matches_target = target.package_interfaces.matches_target(&target.prepared);
+        let certified_exports = target_exports
+            .keys()
+            .filter_map(|binder| {
+                matches_target
+                    .then(|| {
+                        target
+                            .package_interfaces
+                            .interface_digest(&binder.unit, &binder.module)
+                    })
+                    .flatten()
+                    .filter(|digest| *digest != [0; 32])
+                    .map(|digest| (binder.clone(), digest))
+            })
+            .collect();
         for owner in target_owners.iter().chain(
             demanded
                 .iter()
@@ -2829,6 +2858,7 @@ impl PreparedEngine {
             exact_external,
             bindings,
             target_packages,
+            certified_exports,
         )
     }
 
@@ -2846,6 +2876,7 @@ impl PreparedEngine {
         exact_external: &HashMap<ImportOwner, PreparedHandle>,
         bindings: &BindingTable,
         target_packages: BTreeMap<SymbolIdentity, (ValueId, [u8; 32])>,
+        certified_exports: BTreeMap<SymbolIdentity, [u8; 32]>,
     ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
         if target.prepared.globals().len() != target_owners.len() {
             return Err(PreparedRuntimeError::CertifiedTargetOwners);
@@ -3192,7 +3223,12 @@ impl PreparedEngine {
                 package_updates,
                 exports: BTreeMap::new(),
             };
-            staged.exports = match self.stage_code_exports(target_id, exports, &target_packages) {
+            staged.exports = match self.stage_code_exports(
+                target_id,
+                exports,
+                &target_packages,
+                &certified_exports,
+            ) {
                 Ok(exports) => exports,
                 Err(error) => {
                     let tokens = std::mem::take(&mut staged.leases);
@@ -5768,6 +5804,7 @@ pub(super) mod tests {
                     (required.clone(), ValueId(999), None),
                 ],
                 &BTreeMap::from([(required.clone(), (ValueId(999), [9; 32]))]),
+                &BTreeMap::new(),
             )
             .err()
             .expect("required missing export must refuse the stage");
@@ -5783,6 +5820,7 @@ pub(super) mod tests {
             .stage_code_exports(
                 program,
                 vec![(required, ValueId(999), None)],
+                &BTreeMap::new(),
                 &BTreeMap::new(),
             )
             .unwrap();
@@ -5936,6 +5974,7 @@ pub(super) mod tests {
                 &HashMap::new(),
                 &BindingTable::new(),
                 admitted(),
+                BTreeMap::from([(optional.clone(), [9; 32])]),
             )
         };
         let bad = group(true, [9; 32]);
@@ -5954,7 +5993,7 @@ pub(super) mod tests {
         assert_eq!(engine.residency(), before);
         let mut aborted = install(&mut engine, &good).unwrap();
         assert_eq!(aborted.exports.len(), 2);
-        assert_eq!(aborted.exports[&optional].interface_digest, None);
+        assert_eq!(aborted.exports[&optional].interface_digest, Some([9; 32]));
         assert_eq!(aborted.exports[&package].interface_digest, Some([9; 32]));
         assert_eq!(engine.residency().code_exports, before.code_exports + 2);
         assert!(engine.code_exports.is_empty());
@@ -5984,7 +6023,10 @@ pub(super) mod tests {
             staged_residency.code_exports
         );
         assert_eq!(engine.persistent_roots_count(), staged_roots);
-        assert_eq!(engine.code_exports[&optional].interface_digest, None);
+        assert_eq!(
+            engine.code_exports[&optional].interface_digest,
+            Some([9; 32])
+        );
         assert_eq!(
             engine.code_exports[&package].interface_digest,
             Some([9; 32])
