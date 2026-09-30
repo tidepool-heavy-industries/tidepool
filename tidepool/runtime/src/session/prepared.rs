@@ -4437,6 +4437,10 @@ impl PreparedEngine {
             .map_err(PreparedRuntimeError::Run)
     }
 
+    pub(crate) fn pending_parcel_import_identities(&self, parcel: &Parcel) -> Vec<SymbolIdentity> {
+        self.machine.pending_parcel_import_identities(parcel)
+    }
+
     /// The persistent root slot behind a retained handle, by its bare
     /// cross-engine [`ValueHandle`] id -- `ResidentSession::run_rooted_entry`'s
     /// slot lookup, which only ever holds a `RootCustody`'s raw id (see
@@ -6346,7 +6350,15 @@ pub(super) mod tests {
         name: &str,
         generation: u64,
     ) -> BindingEntry {
-        let producer = producer_program();
+        rooted_program_fixture(state, name, generation, producer_program())
+    }
+
+    pub(in crate::session) fn rooted_program_fixture(
+        state: &mut super::super::PersistentSession,
+        name: &str,
+        generation: u64,
+        producer: PreparedProgram,
+    ) -> BindingEntry {
         let top = producer.entry();
         let program = state
             .install_prepared(producer)

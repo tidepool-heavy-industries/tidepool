@@ -1056,6 +1056,18 @@ fn binding_ids_of(mode: &PreparedTurnMode<'_>) -> Vec<SessionVarId> {
     }
 }
 
+fn parcel_library_binding(identity: &SymbolIdentity) -> Option<(SessionVarId, SessionModule)> {
+    let generation = identity
+        .module
+        .strip_prefix("Tidepool.Session.Lib.G")?
+        .parse::<u64>()
+        .ok()?;
+    Some((
+        SessionVarId::from_extract(session_var_id(&identity.module, &identity.occurrence)),
+        SessionModule::lib(Generation(generation)),
+    ))
+}
+
 fn is_checked_turn(code: &TurnCode<'_>) -> bool {
     code.certification
         .as_ref()
@@ -3059,32 +3071,49 @@ where
     /// provenance starts empty, the same choice already made for a value
     /// minted without a parked frame behind it (see
     /// [`Self::prepared_binding_handle`]).
+    #[allow(
+        clippy::expect_used,
+        reason = "exact identities are preflighted and native import mints live handles under this exclusive checkout"
+    )]
     pub fn import_parcel(
         &mut self,
         parcel: Parcel,
         owner: RealmId,
     ) -> Result<RootCustody, ResidentError> {
         self.settle_dropped_custody();
-        let Some(engine) = self.state.prepared_mut() else {
-            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
-                "cannot import a parcel: the prepared machine is not installed".to_string(),
-            ))));
-        };
+        let imports = self
+            .state
+            .prepared()
+            .ok_or_else(|| {
+                ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                    "cannot import a parcel: the prepared machine is not installed".into(),
+                )))
+            })?
+            .pending_parcel_import_identities(&parcel);
+        self.state.validate_new_binding_ids(
+            imports
+                .iter()
+                .filter_map(|identity| parcel_library_binding(identity).map(|(id, _)| id)),
+        )?;
+        let engine = self
+            .state
+            .prepared_mut()
+            .expect("the preflighted engine remains installed");
         let (handle, imports) = engine.import_parcel(parcel, owner)?;
-        // One root-slot lookup per import while `engine` is still borrowed;
-        // the actual binding-store record happens after, since
-        // `PersistentSession::bind` below needs `&mut self.state` and
-        // `engine` already holds it exclusively.
+        // Exact imports were checked before native allocation. Adopt their
+        // binding handles to ROOT before the caller's realm can close.
         let resolved: Vec<(
             SymbolIdentity,
             PreparedHandle,
             tidepool_codegen::old_space::RootSlot,
         )> = imports
             .into_iter()
-            .filter_map(|(identity, imported)| {
-                engine
-                    .handle_slot(imported.raw())
-                    .map(|root| (identity, imported, root))
+            .filter(|(identity, _)| parcel_library_binding(identity).is_some())
+            .map(|(identity, imported)| {
+                let root = engine
+                    .adopt(imported)
+                    .expect("a just-imported binding handle is live");
+                (identity, imported, root)
             })
             .collect();
         for (identity, imported, root) in resolved {
@@ -3095,20 +3124,8 @@ where
             // `code_exports`'s package-top fallback in `resolve_imports`
             // instead of a binding-store entry this session cannot mint a
             // meaningful generation for.
-            let Some(digits) = identity.module.strip_prefix("Tidepool.Session.Lib.G") else {
-                continue;
-            };
-            let Ok(generation) = digits.parse::<u64>() else {
-                continue;
-            };
-            let module = SessionModule::lib(Generation(generation));
-            // The SAME id a later cell's OWN reference to this name mints
-            // (`session_var_id` hashes `"<module>:<occ>"` identically on
-            // both sides -- see its doc comment), so a compiled program's
-            // `NVar` for `Lib.G<n>.foo` matches this entry by raw equality
-            // exactly as it would on the session the value came from.
-            let id =
-                SessionVarId::from_extract(session_var_id(&identity.module, &identity.occurrence));
+            let (id, module) =
+                parcel_library_binding(&identity).expect("selected exact library import");
             self.state.bind(BindingEntry {
                 name: BindingName(identity.occurrence.clone()),
                 id,
@@ -3121,7 +3138,7 @@ where
                 type_display: None,
                 defining_expr: None,
                 scope: ScopeId::ROOT,
-            })?;
+            }).expect("all library identities preflighted before native import under exclusive checkout");
             self.advance_public_visibility(ScopeId::ROOT);
         }
         Ok(RootCustody::new(
@@ -6241,6 +6258,180 @@ mod authored_publication_tests {
     }
 
     type TestSession = ResidentSession<frunk::HNil, EmptyOutput>;
+
+    fn parcel_source_fixture() -> (TestSession, Parcel, PreparedHandle, Vec<SymbolIdentity>) {
+        use tidepool_repr::execution_schema::{
+            testing, Atom, ExprFrame, GlobalDecl, GlobalId, Group, HeapRhs, ResultContract,
+            RuntimeRep, Signature, SignatureId, UpdatePolicy, ValueRef,
+        };
+        let mut source = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+        let mut identities = Vec::new();
+        for (generation, name) in [(481, "first"), (482, "second")] {
+            let mut entry = crate::session::prepared::tests::rooted_publication_fixture(
+                &mut source.state,
+                name,
+                generation,
+            );
+            entry.module = SessionModule::lib(Generation(generation));
+            entry.value.identity = testing::identity(&entry.module.module_name(), name);
+            entry.value.identity.unit = "main".into();
+            entry.id = parcel_library_binding(&entry.value.identity).unwrap().0;
+            identities.push(entry.value.identity.clone());
+            source.state.bind(entry).unwrap();
+        }
+        let mut wire = testing::wire_program();
+        wire.signatures[0] = Signature {
+            arguments: Vec::new(),
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        };
+        wire.globals = identities
+            .iter()
+            .zip([481, 482])
+            .map(|(identity, generation)| GlobalDecl {
+                identity: identity.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                required_generation: Some(generation),
+            })
+            .collect();
+        wire.expressions.nodes[0] =
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.identity = testing::identity("Parcel.Consumer", "payload");
+        top.identity.unit = "main".into();
+        top.binding.rhs = HeapRhs::Thunk {
+            signature: SignatureId(0),
+            update: UpdatePolicy::Memoize,
+            captures: Vec::new(),
+            body: 0,
+        };
+        let entry = crate::session::prepared::tests::rooted_program_fixture(
+            &mut source.state,
+            "payload",
+            483,
+            testing::prepare(wire).unwrap(),
+        );
+        let handle = entry.value.handle;
+        source.state.bind(entry).unwrap();
+        let parcel = source
+            .state
+            .prepared_mut()
+            .unwrap()
+            .export_parcel(handle.raw())
+            .unwrap();
+        (source, parcel, handle, identities)
+    }
+
+    #[test]
+    fn parcel_binding_conflict_refuses_before_native_import_and_partial_visibility() {
+        let (_source, parcel, _payload, identities) = parcel_source_fixture();
+        let mut destination = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+        let mut existing = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut destination.state,
+            "occupied",
+            484,
+        );
+        let id = parcel_library_binding(&identities[1]).unwrap().0;
+        existing.id = id;
+        let handle = existing.value.handle;
+        destination.state.bind(existing).unwrap();
+        assert_eq!(
+            destination
+                .state
+                .prepared()
+                .unwrap()
+                .pending_parcel_import_identities(&parcel),
+            identities
+        );
+        let residency = destination.residency();
+        let revision = destination.state.bindings().mutation_revision();
+        let modules = destination.state.live_val_modules();
+        assert!(matches!(destination.import_parcel(parcel, RealmId(481)),
+            Err(ResidentError::Session(SessionError::InvalidBindingIdentity(error))) if error.id == id));
+        assert_eq!(destination.residency(), residency);
+        assert_eq!(destination.state.bindings().mutation_revision(), revision);
+        assert_eq!(destination.state.live_val_modules(), modules);
+        assert!(destination
+            .state
+            .bindings()
+            .get(parcel_library_binding(&identities[0]).unwrap().0)
+            .is_none());
+        assert_eq!(
+            destination
+                .state
+                .prepared()
+                .unwrap()
+                .prepared_handle_of(handle.raw()),
+            Some(handle)
+        );
+    }
+
+    #[test]
+    fn parcel_imported_binding_handles_survive_caller_realm_and_repeat_import() {
+        let (mut source, parcel, payload, identities) = parcel_source_fixture();
+        let mut destination = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+        let bootstrap = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut destination.state,
+            "bootstrap",
+            485,
+        );
+        destination.state.bind(bootstrap).unwrap();
+        let owner = RealmId(481);
+        let custody = destination.import_parcel(parcel, owner).unwrap();
+        let revision = destination.state.bindings().mutation_revision();
+        let repeated = source
+            .state
+            .prepared_mut()
+            .unwrap()
+            .export_parcel(payload.raw())
+            .unwrap();
+        assert!(destination
+            .state
+            .prepared()
+            .unwrap()
+            .pending_parcel_import_identities(&repeated)
+            .is_empty());
+        let repeated_custody = destination.import_parcel(repeated, owner).unwrap();
+        assert_eq!(destination.state.bindings().mutation_revision(), revision);
+        destination.close_realm(owner);
+        for identity in &identities {
+            let entry = destination
+                .state
+                .bindings()
+                .get(parcel_library_binding(identity).unwrap().0)
+                .unwrap();
+            let handle = entry.value.handle;
+            assert_eq!(&entry.value.identity, identity);
+            assert_eq!(
+                destination
+                    .state
+                    .prepared()
+                    .unwrap()
+                    .prepared_handle_of(handle.raw()),
+                Some(handle)
+            );
+            // Trace the still-live copied closure after realm collection.
+            destination
+                .state
+                .prepared_mut()
+                .unwrap()
+                .export_parcel(handle.raw())
+                .unwrap();
+        }
+        drop(custody);
+        drop(repeated_custody);
+        destination.settle_dropped_custody();
+        for identity in identities {
+            assert!(destination
+                .state
+                .bindings()
+                .get(parcel_library_binding(&identity).unwrap().0)
+                .is_some());
+        }
+    }
 
     #[test]
     fn native_binding_identity_conflicts_refuse_before_install_and_snapshot() {
