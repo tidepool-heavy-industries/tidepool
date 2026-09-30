@@ -1050,13 +1050,28 @@ impl WorktreeManager {
         ]);
         git.try_run(cwd, &args)?;
         let workspace = cwd.join(".exomonad/workspace");
-        Self::normalize_submodule_gitfiles(git, &workspace)?;
+        let parent_common = inspect::git_common_dir(git, cwd)?;
+        let parent_git_dir = inspect::git_dir(git, cwd)?;
+        let expected_workspace_common = workspace_name
+            .as_ref()
+            .map(|name| parent_git_dir.join("modules").join(name));
+        Self::normalize_submodule_gitfiles(
+            git,
+            &workspace,
+            &parent_common,
+            &parent_git_dir,
+            expected_workspace_common.as_deref(),
+        )?;
         if let Some(name) = workspace_name.filter(|_| workspace.join(".git").is_file()) {
             // The command-scoped local URL gets an unpublished parent commit
             // into this clone, but Git also records it as origin. Restore the
             // initialized upstream in the child's clone alone.
             let url_key = format!("submodule.{name}.url");
             let upstream = git.try_run(cwd, &["config", "--local", "--get", &url_key])?;
+            let _workspace = git.write_scope(&workspace)?;
+            Self::require_repository_root(git, &workspace, &workspace)?;
+            let expected_common = parent_git_dir.join("modules").join(&name);
+            Self::require_repository_common_dir(git, &workspace, &expected_common)?;
             git.try_run(
                 &workspace,
                 &["remote", "set-url", "origin", upstream.trimmed()],
@@ -1065,15 +1080,26 @@ impl WorktreeManager {
         Ok(())
     }
 
-    fn normalize_submodule_gitfiles(git: &GitCli, workspace: &Path) -> Result<(), WorktreeError> {
+    fn normalize_submodule_gitfiles(
+        git: &GitCli,
+        workspace: &Path,
+        parent_common: &Path,
+        parent_git_dir: &Path,
+        expected_workspace_common: Option<&Path>,
+    ) -> Result<(), WorktreeError> {
         if !workspace.is_dir() {
             return Ok(());
         }
         // This host-backed subtree is mounted at a stable actor path. Relative
         // gitdir pointers written by Git at the host path would resolve from a
         // different parent in that view. Embedded .git directories stay intact.
-        let mut pending = vec![workspace.to_path_buf()];
-        while let Some(directory) = pending.pop() {
+        let mut pending = vec![(
+            workspace.to_path_buf(),
+            vec![parent_common.to_path_buf(), parent_git_dir.to_path_buf()],
+        )];
+        while let Some((directory, ancestor_common_dirs)) = pending.pop() {
+            let mut child_common_dirs = ancestor_common_dirs.clone();
+            let mut child_directories = Vec::new();
             for entry in std::fs::read_dir(&directory)
                 .map_err(|error| crate::storage::storage_failure(&directory, error))?
             {
@@ -1084,7 +1110,34 @@ impl WorktreeManager {
                     .map_err(|error| crate::storage::storage_failure(&entry.path(), error))?;
                 if entry.file_name() == ".git" {
                     if kind.is_file() {
+                        let _repository = git.write_scope(&directory)?;
+                        Self::require_repository_root(git, &directory, &directory)?;
                         let admin = inspect::git_dir(git, &directory)?;
+                        let common = inspect::git_common_dir(git, &directory)?;
+                        let canonical_common = fs::canonicalize(&common)
+                            .map_err(|error| crate::storage::storage_failure(&common, error))?;
+                        for ancestor in &ancestor_common_dirs {
+                            let canonical_ancestor =
+                                fs::canonicalize(ancestor).map_err(|error| {
+                                    crate::storage::storage_failure(ancestor, error)
+                                })?;
+                            if canonical_ancestor == canonical_common {
+                                return Err(crate::storage::storage_failure(
+                                    &directory,
+                                    format!(
+                                        "nested Git repository at {} resolves to an ancestor's Git metadata",
+                                        directory.display()
+                                    ),
+                                ));
+                            }
+                        }
+                        if directory == workspace {
+                            if let Some(expected) = expected_workspace_common {
+                                Self::require_repository_common_dir(git, &directory, expected)?;
+                            }
+                        }
+                        child_common_dirs.push(admin.clone());
+                        child_common_dirs.push(common);
                         let pointer = format!("gitdir: {}\n", admin.display());
                         tidepool_atomic_write::write_best_effort(&entry.path(), pointer.as_bytes())
                             .map_err(|error| {
@@ -1092,9 +1145,60 @@ impl WorktreeManager {
                             })?;
                     }
                 } else if kind.is_dir() {
-                    pending.push(entry.path());
+                    child_directories.push(entry.path());
                 }
             }
+            pending.extend(
+                child_directories
+                    .into_iter()
+                    .map(|child| (child, child_common_dirs.clone())),
+            );
+        }
+        Ok(())
+    }
+
+    fn require_repository_root(
+        git: &GitCli,
+        cwd: &Path,
+        expected_root: &Path,
+    ) -> Result<(), WorktreeError> {
+        let actual = inspect::work_tree(git, cwd)?;
+        let canonical_actual = fs::canonicalize(&actual)
+            .map_err(|error| crate::storage::storage_failure(&actual, error))?;
+        let canonical_expected = fs::canonicalize(expected_root)
+            .map_err(|error| crate::storage::storage_failure(expected_root, error))?;
+        if canonical_actual != canonical_expected {
+            return Err(crate::storage::storage_failure(
+                cwd,
+                format!(
+                    "Git repository root {} does not match expected child {}",
+                    canonical_actual.display(),
+                    canonical_expected.display()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn require_repository_common_dir(
+        git: &GitCli,
+        cwd: &Path,
+        expected_common: &Path,
+    ) -> Result<(), WorktreeError> {
+        let actual = inspect::git_common_dir(git, cwd)?;
+        let canonical_actual = fs::canonicalize(&actual)
+            .map_err(|error| crate::storage::storage_failure(&actual, error))?;
+        let canonical_expected = fs::canonicalize(expected_common)
+            .map_err(|error| crate::storage::storage_failure(expected_common, error))?;
+        if canonical_actual != canonical_expected {
+            return Err(crate::storage::storage_failure(
+                cwd,
+                format!(
+                    "Git repository metadata {} does not match expected submodule metadata {}",
+                    canonical_actual.display(),
+                    canonical_expected.display()
+                ),
+            ));
         }
         Ok(())
     }
@@ -1471,6 +1575,142 @@ impl WorktreeManager {
         handle: &WorktreeHandle,
     ) -> Result<crate::SubmissionObservation, WorktreeError> {
         crate::submission::observe(&self.git, handle)
+    }
+}
+
+#[cfg(test)]
+mod submodule_gitfile_tests {
+    use super::*;
+    use crate::testing::TestRepo;
+
+    #[test]
+    fn refuses_workspace_gitfile_that_resolves_to_parent_metadata() {
+        let parent = TestRepo::init().unwrap();
+        parent
+            .git()
+            .try_run(
+                parent.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://example.invalid/root.git",
+                ],
+            )
+            .unwrap();
+        parent
+            .writer()
+            .commit_file(
+                ".gitmodules",
+                "[submodule \"workspace\"]\n\tpath = .exomonad/workspace\n\turl = /tmp/not-used\n",
+                "declare workspace submodule",
+            )
+            .unwrap();
+        let workspace = parent.path().join(".exomonad/workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(
+            workspace.join(".git"),
+            format!("gitdir: {}\n", parent.path().join(".git").display()),
+        )
+        .unwrap();
+
+        let before = parent
+            .git()
+            .try_run(parent.path(), &["remote", "get-url", "origin"])
+            .unwrap();
+        let failure =
+            WorktreeManager::initialize_submodules(parent.git(), parent.path(), parent.path())
+                .unwrap_err();
+
+        assert!(failure.to_string().contains("ancestor's Git metadata"));
+        let after = parent
+            .git()
+            .try_run(parent.path(), &["remote", "get-url", "origin"])
+            .unwrap();
+        assert_eq!(after.trimmed(), before.trimmed());
+    }
+
+    #[test]
+    fn normalizes_valid_linked_workspace_submodule_without_touching_parent_origin() {
+        let child = TestRepo::init().unwrap();
+        child
+            .writer()
+            .commit_file("README", "child\n", "child seed")
+            .unwrap();
+
+        let parent = TestRepo::init().unwrap();
+        parent
+            .git()
+            .try_run(
+                parent.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://example.invalid/root.git",
+                ],
+            )
+            .unwrap();
+        parent
+            .git()
+            .try_run(
+                parent.path(),
+                &[
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "add",
+                    child.path().to_str().unwrap(),
+                    ".exomonad/workspace",
+                ],
+            )
+            .unwrap();
+        parent
+            .writer()
+            .commit_file("root.txt", "root\n", "parent seed")
+            .unwrap();
+
+        let target_root = tempfile::tempdir().unwrap();
+        let target = target_root.path().join("target");
+        parent
+            .git()
+            .try_run(
+                parent.path(),
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "test/submodule-target",
+                    target.to_str().unwrap(),
+                    "HEAD",
+                ],
+            )
+            .unwrap();
+        let before = parent
+            .git()
+            .try_run(parent.path(), &["remote", "get-url", "origin"])
+            .unwrap();
+
+        WorktreeManager::initialize_submodules(parent.git(), &target, parent.path()).unwrap();
+
+        let workspace = target.join(".exomonad/workspace");
+        assert_eq!(
+            fs::canonicalize(inspect::work_tree(parent.git(), &workspace).unwrap()).unwrap(),
+            fs::canonicalize(&workspace).unwrap()
+        );
+        let expected_common = inspect::git_dir(parent.git(), &target)
+            .unwrap()
+            .join("modules/.exomonad/workspace");
+        assert_eq!(
+            fs::canonicalize(inspect::git_common_dir(parent.git(), &workspace).unwrap()).unwrap(),
+            fs::canonicalize(expected_common).unwrap()
+        );
+        let after = parent
+            .git()
+            .try_run(parent.path(), &["remote", "get-url", "origin"])
+            .unwrap();
+        assert_eq!(after.trimmed(), before.trimmed());
     }
 }
 
