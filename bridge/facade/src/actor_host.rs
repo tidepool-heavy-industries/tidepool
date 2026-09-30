@@ -45,7 +45,7 @@ mod hosted_tools_tests;
 mod jev_tests;
 #[cfg(all(test, feature = "codex-compat"))]
 mod lookup_availability_tests;
-#[cfg(all(test, feature = "codex-compat"))]
+#[cfg(test)]
 mod m1_host_tests;
 #[cfg(all(test, feature = "codex-compat"))]
 mod observation_budget_tests;
