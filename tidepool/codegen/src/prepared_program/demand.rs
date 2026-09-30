@@ -503,7 +503,7 @@ impl<'a> SealedDemand<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_repr::execution_schema::{testing, GlobalDecl, RuntimeRep};
+    use tidepool_repr::execution_schema::{GlobalDecl, RuntimeRep, testing};
 
     fn group(name: &str, ordinal: u32, imports: &[&str]) -> CertifiedGroup {
         let mut wire = testing::wire_program();
@@ -573,11 +573,82 @@ mod tests {
         assert_eq!(first.len(), 2);
         assert_eq!(registry.misses(), 2);
         let second = demand.compile(&registry).unwrap();
-        assert!(first
-            .iter()
-            .zip(&second)
-            .all(|(a, b)| Arc::ptr_eq(&a.image, &b.image)));
+        assert!(
+            first
+                .iter()
+                .zip(&second)
+                .all(|(a, b)| Arc::ptr_eq(&a.image, &b.image))
+        );
         assert_eq!(registry.hits(), 2);
+    }
+
+    #[test]
+    fn late_source_demand_installs_new_group_without_recompiling_or_replacing_first() {
+        use crate::prepared_program::{
+            BatchProgram, PreparedCallOptions, PreparedMachine, PreparedMachineOptions,
+            PreparedResult,
+        };
+        use crate::suspension::RealmId;
+        use tidepool_repr::execution_schema::ValueId;
+
+        let groups = [
+            group("first", 4, &[]),
+            group("later", 9, &[]),
+            group("unavailable", 12, &["missing"]),
+        ];
+        let inventory = GroupInventory::new(&groups).unwrap();
+        let registry = ImageRegistry::new();
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        let mut installed = Vec::new();
+        for name in ["first", "later"] {
+            let demand = inventory.seal([source(name)]).unwrap();
+            let images = demand.compile(&registry).unwrap();
+            assert_eq!(images.len(), 1);
+            assert_eq!(
+                images[0].group().original_ordinal(),
+                groups[installed.len()].original_ordinal()
+            );
+            let programs = machine
+                .install_shared_batch(vec![BatchProgram {
+                    image: Arc::clone(images[0].image()),
+                    imports: vec![],
+                }])
+                .unwrap();
+            installed.push(programs[0]);
+            for program in &installed {
+                let value = machine
+                    .run_entry_retained(
+                        *program,
+                        ValueId(0),
+                        &[],
+                        PreparedCallOptions {
+                            observation_budget: 0,
+                            collect_before_observation: false,
+                        },
+                        RealmId::ROOT,
+                    )
+                    .unwrap();
+                assert_eq!(value.values, vec![PreparedResult::Scalar(42)]);
+            }
+            assert_eq!(machine.residency().programs, installed.len());
+            assert_eq!(registry.misses(), installed.len() as u64);
+        }
+        let first = inventory.seal([source("first")]).unwrap();
+        let reused = first.compile(&registry).unwrap();
+        assert_eq!(registry.misses(), 2);
+        assert_eq!(registry.hits(), 1);
+        assert_eq!(reused[0].group().original_ordinal(), 4);
+        assert!(matches!(
+            inventory.seal([source("unavailable")]),
+            Err(DemandError::MissingSource(missing)) if missing == source("missing")
+        ));
+        assert_eq!(machine.residency().programs, 2);
+        let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(retired.programs.len(), 2);
+        assert_eq!(machine.residency().programs, 0);
     }
 
     #[test]
