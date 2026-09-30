@@ -607,7 +607,13 @@ fn value_ref_rep(
             .globals()
             .get(id.0 as usize)
             .map(|declaration| declaration.rep)
-            .ok_or(CompileError::Unsupported(super::Unsupported::Global(*id))),
+            .ok_or_else(|| {
+                CompileError::Unsupported(super::unsupported_global(
+                    program,
+                    *id,
+                    super::GlobalRefusalPhase::MissingCaptureDeclaration,
+                ))
+            }),
     }
 }
 

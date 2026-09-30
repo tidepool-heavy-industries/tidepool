@@ -367,11 +367,13 @@ fn add_relocation(
     relocations: &mut Vec<StaticRelocation>,
 ) -> Result<(), CompileError> {
     let ValueRef::Local(id) = value else {
-        return Err(CompileError::Unsupported(Unsupported::Global(
+        return Err(CompileError::Unsupported(super::unsupported_global(
+            &plan.program,
             match value {
                 ValueRef::Global(id) => *id,
                 ValueRef::Local(_) => unreachable!(),
             },
+            super::GlobalRefusalPhase::StaticManagedCapture,
         )));
     };
     let Some((target_offset, target_descriptor)) = top_objects.get(id) else {
@@ -394,11 +396,13 @@ fn resolve_address(
     value: &ValueRef,
 ) -> Result<usize, CompileError> {
     let ValueRef::Local(id) = value else {
-        return Err(CompileError::Unsupported(Unsupported::Global(
+        return Err(CompileError::Unsupported(super::unsupported_global(
+            &plan.program,
             match value {
                 ValueRef::Global(id) => *id,
                 ValueRef::Local(_) => unreachable!(),
             },
+            super::GlobalRefusalPhase::StaticAddressCapture,
         )));
     };
     if top_objects.contains_key(id) {

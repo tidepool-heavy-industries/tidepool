@@ -98,7 +98,11 @@ pub(super) fn admit_definitions(program: &DefinitionsView<'_>) -> Result<(), Uns
             declaration.rep,
             RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef
         ) {
-            return Err(Unsupported::Global(GlobalId(index as u32)));
+            return Err(super::unsupported_global(
+                program,
+                GlobalId(index as u32),
+                super::GlobalRefusalPhase::NonReferenceRepresentation,
+            ));
         }
     }
     let mut functions = BTreeMap::new();
@@ -550,10 +554,21 @@ mod tests {
             vec![ret([atom_int(1)])],
             vec![array([uint(0), top(0, function(0, &[], 0))])],
         );
+        let Err(Unsupported::Global(refusal)) = admit_program(&linked(bytes)) else {
+            panic!("raw scalar import must be refused at native admission");
+        };
+        assert_eq!(refusal.id, GlobalId(0));
         assert_eq!(
-            admit_program(&linked(bytes)),
-            Err(Unsupported::Global(GlobalId(0)))
+            refusal.phase,
+            super::super::GlobalRefusalPhase::NonReferenceRepresentation
         );
+        let declaration = refusal.declaration.as_ref().unwrap();
+        assert_eq!(declaration.identity.occurrence, "imported");
+        assert_eq!(declaration.rep, RuntimeRep::Float(64));
+        assert!(refusal.source_group.is_none());
+        assert!(refusal
+            .to_string()
+            .contains("GlobalId(0) at NonReferenceRepresentation"));
     }
 
     /// A call through a parameter is resolved by the machine at run time

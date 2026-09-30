@@ -128,12 +128,53 @@ mod time;
 mod wide_words;
 pub use admission::{admit_prepared, admit_program, supports_operation};
 
+/// The native boundary that refused one declared or referenced global.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlobalRefusalPhase {
+    NonReferenceRepresentation,
+    StaticManagedCapture,
+    StaticAddressCapture,
+    MissingCaptureDeclaration,
+}
+
+/// Bounded facts for one native global refusal; no execution graph or interface
+/// artifact is copied. A certified source image also names its original owner.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("closed execution cannot admit global {id:?} at {phase:?}; declaration={declaration:?}; signature={entry_signature:?}; source_group={source_group:?}")]
+pub struct GlobalRefusal {
+    pub id: GlobalId,
+    pub phase: GlobalRefusalPhase,
+    pub declaration: Option<tidepool_repr::execution_schema::GlobalDecl>,
+    pub entry_signature: Option<Signature>,
+    pub source_group: Option<(tidepool_repr::execution_schema::CachedHomeOwner, u32)>,
+}
+
+fn unsupported_global(
+    definitions: &DefinitionsView<'_>,
+    id: GlobalId,
+    phase: GlobalRefusalPhase,
+) -> Unsupported {
+    let declaration = definitions.globals().get(id.0 as usize).cloned();
+    let entry_signature = declaration
+        .as_ref()
+        .and_then(|declaration| declaration.entry_signature)
+        .and_then(|signature| definitions.signatures().get(signature.0 as usize))
+        .cloned();
+    Unsupported::Global(Box::new(GlobalRefusal {
+        id,
+        phase,
+        declaration,
+        entry_signature,
+        source_group: None,
+    }))
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Unsupported {
     #[error("closed execution target {0:?} does not match the pinned native host profile")]
     Target(TargetDescriptor),
-    #[error("closed execution cannot admit global {0:?}")]
-    Global(GlobalId),
+    #[error(transparent)]
+    Global(Box<GlobalRefusal>),
     #[error("thunk {0:?} is outside this execution checkpoint")]
     Thunk(ValueId),
     #[error("thunk {0:?} requires a zero-argument lifted-reference result signature")]
@@ -530,7 +571,13 @@ impl CompiledProgram {
             group.definitions(),
             &mut DescriptorInterner::default(),
             &Arc::new(static_bytes::PinnedBytes::empty()),
-        )?;
+        )
+        .map_err(|mut error| {
+            if let CompileError::Unsupported(Unsupported::Global(refusal)) = &mut error {
+                refusal.source_group = Some((group.owner().clone(), group.original_ordinal()));
+            }
+            error
+        })?;
         image.certified_source = Some((group.owner().clone(), group.original_ordinal()));
         Ok(image)
     }
