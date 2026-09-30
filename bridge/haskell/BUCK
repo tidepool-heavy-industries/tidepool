@@ -34,6 +34,7 @@ haskell_library(
         "Tidepool/ModuleCandidates.hs": "src/Tidepool/ModuleCandidates.hs",
         "Tidepool/HomeProducts.hs": "src/Tidepool/HomeProducts.hs",
         "Tidepool/CertifiedProducts.hs": "src/Tidepool/CertifiedProducts.hs",
+        "Tidepool/CheckedCell.hs": "src/Tidepool/CheckedCell.hs",
         "Tidepool/PackageWitness.hs": "src/Tidepool/PackageWitness.hs",
         "Tidepool/PrimOps.hs": "src/Tidepool/PrimOps.hs",
         "Tidepool/PreparedStg.hs": "src/Tidepool/PreparedStg.hs",
@@ -50,6 +51,7 @@ haskell_library(
         "Tidepool/ExecutionSchema.hs": "src/Tidepool/ExecutionSchema.hs",
         "Tidepool/ExecutionProjection.hs": "src/Tidepool/ExecutionProjection.hs",
         "Tidepool/ExecutionEncode.hs": "src/Tidepool/ExecutionEncode.hs",
+        "Tidepool/ExactScope.hs": "src/Tidepool/ExactScope.hs",
         "Tidepool/Json.hs": "src/Tidepool/Json.hs",
         "Tidepool/Resolve.hs": "src/Tidepool/Resolve.hs",
         "Tidepool/Session.hs": "src/Tidepool/Session.hs",
@@ -95,6 +97,66 @@ haskell_binary(
 sh_test(
     name = "execution_schema_encode",
     test = ":execution_schema_encode_test",
+    visibility = ["PUBLIC"],
+)
+
+# Native parity for the accepted Cabal SOURCE SCC product-reuse suite. The
+# shell test stages its four fixture sources at the relative paths the test
+# executable consumes, then runs the same cold/resident/fresh-worker cases.
+haskell_binary(
+    name = "source_boot_product_reuse_test",
+    srcs = {"Main.hs": "test-source-boot/Main.hs"},
+    deps = [":tidepool_extract_internal"],
+    compiler_flags = extractor_binary_flags("-XOverloadedStrings", "-package", "process"),
+    linker_flags = extractor_binary_link_flags() + ["-package", "process"],
+    visibility = ["PUBLIC"],
+)
+
+sh_test(
+    name = "source_boot_product_reuse",
+    test = "test-source-boot-product-reuse.sh",
+    args = [
+        "$(location :source_boot_product_reuse_test)",
+        "$(location :source_boot_cache_even)",
+        "$(location :source_boot_cache_even_boot)",
+        "$(location :source_boot_cache_odd)",
+        "$(location :source_boot_cache_entry)",
+    ],
+    resources = [
+        ":source_boot_product_reuse_test",
+        ":source_boot_cache_even",
+        ":source_boot_cache_even_boot",
+        ":source_boot_cache_odd",
+        ":source_boot_cache_entry",
+    ],
+    env = {
+        "PATH": read_root_config("nix", "ghc_bin") + ":" + read_root_config("nix", "action_path"),
+        "TIDEPOOL_GHC_LIBDIR": read_root_config("nix", "ghc_libdir"),
+    },
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "source_boot_cache_even",
+    src = "test-source-boot/fixtures/CacheEven.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "source_boot_cache_even_boot",
+    src = "test-source-boot/fixtures/CacheEven.hs-boot",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "source_boot_cache_odd",
+    src = "test-source-boot/fixtures/CacheOdd.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "source_boot_cache_entry",
+    src = "test-source-boot/fixtures/CacheEntry.hs",
     visibility = ["PUBLIC"],
 )
 
