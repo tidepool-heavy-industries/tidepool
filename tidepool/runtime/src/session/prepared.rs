@@ -438,9 +438,8 @@ pub(crate) struct CertifiedTurnInstall {
     pub leases: Vec<SourceInstanceLease>,
     facts: Vec<ProgramFacts>,
     plans: Vec<EvidencePlan>,
-    exports: Vec<(SymbolIdentity, ValueId, Option<Signature>)>,
     package_updates: BTreeMap<SymbolIdentity, [u8; 32]>,
-    package_exports: BTreeMap<SymbolIdentity, CodeExport>,
+    exports: BTreeMap<SymbolIdentity, CodeExport>,
 }
 
 /// Which installed program's site table is authoritative for one site id.
@@ -2087,17 +2086,7 @@ impl PreparedEngine {
         let mut engine = Self::from_machine(machine, registry);
         // The first program can conflict only with itself.
         let plan = engine.plan_evidence(&facts)?;
-        engine.programs.insert(program, facts);
-        engine.publish_evidence(program, plan);
-        engine.publish_code_exports(program, exports);
-        // Held live across the install-to-first-run gap; the turn's
-        // bind/complete path (`resident.rs`) unpins it once the run's
-        // outcome is bound, released or parked.
-        engine
-            .machine
-            .pin(program)
-            .map_err(PreparedRuntimeError::Run)?;
-        engine.installs_since_major += 1;
+        engine.finish_program_install(program, facts, plan, exports)?;
         Ok((engine, program))
     }
 
@@ -2270,38 +2259,84 @@ impl PreparedEngine {
         Ok(plans)
     }
 
-    /// Offer `program`'s package tops to every later turn as executable
-    /// imports, so the next turn's projection drops their bodies instead of
-    /// handing this machine a second copy to compile.
-    ///
-    /// Called only after `program` is installed and published, so a refused
-    /// install offers nothing. An identity already exported keeps its
-    /// existing handle: the first program to define it stays the one every
-    /// later turn imports, and no second root is taken for it. A top that
-    /// will not retain (no managed value at its slot) is simply not offered
-    /// -- later turns keep projecting their own body for it, exactly as
-    /// before -- so this can lose a speedup but never a program.
-    fn publish_code_exports(
+    /// Retain exports before any session metadata or source custody publishes.
+    /// An existing export keeps its root. Optional absence is benign only on a
+    /// reusable machine; retention failures release this stage's earlier roots
+    /// and return the original error without publishing a partial export map.
+    fn stage_code_exports(
         &mut self,
         program: ProgramId,
         exports: Vec<(SymbolIdentity, ValueId, Option<Signature>)>,
-    ) {
+        required: &BTreeMap<SymbolIdentity, (ValueId, [u8; 32])>,
+    ) -> Result<BTreeMap<SymbolIdentity, CodeExport>, PreparedRuntimeError> {
+        let mut staged = BTreeMap::<SymbolIdentity, CodeExport>::new();
         for (identity, value, entry) in exports {
             if self.code_exports.contains_key(&identity) {
                 continue;
             }
-            let Ok(handle) = self.machine.retain_export_top(program, value) else {
-                continue;
+            let handle = match self.machine.retain_export_top(program, value) {
+                Ok(handle) => handle,
+                Err(ExecutionError::MissingEntry(_))
+                    if !required.contains_key(&identity)
+                        && self.machine.disposition() == MachineDisposition::Reusable =>
+                {
+                    continue;
+                }
+                Err(error) => {
+                    for export in staged.into_values() {
+                        assert!(
+                            self.release(export.handle),
+                            "failed export stage retains its earlier root"
+                        );
+                    }
+                    return Err(PreparedRuntimeError::Run(error));
+                }
             };
-            self.code_exports.insert(
+            let interface_digest = required.get(&identity).map(|(_, digest)| *digest);
+            staged.insert(
                 identity,
                 CodeExport {
                     handle,
                     entry,
-                    interface_digest: None,
+                    interface_digest,
                 },
             );
         }
+        Ok(staged)
+    }
+
+    /// Complete an ordinary install at its fallible owner. Its pin protects
+    /// the install-to-first-run gap; no retention runs after publication.
+    fn finish_program_install(
+        &mut self,
+        program: ProgramId,
+        facts: ProgramFacts,
+        plan: EvidencePlan,
+        exports: Vec<(SymbolIdentity, ValueId, Option<Signature>)>,
+    ) -> Result<(), PreparedRuntimeError> {
+        self.machine
+            .pin(program)
+            .map_err(PreparedRuntimeError::Run)?;
+        let exports = match self.stage_code_exports(program, exports, &BTreeMap::new()) {
+            Ok(exports) => exports,
+            Err(error) => {
+                assert!(self.unpin(program), "refused install retains its pin");
+                // Integrity failures keep native code/heap custody intact.
+                // Cleanup must neither collect an unavailable machine nor
+                // replace the first retention failure with a cleanup failure.
+                if self.machine.disposition() == MachineDisposition::Reusable {
+                    if let Err(cleanup) = self.quiesce_and_collect_now() {
+                        tracing::warn!(?cleanup, "failed to collect refused export installation");
+                    }
+                }
+                return Err(error);
+            }
+        };
+        self.programs.insert(program, facts);
+        self.publish_evidence(program, plan);
+        self.code_exports.extend(exports);
+        self.installs_since_major += 1;
+        Ok(())
     }
 
     /// Every package top this machine already carries, as the extractor
@@ -2442,16 +2477,7 @@ impl PreparedEngine {
             compiled_off_checkout = false,
             "prepared install"
         );
-        self.programs.insert(program, facts);
-        self.publish_evidence(program, plan);
-        self.publish_code_exports(program, exports);
-        // Held live across the install-to-first-run gap; the turn's
-        // bind/complete path (`resident.rs`) unpins it once the run's
-        // outcome is bound, released or parked.
-        self.machine
-            .pin(program)
-            .map_err(PreparedRuntimeError::Run)?;
-        self.installs_since_major += 1;
+        self.finish_program_install(program, facts, plan, exports)?;
         Ok(program)
     }
 
@@ -3103,40 +3129,19 @@ impl PreparedEngine {
                 leases: installed.leases,
                 facts,
                 plans,
-                exports,
                 package_updates,
-                package_exports: BTreeMap::new(),
+                exports: BTreeMap::new(),
             };
-            for (binder, (value, digest)) in target_packages {
-                let handle = match self.machine.retain_export_top(target_id, value) {
-                    Ok(handle) => handle,
-                    Err(error) => {
-                        let tokens = std::mem::take(&mut staged.leases);
-                        if let Err(cleanup) = self.abort_certified_turn(staged, tokens) {
-                            tracing::warn!(
-                                ?cleanup,
-                                "failed to collect refused package export batch"
-                            );
-                        }
-                        return Err(PreparedRuntimeError::Run(error));
+            staged.exports = match self.stage_code_exports(target_id, exports, &target_packages) {
+                Ok(exports) => exports,
+                Err(error) => {
+                    let tokens = std::mem::take(&mut staged.leases);
+                    if let Err(cleanup) = self.abort_certified_turn(staged, tokens) {
+                        tracing::warn!(?cleanup, "failed to collect refused export batch");
                     }
-                };
-                let entry = staged
-                    .exports
-                    .iter()
-                    .find(|(identity, _, _)| identity == &binder)
-                    .expect("admitted target package top has export evidence")
-                    .2
-                    .clone();
-                staged.package_exports.insert(
-                    binder,
-                    CodeExport {
-                        handle,
-                        entry,
-                        interface_digest: Some(digest),
-                    },
-                );
-            }
+                    return Err(error);
+                }
+            };
             Ok(staged)
         })();
         match result {
@@ -3164,7 +3169,7 @@ impl PreparedEngine {
             staged.leases.is_empty(),
             "source leases must enter scope custody"
         );
-        self.code_exports.extend(staged.package_exports);
+        self.code_exports.extend(staged.exports);
         for (binder, digest) in staged.package_updates {
             self.code_exports
                 .get_mut(&binder)
@@ -3180,7 +3185,6 @@ impl PreparedEngine {
             self.programs.insert(id, facts);
             self.publish_evidence(id, plan);
         }
-        self.publish_code_exports(staged.target, staged.exports);
         self.installs_since_major += staged.groups.len() + 1;
         for group in staged.groups {
             assert!(self.unpin(group), "scoped source root replaces install pin");
@@ -3206,10 +3210,10 @@ impl PreparedEngine {
                 "rejected source token remains rooted"
             );
         }
-        for export in staged.package_exports.into_values() {
+        for export in staged.exports.into_values() {
             assert!(
                 self.release(export.handle),
-                "unpublished package export remains rooted"
+                "unpublished export remains rooted"
             );
         }
         for program in staged
@@ -3316,16 +3320,7 @@ impl PreparedEngine {
             compiled_off_checkout = true,
             "prepared install"
         );
-        self.programs.insert(program, snapshot.facts);
-        self.publish_evidence(program, snapshot.plan);
-        self.publish_code_exports(program, snapshot.exports);
-        // Held live across the install-to-first-run gap; the turn's
-        // bind/complete path (`resident.rs`) unpins it once the run's
-        // outcome is bound, released or parked.
-        self.machine
-            .pin(program)
-            .map_err(PreparedRuntimeError::Run)?;
-        self.installs_since_major += 1;
+        self.finish_program_install(program, snapshot.facts, snapshot.plan, snapshot.exports)?;
         Ok(Some(program))
     }
 
@@ -5623,6 +5618,55 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn export_staging_rolls_back_prior_roots_on_required_absence() {
+        let prepared = testing::prepare(testing::wire_program()).unwrap();
+        let image = Arc::new(CompiledProgram::compile_prepared_definitions(&prepared).unwrap());
+        let mut engine = PreparedEngine::empty_certified(64 * 1024, None).unwrap();
+        let program = engine
+            .machine
+            .install_shared_batch(vec![BatchProgram {
+                image,
+                imports: vec![],
+            }])
+            .unwrap()[0];
+        engine.machine.pin(program).unwrap();
+        let before = engine.residency();
+        let optional = testing::identity("Fixture", "entry");
+        let required = testing::identity("Fixture", "missing");
+        let error = engine
+            .stage_code_exports(
+                program,
+                vec![
+                    (optional, ValueId(0), Some(prepared.signatures()[0].clone())),
+                    (required.clone(), ValueId(999), None),
+                ],
+                &BTreeMap::from([(required.clone(), (ValueId(999), [9; 32]))]),
+            )
+            .err()
+            .expect("required missing export must refuse the stage");
+        assert!(matches!(
+            error,
+            PreparedRuntimeError::Run(ExecutionError::MissingEntry(ValueId(999)))
+        ));
+        assert_eq!(engine.residency(), before);
+        assert!(engine.programs.is_empty());
+        assert!(engine.code_exports.is_empty());
+        assert_eq!(engine.disposition(), MachineDisposition::Reusable);
+        let absent = engine
+            .stage_code_exports(
+                program,
+                vec![(required, ValueId(999), None)],
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert!(absent.is_empty());
+        assert_eq!(engine.residency(), before);
+        assert!(engine.unpin(program));
+        engine.quiesce_and_collect_now().unwrap();
+        assert_eq!(engine.residency().programs, 0);
+    }
+
+    #[test]
     fn cold_certified_package_forward_edge_executes_and_rolls_back() {
         use tidepool_codegen::prepared_program::GroupInventory;
         use tidepool_repr::execution_schema::{CertifiedGroup, ModuleVersion};
@@ -5631,6 +5675,10 @@ pub(super) mod tests {
             unit: "fixture-package".into(),
             module: "FixturePackage".into(),
             ..testing::identity("FixturePackage", "packageValue")
+        };
+        let optional = SymbolIdentity {
+            unit: package.unit.clone(),
+            ..testing::identity("FixturePackage", "optionalValue")
         };
         let source = testing::identity("Fixture", "cached");
         let package_owner = |digest| ImportOwner::Package {
@@ -5696,7 +5744,18 @@ pub(super) mod tests {
             wire.expressions
                 .nodes
                 .push(wire.expressions.nodes[0].clone());
+            let mut optional_top = package_top.clone();
+            optional_top.identity = optional.clone();
+            optional_top.binding.id = ValueId(2);
+            let HeapRhs::Function { body, .. } = &mut optional_top.binding.rhs else {
+                unreachable!()
+            };
+            *body = 2;
+            wire.expressions
+                .nodes
+                .push(wire.expressions.nodes[1].clone());
             wire.bindings.push(Group::NonRecursive(package_top));
+            wire.bindings.push(Group::NonRecursive(optional_top));
             let Group::NonRecursive(top) = &mut wire.bindings[0] else {
                 unreachable!()
             };
@@ -5767,15 +5826,38 @@ pub(super) mod tests {
             Err(PreparedRuntimeError::MissingCertifiedOwner(owner)) if owner == package_owner([8; 32])));
         assert_eq!(engine.residency(), before);
         let mut aborted = install(&mut engine, &good).unwrap();
+        assert_eq!(aborted.exports.len(), 2);
+        assert_eq!(aborted.exports[&optional].interface_digest, None);
+        assert_eq!(aborted.exports[&package].interface_digest, Some([9; 32]));
+        assert_eq!(engine.residency().code_exports, before.code_exports + 2);
         assert!(engine.code_exports.is_empty());
         let tokens = std::mem::take(&mut aborted.leases);
         engine.abort_certified_turn(aborted, tokens).unwrap();
-        assert_eq!(engine.residency().programs, before.programs);
+        // First native installation interns the boxed-array, mutable-variable
+        // and byte-array descriptors for the machine's lifetime. Program
+        // retirement releases callable descriptors, not these shared layouts.
+        let initialized = tidepool_codegen::prepared_program::ResidencyCounts {
+            descriptor_rows: 3,
+            ..before
+        };
+        assert_eq!(engine.residency(), initialized);
         assert!(engine.code_exports.is_empty());
         assert!(engine.programs.is_empty());
+        let mut repeated_abort = install(&mut engine, &good).unwrap();
+        let tokens = std::mem::take(&mut repeated_abort.leases);
+        engine.abort_certified_turn(repeated_abort, tokens).unwrap();
+        assert_eq!(engine.residency(), initialized);
         let mut staged = install(&mut engine, &good).unwrap();
+        let staged_roots = engine.persistent_roots_count();
+        let staged_residency = engine.residency();
         let tokens = std::mem::take(&mut staged.leases);
         let program = engine.commit_certified_turn(staged);
+        assert_eq!(
+            engine.residency().code_exports,
+            staged_residency.code_exports
+        );
+        assert_eq!(engine.persistent_roots_count(), staged_roots);
+        assert_eq!(engine.code_exports[&optional].interface_digest, None);
         assert_eq!(
             engine.code_exports[&package].interface_digest,
             Some([9; 32])
@@ -5802,7 +5884,7 @@ pub(super) mod tests {
         }
         assert!(engine.unpin(program));
         engine.quiesce_and_collect_now().unwrap();
-        assert_eq!(engine.code_export_count(), 1);
+        assert_eq!(engine.code_export_count(), 2);
     }
 
     #[test]
