@@ -1093,6 +1093,60 @@ impl PersistentSession {
         }
     }
 
+    /// The durable cell producer requires an already published exact owner
+    /// surface. A local owner-to-scope association cannot authorize execution.
+    pub fn begin_durable_private_execution(
+        &mut self,
+        owner: &super::RecoveryPublicOwner,
+        public_scope: ScopeId,
+    ) -> Result<PrivateExecutionAdmission, SessionError> {
+        let lib = self.lib();
+        let state = lib
+            .durable_graph
+            .as_ref()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        let retained = state
+            .owner
+            .as_ref()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        retained.validate_owner()?;
+        let snapshot = self
+            .public_visibility_snapshot_in(public_scope)
+            .ok_or(SessionError::DeadScope(public_scope))?;
+        let surface = state
+            .graph
+            .public_surfaces
+            .iter()
+            .find(|surface| &surface.owner == owner)
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        if state.unconfirmed.is_some()
+            || lib.durable_public_scopes.get(owner) != Some(&public_scope)
+            || surface.declaration_root
+                != (snapshot.declaration_tip != Generation(0)).then_some(snapshot.declaration_tip)
+            || surface.epoch != snapshot.epoch
+        {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        let bytes = std::fs::read(&state.path).map_err(|error| SessionError::RecoveryManifest {
+            path: state.path.clone(),
+            detail: error.to_string(),
+        })?;
+        let read = super::recovery::read_v2_bytes(
+            &state.path,
+            state.path.parent().expect("canonical manifest parent"),
+            &bytes,
+        )
+        .map_err(|error| SessionError::RecoveryManifest {
+            path: state.path.clone(),
+            detail: error.to_string(),
+        })?
+        .ok_or(SessionError::WrongPublicManifestTicket)?;
+        if !read.artifact_losses.is_empty() || read.graph.checksum != state.graph.checksum {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        self.begin_private_execution(public_scope)
+    }
+
     pub fn begin_private_execution(
         &mut self,
         public_scope: ScopeId,

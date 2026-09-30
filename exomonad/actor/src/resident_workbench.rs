@@ -7028,14 +7028,13 @@ where
         self.access
             .with_machine(context, move |session, context, _| {
                 let public_scope = context.placement.lexical_scope;
-                session
-                    .bind_durable_public_scope(owner.clone(), public_scope)
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })?;
-                let admission = Arc::new(session.begin_private_execution(public_scope).map_err(
-                    |error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)),
-                )?);
+                let admission = Arc::new(
+                    session
+                        .begin_durable_private_execution(&owner, public_scope)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })?,
+                );
                 let admitted_public = admission.admitted_public().clone();
                 let private_scope = admission.private_scope();
                 Ok(ExecutionPrivateScope {

@@ -507,6 +507,7 @@ impl PublicManifestBase {
             epoch,
             bindings,
             self.final_source_instances,
+            None,
         )
         .map_err(|error| SessionError::RecoveryManifest {
             path: self.path.clone(),

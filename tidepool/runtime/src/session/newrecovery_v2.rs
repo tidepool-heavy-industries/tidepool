@@ -480,6 +480,7 @@ pub(crate) fn stage_public_visibility_v2(
     expected_epoch: u64,
     bindings: Vec<RecoveryPublicBinding>,
     source_instances: Vec<RecoveryPublicSourceInstance>,
+    initial_declaration_root: Option<Generation>,
 ) -> Result<StagedRecoveryManifest, RecoveryError> {
     graph.validate()?;
     let mut candidate = graph.clone();
@@ -492,7 +493,7 @@ pub(crate) fn stage_public_visibility_v2(
         None if expected_epoch == 0 => {
             candidate.public_surfaces.push(RecoveryPublicSurface {
                 owner,
-                declaration_root: None,
+                declaration_root: initial_declaration_root,
                 epoch: 0,
                 bindings: Vec::new(),
                 source_instances: Vec::new(),
@@ -1753,6 +1754,7 @@ mod tests {
             0,
             vec![first],
             vec![],
+            None,
         )
         .unwrap();
         assert!(!manifest.exists(), "staging is not public authority");
@@ -1778,6 +1780,7 @@ mod tests {
             1,
             vec![next],
             vec![],
+            None,
         )
         .unwrap();
         let replacement = match staged.publish() {
@@ -1804,6 +1807,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            None,
         )
         .is_err());
     }
@@ -1830,6 +1834,7 @@ mod tests {
             0,
             vec![binding(1)],
             vec![],
+            None,
         )
         .unwrap()
         .publish()
@@ -1845,6 +1850,7 @@ mod tests {
             0,
             vec![binding(2)],
             vec![],
+            None,
         )
         .unwrap()
         .publish()
@@ -1860,6 +1866,7 @@ mod tests {
             0,
             vec![binding(3)],
             vec![],
+            None,
         )
         .is_err());
         let restored = read_v2(&manifest, dir.path()).unwrap().unwrap().graph;

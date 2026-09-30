@@ -198,6 +198,51 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         PublicManifestCommit::Durable
     );
     let expected = producer.public_visibility_snapshot_in(public).unwrap();
+    let child_owner = RecoveryPublicOwner::new(
+        &tidepool_repr::ActorPath::parse("root/exact-recovery/child").unwrap(),
+        3,
+    )
+    .unwrap();
+    let child = producer.mint_detached_scope(public).unwrap();
+    let parent_surface = producer
+        .lib()
+        .durable_graph
+        .as_ref()
+        .unwrap()
+        .graph
+        .public_surfaces
+        .iter()
+        .find(|surface| surface.owner == owner(1))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        producer
+            .initialize_durable_public_scope(child_owner.clone(), child)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    );
+    let child_snapshot = producer.public_visibility_snapshot_in(child).unwrap();
+    assert_eq!(child_snapshot.declaration_tip, expected.declaration_tip);
+    assert_eq!(
+        producer
+            .lib()
+            .durable_graph
+            .as_ref()
+            .unwrap()
+            .graph
+            .public_surfaces
+            .iter()
+            .find(|surface| surface.owner == owner(1)),
+        Some(&parent_surface)
+    );
+    let child_admission = producer
+        .begin_durable_private_execution(&child_owner, child)
+        .unwrap();
+    assert_eq!(
+        child_admission.admitted_public().declaration_tip,
+        expected.declaration_tip
+    );
+    drop(child_admission);
     drop(admission);
     drop(producer);
     drop(producer_root);
@@ -649,5 +694,135 @@ fn initial_public_owner_survives_restart_before_first_cell() {
             .unwrap()
             .declaration_tip,
         Generation(0)
+    );
+}
+
+#[test]
+fn durable_child_initializer_preserves_parent_and_refuses_a_local_only_owner() {
+    let durable = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let manifest = durable.path().join("declarations.json");
+    let mut session =
+        PersistentSession::new(Some(library(4407, source.path(), &manifest, &[])), 1024);
+    let parent = session.mint_isolated_scope();
+    assert_eq!(
+        session
+            .initialize_durable_public_scope(owner(1), parent)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    );
+    let before_parent = session.public_visibility_snapshot_in(parent).unwrap();
+    let parent_surface = session
+        .lib()
+        .durable_graph
+        .as_ref()
+        .unwrap()
+        .graph
+        .public_surfaces[0]
+        .clone();
+    let child = session.mint_detached_scope(parent).unwrap();
+    let child_owner = RecoveryPublicOwner::new(
+        &tidepool_repr::ActorPath::parse("root/exact-recovery/child").unwrap(),
+        3,
+    )
+    .unwrap();
+    session
+        .bind_durable_public_scope(child_owner.clone(), child)
+        .unwrap();
+    assert!(session
+        .begin_durable_private_execution(&child_owner, child)
+        .is_err());
+    let before = std::fs::read(&manifest).unwrap();
+    assert!(session
+        .initialize_durable_public_scope(child_owner.clone(), parent)
+        .is_err());
+    assert_eq!(std::fs::read(&manifest).unwrap(), before);
+    assert_eq!(
+        session
+            .initialize_durable_public_scope(child_owner.clone(), child)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    );
+    assert_eq!(
+        session.public_visibility_snapshot_in(parent),
+        Some(before_parent)
+    );
+    assert_eq!(
+        session
+            .lib()
+            .durable_graph
+            .as_ref()
+            .unwrap()
+            .graph
+            .public_surfaces
+            .iter()
+            .find(|surface| surface.owner == owner(1)),
+        Some(&parent_surface)
+    );
+    assert!(session.lib().tips.contains_key(&child));
+    assert_eq!(
+        session
+            .begin_durable_private_execution(&child_owner, child)
+            .unwrap()
+            .admitted_public()
+            .epoch,
+        1
+    );
+    let initialized = std::fs::read(&manifest).unwrap();
+    assert_eq!(
+        session
+            .initialize_durable_public_scope(child_owner.clone(), child)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    );
+    assert_eq!(std::fs::read(&manifest).unwrap(), initialized);
+}
+
+#[test]
+fn durable_child_visible_uncertainty_confirms_without_reinitializing_or_reexecuting() {
+    let durable = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let manifest = durable.path().join("declarations.json");
+    let mut session =
+        PersistentSession::new(Some(library(4408, source.path(), &manifest, &[])), 1024);
+    let parent = session.mint_isolated_scope();
+    session
+        .initialize_durable_public_scope(owner(1), parent)
+        .unwrap();
+    let child = session.mint_detached_scope(parent).unwrap();
+    let child_owner = RecoveryPublicOwner::new(
+        &tidepool_repr::ActorPath::parse("root/exact-recovery/child").unwrap(),
+        3,
+    )
+    .unwrap();
+    session.lib_mut().fail_recovery_durability_once = true;
+    assert!(matches!(
+        session
+            .initialize_durable_public_scope(child_owner.clone(), child)
+            .unwrap(),
+        PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+    ));
+    let visible = std::fs::read(&manifest).unwrap();
+    assert!(session
+        .begin_durable_private_execution(&child_owner, child)
+        .is_err());
+    assert!(session
+        .initialize_durable_public_scope(child_owner.clone(), child)
+        .is_err());
+    session.lib_mut().confirm_recovery_durability().unwrap();
+    assert_eq!(
+        session
+            .initialize_durable_public_scope(child_owner.clone(), child)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    );
+    assert_eq!(std::fs::read(&manifest).unwrap(), visible);
+    assert_eq!(
+        session
+            .begin_durable_private_execution(&child_owner, child)
+            .unwrap()
+            .admitted_public()
+            .epoch,
+        1
     );
 }

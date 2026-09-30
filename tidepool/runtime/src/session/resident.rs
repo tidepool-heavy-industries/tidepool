@@ -2163,6 +2163,16 @@ where
         )
     }
 
+    pub fn begin_durable_private_execution(
+        &mut self,
+        owner: &super::RecoveryPublicOwner,
+        public_scope: ScopeId,
+    ) -> Result<super::PrivateExecutionAdmission, SessionError> {
+        self.settle_dropped_custody();
+        self.state
+            .begin_durable_private_execution(owner, public_scope)
+    }
+
     pub fn begin_checked_prefix(
         &self,
         admission: Arc<super::RuntimeCellAdmission>,

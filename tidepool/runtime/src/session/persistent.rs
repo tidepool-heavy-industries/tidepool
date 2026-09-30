@@ -1568,6 +1568,35 @@ impl PersistentSession {
         })
     }
 
+    fn recovery_source_instances(
+        &self,
+        keys: impl IntoIterator<Item = SourceLeaseKey>,
+    ) -> Result<Vec<super::recovery::RecoveryPublicSourceInstance>, SessionError> {
+        keys.into_iter()
+            .map(|key| {
+                let incarnation =
+                    self.machine_incarnation
+                        .ok_or_else(|| SessionError::RecoveryManifest {
+                            path: self.lib().root.clone(),
+                            detail: "native source lease has no owning machine incarnation".into(),
+                        })?;
+                let identity = key.binder.binder;
+                Ok(super::recovery::RecoveryPublicSourceInstance {
+                    machine_incarnation: incarnation.0,
+                    instance: key.instance.raw(),
+                    module_version: key.binder.version.0,
+                    binder: super::recovery::RecoverySourceIdentity {
+                        unit: identity.unit,
+                        module: identity.module,
+                        namespace: identity.namespace,
+                        occurrence: identity.occurrence,
+                        record_parent: identity.record_parent,
+                    },
+                })
+            })
+            .collect()
+    }
+
     /// Admit one exact actor incarnation as the durable public owner of a
     /// minted lexical scope. The scope forest is the liveness authority;
     /// SessionLib only records the checked owner-to-scope association.
@@ -1666,8 +1695,9 @@ impl PersistentSession {
         Ok(scope)
     }
 
-    /// Durably seed a new run's empty public owner before application readiness.
-    /// No declaration, binding, execution, or synthetic graph node is created.
+    /// Durably initialize one actor's exact captured public surface before
+    /// application readiness. Existing owners and declaration products remain
+    /// unchanged; heap values are recorded as recovery loss metadata.
     pub fn initialize_durable_public_scope(
         &mut self,
         owner: RecoveryPublicOwner,
@@ -1676,11 +1706,7 @@ impl PersistentSession {
         let snapshot = self
             .public_visibility_snapshot_in(target)
             .ok_or(SessionError::DeadScope(target))?;
-        if target == ScopeId::ROOT
-            || snapshot.declaration_tip != Generation(0)
-            || !snapshot.bindings.is_empty()
-            || !snapshot.source_instances.is_empty()
-        {
+        if target == ScopeId::ROOT {
             return Err(SessionError::WrongPublicManifestTicket);
         }
         let lib = self
@@ -1700,8 +1726,24 @@ impl PersistentSession {
         })?;
         retained.validate_owner()?;
         if state.unconfirmed.is_some()
-            || !state.graph.public_surfaces.is_empty()
-            || !lib.durable_public_scopes.is_empty()
+            || lib
+                .durable_public_scopes
+                .get(&owner)
+                .is_some_and(|scope| *scope != target)
+            || lib
+                .durable_public_scopes
+                .iter()
+                .any(|(other, scope)| other != &owner && *scope == target)
+            || snapshot.declaration_tip != Generation(0)
+                && (!state
+                    .graph
+                    .nodes
+                    .iter()
+                    .any(|node| node.id == snapshot.declaration_tip)
+                    || lib
+                        .log
+                        .joined_context_at(snapshot.declaration_tip)
+                        .is_none())
         {
             return Err(SessionError::WrongPublicManifestTicket);
         }
@@ -1724,17 +1766,55 @@ impl PersistentSession {
         } else if state.graph.high_water != Generation(0)
             || !state.graph.nodes.is_empty()
             || !state.graph.artifacts.is_empty()
+            || !state.graph.public_surfaces.is_empty()
         {
             return Err(SessionError::WrongPublicManifestTicket);
         }
+        let bindings = snapshot
+            .bindings
+            .iter()
+            .map(|(name, id)| super::recovery::RecoveryPublicBinding {
+                name: name.clone(),
+                owner: super::recovery::RecoveryBindingId {
+                    session: lib.id.0,
+                    variable: id.raw(),
+                },
+            })
+            .collect::<Vec<_>>();
+        let sources = self.recovery_source_instances(snapshot.source_instances.iter().cloned())?;
+        if let Some(surface) = state
+            .graph
+            .public_surfaces
+            .iter()
+            .find(|surface| surface.owner == owner)
+        {
+            if lib.durable_public_scopes.get(&owner) != Some(&target)
+                || surface.declaration_root
+                    != (snapshot.declaration_tip != Generation(0))
+                        .then_some(snapshot.declaration_tip)
+                || surface.epoch != snapshot.epoch
+                || surface.bindings != bindings
+                || surface.source_instances != sources
+            {
+                return Err(SessionError::WrongPublicManifestTicket);
+            }
+            return Ok(PublicManifestCommit::Durable);
+        }
+        // Allocate all owner/tip entries before the visible rename. Finalization
+        // swaps these prepared maps and updates an already reserved epoch entry.
+        let mut public_scopes = lib.durable_public_scopes.clone();
+        public_scopes.insert(owner.clone(), target);
+        let mut tips = lib.tips.clone();
+        tips.insert(target, snapshot.declaration_tip);
         let staged = super::recovery::stage_public_visibility_v2(
             &state.path,
             root,
             &state.graph,
             owner.clone(),
             0,
-            vec![],
-            vec![],
+            bindings,
+            sources,
+            (snapshot.declaration_tip != Generation(0)).then_some(snapshot.declaration_tip),
         )
         .map_err(|error| invalid(error.to_string()))?;
         retained.validate_owner()?;
@@ -1776,11 +1856,8 @@ impl PersistentSession {
                 PublicManifestCommit::PublishedDurabilityUnconfirmed { detail }
             }
         };
-        lib.durable_public_scopes.insert(owner, target);
-        // The declaration publication owner requires an explicit public tip,
-        // including G0 before the first cell. Isolated scope minting alone
-        // deliberately does not create that declaration-log entry.
-        lib.seed_scope(target, Generation(0));
+        lib.durable_public_scopes = public_scopes;
+        lib.tips = tips;
         self.public_visibility_epochs.insert(target, 1);
         Ok(commit)
     }
@@ -1984,30 +2061,7 @@ impl PersistentSession {
             .chain(source_keys.iter())
             .cloned()
             .collect();
-        let final_source_instances = final_source_keys
-            .into_iter()
-            .map(|key| {
-                let incarnation =
-                    self.machine_incarnation
-                        .ok_or_else(|| SessionError::RecoveryManifest {
-                            path: self.lib().root.clone(),
-                            detail: "native source lease has no owning machine incarnation".into(),
-                        })?;
-                let identity = key.binder.binder;
-                Ok(super::recovery::RecoveryPublicSourceInstance {
-                    machine_incarnation: incarnation.0,
-                    instance: key.instance.raw(),
-                    module_version: key.binder.version.0,
-                    binder: super::recovery::RecoverySourceIdentity {
-                        unit: identity.unit,
-                        module: identity.module,
-                        namespace: identity.namespace,
-                        occurrence: identity.occurrence,
-                        record_parent: identity.record_parent,
-                    },
-                })
-            })
-            .collect::<Result<Vec<_>, SessionError>>()?;
+        let final_source_instances = self.recovery_source_instances(final_source_keys)?;
         let mut final_by_name: BTreeMap<String, SessionVarId> =
             expected_public.bindings.iter().cloned().collect();
         for id in &write_ids {
