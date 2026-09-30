@@ -196,6 +196,7 @@ with tempfile.TemporaryDirectory(prefix='tidepool-buck-deps-') as temporary:
     buck = (stage / 'BUCK').read_text()
     if local_harness_source:
         buck, harness_fetch = use_local_harness_source(buck)
+        harness_web_source = harness_fetch[:-4]
     else:
         harness_fetch = next(
             (
@@ -205,6 +206,7 @@ with tempfile.TemporaryDirectory(prefix='tidepool-buck-deps-') as temporary:
             ),
             None,
         )
+        harness_web_source = harness_fetch
     if harness_fetch:
         if 'load("@prelude//:rules.bzl", "filegroup")' not in buck:
             buck = buck.replace(
@@ -216,7 +218,7 @@ with tempfile.TemporaryDirectory(prefix='tidepool-buck-deps-') as temporary:
         buck += (
             '\nfilegroup(\n'
             '    name = "matched_harness_source",\n'
-            f'    srcs = [":{harness_fetch}"],\n'
+            f'    srcs = [":{harness_web_source}"],\n'
             '    visibility = ["PUBLIC"],\n'
             ')\n'
         )

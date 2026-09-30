@@ -31,6 +31,7 @@ haskell_library(
         "Tidepool/Introspection.hs": "src/Tidepool/Introspection.hs",
         "Tidepool/Metadata.hs": "src/Tidepool/Metadata.hs",
         "Tidepool/ModuleCandidates.hs": "src/Tidepool/ModuleCandidates.hs",
+        "Tidepool/OriginalProductRoots.hs": "src/Tidepool/OriginalProductRoots.hs",
         "Tidepool/HomeProducts.hs": "src/Tidepool/HomeProducts.hs",
         "Tidepool/CertifiedProducts.hs": "src/Tidepool/CertifiedProducts.hs",
         "Tidepool/CheckedCell.hs": "src/Tidepool/CheckedCell.hs",

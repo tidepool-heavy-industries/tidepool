@@ -218,6 +218,9 @@ else:
         self.assertIn('srcs = [":harness-source.git"]', buck)
         self.assertIn('crate_root = "harness-source/crates/harness/src/lib.rs"', buck)
         self.assertIn('name = "matched_harness_source"', buck)
+        web_group = buck.split('name = "matched_harness_source",', 1)[1]
+        self.assertIn('srcs = [":harness-source"]', web_group)
+        self.assertNotIn('srcs = [":harness-source.git"]', web_group)
         self.assertIn('source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=0123456789abcdef0123456789abcdef01234567#0123456789abcdef0123456789abcdef01234567"', (self.root / "Cargo.lock").read_text())
 
     def test_default_mode_retains_standard_git_fetch(self):
