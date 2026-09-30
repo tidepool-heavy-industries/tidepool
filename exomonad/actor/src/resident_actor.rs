@@ -860,6 +860,9 @@ fn workbench_failure_after_operations(
 /// unclassified failure has nothing this function can say honestly.
 fn failure_layer_output_hint(layer: Option<WorkbenchFailureLayer>) -> String {
     match layer {
+        Some(WorkbenchFailureLayer::Install) => {
+            "the program failed before running; earlier effects may have committed".to_owned()
+        }
         Some(WorkbenchFailureLayer::Observation) => {
             "effects committed; observing the result failed".to_owned()
         }
