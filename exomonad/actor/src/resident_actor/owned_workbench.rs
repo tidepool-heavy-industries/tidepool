@@ -268,6 +268,77 @@ where
     .await
 }
 
+pub(super) enum WorkbenchFragmentRequest {
+    Settle {
+        fragment: ResidentWorkbenchFragment,
+        outcome: ResidentOutcome,
+    },
+    BackgroundJob {
+        job: String,
+        reason: crate::resident_workbench::CommandObservationStop,
+    },
+    ReplyRejection {
+        continuation: ResidentHole,
+        error: crate::ReplyError,
+    },
+}
+
+pub(super) enum WorkbenchFragmentAdvance {
+    Captured {
+        fragment: ResidentWorkbenchFragment,
+        boundary: ResidentActorBoundary,
+    },
+    Settled(ResidentWorkbenchStep),
+    Resumed(ResidentOutcome),
+}
+
+/// Native settlement and boundary decoding wait only on the original checkout.
+/// The actor applies the returned fragment or boundary under the same step fence.
+pub(super) async fn advance_fragment<H, O>(
+    workbench: &crate::ResidentActorWorkbench<H, O>,
+    runner: &ResidentActorRunner<H, O>,
+    context: ActorSessionContext,
+    request: WorkbenchFragmentRequest,
+) -> Result<WorkbenchFragmentAdvance, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    let step = match request {
+        WorkbenchFragmentRequest::Settle { fragment, outcome } => {
+            workbench
+                .settle_item(context.clone(), fragment, outcome)
+                .await?
+        }
+        WorkbenchFragmentRequest::BackgroundJob { job, reason } => {
+            workbench
+                .bind_background_job(context.clone(), job, reason)
+                .await?
+        }
+        WorkbenchFragmentRequest::ReplyRejection {
+            continuation,
+            error,
+        } => {
+            return runner
+                .resume_reply_rejection(context, continuation, error)
+                .await
+                .map(WorkbenchFragmentAdvance::Resumed)
+        }
+    };
+    match step {
+        ResidentWorkbenchStep::Running { fragment, outcome } => {
+            let boundary = runner
+                .capture_boundary(context.clone(), *outcome, context.placement.resource_scope)
+                .await?;
+            Ok(WorkbenchFragmentAdvance::Captured {
+                fragment: *fragment,
+                boundary,
+            })
+        }
+        step => Ok(WorkbenchFragmentAdvance::Settled(step)),
+    }
+}
+
 impl<H, O> OwnedExecution<H, O> {
     fn scopes(
         &self,
@@ -538,7 +609,9 @@ where
                     .await;
                 match result {
                     Ok(
-                        park @ (WorkbenchRunAdvance::ParkEffect | WorkbenchRunAdvance::ParkUnit),
+                        park @ (WorkbenchRunAdvance::ParkEffect
+                        | WorkbenchRunAdvance::ParkUnit
+                        | WorkbenchRunAdvance::ParkNative),
                     ) => {
                         tracing::debug!(actor = ?owned.state.effects.context.actor,
                         input_unit_index = owned.state.cursor.index, "serial cursor yielded its captured unit or effect");
@@ -554,6 +627,9 @@ where
                                             WorkbenchRunAdvance::ParkUnit => {
                                                 Self::owned_unit_task(owned)
                                             }
+                                            WorkbenchRunAdvance::ParkNative => {
+                                                behavior.owned_fragment_task(owned)
+                                            }
                                             WorkbenchRunAdvance::Complete(_) => {
                                                 unreachable!("captured execution parks")
                                             }
@@ -567,7 +643,9 @@ where
                     result => {
                         let result = result.map(|advance| match advance {
                             WorkbenchRunAdvance::Complete(step) => step,
-                            WorkbenchRunAdvance::ParkEffect | WorkbenchRunAdvance::ParkUnit => {
+                            WorkbenchRunAdvance::ParkEffect
+                            | WorkbenchRunAdvance::ParkUnit
+                            | WorkbenchRunAdvance::ParkNative => {
                                 unreachable!("effect wait handled above")
                             }
                         });
@@ -606,6 +684,46 @@ where
                     "one native result per unit"
                 );
                 owned.state.cursor.started = Some(started);
+                Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
+            },
+        )
+    }
+
+    fn owned_fragment_task(&self, mut owned: OwnedExecution<H, O>) -> OwnedWorkbenchTask<Self> {
+        let request = owned
+            .state
+            .cursor
+            .running
+            .as_mut()
+            .expect("native advance retains its original fragment cursor")
+            .native_start
+            .take()
+            .expect("one captured native advance");
+        let runner = self.environment.runner.clone();
+        Self::owned_step_task(
+            owned,
+            move |owned| {
+                let context = owned.state.effects.context.clone();
+                let workbench = owned
+                    .workbench
+                    .as_ref()
+                    .expect("native advance retains original admitted workbench");
+                Box::pin(
+                    async move { advance_fragment(workbench, &runner, context, request).await },
+                )
+            },
+            |_behavior, _kernel, mut owned, result| {
+                let current = owned
+                    .state
+                    .cursor
+                    .running
+                    .as_mut()
+                    .expect("same native fragment cursor after fenced completion");
+                assert!(
+                    current.native_result.is_none(),
+                    "one native result per advance"
+                );
+                current.native_result = Some(result);
                 Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
             },
         )

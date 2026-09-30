@@ -1301,6 +1301,9 @@ struct WorkbenchCursor {
 }
 
 struct WorkbenchFragmentExecution {
+    native_start: Option<owned_workbench::WorkbenchFragmentRequest>,
+    native_result:
+        Option<Result<owned_workbench::WorkbenchFragmentAdvance, ResidentActorWorkbenchError>>,
     parked_effect: Option<ParkedWorkbenchEffect>,
     resume_failure: Option<ResidentActorWorkbenchError>,
     fragment: Option<ResidentWorkbenchFragment>,
@@ -1311,6 +1314,8 @@ struct WorkbenchFragmentExecution {
 impl WorkbenchFragmentExecution {
     fn new(fragment: ResidentWorkbenchFragment, outcome: ResidentOutcome) -> Self {
         Self {
+            native_start: None,
+            native_result: None,
             parked_effect: None,
             resume_failure: None,
             fragment: Some(fragment),
@@ -1410,12 +1415,14 @@ impl OwnedWorkbenchWait {
 enum WorkbenchRunAdvance {
     Complete(KernelStep<WorkbenchResponse>),
     ParkUnit,
+    ParkNative,
     ParkEffect,
 }
 
 enum FragmentAdvance {
     Settled(ResidentWorkbenchStep),
     ParkEffect,
+    ParkNative,
 }
 
 /// Structured actor turns retain actor publication authority. Workbench effects
@@ -6535,15 +6542,6 @@ where
         current: &mut WorkbenchFragmentExecution,
         unit: WorkbenchUnitExecution<'_>,
     ) -> Result<FragmentAdvance, ResidentActorWorkbenchError> {
-        if let Some(error) = current.resume_failure.take() {
-            return match error {
-                ResidentActorWorkbenchError::CommandObservationStopped { job, reason } => workbench
-                    .bind_background_job(context.clone(), job, reason)
-                    .await
-                    .map(FragmentAdvance::Settled),
-                error => Err(error),
-            };
-        }
         loop {
             self.runtime_observation.publish_workbench_posture(
                 crate::ActorWorkbenchPosture::RunningUnit {
@@ -6551,34 +6549,56 @@ where
                     total: unit.total,
                 },
             );
-            match workbench
-                .settle_item(
-                    context.clone(),
-                    current
-                        .fragment
-                        .take()
-                        .expect("running unit owns its fragment"),
-                    current
-                        .outcome
-                        .take()
-                        .expect("running unit owns its outcome"),
-                )
-                .await?
-            {
-                ResidentWorkbenchStep::Running {
-                    fragment: next_fragment,
-                    outcome: next,
-                } => {
-                    current.fragment = Some(*next_fragment);
+            let native = match current.native_result.take() {
+                Some(result) => result?,
+                None => {
+                    let request = match current.resume_failure.take() {
+                        Some(ResidentActorWorkbenchError::CommandObservationStopped {
+                            job,
+                            reason,
+                        }) => {
+                            owned_workbench::WorkbenchFragmentRequest::BackgroundJob { job, reason }
+                        }
+                        Some(error) => return Err(error),
+                        None => owned_workbench::WorkbenchFragmentRequest::Settle {
+                            fragment: current
+                                .fragment
+                                .take()
+                                .expect("running unit owns its fragment"),
+                            outcome: current
+                                .outcome
+                                .take()
+                                .expect("running unit owns its outcome"),
+                        },
+                    };
+                    if execution_state.park_effects && !execution_state.after_tool_active {
+                        assert!(
+                            current.native_start.is_none(),
+                            "one captured native request"
+                        );
+                        current.native_start = Some(request);
+                        return Ok(FragmentAdvance::ParkNative);
+                    }
+                    owned_workbench::advance_fragment(
+                        workbench,
+                        &self.environment.runner,
+                        context.clone(),
+                        request,
+                    )
+                    .await?
+                }
+            };
+            match native {
+                owned_workbench::WorkbenchFragmentAdvance::Resumed(outcome) => {
+                    current.outcome = Some(outcome);
+                    continue;
+                }
+                owned_workbench::WorkbenchFragmentAdvance::Captured { fragment, boundary } => {
+                    current.fragment = Some(fragment);
                     let next_fragment = current
                         .fragment
                         .as_mut()
                         .expect("captured effect retains its fragment");
-                    let boundary = self
-                        .environment
-                        .runner
-                        .capture_boundary(context.clone(), *next, context.placement.resource_scope)
-                        .await?;
                     let effect = boundary.operation().to_owned();
                     self.runtime_observation.publish_workbench_posture(
                         crate::ActorWorkbenchPosture::AwaitingEffect {
@@ -6672,6 +6692,17 @@ where
                                     WorkbenchOperationDisposition::Rejected,
                                 );
                                 drop(attempt.result);
+                                if execution_state.park_effects
+                                    && !execution_state.after_tool_active
+                                {
+                                    current.native_start = Some(
+                                        owned_workbench::WorkbenchFragmentRequest::ReplyRejection {
+                                            continuation: attempt.continuation,
+                                            error,
+                                        },
+                                    );
+                                    return Ok(FragmentAdvance::ParkNative);
+                                }
                                 current.outcome = Some(
                                     self.environment
                                         .runner
@@ -6737,6 +6768,17 @@ where
                                         effect_started.elapsed(),
                                         WorkbenchOperationDisposition::Rejected,
                                     );
+                                    if execution_state.park_effects
+                                        && !execution_state.after_tool_active
+                                    {
+                                        current.native_start = Some(
+                                            owned_workbench::WorkbenchFragmentRequest::ReplyRejection {
+                                                continuation: acknowledgement.continuation,
+                                                error,
+                                            },
+                                        );
+                                        return Ok(FragmentAdvance::ParkNative);
+                                    }
                                     current.outcome = Some(
                                         self.environment
                                             .runner
@@ -6909,7 +6951,9 @@ where
                         }
                     }
                 }
-                settled => return Ok(FragmentAdvance::Settled(settled)),
+                owned_workbench::WorkbenchFragmentAdvance::Settled(step) => {
+                    return Ok(FragmentAdvance::Settled(step))
+                }
             }
         }
     }
@@ -7178,7 +7222,9 @@ where
                     .await?
                 {
                     FragmentAdvance::Settled(step) => step,
-                    FragmentAdvance::ParkEffect => unreachable!("nested after-tool remains serial"),
+                    FragmentAdvance::ParkEffect | FragmentAdvance::ParkNative => {
+                        unreachable!("nested after-tool remains serial")
+                    }
                 }
             }
             settled => settled,
@@ -7629,6 +7675,9 @@ where
                             Ok(FragmentAdvance::Settled(step)) => step,
                             Ok(FragmentAdvance::ParkEffect) => {
                                 return Ok(WorkbenchRunAdvance::ParkEffect)
+                            }
+                            Ok(FragmentAdvance::ParkNative) => {
+                                return Ok(WorkbenchRunAdvance::ParkNative)
                             }
                             Err(source) => {
                                 self.abort_incomplete_groups(
@@ -9474,7 +9523,9 @@ where
                 .await
                 .map(|advance| match advance {
                     WorkbenchRunAdvance::Complete(step) => step,
-                    WorkbenchRunAdvance::ParkEffect | WorkbenchRunAdvance::ParkUnit => {
+                    WorkbenchRunAdvance::ParkEffect
+                    | WorkbenchRunAdvance::ParkUnit
+                    | WorkbenchRunAdvance::ParkNative => {
                         unreachable!("legacy workbench remains serial")
                     }
                 });
