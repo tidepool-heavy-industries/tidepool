@@ -253,21 +253,31 @@ async fn production_host_runs_browser_haskell_reconnects_without_replay_and_reti
         root: campaign.actor.clone(),
         config: campaign.config.clone(),
         run_root: campaign.config.run_root.clone(),
+        #[cfg(feature = "codex-compat")]
         tmux: TmuxSession::new(&campaign.config.tmux_session).unwrap(),
+        #[cfg(feature = "codex-compat")]
         backend: HostRuntimeMode::Embedded,
         worktrees: campaign.worktrees.clone(),
+        #[cfg(feature = "codex-compat")]
         bindings: campaign.bindings.clone(),
         readiness: readiness_tx,
         worktree_authority: campaign.authority.clone(),
+        #[cfg(feature = "codex-compat")]
         watch_retention: Arc::new(|_, _| false),
+        #[cfg(feature = "codex-compat")]
         watch_observation: Arc::new(|_, _, _| false),
+        #[cfg(feature = "codex-compat")]
         open_request: Arc::new(|_| None),
+        #[cfg(feature = "codex-compat")]
         source_layers: None,
+        #[cfg(feature = "codex-compat")]
         actor_recovery: exomonad_actor::ActorRecoveryJournal::open(
             campaign.config.run_root.join("actor-lifecycle.v2.jsonl"),
         )
         .unwrap(),
+        #[cfg(feature = "codex-compat")]
         recovered_threads: Arc::new(BTreeMap::new()),
+        #[cfg(feature = "codex-compat")]
         recovered_root_predecessor: None,
         host_graph: Arc::new(move || host_graph_forest.inspect_host_graph()),
     };
@@ -664,21 +674,31 @@ async fn production_host_marks_embedded_root_ready_and_retires_invalid_auth_fail
         root: actor,
         config: campaign.config.clone(),
         run_root: campaign.config.run_root.clone(),
+        #[cfg(feature = "codex-compat")]
         tmux: TmuxSession::new(&campaign.config.tmux_session).unwrap(),
+        #[cfg(feature = "codex-compat")]
         backend: HostRuntimeMode::Embedded,
         worktrees: campaign.worktrees.clone(),
+        #[cfg(feature = "codex-compat")]
         bindings: campaign.bindings.clone(),
         readiness: readiness_tx,
         worktree_authority: campaign.authority.clone(),
+        #[cfg(feature = "codex-compat")]
         watch_retention: Arc::new(|_, _| false),
+        #[cfg(feature = "codex-compat")]
         watch_observation: Arc::new(|_, _, _| false),
+        #[cfg(feature = "codex-compat")]
         open_request: Arc::new(|_| None),
+        #[cfg(feature = "codex-compat")]
         source_layers: None,
+        #[cfg(feature = "codex-compat")]
         actor_recovery: exomonad_actor::ActorRecoveryJournal::open(
             campaign.config.run_root.join("actor-lifecycle.v2.jsonl"),
         )
         .unwrap(),
+        #[cfg(feature = "codex-compat")]
         recovered_threads: Arc::new(BTreeMap::new()),
+        #[cfg(feature = "codex-compat")]
         recovered_root_predecessor: None,
         host_graph: Arc::new(move || host_graph_forest.inspect_host_graph()),
     };
