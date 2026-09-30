@@ -48,6 +48,7 @@ pub struct RuntimeCellAdmission {
     view: SessionCompileView,
     visibility: PublicVisibilitySnapshot,
     reserved_generations: Vec<Generation>,
+    initial_value_generation: Generation,
     native_shares: Vec<SourceLeaseKey>,
     interfaces: Vec<AdmittedValueInterface>,
     specification: Arc<dyn Any + Send + Sync>,
@@ -110,6 +111,7 @@ pub struct AdmittedValueInterface {
 #[derive(Debug)]
 pub struct RuntimeCheckedPrefix {
     admission: Arc<RuntimeCellAdmission>,
+    first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
     state: parking_lot::Mutex<RuntimeCheckedState>,
 }
 
@@ -117,7 +119,41 @@ pub struct RuntimeCheckedPrefix {
 struct RuntimeCheckedState {
     snapshot: Arc<RuntimeCheckedPrefixSnapshot>,
     in_flight: Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>>,
+    reservation: Option<CheckedItemReservation>,
     retained_scopes: Vec<Arc<RuntimeLexicalScopeLease>>,
+}
+
+#[derive(Debug)]
+struct CheckedItemReservation {
+    item: tidepool_toolchain::checked_cell::ExactCheckedItem,
+    generation: Generation,
+}
+
+/// Runtime-owned exact item and value identity reserved before compilation.
+#[derive(Debug)]
+pub struct RuntimeCheckedItemAdmission {
+    prefix: Arc<RuntimeCheckedPrefix>,
+    snapshot: Arc<RuntimeCheckedPrefixSnapshot>,
+    item: tidepool_toolchain::checked_cell::ExactCheckedItem,
+    generation: Generation,
+    digest: [u8; 32],
+}
+impl RuntimeCheckedItemAdmission {
+    pub fn prefix(&self) -> &Arc<RuntimeCheckedPrefix> {
+        &self.prefix
+    }
+    pub fn snapshot(&self) -> &Arc<RuntimeCheckedPrefixSnapshot> {
+        &self.snapshot
+    }
+    pub fn item(&self) -> &tidepool_toolchain::checked_cell::ExactCheckedItem {
+        &self.item
+    }
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+    pub fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
 }
 
 #[derive(Debug)]
@@ -166,6 +202,10 @@ impl RuntimeCheckedPrefix {
         if !self.admission.belongs_to(session)
             || self.admission.visibility.scope != scope
             || state.in_flight.is_some()
+            || state.reservation.as_ref().is_none_or(|reservation| {
+                reservation.item != *execution.item()
+                    || reservation.generation.0 != execution.generation()
+            })
             || execution.item().admission_digest() != self.admission.digest()
             || session.public_visibility_snapshot_in(scope).as_ref()
                 != Some(&state.snapshot.visibility)
@@ -243,6 +283,7 @@ impl CheckedTurnCompletion {
         state.retained_scopes.push(retained);
         state.snapshot = snapshot;
         state.in_flight = None;
+        state.reservation = None;
         Ok(())
     }
 }
@@ -352,6 +393,9 @@ impl RuntimeCellAdmission {
     pub fn reserved_generations(&self) -> &[Generation] {
         &self.reserved_generations
     }
+    pub fn initial_value_generation(&self) -> Generation {
+        self.initial_value_generation
+    }
     pub fn native_shares(&self) -> &[SourceLeaseKey] {
         &self.native_shares
     }
@@ -376,6 +420,56 @@ impl RuntimeCellAdmission {
 }
 
 impl PersistentSession {
+    pub fn admit_checked_item(
+        &mut self,
+        prefix: Arc<RuntimeCheckedPrefix>,
+        item: tidepool_toolchain::checked_cell::ExactCheckedItem,
+    ) -> Result<Arc<RuntimeCheckedItemAdmission>, SessionError> {
+        let mut state = prefix.state.lock();
+        let scope = prefix.admission.visibility.scope;
+        if !prefix.admission.belongs_to(self)
+            || !item.same_cell(&prefix.first_item)
+            || item.index() != state.snapshot.compiler_prefix.next_item()
+            || state.in_flight.is_some()
+            || state.reservation.is_some()
+            || self.public_visibility_snapshot_in(scope).as_ref()
+                != Some(&state.snapshot.visibility)
+            || self.compile_view_in(scope).is_none_or(|view| {
+                view.admission_digest() != state.snapshot.view.admission_digest()
+            })
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let generation = if item.index() == 0 {
+            prefix.admission.initial_value_generation
+        } else {
+            let generation = self
+                .compile_view_in(scope)
+                .ok_or(SessionError::DeadScope(scope))?
+                .next_value_generation();
+            self.set_val_gen(generation);
+            generation
+        };
+        let snapshot = state.snapshot.clone();
+        state.reservation = Some(CheckedItemReservation {
+            item: item.clone(),
+            generation,
+        });
+        let mut digest = blake3::Hasher::new();
+        digest.update(b"TidepoolRuntimeCheckedItem1");
+        digest.update(&snapshot.digest());
+        digest.update(&(item.index() as u64).to_le_bytes());
+        digest.update(&generation.0.to_le_bytes());
+        let digest = *digest.finalize().as_bytes();
+        drop(state);
+        Ok(Arc::new(RuntimeCheckedItemAdmission {
+            prefix,
+            snapshot,
+            item,
+            generation,
+            digest,
+        }))
+    }
     pub fn retain_lexical_scope(
         &mut self,
         source: ScopeId,
@@ -435,9 +529,11 @@ impl PersistentSession {
             .map_err(|_| SessionError::StaleStagedDeclaration)?;
         Ok(Arc::new(RuntimeCheckedPrefix {
             admission,
+            first_item,
             state: parking_lot::Mutex::new(RuntimeCheckedState {
                 snapshot,
                 in_flight: None,
+                reservation: None,
                 retained_scopes: Vec::new(),
             }),
         }))
@@ -520,6 +616,8 @@ impl PersistentSession {
             };
             reserved_generations.push(generation);
         }
+        let initial_value_generation = view.next_value_generation();
+        self.set_val_gen(initial_value_generation);
         let mut digest = blake3::Hasher::new();
         let mut frame = |bytes: &[u8]| {
             digest.update(&(bytes.len() as u64).to_le_bytes());
@@ -576,6 +674,7 @@ impl PersistentSession {
             view,
             visibility,
             reserved_generations,
+            initial_value_generation,
             native_shares,
             interfaces,
             specification,

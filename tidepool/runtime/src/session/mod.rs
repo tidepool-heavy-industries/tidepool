@@ -53,8 +53,8 @@ pub use persistent::{
 };
 
 pub use admission::{
-    PrivateExecutionAdmission, RuntimeCellAdmission, RuntimeCheckedPrefix,
-    RuntimeCheckedPrefixSnapshot, RuntimeLexicalScopeLease,
+    PrivateExecutionAdmission, RuntimeCellAdmission, RuntimeCheckedItemAdmission,
+    RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot, RuntimeLexicalScopeLease,
 };
 pub use paired_publication::FinalExecutionIntent;
 pub use paired_publication::{
