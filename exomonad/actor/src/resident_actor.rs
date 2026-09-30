@@ -2453,6 +2453,7 @@ where
     fn release_session_state(&mut self) {
         self.shutdown_hook.take();
         self.checkpoint.take();
+        self.admitted_checkpoint.take();
         self.pending_checkpoint.take();
         self.active_input.take();
         self.boot.take();
@@ -2749,6 +2750,15 @@ where
             let checkpoint_lease = checkpoint_admission
                 .as_ref()
                 .map(|(lease, _)| lease.clone());
+            let retained_checkpoint_scope = checkpoint_lease
+                .as_ref()
+                .map(|lease| lease.retained_scope().cloned())
+                .transpose()
+                .map_err(|refusal| {
+                    ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "checkpoint retained-scope refusal: {refusal:?}"
+                    ))
+                })?;
             if descriptor.model().is_none() {
                 let checkpoint_model = checkpoint_lease
                     .as_ref()
@@ -2939,13 +2949,13 @@ where
                 };
                 descriptor = descriptor.with_source_layer(layer);
             }
-            if let Some(lease) = &checkpoint_lease {
+            if let Some(retained_scope) = &retained_checkpoint_scope {
                 let scope = self
                     .environment
                     .runner
-                    .remint_checkpoint_child_scope(
+                    .remint_checkpoint_child_scope_from_lease(
                         context.clone(),
-                        lease.scope,
+                        retained_scope.clone(),
                         descriptor.placement().lexical_scope,
                     )
                     .await?;
@@ -4175,10 +4185,10 @@ where
                         || freeze_source().map_err(|_| crate::CheckpointRefusal::CaptureFailed),
                         Ok,
                     )?;
-                    let scope = self
+                    let (scope, retained_scope) = self
                         .environment
                         .runner
-                        .capture_context_scope(context.clone())
+                        .capture_retained_context_scope(context.clone())
                         .await
                         .map_err(|_| crate::CheckpointRefusal::CaptureFailed)?;
                     let after = if admitted_source.is_some() {
@@ -4211,7 +4221,7 @@ where
                     Ok(self
                         .environment
                         .fork_groups
-                        .capture_checkpoint_with_host_attachment(
+                        .capture_checkpoint_with_retained_scope(
                             name,
                             context.actor,
                             self.descriptor.effective_role().clone(),
@@ -4222,6 +4232,7 @@ where
                             scope,
                             boundary,
                             attachment,
+                            retained_scope,
                         ))
                 }
                 .await;
