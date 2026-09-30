@@ -21,7 +21,7 @@ use tidepool_repr::execution_schema::{
     CachedHomeOwner, ImportOwner, JsonLayout, PreparedProgram, SymbolIdentity,
 };
 
-use super::admission::CheckedTurnCompletion;
+use super::admission::{CheckedDisplayPlan, CheckedDisplaySettlement, CheckedTurnCompletion};
 use super::prepared::{ParkPolicy, PreparedRuntimeError, PreparedSettlement};
 use super::turn::TurnCode;
 use tidepool_codegen::suspension::{ContinuationId, RealmId, ValueHandle};
@@ -1004,11 +1004,15 @@ struct PreparedCheckedTurn {
 fn checked_turn_plan(
     certification: &Option<super::turn::TurnCertification>,
     prepared: &PreparedProgram,
+    table: &DataConTable,
     mode: &PreparedTurnMode<'_>,
 ) -> Result<Option<PreparedCheckedTurn>, ResidentError> {
     let Some(certification) = certification else {
         return Ok(None);
     };
+    certification
+        .validate_checked_table(table)
+        .map_err(SessionError::Compile)?;
     let (generation, binders) = match mode {
         PreparedTurnMode::Value => (
             certification
@@ -1049,7 +1053,71 @@ fn is_checked_turn(code: &TurnCode<'_>) -> bool {
             certification.checked_item().is_some()
                 || certification.checked_execution().is_some()
                 || certification.checked_prefix().is_some()
+                || certification.checked_display().is_some()
+                || certification.checked_display_admission().is_some()
         })
+}
+
+fn checked_display_plan(
+    code: &TurnCode<'_>,
+    page: &BoundBinder,
+    metadata: &BoundBinder,
+    alias: &BoundBinder,
+    generation: Generation,
+    admission: Arc<super::RuntimeCheckedDisplayAdmission>,
+) -> Result<CheckedDisplayPlan, ResidentError> {
+    let invalid = || {
+        SessionError::Compile(crate::CompileError::ExtractFailed(
+            "display lacks its sealed compiler and runtime admission".into(),
+        ))
+    };
+    let certification = code.certification.as_ref().as_ref().ok_or_else(invalid)?;
+    let proof = certification.checked_display().ok_or_else(invalid)?;
+    if certification
+        .checked_display_admission()
+        .is_none_or(|owned| !Arc::ptr_eq(owned, &admission))
+        || certification.checked_execution().is_some()
+        || proof.admission_digest() != admission.digest()
+        || proof.generation() != generation.0
+        || generation != admission.generation()
+        || !Arc::ptr_eq(proof.capture(), admission.execution())
+        || !proof.matches_target(&code.prepared)
+    {
+        return Err(invalid().into());
+    }
+    certification
+        .validate_checked_table(&code.table)
+        .map_err(SessionError::Compile)?;
+    certification
+        .validate_checked_display(
+            &code.prepared,
+            generation.0,
+            &[page.clone(), metadata.clone(), alias.clone()],
+        )
+        .map_err(SessionError::Compile)?;
+    proof
+        .validate_bound_binders(
+            &[page, metadata, alias].map(super::turn::encode_bound_binder_authority),
+        )
+        .map_err(SessionError::Compile)?;
+    Ok(CheckedDisplayPlan {
+        admission,
+        proof: proof.clone(),
+        metadata: metadata.clone(),
+    })
+}
+
+fn validate_checked_display_rows(
+    plan: &CheckedDisplayPlan,
+    page: &BoundBinder,
+    alias: &BoundBinder,
+) -> Result<(), ResidentError> {
+    plan.proof
+        .validate_bound_binders(
+            &[page, &plan.metadata, alias].map(super::turn::encode_bound_binder_authority),
+        )
+        .map_err(SessionError::Compile)?;
+    Ok(())
 }
 
 fn refuse_checked_turn(code: &TurnCode<'_>) -> Result<(), ResidentError> {
@@ -1145,6 +1213,7 @@ pub struct PendingDisplayInstall {
     provenance: Arc<ProgramProvenance>,
     generation: Generation,
     lexical_scope: ScopeId,
+    checked: Option<CheckedDisplayPlan>,
 }
 
 impl PendingDisplayInstall {
@@ -4139,8 +4208,12 @@ where
         mode: PreparedTurnMode<'_>,
         argument: Option<PreparedHandle>,
     ) -> Result<ResidentOutcome, ResidentError> {
-        let checked =
-            checked_turn_plan(code.certification.as_ref(), code.prepared.as_ref(), &mode)?;
+        let checked = checked_turn_plan(
+            code.certification.as_ref(),
+            code.prepared.as_ref(),
+            &code.table,
+            &mode,
+        )?;
         let lexical_scope = self.run_context.lexical_scope;
         let checked = checked
             .map(|checked| checked.start(&self.state, lexical_scope))
@@ -4270,6 +4343,7 @@ where
         let checked = checked_turn_plan(
             code.certification.as_ref(),
             code.prepared.as_ref(),
+            &code.table,
             &mode.as_mode(),
         )?;
         let prepared = code.prepared.into_owned();
@@ -4375,6 +4449,12 @@ where
                     != Some(&admitted_public)
                 {
                     return Ok(None);
+                }
+                if checked
+                    .as_ref()
+                    .is_some_and(|checked| !checked.execution.matches_target(target.prepared()))
+                {
+                    return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
                 }
                 checked_completion = checked
                     .map(|checked| checked.start(&self.state, lexical_scope))
@@ -4704,51 +4784,98 @@ where
         generation: Generation,
     ) -> Result<ResidentDisplayBundle, ResidentError> {
         refuse_checked_turn(&code)?;
+        self.run_display_bundle_inner(code, page, metadata, alias, generation, None)
+    }
+
+    pub fn run_checked_display_bundle_with_sites(
+        &mut self,
+        code: TurnCode<'_>,
+        page: &BoundBinder,
+        metadata: &BoundBinder,
+        alias: &BoundBinder,
+        generation: Generation,
+        admission: Arc<super::RuntimeCheckedDisplayAdmission>,
+    ) -> Result<ResidentDisplayBundle, ResidentError> {
+        let checked = checked_display_plan(&code, page, metadata, alias, generation, admission)?;
+        self.run_display_bundle_inner(code, page, metadata, alias, generation, Some(checked))
+    }
+
+    fn run_display_bundle_inner(
+        &mut self,
+        code: TurnCode<'_>,
+        page: &BoundBinder,
+        metadata: &BoundBinder,
+        alias: &BoundBinder,
+        generation: Generation,
+        checked: Option<CheckedDisplayPlan>,
+    ) -> Result<ResidentDisplayBundle, ResidentError> {
         check_display_bundle_binders(page, metadata, alias)?;
-        let prepared = code.prepared.into_owned();
-        let provenance = self.provenance_for(&code.sites)?;
-        self.state
-            .merge_table(&code.table)
-            .map_err(ResidentError::TableCollision)?;
-        self.state.set_val_gen(generation);
-        let install_prepared_started = std::time::Instant::now();
         let lexical_scope = self.run_context.lexical_scope;
-        let (program, source_keys) = if let Some(certification) = code.certification.as_ref() {
-            let resolved =
-                self.state
-                    .resolve_certification_in(lexical_scope, &prepared, certification)?;
-            let registry = self.state.certified_image_registry();
-            let target = super::prepared::CertifiedTargetImage::compile_certified(
-                prepared,
-                &registry,
-                resolved.package_interfaces.clone(),
+        if let Some(plan) = &checked {
+            plan.start(&self.state, lexical_scope)?;
+        }
+        let result = (|| {
+            let prepared = code.prepared.into_owned();
+            let provenance = self.provenance_for(&code.sites)?;
+            self.state
+                .merge_table(&code.table)
+                .map_err(ResidentError::TableCollision)?;
+            self.state.set_val_gen(generation);
+            let install_prepared_started = std::time::Instant::now();
+            let lexical_scope = self.run_context.lexical_scope;
+            let (program, source_keys) = if let Some(certification) = code.certification.as_ref() {
+                let resolved =
+                    self.state
+                        .resolve_certification_in(lexical_scope, &prepared, certification)?;
+                let registry = self.state.certified_image_registry();
+                let target = super::prepared::CertifiedTargetImage::compile_certified(
+                    prepared,
+                    &registry,
+                    resolved.package_interfaces.clone(),
+                )
+                .map_err(PreparedRuntimeError::Compile)?;
+                let demanded = resolved
+                    .groups
+                    .into_iter()
+                    .map(|group| DemandedImage::compile(group, &registry))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(PreparedRuntimeError::from)?;
+                self.install_certified_turn_in(
+                    lexical_scope,
+                    target,
+                    &resolved.target_owners,
+                    &resolved.source_evidence,
+                    demanded,
+                    &resolved.inherited_needed,
+                )?
+            } else {
+                (self.state.install_prepared(prepared)?, Vec::new())
+            };
+            timing::record_stage(
+                timing::NO_NODE,
+                timing::NO_ROUND,
+                timing::STAGE_INSTALL_PREPARED,
+                install_prepared_started.elapsed(),
+                0,
+            );
+            self.run_installed_display_bundle(
+                program,
+                source_keys,
+                provenance,
+                page,
+                alias,
+                generation,
             )
-            .map_err(PreparedRuntimeError::Compile)?;
-            let demanded = resolved
-                .groups
-                .into_iter()
-                .map(|group| DemandedImage::compile(group, &registry))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(PreparedRuntimeError::from)?;
-            self.install_certified_turn_in(
-                lexical_scope,
-                target,
-                &resolved.target_owners,
-                &resolved.source_evidence,
-                demanded,
-                &resolved.inherited_needed,
-            )?
-        } else {
-            (self.state.install_prepared(prepared)?, Vec::new())
-        };
-        timing::record_stage(
-            timing::NO_NODE,
-            timing::NO_ROUND,
-            timing::STAGE_INSTALL_PREPARED,
-            install_prepared_started.elapsed(),
-            0,
-        );
-        self.run_installed_display_bundle(program, source_keys, provenance, page, alias, generation)
+        })();
+        if let Some(plan) = checked {
+            let outcome = if result.is_ok() {
+                CheckedDisplaySettlement::Completed
+            } else {
+                CheckedDisplaySettlement::Failed
+            };
+            plan.settle(&mut self.state, lexical_scope, outcome)?;
+        }
+        result
     }
 
     /// Step (a) of the off-checkout split for a display bundle, the
@@ -4768,6 +4895,32 @@ where
         generation: Generation,
     ) -> Result<PendingDisplayInstall, ResidentError> {
         refuse_checked_turn(&code)?;
+        self.snapshot_display_bundle_inner(code, page, metadata, alias, generation, None)
+    }
+
+    pub fn snapshot_checked_display_bundle(
+        &mut self,
+        code: TurnCode<'static>,
+        page: &BoundBinder,
+        metadata: &BoundBinder,
+        alias: &BoundBinder,
+        generation: Generation,
+        admission: Arc<super::RuntimeCheckedDisplayAdmission>,
+    ) -> Result<PendingDisplayInstall, ResidentError> {
+        let checked = checked_display_plan(&code, page, metadata, alias, generation, admission)?;
+        checked.validate_ready(&self.state, self.run_context.lexical_scope)?;
+        self.snapshot_display_bundle_inner(code, page, metadata, alias, generation, Some(checked))
+    }
+
+    fn snapshot_display_bundle_inner(
+        &mut self,
+        code: TurnCode<'static>,
+        page: &BoundBinder,
+        metadata: &BoundBinder,
+        alias: &BoundBinder,
+        generation: Generation,
+        checked: Option<CheckedDisplayPlan>,
+    ) -> Result<PendingDisplayInstall, ResidentError> {
         check_display_bundle_binders(page, metadata, alias)?;
         let prepared = code.prepared.into_owned();
         let provenance = self.provenance_for(&code.sites)?;
@@ -4802,6 +4955,7 @@ where
             provenance,
             generation,
             lexical_scope,
+            checked,
         })
     }
 
@@ -4822,54 +4976,107 @@ where
             provenance,
             generation,
             lexical_scope,
+            checked,
         } = pending;
-        let install_started = std::time::Instant::now();
-        let (program, source_keys) = match (snapshot, compiled.kind) {
-            (PendingPreparedSource::Legacy(snapshot), CompiledPreparedKind::Legacy(compiled)) => {
-                let Some(program) = self
-                    .state
-                    .revalidate_and_install_prepared(snapshot, compiled)?
-                else {
-                    return Ok(None);
-                };
-                (program, Vec::new())
+        if lexical_scope != self.run_context.lexical_scope {
+            return Err(SessionError::StaleStagedDeclaration.into());
+        }
+        if let Some(plan) = &checked {
+            validate_checked_display_rows(plan, page, alias)?;
+            plan.validate_ready(&self.state, lexical_scope)?;
+        }
+        if let Some(plan) = &checked {
+            match &compiled.kind {
+                CompiledPreparedKind::Certified { target, .. }
+                    if plan.proof.matches_target(target.prepared()) => {}
+                _ => return Err(PreparedRuntimeError::CertifiedTargetOwners.into()),
             }
-            (
-                PendingPreparedSource::Certified {
-                    resolved,
-                    admitted_public,
-                    ..
-                },
-                CompiledPreparedKind::Certified { target, demanded },
-            ) => {
-                if self
-                    .state
-                    .public_visibility_snapshot_in(lexical_scope)
-                    .as_ref()
-                    != Some(&admitted_public)
-                {
-                    return Ok(None);
+        }
+        // Refusals before native installation leave this display admission unused.
+        if let PendingPreparedSource::Certified {
+            admitted_public, ..
+        } = &snapshot
+        {
+            if self
+                .state
+                .public_visibility_snapshot_in(lexical_scope)
+                .as_ref()
+                != Some(admitted_public)
+            {
+                return Ok(None);
+            }
+        }
+        if let Some(plan) = &checked {
+            plan.start(&self.state, lexical_scope)?;
+        }
+        let result = (|| {
+            let install_started = std::time::Instant::now();
+            let (program, source_keys) = match (snapshot, compiled.kind) {
+                (
+                    PendingPreparedSource::Legacy(snapshot),
+                    CompiledPreparedKind::Legacy(compiled),
+                ) => {
+                    let Some(program) = self
+                        .state
+                        .revalidate_and_install_prepared(snapshot, compiled)?
+                    else {
+                        return Ok(None);
+                    };
+                    (program, Vec::new())
                 }
-                self.install_certified_turn_in(
-                    lexical_scope,
-                    target,
-                    &resolved.target_owners,
-                    &resolved.source_evidence,
-                    demanded,
-                    &resolved.inherited_needed,
-                )?
-            }
-            _ => return Err(PreparedRuntimeError::CertifiedTargetOwners.into()),
-        };
-        timing::record_stage(
-            timing::NO_NODE,
-            timing::NO_ROUND,
-            timing::STAGE_INSTALL_PREPARED,
-            install_started.elapsed(),
-            0,
-        );
-        self.run_installed_display_bundle(program, source_keys, provenance, page, alias, generation)
+                (
+                    PendingPreparedSource::Certified {
+                        resolved,
+                        admitted_public,
+                        ..
+                    },
+                    CompiledPreparedKind::Certified { target, demanded },
+                ) => {
+                    if self
+                        .state
+                        .public_visibility_snapshot_in(lexical_scope)
+                        .as_ref()
+                        != Some(&admitted_public)
+                    {
+                        return Ok(None);
+                    }
+                    self.install_certified_turn_in(
+                        lexical_scope,
+                        target,
+                        &resolved.target_owners,
+                        &resolved.source_evidence,
+                        demanded,
+                        &resolved.inherited_needed,
+                    )?
+                }
+                _ => return Err(PreparedRuntimeError::CertifiedTargetOwners.into()),
+            };
+            timing::record_stage(
+                timing::NO_NODE,
+                timing::NO_ROUND,
+                timing::STAGE_INSTALL_PREPARED,
+                install_started.elapsed(),
+                0,
+            );
+            self.run_installed_display_bundle(
+                program,
+                source_keys,
+                provenance,
+                page,
+                alias,
+                generation,
+            )
             .map(Some)
+        })();
+        if let Some(plan) = checked {
+            let outcome = if matches!(result, Ok(Some(_))) {
+                CheckedDisplaySettlement::Completed
+            } else {
+                CheckedDisplaySettlement::Failed
+            };
+            plan.settle(&mut self.state, lexical_scope, outcome)?;
+        }
+        result
     }
 
     /// Run an installed (and pinned) display-bundle program and settle its

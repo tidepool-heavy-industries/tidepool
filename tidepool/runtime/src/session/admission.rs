@@ -212,6 +212,7 @@ pub struct RuntimeCheckedPrefix {
 struct RuntimeCheckedState {
     snapshot: Arc<RuntimeCheckedPrefixSnapshot>,
     in_flight: Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>>,
+    display_in_flight: Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>>,
     reservation: Option<CheckedItemReservation>,
     interface_index: std::collections::BTreeMap<u64, [u8; 32]>,
 }
@@ -247,6 +248,7 @@ pub struct RuntimeCheckedDisplayAdmission {
     presented: Vec<String>,
     digest: [u8; 32],
     _retained_scope: Arc<RuntimeLexicalScopeLease>,
+    started: std::sync::atomic::AtomicBool,
 }
 
 impl RuntimeCheckedDisplayAdmission {
@@ -296,7 +298,7 @@ impl RuntimeCheckedItemAdmission {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct RuntimeCheckedPrefixSnapshot {
     view: SessionCompileView,
     visibility: PublicVisibilitySnapshot,
@@ -304,6 +306,7 @@ pub struct RuntimeCheckedPrefixSnapshot {
     _retained_scope: Arc<RuntimeLexicalScopeLease>,
     native_shares: Vec<SourceLeaseKey>,
     compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
+    last_display_settlement: Option<CheckedDisplaySettlement>,
     digest: [u8; 32],
 }
 
@@ -322,6 +325,9 @@ impl RuntimeCheckedPrefixSnapshot {
     }
     pub fn digest(&self) -> [u8; 32] {
         self.digest
+    }
+    pub fn display_settlement(&self) -> Option<CheckedDisplaySettlement> {
+        self.last_display_settlement
     }
 }
 
@@ -343,6 +349,7 @@ impl RuntimeCheckedPrefix {
         if !self.admission.belongs_to(session)
             || self.admission.visibility.scope != scope
             || state.in_flight.is_some()
+            || state.display_in_flight.is_some()
             || state.reservation.as_ref().is_none_or(|reservation| {
                 reservation.item != *execution.item()
                     || reservation.generation.0 != execution.generation()
@@ -364,6 +371,105 @@ impl RuntimeCheckedPrefix {
             execution,
             scope,
         }))
+    }
+}
+
+/// Auxiliary display settlement never completes another authored item. Its
+/// snapshot records the actual native rows, including a preserved page after
+/// a pure renderer failure, rather than the compiler's expected bundle rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckedDisplaySettlement {
+    Completed,
+    Failed,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CheckedDisplayPlan {
+    pub(crate) admission: Arc<RuntimeCheckedDisplayAdmission>,
+    pub(crate) proof: Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>,
+    pub(crate) metadata: super::BoundBinder,
+}
+impl CheckedDisplayPlan {
+    pub(crate) fn validate_ready(
+        &self,
+        session: &PersistentSession,
+        scope: ScopeId,
+    ) -> Result<(), SessionError> {
+        let prefix = &self.admission.prefix;
+        let state = prefix.state.lock();
+        if !prefix.admission.belongs_to(session)
+            || prefix.admission.visibility.scope != scope
+            || !Arc::ptr_eq(&state.snapshot, &self.admission.snapshot)
+            || state.in_flight.is_some()
+            || state.display_in_flight.is_some()
+            || state.reservation.is_some()
+            || self.proof.admission_digest() != self.admission.digest()
+            || self.proof.generation() != self.admission.generation().0
+            || !Arc::ptr_eq(self.proof.capture(), self.admission.execution())
+            || session.public_visibility_snapshot_in(scope).as_ref()
+                != Some(&state.snapshot.visibility)
+            || session.compile_view_in(scope).is_none_or(|view| {
+                view.admission_digest() != state.snapshot.view.admission_digest()
+            })
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        state
+            .snapshot
+            .compiler_prefix
+            .append_display(self.proof.clone())?;
+        Ok(())
+    }
+    pub(crate) fn start(
+        &self,
+        session: &PersistentSession,
+        scope: ScopeId,
+    ) -> Result<(), SessionError> {
+        self.validate_ready(session, scope)?;
+        self.admission
+            .started
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map_err(|_| SessionError::StaleStagedDeclaration)?;
+        self.admission.prefix.state.lock().display_in_flight = Some(self.proof.clone());
+        Ok(())
+    }
+    pub(crate) fn settle(
+        &self,
+        session: &mut PersistentSession,
+        scope: ScopeId,
+        outcome: CheckedDisplaySettlement,
+    ) -> Result<(), SessionError> {
+        let prefix = &self.admission.prefix;
+        let mut state = prefix.state.lock();
+        if !prefix.admission.belongs_to(session)
+            || state
+                .display_in_flight
+                .as_ref()
+                .is_none_or(|proof| !Arc::ptr_eq(proof, &self.proof))
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let compiler_prefix = state
+            .snapshot
+            .compiler_prefix
+            .append_display(self.proof.clone())?;
+        let interface = self.proof.value_interface_owned();
+        settle_checked_snapshot(
+            session,
+            &mut state,
+            scope,
+            compiler_prefix,
+            prefix.admission.digest(),
+            Some(interface),
+            Some(outcome),
+        )?;
+        state.display_in_flight = None;
+        Ok(())
     }
 }
 
@@ -391,50 +497,72 @@ impl CheckedTurnCompletion {
             .snapshot
             .compiler_prefix
             .append(self.execution.clone())?;
-        let view = session
-            .compile_view_in(self.scope)
-            .ok_or(SessionError::DeadScope(self.scope))?;
-        let visibility = session
-            .public_visibility_snapshot_in(self.scope)
-            .ok_or(SessionError::DeadScope(self.scope))?;
-        let mut interfaces = state.snapshot.interfaces.clone();
-        if let Some((module, bytes)) = self.execution.value_interface_owned() {
-            let module = checked_value_module(module)?;
-            let digest = interfaces.interface_digest(bytes);
-            match state.interface_index.get(&module.gen.0) {
-                Some(existing) if existing != &digest => {
-                    return Err(SessionError::StaleStagedDeclaration)
-                }
-                Some(_) => {}
-                None => {
-                    interfaces = interfaces.append(
-                        AdmittedValueInterface {
-                            module,
-                            bytes: bytes.clone(),
-                        },
-                        digest,
-                    );
-                    state.interface_index.insert(module.gen.0, digest);
-                }
-            }
-        }
-        // The next snapshot owns the complete exact dependency closure before
-        // the previous snapshot can drop. Outstanding compiler/display owners
-        // keep their own old snapshot and lexical lease until they finish.
-        let retained = session.retain_lexical_scope(self.scope)?;
-        let snapshot = Arc::new(checked_snapshot(
-            view,
-            visibility,
-            interfaces,
+        settle_checked_snapshot(
+            session,
+            &mut state,
+            self.scope,
             compiler_prefix,
             self.prefix.admission.digest(),
-            retained,
-        ));
-        state.snapshot = snapshot;
+            self.execution.value_interface_owned(),
+            None,
+        )?;
         state.in_flight = None;
         state.reservation = None;
         Ok(())
     }
+}
+
+fn settle_checked_snapshot(
+    session: &mut PersistentSession,
+    state: &mut RuntimeCheckedState,
+    scope: ScopeId,
+    compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
+    admission: [u8; 32],
+    interface: Option<(&str, &Arc<[u8]>)>,
+    display_settlement: Option<CheckedDisplaySettlement>,
+) -> Result<(), SessionError> {
+    let view = session
+        .compile_view_in(scope)
+        .ok_or(SessionError::DeadScope(scope))?;
+    let visibility = session
+        .public_visibility_snapshot_in(scope)
+        .ok_or(SessionError::DeadScope(scope))?;
+    let mut interfaces = state.snapshot.interfaces.clone();
+    if let Some((module, bytes)) = interface {
+        let module = checked_value_module(module)?;
+        let digest = interfaces.interface_digest(bytes);
+        match state.interface_index.get(&module.gen.0) {
+            Some(existing) if existing != &digest => {
+                return Err(SessionError::StaleStagedDeclaration)
+            }
+            Some(_) => {}
+            None => {
+                interfaces = interfaces.append(
+                    AdmittedValueInterface {
+                        module,
+                        bytes: bytes.clone(),
+                    },
+                    digest,
+                );
+                state.interface_index.insert(module.gen.0, digest);
+            }
+        }
+    }
+    // The next snapshot owns the complete exact dependency closure before
+    // the previous snapshot can drop. Outstanding compiler/display owners
+    // keep their own old snapshot and lexical lease until they finish.
+    let retained = session.retain_lexical_scope(scope)?;
+    let snapshot = Arc::new(checked_snapshot(
+        view,
+        visibility,
+        interfaces,
+        compiler_prefix,
+        admission,
+        retained,
+        display_settlement,
+    ));
+    state.snapshot = snapshot;
+    Ok(())
 }
 
 fn checked_value_module(name: &str) -> Result<tidepool_repr::SessionModule, SessionError> {
@@ -456,6 +584,7 @@ fn checked_snapshot(
     compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
     admission: [u8; 32],
     retained_scope: Arc<RuntimeLexicalScopeLease>,
+    last_display_settlement: Option<CheckedDisplaySettlement>,
 ) -> RuntimeCheckedPrefixSnapshot {
     let native_shares = visibility.source_instances.clone();
     let mut digest = blake3::Hasher::new();
@@ -481,6 +610,11 @@ fn checked_snapshot(
         frame(name.as_bytes());
         frame(&id.raw().to_le_bytes());
     }
+    frame(match last_display_settlement {
+        None => b"no-display-settlement".as_slice(),
+        Some(CheckedDisplaySettlement::Completed) => b"display-completed".as_slice(),
+        Some(CheckedDisplaySettlement::Failed) => b"display-failed".as_slice(),
+    });
     frame(b"interfaces");
     frame(&interfaces.commitment);
     for key in &native_shares {
@@ -506,6 +640,7 @@ fn checked_snapshot(
         _retained_scope: retained_scope,
         native_shares,
         compiler_prefix,
+        last_display_settlement,
         digest: *digest.finalize().as_bytes(),
     }
 }
@@ -607,6 +742,7 @@ impl PersistentSession {
         if !prefix.admission.belongs_to(self)
             || prefix.admission.private_execution().is_none()
             || state.in_flight.is_some()
+            || state.display_in_flight.is_some()
             || state.reservation.is_some()
             || state
                 .snapshot
@@ -668,6 +804,7 @@ impl PersistentSession {
             presented,
             digest: *digest.finalize().as_bytes(),
             _retained_scope: retained_scope,
+            started: std::sync::atomic::AtomicBool::new(false),
         }))
     }
 
@@ -682,6 +819,7 @@ impl PersistentSession {
             || !item.same_cell(&prefix.first_item)
             || item.index() != state.snapshot.compiler_prefix.next_item()
             || state.in_flight.is_some()
+            || state.display_in_flight.is_some()
             || state.reservation.is_some()
             || self.public_visibility_snapshot_in(scope).as_ref()
                 != Some(&state.snapshot.visibility)
@@ -791,6 +929,7 @@ impl PersistentSession {
             first_item.initial_prefix()?,
             admission.digest(),
             admission._retained_scope.clone(),
+            None,
         ));
         admission
             .prefix_started
@@ -807,6 +946,7 @@ impl PersistentSession {
             state: parking_lot::Mutex::new(RuntimeCheckedState {
                 snapshot,
                 in_flight: None,
+                display_in_flight: None,
                 reservation: None,
                 interface_index,
             }),
