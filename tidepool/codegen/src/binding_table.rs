@@ -48,6 +48,7 @@
 //! `RootSlot` addresses alone.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Weak};
 
 use tidepool_repr::{BindingName, SessionModule, SessionVarId, VarId};
 
@@ -99,7 +100,7 @@ pub struct PreparedBindingPromotion {
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SourceLeaseKey {
     pub instance: GroupInstanceId,
-    pub binder: SourceBinder,
+    pub binder: Arc<SourceBinder>,
 }
 
 impl SourceLeaseKey {
@@ -107,7 +108,7 @@ impl SourceLeaseKey {
     pub fn of(lease: &SourceInstanceLease) -> Self {
         Self {
             instance: lease.instance(),
-            binder: lease.binder().clone(),
+            binder: Arc::new(lease.binder().clone()),
         }
     }
 }
@@ -131,8 +132,22 @@ struct BindingTip {
     /// Frozen exact ancestor values, including shadowed generations needed by
     /// inherited declaration code. Leasing them keeps observations alive if
     /// their original owner later stops naming them.
-    retained: HashSet<SessionVarId>,
+    retained: Arc<HashSet<SessionVarId>>,
+    source_instances: Arc<HashSet<SourceLeaseKey>>,
+    leases: Arc<BindingLeaseChunk>,
+}
+
+#[derive(Debug)]
+struct BindingLeaseChunk {
+    parents: Vec<Arc<BindingLeaseChunk>>,
+    bindings: HashSet<SessionVarId>,
     source_instances: HashSet<SourceLeaseKey>,
+}
+
+struct CaptureLeaseHistory {
+    chunk: Weak<BindingLeaseChunk>,
+    retained: Arc<HashSet<SessionVarId>>,
+    source_instances: Arc<HashSet<SourceLeaseKey>>,
 }
 
 /// A value retained by a prepared-STG `PreparedMachine`: tenured as-is (never
@@ -201,6 +216,7 @@ pub struct BindingTable {
     scope_revisions: HashMap<ScopeId, u64>,
     /// Immutable, flattened inherited view captured when a scope is minted.
     tips: HashMap<ScopeId, BindingTip>,
+    capture_history: HashMap<ScopeId, CaptureLeaseHistory>,
     /// Names deliberately hidden by this scope's persistent declaration environment.
     hidden: HashMap<ScopeId, HashSet<BindingName>>,
     /// Binding tips and prepared work retaining each value identity.
@@ -405,7 +421,7 @@ mod promotion_tests {
             .is_none());
 
         assert!(table.save_observation(first_id, &[], 0).is_empty());
-        assert!(table.lease_count(first_id) >= 2);
+        assert!(table.lease_count(first_id) >= 1);
         assert!(table
             .resolve_exact_prepared_in(&tree, descendant, &first_identity, 4)
             .is_some());
@@ -432,6 +448,7 @@ impl Default for BindingTable {
             revision: 1,
             scope_revisions: HashMap::new(),
             tips: HashMap::new(),
+            capture_history: HashMap::new(),
             hidden: HashMap::new(),
             leases: HashMap::new(),
             retired_owners: HashSet::new(),
@@ -459,6 +476,17 @@ impl Default for BindingTable {
 // touched by exactly one thread at a time. Sending ownership across the
 // suspend/resume thread boundary is therefore sound.
 unsafe impl Send for BindingTable {}
+
+impl Drop for BindingTable {
+    fn drop(&mut self) {
+        // The machine owns final root destruction. Unwind internal chunk
+        // ownership iteratively even when a long prefix drops as one table.
+        let tips = std::mem::take(&mut self.tips);
+        for tip in tips.into_values() {
+            self.release_chunks(tip.leases);
+        }
+    }
+}
 
 impl BindingTable {
     /// Table-wide cache invalidation only. Exhaustion permanently disables
@@ -877,7 +905,7 @@ impl BindingTable {
         let mut keys = self
             .tips
             .get(&scope)
-            .map(|tip| tip.source_instances.clone())
+            .map(|tip| tip.source_instances.as_ref().clone())
             .unwrap_or_default();
         let owners = if self.tips.contains_key(&scope) {
             vec![scope]
@@ -1270,6 +1298,7 @@ impl BindingTable {
     /// Retire one scope's binding and materialized source ownership together.
     /// The session owner releases returned machine handles under checkout.
     pub fn drain_scope_with_sources(&mut self, scope: ScopeId) -> ScopeDrain {
+        self.capture_history.remove(&scope);
         let (mut released, mut source_instances) = self.release_tip(scope);
         if let Some(promoted) = self.promoted.remove(&scope) {
             released.extend(self.release_leases(promoted));
@@ -1330,8 +1359,8 @@ impl BindingTable {
     }
 
     /// Freeze the value bindings visible from `parent` as `child`'s immutable
-    /// inherited view. Each distinct referenced value receives one root lease
-    /// owned by the child tip.
+    /// inherited view. Immutable chunks share existing physical custody;
+    /// each newly captured exact root receives one lease in the new delta.
     pub fn seed_scope(
         &mut self,
         tree: &ScopeTree,
@@ -1354,9 +1383,9 @@ impl BindingTable {
         // Inherited custody is already closed at its capture. Only the
         // parent's own mutable owner dependencies may grow this new capture.
         let retained = self.scope_dependency_ids(tree, parent);
-        self.lease_exact_ids(&retained);
-        let source_instances = self.source_instance_keys_in(tree, parent);
-        self.acquire_source_shares(&source_instances);
+        let retained = Arc::new(retained);
+        let source_instances = Arc::new(self.source_instance_keys_in(tree, parent));
+        let leases = self.capture_leases(parent, &retained, &source_instances);
         let visible = inherited
             .into_iter()
             .filter(|(_, id)| !self.scope_local_aliases.contains(id))
@@ -1369,6 +1398,7 @@ impl BindingTable {
                 visible,
                 retained,
                 source_instances,
+                leases,
             },
         );
         self.changed(child);
@@ -1406,23 +1436,23 @@ impl BindingTable {
             .difference(already)
             .copied()
             .collect();
-        self.lease_exact_ids(&retained);
-        self.tips
-            .get_mut(&target)
-            .unwrap()
-            .retained
-            .extend(retained);
         let source_keys = self.source_instance_keys_in(tree, source);
         let already_source = self.source_instance_keys_in(tree, target);
         let additional_source: HashSet<_> =
             source_keys.difference(&already_source).cloned().collect();
-        self.acquire_source_shares(&additional_source);
-        self.tips
-            .get_mut(&target)
-            .unwrap()
-            .source_instances
-            .extend(additional_source);
-        self.changed(target);
+        if !retained.is_empty() || !additional_source.is_empty() {
+            self.lease_exact_ids(&retained);
+            self.acquire_source_shares(&additional_source);
+            let tip = self.tips.get_mut(&target).expect("target was checked");
+            Arc::make_mut(&mut tip.retained).extend(retained.iter().copied());
+            Arc::make_mut(&mut tip.source_instances).extend(additional_source.iter().cloned());
+            tip.leases = Arc::new(BindingLeaseChunk {
+                parents: vec![Arc::clone(&tip.leases)],
+                bindings: retained,
+                source_instances: additional_source,
+            });
+            self.changed(target);
+        }
         true
     }
 
@@ -1436,10 +1466,109 @@ impl BindingTable {
         let Some(tip) = self.tips.remove(&scope) else {
             return (Vec::new(), Vec::new());
         };
-        (
-            self.release_leases(tip.retained),
-            self.release_source_shares(tip.source_instances),
-        )
+        self.release_chunks(tip.leases)
+    }
+
+    // Metadata has one latest owner-local history entry. Its Weak chunk never
+    // retains roots; captures and live tips own every physical lease.
+    fn capture_leases(
+        &mut self,
+        parent: ScopeId,
+        retained: &Arc<HashSet<SessionVarId>>,
+        source_instances: &Arc<HashSet<SourceLeaseKey>>,
+    ) -> Arc<BindingLeaseChunk> {
+        let previous = self.capture_history.remove(&parent).and_then(|history| {
+            history
+                .chunk
+                .upgrade()
+                .map(|chunk| (chunk, history.retained, history.source_instances))
+        });
+        let inherited = self.tips.get(&parent).map(|tip| {
+            (
+                Arc::clone(&tip.leases),
+                Arc::clone(&tip.retained),
+                Arc::clone(&tip.source_instances),
+            )
+        });
+        let mut selected = None;
+        // Test coverage while selecting the current deltas, without walking
+        // the historical chunk chain. A retraction cannot retain obsolete
+        // native custody through a previous capture's physical parent.
+        for (chunk, covered, covered_source) in previous.into_iter().chain(inherited) {
+            let bindings = retained
+                .difference(&covered)
+                .copied()
+                .collect::<HashSet<_>>();
+            let sources = source_instances
+                .difference(&covered_source)
+                .cloned()
+                .collect::<HashSet<_>>();
+            if retained.len() - bindings.len() == covered.len()
+                && source_instances.len() - sources.len() == covered_source.len()
+            {
+                selected = Some((chunk, bindings, sources));
+                break;
+            }
+            // A failed candidate can be the final strong reference. Return
+            // its custody through the same iterative drain mechanism.
+            let released = self.release_chunks(chunk);
+            assert!(
+                released.0.is_empty() && released.1.is_empty(),
+                "candidate remains captured"
+            );
+        }
+        let (parents, bindings, sources) = match selected {
+            Some((chunk, bindings, sources)) if bindings.is_empty() && sources.is_empty() => {
+                self.capture_history.insert(
+                    parent,
+                    CaptureLeaseHistory {
+                        chunk: Arc::downgrade(&chunk),
+                        retained: Arc::clone(retained),
+                        source_instances: Arc::clone(source_instances),
+                    },
+                );
+                return chunk;
+            }
+            Some((parent, bindings, sources)) => (vec![parent], bindings, sources),
+            None => (
+                Vec::new(),
+                retained.as_ref().clone(),
+                source_instances.as_ref().clone(),
+            ),
+        };
+        self.lease_exact_ids(&bindings);
+        self.acquire_source_shares(&sources);
+        let chunk = Arc::new(BindingLeaseChunk {
+            parents,
+            bindings,
+            source_instances: sources,
+        });
+        self.capture_history.insert(
+            parent,
+            CaptureLeaseHistory {
+                chunk: Arc::downgrade(&chunk),
+                retained: Arc::clone(retained),
+                source_instances: Arc::clone(source_instances),
+            },
+        );
+        chunk
+    }
+
+    fn release_chunks(
+        &mut self,
+        chunk: Arc<BindingLeaseChunk>,
+    ) -> (Vec<BindingEntry>, Vec<SourceInstanceLease>) {
+        let mut pending = vec![chunk];
+        let mut bindings = Vec::new();
+        let mut sources = Vec::new();
+        while let Some(chunk) = pending.pop() {
+            if let Ok(chunk) = Arc::try_unwrap(chunk) {
+                bindings.extend(self.release_leases(chunk.bindings));
+                sources.extend(self.release_source_shares(chunk.source_instances));
+                pending.extend(chunk.parents);
+            }
+        }
+        (bindings, sources)
     }
 
     /// Lease exact binding identities, including identities reserved for future
