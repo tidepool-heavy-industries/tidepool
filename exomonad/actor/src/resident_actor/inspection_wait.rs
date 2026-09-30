@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::status_tool::StatusDiscovery;
+use crate::ResidentActorWorkbench;
 
 #[derive(Debug)]
 pub(super) enum InspectionRequest {
