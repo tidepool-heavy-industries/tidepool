@@ -1117,6 +1117,7 @@ impl PersistentSession {
                 next_value_generation: self.val_gen.next(),
                 shadowing,
                 staged_hiding: Vec::new(),
+                exact_context: lib.log.joined_context_at(lib.scope_tip(scope)),
             }
             .canonicalize(),
         )

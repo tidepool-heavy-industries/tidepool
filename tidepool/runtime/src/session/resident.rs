@@ -5515,6 +5515,7 @@ mod authored_publication_tests {
         includes.push(root.path().to_path_buf());
         let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         let TurnResult::Bind { bound, compiled, .. } = run_turn(TurnRequest {
+            exact_context: None,
             session_id: None,
             turn_text: "let (page, metadata, cellDisplay) = ((42 :: Int), (\"page\", False, False), (42 :: Int))",
             templates: &templates,

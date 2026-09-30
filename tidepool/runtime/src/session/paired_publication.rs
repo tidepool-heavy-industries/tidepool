@@ -342,6 +342,17 @@ impl AcceptedDeclarationPublication {
     /// final publication checkout.
     pub fn stage(self) -> Result<StagedPublicManifest, SessionError> {
         let Self { mut base, receipt } = self;
+        let context = Arc::new(ExactDeclarationContext::new(
+            &[],
+            std::slice::from_ref(&receipt),
+            vec![ExactLexicalNode {
+                owner: ExactModuleIdentity {
+                    unit: receipt.reserved().unit.clone(),
+                    module: receipt.reserved().module.clone(),
+                },
+                imports: Vec::new(),
+            }],
+        )?);
         let checksum = base.public.graph.checksum.clone();
         let high_water = base.public.graph.high_water;
         let root = base
@@ -444,6 +455,7 @@ impl AcceptedDeclarationPublication {
             joined: JoinedDeclaration {
                 turn: base.turn,
                 evidence: receipt,
+                context,
             },
         };
         base.public
@@ -709,6 +721,28 @@ mod tests {
             .bindings
             .iter()
             .any(|(name, id)| name == "other" && *id == other_id));
+        let compiled_against = session.compile_view_in(public).unwrap();
+        let context = compiled_against
+            .exact_declaration_context()
+            .unwrap()
+            .clone();
+        assert_eq!(context.lexical_graph().len(), 1);
+        assert_eq!(
+            context.lexical_graph()[0].owner.module,
+            SessionModule::lib(generation).module_name()
+        );
+        assert!(context
+            .recovery_products()
+            .iter()
+            .any(|product| product.owner() == authored.product().owner()));
+        assert!(Arc::ptr_eq(
+            compiled_against.exact_declaration_context().unwrap(),
+            session
+                .compile_view_in(public)
+                .unwrap()
+                .exact_declaration_context()
+                .unwrap(),
+        ));
         let graph = recovery::read_v2(&path, root.path())
             .unwrap()
             .unwrap()
@@ -757,5 +791,11 @@ mod tests {
         session.retire_scope(private);
         assert!(session.bindings().get(other_id).is_some());
         assert_eq!(session.lib().scope_tip(public), generation);
+        let retained = session.compile_view_in(public).unwrap();
+        assert!(retained.is_current_for(&compiled_against));
+        assert!(Arc::ptr_eq(
+            retained.exact_declaration_context().unwrap(),
+            &context
+        ));
     }
 }

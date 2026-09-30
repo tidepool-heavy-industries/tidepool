@@ -605,6 +605,8 @@ pub struct StagedDeclaration {
     reserved: bool,
     module: SessionModule,
     receipt: DeclarationReceipt,
+    exact_context:
+        Option<std::sync::Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
     session_id: SessionId,
     root: PathBuf,
     scope: ScopeId,
@@ -670,6 +672,8 @@ impl StagedDeclaration {
 /// checkout that is released immediately after.
 #[derive(Clone, Debug)]
 pub struct DeclarationCandidateRender {
+    exact_context:
+        Option<std::sync::Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
     session_id: SessionId,
     root: PathBuf,
     extra_include: Vec<PathBuf>,
@@ -1558,6 +1562,7 @@ impl SessionLib {
             ),
         };
         let turn_result = run_turn(TurnRequest {
+            exact_context: None,
             session_id: Some(self.session_id()),
             turn_text: &combined,
             templates: std::slice::from_ref(&decl_template),
@@ -1699,6 +1704,7 @@ impl SessionLib {
         let generation = log.push(turn.clone());
         let rendered = render::render_module_with_vals(&log, generation, &self.env, import_modules);
         DeclarationCandidateRender {
+            exact_context: self.log.joined_context_at(self.scope_tip(scope)),
             session_id: self.id,
             root: self.root.clone(),
             extra_include: self.extra_include.clone(),
@@ -1774,6 +1780,7 @@ impl SessionLib {
             || staged.root != self.root
             || (!staged.reserved && staged.base_generation != self.log.generation())
             || staged.base_tip != self.scope_tip(staged.scope)
+            || staged.exact_context != self.log.joined_context_at(staged.base_tip)
             || !slot_matches
             || staged.visible_values != visible_values
         {
@@ -2188,6 +2195,7 @@ impl SessionLib {
             &includes,
             &self.root,
             &self.env.pragmas,
+            None,
         )
     }
 
@@ -2248,6 +2256,9 @@ fn validate_rendered_module(
     includes: &[PathBuf],
     session_root: &Path,
     pragmas: &str,
+    exact_context: Option<
+        &std::sync::Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+    >,
 ) -> Result<BTreeMap<String, String>, SessionError> {
     let mut values = Vec::new();
     for item in items {
@@ -2294,6 +2305,7 @@ fn validate_rendered_module(
     let preamble = format!("{pragmas}\nmodule TidepoolDeclarationTypes where\n");
     let include_refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let results = match inspection::run_inspections_strict(InspectionRequest {
+        exact_context: exact_context.cloned(),
         preamble: &preamble,
         imports: &imports,
         include: &include_refs,
@@ -2379,6 +2391,7 @@ pub fn validate_declaration_candidate(
         &includes,
         &candidate.root,
         &candidate.pragmas,
+        candidate.exact_context.as_ref(),
     ) {
         Ok(types) => types,
         Err(error) => {
@@ -2413,6 +2426,7 @@ pub fn validate_declaration_candidate(
         reserved: candidate.reserved,
         module: candidate.rendered.module,
         receipt: candidate.receipt,
+        exact_context: candidate.exact_context,
         session_id: candidate.session_id,
         root: candidate.root,
         scope: candidate.scope,
@@ -2966,6 +2980,7 @@ mod tests {
             effects[1].as_path(),
         ];
         let bound = run_turn(TurnRequest {
+            exact_context: None,
             session_id: None,
             turn_text: "old <- pure (OldVersion 1)",
             templates: std::slice::from_ref(&bind_template),

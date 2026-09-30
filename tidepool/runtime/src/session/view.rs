@@ -7,9 +7,11 @@
 //! cache, or declaration log.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::{Generation, SessionId, SessionModule};
+use tidepool_toolchain::declaration_join::ExactDeclarationContext;
 
 /// Apply a frontend's explicit vocabulary replacements to generated imports.
 /// Qualified imports remain available; authored imports are normalized by GHC.
@@ -157,6 +159,9 @@ pub struct SessionCompileView {
     pub(super) next_value_generation: Generation,
     pub(super) shadowing: Vec<super::ExportItem>,
     pub(super) staged_hiding: Vec<(SessionModule, Vec<super::ExportItem>)>,
+    /// Immutable original declaration products and selected lexical graph.
+    /// This is separate from the include roots used to discover fresh source.
+    pub(super) exact_context: Option<Arc<ExactDeclarationContext>>,
 }
 
 impl SessionCompileView {
@@ -225,6 +230,11 @@ impl SessionCompileView {
     }
 
     #[must_use]
+    pub fn exact_declaration_context(&self) -> Option<&Arc<ExactDeclarationContext>> {
+        self.exact_context.as_ref()
+    }
+
+    #[must_use]
     pub fn visible_values(&self) -> &[SessionModule] {
         &self.visible_values
     }
@@ -273,6 +283,14 @@ impl SessionCompileView {
             && self.visible_value_names == compiled_against.visible_value_names
             && self.shadowing == compiled_against.shadowing
             && self.staged_hiding == compiled_against.staged_hiding
+            && match (&self.exact_context, &compiled_against.exact_context) {
+                (Some(current), Some(compiled)) => {
+                    Arc::ptr_eq(current, compiled)
+                        || current.semantic_sha256() == compiled.semantic_sha256()
+                }
+                (None, None) => true,
+                _ => false,
+            }
             && compiled_against
                 .reachable_values
                 .iter()
@@ -465,6 +483,7 @@ mod tests {
             next_value_generation: Generation(6),
             shadowing: Vec::new(),
             staged_hiding: Vec::new(),
+            exact_context: None,
         }
         .canonicalize();
         let external = SourceImports::from_specs(["HarnessTypes (Decision (..))"]);
@@ -507,6 +526,7 @@ mod tests {
             next_value_generation: Generation(6),
             shadowing: Vec::new(),
             staged_hiding: Vec::new(),
+            exact_context: None,
         }
         .canonicalize();
 
@@ -572,6 +592,7 @@ mod tests {
             next_value_generation: Generation(6),
             shadowing: Vec::new(),
             staged_hiding: Vec::new(),
+            exact_context: None,
         }
         .with_staged_values(SessionModule::val(Generation(6)), ["answer".into()])
         .with_staged_values(SessionModule::val(Generation(7)), ["answer".into()]);
@@ -608,6 +629,7 @@ mod tests {
             next_value_generation: Generation(6),
             shadowing: Vec::new(),
             staged_hiding: Vec::new(),
+            exact_context: None,
         }
         .with_staged_values(SessionModule::val(Generation(6)), ["cellDisplay".into()]);
 

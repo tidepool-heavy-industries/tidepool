@@ -198,6 +198,7 @@ enum DeclarationSlot {
 pub(crate) struct JoinedDeclaration {
     pub turn: DeclTurn,
     pub evidence: Arc<tidepool_toolchain::declaration_join::AcceptedJoin>,
+    pub context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
 }
 
 impl DeclLog {
@@ -308,6 +309,16 @@ impl DeclLog {
     ) -> Option<Arc<tidepool_toolchain::declaration_join::CertifiedAuthoredDeclaration>> {
         match self.turns.get(&generation)? {
             DeclarationSlot::CertifiedAuthored { evidence, .. } => Some(evidence.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn joined_context_at(
+        &self,
+        generation: Generation,
+    ) -> Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>> {
+        match self.turns.get(&generation)? {
+            DeclarationSlot::Joined(joined) => Some(joined.context.clone()),
             _ => None,
         }
     }
