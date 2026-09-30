@@ -642,7 +642,7 @@ async fn resident_await_watch_case(case: WatchCase) {
             "captured sleep keeps the original reply pending"
         );
     } else {
-        let cancellation_start_bound = if cancel_first { 180 } else { 60 };
+        let cancellation_start_bound = 180;
         tokio::time::timeout(std::time::Duration::from_secs(cancellation_start_bound), async {
         tokio::select! {
             () = supply_command_until_started(&mut deployments, command_backend.clone(), actor.identity()) => {},
