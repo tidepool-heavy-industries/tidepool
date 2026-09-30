@@ -14,6 +14,7 @@ output_path() {
 }
 rust="$(output_path rust)"
 ghc="$(output_path ghc)"
+ghc_libdir="$("${ghc}/bin/ghc" --print-libdir)"
 cc="$(output_path cc)"
 binutils="$(output_path binutils)"
 node="$(output_path node)"
@@ -45,8 +46,10 @@ rustc = $rust/bin/rustc
 rustdoc = $rust/bin/rustdoc
 clippy = $rust/bin/clippy-driver
 ghc = $ghc/bin/ghc
+ghc_bin = $ghc/bin
 ghc_pkg = $ghc/bin/ghc-pkg
 haddock = $ghc/bin/haddock
+ghc_libdir = $ghc_libdir
 cc = $cc/bin/cc
 cxx = $cc/bin/c++
 ar = $binutils/bin/ar

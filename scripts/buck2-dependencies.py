@@ -6,33 +6,74 @@ from pathlib import Path
 import subprocess
 import tomllib
 
+from buck2_cargo_features import (
+    FeatureSelectionError,
+    metadata_feature_args,
+    resolve as resolve_cargo_features,
+)
+
 ROOT = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser()
 parser.add_argument("--output-dir", type=Path, required=True)
-DEST = parser.parse_args().output_dir.resolve()
+parser.add_argument("--no-default-features", action="append", default=[], metavar="PACKAGE")
+parser.add_argument("--features", action="append", default=[], metavar="PACKAGE=FEATURES")
+options = parser.parse_args()
+DEST = options.output_dir.resolve()
 DEST.mkdir(parents=True, exist_ok=True)
-# Test roots retain their direct dev-dependency closure. These four additional
-# roots are library-only; their dev dependencies and codegen's replaced build
-# script are not part of the native library dependency bundle.
-TEST_ROOTS = {"tidepool-atomic-write", "tidepool-repr", "tidepool-heap"}
-LIBRARY_ROOTS = {"tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen"}
+# Test roots retain their direct dev-dependency closure. The remaining roots
+# are library-only; their dev dependencies and codegen's replaced build script
+# are not part of the native library dependency bundle.
+TEST_ROOTS = {
+    "tidepool-atomic-write", "tidepool-repr", "tidepool-heap",
+    "tidepool-extract-cmd", "tidepool-toolchain",
+}
+LIBRARY_ROOTS = {
+    "tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen",
+    "tidepool-extract-report",
+}
 ROOTS = TEST_ROOTS | LIBRARY_ROOTS
 LINUX_TARGETS = {None, "cfg(unix)"}
-metadata = json.loads(subprocess.check_output([
+metadata_command = [
     "cargo", "metadata", "--locked", "--filter-platform", "x86_64-unknown-linux-gnu",
     "--format-version", "1",
-], cwd=ROOT))
+]
+no_default = set(options.no_default_features)
+feature_overrides = {}
+for value in options.features:
+    package_name, separator, raw_features = value.partition("=")
+    if not separator or not package_name or not raw_features:
+        raise SystemExit(f"invalid --features value {value!r}; expected PACKAGE=FEATURE[,FEATURE...]")
+    feature_overrides.setdefault(package_name, set()).update(
+        feature for feature in raw_features.split(",") if feature
+    )
+unknown = (no_default | set(feature_overrides)) - ROOTS
+if unknown:
+    raise SystemExit("feature selection names an unknown dependency root: " + ", ".join(sorted(unknown)))
+
+baseline = json.loads(subprocess.check_output(metadata_command, cwd=ROOT))
+metadata_command.append("--no-default-features")
+metadata_command.extend(metadata_feature_args(baseline, no_default, feature_overrides))
+metadata = json.loads(subprocess.check_output(metadata_command, cwd=ROOT))
 packages = {p["id"]: p for p in metadata["packages"]}
 nodes = {p["id"]: p for p in metadata["resolve"]["nodes"]}
 selected = [p for p in packages.values() if p["name"] in ROOTS and p["source"] is None]
 if len(selected) != len(ROOTS) or {p["name"] for p in selected} != ROOTS:
     raise SystemExit("Missing migrated Cargo package")
+
+
 dependencies = {}
 for package in selected:
-    if package["features"]:
-        raise SystemExit(f"Model Cargo feature selection before migrating {package['name']}")
     library_only = package["name"] in LIBRARY_ROOTS
     resolved_deps = nodes[package["id"]]["deps"]
+    try:
+        _, active_dependencies, dependency_features = resolve_cargo_features(
+            package,
+            feature_overrides.get(package["name"], set()),
+            package["name"] not in no_default,
+            resolved_node=nodes[package["id"]],
+        )
+    except FeatureSelectionError as error:
+        raise SystemExit(str(error)) from error
     for dependency in package["dependencies"]:
         kind = dependency["kind"]
         # The generated library-only packages don't build their test targets.
@@ -45,8 +86,9 @@ for package in selected:
             continue
         if kind == "build":
             raise SystemExit(f"Model build dependency for {package['name']}: {dependency['name']}")
-        if dependency["optional"]:
-            raise SystemExit(f"Model optional dependency for {package['name']}: {dependency['name']}")
+        dependency_key = dependency["rename"] or dependency["name"]
+        if dependency["optional"] and dependency_key not in active_dependencies:
+            continue
         target_platform = dependency["target"]
         if target_platform not in LINUX_TARGETS:
             raise SystemExit(
@@ -76,6 +118,7 @@ for package in selected:
         key = (target["name"], target["version"])
         spec = dependencies.setdefault(key, {"features": set(), "default": False})
         spec["features"].update(dependency["features"])
+        spec["features"].update(dependency_features.get(dependency_key, set()))
         spec["default"] |= dependency["uses_default_features"]
 lines = [
     '# @generated by scripts/buck2-dependencies.py; Cargo manifests and root lock own dependencies.',

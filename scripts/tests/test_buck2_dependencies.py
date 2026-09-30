@@ -10,10 +10,12 @@ import tomllib
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "buck2-dependencies.py"
+FEATURES = SCRIPT.with_name("buck2_cargo_features.py")
 REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
 ROOT_NAMES = (
     "tidepool-atomic-write", "tidepool-repr", "tidepool-heap",
     "tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen",
+    "tidepool-extract-cmd", "tidepool-extract-report", "tidepool-toolchain",
 )
 
 
@@ -27,6 +29,7 @@ class DependencyManifest(unittest.TestCase):
         self.script = self.root / "scripts/buck2-dependencies.py"
         self.script.write_bytes(SCRIPT.read_bytes())
         self.script.chmod(0o755)
+        (self.root / "scripts/buck2_cargo_features.py").write_bytes(FEATURES.read_bytes())
         self.metadata_path = self.root / "metadata.json"
         self.cargo_lock = self.root / "Cargo.lock"
         metadata, lock_packages = self.fixture_metadata()
@@ -60,12 +63,17 @@ print(open(os.environ['FAKE_METADATA']).read())
         local_ids = {name: f"path+file:///fixture/{name}#{name}@0.1.0" for name in ROOT_NAMES}
         local_ids.update({
             name: f"path+file:///fixture/{name}#{name}@0.1.0"
-            for name in ("tidepool-bridge-derive", "tidepool-test-data")
+            for name in (
+                "tidepool-bridge-derive", "tidepool-test-data", "tidepool-extract-cmd",
+                "tidepool-extract-report", "tidepool-toolchain",
+            )
         })
         registry_versions = {
             "tempfile": "3.27.0", "ciborium": "0.2.2", "thiserror": "2.0.20",
+            "blake3": "1.8.2", "serde": "1.0.228",
             "proptest": "1.11.0", "num-bigint": "0.4.8", "serde_json": "1.0.151",
             "chrono": "0.4.45", "libc": "0.2.189", "frunk": "0.5.0",
+            "serial_test": "3.2.0",
             "parking_lot": "0.12.5", "cranelift-codegen": "0.129.1",
             "bridge-dev-only": "1.0.0", "effect-dev-only": "1.0.0",
             "cc": "1.0.0", "windows-only": "1.0.0",
@@ -124,6 +132,24 @@ print(open(os.environ['FAKE_METADATA']).read())
                 ("tidepool-heap", None, None, True, []),
                 ("tidepool-repr", None, None, True, []),
             ],
+            "tidepool-extract-cmd": [
+                ("blake3", None, None, True, []),
+                ("serde_json", "dev", None, True, []),
+                ("tempfile", "dev", None, True, []),
+            ],
+            "tidepool-extract-report": [
+                ("blake3", None, None, True, []),
+                ("serde", None, None, True, ["derive"]),
+                ("serde_json", None, None, True, ["arbitrary_precision"]),
+                ("thiserror", None, None, True, []),
+            ],
+            "tidepool-toolchain": [
+                ("tidepool-atomic-write", None, None, True, []),
+                ("tidepool-extract-cmd", None, None, True, []),
+                ("tidepool-extract-report", None, None, True, []),
+                ("tidepool-repr", None, None, True, []),
+                ("serial_test", "dev", None, True, []),
+            ],
         }
         edges_by_root = {}
         for root_name, deps in declarations.items():
@@ -166,11 +192,11 @@ print(open(os.environ['FAKE_METADATA']).read())
             "resolve": {"nodes": nodes},
         }, lock_packages
 
-    def run_generator(self, metadata=None):
+    def run_generator(self, metadata=None, *args):
         if metadata is not None:
             self.metadata_path.write_text(json.dumps(metadata))
         return subprocess.run(
-            ["python3", str(self.script), "--output-dir", str(self.output)],
+            ["python3", str(self.script), "--output-dir", str(self.output), *args],
             cwd=self.root, env=self.env, capture_output=True, text=True, timeout=10,
         )
 
@@ -230,6 +256,57 @@ print(open(os.environ['FAKE_METADATA']).read())
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Missing or ambiguous Linux-resolved dependency libc", result.stderr)
         self.assertFalse((self.output / "Cargo.toml").exists())
+
+    def test_no_default_feature_selection_excludes_optional_vendor_dependency(self):
+        metadata, _ = self.fixture_metadata()
+        package = next(p for p in metadata["packages"] if p["name"] == "tidepool-codegen")
+        package["features"] = {
+            "default": ["codex-compat"],
+            "codex-compat": [
+                "dep:codex_proto", "codex_proto/json", "codex_proto?/transport",
+            ],
+            "weak-only": ["codex_proto?/transport"],
+            "embedded": [],
+        }
+        package["dependencies"].append({
+            "name": "codex-shoal-protocol", "rename": "codex_proto", "kind": None,
+            "target": None, "optional": True, "uses_default_features": True,
+            "features": [],
+        })
+        vendor_id = "registry+fixture#codex-shoal-protocol@1.0.0"
+        metadata["packages"].append({
+            "id": vendor_id, "name": "codex-shoal-protocol", "version": "1.0.0",
+            "source": REGISTRY, "features": {}, "dependencies": [], "targets": [],
+        })
+        node = next(n for n in metadata["resolve"]["nodes"] if n["id"] == package["id"])
+        node["deps"].append({
+            "name": "codex_proto", "pkg": vendor_id,
+            "dep_kinds": [{"kind": None, "target": None}],
+        })
+        result = self.run_generator(
+            metadata, "--no-default-features", "tidepool-codegen",
+            "--features", "tidepool-codegen=embedded",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = tomllib.loads((self.output / "Cargo.toml").read_text())
+        self.assertNotIn("codex-shoal-protocol", manifest["dependencies"])
+
+        result = self.run_generator(metadata)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = tomllib.loads((self.output / "Cargo.toml").read_text())
+        self.assertIn("codex-shoal-protocol", manifest["dependencies"])
+        self.assertEqual(
+            manifest["dependencies"]["codex-shoal-protocol"]["features"],
+            ["json", "transport"],
+        )
+
+        result = self.run_generator(
+            metadata, "--no-default-features", "tidepool-codegen",
+            "--features", "tidepool-codegen=weak-only",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = tomllib.loads((self.output / "Cargo.toml").read_text())
+        self.assertNotIn("codex-shoal-protocol", manifest["dependencies"])
 
 
 if __name__ == "__main__":

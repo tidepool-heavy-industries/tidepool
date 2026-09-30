@@ -14,6 +14,7 @@ import unittest
 
 
 GENERATOR = Path(__file__).resolve().parents[1] / "buck2-first-party.py"
+FEATURES = GENERATOR.with_name("buck2_cargo_features.py")
 
 
 class FirstPartySources(unittest.TestCase):
@@ -24,6 +25,7 @@ class FirstPartySources(unittest.TestCase):
         self.root = self.base / "repo"
         (self.root / "scripts").mkdir(parents=True)
         shutil.copyfile(GENERATOR, self.root / "scripts/buck2-first-party.py")
+        shutil.copyfile(FEATURES, self.root / "scripts/buck2_cargo_features.py")
         self.bin = self.base / "bin"
         self.bin.mkdir()
         cargo = self.bin / "cargo"
@@ -61,6 +63,9 @@ class FirstPartySources(unittest.TestCase):
                       "retention_tests.rs", "settlement_tests.rs", "tests.rs"):
             self.write(f"tidepool/codegen/src/prepared_program/{source}", "")
         self.write("bridge/atomic-write/tests/strict_directory.rs", "#[test] fn write() {}\n")
+        self.write("tidepool/extract-cmd/Cargo.toml", "[package]\nname = 'tidepool-extract-cmd'\n")
+        self.write("tidepool/extract-cmd/src/lib.rs", "pub fn frontend() {}\n")
+        self.write("tidepool/extract-cmd/src/main.rs", "fn main() {}\n")
         self.packages = [self.package("tidepool-repr", "tidepool/repr", [
             ("tidepool_repr", "lib", "src/lib.rs"), ("repr", "test", "tests/suites/repr.rs")]),
             self.package("tidepool-atomic-write", "bridge/atomic-write", [
@@ -73,7 +78,10 @@ class FirstPartySources(unittest.TestCase):
             self.package("tidepool-codegen", "tidepool/codegen", [
                 ("tidepool_codegen", "lib", "src/lib.rs"),
                 ("native_md5_link", "test", "tests/native_md5_link.rs"),
-                ("prepared_control", "test", "tests/prepared_control.rs")])]
+                ("prepared_control", "test", "tests/prepared_control.rs")]),
+            self.package("tidepool-extract-cmd", "tidepool/extract-cmd", [
+                ("tidepool_extract_cmd", "lib", "src/lib.rs"),
+                ("tidepool-extract", "bin", "src/main.rs")])]
         self.metadata = self.base / "metadata.json"
         self.metadata.write_text(json.dumps({"packages": self.packages,
             "workspace_members": [package["id"] for package in self.packages],
@@ -99,6 +107,7 @@ class FirstPartySources(unittest.TestCase):
                                "--package", "tidepool-repr", "--package", "tidepool-atomic-write",
                                "--package", "tidepool-heap",
                                "--package", "tidepool-codegen",
+                               "--package", "tidepool-extract-cmd",
                                *args], cwd=self.root, env=env, capture_output=True, text=True)
 
     def groups(self, path):
@@ -118,6 +127,17 @@ class FirstPartySources(unittest.TestCase):
         self.assertNotIn("prepared_control", buck)
         self.assertIn("tidepool_codegen_unit_tests", buck)
         self.assertIn("tidepool_codegen_unit_tests_sources", groups)
+
+    def test_extract_frontend_binary_is_generated_from_its_cargo_target(self):
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        buck, groups = self.groups("tidepool/extract-cmd")
+        self.assertIn('name = "tidepool-extract"', buck)
+        self.assertIn('crate_root = "tidepool/extract-cmd/src/main.rs"', buck)
+        self.assertEqual(
+            groups["tidepool-extract_sources"]["src/main.rs"],
+            "tidepool/extract-cmd/src/main.rs",
+        )
 
     def test_source_tree_preserves_fixture_layout_and_target_inputs(self):
         result = self.generate()
@@ -228,6 +248,46 @@ class FirstPartySources(unittest.TestCase):
         result = self.generate()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unsupported Linux dependency selector", result.stderr)
+
+    def test_feature_selection_keeps_optional_vendor_protocol_out_of_embedded_graph(self):
+        metadata = json.loads(self.metadata.read_text())
+        package = next(p for p in metadata["packages"] if p["name"] == "tidepool-repr")
+        package["features"] = {
+            "default": ["codex-compat"],
+            "codex-compat": ["dep:codex-shoal-protocol"],
+            "embedded": [],
+        }
+        package["dependencies"].append({
+            "name": "codex-shoal-protocol", "rename": None, "kind": None,
+            "target": None, "optional": True, "uses_default_features": True,
+            "features": [], "req": "=0.1.0",
+        })
+        vendor_id = "registry+https://github.com/rust-lang/crates.io-index#codex-shoal-protocol@0.1.0"
+        metadata["packages"].append({
+            "id": vendor_id, "name": "codex-shoal-protocol", "version": "0.1.0",
+            "source": "registry+https://github.com/rust-lang/crates.io-index",
+        })
+        node = next(n for n in metadata["resolve"]["nodes"] if n["id"] == package["id"])
+        node["deps"].append({
+            "name": "codex_shoal_protocol", "pkg": vendor_id,
+            "dep_kinds": [{"kind": None, "target": None}],
+        })
+        self.metadata.write_text(json.dumps(metadata))
+
+        embedded = self.generate(
+            "--no-default-features", "tidepool-repr",
+            "--features", "tidepool-repr=embedded",
+        )
+        self.assertEqual(embedded.returncode, 0, embedded.stderr)
+        buck = (self.root / "tidepool/repr/BUCK").read_text()
+        self.assertNotIn("codex-shoal-protocol", buck)
+        self.assertIn('features = [\n        "embedded",\n    ]', buck)
+
+        default = self.generate()
+        self.assertEqual(default.returncode, 0, default.stderr)
+        buck = (self.root / "tidepool/repr/BUCK").read_text()
+        self.assertIn("//third-party/rust:codex-shoal-protocol", buck)
+        self.assertIn('"codex-compat"', buck)
 
 
 if __name__ == "__main__":
