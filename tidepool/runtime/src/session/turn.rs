@@ -8182,15 +8182,28 @@ mod tests {
     #[test]
     fn run_turn_retries_opaque_template_after_render_source_rejection() {
         tidepool_testing::eval_harness::require_extract();
+        let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
         let session_root = TempDir::new().unwrap();
         let templates = [
             TurnTemplate {
                 kind: TemplateSelector::Expr,
-                source: "module Expr where\n__result = show ({{TURN}})\n".into(),
+                source: assemble_display_expression_module(
+                    effects.preamble(),
+                    "__result",
+                    effects.row(),
+                    "{{TURN}}",
+                    ExpressionLift::Pure,
+                ),
             },
             TurnTemplate {
                 kind: TemplateSelector::Expr,
-                source: "module Expr where\n__result = let _value = {{TURN}} in (\"<opaque>\" :: String)\n".into(),
+                source: assemble_opaque_expression_module(
+                    effects.preamble(),
+                    "__result",
+                    effects.row(),
+                    "{{TURN}}",
+                    ExpressionLift::Pure,
+                ),
             },
         ];
         let result = run_turn(TurnRequest {
@@ -8198,7 +8211,7 @@ mod tests {
             session_id: None,
             turn_text: "((+ 1) :: Int -> Int)",
             templates: &templates,
-            include: &[],
+            include: &effects.include_path_refs(),
             session_root: session_root.path(),
             inject_modules: &[],
             gen: 0,
