@@ -68,6 +68,7 @@ pub struct BindingTipId(pub u64);
 pub struct BindingScopeWitness {
     inherited: Option<BindingTipId>,
     frames: Vec<(ScopeId, u64)>,
+    dependency_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -209,6 +210,8 @@ pub struct BindingTable {
     retired_owners: HashSet<SessionVarId>,
     next_tip: u64,
     observations: HashMap<SessionVarId, ObservationBinding>,
+    observation_owners: HashMap<ScopeId, usize>,
+    dependency_revision: u64,
     next_observation_order: u64,
     scope_local_aliases: HashSet<SessionVarId>,
     /// Exact private owners and their dependency closure retained by a
@@ -413,6 +416,7 @@ mod promotion_tests {
 }
 
 struct ObservationBinding {
+    owner: ScopeId,
     dependencies: Vec<SessionVarId>,
     recent: Option<u64>,
     retain_while_current: bool,
@@ -433,6 +437,8 @@ impl Default for BindingTable {
             retired_owners: HashSet::new(),
             next_tip: 1,
             observations: HashMap::new(),
+            observation_owners: HashMap::new(),
+            dependency_revision: 1,
             next_observation_order: 0,
             scope_local_aliases: HashSet::new(),
             promoted: HashMap::new(),
@@ -475,6 +481,10 @@ impl BindingTable {
         };
         Some(BindingScopeWitness {
             inherited,
+            dependency_revision: owners
+                .iter()
+                .any(|owner| self.observation_owners.contains_key(owner))
+                .then_some(self.dependency_revision),
             frames: owners
                 .into_iter()
                 .map(|owner| {
@@ -508,6 +518,7 @@ impl BindingTable {
 
     fn remove_entry(&mut self, id: SessionVarId) -> Option<BindingEntry> {
         let entry = self.live.remove(&id)?;
+        self.remove_observation(id);
         if let Some(owned) = self.owned.get_mut(&entry.scope) {
             owned.remove(&id);
             if owned.is_empty() {
@@ -561,6 +572,30 @@ impl BindingTable {
         Ok(())
     }
 
+    fn insert_observation(&mut self, id: SessionVarId, observation: ObservationBinding) {
+        self.remove_observation(id);
+        let scope = observation.owner;
+        *self.observation_owners.entry(scope).or_default() += 1;
+        self.observations.insert(id, observation);
+        self.changed(scope);
+        self.dependency_revision = self.revision;
+    }
+
+    fn remove_observation(&mut self, id: SessionVarId) -> Option<ObservationBinding> {
+        let observation = self.observations.remove(&id)?;
+        let count = self
+            .observation_owners
+            .get_mut(&observation.owner)
+            .expect("observation owner is indexed");
+        *count -= 1;
+        if *count == 0 {
+            self.observation_owners.remove(&observation.owner);
+        }
+        self.changed(observation.owner);
+        self.dependency_revision = self.revision;
+        Some(observation)
+    }
+
     /// Mark a compiler-issued binding as an automatic observation. Only the
     /// newest `limit` names in its scope remain discoverable. Values referenced
     /// by newer observations or frozen fork tips remain rooted until unused.
@@ -589,15 +624,15 @@ impl BindingTable {
         // save order expresses which observations are recent.
         let order = self.next_observation_order;
         self.next_observation_order = order.checked_add(1).expect("observation order exhausted");
-        self.observations.insert(
+        self.insert_observation(
             id,
             ObservationBinding {
+                owner: scope,
                 dependencies,
                 recent: Some(order),
                 retain_while_current: false,
             },
         );
-        self.changed(scope);
         let mut recent: Vec<_> = self
             .observations
             .iter()
@@ -641,11 +676,8 @@ impl BindingTable {
             .map(SessionVarId::from_var)
             .collect();
         while let Some(id) = pending.pop() {
-            if let Some(observation) = self.observations.remove(&id) {
+            if let Some(observation) = self.remove_observation(id) {
                 pending.extend(observation.dependencies);
-                if let Some(scope) = self.live.get(&id).map(|entry| entry.scope) {
-                    self.changed(scope);
-                }
             }
         }
     }
@@ -653,10 +685,14 @@ impl BindingTable {
     /// Collect expired automatic roots only after accounting for compiled
     /// observation dependencies and immutable fork views.
     pub fn collect_observations(&mut self) -> Vec<BindingEntry> {
-        let previous = self.observations.len();
-        self.observations.retain(|id, _| self.live.contains_key(id));
-        if self.observations.len() != previous {
-            self.changed(ScopeId::ROOT);
+        let stale = self
+            .observations
+            .keys()
+            .filter(|id| !self.live.contains_key(id))
+            .copied()
+            .collect::<Vec<_>>();
+        for id in stale {
+            self.remove_observation(id);
         }
         let mut pending: Vec<_> = self
             .observations
@@ -690,7 +726,7 @@ impl BindingTable {
             .collect();
         let mut released = Vec::new();
         for id in expired {
-            self.observations.remove(&id);
+            self.remove_observation(id);
             if let Some(entry) = self.remove_live(id) {
                 released.push(entry);
             }
@@ -1105,9 +1141,10 @@ impl BindingTable {
         }
         let id = self.bind_in(scope, entry).ok()?;
         self.scope_local_aliases.insert(id);
-        self.observations.insert(
+        self.insert_observation(
             id,
             ObservationBinding {
+                owner: scope,
                 dependencies: vec![source],
                 recent: None,
                 retain_while_current: true,
@@ -1314,33 +1351,10 @@ impl BindingTable {
             .into_iter()
             .map(|(name, entry)| (name.clone(), entry.id))
             .collect();
-        let owners = if self.tips.contains_key(&parent) {
-            vec![parent]
-        } else {
-            tree.lookup_chain(parent)
-        };
-        let available_exact: HashSet<_> = owners
-            .iter()
-            .flat_map(|owner| self.owned.get(owner).into_iter().flat_map(HashSet::iter))
-            .copied()
-            .chain(
-                owners
-                    .iter()
-                    .filter_map(|scope| self.tips.get(scope))
-                    .flat_map(|tip| tip.retained.iter())
-                    .copied(),
-            )
-            .chain(
-                owners
-                    .iter()
-                    .filter_map(|scope| self.promoted.get(scope))
-                    .flat_map(HashSet::iter)
-                    .copied(),
-            )
-            .collect();
-        // Keep the parent's exact value identities rooted for inherited code,
-        // but do not give a fresh actor its parent's local display alias name.
-        let retained = self.acquire_leases(available_exact);
+        // Inherited custody is already closed at its capture. Only the
+        // parent's own mutable owner dependencies may grow this new capture.
+        let retained = self.scope_dependency_ids(tree, parent);
+        self.lease_exact_ids(&retained);
         let source_instances = self.source_instance_keys_in(tree, parent);
         self.acquire_source_shares(&source_instances);
         let visible = inherited
@@ -1386,28 +1400,9 @@ impl BindingTable {
         if !tree.is_live(source) || !tree.is_live(target) || !self.tips.contains_key(&target) {
             return false;
         }
-        let ancestors = tree.lookup_chain(source);
         let already = &self.tips[&target].retained;
-        let additional: Vec<_> = ancestors
-            .iter()
-            .flat_map(|owner| self.owned.get(owner).into_iter().flat_map(HashSet::iter))
-            .copied()
-            // A detached source may retain an older value owned by a scope
-            // outside its ancestry. Its declarations can still import that
-            // value after the original owner and this source retire.
-            .chain(
-                ancestors
-                    .iter()
-                    .filter_map(|scope| self.tips.get(scope))
-                    .flat_map(|tip| tip.retained.iter().copied()),
-            )
-            .collect();
-        // Expand alias/observation dependencies BEFORE subtracting leases the
-        // target already owns. Filtering only the input IDs would acquire an
-        // extra lease for an already-retained dependency reached through a new
-        // alias, then lose it when the target's HashSet deduplicates the ID.
         let retained: HashSet<_> = self
-            .dependency_closure(additional)
+            .scope_dependency_ids(tree, source)
             .difference(already)
             .copied()
             .collect();
@@ -1762,8 +1757,18 @@ impl BindingTable {
         tree: &ScopeTree,
         scope: ScopeId,
     ) -> Vec<SessionVarId> {
+        let mut ids = self
+            .scope_dependency_ids(tree, scope)
+            .into_iter()
+            .filter(|id| self.live.contains_key(id))
+            .collect::<Vec<_>>();
+        ids.sort_by_key(|id| id.raw());
+        ids
+    }
+
+    fn scope_dependency_ids(&self, tree: &ScopeTree, scope: ScopeId) -> HashSet<SessionVarId> {
         if !tree.is_live(scope) {
-            return Vec::new();
+            return HashSet::new();
         }
         let tip = self.tips.get(&scope);
         let owners = if tip.is_some() {
@@ -1783,19 +1788,11 @@ impl BindingTable {
             .iter()
             .flat_map(|owner| self.promoted.get(owner).into_iter().flat_map(HashSet::iter))
             .copied();
-        let mut ids = self
-            .dependency_closure(own)
+        self.dependency_closure(own)
             .into_iter()
-            // Inherited/promoted custody already closed dependencies when it
-            // was captured. Later ancestor metadata cannot expand this tip.
             .chain(inherited)
             .chain(promoted)
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .filter(|id| self.live.contains_key(id))
-            .collect::<Vec<_>>();
-        ids.sort_by_key(|id| id.raw());
-        ids
+            .collect()
     }
 
     /// Number of live bindings.

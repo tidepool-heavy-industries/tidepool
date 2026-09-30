@@ -225,6 +225,20 @@ fn frozen_exact_ids_cannot_gain_later_ancestor_dependencies_or_sibling_aliases()
         .resolve_exact_prepared_in(&tree, child, &sibling_identity, 1)
         .is_none());
     assert_eq!(table.scope_witness(&tree, child), witness);
+    let grandchild = tree.mint_isolated();
+    table.seed_detached_scope(&tree, child, grandchild);
+    assert_eq!(
+        table.scope_reachable_binding_ids(&tree, grandchild),
+        vec![parent_id]
+    );
+    let target = tree.mint_isolated();
+    let empty_parent = tree.mint_isolated();
+    table.seed_detached_scope(&tree, empty_parent, target);
+    assert!(table.retain_scope_dependencies(&tree, child, target));
+    assert_eq!(
+        table.scope_reachable_binding_ids(&tree, target),
+        vec![parent_id]
+    );
 }
 
 #[test]
@@ -242,5 +256,33 @@ fn unseeded_witness_tracks_ancestor_frames_and_last_removal() {
     assert_ne!(named, before);
     table.remove_live(id).unwrap();
     assert_ne!(table.scope_witness(&tree, child), named);
+    assert_indexes(&table);
+}
+
+#[test]
+fn observation_witness_covers_mutable_cross_scope_dependency_metadata() {
+    let mut tree = ScopeTree::new();
+    let a = tree.mint_isolated();
+    let b = tree.mint_isolated();
+    let c = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let mut a_slot = std::ptr::null_mut();
+    let mut b_slot = std::ptr::null_mut();
+    let mut c_slot = std::ptr::null_mut();
+    let a_id = table.bind_in(a, entry("a", 1, &mut a_slot)).unwrap();
+    let b_id = table.bind_in(b, entry("b", 2, &mut b_slot)).unwrap();
+    let c_id = table.bind_in(c, entry("c", 3, &mut c_slot)).unwrap();
+    table.save_observation(c_id, &[], 1);
+    table.save_observation(b_id, &[], 1);
+    table.save_observation(a_id, &[b_id.var()], 1);
+    let before = table.scope_witness(&tree, a);
+    assert!(!table.scope_reachable_binding_ids(&tree, a).contains(&c_id));
+    table.save_observation(b_id, &[c_id.var()], 1);
+    assert_ne!(table.scope_witness(&tree, a), before);
+    assert!(table.scope_reachable_binding_ids(&tree, a).contains(&c_id));
+    let before = table.scope_witness(&tree, a);
+    table.preserve_observations(&[b_id.var()]);
+    assert_ne!(table.scope_witness(&tree, a), before);
+    assert!(!table.scope_reachable_binding_ids(&tree, a).contains(&c_id));
     assert_indexes(&table);
 }
