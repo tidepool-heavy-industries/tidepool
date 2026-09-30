@@ -222,6 +222,7 @@ pub struct TargetArtifact {
     /// Versioned execution program decoded under the exact host contract.
     pub prepared: PreparedArtifact,
     pub pending_imports: Vec<certified_products::PendingImportOwner>,
+    pub package_interfaces: certified_products::CertifiedTargetPackageInterfaces,
 }
 
 /// The full output of one `tidepool-extract` invocation: a shared constructor
@@ -286,6 +287,7 @@ pub struct SealedTurnProducts {
     pub certified_groups: Vec<certified_products::PendingCertifiedGroup>,
     pub pending_imports: Vec<certified_products::PendingImportOwner>,
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
+    pub package_interfaces: certified_products::CertifiedTargetPackageInterfaces,
 }
 
 fn has_ready_home_module(evidence: &cache::DependencyEvidence) -> bool {
@@ -414,6 +416,9 @@ pub fn seal_turn_outputs(
         &receipt.packages,
     )
     .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    let package_interfaces =
+        certified_products::certify_target_package_interfaces(prepared, &receipt.packages)
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     module_candidates::publish(
         &offer.producer,
         &offer.include,
@@ -427,6 +432,7 @@ pub fn seal_turn_outputs(
         certified_groups: certified.groups,
         pending_imports,
         recovery_products: certified.recovery_products,
+        package_interfaces,
     }))
 }
 
@@ -833,6 +839,11 @@ fn compile_invocation_inner(
                     target.prepared.prepared(),
                     accepted,
                     &certified.groups,
+                    &receipt.packages,
+                )
+                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+                target.package_interfaces = certified_products::certify_target_package_interfaces(
+                    target.prepared.prepared(),
                     &receipt.packages,
                 )
                 .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
@@ -1266,6 +1277,7 @@ pub(crate) fn assemble(
                 asks,
                 prepared,
                 pending_imports: Vec::new(),
+                package_interfaces: Default::default(),
             },
         );
     }
