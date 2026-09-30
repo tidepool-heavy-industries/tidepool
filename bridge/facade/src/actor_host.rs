@@ -20,11 +20,11 @@ mod custody_tests;
 #[cfg(all(test, feature = "codex-compat"))]
 mod documentation_tests;
 #[cfg(test)]
-mod embedded_command_tests;
-#[cfg(test)]
 mod embedded_checkpoint_children_survive_later_failure_tests;
 #[cfg(test)]
 mod embedded_checkpoint_children_tests;
+#[cfg(test)]
+mod embedded_command_tests;
 mod embedded_harness;
 #[cfg(test)]
 mod embedded_pending_compaction_tests;
@@ -3551,6 +3551,7 @@ fn compile_driver(
     let session_root = run_root.join("haskell-session");
     std::fs::create_dir_all(&session_root)?;
     let compiled = match run_turn(HaskellTurnRequest {
+        exact_context: None,
         session_id: None,
         turn_text: DRIVER_ENTRY,
         templates: &templates,

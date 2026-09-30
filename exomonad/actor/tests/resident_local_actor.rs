@@ -296,6 +296,7 @@ async fn resident_local_actor_await_watch_parks_resumes_and_cancels() {
         ResidentSession::unbootstrapped(NoHandlers, TestSink, DEFAULT_NURSERY_SIZE, Some(lib));
     let retained = machine.prepared_retained();
     let compiled = match run_turn(HaskellTurnRequest {
+        exact_context: None,
         session_id: None,
         turn_text: include_str!("resident_local_actor/await_watch_policy.hs"),
         templates: &templates,
@@ -492,6 +493,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
         ResidentSession::unbootstrapped(NoHandlers, TestSink, DEFAULT_NURSERY_SIZE, Some(lib));
     let retained = machine.prepared_retained();
     let compiled = match run_turn(HaskellTurnRequest {
+        exact_context: None,
         session_id: None,
         turn_text: if fail_hook {
             include_str!("resident_local_actor/policy_failed_hook.hs")

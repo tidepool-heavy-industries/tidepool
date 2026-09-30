@@ -118,6 +118,7 @@ async fn run_record_case(source: &str, discriminator: u32) {
         ResidentSession::unbootstrapped(NoHandlers, Sink, DEFAULT_NURSERY_SIZE, Some(lib));
     let retained = machine.prepared_retained();
     let compiled = match run_turn(HaskellTurnRequest {
+        exact_context: None,
         session_id: None,
         turn_text: source,
         templates: &templates,
