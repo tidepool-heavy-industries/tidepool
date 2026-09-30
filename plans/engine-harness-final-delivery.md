@@ -3,8 +3,8 @@
 Approved for implementation 2026-09-30. This refines
 `engine-harness-completion-wave.md`; conflicting older sequencing is superseded.
 The finish line is verified release readiness. Live trials and backend default
-changes remain separate. Publication of viable work to main is authorized by
-the user; dependency revisions must be published before their consumers.
+changes remain separate. Pushes are deferred at the user's request; dependency
+revisions must be published before their consumers when publication resumes.
 Native goal tools stay disabled. Codex is not
 built with Buck; the resident compiler remains a runtime service.
 
@@ -18,7 +18,8 @@ changed. Origin now fetches Tidepool over HTTPS and pushes over SSH. The cause
 of that configuration change is under investigation; no merge or force push
 is required.
 
-Publication is pending GitHub authentication for this session. SSH dry-run
+Publication is deferred at the user's request. GitHub authentication
+also remains unavailable in this session. SSH dry-run
 fails host-key verification; HTTPS has no usable credential helper. Publish
 the pinned harness revision `814b1697226344e8fd16196666e41c184a73531d` and
 verify availability of the Codex gitlink
@@ -234,3 +235,22 @@ Finish with committed selected work, updated evidence/index and stale-path
 cleanup, verified Tidepool/harness bundles and reproduction commands. Report M1,
 M2, engine/performance and Buck separately. Prepare a concrete bounded live trial
 packet for later approval; do not launch, push or change defaults in this wave.
+
+## Retained browser request projection checkpoint
+
+Harness `9986ca3cf8b1e4be9826cb7420de01e4371922c7` extends the accepted
+library source `814b1697` with bounded durable model-request projections.
+Tidepool refreshes them on lifecycle changes and the existing host heartbeat.
+Completion means the model response Items were durably recorded, not that its
+tools or the whole execution finished. The latest 128 model completion events
+supply chronological metadata only; evictions emit explicit removals. The
+partial index is installed for fresh, migrated, and existing version-7 Stores.
+
+Independent source review cleared the projection and index repair. The owning
+Rust 1.93 tests executed two cases successfully: bounded completion/reconnect
+and existing-database reopen/index query plan. Logs are retained under
+`target/completion-evidence/final-delivery/request-projection-reopen-fixed-test.log`.
+The companion has a verified complete-history bundle at
+`target/completion-evidence/final-delivery/harness-retained-model-requests.bundle`.
+Combined Tidepool compilation and the actual browser journey remain pending;
+this checkpoint does not establish M1 acceptance.

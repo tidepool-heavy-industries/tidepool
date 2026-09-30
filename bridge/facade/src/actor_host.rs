@@ -4545,6 +4545,9 @@ async fn run_interactive_applications(
                 if changed.is_ok() {
                     let states = (*embedded_lifecycle_rx.borrow_and_update()).clone();
                     if let Some(service) = embedded_service.as_ref() {
+                        if let Err(error) = service.control.refresh_completed_model_requests(&service.runtime.store()) {
+                            break Some(format!("embedded request projection failed: {error}"));
+                        }
                         embedded_projection.publish(
                             &service.control,
                             &embedded_run,
@@ -4569,6 +4572,9 @@ async fn run_interactive_applications(
                     );
                 }
                 if let Some(service) = embedded_service.as_mut() {
+                    if let Err(error) = service.control.refresh_completed_model_requests(&service.runtime.store()) {
+                        break Some(format!("embedded request projection failed: {error}"));
+                    }
                     if service.server_finished() {
                         let detail = match service.shutdown().await {
                             Ok(()) => "stopped unexpectedly".to_owned(),
