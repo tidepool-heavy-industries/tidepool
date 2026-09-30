@@ -50,7 +50,22 @@ system_cxx_toolchain(
 
 system_genrule_toolchain(name = "genrule", visibility = ["PUBLIC"])
 noop_test_toolchain(name = "test", visibility = ["PUBLIC"])
-remote_test_execution_toolchain(name = "remote_test_execution", visibility = ["PUBLIC"])
+remote_test_execution_toolchain(
+    name = "remote_test_execution",
+    default_profile = "swarm" if read_root_config("remote", "enabled", "false") == "true" else None,
+    profiles = {
+        "swarm": {
+            "capabilities": {
+                "OSFamily": "linux",
+                "toolchain": read_root_config("remote", "toolchain", ""),
+            },
+            "local_enabled": False,
+            "local_listing_enabled": False,
+            "use_case": "buck2-default",
+        },
+    },
+    visibility = ["PUBLIC"],
+)
 
 system_python_bootstrap_toolchain(
     name = "python_bootstrap",

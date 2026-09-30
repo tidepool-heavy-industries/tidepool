@@ -29,7 +29,7 @@ unshare --user --map-root-user --mount bash -c '
   export TIDEPOOL_BUCK_REMOTE_ADDRESS=grpc://127.0.0.1:50071
   bash scripts/buck2-configure.sh
   bash scripts/buck2-run.sh build //bridge/atomic-write:tidepool_atomic_write
-  bash scripts/buck2-run.sh test //bridge/atomic-write:tidepool_atomic_write_unit_tests
+  bash scripts/buck2-run.sh test --remote-only //bridge/atomic-write:tidepool_atomic_write_unit_tests
   bash scripts/buck2-run.sh build //bridge/haskell:assignment_internal
 '
 ```
@@ -44,9 +44,11 @@ inputs through Buck's CAS protocol.
 The focused readiness run on 2026-09-30 used Tidepool
 `d9d82f46ff5f702a16257c2dd9e42fe745e27265` and harness
 `814b1697226344e8fd16196666e41c184a73531d`, Rust 1.93.0 and GHC 9.12.2.
-Rust compilation executed 36 remote actions; the unit test target passed with
+Rust compilation executed 36 remote actions; the unit test target compiled with
 20 remote actions; the Haskell library executed two remote actions. All three
-runs had zero local actions. A second independent local checkout reused 36
+builds had zero local actions. The default remote test profile then executed
+the test binary on the worker with `--remote-only`: all eight tests passed,
+and the worker journal records the binary's invocation. A second independent local checkout reused 36
 actions from cache. Changing its Rust source executed two new remote actions;
 restoring that source and requesting the Rust and Haskell libraries reused all
 four required actions from cache. This qualifies these focused targets; broader
