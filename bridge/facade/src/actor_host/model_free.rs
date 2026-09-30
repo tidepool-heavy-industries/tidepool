@@ -69,6 +69,7 @@ impl ModelFreeSession {
             source_layers.as_ref(),
             host_incarnation,
             super::JournalOpenMode::Create,
+            None,
         )?;
         let (descriptor, machine, outcome) = root.into_parts();
         let (forest, mut deployments) = ResidentForest::new_with_launch_resolver(

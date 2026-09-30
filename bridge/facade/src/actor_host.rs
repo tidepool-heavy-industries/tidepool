@@ -35,6 +35,7 @@ mod embedded_notification_tests;
 mod embedded_pending_compaction_tests;
 mod embedded_policy;
 mod embedded_projection;
+mod embedded_recovery;
 mod embedded_service;
 mod host_incarnation;
 #[cfg(feature = "codex-compat")]
@@ -822,10 +823,9 @@ fn next_actor_incarnation(actor: ActorRef) -> Result<ActorRef, Box<dyn std::erro
     })
 }
 
-fn durable_root_identity(
+fn latest_durable_root_application(
     records: &[exomonad_actor::DurableActorRecord],
-    accepted_source: Option<&str>,
-) -> Result<Option<(ActorRef, ActorRef)>, Box<dyn std::error::Error>> {
+) -> Result<Option<&exomonad_actor::DurableActorRecord>, Box<dyn std::error::Error>> {
     // Root privileges also belong to non-model operator actors. Identify the
     // attached application's logical actor before selecting its latest
     // incarnation; an incomplete successor must never revive its predecessor.
@@ -847,7 +847,7 @@ fn durable_root_identity(
     if applications.next().is_some() {
         return Err(runtime_error("durable root application identity is ambiguous").into());
     }
-    records
+    Ok(records
         .iter()
         .filter(|record| {
             record.admission.actor.id == root_id
@@ -856,7 +856,14 @@ fn durable_root_identity(
                 && record.admission.supervisor_parent.is_none()
                 && record.admission.context_parent.is_none()
         })
-        .max_by_key(|record| record.admission.actor.incarnation)
+        .max_by_key(|record| record.admission.actor.incarnation))
+}
+
+fn durable_root_identity(
+    records: &[exomonad_actor::DurableActorRecord],
+    accepted_source: Option<&str>,
+) -> Result<Option<(ActorRef, ActorRef)>, Box<dyn std::error::Error>> {
+    latest_durable_root_application(records)?
         .filter(|record| {
             record.terminal.is_none()
                 && record.application.as_ref().is_some_and(|application| {
@@ -954,7 +961,11 @@ async fn recover_prior_actors(
             let Some(application) = &record.application else {
                 continue;
             };
-            let Some(expected_conversation) = application.conversation.as_deref() else {
+            let Some(expected_conversation) = application
+                .conversation
+                .as_ref()
+                .and_then(exomonad_actor::ApplicationConversation::codex_thread)
+            else {
                 continue;
             };
             if application.accepted_source.as_deref() != accepted_source {
@@ -2516,9 +2527,35 @@ fn run_journal_mode(
 }
 
 pub(crate) async fn run(
+    config: ActorHostConfig,
+    readiness: mpsc::UnboundedSender<ActorHostReadiness>,
+    host_incarnation: HostIncarnationLease,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_owned(
+        config,
+        readiness,
+        host_incarnation,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn run_with_test_transport(
+    config: ActorHostConfig,
+    readiness: mpsc::UnboundedSender<ActorHostReadiness>,
+    host_incarnation: HostIncarnationLease,
+    transport: Arc<dyn harness::engine::ResponsesTransport>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_owned(config, readiness, host_incarnation, Some(transport)).await
+}
+
+async fn run_owned(
     mut config: ActorHostConfig,
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
     host_incarnation: HostIncarnationLease,
+    #[cfg(test)] test_transport: Option<Arc<dyn harness::engine::ResponsesTransport>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let host_incarnation = Arc::new(host_incarnation);
     let run_root = config.run_root.clone();
@@ -2533,7 +2570,8 @@ pub(crate) async fn run(
     let worktree_authority =
         ActorWorktreeAuthority::new(runtime_namespace(&run_root), Arc::clone(&bindings));
     let tmux = TmuxSession::new(&config.tmux_session)?;
-    if !tmux.exists().await? {
+    if config.backend.kind() != crate::exomonad::ExomonadBackend::Embedded && !tmux.exists().await?
+    {
         return Err(runtime_error(format!(
             "Exomonad tmux session {:?} does not exist",
             config.tmux_session
@@ -2578,6 +2616,29 @@ pub(crate) async fn run(
         &run_journal_path,
         prior_actor_records.is_empty(),
     )?;
+    let embedded_service = if config.backend.kind() == crate::exomonad::ExomonadBackend::Embedded {
+        let settings = config
+            .embedded
+            .as_ref()
+            .ok_or_else(|| runtime_error("embedded backend requires [launch.embedded]"))?;
+        Some(
+            embedded_service::EmbeddedService::prepare_owned(
+                &run_root,
+                settings,
+                Arc::clone(&host_incarnation),
+            )
+            .await
+            .map_err(runtime_error)?,
+        )
+    } else {
+        None
+    };
+    #[cfg(test)]
+    let mut embedded_service = embedded_service;
+    #[cfg(test)]
+    if let (Some(service), Some(transport)) = (&mut embedded_service, test_transport) {
+        service.set_test_transport(transport);
+    }
     let (source, root, program, child_session_factory, image_registry) = compile_root(
         &config,
         &run_root,
@@ -2586,7 +2647,17 @@ pub(crate) async fn run(
         source_layers.as_ref(),
         Arc::clone(&host_incarnation),
         run_journal_mode,
+        embedded_service
+            .as_ref()
+            .map(|service| embedded_recovery::EmbeddedStartupRecovery {
+                lease: Arc::clone(&host_incarnation),
+                journal: Arc::clone(&actor_recovery),
+                store: service.runtime.store(),
+                root_binding_path: config.root_binding_path.clone(),
+            })
+            .as_ref(),
     )?;
+    let prior_actor_records = actor_recovery.records();
     let accepted_source = active_source_identity(&run_root, config.workspace_inputs.is_some())?;
     let (descriptor, machine, outcome) = root.into_parts();
     #[cfg(feature = "codex-compat")]
@@ -2692,23 +2763,6 @@ pub(crate) async fn run(
         .map_err(runtime_error)?;
     // Bind the embedded browser and run Store before the resident root exists.
     // A run that cannot establish both cannot truthfully report readiness.
-    let embedded_service = if config.backend.kind() == crate::exomonad::ExomonadBackend::Embedded {
-        let settings = config
-            .embedded
-            .as_ref()
-            .ok_or_else(|| runtime_error("embedded backend requires [launch.embedded]"))?;
-        Some(
-            embedded_service::EmbeddedService::prepare_owned(
-                &run_root,
-                settings,
-                Arc::clone(&host_incarnation),
-            )
-            .await
-            .map_err(runtime_error)?,
-        )
-    } else {
-        None
-    };
     let (mut root_actor, mut root_task) = match recovered_root {
         Some((_, identity)) => {
             forest
@@ -2717,10 +2771,17 @@ pub(crate) async fn run(
         }
         None => forest.admit_root(descriptor, outcome).await?,
     };
-    if let Err(error) = actor_recovery.prepare_application(
+    if let Err(error) = actor_recovery.prepare_application_with_intent(
         root_actor.identity(),
         config.root_binding_path.clone(),
         accepted_source.clone(),
+        embedded_service.as_ref().map(|_| {
+            embedded_recovery::conversation(&embedded_recovery::host_identity(
+                &run_root,
+                "/root",
+                root_actor.identity(),
+            ))
+        }),
     ) {
         forest.shutdown().await;
         return Err(runtime_error(format!(
@@ -2746,14 +2807,40 @@ pub(crate) async fn run(
                 .ok_or_else(|| runtime_error("durable root predecessor has no incarnation"))?;
                 let authority = root_declaration_recovery::successor_authority(
                     Arc::clone(&host_incarnation),
-                    admission,
+                    Arc::clone(&admission),
                 );
                 match forest
                     .transfer_recovered_root_public_owner(root_actor.identity(), &owner, authority)
                     .await
                     .map_err(|error| runtime_error(error.to_string()))?
                 {
-                    tidepool_runtime::session::PublicManifestCommit::Durable => Ok(()),
+                    tidepool_runtime::session::PublicManifestCommit::Durable => {
+                        if let Some(service) = &embedded_service {
+                            let authority = embedded_recovery::EmbeddedBindingSuccessorAuthority {
+                                lease: Arc::clone(&host_incarnation),
+                                run_root: run_root.clone(),
+                                admission,
+                            };
+                            service
+                                .runtime
+                                .store()
+                                .transfer_embedded_binding(
+                                    &embedded_recovery::host_identity(
+                                        &run_root,
+                                        "/root",
+                                        predecessor,
+                                    ),
+                                    &embedded_recovery::host_identity(
+                                        &run_root,
+                                        "/root",
+                                        root_actor.identity(),
+                                    ),
+                                    &authority,
+                                )
+                                .map_err(|error| runtime_error(error.to_string()))?;
+                        }
+                        Ok(())
+                    }
                     outcome => Err(runtime_error(format!(
                         "root declaration successor transfer did not become durable: {outcome:?}"
                     ))),
@@ -2769,7 +2856,24 @@ pub(crate) async fn run(
                     "initial root declaration ownership did not become durable: {outcome:?}"
                 ))),
             },
+        }?;
+        if let Some(service) = &embedded_service {
+            service
+                .runtime
+                .configure_application_recovery(Arc::new(
+                    embedded_recovery::EmbeddedApplicationRecovery {
+                        lease: Arc::clone(&host_incarnation),
+                        journal: Arc::clone(&actor_recovery),
+                        run_root: run_root.clone(),
+                        root: root_actor.identity(),
+                        root_binding_path: config.root_binding_path.clone(),
+                        accepted_source: accepted_source.clone(),
+                        recovered_root: recovered_root.is_some(),
+                    },
+                ))
+                .map_err(runtime_error)?;
         }
+        Ok::<(), Box<dyn std::error::Error>>(())
     }
     .await;
     if let Err(error) = declaration_recovery {
@@ -3852,6 +3956,7 @@ fn compile_root(
     source: Option<&Arc<crate::exomonad::source::ExomonadSourceReload>>,
     host_incarnation: Arc<HostIncarnationLease>,
     run_journal_mode: JournalOpenMode,
+    embedded_startup: Option<&embedded_recovery::EmbeddedStartupRecovery>,
 ) -> Result<CompiledRoot, Box<dyn std::error::Error>> {
     let CompiledExomonadDriver {
         preamble,
@@ -3878,6 +3983,13 @@ fn compile_root(
     let mut library = SessionLib::open(session, &session_root, module_env)?
         .with_validation_include(include.clone());
     root_declaration_recovery::attach(&mut library, run_root, Arc::clone(&host_incarnation))?;
+    if let Some(startup) = embedded_startup {
+        startup.reconcile(
+            &library,
+            run_root,
+            active_source_identity(run_root, config.workspace_inputs.is_some())?.as_deref(),
+        )?;
+    }
     let event_registry = WorktreeRegistry::open(
         actor_worktree_storage_root(&config.workspace, run_root)?.join("registry"),
     )?;

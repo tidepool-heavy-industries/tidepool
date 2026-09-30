@@ -508,7 +508,9 @@ fn tree(run: &Path, trace: Option<&TraceEvents>) -> Section<Vec<TreeNode>> {
                 thread: record
                     .application
                     .as_ref()
-                    .and_then(|application| application.conversation.clone()),
+                    .and_then(|application| application.conversation.as_ref())
+                    .and_then(exomonad_actor::ApplicationConversation::codex_thread)
+                    .map(str::to_owned),
                 started_at_unix_ms: None,
                 launched_at_unix_ms: None,
                 first_tool_call_at_unix_ms: None,

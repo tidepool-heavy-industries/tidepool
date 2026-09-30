@@ -13,10 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tidepool_repr::jsonl::{SyncPolicy, TailPolicy};
 
-// Version 2 adds the creation marker that distinguishes a newly initialized
-// owner from missing recovery evidence. Version 1 is rejected rather than
-// silently treating an old or lost journal as an empty current run.
-const VERSION: u32 = 2;
+// Typed bindings preserve prepared backend intent. V2 bound strings are
+// Codex evidence; v1 lacks the required durable creation marker and is refused.
+const VERSION: u32 = 3;
 
 /// Issued by the Forest after checking its existing descriptor and directory.
 /// The process-local placement is deliberately absent from durable rows.
@@ -73,6 +72,43 @@ impl DurableRootSuccessorAdmission {
     }
     pub fn successor(&self) -> &RootRecoveryPlacement {
         &self.successor
+    }
+    /// Validate the exact persisted backend transition using the retained
+    /// journal, rather than caller-constructed actor or conversation tuples.
+    pub fn validate_embedded_binding(
+        &self,
+        run_root: &Path,
+        predecessor: &ApplicationConversation,
+        successor: &ApplicationConversation,
+    ) -> std::io::Result<bool> {
+        let state = self.journal.state.lock();
+        self.journal.validate_root_successor(
+            &state,
+            self.predecessor,
+            &self.successor,
+            self.source.as_deref(),
+            &self.binding_path,
+        )?;
+        let canonical = run_root.canonicalize()?;
+        if self.journal.path.canonicalize()?.parent() != Some(canonical.as_path()) {
+            return Ok(false);
+        }
+        let old = state
+            .records
+            .get(&self.predecessor)
+            .and_then(|record| record.application.as_ref());
+        let new = state
+            .records
+            .get(&self.successor.actor)
+            .and_then(|record| record.application.as_ref());
+        Ok(
+            old.and_then(|app| app.conversation.as_ref()) == Some(predecessor)
+                && new.and_then(|app| app.intended_conversation.as_ref()) == Some(successor)
+                && matches!((predecessor, successor),
+                (ApplicationConversation::Embedded {run: old_run, agent_path: old_path, ..},
+                 ApplicationConversation::Embedded {run: new_run, agent_path: new_path, ..})
+                 if old_run == new_run && old_path == new_path),
+        )
     }
     pub fn validate_successor(
         &self,
@@ -186,11 +222,40 @@ pub struct DurableActorRecord {
     pub terminal: Option<DurableActorTerminal>,
 }
 
+/// Exact retained backend identity; possession grants no live actor authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ApplicationConversation {
+    Codex {
+        thread_id: String,
+    },
+    Embedded {
+        run: String,
+        agent_path: String,
+        incarnation: String,
+    },
+}
+impl ApplicationConversation {
+    pub fn codex_thread(&self) -> Option<&str> {
+        match self {
+            Self::Codex { thread_id } => Some(thread_id),
+            _ => None,
+        }
+    }
+}
+impl From<String> for ApplicationConversation {
+    fn from(thread_id: String) -> Self {
+        Self::Codex { thread_id }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DurableActorApplication {
     pub binding_path: PathBuf,
-    pub conversation: Option<String>,
+    pub conversation: Option<ApplicationConversation>,
+    #[serde(default)]
+    pub intended_conversation: Option<ApplicationConversation>,
     pub accepted_source: Option<String>,
 }
 
@@ -206,10 +271,12 @@ enum EventKind {
         binding_path: PathBuf,
         #[serde(default)]
         accepted_source: Option<String>,
+        #[serde(default)]
+        intended_conversation: Option<ApplicationConversation>,
     },
     ApplicationBound {
         actor: ActorRef,
-        conversation: String,
+        conversation: ApplicationConversation,
     },
     Retired {
         actor: ActorRef,
@@ -270,22 +337,7 @@ impl ActorRecoveryJournal {
         expected_source: Option<&str>,
         binding_path: &Path,
     ) -> std::io::Result<()> {
-        ensure_writable(state)?;
-        // Observe the actual file without tail repair; another append or a torn
-        // write cannot be hidden by this process's retained in-memory records.
-        let (rows, torn) = tidepool_repr::jsonl::read_tail(
-            &self.path,
-            |line| parse_row(line).map_err(|error| error.to_string()),
-            TailPolicy::Observe,
-        )
-        .map_err(std::io::Error::other)?;
-        let (records, sequence, created) = replay(rows)?;
-        if torn.is_some() || !created || sequence != state.next_sequence || records != state.records
-        {
-            return Err(std::io::Error::other(
-                "root successor journal changed or has uncertain durable evidence",
-            ));
-        }
+        let records = self.validated_state_records(state)?;
         let old = records
             .get(&predecessor)
             .ok_or_else(|| std::io::Error::other("root predecessor admission is absent"))?;
@@ -336,6 +388,38 @@ impl ActorRecoveryJournal {
         }
         Ok(())
     }
+    fn validated_state_records(
+        &self,
+        state: &State,
+    ) -> std::io::Result<BTreeMap<ActorRef, DurableActorRecord>> {
+        ensure_writable(state)?;
+        // Observe the actual file without tail repair; another append or a torn
+        // write cannot be hidden by this process's retained in-memory records.
+        let (rows, torn) = tidepool_repr::jsonl::read_tail(
+            &self.path,
+            |line| parse_row(line).map_err(|error| error.to_string()),
+            TailPolicy::Observe,
+        )
+        .map_err(std::io::Error::other)?;
+        let (records, sequence, created) = replay(rows)?;
+        if torn.is_some() || !created || sequence != state.next_sequence || records != state.records
+        {
+            return Err(std::io::Error::other(
+                "root successor journal changed or has uncertain durable evidence",
+            ));
+        }
+        Ok(records)
+    }
+
+    /// Observe the retained writer's exact durable readback without tail repair.
+    pub fn validated_records(&self) -> std::io::Result<Vec<DurableActorRecord>> {
+        let state = self.state.lock();
+        Ok(self
+            .validated_state_records(&state)?
+            .into_values()
+            .collect())
+    }
+
     pub fn open(path: impl Into<PathBuf>) -> std::io::Result<Arc<Self>> {
         Self::open_with_mode(path.into(), false)
     }
@@ -419,12 +503,12 @@ impl ActorRecoveryJournal {
         ensure_writable(&state)?;
         match state.records.get(&actor) {
             Some(existing) if existing.admission == admission && existing.terminal.is_none() => {
-                return Ok(())
+                return Ok(());
             }
             Some(_) => {
                 return Err(std::io::Error::other(format!(
                     "actor identity {actor} was reused with different durable parameters"
-                )))
+                )));
             }
             None => {}
         }
@@ -462,7 +546,7 @@ impl ActorRecoveryJournal {
             Some(_) => {
                 return Err(std::io::Error::other(format!(
                     "actor {actor} retired with a conflicting terminal disposition"
-                )))
+                )));
             }
             None => {}
         }
@@ -487,6 +571,16 @@ impl ActorRecoveryJournal {
         binding_path: PathBuf,
         accepted_source: Option<String>,
     ) -> std::io::Result<()> {
+        self.prepare_application_with_intent(actor, binding_path, accepted_source, None)
+    }
+
+    pub fn prepare_application_with_intent(
+        &self,
+        actor: ActorRef,
+        binding_path: PathBuf,
+        accepted_source: Option<String>,
+        intended_conversation: Option<ApplicationConversation>,
+    ) -> std::io::Result<()> {
         let mut state = self.state.lock();
         ensure_writable(&state)?;
         let record = state.records.get(&actor).ok_or_else(|| {
@@ -494,18 +588,24 @@ impl ActorRecoveryJournal {
                 "application for actor {actor} has no durable admission"
             ))
         })?;
+        if record.terminal.is_some() {
+            return Err(std::io::Error::other(
+                "terminal actor cannot prepare an application",
+            ));
+        }
+        validate_application_intent(&record.admission, intended_conversation.as_ref())?;
         match &record.application {
             Some(existing)
                 if existing.binding_path == binding_path
-                    && existing.conversation.is_none()
+                    && existing.intended_conversation == intended_conversation
                     && existing.accepted_source == accepted_source =>
             {
-                return Ok(())
+                return Ok(());
             }
             Some(_) => {
                 return Err(std::io::Error::other(format!(
                     "actor {actor} reused its application identity with changed parameters"
-                )))
+                )));
             }
             None => {}
         }
@@ -515,6 +615,7 @@ impl ActorRecoveryJournal {
                 actor,
                 binding_path: binding_path.clone(),
                 accepted_source: accepted_source.clone(),
+                intended_conversation: intended_conversation.clone(),
             },
         )?;
         state
@@ -526,14 +627,32 @@ impl ActorRecoveryJournal {
             .application = Some(DurableActorApplication {
             binding_path,
             conversation: None,
+            intended_conversation,
             accepted_source,
         });
         Ok(())
     }
 
-    pub fn bind_application(&self, actor: ActorRef, conversation: String) -> std::io::Result<()> {
+    pub fn bind_application(&self, actor: ActorRef, thread_id: String) -> std::io::Result<()> {
+        self.bind_application_conversation(actor, ApplicationConversation::Codex { thread_id })
+    }
+
+    pub fn bind_application_conversation(
+        &self,
+        actor: ActorRef,
+        conversation: ApplicationConversation,
+    ) -> std::io::Result<()> {
         let mut state = self.state.lock();
         ensure_writable(&state)?;
+        if state
+            .records
+            .get(&actor)
+            .is_some_and(|record| record.terminal.is_some())
+        {
+            return Err(std::io::Error::other(
+                "terminal actor cannot publish a conversation binding",
+            ));
+        }
         let application = state
             .records
             .get(&actor)
@@ -543,12 +662,13 @@ impl ActorRecoveryJournal {
                     "binding for actor {actor} precedes durable application preparation"
                 ))
             })?;
+        validate_application_binding(application, &conversation)?;
         match &application.conversation {
             Some(existing) if existing == &conversation => return Ok(()),
             Some(_) => {
                 return Err(std::io::Error::other(format!(
                     "actor {actor} published conflicting conversation identities"
-                )))
+                )));
             }
             None => {}
         }
@@ -588,6 +708,58 @@ impl ActorRecoveryJournal {
         state.next_sequence += 1;
         Ok(())
     }
+}
+
+fn validate_application_intent(
+    admission: &DurableActorAdmission,
+    intent: Option<&ApplicationConversation>,
+) -> std::io::Result<()> {
+    if let Some(ApplicationConversation::Embedded {
+        run,
+        agent_path,
+        incarnation,
+    }) = intent
+    {
+        let root = admission.role == "root"
+            && admission.creator.is_none()
+            && admission.supervisor_parent.is_none()
+            && admission.context_parent.is_none();
+        let child_suffix = format!(
+            "/a{}_i{}",
+            admission.actor.id.0, admission.actor.incarnation.0
+        );
+        if run.is_empty()
+            || incarnation != &admission.actor.incarnation.0.to_string()
+            || if root {
+                agent_path != "/root"
+            } else {
+                !agent_path.starts_with('/') || !agent_path.ends_with(&child_suffix)
+            }
+        {
+            return Err(std::io::Error::other(
+                "embedded application intent differs from admitted actor identity",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_application_binding(
+    application: &DurableActorApplication,
+    conversation: &ApplicationConversation,
+) -> std::io::Result<()> {
+    if application
+        .intended_conversation
+        .as_ref()
+        .is_some_and(|expected| expected != conversation)
+        || matches!(conversation, ApplicationConversation::Embedded { .. })
+            && application.intended_conversation.is_none()
+    {
+        return Err(std::io::Error::other(
+            "conversation binding differs from durable prepared intent",
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_writable(state: &State) -> std::io::Result<()> {
@@ -667,17 +839,25 @@ fn apply_event(
             actor,
             binding_path,
             accepted_source,
+            intended_conversation,
         } => {
             let record = records.get_mut(&actor).ok_or_else(|| {
                 std::io::Error::other(format!(
                     "application row precedes admission for actor {actor}"
                 ))
             })?;
+            validate_application_intent(&record.admission, intended_conversation.as_ref())?;
+            if record.terminal.is_some() {
+                return Err(std::io::Error::other(
+                    "terminal actor has prepared application row",
+                ));
+            }
             if record
                 .application
                 .replace(DurableActorApplication {
                     binding_path,
                     conversation: None,
+                    intended_conversation,
                     accepted_source,
                 })
                 .is_some()
@@ -691,6 +871,14 @@ fn apply_event(
             actor,
             conversation,
         } => {
+            if records
+                .get(&actor)
+                .is_some_and(|record| record.terminal.is_some())
+            {
+                return Err(std::io::Error::other(
+                    "terminal actor has conversation binding row",
+                ));
+            }
             let application = records
                 .get_mut(&actor)
                 .and_then(|record| record.application.as_mut())
@@ -699,6 +887,7 @@ fn apply_event(
                         "binding row precedes application preparation for actor {actor}"
                     ))
                 })?;
+            validate_application_binding(application, &conversation)?;
             if application.conversation.replace(conversation).is_some() {
                 return Err(std::io::Error::other(format!(
                     "duplicate binding row for actor {actor}"
@@ -722,9 +911,26 @@ fn apply_event(
 fn parse_row(line: &str) -> Result<Row, Box<dyn std::error::Error + Send + Sync>> {
     let value: serde_json::Value = serde_json::from_str(line)?;
     let found = tidepool_repr::version_ladder::found_version(&value);
-    let current =
-        tidepool_repr::version_ladder::migrate_to_current(value, found, VERSION, VERSION, &[])?;
-    Ok(serde_json::from_value(current)?)
+    let mut value = value;
+    match found {
+        2 => {
+            if value.get("intended_conversation").is_some() {
+                return Err("v2 application has unsupported typed intent".into());
+            }
+            if value.get("event").and_then(serde_json::Value::as_str) == Some("application_bound") {
+                let thread_id = value
+                    .get("conversation")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or("v2 binding must be a Codex thread string")?
+                    .to_owned();
+                value["conversation"] = serde_json::json!({"kind":"codex", "thread_id":thread_id});
+            }
+            value["version"] = serde_json::json!(VERSION);
+        }
+        VERSION => {}
+        _ => return Err("unsupported actor journal version; explicit migration required".into()),
+    }
+    Ok(serde_json::from_value(value)?)
 }
 
 #[cfg(test)]
@@ -734,6 +940,116 @@ mod tests {
     use tidepool_codegen::scope::ScopeId;
     use tidepool_codegen::suspension::RealmId;
     use tidepool_repr::SessionId;
+
+    #[test]
+    fn embedded_application_intent_and_binding_survive_cold_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("actors.jsonl");
+        let actor = ActorRef {
+            id: ActorId(7),
+            incarnation: Incarnation(3),
+        };
+        let journal = ActorRecoveryJournal::open(&path).unwrap();
+        journal.admit(actor, &descriptor("worker"), &[]).unwrap();
+        let expected = ApplicationConversation::Embedded {
+            run: "run".into(),
+            agent_path: "/root/a7_i3".into(),
+            incarnation: "3".into(),
+        };
+        journal
+            .prepare_application_with_intent(
+                actor,
+                directory.path().join("binding.json"),
+                Some("source".into()),
+                Some(expected.clone()),
+            )
+            .unwrap();
+        assert!(journal
+            .bind_application(actor, "fake-codex-thread".into())
+            .is_err());
+        let changed = ApplicationConversation::Embedded {
+            run: "run".into(),
+            agent_path: "/root/a7_i3".into(),
+            incarnation: "4".into(),
+        };
+        assert!(journal
+            .bind_application_conversation(actor, changed)
+            .is_err());
+        drop(journal);
+        let journal = ActorRecoveryJournal::open_existing(&path).unwrap();
+        assert!(journal.records()[0]
+            .application
+            .as_ref()
+            .unwrap()
+            .conversation
+            .is_none());
+        journal
+            .bind_application_conversation(actor, expected.clone())
+            .unwrap();
+        journal
+            .bind_application_conversation(actor, expected.clone())
+            .unwrap();
+        drop(journal);
+        let journal = ActorRecoveryJournal::open_existing(path).unwrap();
+        let record = journal.records().remove(0);
+        let application = record.application.unwrap();
+        assert_eq!(application.intended_conversation, Some(expected.clone()));
+        assert_eq!(application.conversation, Some(expected));
+    }
+
+    #[test]
+    fn v2_bound_strings_migrate_only_as_codex_and_v1_is_refused() {
+        let actor = serde_json::json!({"id":7,"incarnation":3});
+        let old = serde_json::json!({"version":2,"sequence":1,"event":"application_bound","actor":actor,"conversation":"thread-7"});
+        let row = parse_row(&old.to_string()).unwrap();
+        assert!(
+            matches!(row.event, EventKind::ApplicationBound {conversation:ApplicationConversation::Codex {thread_id}, ..} if thread_id == "thread-7")
+        );
+        let mut current = old.clone();
+        current["version"] = serde_json::json!(3);
+        assert!(parse_row(&current.to_string()).is_err());
+        current["version"] = serde_json::json!(1);
+        assert!(parse_row(&current.to_string()).is_err());
+        let malformed = serde_json::json!({"version":2,"sequence":1,"event":"application_bound","actor":actor,"conversation":{"kind":"embedded","run":"run","agent_path":"/root","incarnation":"3"}});
+        assert!(parse_row(&malformed.to_string()).is_err());
+    }
+
+    #[test]
+    fn cold_replay_refuses_binding_after_terminal_publication() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("actors.jsonl");
+        let actor = ActorRef {
+            id: ActorId(7),
+            incarnation: Incarnation(3),
+        };
+        let journal = ActorRecoveryJournal::open(&path).unwrap();
+        journal.admit(actor, &descriptor("worker"), &[]).unwrap();
+        journal
+            .prepare_application(actor, directory.path().join("binding.json"), None)
+            .unwrap();
+        journal
+            .retire(actor, ActorExitKind::Completed, "done".into())
+            .unwrap();
+        assert!(journal.bind_application(actor, "thread".into()).is_err());
+        let row = Row {
+            version: VERSION,
+            sequence: journal.state.lock().next_sequence,
+            event: EventKind::ApplicationBound {
+                actor,
+                conversation: ApplicationConversation::Codex {
+                    thread_id: "thread".into(),
+                },
+            },
+        };
+        tidepool_repr::jsonl::append_new_line(
+            &path,
+            &serde_json::to_string(&row).unwrap(),
+            SyncPolicy::All,
+        )
+        .unwrap();
+        drop(journal);
+        assert!(ActorRecoveryJournal::open_existing(path).is_err());
+    }
 
     fn descriptor(label: &str) -> ActorDescriptor {
         ActorDescriptor::new(
@@ -793,7 +1109,8 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .conversation
-                .as_deref(),
+                .as_ref()
+                .and_then(ApplicationConversation::codex_thread),
             Some("conversation-7")
         );
         assert_eq!(records[0].terminal.as_ref().unwrap().summary, "done");
@@ -873,7 +1190,8 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .conversation
-                .as_deref(),
+                .as_ref()
+                .and_then(ApplicationConversation::codex_thread),
             Some("conversation-9")
         );
     }

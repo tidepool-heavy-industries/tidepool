@@ -1,10 +1,12 @@
 use std::{num::NonZeroU64, path::Path, sync::Arc};
 
 use exomonad_actor::LocalResidentInstallation;
+#[cfg(test)]
+use harness::server::ClientCommand;
 use harness::{
     engine::EngineConfig,
     model::{AgentPath, Effort},
-    server::{ClientCommand, QueuedCommand, ServerConfig, ServerControl, SessionSecret},
+    server::{QueuedCommand, ServerConfig, ServerControl, SessionSecret},
     transport::{auth::CodexFileAuth, ResponsesClient},
 };
 use tokio::{
@@ -90,7 +92,9 @@ impl EmbeddedService {
             .map_err(|error| error.to_string())?;
         let address = listener.local_addr().map_err(|error| error.to_string())?;
         let (router, control, commands) = harness::server::server_with_config(server_config);
+        let server_owner = Arc::clone(&owner);
         let server = tokio::spawn(async move {
+            let _server_owner = server_owner;
             axum::serve(listener, router)
                 .await
                 .map_err(|error| error.to_string())
@@ -174,7 +178,7 @@ pub(super) async fn attach_actor(
             parent.as_ref(),
         )
         .map_err(|error| error.to_string())?;
-    if let Some(input) = initial_input {
+    if let Some(input) = initial_input.filter(|_| service.runtime.admit_initial_input(actor)) {
         embedded
             .conversation
             .input(
@@ -248,7 +252,7 @@ pub(super) async fn attach_checkpoint_actor(
             captured,
         )
         .map_err(|error| error.to_string())?;
-    if let Some(input) = initial_input {
+    if let Some(input) = initial_input.filter(|_| runtime.admit_initial_input(actor)) {
         embedded
             .conversation
             .input(
@@ -305,7 +309,7 @@ pub(super) async fn attach_selected_actor(
             Some(&parent.identity().actor),
         )
         .map_err(|error| error.to_string())?;
-    if let Some(input) = initial_input {
+    if let Some(input) = initial_input.filter(|_| runtime.admit_initial_input(actor)) {
         embedded
             .conversation
             .input(
@@ -533,6 +537,7 @@ fn cancelled_head(
     }
 }
 
+#[cfg(test)]
 pub(super) async fn submit_browser_command(
     command: QueuedCommand,
     root: &harness::embedding::Conversation,

@@ -2,7 +2,7 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
 };
 
@@ -45,6 +45,7 @@ pub(super) struct EmbeddedHarnessRuntime {
     run: String,
     store: Arc<Store>,
     scheduler: Arc<JobScheduler>,
+    recovery: OnceLock<Arc<super::embedded_recovery::EmbeddedApplicationRecovery>>,
 }
 
 impl EmbeddedHarnessRuntime {
@@ -54,12 +55,65 @@ impl EmbeddedHarnessRuntime {
             .map_err(|error| EmbeddedError::Binding(error.to_string()))?;
         Ok(Self {
             run: super::runtime_namespace(run_root),
+            recovery: OnceLock::new(),
             store: Arc::new(Store::open(harness_root.join("store.sqlite"))?),
             scheduler: Arc::new(
                 JobScheduler::new(concurrent_jobs)
                     .map_err(|error| EmbeddedError::Binding(error.to_string()))?,
             ),
         })
+    }
+
+    pub(super) fn configure_application_recovery(
+        &self,
+        recovery: Arc<super::embedded_recovery::EmbeddedApplicationRecovery>,
+    ) -> Result<(), String> {
+        self.recovery
+            .set(recovery)
+            .map_err(|_| "embedded recovery owner was already configured".into())
+    }
+
+    fn prepare_application(
+        &self,
+        actor: ActorRef,
+        identity: &HostIdentity,
+    ) -> Result<(), EmbeddedError> {
+        match self.recovery.get() {
+            Some(recovery) => recovery
+                .prepare(actor, identity)
+                .map_err(EmbeddedError::Binding),
+            #[cfg(test)]
+            None => Ok(()),
+            #[cfg(not(test))]
+            None => Err(EmbeddedError::Binding(
+                "embedded runtime has no retained recovery owner".into(),
+            )),
+        }
+    }
+
+    fn bind_application(
+        &self,
+        actor: ActorRef,
+        conversation: &Conversation,
+    ) -> Result<(), EmbeddedError> {
+        match self.recovery.get() {
+            Some(recovery) => recovery
+                .bind(actor, conversation.identity(), &self.store)
+                .map_err(EmbeddedError::Binding),
+            #[cfg(test)]
+            None => Ok(()),
+            #[cfg(not(test))]
+            None => Err(EmbeddedError::Binding(
+                "embedded runtime has no retained recovery owner".into(),
+            )),
+        }
+    }
+
+    pub(super) fn admit_initial_input(&self, actor: ActorRef) -> bool {
+        !self
+            .recovery
+            .get()
+            .is_some_and(|recovery| recovery.root == actor && recovery.recovered_root)
     }
 
     pub(super) fn attach(
@@ -74,6 +128,8 @@ impl EmbeddedHarnessRuntime {
                 "embedded host run does not match the owning run directory".into(),
             ));
         }
+        let actor_identity = actor.identity();
+        self.prepare_application(actor_identity, &identity)?;
         let (wakes, incoming) = mpsc::unbounded_channel();
         let round_control = Arc::new(EmbeddedRoundControl::default());
         let host = Arc::new(EmbeddedHostActor::new(
@@ -89,6 +145,7 @@ impl EmbeddedHarnessRuntime {
             host.clone(),
             parent,
         )?);
+        self.bind_application(actor_identity, &conversation)?;
         Ok(EmbeddedConversation {
             conversation,
             incoming,
@@ -123,6 +180,8 @@ impl EmbeddedHarnessRuntime {
             exomonad_actor::ForkGroupPublication::Captured => captured.cuts.before_call(),
         };
         let parent = checkpoint.origin().clone();
+        let actor_identity = actor.identity();
+        self.prepare_application(actor_identity, &identity)?;
         let (wakes, incoming) = mpsc::unbounded_channel();
         let round_control = Arc::new(EmbeddedRoundControl::default());
         let host = Arc::new(EmbeddedHostActor::new(
@@ -143,6 +202,7 @@ impl EmbeddedHarnessRuntime {
             &json!({}),
             &json!({}),
         )?);
+        self.bind_application(actor_identity, &conversation)?;
         Ok(EmbeddedConversation {
             conversation,
             incoming,

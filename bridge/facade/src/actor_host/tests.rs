@@ -1425,7 +1425,8 @@ fn durable_root(actor: ActorRef) -> exomonad_actor::DurableActorRecord {
                 "binding-{}-{}.json",
                 actor.id.0, actor.incarnation.0
             )),
-            conversation: Some(format!("conversation-{}", actor.id.0)),
+            conversation: Some(format!("conversation-{}", actor.id.0).into()),
+            intended_conversation: None,
             accepted_source: Some("source-revision".into()),
         }),
         terminal: None,
@@ -1444,7 +1445,8 @@ fn durable_child(
             "binding-{}-{}.json",
             actor.id.0, actor.incarnation.0
         )),
-        conversation: Some(conversation.into()),
+        conversation: Some(conversation.to_owned().into()),
+        intended_conversation: None,
         accepted_source: Some("source-revision".into()),
     });
     record
