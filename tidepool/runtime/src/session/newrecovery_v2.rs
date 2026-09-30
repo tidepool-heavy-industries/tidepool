@@ -2,17 +2,20 @@
 //! executable bytes stay owned by the toolchain cache and its run-owned copy.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use tidepool_repr::Generation;
+use tidepool_toolchain::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
 use tidepool_toolchain::recovery_artifacts::{
     verify_materialized_join, verify_materialized_ref, RecoveryArtifactError, RecoveryArtifactRef,
     RecoveryJoinRef,
 };
 
-const VERSION: u32 = 2;
-const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v2";
+const VERSION: u32 = 3;
+const V2_VERSION: u32 = 2;
+const V2_PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v2";
+const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v3";
 const MAX_MANIFEST_BYTES: usize = 64 << 20;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -110,6 +113,11 @@ pub(crate) struct RecoveryNode {
     pub kind: RecoveryNodeKind,
     #[serde(with = "generation_vec_serde")]
     pub implementation_refs: Vec<Generation>,
+    /// Exact source modules visible at this declaration tip. These identities
+    /// and edges describe lexical authority independently of implementation
+    /// artifact reachability.
+    pub lexical_roots: Vec<ExactModuleIdentity>,
+    pub lexical: Vec<ExactLexicalNode>,
     pub artifact_refs: Vec<String>,
     pub exports: Vec<RecoveryExport>,
     pub retracts: Vec<RecoverySymbolIdentity>,
@@ -120,6 +128,60 @@ pub(crate) struct RecoveryNode {
     pub instances: RecoveryInstanceInventory,
     pub live_dependencies: Vec<RecoveryLiveDependency>,
     pub state: RecoveryNodeState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryGraphV2 {
+    version: u32,
+    public_schema: String,
+    source_session: u64,
+    lineage: u64,
+    #[serde(with = "generation_serde")]
+    high_water: Generation,
+    public_surfaces: Vec<RecoveryPublicSurface>,
+    nodes: Vec<RecoveryNodeV2>,
+    artifacts: Vec<RecoveryArtifactClosure>,
+    checksum: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryNodeV2 {
+    #[serde(with = "generation_serde")]
+    id: Generation,
+    #[serde(with = "option_generation_serde")]
+    parent: Option<Generation>,
+    kind: RecoveryNodeKind,
+    #[serde(with = "generation_vec_serde")]
+    implementation_refs: Vec<Generation>,
+    artifact_refs: Vec<String>,
+    exports: Vec<RecoveryExport>,
+    retracts: Vec<RecoverySymbolIdentity>,
+    workbench_imports: Vec<String>,
+    instances: RecoveryInstanceInventory,
+    live_dependencies: Vec<RecoveryLiveDependency>,
+    state: RecoveryNodeState,
+}
+
+impl From<RecoveryNodeV2> for RecoveryNode {
+    fn from(node: RecoveryNodeV2) -> Self {
+        Self {
+            id: node.id,
+            parent: node.parent,
+            kind: node.kind,
+            implementation_refs: node.implementation_refs,
+            lexical_roots: Vec::new(),
+            lexical: Vec::new(),
+            artifact_refs: node.artifact_refs,
+            exports: node.exports,
+            retracts: node.retracts,
+            workbench_imports: node.workbench_imports,
+            instances: node.instances,
+            live_dependencies: node.live_dependencies,
+            state: node.state,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -474,8 +536,8 @@ fn high_water_candidate(
     Ok(candidate)
 }
 
-/// Read only v2. Version 1 remains under the explicit legacy migration path;
-/// future versions fail rather than being mistaken for a missing manifest.
+/// Read the current graph and migrate only a certified-empty v2 public surface.
+/// Version 1 remains under its explicit source-only migration path.
 pub(crate) fn read_v2(
     path: &Path,
     recovery_root: &Path,
@@ -505,24 +567,63 @@ pub(crate) fn read_v2(
             if value
                 .get("public_schema")
                 .and_then(serde_json::Value::as_str)
+                != Some(V2_PAIRED_PUBLIC_SCHEMA)
+            {
+                return Err(at(
+                    path,
+                    "v2 recovery graph lacks the supported paired-public-v2 schema",
+                ));
+            }
+            let old: RecoveryGraphV2 = serde_json::from_value(value)
+                .map_err(|e| at(path, format!("invalid v2 recovery graph: {e}")))?;
+            let expected_checksum = checksum_v2(&old).map_err(|e| at(path, e.detail))?;
+            if old.version != V2_VERSION || old.checksum != expected_checksum {
+                return Err(at(path, "v2 recovery graph checksum mismatch"));
+            }
+            if old.public_surfaces.iter().any(|surface| {
+                surface.declaration_root.is_some()
+                    || !surface.bindings.is_empty()
+                    || !surface.source_instances.is_empty()
+            }) {
+                return Err(at(
+                    path,
+                    "nonempty v2 public surface lacks certified lexical authority; refusing attachment",
+                ));
+            }
+            let mut graph = RecoveryGraph {
+                version: VERSION,
+                public_schema: PAIRED_PUBLIC_SCHEMA.into(),
+                source_session: old.source_session,
+                lineage: old.lineage,
+                high_water: old.high_water,
+                public_surfaces: old.public_surfaces,
+                nodes: old.nodes.into_iter().map(RecoveryNode::from).collect(),
+                artifacts: old.artifacts,
+                checksum: String::new(),
+            };
+            graph.seal().map_err(|e| at(path, e.detail))?;
+            graph.validate().map_err(|e| at(path, e.detail))?;
+            let artifact_losses = graph
+                .validate_artifact_files(recovery_root)
+                .map_err(|e| at(path, e.detail))?;
+            Ok(Some(RecoveryV2Read {
+                graph,
+                artifact_losses,
+            }))
+        }
+        3 => {
+            if value
+                .get("public_schema")
+                .and_then(serde_json::Value::as_str)
                 != Some(PAIRED_PUBLIC_SCHEMA)
             {
                 return Err(at(
                     path,
-                    "v2 recovery graph lacks the supported paired public visibility schema",
-                ));
-            }
-            if !value
-                .get("public_surfaces")
-                .is_some_and(serde_json::Value::is_array)
-            {
-                return Err(at(
-                    path,
-                    "v2 recovery graph lacks per-actor public surfaces",
+                    "v3 recovery graph lacks the supported paired-public-v3 schema",
                 ));
             }
             let graph: RecoveryGraph = serde_json::from_value(value)
-                .map_err(|e| at(path, format!("invalid v2 recovery graph: {e}")))?;
+                .map_err(|e| at(path, format!("invalid v3 recovery graph: {e}")))?;
             graph.validate().map_err(|e| at(path, e.detail))?;
             let artifact_losses = graph
                 .validate_artifact_files(recovery_root)
@@ -595,6 +696,13 @@ impl RecoveryGraph {
         for node in &mut self.nodes {
             node.implementation_refs.sort();
             node.implementation_refs.dedup();
+            node.lexical_roots.sort();
+            node.lexical_roots.dedup();
+            node.lexical.sort_by(|a, b| a.owner.cmp(&b.owner));
+            for lexical in &mut node.lexical {
+                lexical.imports.sort();
+                lexical.imports.dedup();
+            }
             node.artifact_refs.sort();
             node.artifact_refs.dedup();
         }
@@ -821,10 +929,10 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
             )));
         }
         if node.parent.is_some_and(|parent| parent >= node.id)
-            || node.implementation_refs.iter().any(|dep| *dep >= node.id)
+            || node.implementation_refs.contains(&node.id)
         {
             return Err(error(format!(
-                "recovery node {} has a non-ancestor reference",
+                "recovery node {} has an invalid parent or self implementation reference",
                 node.id.0
             )));
         }
@@ -841,6 +949,62 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
         {
             return Err(error(format!(
                 "recovery node {} must report its live-value dependencies",
+                node.id.0
+            )));
+        }
+        let lexical_owners: BTreeMap<_, _> = node
+            .lexical
+            .iter()
+            .map(|entry| (&entry.owner, &entry.imports))
+            .collect();
+        let mut unique_roots = BTreeSet::new();
+        if node.lexical_roots.iter().any(|root| {
+            root.unit.is_empty()
+                || root.module.is_empty()
+                || !unique_roots.insert(root)
+                || !lexical_owners.contains_key(root)
+        }) {
+            return Err(error(format!(
+                "recovery node {} has invalid or unrepresented lexical roots",
+                node.id.0
+            )));
+        }
+        let mut unique_owners = BTreeSet::new();
+        for lexical in &node.lexical {
+            let mut unique_imports = BTreeSet::new();
+            if lexical.owner.unit.is_empty()
+                || lexical.owner.module.is_empty()
+                || !unique_owners.insert(&lexical.owner)
+                || lexical.imports.iter().any(|import| {
+                    import.unit.is_empty()
+                        || import.module.is_empty()
+                        || !unique_imports.insert(import)
+                        || !lexical_owners.contains_key(import)
+                })
+            {
+                return Err(error(format!(
+                    "recovery node {} has invalid or non-closed lexical edges",
+                    node.id.0
+                )));
+            }
+        }
+        if !node.lexical.is_empty() {
+            let mut reachable = BTreeSet::new();
+            let mut pending = node.lexical_roots.clone();
+            while let Some(owner) = pending.pop() {
+                if reachable.insert(owner.clone()) {
+                    pending.extend(lexical_owners[&owner].iter().cloned());
+                }
+            }
+            if reachable.len() != lexical_owners.len() {
+                return Err(error(format!(
+                    "recovery node {} retains lexical owners outside its exact root closure",
+                    node.id.0
+                )));
+            }
+        } else if !node.lexical_roots.is_empty() {
+            return Err(error(format!(
+                "recovery node {} has lexical roots without edges",
                 node.id.0
             )));
         }
@@ -918,6 +1082,38 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
             )));
         }
     }
+    let mut incoming = nodes
+        .keys()
+        .map(|id| (*id, 0usize))
+        .collect::<BTreeMap<_, _>>();
+    for node in &graph.nodes {
+        for dependency in node.parent.iter().chain(node.implementation_refs.iter()) {
+            *incoming
+                .get_mut(dependency)
+                .expect("references were validated above") += 1;
+        }
+    }
+    let mut ready = incoming
+        .iter()
+        .filter_map(|(id, count)| (*count == 0).then_some(*id))
+        .collect::<VecDeque<_>>();
+    let mut visited = 0usize;
+    while let Some(id) = ready.pop_front() {
+        visited += 1;
+        let node = nodes[&id];
+        for dependency in node.parent.iter().chain(node.implementation_refs.iter()) {
+            let count = incoming.get_mut(dependency).expect("known recovery node");
+            *count -= 1;
+            if *count == 0 {
+                ready.push_back(*dependency);
+            }
+        }
+    }
+    if visited != nodes.len() {
+        return Err(error(
+            "recovery parent and implementation references contain a cycle",
+        ));
+    }
     for surface in &graph.public_surfaces {
         if surface
             .declaration_root
@@ -973,6 +1169,37 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
             )));
         }
     }
+    let referenced_artifacts: BTreeSet<_> = graph
+        .nodes
+        .iter()
+        .flat_map(|node| node.artifact_refs.iter().cloned())
+        .collect();
+    let owned_modules: BTreeSet<_> = referenced_artifacts
+        .iter()
+        .filter_map(|key| artifacts.get(key).copied())
+        .map(|artifact| match artifact {
+            RecoveryArtifactClosure::Home(reference) => ExactModuleIdentity {
+                unit: reference.unit.clone(),
+                module: reference.module.clone(),
+            },
+            RecoveryArtifactClosure::Join(reference) => ExactModuleIdentity {
+                unit: reference.unit.clone(),
+                module: reference.module.clone(),
+            },
+        })
+        .collect();
+    for node in &graph.nodes {
+        if node
+            .lexical
+            .iter()
+            .any(|lexical| !owned_modules.contains(&lexical.owner))
+        {
+            return Err(error(format!(
+                "recovery node {} has lexical ownership without a referenced exact artifact",
+                node.id.0
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -981,6 +1208,16 @@ fn checksum(graph: &RecoveryGraph) -> Result<String, RecoveryError> {
     unsigned.checksum.clear();
     let bytes = serde_json::to_vec(&unsigned)
         .map_err(|e| error(format!("could not encode recovery graph: {e}")))?;
+    let mut domain = b"tidepool-recovery-graph-v3\0".to_vec();
+    domain.extend_from_slice(&bytes);
+    Ok(blake3::hash(&domain).to_hex().to_string())
+}
+
+fn checksum_v2(graph: &RecoveryGraphV2) -> Result<String, RecoveryError> {
+    let mut unsigned = graph.clone();
+    unsigned.checksum.clear();
+    let bytes = serde_json::to_vec(&unsigned)
+        .map_err(|e| error(format!("could not encode v2 recovery graph: {e}")))?;
     let mut domain = b"tidepool-recovery-graph-v2\0".to_vec();
     domain.extend_from_slice(&bytes);
     Ok(blake3::hash(&domain).to_hex().to_string())
@@ -1256,6 +1493,13 @@ mod tests {
         }
     }
 
+    fn module(unit: &str, module: &str) -> ExactModuleIdentity {
+        ExactModuleIdentity {
+            unit: unit.into(),
+            module: module.into(),
+        }
+    }
+
     fn fixture(root: &Path) -> RecoveryGraph {
         let source = tempfile::tempdir().unwrap();
         let iface = source.path().join("Lib.hi");
@@ -1326,6 +1570,8 @@ mod tests {
                     parent: None,
                     kind: RecoveryNodeKind::Authored,
                     implementation_refs: vec![],
+                    lexical_roots: vec![],
+                    lexical: vec![],
                     artifact_refs: vec![key],
                     exports: vec![export.clone()],
                     retracts: vec![],
@@ -1339,6 +1585,8 @@ mod tests {
                     parent: Some(Generation(1)),
                     kind: RecoveryNodeKind::Join,
                     implementation_refs: vec![Generation(1)],
+                    lexical_roots: vec![],
+                    lexical: vec![],
                     artifact_refs: vec![],
                     exports: vec![export],
                     retracts: vec![],
@@ -1355,6 +1603,38 @@ mod tests {
         };
         graph.seal().unwrap();
         graph
+    }
+
+    fn v2_graph(graph: RecoveryGraph) -> RecoveryGraphV2 {
+        let mut old = RecoveryGraphV2 {
+            version: V2_VERSION,
+            public_schema: V2_PAIRED_PUBLIC_SCHEMA.into(),
+            source_session: graph.source_session,
+            lineage: graph.lineage,
+            high_water: graph.high_water,
+            public_surfaces: graph.public_surfaces,
+            nodes: graph
+                .nodes
+                .into_iter()
+                .map(|node| RecoveryNodeV2 {
+                    id: node.id,
+                    parent: node.parent,
+                    kind: node.kind,
+                    implementation_refs: node.implementation_refs,
+                    artifact_refs: node.artifact_refs,
+                    exports: node.exports,
+                    retracts: node.retracts,
+                    workbench_imports: node.workbench_imports,
+                    instances: node.instances,
+                    live_dependencies: node.live_dependencies,
+                    state: node.state,
+                })
+                .collect(),
+            artifacts: graph.artifacts,
+            checksum: String::new(),
+        };
+        old.checksum = checksum_v2(&old).unwrap();
+        old
     }
 
     #[test]
@@ -1645,14 +1925,69 @@ mod tests {
     }
 
     #[test]
-    fn legacy_v2_without_paired_public_schema_is_explicitly_refused() {
+    fn v2_empty_public_surface_migrates_in_memory_and_preserves_high_water() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("declarations.json");
-        fs::write(&manifest, br#"{"version":2,"source_session":41}"#).unwrap();
+        let mut graph = fixture(dir.path());
+        graph.high_water = Generation(7);
+        graph.public_surfaces[0].declaration_root = None;
+        graph.public_surfaces[0].bindings.clear();
+        graph.public_surfaces[0].source_instances.clear();
+        graph.seal().unwrap();
+        let bytes = serde_json::to_vec(&v2_graph(graph)).unwrap();
+        fs::write(&manifest, &bytes).unwrap();
+
+        let restored = read_v2(&manifest, dir.path()).unwrap().unwrap().graph;
+
+        assert_eq!(restored.version, VERSION);
+        assert_eq!(restored.public_schema, PAIRED_PUBLIC_SCHEMA);
+        assert_eq!(restored.high_water, Generation(7));
+        assert!(restored.nodes.iter().all(|node| node.lexical.is_empty()));
+        assert_eq!(
+            fs::read(&manifest).unwrap(),
+            bytes,
+            "read migration is non-mutating"
+        );
+    }
+
+    #[test]
+    fn v2_nonempty_public_surface_refuses_attachment_without_rewriting_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("declarations.json");
+        let bytes = serde_json::to_vec(&v2_graph(fixture(dir.path()))).unwrap();
+        fs::write(&manifest, &bytes).unwrap();
+
         let error = read_v2(&manifest, dir.path()).err().unwrap();
-        assert!(error
-            .detail
-            .contains("lacks the supported paired public visibility schema"));
+
+        assert!(error.detail.contains("nonempty v2 public surface"));
+        assert_eq!(fs::read(&manifest).unwrap(), bytes);
+    }
+
+    #[test]
+    fn v2_decode_rejects_v3_lexical_fields_instead_of_ignoring_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("declarations.json");
+        let mut value = serde_json::to_value(v2_graph(fixture(dir.path()))).unwrap();
+        value["nodes"][0]["lexical_roots"] = serde_json::json!([]);
+        fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let error = read_v2(&manifest, dir.path()).err().unwrap();
+
+        assert!(error.detail.contains("invalid v2 recovery graph"));
+        assert!(error.detail.contains("unknown field"));
+    }
+
+    #[test]
+    fn v2_without_the_exact_public_schema_is_explicitly_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("declarations.json");
+        fs::write(
+            &manifest,
+            br#"{"version":2,"public_schema":"paired-public-v1"}"#,
+        )
+        .unwrap();
+        let error = read_v2(&manifest, dir.path()).err().unwrap();
+        assert!(error.detail.contains("supported paired-public-v2 schema"));
     }
 
     #[test]
@@ -1712,13 +2047,104 @@ mod tests {
     fn prior_paired_schema_cannot_be_read_as_node_level_instance_evidence() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("declarations.json");
-        let mut value = serde_json::to_value(fixture(dir.path())).unwrap();
+        let mut value = serde_json::to_value(v2_graph(fixture(dir.path()))).unwrap();
         value["public_schema"] = serde_json::json!("paired-public-v1");
         fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
         let error = read_v2(&manifest, dir.path()).err().unwrap();
-        assert!(error
+        assert!(error.detail.contains("supported paired-public-v2 schema"));
+    }
+
+    #[test]
+    fn lexical_graph_requires_closed_reachable_artifact_owned_identities() {
+        let dir = tempfile::tempdir().unwrap();
+        let valid = module("main", "Lib");
+        let missing = module("main", "Missing");
+
+        let mut graph = fixture(dir.path());
+        graph.nodes[0].lexical_roots = vec![valid.clone()];
+        graph.nodes[0].lexical = vec![ExactLexicalNode {
+            owner: valid.clone(),
+            imports: vec![],
+        }];
+        graph.seal().unwrap();
+
+        let mut unrepresented = graph.clone();
+        unrepresented.nodes[0].lexical_roots = vec![missing.clone()];
+        assert!(unrepresented
+            .seal()
+            .unwrap_err()
             .detail
-            .contains("supported paired public visibility schema"));
+            .contains("unrepresented lexical roots"));
+
+        let mut open_edge = graph.clone();
+        open_edge.nodes[0].lexical[0].imports.push(missing);
+        assert!(open_edge
+            .seal()
+            .unwrap_err()
+            .detail
+            .contains("non-closed lexical edges"));
+
+        let mut unreachable = graph.clone();
+        unreachable.nodes[0].lexical_roots.clear();
+        assert!(unreachable
+            .seal()
+            .unwrap_err()
+            .detail
+            .contains("outside its exact root closure"));
+
+        let mut unowned = graph;
+        unowned.nodes[0].lexical[0].owner = module("other", "Lib");
+        unowned.nodes[0].lexical_roots = vec![module("other", "Lib")];
+        assert!(unowned
+            .seal()
+            .unwrap_err()
+            .detail
+            .contains("without a referenced exact artifact"));
+    }
+
+    #[test]
+    fn v3_checksum_covers_lexical_roots_and_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = module("main", "Lib");
+        let other = module("main", "Other");
+        let mut graph = fixture(dir.path());
+        let RecoveryArtifactClosure::Home(mut other_artifact) = graph.artifacts[0].clone() else {
+            unreachable!()
+        };
+        other_artifact.module = "Other".into();
+        let other_closure = RecoveryArtifactClosure::Home(other_artifact);
+        let other_key = other_closure.key();
+        graph.artifacts.push(other_closure);
+        graph.nodes[0].artifact_refs.push(other_key);
+        graph.nodes[0].lexical_roots = vec![root.clone(), other.clone()];
+        graph.nodes[0].lexical = vec![
+            ExactLexicalNode {
+                owner: root.clone(),
+                imports: vec![other.clone()],
+            },
+            ExactLexicalNode {
+                owner: other,
+                imports: vec![],
+            },
+        ];
+        graph.seal().unwrap();
+        graph.validate().unwrap();
+
+        let mut roots_changed = graph.clone();
+        roots_changed.nodes[0].lexical_roots.reverse();
+        assert!(roots_changed
+            .validate()
+            .unwrap_err()
+            .detail
+            .contains("checksum mismatch"));
+
+        let mut edges_changed = graph;
+        edges_changed.nodes[0].lexical[0].imports = vec![root];
+        assert!(edges_changed
+            .validate()
+            .unwrap_err()
+            .detail
+            .contains("checksum mismatch"));
     }
 
     #[test]
