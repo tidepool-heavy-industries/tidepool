@@ -11,8 +11,11 @@ On `83c46c44a2` plus strict result checks, the TPCERT3 matched native gate
 executed five cases: the expanded checked-cell original/publication case,
 root Ready/authentication failure and running-cell cancellation passed;
 positive HTTP Haskell/result retention and the browser journey failed.
-The positive cases retained a missing folded-output diagnostic and did not
-deliver the expected completed call result. See
+The positive cases did not deliver the expected completed call result. Their
+missing folded-output diagnostic is not evidence of a compilation failure:
+retained whole-cell checking succeeded, and expressions intentionally do not
+use the declaration-fold path. The pending display/settlement continuation
+requires further investigation. See
 [`receipt3-joined-gates.log`](../target/completion-evidence/final-delivery/receipt3-joined-gates.log).
 This supersedes any positive-Haskell inference from the earlier host checks:
 their result assertion searched rendered JSON for `42` and was insufficient

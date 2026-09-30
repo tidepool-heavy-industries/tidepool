@@ -60,6 +60,45 @@ impl Drop for RunningBrowserHost {
 }
 
 impl RunningBrowserHost {
+    pub(super) async fn cell_settlement_diagnostic(&self, call_id: &str) -> String {
+        let call = harness::model::CallId(call_id.into());
+        let store = self.runtime.store();
+        let Ok(claims) = store.claims(&call) else {
+            return format!("call={call_id}, claims=lookup_failed");
+        };
+        let mut settlements = Vec::new();
+        for claim in claims.iter().take(4) {
+            let scheduler = self.runtime.scheduler().output(&claim.operation).await;
+            let stage = match &scheduler {
+                Ok(None) => "pending",
+                Ok(Some(harness::turn::JobOutput::Completed(Ok(_)))) => "completed",
+                Ok(Some(harness::turn::JobOutput::Completed(Err(_)))) => "failed",
+                Ok(Some(harness::turn::JobOutput::Cancelled)) => "cancelled",
+                Ok(Some(harness::turn::JobOutput::Interrupted)) => "interrupted",
+                Ok(Some(harness::turn::JobOutput::CancellationUnconfirmed(_))) => "unconfirmed",
+                Err(_) => "lookup_failed",
+            };
+            settlements.push(format!(
+                "request={}, claim={:?}, scheduler={stage}, persisted_output={:?}",
+                claim.request.0,
+                claim.state,
+                store
+                    .replay_output_operation(&claim.operation)
+                    .map(|value| value.is_some()),
+            ));
+        }
+        format!(
+            "call={call_id}, computing={}, claims={}, settlements={settlements:?}, actor_terminal={:?}",
+            self.campaign.actor.hosted_cell_computing(),
+            claims.len(),
+            self.campaign
+                .actor
+                .terminal()
+                .get()
+                .map(|terminal| terminal.kind),
+        )
+    }
+
     pub(super) async fn start(
         settings: &crate::exomonad::EmbeddedLaunchConfig,
         transport: &Arc<dyn harness::engine::ResponsesTransport>,

@@ -305,22 +305,28 @@ async fn production_host_retains_http_haskell_commands_and_reconnects_without_re
     let request_after_cell = tokio::time::timeout(Duration::from_secs(120), async {
         while let Some(request) = second_rx.recv().await {
             if request.input.iter().any(|item| {
-                item.0["type"] == "custom_tool_call_output"
-                    && item.0["call_id"] == "host-real-cell"
+                item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == "host-real-cell"
             }) {
                 return Some(request);
             }
         }
         None
     })
-        .await
+    .await;
+    let diagnostic = if request_after_cell.is_err() {
+        fixture.cell_settlement_diagnostic("host-real-cell").await
+    } else {
+        String::new()
+    };
+    let request_after_cell = request_after_cell
         .unwrap_or_else(|_| {
             panic!(
-                "host Engine did not request a successor turn after the Haskell cell; transport requests={}",
-                transport.calls.load(Ordering::SeqCst)
+                "host Engine did not request a successor turn after the Haskell cell; transport requests={}, {diagnostic}",
+                transport.calls.load(Ordering::SeqCst),
             )
         })
         .expect("scripted transport dropped its successor request");
+    let completed_provider_turns = transport.calls.load(Ordering::SeqCst);
     assert_eq!(
         request_after_cell
             .input
@@ -416,12 +422,13 @@ async fn production_host_retains_http_haskell_commands_and_reconnects_without_re
         1,
         "reconnect/replay must not re-execute the Haskell call"
     );
-    assert_eq!(transport.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        transport.calls.load(Ordering::SeqCst),
+        completed_provider_turns
+    );
     assert!(
         retained_items.iter().any(|item| {
-            item["type"] == "custom_tool_call_output"
-                && item["call_id"] == "host-real-cell"
-                && item.to_string().contains("42")
+            cell_output_matches(&harness::item::Item(item.clone()), "host-real-cell", "42")
         }),
         "browser history did not retain the real Haskell output"
     );

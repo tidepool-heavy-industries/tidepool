@@ -324,6 +324,14 @@ pub(super) async fn production_browser_journey() {
         .await
         .unwrap();
     let outcome = drive_browser(&fixture, secret, barrier_rx).await;
+    if outcome.is_err() {
+        eprintln!(
+            "browser gate {}",
+            fixture
+                .cell_settlement_diagnostic("browser-real-cell")
+                .await
+        );
+    }
     let terminal = fixture.campaign.actor.terminal().get();
     let retirement_cleanup = fixture.campaign.actor.terminal().cleanup();
     let cleanup = fixture.stop().await;
