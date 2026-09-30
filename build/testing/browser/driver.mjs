@@ -66,6 +66,16 @@ function assertRequestIncludes(summary, expected, phase) {
   if (!rendered.includes(expected)) throw new Error(`provider barrier ${phase} did not contain its expected input`);
 }
 
+function decodeWsFrame(payload) {
+  if (typeof payload !== 'string') return undefined;
+  try { return JSON.parse(payload); } catch { return undefined; }
+}
+
+function hostActor(snapshot, actor) {
+  return snapshot?.actors?.find((candidate) => candidate.identity?.actor === actor.name
+    && candidate.identity?.incarnation === actor.incarnation);
+}
+
 async function releaseBarrier(spec, defaultExpectedInput) {
   const finalPhase = spec.until_phase ?? spec.phase;
   if (typeof finalPhase !== 'string' || finalPhase.length === 0) {
@@ -134,20 +144,84 @@ async function runJourney(ready) {
   page.setDefaultTimeout(30_000);
   const hostOperations = [];
   const hostOperationWaiters = [];
-  page.on('websocket', (socket) => socket.on('framesent', ({ payload }) => {
-    if (typeof payload !== 'string') return;
-    let frame;
-    try { frame = JSON.parse(payload); } catch { return; }
-    if (frame.type !== 'host_command') return;
-    hostOperations.push(frame);
-    for (let index = hostOperationWaiters.length - 1; index >= 0; index -= 1) {
-      const waiter = hostOperationWaiters[index];
-      if (hostOperations.length < waiter.count) continue;
-      hostOperationWaiters.splice(index, 1);
-      clearTimeout(waiter.timer);
-      waiter.resolve();
-    }
-  }));
+  const commandReceipts = [];
+  const receiptWaiters = new Map();
+  let latestSnapshot;
+  let firstOperation;
+  let droppedFirstAck = 0;
+  let droppedFirstReceipt = 0;
+  let filteredSnapshotReceipt = 0;
+  await page.routeWebSocket('**/api/ws', (socket) => {
+    const server = socket.connectToServer();
+    socket.onMessage((payload) => {
+      const frame = decodeWsFrame(payload);
+      if (frame?.type === 'host_command') {
+        hostOperations.push(frame);
+        if (!firstOperation && frame.command?.action === 'input') firstOperation = frame;
+        for (let index = hostOperationWaiters.length - 1; index >= 0; index -= 1) {
+          const waiter = hostOperationWaiters[index];
+          if (hostOperations.length < waiter.count) continue;
+          hostOperationWaiters.splice(index, 1);
+          clearTimeout(waiter.timer);
+          waiter.resolve();
+        }
+      }
+      server.send(payload);
+    });
+    server.onMessage((payload) => {
+      const frame = decodeWsFrame(payload);
+      const operationId = firstOperation?.operation_id;
+      if (operationId && frame?.type === 'command.accepted' && frame.command_id === operationId) {
+        droppedFirstAck += 1;
+        return;
+      }
+      if (operationId && frame?.type === 'snapshot' && frame.snapshot && Array.isArray(frame.snapshot.commandReceipts)) {
+        const before = frame.snapshot.commandReceipts.length;
+        frame.snapshot.commandReceipts = frame.snapshot.commandReceipts.filter((receipt) => receipt.commandId !== operationId);
+        filteredSnapshotReceipt += before - frame.snapshot.commandReceipts.length;
+      }
+      if (frame?.type === 'snapshot') latestSnapshot = frame.snapshot;
+      if (frame?.type === 'event') {
+        const event = frame.event?.event;
+        if (operationId && event?.kind === 'command.receipt' && event.value?.commandId === operationId) {
+          droppedFirstReceipt += 1;
+          return;
+        }
+        if (operationId && event?.kind === 'command.queued'
+            && (event.value?.commandId === operationId || event.value?.operationId === operationId)) return;
+        if (event?.kind === 'actor.upsert' && latestSnapshot) {
+          const projection = event.value;
+          const identity = projection?.identity;
+          if (identity) {
+            const actors = latestSnapshot.actors ?? [];
+            const index = actors.findIndex((candidate) => candidate.identity?.run === identity.run
+              && candidate.identity?.actor === identity.actor
+              && candidate.identity?.incarnation === identity.incarnation);
+            latestSnapshot = {
+              ...latestSnapshot,
+              actors: index < 0 ? [...actors, projection] : actors.map((candidate, candidateIndex) => candidateIndex === index ? projection : candidate),
+            };
+          }
+        }
+        if (event?.kind === 'entity.remove' && event.value?.entity === 'actor' && latestSnapshot) {
+          latestSnapshot = {
+            ...latestSnapshot,
+            actors: (latestSnapshot.actors ?? []).filter((candidate) => candidate.identity?.actor !== event.value.id),
+          };
+        }
+        if (event?.kind === 'command.receipt') {
+          commandReceipts.push(event.value);
+          const waiter = receiptWaiters.get(event.value?.commandId);
+          if (waiter) {
+            receiptWaiters.delete(event.value.commandId);
+            clearTimeout(waiter.timer);
+            waiter.resolve(event.value);
+          }
+        }
+      }
+      socket.send(frame === undefined ? payload : JSON.stringify(frame));
+    });
+  });
   const waitForHostOperations = (count, timeoutMs = 15_000) => {
     if (hostOperations.length >= count) return Promise.resolve();
     return new Promise((resolve, reject) => {
@@ -158,6 +232,18 @@ async function runJourney(ready) {
         reject(new Error('browser operation did not reach the host socket'));
       }, timeoutMs);
       hostOperationWaiters.push(waiter);
+    });
+  };
+  const waitForReceipt = (operationId, timeoutMs = 30_000) => {
+    const existing = commandReceipts.find((receipt) => receipt.commandId === operationId);
+    if (existing) return Promise.resolve(existing);
+    return new Promise((resolve, reject) => {
+      const waiter = { resolve, reject, timer: undefined };
+      waiter.timer = setTimeout(() => {
+        receiptWaiters.delete(operationId);
+        reject(new Error(`operation ${operationId} did not publish a command receipt`));
+      }, timeoutMs);
+      receiptWaiters.set(operationId, waiter);
     });
   };
   let lastOperation;
@@ -208,19 +294,71 @@ async function runJourney(ready) {
         }
         await page.getByText(step.state, { exact: true }).last().waitFor({ timeout: step.timeout_ms ?? 60_000 });
       } else if (step.action === 'interrupt') {
+        const actorProjection = hostActor(latestSnapshot, actor);
+        const expectedRound = actorProjection?.activeRound;
+        if (typeof expectedRound !== 'string' || expectedRound.length === 0) {
+          throw new Error('interrupt step has no current projected actor round');
+        }
+        const sentBeforeInterrupt = hostOperations.length;
         await page.getByRole('button', { name: 'Interrupt', exact: true }).click();
-        await page.getByText('Interrupt requested').last().waitFor({ timeout: 30_000 });
+        await waitForHostOperations(sentBeforeInterrupt + 1);
+        const interruption = hostOperations.at(-1);
+        assert.equal(interruption?.command?.action, 'interrupt', 'browser did not send an interrupt operation');
+        assert.deepEqual(interruption.command.target, actorProjection.identity, 'interrupt targeted another actor identity');
+        assert.equal(interruption.command.expected_round, expectedRound, 'interrupt did not target the current projected round');
+        const interruptReceipt = waitForReceipt(interruption.operation_id);
+        const [, receipt] = await Promise.all([
+          page.getByText('Interrupt requested').last().waitFor({ timeout: 30_000 }),
+          interruptReceipt,
+        ]);
+        assert.equal(receipt.outcome, 'control_requested');
+        assert.equal(receipt.control, 'interrupt');
+        assert.deepEqual(receipt.target, interruption.command.target);
       } else if (step.action === 'retire') {
+        const actorProjection = hostActor(latestSnapshot, actor);
+        if (!actorProjection) throw new Error('retire step has no current projected actor identity');
+        const sentBeforeRetire = hostOperations.length;
         await page.getByRole('button', { name: 'Retire', exact: true }).click();
-        await page.getByText('Retire requested').last().waitFor({ timeout: 30_000 });
-        await page.getByText('retired', { exact: true }).last().waitFor({ timeout: 60_000 });
+        await waitForHostOperations(sentBeforeRetire + 1);
+        const retirement = hostOperations.at(-1);
+        assert.equal(retirement?.command?.action, 'retire', 'browser did not send a retire operation');
+        assert.deepEqual(retirement.command.target, actorProjection.identity, 'retire targeted another actor identity');
+        const retireReceipt = waitForReceipt(retirement.operation_id);
+        const requested = page.getByText('Retire requested').last().waitFor({ timeout: 30_000 });
+        const [, receipt] = await Promise.all([
+          requested.then(() => page.getByText('retired', { exact: true }).last().waitFor({ timeout: 60_000 })),
+          retireReceipt,
+        ]);
+        assert.equal(receipt.outcome, 'control_requested');
+        assert.equal(receipt.control, 'retire');
+        assert.deepEqual(receipt.target, retirement.command.target);
       } else if (step.action === 'reload') {
         const sentBeforeReload = hostOperations.length;
+        const operationId = lastOperation?.operation_id;
+        const statusResponse = operationId
+          ? page.waitForResponse((response) => new URL(response.url()).pathname === `/api/commands/${operationId}`, { timeout: 30_000 })
+          : undefined;
         await page.reload({ waitUntil: 'domcontentloaded' });
         await page.getByRole('status', { name: 'Session authenticated' }).waitFor({ timeout: 30_000 });
         await page.getByRole('heading', { name: 'Tree' }).waitFor({ timeout: 30_000 });
         await selectHostActor(page, actor);
-        if (step.expect_no_replay !== false && hostOperations.length !== sentBeforeReload) {
+        if (statusResponse && lastOperation) {
+          const response = await statusResponse;
+          assert.equal(response.status(), 200, 'reconnect status lookup did not succeed');
+          const status = await response.json();
+          assert.equal(status.operationId, lastOperation.operation_id, 'reconnect status returned another operation');
+          assert.deepEqual(status.command, lastOperation.command, 'reconnect status changed the retained target or payload');
+          assert.equal(status.state, 'input_admitted', 'reconnect did not recover the admitted input status');
+          assert.ok(Number.isSafeInteger(status.envelopeId) && status.envelopeId > 0, 'recovered input status omitted its envelope');
+          assert.equal(status.receipt?.outcome, 'admitted', 'recovered status omitted its admitted receipt');
+          await page.locator(`[data-operation-id="${lastOperation.operation_id}"]`).getByText('input_admitted', { exact: true }).waitFor({ timeout: 30_000 });
+          if (step.expect_no_replay !== false && hostOperations.length !== sentBeforeReload) {
+            throw new Error('reconnect replayed a retained browser operation automatically');
+          }
+          if (droppedFirstAck !== 1 || droppedFirstReceipt < 1 || filteredSnapshotReceipt < 1) {
+            throw new Error('browser journey did not lose and recover the retained operation acknowledgement and receipt');
+          }
+        } else if (step.expect_no_replay !== false && hostOperations.length !== sentBeforeReload) {
           throw new Error('reconnect replayed a retained browser operation automatically');
         }
       } else if (step.action === 'retry') {
