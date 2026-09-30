@@ -100,6 +100,53 @@ pub(crate) struct WorkbenchPublicOwner {
     durable: Option<tidepool_runtime::session::RecoveryPublicOwner>,
 }
 
+/// Plain resource owners retained by the existing native continuation entry.
+/// No abort callback, session registry, or input-retirement callback belongs here.
+pub(crate) struct ExecutionResourceOwners {
+    _compilation: Arc<WorkbenchCompilationAuthority>,
+    public: Arc<WorkbenchPublicOwner>,
+    private: std::sync::OnceLock<Arc<tidepool_runtime::session::PrivateExecutionAdmission>>,
+}
+
+impl ExecutionResourceOwners {
+    fn new(
+        compilation: Arc<WorkbenchCompilationAuthority>,
+        public: Arc<WorkbenchPublicOwner>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            _compilation: compilation,
+            public,
+            private: std::sync::OnceLock::new(),
+        })
+    }
+
+    pub(super) fn retain_private(
+        &self,
+        admission: Arc<tidepool_runtime::session::PrivateExecutionAdmission>,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        if admission.view().session() != self.public.placement.session
+            || admission.admitted_public().scope != self.public.placement.lexical_scope
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "private resources differ from the original publication owner".into(),
+            ));
+        }
+        if let Err(admission) = self.private.set(admission) {
+            if !Arc::ptr_eq(
+                self.private
+                    .get()
+                    .expect("original private owner already retained"),
+                &admission,
+            ) {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "execution cannot replace its original private resource owner".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl WorkbenchPublicOwner {
     pub(super) fn issue(
         context: &ActorSessionContext,
@@ -164,8 +211,7 @@ struct OwnedExecution<H, O> {
     workbench: crate::ResidentActorWorkbench<H, O>,
     timing: Option<crate::call_timing::CallScope>,
     cleanup: crate::resident_workbench::ParkedHoleAbortGuard,
-    _compilation_authority: Arc<WorkbenchCompilationAuthority>,
-    _public_owner: Arc<WorkbenchPublicOwner>,
+    resources: Arc<ExecutionResourceOwners>,
 }
 
 impl<H, O> OwnedExecution<H, O> {
@@ -266,10 +312,11 @@ where
             .unwrap_or_else(|| "cell".into());
         let (actor, incarnation) = actor_address(context.actor);
         let timing = crate::call_timing::CallScope::new(kind, actor as u64, incarnation as u64);
+        let resources = ExecutionResourceOwners::new(compilation_authority, public_owner);
         let cleanup = workbench.continuation_cleanup_owner(
             context.clone(),
             "hosted execution abandoned before exact continuation settlement".into(),
-            compilation_authority.clone(),
+            resources.clone(),
         );
         let owned = OwnedExecution {
             state: WorkbenchExecutionState {
@@ -295,8 +342,7 @@ where
             workbench,
             timing: Some(timing),
             cleanup,
-            _compilation_authority: compilation_authority,
-            _public_owner: public_owner,
+            resources,
         };
         let runner = self.environment.runner.clone();
         WorkbenchDispatch::Owned(OwnedWorkbenchTask::new(Box::pin(async move {

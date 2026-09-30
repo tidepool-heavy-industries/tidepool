@@ -3094,7 +3094,7 @@ where
         &self,
         context: crate::ActorSessionContext,
         reason: String,
-        authority: Arc<crate::resident_actor::WorkbenchCompilationAuthority>,
+        authority: Arc<crate::resident_actor::ExecutionResourceOwners>,
     ) -> ParkedHoleAbortGuard {
         ParkedHoleAbortGuard::with_retained_latest(
             &self.access,

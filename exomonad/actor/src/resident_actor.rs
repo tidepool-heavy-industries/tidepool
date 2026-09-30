@@ -20,7 +20,9 @@ mod replacement;
 mod status_rendering;
 mod workbench_ledger;
 
-pub(crate) use owned_workbench::{WorkbenchCompilationAuthority, WorkbenchPublicOwner};
+pub(crate) use owned_workbench::{
+    ExecutionResourceOwners, WorkbenchCompilationAuthority, WorkbenchPublicOwner,
+};
 
 use status_rendering::{
     render_bindings_section, render_job_line, render_revisions_section, render_roster_changes,
