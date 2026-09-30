@@ -261,8 +261,11 @@ impl DeclarationRetraction {
 
 /// The sparse generation-addressed declaration graph. A reserved identity
 /// has no lexical meaning until a certified join commits it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeclLog {
+    /// Changes at every graph mutation, including reserved-slot settlement.
+    /// Zero permanently fences publication if the revision space is exhausted.
+    revision: u64,
     /// Highest allocated identity, independent of public visibility.
     high_water: Generation,
     /// Sparse generation-addressed nodes; abandoned reservations remain
@@ -317,9 +320,22 @@ impl DeclLog {
     #[must_use]
     pub fn new() -> DeclLog {
         DeclLog {
+            revision: 1,
             high_water: Generation(0),
             turns: BTreeMap::new(),
         }
+    }
+
+    pub(crate) fn publication_revision(&self) -> Option<u64> {
+        (self.revision != 0).then_some(self.revision)
+    }
+
+    fn advance_revision(&mut self) {
+        self.revision = if self.revision == 0 {
+            0
+        } else {
+            self.revision.checked_add(1).unwrap_or(0)
+        };
     }
 
     /// Highest allocated generation. This includes invisible reservations and
@@ -336,6 +352,7 @@ impl DeclLog {
             return false;
         }
         self.high_water = high_water;
+        self.advance_revision();
         true
     }
 
@@ -354,6 +371,7 @@ impl DeclLog {
         }
         self.turns
             .insert(generation, DeclarationSlot::Recovered(recovered));
+        self.advance_revision();
         true
     }
 
@@ -398,6 +416,7 @@ impl DeclLog {
             return false;
         }
         *slot = DeclarationSlot::Committed(turn);
+        self.advance_revision();
         true
     }
 
@@ -485,6 +504,7 @@ impl DeclLog {
     }
 
     fn next_generation(&mut self) -> Generation {
+        self.advance_revision();
         self.high_water = Generation(
             self.high_water
                 .0
@@ -519,6 +539,7 @@ impl DeclLog {
             return false;
         }
         *slot = DeclarationSlot::Joined(joined);
+        self.advance_revision();
         true
     }
 
@@ -533,6 +554,7 @@ impl DeclLog {
     }
 
     pub fn turn_mut(&mut self, generation: Generation) -> Option<&mut DeclTurn> {
+        self.advance_revision();
         match self.turns.get_mut(&generation)? {
             DeclarationSlot::Committed(turn) => Some(turn),
             DeclarationSlot::CertifiedAuthored { turn, .. } => Some(turn),
@@ -552,6 +574,7 @@ impl DeclLog {
             return false;
         }
         self.turns.insert(generation, DeclarationSlot::Reserved);
+        self.advance_revision();
         true
     }
 
@@ -749,6 +772,12 @@ impl DeclLog {
             }
         }
         out
+    }
+}
+
+impl Default for DeclLog {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

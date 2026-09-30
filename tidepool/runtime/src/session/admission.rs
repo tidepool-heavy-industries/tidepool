@@ -16,6 +16,7 @@ use super::{PersistentSession, PublicVisibilitySnapshot, SessionCompileView, Ses
 pub struct PrivateExecutionAdmission {
     pub(super) owner: Arc<RuntimeAdmissionOwner>,
     pub(super) owner_epoch: u64,
+    pub(super) durable_owner: Option<super::RecoveryPublicOwner>,
     pub(super) scope_lease: Arc<RuntimeLexicalScopeLease>,
     admitted: PublicVisibilitySnapshot,
     private_scope: ScopeId,
@@ -36,6 +37,9 @@ impl PrivateExecutionAdmission {
     }
     pub fn binding_tip(&self) -> BindingTipId {
         self.binding_tip
+    }
+    pub fn durable_owner(&self) -> Option<&super::RecoveryPublicOwner> {
+        self.durable_owner.as_ref()
     }
 }
 
@@ -364,6 +368,17 @@ impl RuntimeCheckedPrefix {
             return Err(SessionError::StaleStagedDeclaration);
         }
         // Appending checks the compiler-owned same-cell identity and order.
+        refuse_ephemeral_declaration_replacement(
+            self,
+            session,
+            &state.snapshot,
+            execution
+                .item()
+                .binders()
+                .iter()
+                .map(String::as_str)
+                .chain(execution.observation_name()),
+        )?;
         state.snapshot.compiler_prefix.append(execution.clone())?;
         state.in_flight = Some(execution.clone());
         Ok(Arc::new(CheckedTurnCompletion {
@@ -372,6 +387,34 @@ impl RuntimeCheckedPrefix {
             scope,
         }))
     }
+}
+
+fn refuse_ephemeral_declaration_replacement<'a>(
+    prefix: &RuntimeCheckedPrefix,
+    session: &PersistentSession,
+    snapshot: &RuntimeCheckedPrefixSnapshot,
+    names: impl Iterator<Item = &'a str>,
+) -> Result<(), SessionError> {
+    if prefix
+        .admission
+        .private_execution
+        .as_ref()
+        .is_none_or(|private| private.durable_owner.is_some())
+    {
+        return Ok(());
+    }
+    let names = names.collect::<std::collections::BTreeSet<_>>();
+    if session
+        .lib()
+        .log
+        .current_items_at(snapshot.visibility.declaration_tip)
+        .iter()
+        .flat_map(|(item, _)| item.value_names())
+        .any(|name| names.contains(name))
+    {
+        return Err(SessionError::UnsupportedPrivateValueReplacement);
+    }
+    Ok(())
 }
 
 /// Auxiliary display settlement never completes another authored item. Its
@@ -388,6 +431,7 @@ pub(crate) struct CheckedDisplayPlan {
     pub(crate) admission: Arc<RuntimeCheckedDisplayAdmission>,
     pub(crate) proof: Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>,
     pub(crate) metadata: super::BoundBinder,
+    pub(crate) binding_names: [String; 3],
 }
 impl CheckedDisplayPlan {
     pub(crate) fn validate_ready(
@@ -414,6 +458,12 @@ impl CheckedDisplayPlan {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        refuse_ephemeral_declaration_replacement(
+            prefix,
+            session,
+            &state.snapshot,
+            self.binding_names.iter().map(String::as_str),
+        )?;
         state
             .snapshot
             .compiler_prefix
@@ -848,7 +898,16 @@ impl PersistentSession {
             .then(|| {
                 let mut name = format!("observation{}", generation.0);
                 let visible = self.bindings().iter_current_in(self.scope_tree(), scope);
-                while visible.iter().any(|(existing, _)| existing.0 == name) {
+                let declaration_names = self
+                    .lib()
+                    .log
+                    .current_items_at(snapshot.visibility.declaration_tip)
+                    .into_iter()
+                    .flat_map(|(item, _)| item.value_names().map(str::to_owned).collect::<Vec<_>>())
+                    .collect::<std::collections::BTreeSet<_>>();
+                while visible.iter().any(|(existing, _)| existing.0 == name)
+                    || declaration_names.contains(&name)
+                {
                     name.push('_');
                 }
                 name
@@ -962,6 +1021,16 @@ impl PersistentSession {
         let staged = super::StagedDeclaration {
             generation,
             reserved: true,
+            persistence: if prefix
+                .admission
+                .private_execution
+                .as_ref()
+                .is_some_and(|private| private.durable_owner.is_some())
+            {
+                super::DeclarationPersistence::Durable
+            } else {
+                super::DeclarationPersistence::Ephemeral
+            },
             module,
             receipt,
             exact_context: self.lib().log.joined_context_at(base_tip),
@@ -1152,9 +1221,16 @@ impl PersistentSession {
         public_scope: ScopeId,
     ) -> Result<PrivateExecutionAdmission, SessionError> {
         self.reap_admission_leases();
+        let durable_owner = self
+            .lib()
+            .durable_public_scopes
+            .iter()
+            .find_map(|(owner, scope)| (*scope == public_scope).then(|| owner.clone()));
         let admitted = self
             .public_visibility_snapshot_in(public_scope)
             .ok_or(SessionError::DeadScope(public_scope))?;
+        self.lib_mut()
+            .seed_scope(public_scope, admitted.declaration_tip);
         let private_scope = self
             .mint_detached_scope(public_scope)
             .ok_or(SessionError::DeadScope(public_scope))?;
@@ -1167,6 +1243,7 @@ impl PersistentSession {
         Ok(PrivateExecutionAdmission {
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
+            durable_owner,
             scope_lease: Arc::new(RuntimeLexicalScopeLease {
                 owner: self.admission_owner().clone(),
                 scope: private_scope,
@@ -1177,6 +1254,23 @@ impl PersistentSession {
             binding_tip,
             final_intent: OnceLock::new(),
         })
+    }
+
+    /// An explicitly local public surface cannot reuse an initialized durable
+    /// owner's scope. The admission remembers this choice through finalization.
+    pub fn begin_ephemeral_private_execution(
+        &mut self,
+        public_scope: ScopeId,
+    ) -> Result<PrivateExecutionAdmission, SessionError> {
+        if self
+            .lib()
+            .durable_public_scopes
+            .values()
+            .any(|scope| *scope == public_scope)
+        {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        self.begin_private_execution(public_scope)
     }
 
     pub fn admit_cell_in(

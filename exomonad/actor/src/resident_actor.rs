@@ -9,13 +9,12 @@ use std::sync::Arc;
 
 #[cfg(test)]
 mod capture_workspace_tests;
-#[cfg(test)]
-mod provider_owner_tests;
-
 mod command_presentation;
 mod command_settlement;
 mod commands;
 mod owned_workbench;
+#[cfg(test)]
+mod provider_owner_tests;
 mod replacement;
 mod status_rendering;
 mod workbench_ledger;

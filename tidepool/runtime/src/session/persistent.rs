@@ -2070,6 +2070,23 @@ impl PersistentSession {
         write_ids: Vec<SessionVarId>,
         source_keys: Vec<SourceLeaseKey>,
     ) -> Result<PublicManifestBase, SessionError> {
+        self.snapshot_publication_target(
+            Some(owner),
+            public_scope,
+            private_scope,
+            write_ids,
+            source_keys,
+        )
+    }
+
+    pub(super) fn snapshot_publication_target(
+        &self,
+        owner: Option<RecoveryPublicOwner>,
+        public_scope: ScopeId,
+        private_scope: ScopeId,
+        write_ids: Vec<SessionVarId>,
+        source_keys: Vec<SourceLeaseKey>,
+    ) -> Result<PublicManifestBase, SessionError> {
         if !self.scopes.is_live(public_scope) {
             return Err(SessionError::DeadScope(public_scope));
         }
@@ -2097,7 +2114,11 @@ impl PersistentSession {
             .chain(source_keys.iter())
             .cloned()
             .collect();
-        let final_source_instances = self.recovery_source_instances(final_source_keys)?;
+        let final_source_instances = if owner.is_some() {
+            self.recovery_source_instances(final_source_keys)?
+        } else {
+            Vec::new()
+        };
         let mut final_by_name: BTreeMap<String, SessionVarId> =
             expected_public.bindings.iter().cloned().collect();
         for id in &write_ids {
@@ -2109,11 +2130,12 @@ impl PersistentSession {
                 ))?;
             final_by_name.insert(entry.name.0.clone(), *id);
         }
-        let mut base = self
+        let lib = self
             .lib
             .as_ref()
-            .ok_or(SessionError::MissingDeclarationLibrary)?
-            .snapshot_public_manifest(
+            .ok_or(SessionError::MissingDeclarationLibrary)?;
+        let mut base = if let Some(owner) = owner {
+            lib.snapshot_public_manifest(
                 owner,
                 public_scope,
                 private_scope,
@@ -2123,7 +2145,36 @@ impl PersistentSession {
                 expected_private,
                 final_by_name.into_iter().collect(),
                 final_source_instances,
-            )?;
+            )?
+        } else {
+            if lib
+                .durable_public_scopes
+                .values()
+                .any(|scope| *scope == public_scope)
+            {
+                return Err(SessionError::WrongPublicManifestTicket);
+            }
+            PublicManifestBase {
+                admission_owner: None,
+                admission_owner_epoch: None,
+                manifest_owner: None,
+                session: lib.id,
+                log_revision: lib
+                    .log
+                    .publication_revision()
+                    .ok_or(SessionError::StaleStagedDeclaration)?,
+                path: lib.root.clone(),
+                target: super::PublicPublicationBaseline::Ephemeral,
+                public_scope,
+                private_scope,
+                write_ids,
+                source_keys,
+                expected_public,
+                expected_private,
+                final_bindings: final_by_name.into_iter().collect(),
+                final_source_instances,
+            }
+        };
         base.admission_owner = Some(self.admission_owner().clone());
         base.admission_owner_epoch = Some(self.admission_owner().epoch());
         Ok(base)
@@ -2186,6 +2237,7 @@ impl PersistentSession {
                 claim.before_rename_failure();
             }
             PublicManifestCommit::Durable
+            | PublicManifestCommit::Ephemeral
             | PublicManifestCommit::PublishedDurabilityUnconfirmed { .. } => {
                 self.bindings.commit_exact_binding_promotion(prepared);
                 for name in declared_names {
@@ -3039,7 +3091,11 @@ mod checkpoint_scope_tests {
             .unwrap()
             .stage()
             .unwrap();
-        foreign.owner = actor_b;
+        let super::super::StagedPublicationTarget::Durable { owner, .. } = &mut foreign.target
+        else {
+            unreachable!()
+        };
+        *owner = actor_b;
         assert!(matches!(
             session.publish_staged_public_manifest(foreign, &PublicationDecision::new()),
             Err(SessionError::WrongPublicManifestTicket)

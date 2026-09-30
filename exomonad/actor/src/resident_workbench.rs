@@ -1418,7 +1418,7 @@ pub struct ResidentActorRunner<H, O> {
 }
 
 pub(crate) struct ExecutionPrivateScope {
-    pub owner: tidepool_runtime::session::RecoveryPublicOwner,
+    pub owner: Arc<crate::resident_actor::WorkbenchPublicOwner>,
     pub public_scope: tidepool_codegen::scope::ScopeId,
     pub private_scope: tidepool_codegen::scope::ScopeId,
     pub admitted_public: tidepool_runtime::session::PublicVisibilitySnapshot,
@@ -7022,18 +7022,27 @@ where
     pub(crate) async fn begin_private_execution(
         &self,
         context: crate::ActorSessionContext,
-        owner: tidepool_runtime::session::RecoveryPublicOwner,
+        owner: Arc<crate::resident_actor::WorkbenchPublicOwner>,
         decision: Arc<tidepool_runtime::session::PublicationDecision>,
     ) -> Result<ExecutionPrivateScope, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, context, _| {
                 let public_scope = context.placement.lexical_scope;
+                if !owner.matches_context(&context) {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "private admission requires its original public owner".into(),
+                    ));
+                }
                 let admission = Arc::new(
-                    session
-                        .begin_durable_private_execution(&owner, public_scope)
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                        })?,
+                    match owner.durable() {
+                        Some(durable) => {
+                            session.begin_durable_private_execution(durable, public_scope)
+                        }
+                        None => session.begin_ephemeral_private_execution(public_scope),
+                    }
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })?,
                 );
                 let admitted_public = admission.admitted_public().clone();
                 let private_scope = admission.private_scope();
@@ -7080,6 +7089,13 @@ where
                 "execution publication requires its admitted private context".into(),
             ));
         }
+        let mut public_context = context.clone();
+        public_context.placement.lexical_scope = execution.public_scope;
+        if !execution.owner.matches_context(&public_context) {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "publication requires its original public owner".into(),
+            ));
+        }
         let admission = execution.admission.clone();
         let intent = self
             .access
@@ -7108,11 +7124,15 @@ where
             let baseline = self
                 .access
                 .with_machine(context.clone(), move |session, _, _| {
-                    session
-                        .restage_execution_publication(owner, intent)
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                        })
+                    match owner.durable() {
+                        Some(durable) => {
+                            session.restage_execution_publication(durable.clone(), intent)
+                        }
+                        None => session.restage_ephemeral_execution_publication(intent),
+                    }
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })
                 })
                 .await?;
             let compile_cancellation = cancellation.clone();

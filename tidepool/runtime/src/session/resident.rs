@@ -1104,6 +1104,7 @@ fn checked_display_plan(
         admission,
         proof: proof.clone(),
         metadata: metadata.clone(),
+        binding_names: [page.name.clone(), metadata.name.clone(), alias.name.clone()],
     })
 }
 
@@ -2111,6 +2112,14 @@ where
         self.state.begin_private_execution(public)
     }
 
+    pub fn begin_ephemeral_private_execution(
+        &mut self,
+        public: ScopeId,
+    ) -> Result<super::PrivateExecutionAdmission, SessionError> {
+        self.settle_dropped_custody();
+        self.state.begin_ephemeral_private_execution(public)
+    }
+
     pub fn bind_durable_public_scope(
         &mut self,
         owner: super::RecoveryPublicOwner,
@@ -2284,6 +2293,14 @@ where
         intent: Arc<super::FinalExecutionIntent>,
     ) -> Result<super::ExecutionPublication, SessionError> {
         self.state.restage_execution_publication(owner, intent)
+    }
+
+    pub fn restage_ephemeral_execution_publication(
+        &mut self,
+        intent: Arc<super::FinalExecutionIntent>,
+    ) -> Result<super::ExecutionPublication, SessionError> {
+        self.settle_dropped_custody();
+        self.state.restage_ephemeral_execution_publication(intent)
     }
 
     pub fn revalidate_declaration_rejection(

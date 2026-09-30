@@ -49,6 +49,7 @@ struct AuthoredWrite {
 pub struct FinalExecutionIntent {
     owner: Arc<super::admission::RuntimeAdmissionOwner>,
     owner_epoch: u64,
+    durable_owner: Option<RecoveryPublicOwner>,
     _private_scope_lease: Option<Arc<super::RuntimeLexicalScopeLease>>,
     admitted: PublicVisibilitySnapshot,
     private: PublicVisibilitySnapshot,
@@ -235,9 +236,15 @@ fn snapshot_digest(snapshot: &PublicVisibilitySnapshot) -> serde_json::Value {
 }
 
 fn paired_version(base: &PublicManifestBase) -> String {
+    let target = match &base.target {
+        super::PublicPublicationBaseline::Durable { owner, graph } => serde_json::json!({
+            "mode": "durable", "owner": owner, "graph": graph.checksum, "high_water": graph.high_water.0 }),
+        super::PublicPublicationBaseline::Ephemeral => serde_json::json!({ "mode": "ephemeral" }),
+    };
     let bytes = serde_json::to_vec(&serde_json::json!({
         "schema": "tidepool-paired-declaration-baseline-v2", "session": base.session.0,
-        "owner": base.owner, "graph": base.graph.checksum, "high_water": base.graph.high_water.0,
+        "target": target,
+        "log_revision": base.log_revision,
         "public": snapshot_digest(&base.expected_public), "private": snapshot_digest(&base.expected_private),
     })).expect("paired baseline contains serializable scalar identities");
     blake3::hash(&bytes).to_hex().to_string()
@@ -544,6 +551,7 @@ impl PersistentSession {
             write_ids,
             source_keys,
             Some(admission.scope_lease.clone()),
+            admission.durable_owner.clone(),
         )?;
         assert!(
             admission.final_intent.set(intent.clone()).is_ok(),
@@ -559,6 +567,7 @@ impl PersistentSession {
         write_ids: Vec<SessionVarId>,
         source_keys: Vec<SourceLeaseKey>,
         private_scope_lease: Option<Arc<super::RuntimeLexicalScopeLease>>,
+        durable_owner: Option<RecoveryPublicOwner>,
     ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
         if private_scope == admitted.scope || !self.scope_tree().is_live(private_scope) {
             return Err(SessionError::DeadScope(private_scope));
@@ -674,10 +683,15 @@ impl PersistentSession {
                 &source_keys,
             )
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
-        let reserved = self.lib_mut().reserve_join_generation_durable()?;
+        let reserved = if self.lib().durable_graph.is_some() {
+            self.lib_mut().reserve_join_generation_durable()?
+        } else {
+            self.lib_mut().log.reserve()
+        };
         Ok(Arc::new(FinalExecutionIntent {
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
+            durable_owner,
             _private_scope_lease: private_scope_lease,
             admitted: admitted.clone(),
             private,
@@ -696,7 +710,22 @@ impl PersistentSession {
         owner: RecoveryPublicOwner,
         intent: Arc<FinalExecutionIntent>,
     ) -> Result<ExecutionPublication, SessionError> {
-        let base = self.restage_declaration_publication(owner, intent)?;
+        self.restage_execution_target(Some(owner), intent)
+    }
+
+    pub fn restage_ephemeral_execution_publication(
+        &mut self,
+        intent: Arc<FinalExecutionIntent>,
+    ) -> Result<ExecutionPublication, SessionError> {
+        self.restage_execution_target(None, intent)
+    }
+
+    fn restage_execution_target(
+        &mut self,
+        owner: Option<RecoveryPublicOwner>,
+        intent: Arc<FinalExecutionIntent>,
+    ) -> Result<ExecutionPublication, SessionError> {
+        let base = self.restage_declaration_target(owner, intent)?;
         let declaration_conflict = base.current_public.as_ref().is_some_and(|tip| {
             tip.exports.iter().any(|export| {
                 base.intent.head_replacements.iter().any(|replacement| {
@@ -718,12 +747,23 @@ impl PersistentSession {
         owner: RecoveryPublicOwner,
         intent: Arc<FinalExecutionIntent>,
     ) -> Result<DeclarationPublicationBase, SessionError> {
+        self.restage_declaration_target(Some(owner), intent)
+    }
+
+    fn restage_declaration_target(
+        &mut self,
+        owner: Option<RecoveryPublicOwner>,
+        intent: Arc<FinalExecutionIntent>,
+    ) -> Result<DeclarationPublicationBase, SessionError> {
         if !Arc::ptr_eq(&intent.owner, self.admission_owner())
             || intent.owner_epoch != self.admission_owner().epoch()
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        let public = self.snapshot_publication(
+        if intent.durable_owner != owner {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        let public = self.snapshot_publication_target(
             owner,
             intent.admitted.scope,
             intent.private.scope,
@@ -770,6 +810,7 @@ impl PersistentSession {
             write_ids,
             source_keys,
             None,
+            Some(owner.clone()),
         )?;
         self.restage_declaration_publication(owner, intent)
     }
@@ -807,14 +848,8 @@ impl PersistentSession {
         if !self.has_lib() {
             return Err(SessionError::MissingDeclarationLibrary);
         }
-        Ok(self.lib().public_manifest_baseline_is_current(
-            base.session,
-            &base.path,
-            &base.owner,
-            base.public_scope,
-            &base.graph.checksum,
-            base.graph.high_water,
-        )? && self.publication_views_are_current(&base.expected_public, &base.expected_private))
+        Ok(self.lib().publication_baseline_is_current(base)?
+            && self.publication_views_are_current(&base.expected_public, &base.expected_private))
     }
 }
 
@@ -1006,123 +1041,124 @@ impl AcceptedDeclarationPublication {
             .chain(base.surface.lexical.iter().cloned())
             .collect(),
         )?);
-        let checksum = base.public.graph.checksum.clone();
-        let high_water = base.public.graph.high_water;
-        let root = base
-            .public
-            .path
-            .parent()
-            .ok_or_else(|| invalid(&base.public, "manifest has no parent"))?;
-        let materialized = receipt
-            .materialize(root)
-            .map_err(|error| invalid(&base.public, error.to_string()))?;
-        let exports = receipt
-            .exports()
-            .iter()
-            .map(|export| {
-                super::certified_recovery_export(export)
-                    .ok_or_else(|| invalid(&base.public, "unsupported joined export identity"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut implementation_refs = base
-            .intent
-            .writes
-            .iter()
-            .map(|write| write.generation)
-            .collect::<Vec<_>>();
-        if let Some(public) = &base.current_public {
-            implementation_refs.push(public.generation);
-        }
-        let artifacts = materialized
-            .products
-            .into_iter()
-            .map(recovery::RecoveryArtifactClosure::Home)
-            .chain(
-                materialized
-                    .anchors
-                    .into_iter()
-                    .map(recovery::RecoveryArtifactClosure::Join),
-            )
-            .chain(std::iter::once(recovery::RecoveryArtifactClosure::Join(
-                materialized.join,
-            )))
-            .collect::<Vec<_>>();
-        let artifact_refs = artifacts
-            .iter()
-            .map(recovery::RecoveryArtifactClosure::key)
-            .collect();
-        let live_dependencies = implementation_refs
-            .iter()
-            .filter_map(|id| base.public.graph.nodes.iter().find(|node| node.id == *id))
-            .flat_map(|node| node.live_dependencies.clone())
-            .collect::<Vec<_>>();
-        let mut workbench_imports = base
-            .current_public
-            .as_ref()
-            .map(|tip| tip.turn.workbench_imports.clone())
-            .unwrap_or_default();
-        for write in &base.intent.writes {
-            workbench_imports.extend(&write.turn.workbench_imports);
-        }
-        base.public.graph.nodes.push(recovery::RecoveryNode {
-            id: base.reserved,
-            parent: None,
-            kind: recovery::RecoveryNodeKind::Join,
-            implementation_refs,
-            artifact_refs,
-            exports,
-            lexical_roots: vec![ExactModuleIdentity {
-                unit: receipt.reserved().unit.clone(),
-                module: receipt.reserved().module.clone(),
-            }],
-            lexical: context.lexical_graph().to_vec(),
-            retracts: Vec::new(),
-            workbench_imports: workbench_imports.specs().to_vec(),
-            instances: recovery_instances(receipt.instances(), receipt.family_closure()),
-            state: if live_dependencies.is_empty() {
-                recovery::RecoveryNodeState::ExactArtifactClosure
-            } else {
-                recovery::RecoveryNodeState::LiveValueDependency {
-                    reason: "joined declaration retains exact live dependencies".into(),
-                }
-            },
-            live_dependencies,
-        });
-        for artifact in artifacts {
-            if !base
-                .public
-                .graph
-                .artifacts
-                .iter()
-                .any(|existing| existing.key() == artifact.key())
-            {
-                base.public.graph.artifacts.push(artifact);
+        let baseline = match &base.public.target {
+            super::PublicPublicationBaseline::Durable { graph, .. } => {
+                Some((graph.checksum.clone(), graph.high_water))
             }
-        }
-        if let Some(surface) = base
-            .public
-            .graph
-            .public_surfaces
-            .iter_mut()
-            .find(|surface| surface.owner == base.public.owner)
+            super::PublicPublicationBaseline::Ephemeral => None,
+        };
+        let error_path = base.public.path.clone();
+        if let super::PublicPublicationBaseline::Durable { owner, graph } = &mut base.public.target
         {
-            surface.declaration_root = Some(base.reserved);
-        } else {
-            base.public
-                .graph
+            let root = base
+                .public
+                .path
+                .parent()
+                .ok_or_else(|| invalid_at(&error_path, "manifest has no parent"))?;
+            let materialized = receipt
+                .materialize(root)
+                .map_err(|error| invalid_at(&error_path, error.to_string()))?;
+            let exports = receipt
+                .exports()
+                .iter()
+                .map(|export| {
+                    super::certified_recovery_export(export).ok_or_else(|| {
+                        invalid_at(&error_path, "unsupported joined export identity")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut implementation_refs = base
+                .intent
+                .writes
+                .iter()
+                .map(|write| write.generation)
+                .collect::<Vec<_>>();
+            if let Some(public) = &base.current_public {
+                implementation_refs.push(public.generation);
+            }
+            let artifacts = materialized
+                .products
+                .into_iter()
+                .map(recovery::RecoveryArtifactClosure::Home)
+                .chain(
+                    materialized
+                        .anchors
+                        .into_iter()
+                        .map(recovery::RecoveryArtifactClosure::Join),
+                )
+                .chain(std::iter::once(recovery::RecoveryArtifactClosure::Join(
+                    materialized.join,
+                )))
+                .collect::<Vec<_>>();
+            let artifact_refs = artifacts
+                .iter()
+                .map(recovery::RecoveryArtifactClosure::key)
+                .collect();
+            let live_dependencies = implementation_refs
+                .iter()
+                .filter_map(|id| graph.nodes.iter().find(|node| node.id == *id))
+                .flat_map(|node| node.live_dependencies.clone())
+                .collect::<Vec<_>>();
+            let mut workbench_imports = base
+                .current_public
+                .as_ref()
+                .map(|tip| tip.turn.workbench_imports.clone())
+                .unwrap_or_default();
+            for write in &base.intent.writes {
+                workbench_imports.extend(&write.turn.workbench_imports);
+            }
+            graph.nodes.push(recovery::RecoveryNode {
+                id: base.reserved,
+                parent: None,
+                kind: recovery::RecoveryNodeKind::Join,
+                implementation_refs,
+                artifact_refs,
+                exports,
+                lexical_roots: vec![ExactModuleIdentity {
+                    unit: receipt.reserved().unit.clone(),
+                    module: receipt.reserved().module.clone(),
+                }],
+                lexical: context.lexical_graph().to_vec(),
+                retracts: Vec::new(),
+                workbench_imports: workbench_imports.specs().to_vec(),
+                instances: recovery_instances(receipt.instances(), receipt.family_closure()),
+                state: if live_dependencies.is_empty() {
+                    recovery::RecoveryNodeState::ExactArtifactClosure
+                } else {
+                    recovery::RecoveryNodeState::LiveValueDependency {
+                        reason: "joined declaration retains exact live dependencies".into(),
+                    }
+                },
+                live_dependencies,
+            });
+            for artifact in artifacts {
+                if !graph
+                    .artifacts
+                    .iter()
+                    .any(|existing| existing.key() == artifact.key())
+                {
+                    graph.artifacts.push(artifact);
+                }
+            }
+            if let Some(surface) = graph
                 .public_surfaces
-                .push(recovery::RecoveryPublicSurface {
-                    owner: base.public.owner.clone(),
+                .iter_mut()
+                .find(|surface| &surface.owner == owner)
+            {
+                surface.declaration_root = Some(base.reserved);
+            } else {
+                graph.public_surfaces.push(recovery::RecoveryPublicSurface {
+                    owner: owner.clone(),
                     declaration_root: Some(base.reserved),
                     epoch: 0,
                     bindings: Vec::new(),
                     source_instances: Vec::new(),
                 });
+            }
+            graph
+                .seal()
+                .map_err(|error| invalid_at(&error_path, error.to_string()))?;
         }
-        base.public
-            .graph
-            .seal()
-            .map_err(|error| invalid(&base.public, error.to_string()))?;
         let mut turn = base
             .current_public
             .as_ref()
@@ -1246,8 +1282,18 @@ impl AcceptedDeclarationPublication {
             .final_bindings
             .retain(|(name, _)| !declaration.declared_names.contains(name));
         let mut ticket = base.public.stage()?;
-        ticket.base_checksum = checksum;
-        ticket.base_high_water = high_water;
+        if let (
+            Some((checksum, high_water)),
+            super::StagedPublicationTarget::Durable {
+                base_checksum,
+                base_high_water,
+                ..
+            },
+        ) = (baseline, &mut ticket.target)
+        {
+            *base_checksum = checksum;
+            *base_high_water = high_water;
+        }
         ticket.declaration = Some(declaration);
         Ok(ticket)
     }
@@ -1298,6 +1344,235 @@ mod tests {
                 panic!("unexpected rejection: {:?}", rejected.receipt.outcome())
             }
         }
+    }
+
+    fn ephemeral_binding_stage(
+        session: &mut PersistentSession,
+        intent: Arc<FinalExecutionIntent>,
+    ) -> StagedPublicManifest {
+        let ExecutionPublication::Bindings(base) = session
+            .restage_ephemeral_execution_publication(intent)
+            .unwrap()
+        else {
+            panic!("fixture has no declaration writes");
+        };
+        base.stage().unwrap()
+    }
+
+    #[test]
+    fn paired_ephemeral_completion_order_rebases_without_replaying_native_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let lib = SessionLib::open(
+            SessionId(4480),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_isolated_scope();
+        let a = session.begin_ephemeral_private_execution(public).unwrap();
+        let b = session.begin_ephemeral_private_execution(public).unwrap();
+        let a_value =
+            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "x", 701);
+        let a_id = a_value.id;
+        session.bind_in(a.private_scope(), a_value).unwrap();
+        let b_value =
+            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "x", 702);
+        let b_id = b_value.id;
+        session.bind_in(b.private_scope(), b_value).unwrap();
+        let a_intent = session
+            .freeze_execution_intent(&a, vec![a_id], vec![])
+            .unwrap();
+        let b_intent = session
+            .freeze_execution_intent(&b, vec![b_id], vec![])
+            .unwrap();
+        let stale_a = ephemeral_binding_stage(&mut session, a_intent.clone());
+        let b_stage = ephemeral_binding_stage(&mut session, b_intent);
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(b_stage, &PublicationDecision::new())
+                .unwrap(),
+            super::super::PublicManifestCommit::Ephemeral
+        );
+        assert_eq!(
+            session
+                .bindings()
+                .resolve_in(session.scope_tree(), public, "x")
+                .map(|entry| entry.id),
+            Some(b_id)
+        );
+        let decision = PublicationDecision::new();
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(stale_a, &decision)
+                .unwrap(),
+            PublicManifestCommit::Stale
+        );
+        assert_eq!(decision.phase(), PublicationPhase::Running);
+        let current_a = ephemeral_binding_stage(&mut session, a_intent.clone());
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(current_a, &decision)
+                .unwrap(),
+            PublicManifestCommit::Ephemeral
+        );
+        assert_eq!(decision.phase(), PublicationPhase::Published);
+        assert_eq!(
+            session
+                .bindings()
+                .resolve_in(session.scope_tree(), public, "x")
+                .map(|entry| entry.id),
+            Some(a_id)
+        );
+        assert!(session.bindings().get(b_id).is_some());
+        assert!(session.lib().durable_graph.is_none());
+        assert!(Arc::ptr_eq(
+            &session
+                .freeze_execution_intent(&a, vec![a_id], vec![])
+                .unwrap(),
+            &a_intent
+        ));
+    }
+
+    #[test]
+    fn paired_ephemeral_ticket_keeps_attached_manifest_and_admission_mode() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("declarations.json");
+        let mut lib = SessionLib::open(
+            SessionId(4481),
+            root.path().join("source"),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        lib.attach_recovery_graph_v2(&path).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_isolated_scope();
+        let admission = session.begin_ephemeral_private_execution(public).unwrap();
+        let value =
+            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "local", 703);
+        let id = value.id;
+        session.bind_in(admission.private_scope(), value).unwrap();
+        let intent = session
+            .freeze_execution_intent(&admission, vec![id], vec![])
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let cancelled = PublicationDecision::new();
+        cancelled.request_cancellation();
+        let stage = ephemeral_binding_stage(&mut session, intent.clone());
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(stage, &cancelled)
+                .unwrap(),
+            PublicManifestCommit::Cancelled
+        );
+        assert!(session
+            .bindings()
+            .resolve_in(session.scope_tree(), public, "local")
+            .is_none());
+        let unrelated = session.lib_mut().log.reserve();
+        let stale = ephemeral_binding_stage(&mut session, intent.clone());
+        // A reserved node can settle without changing the generation counter.
+        let generation = session.lib().generation();
+        let revision = session.lib().log.publication_revision();
+        assert!(session.lib_mut().log.commit_reserved_authored(
+            unrelated,
+            DeclTurn {
+                normalized: DeclarationSource {
+                    prologue: Default::default(),
+                    body: String::new()
+                },
+                external_imports: SourceImports::new(),
+                sources: Vec::new(),
+                workbench_imports: SourceImports::new(),
+                items: Vec::new(),
+                value_types: BTreeMap::new(),
+                retracts: Vec::new(),
+                parent: None,
+            }
+        ));
+        assert_eq!(session.lib().generation(), generation);
+        assert_ne!(session.lib().log.publication_revision(), revision);
+        let decision = PublicationDecision::new();
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(stale, &decision)
+                .unwrap(),
+            PublicManifestCommit::Stale
+        );
+        assert_eq!(decision.phase(), PublicationPhase::Running);
+        let current = ephemeral_binding_stage(&mut session, intent.clone());
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(current, &decision)
+                .unwrap(),
+            PublicManifestCommit::Ephemeral
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let owner = RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/ephemeral-mode").unwrap(),
+            1,
+        )
+        .unwrap();
+        session
+            .bind_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        assert!(session
+            .restage_execution_publication(owner, intent)
+            .is_err());
+        assert!(session.begin_ephemeral_private_execution(public).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn paired_ephemeral_foreign_runtime_ticket_never_claims() {
+        let root = tempfile::tempdir().unwrap();
+        let make = || {
+            PersistentSession::new(
+                Some(
+                    SessionLib::open(
+                        SessionId(4482),
+                        root.path(),
+                        ModuleEnv::standalone_default(),
+                    )
+                    .unwrap(),
+                ),
+                1024,
+            )
+        };
+        let mut first = make();
+        let public = first.mint_isolated_scope();
+        let admission = first.begin_ephemeral_private_execution(public).unwrap();
+        let intent = first
+            .freeze_execution_intent(&admission, vec![], vec![])
+            .unwrap();
+        let ticket = ephemeral_binding_stage(&mut first, intent.clone());
+        let mut second = make();
+        let second_public = second.mint_isolated_scope();
+        let second_admission = second
+            .begin_ephemeral_private_execution(second_public)
+            .unwrap();
+        second
+            .freeze_execution_intent(&second_admission, vec![], vec![])
+            .unwrap();
+        assert_eq!(
+            first.public_visibility_snapshot_in(public),
+            second.public_visibility_snapshot_in(second_public)
+        );
+        assert_eq!(
+            first.lib().log.publication_revision(),
+            second.lib().log.publication_revision()
+        );
+        let decision = PublicationDecision::new();
+        assert_eq!(
+            second
+                .publish_staged_public_manifest(ticket, &decision)
+                .unwrap(),
+            PublicManifestCommit::Stale
+        );
+        assert_eq!(decision.phase(), PublicationPhase::Running);
+        assert!(second
+            .restage_ephemeral_execution_publication(intent)
+            .is_err());
     }
 
     #[test]

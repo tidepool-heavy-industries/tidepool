@@ -328,6 +328,8 @@ pub enum SessionError {
     MissingDeclarationLibrary,
     #[error("staged public manifest belongs to a different session, actor, or manifest")]
     WrongPublicManifestTicket,
+    #[error("private value replacement requires a certified lexical overlay")]
+    UnsupportedPrivateValueReplacement,
     #[error("public binding promotion failed preflight: {0:?}")]
     InvalidPublicBindingPromotion(tidepool_codegen::binding_table::BindingPromotionError),
     #[error(
@@ -426,8 +428,9 @@ pub struct PublicManifestBase {
     admission_owner_epoch: Option<u64>,
     manifest_owner: Option<std::sync::Arc<recovery_hydration::OwnedRecoveryManifest>>,
     session: SessionId,
+    log_revision: u64,
     path: PathBuf,
-    owner: RecoveryPublicOwner,
+    target: PublicPublicationBaseline,
     public_scope: ScopeId,
     private_scope: ScopeId,
     write_ids: Vec<SessionVarId>,
@@ -436,7 +439,24 @@ pub struct PublicManifestBase {
     expected_private: PublicVisibilitySnapshot,
     final_bindings: Vec<(String, SessionVarId)>,
     final_source_instances: Vec<recovery::RecoveryPublicSourceInstance>,
-    graph: recovery::RecoveryGraph,
+}
+
+enum PublicPublicationBaseline {
+    Durable {
+        owner: RecoveryPublicOwner,
+        graph: recovery::RecoveryGraph,
+    },
+    Ephemeral,
+}
+
+enum StagedPublicationTarget {
+    Durable {
+        owner: RecoveryPublicOwner,
+        base_checksum: String,
+        base_high_water: Generation,
+        staged: recovery::StagedRecoveryManifest,
+    },
+    Ephemeral,
 }
 
 /// A fully written, fsynced manifest candidate. Only the owning session may
@@ -446,17 +466,15 @@ pub struct StagedPublicManifest {
     admission_owner_epoch: Option<u64>,
     manifest_owner: Option<std::sync::Arc<recovery_hydration::OwnedRecoveryManifest>>,
     session: SessionId,
+    log_revision: u64,
     path: PathBuf,
-    owner: RecoveryPublicOwner,
+    target: StagedPublicationTarget,
     public_scope: ScopeId,
     private_scope: ScopeId,
     write_ids: Vec<SessionVarId>,
     source_keys: Vec<SourceLeaseKey>,
     expected_public: PublicVisibilitySnapshot,
     expected_private: PublicVisibilitySnapshot,
-    base_checksum: String,
-    base_high_water: Generation,
-    staged: recovery::StagedRecoveryManifest,
     declaration: Option<paired_publication::PreparedDeclarationPublication>,
 }
 
@@ -466,69 +484,80 @@ pub struct StagedPublicManifest {
 pub enum PublicManifestCommit {
     Stale,
     Cancelled,
-    BeforeRename { detail: String },
+    BeforeRename {
+        detail: String,
+    },
     Durable,
-    PublishedDurabilityUnconfirmed { detail: String },
+    /// The paired lexical/native swap is visible only in this runtime owner.
+    Ephemeral,
+    PublishedDurabilityUnconfirmed {
+        detail: String,
+    },
 }
 
 impl PublicManifestBase {
     /// Stage the exact binding and native source-instance winners captured by
     /// the session owner. This writes bytes without borrowing the machine.
     pub fn stage(self) -> Result<StagedPublicManifest, SessionError> {
-        let root = self
-            .path
-            .parent()
-            .ok_or_else(|| SessionError::RecoveryManifest {
-                path: self.path.clone(),
-                detail: "recovery manifest has no parent directory".into(),
-            })?;
-        let surface = self
-            .graph
-            .public_surfaces
-            .iter()
-            .find(|s| s.owner == self.owner);
-        let epoch = surface.map_or(0, |s| s.epoch);
-        let bindings = self
-            .final_bindings
-            .into_iter()
-            .map(|(name, id)| recovery::RecoveryPublicBinding {
-                name,
-                owner: recovery::RecoveryBindingId {
-                    session: self.session.0,
-                    variable: id.raw(),
-                },
-            })
-            .collect();
-        let staged = recovery::stage_public_visibility_v2(
-            &self.path,
-            root,
-            &self.graph,
-            self.owner.clone(),
-            epoch,
-            bindings,
-            self.final_source_instances,
-            None,
-        )
-        .map_err(|error| SessionError::RecoveryManifest {
-            path: self.path.clone(),
-            detail: error.to_string(),
-        })?;
+        let target = match self.target {
+            PublicPublicationBaseline::Ephemeral => StagedPublicationTarget::Ephemeral,
+            PublicPublicationBaseline::Durable { owner, graph } => {
+                let root = self
+                    .path
+                    .parent()
+                    .ok_or_else(|| SessionError::RecoveryManifest {
+                        path: self.path.clone(),
+                        detail: "recovery manifest has no parent directory".into(),
+                    })?;
+                let surface = graph.public_surfaces.iter().find(|s| s.owner == owner);
+                let epoch = surface.map_or(0, |s| s.epoch);
+                let bindings = self
+                    .final_bindings
+                    .into_iter()
+                    .map(|(name, id)| recovery::RecoveryPublicBinding {
+                        name,
+                        owner: recovery::RecoveryBindingId {
+                            session: self.session.0,
+                            variable: id.raw(),
+                        },
+                    })
+                    .collect();
+                let staged = recovery::stage_public_visibility_v2(
+                    &self.path,
+                    root,
+                    &graph,
+                    owner.clone(),
+                    epoch,
+                    bindings,
+                    self.final_source_instances,
+                    None,
+                )
+                .map_err(|error| SessionError::RecoveryManifest {
+                    path: self.path.clone(),
+                    detail: error.to_string(),
+                })?;
+                StagedPublicationTarget::Durable {
+                    owner,
+                    base_checksum: graph.checksum,
+                    base_high_water: graph.high_water,
+                    staged,
+                }
+            }
+        };
         Ok(StagedPublicManifest {
             admission_owner: self.admission_owner,
             admission_owner_epoch: self.admission_owner_epoch,
             manifest_owner: self.manifest_owner,
             session: self.session,
+            log_revision: self.log_revision,
             path: self.path,
-            owner: self.owner,
+            target,
             public_scope: self.public_scope,
             private_scope: self.private_scope,
             write_ids: self.write_ids,
             source_keys: self.source_keys,
             expected_public: self.expected_public,
             expected_private: self.expected_private,
-            base_checksum: self.graph.checksum,
-            base_high_water: self.graph.high_water,
-            staged,
             declaration: None,
         })
     }
@@ -651,6 +680,7 @@ struct DurableDeclarationGraph {
 pub struct StagedDeclaration {
     generation: Generation,
     reserved: bool,
+    persistence: DeclarationPersistence,
     module: SessionModule,
     receipt: DeclarationReceipt,
     exact_context:
@@ -673,6 +703,12 @@ pub struct StagedDeclaration {
     /// preparation).
     rendered: RenderedModule,
     certified_authored: Option<tidepool_toolchain::declaration_join::CertifiedAuthoredDeclaration>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeclarationPersistence {
+    Durable,
+    Ephemeral,
 }
 
 impl StagedDeclaration {
@@ -889,8 +925,15 @@ impl SessionLib {
             admission_owner_epoch: None,
             manifest_owner: state.owner.clone(),
             session: self.id,
+            log_revision: self
+                .log
+                .publication_revision()
+                .ok_or(SessionError::StaleStagedDeclaration)?,
             path: state.path.clone(),
-            owner,
+            target: PublicPublicationBaseline::Durable {
+                owner,
+                graph: state.graph.clone(),
+            },
             public_scope,
             private_scope,
             write_ids,
@@ -899,7 +942,6 @@ impl SessionLib {
             expected_private,
             final_bindings,
             final_source_instances,
-            graph: state.graph.clone(),
         })
     }
 
@@ -907,6 +949,22 @@ impl SessionLib {
         &self,
         ticket: &StagedPublicManifest,
     ) -> Result<bool, SessionError> {
+        if self.log.publication_revision() != Some(ticket.log_revision) {
+            return Ok(false);
+        }
+        let StagedPublicationTarget::Durable {
+            owner,
+            base_checksum,
+            base_high_water,
+            ..
+        } = &ticket.target
+        else {
+            return Ok(ticket.session == self.id
+                && !self
+                    .durable_public_scopes
+                    .values()
+                    .any(|scope| *scope == ticket.public_scope));
+        };
         let live = self
             .durable_graph
             .as_ref()
@@ -917,11 +975,36 @@ impl SessionLib {
         self.public_manifest_baseline_is_current(
             ticket.session,
             &ticket.path,
-            &ticket.owner,
+            owner,
             ticket.public_scope,
-            &ticket.base_checksum,
-            ticket.base_high_water,
+            base_checksum,
+            *base_high_water,
         )
+    }
+
+    fn publication_baseline_is_current(
+        &self,
+        base: &PublicManifestBase,
+    ) -> Result<bool, SessionError> {
+        if self.log.publication_revision() != Some(base.log_revision) {
+            return Ok(false);
+        }
+        match &base.target {
+            PublicPublicationBaseline::Durable { owner, graph } => self
+                .public_manifest_baseline_is_current(
+                    base.session,
+                    &base.path,
+                    owner,
+                    base.public_scope,
+                    &graph.checksum,
+                    graph.high_water,
+                ),
+            PublicPublicationBaseline::Ephemeral => Ok(base.session == self.id
+                && !self
+                    .durable_public_scopes
+                    .values()
+                    .any(|scope| *scope == base.public_scope)),
+        }
     }
 
     fn public_manifest_baseline_is_current(
@@ -954,7 +1037,13 @@ impl SessionLib {
     ) -> PublicManifestCommit {
         let declaration = ticket.declaration.take();
         let public_scope = ticket.public_scope;
-        let outcome = self.publish_recovery_manifest(ticket.staged);
+        let StagedPublicationTarget::Durable { staged, .. } = ticket.target else {
+            if let Some(declaration) = declaration {
+                self.commit_prepared_declaration(public_scope, declaration);
+            }
+            return PublicManifestCommit::Ephemeral;
+        };
+        let outcome = self.publish_recovery_manifest(staged);
         let state = self
             .durable_graph
             .as_mut()
@@ -1778,7 +1867,10 @@ impl SessionLib {
                 paired_publication::authored_context(self, staged.base_tip, certificate)
             })
             .transpose()?;
-        let staged_graph = if staged.reserved && self.durable_graph.is_some() {
+        let staged_graph = if staged.reserved
+            && staged.persistence == DeclarationPersistence::Durable
+            && self.durable_graph.is_some()
+        {
             let (context, _) = authored_context
                 .as_ref()
                 .ok_or(SessionError::StaleStagedDeclaration)?;
@@ -2518,6 +2610,7 @@ pub fn validate_declaration_candidate(
     Ok(StagedDeclaration {
         generation: candidate.generation,
         reserved: candidate.reserved,
+        persistence: DeclarationPersistence::Durable,
         module: candidate.rendered.module,
         receipt: candidate.receipt,
         exact_context: candidate.exact_context,

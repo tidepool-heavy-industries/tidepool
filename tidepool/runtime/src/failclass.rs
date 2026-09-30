@@ -58,6 +58,7 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         SessionError::DeadScope(_)
         | SessionError::MissingDeclarationLibrary
         | SessionError::WrongPublicManifestTicket
+        | SessionError::UnsupportedPrivateValueReplacement
         | SessionError::InvalidPublicBindingPromotion(_)
         | SessionError::StaleStagedDeclaration => {
             FailureEnvelope::new(FailureClass::Runtime, Phase::Run, err.to_string())
