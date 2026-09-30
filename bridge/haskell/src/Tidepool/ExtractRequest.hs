@@ -273,7 +273,8 @@ workerRequestFromArgv [flag, payload]
 workerRequestFromArgv _ = Left "worker requires exactly one versioned request"
 
 -- Certification produces original products for the whole home graph. A
--- higher-priority dispatch mode or injected product cannot replace that work.
+-- higher-priority dispatch mode or ordinary candidate cannot replace that work.
+-- Explicit immutable declaration context accompanies the fresh source proof.
 validateCertificationFields :: [RequestField] -> Either String ()
 validateCertificationFields fields
   | CertifyHomeProducts `notElem` fields = Right ()
@@ -289,6 +290,7 @@ validateCertificationFields fields
       Targets _ -> True
       Include _ -> True
       SessionRoot _ -> True
+      SessionArtifacts _ -> True
       HarnessProfile -> True
       BuildProductsDir _ -> True
       CertifyHomeProducts -> True

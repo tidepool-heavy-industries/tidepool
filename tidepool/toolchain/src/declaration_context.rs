@@ -3,7 +3,7 @@
 
 use ciborium::value::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::certified_products::{
@@ -32,6 +32,267 @@ pub struct ExactDeclarationContext {
 pub struct MaterializedExactDeclarationContext {
     pub artifacts: Vec<DeclarationArtifact>,
     pub lexical: Vec<ExactLexicalNode>,
+}
+
+pub(crate) struct ExactCompilationRequest {
+    pub(crate) context: Arc<ExactDeclarationContext>,
+    pub(crate) manifest: PathBuf,
+    pub(crate) request_sha256: String,
+    pub(crate) semantic_sha256: [u8; 32],
+    pub(crate) artifacts: Vec<DeclarationArtifact>,
+    pub(crate) groups: Vec<PendingCertifiedGroup>,
+}
+
+/// A successful compiler transaction's actual generated source, bound to its
+/// immutable declaration context. It is not ordinary source-cache evidence.
+#[derive(Clone, Debug)]
+pub struct ExactSourceWitness {
+    source_path: PathBuf,
+    source_sha256: [u8; 32],
+}
+
+impl ExactSourceWitness {
+    pub fn source_path(&self) -> &Path {
+        &self.source_path
+    }
+    pub fn source_sha256(&self) -> &[u8; 32] {
+        &self.source_sha256
+    }
+    pub fn matches_source(&self, path: &Path, source: &str) -> bool {
+        use sha2::Digest;
+        self.source_path == path
+            && self.source_sha256 == <[u8; 32]>::from(sha2::Sha256::digest(source.as_bytes()))
+    }
+}
+
+pub(crate) struct ExactSourceAdmission {
+    pub(crate) witness: ExactSourceWitness,
+    pub(crate) evidence: crate::cache::DependencyEvidence,
+    pub(crate) evidence_bytes: Vec<u8>,
+    pub(crate) exact_imports: BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
+}
+
+pub(crate) struct ExactProductAdmission<'a> {
+    pub(crate) request: &'a ExactCompilationRequest,
+    pub(crate) source: &'a ExactSourceAdmission,
+}
+
+impl ExactSourceAdmission {
+    pub(crate) fn validate_ineligible_evidence(&self, bytes: &[u8]) -> Result<(), CompileError> {
+        let mut expected: crate::cache::DependencyEvidence =
+            serde_json::from_slice(&self.evidence_bytes).map_err(failure)?;
+        expected.cache_safe = false;
+        expected.selection_complete = false;
+        let actual: crate::cache::DependencyEvidence =
+            serde_json::from_slice(bytes).map_err(failure)?;
+        if serde_json::to_value(expected).map_err(failure)?
+            != serde_json::to_value(actual).map_err(failure)?
+        {
+            return Err(failure(
+                "source-cache-ineligible evidence differs from exact fresh proof",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ExactCompilationRequest {
+    pub(crate) fn admit_source(
+        &self,
+        source_path: &Path,
+        source: &str,
+    ) -> Result<ExactSourceAdmission, CompileError> {
+        use sha2::Digest;
+        let expected: [u8; 32] = sha2::Sha256::digest(source.as_bytes()).into();
+        self.validate_outputs(
+            source_path
+                .parent()
+                .ok_or_else(|| failure("source has no directory"))?,
+        )?
+        .into_iter()
+        .find(|admitted| {
+            admitted.witness.source_path() == source_path
+                && admitted.witness.source_sha256() == &expected
+        })
+        .ok_or_else(|| failure("source lacks its exact consumed source receipt"))
+    }
+    pub(crate) fn validate_outputs(
+        &self,
+        root: &Path,
+    ) -> Result<Vec<ExactSourceAdmission>, CompileError> {
+        self.context.validate_artifacts(&self.artifacts)?;
+        if sha256(&std::fs::read(&self.manifest)?) != self.request_sha256 {
+            return Err(failure("scope request changed during compilation"));
+        }
+        let directory = root.join(".exact-compilations");
+        let mut receipts = std::fs::read_dir(&directory)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()?;
+        receipts.sort();
+        if receipts.is_empty() || receipts.len() > 4096 {
+            return Err(failure("missing or excessive successful compile receipts"));
+        }
+        receipts
+            .iter()
+            .map(|path| self.validate_receipt(&path.join("receipt.cbor")))
+            .collect()
+    }
+
+    fn validate_receipt(&self, path: &Path) -> Result<ExactSourceAdmission, CompileError> {
+        use sha2::Digest;
+        let bytes = bounded_read(path, 4 * 1024 * 1024)?;
+        let mut cursor = std::io::Cursor::new(&bytes);
+        let value: Value = ciborium::de::from_reader(&mut cursor).map_err(failure)?;
+        if cursor.position() != bytes.len() as u64 {
+            return Err(failure("compile receipt has trailing bytes"));
+        }
+        let header = row(&value, 9)?;
+        if string(&header[0])? != "TPEXACTCOMPILE"
+            || string(&header[1])? != "1"
+            || string(&header[2])? != self.request_sha256
+            || string(&header[3])? != hex(&self.semantic_sha256)
+        {
+            return Err(failure(
+                "compile receipt belongs to another context or version",
+            ));
+        }
+        let source_path = PathBuf::from(string(&header[4])?);
+        let snapshot = PathBuf::from(string(&header[6])?);
+        if !source_path.is_absolute()
+            || !snapshot.is_absolute()
+            || snapshot
+                != path
+                    .parent()
+                    .ok_or_else(|| failure("compile receipt has no owner directory"))?
+                    .join("source.hs")
+        {
+            return Err(failure("compile source snapshot has another owner"));
+        }
+        let source_bytes = bounded_read(&snapshot, 32 * 1024 * 1024)?;
+        let source_sha256: [u8; 32] = sha2::Sha256::digest(&source_bytes).into();
+        if string(&header[5])? != hex(&source_sha256) {
+            return Err(failure("compile source snapshot changed"));
+        }
+        let source = std::str::from_utf8(&source_bytes).map_err(failure)?;
+        let evidence_bytes = string(&header[7])?.as_bytes().to_vec();
+        let evidence =
+            crate::cache::DependencyEvidence::from_worker(&evidence_bytes, &source_path, source)
+                .ok_or_else(|| {
+                    failure("fresh compilation lacks complete tracked source evidence")
+                })?;
+        let exact_owners: BTreeSet<_> = self
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.interface.unit.as_str(),
+                    artifact.interface.module.as_str(),
+                )
+            })
+            .collect();
+        let source_owners: BTreeSet<_> = evidence
+            .modules
+            .iter()
+            .map(|module| (module.unit.as_str(), module.module.as_str(), module.boot))
+            .collect();
+        if source_owners
+            .iter()
+            .any(|(unit, module, _)| exact_owners.contains(&(*unit, *module)))
+        {
+            return Err(failure("fresh module replaced an admitted exact owner"));
+        }
+        let selected: BTreeSet<_> = self
+            .context
+            .lexical
+            .iter()
+            .map(|node| (node.owner.unit.as_str(), node.owner.module.as_str()))
+            .collect();
+        let edges = list(&header[8], 4096)?;
+        let mut seen = BTreeSet::new();
+        let mut exact_imports = BTreeMap::new();
+        for module in edges {
+            let module = row(module, 4)?;
+            let owner = (
+                string(&module[0])?,
+                string(&module[1])?,
+                boolean(&module[2])?,
+            );
+            if !source_owners.contains(&owner) || !seen.insert(owner) {
+                return Err(failure(
+                    "exact import witness has another fresh source owner",
+                ));
+            }
+            let mut imported = BTreeSet::new();
+            let mut resolved = BTreeSet::new();
+            for edge in list(&module[3], 4096)? {
+                let edge = row(edge, 4)?;
+                let qualifier = string(&edge[0])?;
+                let name = string(&edge[1])?;
+                let boot = boolean(&edge[2])?;
+                let unit = string(&edge[3])?;
+                if boot
+                    || !selected.contains(&(unit, name))
+                    || (qualifier != "none" && qualifier != format!("this:{unit}"))
+                    || !imported.insert((qualifier, name, boot, unit))
+                {
+                    return Err(failure(
+                        "exact import witness leaves selected lexical graph",
+                    ));
+                }
+                resolved.insert(identity(unit, name));
+            }
+            exact_imports.insert(identity(owner.0, owner.1), resolved.into_iter().collect());
+        }
+        if seen != source_owners {
+            return Err(failure("exact import witness omits a fresh source module"));
+        }
+        Ok(ExactSourceAdmission {
+            witness: ExactSourceWitness {
+                source_path,
+                source_sha256,
+            },
+            evidence,
+            evidence_bytes,
+            exact_imports,
+        })
+    }
+}
+
+fn bounded_read(path: &Path, limit: u64) -> Result<Vec<u8>, CompileError> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(limit + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(failure("exact artifact exceeds byte bound"));
+    }
+    Ok(bytes)
+}
+fn row(value: &Value, length: usize) -> Result<&[Value], CompileError> {
+    let values = list(value, length)?;
+    if values.len() != length {
+        return Err(failure("invalid exact compile row"));
+    }
+    Ok(values)
+}
+fn list(value: &Value, limit: usize) -> Result<&[Value], CompileError> {
+    match value {
+        Value::Array(values) if values.len() <= limit => Ok(values),
+        _ => Err(failure("invalid exact compile inventory")),
+    }
+}
+fn string(value: &Value) -> Result<&str, CompileError> {
+    match value {
+        Value::Text(value) => Ok(value),
+        _ => Err(failure("invalid exact compile text")),
+    }
+}
+fn boolean(value: &Value) -> Result<bool, CompileError> {
+    match value {
+        Value::Bool(value) => Ok(*value),
+        _ => Err(failure("invalid exact compile boolean")),
+    }
 }
 
 fn failure(message: impl std::fmt::Display) -> CompileError {
@@ -151,6 +412,7 @@ impl ExactDeclarationContext {
             self.products
                 .extend_from_slice(certificate.recovery_products());
             self.interfaces.extend_from_slice(&certificate.interfaces);
+            self.joins.extend_from_slice(&certificate.joined_interfaces);
         }
         for join in joins {
             self.admit_producer(join.toolchain_identity_sha256())?;
@@ -177,6 +439,9 @@ impl ExactDeclarationContext {
 
     pub fn toolchain_identity_sha256(&self) -> [u8; 32] {
         self.producer
+    }
+    pub(crate) fn interface_owners(&self) -> &[ExactInterfaceOwner] {
+        &self.interfaces
     }
     pub fn recovery_products(&self) -> &[CertifiedRecoveryProduct] {
         &self.products
@@ -494,6 +759,152 @@ impl ExactDeclarationContext {
         )
         .map_err(failure)
     }
+
+    pub(crate) fn prepare_compilation(
+        self: &Arc<Self>,
+        root: &Path,
+        producer: &[u8],
+    ) -> Result<ExactCompilationRequest, CompileError> {
+        use sha2::Digest;
+        if !root.is_absolute()
+            || self.producer == [0; 32]
+            || self.producer != <[u8; 32]>::from(sha2::Sha256::digest(producer))
+        {
+            return Err(failure(
+                "compile request has a different producer or invalid root",
+            ));
+        }
+        std::fs::create_dir_all(root)?;
+        let materialized = self.materialize(root)?;
+        self.validate_artifacts(&materialized.artifacts)?;
+        let groups = self.inherited_groups(root)?;
+        let semantic_sha256 = self.semantic_sha256();
+        let value = Value::Array(vec![
+            text("TPEXACTSCOPE"),
+            text("1"),
+            text(hex(&semantic_sha256)),
+            Value::Array(
+                materialized
+                    .artifacts
+                    .iter()
+                    .map(|artifact| {
+                        let iface = &artifact.interface;
+                        let packages = iface.path.with_extension("hi.packages");
+                        Ok(Value::Array(vec![
+                            text(&iface.unit),
+                            text(&iface.module),
+                            path_value(&iface.path)?,
+                            text(&iface.sha256),
+                            Value::Array(
+                                iface
+                                    .requirements
+                                    .iter()
+                                    .map(|(unit, module)| {
+                                        Value::Array(vec![text(unit), text(module)])
+                                    })
+                                    .collect(),
+                            ),
+                            path_value(&packages)?,
+                            text(sha256(&std::fs::read(packages)?)),
+                        ]))
+                    })
+                    .collect::<Result<Vec<_>, CompileError>>()?,
+            ),
+            Value::Array(
+                materialized
+                    .lexical
+                    .iter()
+                    .map(|node| {
+                        Value::Array(vec![
+                            module_value(&node.owner),
+                            Value::Array(node.imports.iter().map(module_value).collect()),
+                        ])
+                    })
+                    .collect(),
+            ),
+            Value::Array(
+                self.products
+                    .iter()
+                    .map(|product| {
+                        let owner = product.owner();
+                        let artifact = materialized
+                            .artifacts
+                            .iter()
+                            .find(|artifact| {
+                                artifact.interface.unit == owner.unit
+                                    && artifact.interface.module == owner.module
+                            })
+                            .and_then(|artifact| artifact.product.as_ref())
+                            .ok_or_else(|| failure("original product anchor is missing"))?;
+                        Ok(Value::Array(vec![
+                            text(&owner.unit),
+                            text(&owner.module),
+                            text(hex(&owner.module_version.0)),
+                            text(hex(&owner.skinny_iface_sha256)),
+                            text(hex(&owner.product_sha256)),
+                            path_value(&artifact.path)?,
+                            Value::Array(
+                                groups
+                                    .iter()
+                                    .filter(|group| group.owner() == owner)
+                                    .map(|group| {
+                                        Value::Array(vec![
+                                            Value::Integer(group.group().original_ordinal().into()),
+                                            Value::Array(
+                                                group
+                                                    .group()
+                                                    .binders()
+                                                    .iter()
+                                                    .map(symbol_value)
+                                                    .collect(),
+                                            ),
+                                            Value::Array(
+                                                group
+                                                    .group()
+                                                    .globals()
+                                                    .iter()
+                                                    .map(|global| {
+                                                        Value::Array(vec![
+                                                            symbol_value(&global.identity),
+                                                            Value::Bool(
+                                                                global
+                                                                    .required_generation
+                                                                    .is_none(),
+                                                            ),
+                                                        ])
+                                                    })
+                                                    .collect(),
+                                            ),
+                                        ])
+                                    })
+                                    .collect(),
+                            ),
+                        ]))
+                    })
+                    .collect::<Result<Vec<_>, CompileError>>()?,
+            ),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut bytes).map_err(failure)?;
+        if bytes.len() > 4 * 1024 * 1024 {
+            return Err(failure("scope manifest exceeds four MiB"));
+        }
+        let manifest = root.join("exact-declaration-scope.cbor");
+        use std::io::Write;
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&manifest)?;
+        output.write_all(&bytes)?;
+        Ok(ExactCompilationRequest {
+            context: self.clone(),
+            manifest,
+            request_sha256: sha256(&bytes),
+            semantic_sha256,
+            artifacts: materialized.artifacts,
+            groups,
+        })
+    }
 }
 
 fn text(value: impl Into<String>) -> Value {
@@ -501,6 +912,20 @@ fn text(value: impl Into<String>) -> Value {
 }
 fn module_value(owner: &ExactModuleIdentity) -> Value {
     Value::Array(vec![text(&owner.unit), text(&owner.module)])
+}
+fn path_value(path: &Path) -> Result<Value, CompileError> {
+    path.to_str()
+        .map(text)
+        .ok_or_else(|| failure("non-UTF-8 artifact path"))
+}
+fn symbol_value(symbol: &tidepool_repr::execution_schema::SymbolIdentity) -> Value {
+    Value::Array(vec![
+        text(&symbol.unit),
+        text(&symbol.module),
+        text(&symbol.namespace),
+        text(&symbol.occurrence),
+        symbol.record_parent.as_ref().map_or(Value::Null, text),
+    ])
 }
 
 fn hex(bytes: &[u8; 32]) -> String {

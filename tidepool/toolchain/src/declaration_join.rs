@@ -2,6 +2,7 @@
 //! opaque: the resident session compares it on accepted and rejected outcomes.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -13,7 +14,7 @@ use crate::{
 };
 
 pub use crate::declaration_context::{
-    ExactDeclarationContext, MaterializedExactDeclarationContext,
+    ExactDeclarationContext, ExactSourceWitness, MaterializedExactDeclarationContext,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -157,6 +158,8 @@ pub struct CertifiedAuthoredDeclaration {
     /// SHA-256 of the bound compiler producer identity used for these bytes.
     toolchain_identity_sha256: [u8; 32],
     pub(crate) interfaces: Vec<ExactInterfaceOwner>,
+    pub(crate) joined_interfaces: Vec<crate::recovery_artifacts::CertifiedJoinedInterface>,
+    original_imports: Vec<ExactInterfaceOwner>,
 }
 
 impl CertifiedAuthoredDeclaration {
@@ -191,7 +194,7 @@ impl CertifiedAuthoredDeclaration {
     pub fn original_home_imports(
         &self,
     ) -> impl ExactSizeIterator<Item = (&ExactModuleIdentity, &[ExactModuleIdentity])> {
-        self.interfaces
+        self.original_imports
             .iter()
             .map(|entry| (&entry.owner, entry.requirements.as_slice()))
     }
@@ -228,6 +231,45 @@ pub fn certify_authored_declaration(
     includes: &[PathBuf],
     session_root: &Path,
 ) -> Result<CertifiedAuthoredDeclaration, CompileError> {
+    certify_authored_declaration_inner(
+        module,
+        source_path,
+        exact_source,
+        includes,
+        session_root,
+        None,
+    )
+}
+
+/// Certify a new original declaration against the selected exact lexical
+/// graph. The certificate retains every required original product and Join
+/// interface; source lookup cannot replace an admitted immutable owner.
+pub fn certify_authored_declaration_in_context(
+    module: SessionModule,
+    source_path: &Path,
+    exact_source: &str,
+    includes: &[PathBuf],
+    session_root: &Path,
+    context: Arc<ExactDeclarationContext>,
+) -> Result<CertifiedAuthoredDeclaration, CompileError> {
+    certify_authored_declaration_inner(
+        module,
+        source_path,
+        exact_source,
+        includes,
+        session_root,
+        Some(context),
+    )
+}
+
+fn certify_authored_declaration_inner(
+    module: SessionModule,
+    source_path: &Path,
+    exact_source: &str,
+    includes: &[PathBuf],
+    session_root: &Path,
+    context: Option<Arc<ExactDeclarationContext>>,
+) -> Result<CertifiedAuthoredDeclaration, CompileError> {
     if module.kind != SessionModuleKind::Lib
         || module.gen.0 == 0
         || includes.is_empty()
@@ -251,6 +293,7 @@ pub fn certify_authored_declaration(
         "authoredProductProbe",
         includes,
         session_root,
+        context.clone(),
     )?;
     if std::fs::read(source_path)? != exact_source.as_bytes() {
         return Err(contract("authored source changed during certification"));
@@ -330,31 +373,76 @@ pub fn certify_authored_declaration(
     )
     .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
     let mut artifacts = Vec::with_capacity(products.len());
+    let mut original_imports = Vec::new();
     for (product, reference) in products.iter().zip(&references) {
         let owner = product.owner();
+        let identity = ExactModuleIdentity {
+            unit: owner.unit.clone(),
+            module: owner.module.clone(),
+        };
         let row = evidence
             .iter()
-            .find(|row| !row.boot && row.unit == owner.unit && row.module == owner.module)
-            .ok_or_else(|| contract("certified product absent from final graph"))?;
-        let mut requirements = Vec::new();
-        for imported in &row.imports {
-            let Some(path) = &imported.selected else {
-                continue;
-            };
-            let import_owner = evidence.iter().find(|candidate| {
-                !candidate.boot && candidate.module == imported.module && candidate.source == *path
-            });
-            if let Some(import_owner) = import_owner {
-                let key = (import_owner.unit.clone(), import_owner.module.clone());
-                if !requirements.contains(&key) {
-                    requirements.push(key);
+            .find(|row| !row.boot && row.unit == owner.unit && row.module == owner.module);
+        let mut requirements = if let Some(row) = row {
+            let mut imports = Vec::new();
+            for imported in &row.imports {
+                let Some(path) = &imported.selected else {
+                    continue;
+                };
+                let import_owner = evidence.iter().find(|candidate| {
+                    !candidate.boot
+                        && candidate.module == imported.module
+                        && candidate.source == *path
+                });
+                if let Some(import_owner) = import_owner {
+                    let key = ExactModuleIdentity {
+                        unit: import_owner.unit.clone(),
+                        module: import_owner.module.clone(),
+                    };
+                    if !imports.contains(&key) {
+                        imports.push(key);
+                    }
+                } else if includes.iter().any(|root| path.starts_with(root)) {
+                    return Err(contract(
+                        "authored home import has no exact dependency owner",
+                    ));
                 }
-            } else if includes.iter().any(|root| path.starts_with(root)) {
-                return Err(contract(
-                    "authored home import has no exact dependency owner",
-                ));
             }
-        }
+            if let Some(admitted) = &compiled.exact_source_admission {
+                let exact = admitted
+                    .exact_imports
+                    .get(&identity)
+                    .ok_or_else(|| contract("fresh authored module lacks exact import witness"))?;
+                imports.extend_from_slice(exact);
+            }
+            imports.sort();
+            imports.dedup();
+            original_imports.push(ExactInterfaceOwner {
+                owner: identity.clone(),
+                requirements: imports.clone(),
+            });
+            imports
+        } else {
+            context
+                .as_ref()
+                .and_then(|context| {
+                    context
+                        .interface_owners()
+                        .iter()
+                        .find(|entry| entry.owner == identity)
+                })
+                .ok_or_else(|| {
+                    contract("certified product absent from source graph and exact context")
+                })?
+                .requirements
+                .clone()
+        };
+        requirements.sort();
+        requirements.dedup();
+        let requirements = requirements
+            .into_iter()
+            .map(|owner| (owner.unit, owner.module))
+            .collect();
         let interface_path = scratch.path().join(&reference.interface_path);
         let product_path = scratch.path().join(&reference.product_path);
         artifacts.push(DeclarationArtifact {
@@ -371,6 +459,18 @@ pub fn certify_authored_declaration(
                 sha256: sha256(product.product_bytes()),
             }),
         });
+    }
+    let joined_interfaces = context
+        .as_ref()
+        .map_or_else(Vec::new, |context| context.joined_interfaces().to_vec());
+    if let Some(context) = &context {
+        let inherited = context.materialize(scratch.path())?;
+        artifacts.extend(
+            inherited
+                .artifacts
+                .into_iter()
+                .filter(|artifact| artifact.product.is_none()),
+        );
     }
     let outcome = inspect_declaration_artifacts_with_producer(
         &artifacts,
@@ -440,6 +540,8 @@ pub fn certify_authored_declaration(
         source_sha256,
         toolchain_identity_sha256,
         interfaces,
+        joined_interfaces,
+        original_imports,
     })
 }
 
@@ -1643,10 +1745,195 @@ mod authored_tests {
         .unwrap();
         assert_eq!(recovered.toolchain_identity_sha256(), expected_producer);
         let recovered_identity = recovered.semantic_sha256();
+        let selected_instances = certificate.instances().clone();
         let extended = recovered
             .extend(&[certificate], &[Arc::new(accepted)], lexical)
             .unwrap();
         assert_eq!(extended.semantic_sha256(), recovered_identity);
+        let extended = Arc::new(extended);
+        let fresh_root = tempfile::tempdir().unwrap();
+        let fresh_module = SessionModule::lib(Generation(3));
+        let fresh_source = include_str!("../tests/fixtures/owned-declaration/G3.hs");
+        let fresh_path = fresh_root.path().join(fresh_module.relative_hs_path());
+        std::fs::create_dir_all(fresh_path.parent().unwrap()).unwrap();
+        std::fs::write(&fresh_path, fresh_source).unwrap();
+        let fresh_certificate = Arc::new(
+            certify_authored_declaration_in_context(
+                fresh_module,
+                &fresh_path,
+                fresh_source,
+                &[fresh_root.path().to_path_buf()],
+                fresh_root.path(),
+                extended.clone(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(fresh_certificate.introduced_exports().len(), 1);
+        assert_eq!(
+            fresh_certificate.introduced_exports()[0].head.occurrence,
+            "freshAnswer"
+        );
+        assert!(fresh_certificate
+            .lexical_exports()
+            .iter()
+            .any(|export| export.head.occurrence == "answer"
+                && export.head.module == module.module_name()));
+        let fresh_owner = ExactModuleIdentity {
+            unit: fresh_certificate.product().owner().unit.clone(),
+            module: fresh_module.module_name(),
+        };
+        let joined_owner = ExactModuleIdentity {
+            unit: fresh_owner.unit.clone(),
+            module: SessionModule::lib(Generation(2)).module_name(),
+        };
+        assert!(fresh_certificate
+            .original_home_imports()
+            .any(|(owner, imports)| owner == &fresh_owner && imports == [joined_owner.clone()]));
+        let next_context = ExactDeclarationContext::new(
+            &[fresh_certificate.clone()],
+            &[],
+            vec![
+                ExactLexicalNode {
+                    owner: joined_owner.clone(),
+                    imports: Vec::new(),
+                },
+                ExactLexicalNode {
+                    owner: fresh_owner.clone(),
+                    imports: vec![joined_owner.clone()],
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(next_context.joined_interfaces().len(), 1);
+        for original in extended.recovery_products() {
+            let retained = next_context
+                .recovery_products()
+                .iter()
+                .find(|product| product.owner() == original.owner())
+                .unwrap();
+            assert_eq!(retained.product_bytes(), original.product_bytes());
+            assert_eq!(retained.interface_bytes(), original.interface_bytes());
+        }
+        let next_worker = tempfile::tempdir().unwrap();
+        let next_anchors = next_context.materialize(next_worker.path()).unwrap();
+        let snapshot = |owner: &ExactModuleIdentity| {
+            let artifact = next_anchors
+                .artifacts
+                .iter()
+                .find(|artifact| {
+                    artifact.interface.unit == owner.unit
+                        && artifact.interface.module == owner.module
+                })
+                .unwrap();
+            ModuleSnapshot {
+                module: owner.module.clone(),
+                path: artifact.interface.path.clone(),
+                sha256: artifact.interface.sha256.clone(),
+            }
+        };
+        let next_input = DeclarationJoinInput {
+            expected_public_version: "next-paired-version".into(),
+            public_module: Some(snapshot(&joined_owner)),
+            private_base: Some(snapshot(&joined_owner)),
+            private_tip: Some(snapshot(&fresh_owner)),
+            writes: vec![DeclarationWrite {
+                generation: 3,
+                module: snapshot(&fresh_owner),
+                exports: fresh_certificate.introduced_exports().to_vec(),
+                retractions: Vec::new(),
+            }],
+            reserved: ReservedJoin {
+                unit: fresh_owner.unit.clone(),
+                module: SessionModule::lib(Generation(4)).module_name(),
+                path: next_worker.path().join("joined-next.hi"),
+            },
+            artifacts: next_anchors.artifacts,
+            family_closure: fresh_certificate.family_closure().to_vec(),
+            expected_exports: fresh_certificate.lexical_exports().to_vec(),
+            expected_instances: selected_instances,
+        };
+        let CertifiedDeclarationJoin::Accepted(next_join) = certify_declaration_join(
+            next_input,
+            &next_context,
+            &[fresh_root.path().to_path_buf()],
+            fresh_root.path(),
+        )
+        .unwrap() else {
+            panic!("expected second accepted join after source-hidden authored certification")
+        };
+        assert_eq!(next_join.context().joined_interfaces().len(), 1);
+        drop(fresh_root);
+        drop(next_worker);
+        let second_durable = tempfile::tempdir().unwrap();
+        next_join.materialize(second_durable.path()).unwrap();
+        let next_join = Arc::new(next_join);
+        let downstream_context = Arc::new(
+            ExactDeclarationContext::new(
+                &[],
+                &[next_join.clone()],
+                vec![ExactLexicalNode {
+                    owner: ExactModuleIdentity {
+                        unit: fresh_owner.unit.clone(),
+                        module: SessionModule::lib(Generation(4)).module_name(),
+                    },
+                    imports: Vec::new(),
+                }],
+            )
+            .unwrap(),
+        );
+        let downstream = include_str!("../tests/fixtures/owned-declaration/ExactConsumer.hs");
+        let source_free = tempfile::tempdir().unwrap();
+        let include = [source_free.path().to_path_buf()];
+        let compiled = crate::artifacts::compile_invocation_in_context(
+            &crate::artifacts::CompileInvocation {
+                source: downstream,
+                targets: &["downstream"],
+                include: &include,
+                fallback_module_name: "ExactConsumer",
+            },
+            downstream_context,
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert!(compiled.targets.contains_key("downstream"));
+        for original in next_join.recovery_products() {
+            for group in compiled.certified_groups.iter().filter(|group| {
+                group.owner().unit == original.owner().unit
+                    && group.owner().module == original.owner().module
+            }) {
+                assert_eq!(group.owner(), original.owner());
+            }
+            assert!(compiled
+                .recovery_products
+                .iter()
+                .any(|product| product.owner() == original.owner()
+                    && product.interface_bytes() == original.interface_bytes()
+                    && product.product_bytes() == original.product_bytes()));
+        }
+        let admitted = compiled
+            .exact_source_admission
+            .as_ref()
+            .expect("frontdoor must retain exact source admission");
+        assert!(admitted
+            .witness
+            .matches_source(admitted.witness.source_path(), downstream));
+        assert!(admitted.evidence.valid(downstream));
+        let mut raw_evidence: serde_json::Value =
+            serde_json::from_slice(&admitted.evidence_bytes).unwrap();
+        raw_evidence["cache_safe"] = false.into();
+        raw_evidence["selection_complete"] = false.into();
+        admitted
+            .validate_ineligible_evidence(&serde_json::to_vec(&raw_evidence).unwrap())
+            .unwrap();
+        raw_evidence["cache_safe"] = true.into();
+        raw_evidence["selection_complete"] = true.into();
+        assert!(admitted
+            .validate_ineligible_evidence(&serde_json::to_vec(&raw_evidence).unwrap())
+            .is_err());
+        let mut ordinary_evidence = admitted.evidence.clone();
+        ordinary_evidence.cache_safe = false;
+        ordinary_evidence.selection_complete = false;
+        assert!(!ordinary_evidence.valid(downstream));
         let next_worker = tempfile::tempdir().unwrap();
         let exact = extended.materialize(next_worker.path()).unwrap();
         extended.validate_artifacts(&exact.artifacts).unwrap();

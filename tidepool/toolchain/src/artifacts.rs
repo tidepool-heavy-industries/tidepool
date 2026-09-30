@@ -245,10 +245,11 @@ pub struct CompiledArtifacts {
     /// Bound compiler producer identity for this exact invocation. `None`
     /// means the bundle was assembled from bytes without an endpoint.
     pub producer_identity: Option<[u8; 32]>,
-    /// Exact post-downsweep graph paired with these products when the worker
-    /// supplied complete, revalidated cache evidence. A later compiler
-    /// request still needs its own precompile graph check before reuse.
+    /// Fresh post-downsweep source graph paired with these products. Immutable
+    /// declaration owners have separate protected admission and do not acquire
+    /// source lookup witnesses. A later compile must revalidate its own inputs.
     pub module_inventory: Option<Vec<cache::ModuleEvidence>>,
+    pub(crate) exact_source_admission: Option<crate::declaration_context::ExactSourceAdmission>,
 }
 
 /// Candidate suggestions for a worker compile whose source is rendered by the
@@ -259,6 +260,7 @@ pub struct ModuleCandidateOffer {
     selected: Option<module_candidates::CandidateSet>,
     producer: Vec<u8>,
     include: Vec<PathBuf>,
+    exact: Option<crate::declaration_context::ExactCompilationRequest>,
 }
 
 impl ModuleCandidateOffer {
@@ -267,7 +269,44 @@ impl ModuleCandidateOffer {
             selected: module_candidates::select(producer, include, scratch),
             producer: producer.to_vec(),
             include: include.to_vec(),
+            exact: None,
         }
+    }
+
+    pub fn select_in_context(
+        producer: &[u8],
+        include: &[PathBuf],
+        scratch: &Path,
+        context: Arc<crate::declaration_join::ExactDeclarationContext>,
+    ) -> Result<Self, CompileError> {
+        Ok(Self {
+            selected: None,
+            producer: producer.to_vec(),
+            include: include.to_vec(),
+            exact: Some(context.prepare_compilation(&scratch.join("exact-scope"), producer)?),
+        })
+    }
+
+    pub fn exact_scope_path(&self) -> Option<&Path> {
+        self.exact
+            .as_ref()
+            .map(|request| request.manifest.as_path())
+    }
+
+    /// Validate successful source transactions under one actual source parent.
+    /// A request using several source directories validates each directory.
+    pub fn validate_exact_outputs(
+        &self,
+        source_directory: &Path,
+    ) -> Result<Vec<crate::declaration_join::ExactSourceWitness>, CompileError> {
+        let request = self.exact.as_ref().ok_or_else(|| {
+            CompileError::ExtractFailed("source-only offer cannot admit exact outputs".into())
+        })?;
+        Ok(request
+            .validate_outputs(source_directory)?
+            .into_iter()
+            .map(|source| source.witness)
+            .collect())
     }
 
     pub fn manifest_path(&self) -> Option<&Path> {
@@ -357,8 +396,27 @@ pub fn seal_turn_outputs(
         &crate::prepared_artifact::production_requirements()?,
         module_candidates::product_decode_limits(),
     )?;
-    let evidence = cache::DependencyEvidence::from_worker(&evidence_bytes, source_path, source);
+    let exact_source = offer
+        .exact
+        .as_ref()
+        .map(|request| request.admit_source(source_path, source))
+        .transpose()?;
+    let exact = offer
+        .exact
+        .as_ref()
+        .zip(exact_source.as_ref())
+        .map(
+            |(request, source)| crate::declaration_context::ExactProductAdmission {
+                request,
+                source,
+            },
+        );
+    let evidence = match exact_source.as_ref() {
+        Some(source) => Some(source.evidence.clone()),
+        None => cache::DependencyEvidence::from_worker(&evidence_bytes, source_path, source),
+    };
     let needs_certificate = offer.has_candidates()
+        || offer.exact.is_some()
         || !fresh_products.is_empty()
         || !prepared.globals().is_empty()
         || evidence.as_ref().is_some_and(has_ready_home_module);
@@ -397,6 +455,7 @@ pub fn seal_turn_outputs(
         source,
         &offer.producer,
         &offer.include,
+        exact.as_ref(),
     )
     .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     ensure_ready_module_inventory(&receipt.modules, valid)?;
@@ -409,31 +468,57 @@ pub fn seal_turn_outputs(
             "turn target product receipt count".into(),
         ));
     }
+    let package_closure = merge_package_closure(&receipt.packages, offer.exact.as_ref())?;
     let pending_imports = certified_products::certify_target_owners(
         prepared,
         accepted,
         &certified.groups,
-        &receipt.packages,
+        &package_closure,
     )
     .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     let package_interfaces =
-        certified_products::certify_target_package_interfaces(prepared, &receipt.packages)
+        certified_products::certify_target_package_interfaces(prepared, &package_closure)
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-    module_candidates::publish(
-        &offer.producer,
-        &offer.include,
-        valid,
-        &fresh_products,
-        &product_bytes,
-        &package_bundle_bytes,
-        source,
-    );
+    if offer.exact.is_none() {
+        module_candidates::publish(
+            &offer.producer,
+            &offer.include,
+            valid,
+            &fresh_products,
+            &product_bytes,
+            &package_bundle_bytes,
+            source,
+        );
+    }
     Ok(Some(SealedTurnProducts {
         certified_groups: certified.groups,
         pending_imports,
         recovery_products: certified.recovery_products,
         package_interfaces,
     }))
+}
+
+fn merge_package_closure(
+    packages: &BTreeMap<(String, String), certified_products::PackageInterfaceWitness>,
+    exact: Option<&crate::declaration_context::ExactCompilationRequest>,
+) -> Result<BTreeMap<(String, String), certified_products::PackageInterfaceWitness>, CompileError> {
+    let mut selected = packages.clone();
+    if let Some(request) = exact {
+        let inherited =
+            certified_products::inherited_package_witnesses(request.context.recovery_products())
+                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        for (owner, witness) in inherited {
+            if selected
+                .insert(owner, witness.clone())
+                .is_some_and(|old| old != witness)
+            {
+                return Err(CompileError::ExtractFailed(
+                    "exact inherited package selection differs from current target".into(),
+                ));
+            }
+        }
+    }
+    Ok(selected)
 }
 
 // ---------------------------------------------------------------------------
@@ -482,7 +567,18 @@ pub fn compile_invocation(
     inv: &CompileInvocation<'_>,
     mut on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
-    compile_invocation_inner(inv, &mut on_stage, true, None)
+    compile_invocation_inner(inv, &mut on_stage, true, None, None)
+}
+
+/// Compile fresh source against immutable declaration owners through the same
+/// artifact front door. Ordinary source candidates and artifact memo are
+/// unavailable; successful products require context-bound compiler receipts.
+pub fn compile_invocation_in_context(
+    inv: &CompileInvocation<'_>,
+    context: Arc<crate::declaration_join::ExactDeclarationContext>,
+    mut on_stage: impl FnMut(&str, Duration, u64),
+) -> Result<CompiledArtifacts, CompileError> {
+    compile_invocation_inner(inv, &mut on_stage, false, None, Some(context))
 }
 
 /// Compile a declaration probe in full-home-product mode, which produces
@@ -494,6 +590,7 @@ pub(crate) fn compile_authored_products(
     target: &str,
     include: &[PathBuf],
     session_root: &Path,
+    context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
 ) -> Result<CompiledArtifacts, CompileError> {
     let inv = CompileInvocation {
         source,
@@ -501,7 +598,7 @@ pub(crate) fn compile_authored_products(
         include,
         fallback_module_name: AUTHORED_PRODUCT_PROBE_MODULE,
     };
-    compile_invocation_inner(&inv, &mut |_, _, _| {}, false, Some(session_root))
+    compile_invocation_inner(&inv, &mut |_, _, _| {}, false, Some(session_root), context)
 }
 
 pub(crate) const AUTHORED_PRODUCT_PROBE_MODULE: &str = "TidepoolAuthoredProductProbe";
@@ -511,6 +608,7 @@ fn compile_invocation_inner(
     mut on_stage: &mut impl FnMut(&str, Duration, u64),
     allow_candidates: bool,
     session_root: Option<&Path>,
+    exact_context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
 ) -> Result<CompiledArtifacts, CompileError> {
     assert!(
         !inv.targets.is_empty(),
@@ -535,6 +633,19 @@ fn compile_invocation_inner(
     if let Some(root) = session_root {
         cmd.session_root(root).certify_home_products();
     }
+    let exact_request = if let Some(context) = exact_context.as_ref() {
+        let endpoint = cmd
+            .bind()
+            .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))?;
+        let request = context.prepare_compilation(
+            &temp_dir.path().join("exact-scope"),
+            endpoint.identity().producer_bytes(),
+        )?;
+        cmd.session_artifacts(&request.manifest);
+        Some(request)
+    } else {
+        None
+    };
 
     // Persistent build-products dir (module-granular GHC recompilation
     // avoidance across spawns — see `crate::paths::build_products_dir`'s
@@ -601,6 +712,7 @@ fn compile_invocation_inner(
                                 &product_bytes,
                                 &[],
                                 Some(&evidence),
+                                None,
                                 &mut on_stage,
                             ) {
                                 artifacts.producer_identity =
@@ -644,6 +756,16 @@ fn compile_invocation_inner(
         CompileAttempt::Executed(executed) => executed,
     };
 
+    if let Some(request) = exact_request.as_ref() {
+        use sha2::Digest;
+        let actual: [u8; 32] = sha2::Sha256::digest(&producer).into();
+        if actual != request.context.toolchain_identity_sha256() {
+            return Err(CompileError::ExtractFailed(
+                "exact compile rebound to a different producer".into(),
+            ));
+        }
+    }
+
     // The full spawn argv, rendered once: DEBUG on every spawn, and attached
     // to the failure WARN below. This is the record of what include set /
     // session-root / flags an individual spawn actually received — without
@@ -684,7 +806,7 @@ fn compile_invocation_inner(
                     .is_some_and(|set| !set.by_owner.is_empty()) =>
         {
             tracing::warn!(%error, "candidate compile failed; retrying without candidates");
-            return compile_invocation_inner(inv, on_stage, false, session_root);
+            return compile_invocation_inner(inv, on_stage, false, session_root, exact_context);
         }
         Err(error) => {
             return Err(retain_compiler_failure(
@@ -702,10 +824,32 @@ fn compile_invocation_inner(
         let evidence_bytes = std::fs::read(temp_dir.path().join("dependencies.json"))?;
         let package_bundle_bytes =
             std::fs::read(temp_dir.path().join("module-package-imports.cbor"))?;
-        let evidence =
-            cache::DependencyEvidence::from_worker(&evidence_bytes, &input_path, inv.source);
+        let exact_source = exact_request
+            .as_ref()
+            .map(|request| request.admit_source(&input_path, inv.source))
+            .transpose()?;
+        let exact = exact_request
+            .as_ref()
+            .zip(exact_source.as_ref())
+            .map(
+                |(request, source)| crate::declaration_context::ExactProductAdmission {
+                    request,
+                    source,
+                },
+            );
+        let evidence = match exact_source.as_ref() {
+            Some(source) => Some(source.evidence.clone()),
+            None => {
+                cache::DependencyEvidence::from_worker(&evidence_bytes, &input_path, inv.source)
+            }
+        };
         let receipt_bytes = std::fs::read(temp_dir.path().join("certified-products.cbor"))?;
         if receipt_bytes.is_empty() {
+            if exact_request.is_some() {
+                return Err(CompileError::ExtractFailed(
+                    "exact compile product certificate unavailable".into(),
+                ));
+            }
             if candidate_set
                 .as_ref()
                 .is_some_and(|set| !set.by_owner.is_empty())
@@ -735,6 +879,7 @@ fn compile_invocation_inner(
                 &product_bytes,
                 &[],
                 evidence.as_ref(),
+                None,
                 &mut *on_stage,
             )?;
             ensure_no_uncertified_globals(&artifacts)?;
@@ -777,6 +922,7 @@ fn compile_invocation_inner(
                 inv.source,
                 &producer,
                 inv.include,
+                exact.as_ref(),
             )
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
             ensure_ready_module_inventory(&receipt.modules, valid)?;
@@ -798,7 +944,7 @@ fn compile_invocation_inner(
                 recovery_products: Vec::new(),
             }
         };
-        let extra_products: Vec<_> = cached_receipts
+        let mut extra_products: Vec<_> = cached_receipts
             .iter()
             .map(|module| {
                 candidate_set
@@ -814,12 +960,22 @@ fn compile_invocation_inner(
                     })
             })
             .collect::<Result<_, _>>()?;
+        if let Some(request) = exact_request.as_ref() {
+            for product in request.context.recovery_products() {
+                extra_products.extend(tidepool_repr::execution_schema::parse_module_products(
+                    product.product_bytes(),
+                    &crate::prepared_artifact::production_requirements()?,
+                    module_candidates::product_decode_limits(),
+                )?);
+            }
+        }
         let mut artifacts = assemble_with_products(
             &meta_bytes,
             &raw,
             &product_bytes,
             &extra_products,
             evidence.as_ref(),
+            exact_request.as_ref(),
             &mut on_stage,
         )?;
         if valid_evidence.is_none() {
@@ -830,6 +986,7 @@ fn compile_invocation_inner(
                 "target product receipt count".into(),
             ));
         }
+        let package_closure = merge_package_closure(&receipt.packages, exact_request.as_ref())?;
         for (name, target) in &mut artifacts.targets {
             let accepted = receipt.targets.get(name).ok_or_else(|| {
                 CompileError::ExtractFailed("target product receipt missing".into())
@@ -839,22 +996,23 @@ fn compile_invocation_inner(
                     target.prepared.prepared(),
                     accepted,
                     &certified.groups,
-                    &receipt.packages,
+                    &package_closure,
                 )
                 .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
                 target.package_interfaces = certified_products::certify_target_package_interfaces(
                     target.prepared.prepared(),
-                    &receipt.packages,
+                    &package_closure,
                 )
                 .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
             }
         }
         artifacts.certified_groups = certified.groups;
         artifacts.recovery_products = certified.recovery_products;
+        artifacts.exact_source_admission = exact_source;
         artifacts.producer_identity = Some(producer.as_slice().try_into().map_err(|_| {
             CompileError::ExtractFailed("bound compiler producer identity length".into())
         })?);
-        if let Some(evidence) = evidence.as_ref() {
+        if let Some(evidence) = evidence.as_ref().filter(|_| exact_request.is_none()) {
             module_candidates::publish(
                 &producer,
                 inv.include,
@@ -867,7 +1025,7 @@ fn compile_invocation_inner(
         }
         // A memo hit has no certified source group owner mapping. The module
         // store owns reuse for invocations with home products.
-        if cached_receipts.is_empty() && fresh_products.is_empty() {
+        if exact_request.is_none() && cached_receipts.is_empty() && fresh_products.is_empty() {
             if let (Some(key), Some(evidence)) = (&inv_key, evidence.as_ref()) {
                 store_memo(
                     key,
@@ -890,7 +1048,7 @@ fn compile_invocation_inner(
                     .is_some_and(|set| !set.by_owner.is_empty()) =>
         {
             tracing::warn!(%error, "candidate certification failed; retrying without candidates");
-            compile_invocation_inner(inv, on_stage, false, session_root)
+            compile_invocation_inner(inv, on_stage, false, session_root, exact_context)
         }
         result => result
             .map_err(|error| retain_compiler_failure(temp_dir.path(), &compiler_stderr, error)),
@@ -1292,6 +1450,7 @@ pub(crate) fn assemble(
         recovery_products: Vec::new(),
         producer_identity: None,
         module_inventory: None,
+        exact_source_admission: None,
     })
 }
 
@@ -1301,6 +1460,7 @@ fn assemble_with_products(
     product_bytes: &[u8],
     certified_cached: &[RawModuleProduct],
     evidence: Option<&cache::DependencyEvidence>,
+    exact: Option<&crate::declaration_context::ExactCompilationRequest>,
     on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
     let mut artifacts = assemble(meta_bytes, raw, on_stage)?;
@@ -1313,18 +1473,49 @@ fn assemble_with_products(
         .module_products
         .extend_from_slice(certified_cached);
     if let Some(evidence) = evidence {
+        let protected: BTreeMap<_, _> = exact
+            .into_iter()
+            .flat_map(|request| request.context.recovery_products())
+            .map(|product| {
+                (
+                    (
+                        product.owner().unit.as_str(),
+                        product.owner().module.as_str(),
+                    ),
+                    product,
+                )
+            })
+            .collect();
+        let mut protected_groups = BTreeMap::<_, BTreeMap<_, _>>::new();
+        for group in exact.into_iter().flat_map(|request| &request.groups) {
+            protected_groups
+                .entry((group.owner().unit.as_str(), group.owner().module.as_str()))
+                .or_default()
+                .insert(group.group().original_ordinal(), group.group());
+        }
         let mut emitted = std::collections::HashSet::new();
         for product in &artifacts.module_products {
-            if !emitted.insert((&product.unit, &product.module))
-                || !evidence.modules.iter().any(|module| {
+            let key = (product.unit.as_str(), product.module.as_str());
+            let admitted = if let Some(original) = protected.get(&key) {
+                let expected = protected_groups.get(&key);
+                product.interface == original.interface_bytes()
+                    && product.groups.len() == expected.map_or(0, BTreeMap::len)
+                    && product.groups.iter().all(|group| {
+                        expected
+                            .and_then(|groups| groups.get(&group.original_ordinal()))
+                            .is_some_and(|original| *original == group)
+                    })
+            } else {
+                evidence.modules.iter().any(|module| {
                     !module.boot
                         && module.product == cache::ProductAvailability::Ready
                         && module.unit == product.unit
                         && module.module == product.module
                 })
-            {
+            };
+            if !emitted.insert((&product.unit, &product.module)) || !admitted {
                 return Err(CompileError::ExtractFailed(format!(
-                    "module product {}:{} has no unique ready graph node",
+                    "module product {}:{} lacks a unique fresh graph or protected original inventory",
                     product.unit, product.module
                 )));
             }

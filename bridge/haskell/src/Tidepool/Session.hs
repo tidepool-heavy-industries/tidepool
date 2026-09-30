@@ -32,7 +32,7 @@
 --     synthetic type-only modules.
 --
 -- GATING: nothing here runs on the normal one-shot eval path. 'SessionScope'
--- with an empty 'ssValIfaces' is inert; 'GhcPipeline.runPipelineSelected' calls the
+-- without values or an explicit exact declaration scope is inert; 'GhcPipeline.runPipelineSelected' calls the
 -- session machinery only when a scope is supplied.
 --
 -- 'typecheckIface' reconstructs an
@@ -195,11 +195,13 @@ sessionHiPath root sm = root </> dotsToSlashes (sessionModuleString sm) <.> "hi"
 
 -- | The session state a turn injects before compiling. @ssValIfaces@ are the
 -- live @Val.G<g>@ modules to @readIface@+HPT-inject (domain model §7
--- @SessionScope@). EMPTY = inert: the normal one-shot eval path passes
+-- @SessionScope@). Without values or exact owners the scope is inert: the normal one-shot eval path passes
 -- 'emptySessionScope' (or @Nothing@) and nothing here fires.
 data SessionScope = SessionScope
   { ssRoot      :: !FilePath          -- ^ dir the session @.hi@ files live under
   , ssValIfaces :: ![SessionModule]   -- ^ inject these (readIface raw -> HPT)
+  , ssExactScope :: !(Maybe FilePath)
+    -- ^ Explicit producer-owned source-free declaration scope.
   , ssIncarnation :: !(Maybe String)
     -- ^ This session's incarnation identity (the Rust @SessionId@, decimal
     -- text), when the caller has one. Session memo entries produced under
@@ -209,10 +211,11 @@ data SessionScope = SessionScope
   } deriving (Show)
 
 emptySessionScope :: SessionScope
-emptySessionScope = SessionScope "" [] Nothing
+emptySessionScope = SessionScope "" [] Nothing Nothing
 
 isSessionScopeActive :: SessionScope -> Bool
-isSessionScopeActive = not . null . ssValIfaces
+isSessionScopeActive scope = not (null (ssValIfaces scope))
+  || case ssExactScope scope of Just _ -> True; Nothing -> False
 
 --------------------------------------------------------------------------------
 -- mkThinSessionIface — synthesize a type-only iface from TyThings

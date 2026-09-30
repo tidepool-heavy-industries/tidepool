@@ -158,9 +158,40 @@ pub(crate) fn certify_target_package_interfaces(
     })
 }
 
-/// A group whose retained globals still need the authoritative lexical
-/// `SessionVarId` and live handle. Runtime resolves those under checkout,
-/// then constructs `CertifiedGroup`; it never infers a retained ID from text.
+pub(crate) fn inherited_package_witnesses(
+    products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+) -> CertResult<BTreeMap<(String, String), PackageInterfaceWitness>> {
+    let mut selected = BTreeMap::new();
+    for product in products {
+        let witness = decode_home_witness(product.certification_bytes())?;
+        if &witness.owner != product.owner() {
+            return Err(CertificationError::Mismatch(
+                "inherited package product owner",
+            ));
+        }
+        for (owner, interface) in witness.packages {
+            if !interface.selected_path.is_absolute()
+                || sha(&read_bounded(
+                    &interface.selected_path,
+                    PACKAGE_INTERFACE_LIMIT,
+                )?) != interface.sha256
+            {
+                return Err(CertificationError::StaleEvidence);
+            }
+            if selected
+                .insert(owner, interface.clone())
+                .is_some_and(|old| old != interface)
+            {
+                return Err(CertificationError::Mismatch("inherited package selection"));
+            }
+        }
+    }
+    Ok(selected)
+}
+
+/// A group whose retained globals still need an exact live binding or native
+/// export owner. Runtime resolves those through its binding table or owning
+/// machine's export ledger before constructing `CertifiedGroup`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingCertifiedGroup {
     origin: ProductOrigin,
@@ -1424,13 +1455,23 @@ pub(crate) fn certify_products(
     final_target_source: &str,
     endpoint_identity: &[u8],
     include: &[PathBuf],
+    exact: Option<&crate::declaration_context::ExactProductAdmission<'_>>,
 ) -> CertResult<CertifiedProducts> {
-    let normalized = DependencyEvidence::from_worker(
-        fresh_evidence_bytes,
-        fresh_input_path,
-        final_target_source,
-    )
-    .ok_or(CertificationError::StaleEvidence)?;
+    let normalized = match exact {
+        None => DependencyEvidence::from_worker(
+            fresh_evidence_bytes,
+            fresh_input_path,
+            final_target_source,
+        )
+        .ok_or(CertificationError::StaleEvidence)?,
+        Some(admission) => {
+            admission
+                .source
+                .validate_ineligible_evidence(fresh_evidence_bytes)
+                .map_err(|_| CertificationError::Mismatch("exact fresh evidence"))?;
+            admission.source.evidence.clone()
+        }
+    };
     if serde_json::to_vec(&normalized)
         .map_err(|_| CertificationError::Mismatch("fresh evidence encoding"))?
         != serde_json::to_vec(final_evidence)
@@ -1500,16 +1541,38 @@ pub(crate) fn certify_products(
                         .get(&key)
                         .ok_or(CertificationError::Mismatch("fresh module product"))?;
                     let source_sha = ready_source_sha(final_evidence, &key.0, &key.1)?;
-                    let version = fresh_module_version(
-                        endpoint_identity,
-                        include,
-                        &source_sha,
-                        &product.interface,
-                        module_bytes,
-                        fresh_package_imports
-                            .get(&key)
-                            .ok_or(CertificationError::Mismatch("fresh package imports"))?,
-                    )?;
+                    let version = if let Some(admission) = exact {
+                        let mut digest = Sha256::new();
+                        for field in [
+                            b"tidepool-exact-source-home-v1".as_slice(),
+                            endpoint_identity,
+                            admission.request.semantic_sha256.as_slice(),
+                            key.0.as_bytes(),
+                            key.1.as_bytes(),
+                            source_sha.as_slice(),
+                            product.interface.as_slice(),
+                            module_bytes.as_slice(),
+                            fresh_package_imports
+                                .get(&key)
+                                .ok_or(CertificationError::Mismatch("fresh package imports"))?
+                                .as_slice(),
+                        ] {
+                            digest.update((field.len() as u64).to_be_bytes());
+                            digest.update(field);
+                        }
+                        ModuleVersion(digest.finalize().into())
+                    } else {
+                        fresh_module_version(
+                            endpoint_identity,
+                            include,
+                            &source_sha,
+                            &product.interface,
+                            module_bytes,
+                            fresh_package_imports
+                                .get(&key)
+                                .ok_or(CertificationError::Mismatch("fresh package imports"))?,
+                        )?
+                    };
                     (
                         product,
                         fresh_product_bytes,
@@ -1662,7 +1725,10 @@ pub(crate) fn certify_products(
             return Err(CertificationError::Mismatch("unwitnessed fresh module"));
         }
     }
-    let mut source_groups = SourceGroupMap::new();
+    let mut source_groups = match exact {
+        Some(admission) => certified_source_map(&admission.request.groups)?,
+        None => SourceGroupMap::new(),
+    };
     for (origin, owner, group, _) in &groups {
         for binder in group.binders() {
             let key = (
@@ -1679,7 +1745,7 @@ pub(crate) fn certify_products(
             }
         }
     }
-    let groups: Vec<PendingCertifiedGroup> = groups
+    let mut groups: Vec<PendingCertifiedGroup> = groups
         .into_iter()
         .map(|(origin, owner, group, imports)| {
             let imports = imports
@@ -1694,7 +1760,7 @@ pub(crate) fn certify_products(
             })
         })
         .collect::<CertResult<_>>()?;
-    let recovery_products = module_bytes
+    let mut recovery_products: Vec<_> = module_bytes
         .into_iter()
         .map(
             |(owner, source_sha, interface, product_bytes, package_bytes)| {
@@ -1718,6 +1784,17 @@ pub(crate) fn certify_products(
             },
         )
         .collect::<CertResult<Vec<_>>>()?;
+    if let Some(admission) = exact {
+        groups.extend(admission.request.groups.iter().cloned());
+        recovery_products.extend(
+            admission
+                .request
+                .context
+                .recovery_products()
+                .iter()
+                .cloned(),
+        );
+    }
     Ok(CertifiedProducts {
         groups,
         recovery_products,
@@ -2303,6 +2380,7 @@ mod tests {
             source,
             b"producer",
             &[],
+            None,
         )
         .unwrap();
         assert!(certified.groups.is_empty());
@@ -2340,6 +2418,7 @@ mod tests {
                 source,
                 b"producer",
                 &[],
+                None,
             ),
             Err(CertificationError::Mismatch("fresh evidence bytes"))
         ));
@@ -2361,7 +2440,8 @@ mod tests {
                 &evidence,
                 source,
                 b"producer",
-                &[]
+                &[],
+                None,
             ),
             Err(CertificationError::Mismatch(
                 "product/iface/source/evidence digest"
@@ -2385,6 +2465,7 @@ mod tests {
             source,
             b"producer",
             &[],
+            None,
         )
         .is_err());
     }

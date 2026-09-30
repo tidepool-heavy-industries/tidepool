@@ -89,9 +89,12 @@ certificationRequestValidation = do
   case workerRequestFromArgv (workerArgv valid) of
     Right (Just request) | requestCertifyHomeProducts request -> pure ()
     other -> fail ("home-product certification request rejected: " ++ show other)
+  case workerRequestFromArgv (workerArgv (valid ++ [SessionArtifacts "/scope.cbor"])) of
+    Right (Just request) | requestSessionArtifacts request == Just "/scope.cbor" -> pure ()
+    other -> fail ("home-product certification rejected explicit exact context: " ++ show other)
   forM_ [ Cell, Classify, Turn, InspectType "Int", InspectTypeBatch "Batch.hs"
         , DeclarationJoin "join.cbor", BindGen 1, InjectVal "Val1"
-        , ModuleCandidates "candidates.cbor", SessionArtifacts "artifacts.cbor"
+        , ModuleCandidates "candidates.cbor"
         , ActivationPreview, CellFoldTurn, TargetModuleOnly
         , RetainedGeneration (SymbolIdentity "main" "Producer" "value" "value" Nothing) 1
         ] $ \field ->
@@ -889,7 +892,7 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
       consumer = root </> "SessionConsumer.hs"
       unreachable = root </> "SessionUnreachable.hs"
       ordinary = root </> "OrdinaryFirst.hs"
-      scope = SessionScope scopeRoot [valueModule] Nothing
+      scope = SessionScope scopeRoot [valueModule] Nothing Nothing
   writeFile seed "module SessionSeed where\nseed = 1 :: Int\n"
   writeFile unused "module SessionUnused (unused) where\nunused :: Int\nunused = 5\n"
   writeFile consumer "module SessionConsumer (used) where\nimport SessionUnused (unused)\nused = unused + 1\n"
@@ -1069,7 +1072,7 @@ requestMemoLifecycle root = do
       -- incarnation-less request never reuses one and never keeps one.
       let compileIn scope purpose compiler = compiler PreparedStg mempty purpose scope targetPath [root] Nothing
           compile = compileIn Nothing
-          incarnate = Just (SessionScope root [] (Just "7"))
+          incarnate = Just (SessionScope root [] Nothing (Just "7"))
           sessionMiss = "tidepool-memo-miss module=Tidepool.Session.Lib.G1"
           absentSession = sessionMiss ++ " reason=absent"
           targetMiss = "tidepool-memo-miss module=MemoTarget"

@@ -76,15 +76,49 @@ fn exact_join_round_trips_actual_worker_and_source_hidden_consumers() {
         .instances
         .classes
         .iter()
-        .find(|name| name.occurrence == "$fCDouble")
+        .find(|record| record.dfun.occurrence == "$fCDouble")
         .expect("Old C Double dfun")
         .clone();
+    assert_eq!(old_double.dfun.unit, "main");
+    assert_eq!(old_double.dfun.module, "Old");
+    assert_eq!(old_double.dfun.namespace, ExportNamespace::Value);
+    assert_eq!(
+        old_double.class,
+        ExportIdentity {
+            unit: "main".into(),
+            module: "Common".into(),
+            namespace: ExportNamespace::Type,
+            occurrence: "C".into(),
+            record_parent: None,
+        }
+    );
+    assert!(old_double.selected_axioms.is_empty());
     instances.classes.push(old_double);
     assert!(inventories[1]
         .instances
         .classes
         .iter()
-        .all(|name| name.module == "Old"));
+        .all(|record| record.dfun.unit == "main"
+            && record.dfun.module == "Old"
+            && record.dfun.namespace == ExportNamespace::Value
+            && record.class.unit == "main"
+            && record.class.module == "Common"
+            && record.class.namespace == ExportNamespace::Type));
+    let associated = inventories[1]
+        .instances
+        .classes
+        .iter()
+        .find(|record| record.class.occurrence == "A")
+        .expect("Old A Int typed instance");
+    assert_eq!(associated.dfun.occurrence, "$fAInt");
+    assert!(!associated.selected_axioms.is_empty());
+    assert!(associated
+        .selected_axioms
+        .iter()
+        .all(|axiom| axiom.unit == "main"
+            && axiom.module == "Old"
+            && axiom.namespace == ExportNamespace::Type
+            && inventories[1].instances.families.contains(axiom)));
     assert!(inventories[1]
         .instances
         .families

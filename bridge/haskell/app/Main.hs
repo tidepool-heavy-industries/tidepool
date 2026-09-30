@@ -71,7 +71,7 @@ import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots )
 import Tidepool.ModuleCandidates (ModuleCandidate(..))
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
-import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobals)
+import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithExact)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.PackageWitness (PackageImportRoot, encodePackageImports)
 import qualified Crypto.Hash.SHA256 as SHA256
@@ -87,6 +87,9 @@ import Tidepool.DiagJson
 import Tidepool.ExtractUtil (capitalize)
 import Tidepool.ExtractRequest (InspectionRequest(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
 import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
+import Tidepool.ExactScope
+  ( ExactCompilation(..), ExactScope(..), ExactProduct(..), ExactOriginalGroup(..)
+  , revalidateExactScope, writeExactCompilation )
 import Tidepool.Session
   ( SessionScope(..), preparedScaffoldTargetName, preparedResumeTargetName
   , preparedApplyEntryTargetName, preparedApplyValueTargetName
@@ -420,7 +423,8 @@ reportDiagsWithWarnings (Right warnings) =
 
 -- | Whether a generic extraction needs stable session values in scope.
 hasSessionScope :: WorkerRequest -> Bool
-hasSessionScope args = not (null (requestInjectVals args)) || isJust (requestSessionRoot args)
+hasSessionScope args = not (null (requestInjectVals args))
+  || isJust (requestSessionRoot args) || isJust (requestSessionArtifacts args)
 
 -- | Project the session portion of a worker request. Callers decide whether
 -- the resulting scope is active.
@@ -428,6 +432,7 @@ scopeFromWorkerRequest :: WorkerRequest -> SessionScope
 scopeFromWorkerRequest args = SessionScope
   { ssRoot      = fromMaybe "" (requestSessionRoot args)
   , ssValIfaces = mapMaybe parseValModule (requestInjectVals args)
+  , ssExactScope = requestSessionArtifacts args
   , ssIncarnation = requestSessionIncarnation args
   }
 
@@ -466,7 +471,7 @@ processFile compiler caches timing args path = do
           targets@(_ : _) -> targets
           [] -> maybe [] pure mTarget
     (preparedArtifacts, productContext) <- prepareArtifacts caches path hscEnv (pprModules prepared) preparedTargets
-      (standardAuxiliaryRoots binds) (requestRetainedGenerations args) (pprAcceptedCandidates prepared)
+      (standardAuxiliaryRoots binds) (requestRetainedGenerations args) (pprAcceptedCandidates prepared) (compilationScope <$> pprExactCompilation prepared)
     if null preparedArtifacts
       then ioError (userError "prepared extraction requires --target or --targets")
       else timePhase timing "prepared_sidecars" $ writePreparedSidecars SeparateYieldSites outDir binds tycons mCapturedTy warnTexts preparedArtifacts
@@ -494,12 +499,21 @@ writeCertifiedProducts outDir hscEnv prepared productContext preparedArtifacts =
               else Map.findWithDefault (dependencyModuleProduct node)
                 (dependencyModuleUnit node, dependencyModuleName node) withCertified
           }
-        finalDependencies = dependencies
+        freshDependencies = dependencies
           { dependencyModules = map withAvailability (dependencyModules dependencies) }
+        finalDependencies = case pprExactCompilation prepared of
+          Nothing -> freshDependencies
+          Just _ -> freshDependencies
+            { dependencyCacheSafe = False, dependencySelectionComplete = False }
     writeDependencyEvidence outDir finalDependencies
+    forM_ (pprExactCompilation prepared) $ \compilation -> do
+      verified <- revalidateExactScope hscEnv (compilationScope compilation)
+      either (ioError . userError) pure verified
+      writeExactCompilation compilation freshDependencies
     productBytes <- BS.readFile (outDir </> "module-products.cbor")
     evidenceBytes <- BS.readFile (outDir </> "dependencies.json")
     certified <- encodeCertifiedProducts hscEnv (pprAcceptedCandidates prepared)
+      (compilationScope <$> pprExactCompilation prepared)
       freshProducts [(paTarget artifact, paProgram artifact) | artifact <- preparedArtifacts]
       finalDependencies productBytes evidenceBytes
     case certified of
@@ -528,10 +542,10 @@ data PreparedArtifact = PreparedArtifact
 -- Project before writing artifacts so the shared constructor
 -- table includes exactly the GHC constructors admitted by prepared execution.
 prepareArtifacts :: RecoveryCaches -> FilePath -> HscEnv -> [PreparedModule] -> [String] -> [String]
-  -> Map.Map SymbolIdentity Word64 -> [ModuleCandidate]
+  -> Map.Map SymbolIdentity Word64 -> [ModuleCandidate] -> Maybe ExactScope
   -> IO ([PreparedArtifact], Maybe ProjectionContext)
-prepareArtifacts _ _ _ _ [] _ _ _ = pure ([], Nothing)
-prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliaryRoots retainedGenerations candidates = do
+prepareArtifacts _ _ _ _ [] _ _ _ _ = pure ([], Nothing)
+prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliaryRoots retainedGenerations candidates exactScope = do
   timing <- readTimingEnabled
   formattingAuthority <- timePhase timing "formatting_authority" $ resolveFormattingAuthority hscEnv
   timeAuthority <- timePhase timing "time_authority" $ resolveTimeAuthority hscEnv
@@ -567,8 +581,14 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
           , projectionJsonAuthority = jsonAuthority
           , projectionTextUnit = textAuthority
           }
-  let certifiedHomes = Set.fromList
-        [(candidateUnit candidate, candidateModule candidate) | candidate <- candidates]
+  let exactProducts = maybe [] scopeProducts exactScope
+      certifiedHomes = Set.fromList
+        ([(candidateUnit candidate, candidateModule candidate) | candidate <- candidates]
+         ++ [(originalUnit originalProduct, originalModule originalProduct) | originalProduct <- exactProducts])
+      exactOriginals =
+        [(originalUnit originalProduct, originalModule originalProduct,
+          [(originalOrdinal group, originalBinders group, originalGlobals group)
+           | group <- originalGroups originalProduct]) | originalProduct <- exactProducts]
       originalProducts =
         [(unitString (moduleUnit (pmModule prepared)), moduleNameString (moduleName (pmModule prepared)),
           either (Left . show) Right (projectPreparedModuleGroups (contextFor firstTarget) prepared))
@@ -591,7 +611,7 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
               (closureModules recovered) (closureReachability recovered))
           (program, constructors) <- requireProjection (projectSelected selected)
           required <- either (ioError . userError) pure
-            (requiredOriginalPackageGlobals originalProducts candidates (programGlobals program))
+            (requiredOriginalPackageGlobalsWithExact originalProducts candidates exactOriginals (programGlobals program))
           let nextRoots = Set.toAscList (Set.fromList (roots ++ required))
           if nextRoots == roots
             then pure (recovered, program, constructors, roots)
@@ -936,7 +956,7 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
     -- scaffold, and its constructors join the shared metadata before write.
     (preparedArtifacts, productContext) <- prepareArtifacts caches compiledPath hscEnv preparedModules
       [preparedScaffoldTargetName] (standardAuxiliaryRoots binds)
-      (requestRetainedGenerations args) (pprAcceptedCandidates prepared)
+      (requestRetainedGenerations args) (pprAcceptedCandidates prepared) (compilationScope <$> pprExactCompilation prepared)
     let asksSites = concatMap paYieldSites preparedArtifacts
     timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts

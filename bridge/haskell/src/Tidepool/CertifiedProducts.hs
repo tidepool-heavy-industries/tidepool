@@ -43,11 +43,14 @@ import Tidepool.ExecutionSchema
   ( GlobalDecl(..), ProjectedGroup(..), ProjectedGroupBody(..)
   , ResultContract(..), RuntimeRep(..), Signature(..), SignatureId(..)
   , SymbolIdentity(..), WireProgram(..) )
+import Tidepool.ExactScope
+  ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..) )
 import Tidepool.ModuleCandidates
   ( CandidateGlobal(..), CandidateGroup(..), ModuleCandidate(..) )
 import Tidepool.PackageWitness
   ( PackageImportRoot(..), packageImportRoot, validatePackageImportRoot )
 import Tidepool.FatIface (readExactInterface)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 
 data Product = Product
   { productOrigin :: T.Text
@@ -67,12 +70,12 @@ type PackageWitness = (T.Text, T.Text, FilePath, T.Text)
 -- The producer's group inventory is only a suggestion. Rust compares every
 -- emitted row with the original sidecar bytes before admitting any product.
 encodeCertifiedProducts
-  :: HscEnv -> [ModuleCandidate]
+  :: HscEnv -> [ModuleCandidate] -> Maybe ExactScope
   -> [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])]
   -> [(String, WireProgram)]
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
   -> IO (Either String BS.ByteString)
-encodeCertifiedProducts env cached fresh targets evidence productBytes evidenceBytes = do
+encodeCertifiedProducts env cached exact fresh targets evidence productBytes evidenceBytes = do
   packageRef <- newIORef []
   let freshEvidenceSha = digest evidenceBytes
       freshProductSha = digest productBytes
@@ -103,15 +106,22 @@ encodeCertifiedProducts env cached fresh targets evidence productBytes evidenceB
           } | candidate <- cached ]
       products = freshProducts ++ cachedProducts
       expectedFresh = length fresh
-      binders =
+      admittedBinders =
+        [ (binder, (T.pack (originalUnit product), T.pack (originalModule product),
+                    Just (T.pack (originalVersion product)), originalOrdinal group))
+        | scope <- maybe [] pure exact, product <- scopeProducts scope
+        , group <- originalGroups product, binder <- originalBinders group ]
+      binders = admittedBinders ++
         [ (binder, (productUnit product, productModule product,
                     productVersion product, candidateGroupOrdinal group))
         | product <- products, group <- productGroups product
         , binder <- candidateGroupBinders group ]
       ownerMap = Map.fromList binders
-      homeModules = Set.fromList
+      homeModules = Set.fromList (
         [ (T.pack (dependencyModuleUnit node), T.pack (dependencyModuleName node))
         | node <- dependencyModules evidence, not (dependencyModuleBoot node) ]
+        ++ [(T.pack (exactUnit iface), T.pack (exactModule iface))
+           | scope <- maybe [] pure exact, (iface, _, _) <- scopeInterfaces scope])
       allGlobals =
         [ (product, group) | product <- products, group <- productGroups product ]
   if length freshProducts /= expectedFresh

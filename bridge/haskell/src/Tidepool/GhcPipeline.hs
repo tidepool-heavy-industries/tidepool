@@ -159,7 +159,11 @@ import Tidepool.DependencyEvidence
   , DependencyModule(..), DependencyImport(..), ProductAvailability(..)
   , sourceEvidenceWithFingerprint )
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope )
+  ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope
+  , installExactLexicalGraph )
+import Tidepool.ExactScope
+  ( ExactScope(..), ExactCompilation(..), readExactScope, revalidateExactScope
+  , writeExactCompilation )
 import Tidepool.PackageWitness
   ( PackageImportRoot(..), packageImportRoot, readPackageImports
   , validatePackageImportRoot )
@@ -224,6 +228,7 @@ data PreparedPipelineResult = PreparedPipelineResult
   , pprProductInterfaces :: Map.Map ModuleName ModIface
   , pprPackageRoots :: Map.Map ModuleName [PackageImportRoot]
   , pprAcceptedCandidates :: [ModuleCandidate]
+  , pprExactCompilation :: Maybe ExactCompilation
   }
 
 -- | Metadata has no executable projection. The environment
@@ -633,6 +638,8 @@ data TierPolicy
 data PipelineVariant = PipelineVariant
   { pvLabel :: String
     -- ^ Prefix on this variant's own error messages.
+  , pvExactScope :: Maybe ExactScope
+    -- ^ Admitted immutable declaration owners, independent of live values.
   , pvDownsweepExcludes :: [ModuleName]
     -- ^ Modules @depanal@ must NOT try to summarise (the session path's
     -- source-less @Val.G\<g\>@ ifaces). Empty on the normal path.
@@ -1260,15 +1267,21 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
         candidateManifest = case selection of
           PreparedProducts candidatePath -> candidatePath
           _ -> Nothing
-        exactCycle = isJust candidateManifest
+        exactCycle = isJust candidateManifest || isJust (pvExactScope variant)
         -- An exact hydration transaction cannot borrow mutable interface or
         -- Core memo state from a preceding lexical environment.
         mCache = if exactCycle then Nothing else mCacheInput
         mMemoRef = if exactCycle then Nothing else mMemoRefInput
+    when (isJust candidateManifest && isJust (pvExactScope variant)) $
+      liftIO $ ioError $ userError "ordinary source candidates cannot accompany exact declaration owners"
     when exactCycle $ do
       current <- getSession
       fresh <- liftIO (freshExactState current)
       setSession fresh
+    forM_ (pvExactScope variant) $ \scope -> do
+      env <- getSession
+      verified <- liftIO (revalidateExactScope env scope)
+      either (liftIO . ioError . userError) pure verified
     target <- guessTarget path Nothing Nothing
     setTargets [target]
     -- Install target-diagnostic capture before load/typecheck. Warnings become
@@ -1307,6 +1320,18 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
     setSession previous {hsc_mod_graph = mkModuleGraph
       (filter keepSummary (mgModSummaries' (hsc_mod_graph previous)))}
     modGraphRaw <- depanal (pvDownsweepExcludes variant) False
+    forM_ (pvExactScope variant) $ \scope -> do
+      let exactNames = Set.fromList [mkModuleName (exactModule iface)
+            | (iface, _, _) <- scopeInterfaces scope]
+      when (any (\node -> case node of
+          ModuleNode _ summary -> ms_mod_name summary `Set.member` exactNames
+          _ -> False) (mgModSummaries' modGraphRaw)) $
+        liftIO $ ioError $ userError "fresh source collides with an admitted exact owner"
+    let (freshGraph, exactImports) = sourceEvidenceGraph (pvExactScope variant) modGraphRaw
+        exactCompilation = (\scope -> ExactCompilation scope requestIdentity path exactImports)
+          <$> pvExactScope variant
+    when (any (\(_, imports) -> any (\(_, _, boot, _) -> boot) imports) exactImports) $
+      liftIO $ ioError $ userError "exact scope does not admit SOURCE boot imports"
     acceptedCandidates <- case candidateManifest of
       Nothing -> pure Map.empty
       Just manifest -> certifyModuleCandidates manifest modGraphRaw path
@@ -2177,7 +2202,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 , prTargetTcGblEnv = targetEnvironment
                 }
           capturedSources <- liftIO (captureDependencySources modGraphRaw)
-          dependencies <- liftIO (dependencyEvidenceFor hscFinal capturedSources modGraphRaw
+          dependencies <- liftIO (dependencyEvidenceFor hscFinal capturedSources freshGraph
             (zip (map (ms_mod_name . observationSummary) observations) moduleFacts))
           productInterfaces <- liftIO (readIORef productInterfacesRef)
           let packageRoots = Map.fromList
@@ -2195,6 +2220,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           , pprProductInterfaces = productInterfaces
           , pprPackageRoots = packageRoots
           , pprAcceptedCandidates = []
+          , pprExactCompilation = exactCompilation
           }
       PreparedProducts _ -> do
         (result, modules, dependencies, productInterfaces, packageRoots) <- compileExecutable
@@ -2208,28 +2234,32 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           , pprProductInterfaces = productInterfaces
           , pprPackageRoots = packageRoots
           , pprAcceptedCandidates = Map.elems acceptedCandidates
+          , pprExactCompilation = exactCompilation
           }
       CheckedEnvironment -> do
         -- load' may need executable dependencies for TH; it never sees the
         -- metadata target. Restore the full graph for instance visibility.
         environment <- getSession
-        setSession environment { hsc_mod_graph = modGraphRaw }
+        when (isNothing (pvExactScope variant)) $
+          setSession environment { hsc_mod_graph = modGraphRaw }
         -- The list is topologically ordered, so only an unprocessed source
         -- module can consume an interface we build here. Completed modules no
         -- longer consult the HPT, while the returned target environment owns
         -- its types and reader scope directly.
+        checkedFactsRef <- liftIO (newIORef [])
         checked <- forM (zip summaries (homeInterfaceConsumers summaries)) $ \(summary, laterConsumers) -> do
           cpBeforeModule plan summary
           current <- getSession
           let isTarget = ms_mod_name summary == targetName
               loaded = lookupHpt (hsc_HPT current) (ms_mod_name summary)
-          if not isTarget && not (isNothing loaded)
+          if not isTarget && not (isNothing loaded) && isNothing (pvExactScope variant)
             then pure Nothing
             else do
               liftIO $ hPutStrLn stderr $
                 "tidepool-checked module=" ++ moduleNameString (ms_mod_name summary)
                   ++ " target=" ++ show isTarget
               parsed <- parseModule summary
+              origins <- liftIO (classifyQuasiQuoteOrigins current parsed)
               typed <- typecheckModule (pvTransformParsed variant summary parsed)
               let tcg = fst (tm_internals_ typed)
                   inspectionProbes = capturedInspectionProbes typed tcg
@@ -2250,6 +2280,13 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                     when timing $ liftIO $ hPutStrLn stderr $
                       "tidepool-checked-interface-retained module="
                         ++ moduleNameString (ms_mod_name summary) ++ reason
+              dependentFiles <- liftIO (readIORef (tcg_dependent_files tcg))
+              liftIO (modifyIORef' checkedFactsRef ((ms_mod_name summary, ModuleFacts
+                { moduleFactTyCons = typeEnvTyCons (tcg_type_env tcg)
+                , moduleFactReferences = Set.empty
+                , moduleFactPackageRoots = []
+                , moduleFactHasDependentFiles = not (null dependentFiles)
+                , moduleFactQuasiQuoteOrigins = origins }) :))
               case homeInterfaceUse summary laterConsumers of
                 HomeInterfaceLeaf -> when timing $ liftIO $ hPutStrLn stderr $
                   "tidepool-checked-interface-elided module="
@@ -2266,6 +2303,13 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
         case [(tcg, probes) | Just (tcg, probes) <- checked] of
           [(tcg, probes)] -> do
             env <- getSession
+            forM_ exactCompilation $ \compilation -> do
+              captured <- liftIO (captureDependencySources modGraphRaw)
+              facts <- liftIO (readIORef checkedFactsRef)
+              evidence <- liftIO (dependencyEvidenceFor env captured freshGraph facts)
+              verified <- liftIO (revalidateExactScope env (compilationScope compilation))
+              either (liftIO . ioError . userError) pure verified
+              liftIO (writeExactCompilation compilation evidence)
             pure CheckedEnvironmentResult
               { crHscEnv = cpFinalEnv plan env
               , crTargetTcGblEnv = tcg
@@ -2463,6 +2507,43 @@ revalidateAcceptedCandidates candidates = and <$> forM candidates (\candidate ->
 -- | Capture import-resolution witnesses from the exact module graph. Package
 -- imports have no selected home path; their ordered absent home candidates
 -- remain evidence because creating one later would introduce shadowing.
+-- Explicit exact imports have owner witnesses rather than source lookup
+-- witnesses. The existing fresh-source evidence owner handles every remaining
+-- import, including negative candidates for newly discovered dependencies.
+sourceEvidenceGraph
+  :: Maybe ExactScope -> ModuleGraph
+  -> (ModuleGraph, [((String, String, Bool), [(String, String, Bool, String)])])
+sourceEvidenceGraph Nothing graph = (graph, [])
+sourceEvidenceGraph (Just scope) graph =
+  (mkModuleGraph (map strip nodes), map importsFor summaries)
+  where
+    nodes = mgModSummaries' graph
+    summaries = [summary | ModuleNode _ summary <- nodes]
+    exactOwners = Map.fromList [(mkModuleName (exactModule iface), exactUnit iface)
+      | (iface, _, _) <- scopeInterfaces scope]
+    selected qualifier imported = do
+      unit <- Map.lookup (unLoc imported) exactOwners
+      case qualifier of
+        NoPkgQual -> Just unit
+        ThisPkg requested | unitString requested == unit -> Just unit
+        _ -> Nothing
+    qualifierKey NoPkgQual = "none"
+    qualifierKey (ThisPkg unit) = "this:" ++ unitString unit
+    qualifierKey (OtherPkg unit) = "other:" ++ unitString unit
+    importsFor summary =
+      ((unitString (moduleUnit (ms_mod summary)), moduleNameString (ms_mod_name summary),
+        ms_hsc_src summary == HsBootFile),
+       sort . nub $
+         [(qualifierKey qualifier, moduleNameString (unLoc imported), boot, unit)
+         | (boot, edges) <- [(False, ms_textual_imps summary), (True, ms_srcimps summary)]
+         , (qualifier, imported) <- edges
+         , Just unit <- [selected qualifier imported]])
+    ordinary (qualifier, imported) = isNothing (selected qualifier imported)
+    strip (ModuleNode edges summary) = ModuleNode edges (summary
+      { ms_textual_imps = filter ordinary (ms_textual_imps summary)
+      , ms_srcimps = filter ordinary (ms_srcimps summary) })
+    strip node = node
+
 dependencyEvidenceFor
   :: HscEnv -> ([DependencySource], Bool) -> ModuleGraph -> [(ModuleName, ModuleFacts)]
   -> IO DependencyEvidence
@@ -2899,6 +2980,7 @@ normalVariant purpose path = do
   targetModName' <- targetModuleNameFor path
   pure PipelineVariant
    { pvLabel = "runPipeline"
+   , pvExactScope = Nothing
    , pvDownsweepExcludes = []
    , pvTransformParsed = transformFor purpose targetModName'
    , pvPlan = \_timing modGraphRaw -> pure CompilePlan
@@ -2978,14 +3060,20 @@ normalVariant purpose path = do
 sessionVariant :: CompilePurpose -> SessionScope -> FilePath -> IO PipelineVariant
 sessionVariant purpose scope path = do
   targetModName' <- targetModuleNameFor path
+  exact <- traverse (\manifest -> readExactScope manifest >>= either (ioError . userError) pure)
+    (ssExactScope scope)
   -- The injected source-less @Val.G<g>@ modules: excluded from the
   -- downsweep (no source to summarise) — a deferred module's @import@ of
   -- them resolves from the HPT entry 'cpBeforeModule' registers immediately
   -- before the importing source module is compiled.
   let excludedVal = map renderSessionModule (ssValIfaces scope)
+      excludedExact = [mkModuleName (exactModule iface)
+        | admitted <- maybe [] pure exact, (iface, _, _) <- scopeInterfaces admitted]
+      excludedOwners = excludedVal ++ excludedExact
   pure PipelineVariant
    { pvLabel = "runSessionPipeline"
-   , pvDownsweepExcludes = excludedVal
+   , pvExactScope = exact
+   , pvDownsweepExcludes = excludedOwners
    , pvTransformParsed = transformFor purpose targetModName'
    , pvPlan = \timing modGraphRaw -> do
       let directSummaries = [ ms | ModuleNode _ ms <- mgModSummaries' modGraphRaw ]
@@ -3007,7 +3095,7 @@ sessionVariant purpose scope path = do
                   , any (`Set.member` seed) (importsOf ms)
                   ]
             in if grown == seed then seed else closure grown
-          deferredMods = closure (Set.fromList (targetModName' : excludedVal))
+          deferredMods = closure (Set.fromList (targetModName' : excludedOwners))
           -- Exclude every deferred module (target ∪ transitive Val-importers)
           -- from the load' graph. A @load'@ that reaches one of them (e.g.
           -- @LoadDependenciesOf targetHUM@, whose @createBuildPlan@ includes
@@ -3049,7 +3137,20 @@ sessionVariant purpose scope path = do
             -- depGraph@ (target absent), which would yield an empty HPT
             -- instance env ("No instance for ToJSON …").
             do hscMG <- getSession
-               setSession hscMG { hsc_mod_graph = modGraphRaw }
+               case exact of
+                 Nothing -> setSession hscMG { hsc_mod_graph = modGraphRaw }
+                 Just admitted -> do
+                   loaded <- liftIO (readExactIfaceArtifacts hscMG
+                     [iface | (iface, _, _) <- scopeInterfaces admitted])
+                   interfaces <- either (liftIO . ioError . userError) pure loaded
+                   hydrated <- liftIO (hydrateExactScope hscMG interfaces)
+                   let selected =
+                         [(iface, imports)
+                         | (owner, imports) <- scopeLexical admitted
+                         , (iface, _, _) <- scopeInterfaces admitted
+                         , owner == (exactUnit iface, exactModule iface)]
+                   graph <- liftIO (installExactLexicalGraph modGraphRaw selected hydrated)
+                   either (liftIO . ioError . userError) setSession graph
             -- Dependency order matters now that MULTIPLE modules (not just
             -- one leaf target) may need deferred, post-injection compilation:
             -- a deferred module that itself depends on another deferred
@@ -3067,7 +3168,7 @@ sessionVariant purpose scope path = do
           -- ('isSessionScopeActive'); every such turn's wrapper compiles a
           -- target literally named @__result@ (scaffold-reserved, never
           -- @result@).
-        , cpResultBinders = [scaffoldTargetName]
+        , cpResultBinders = [scaffoldTargetName, scaffoldOutputBase]
         , cpBeforeModule = \modSum ->
             when (ms_mod_name modSum `Set.member` deferredMods) $ do
               injected <- liftIO (readIORef injectedRef)

@@ -1,6 +1,7 @@
 -- Exact original groups can retain package dependencies that the optimized
 -- target no longer references. Their executable closure is part of admission.
-module Tidepool.OriginalProductRoots (requiredOriginalPackageGlobals) where
+module Tidepool.OriginalProductRoots
+  ( requiredOriginalPackageGlobals, requiredOriginalPackageGlobalsWithExact ) where
 
 import Control.Monad (foldM)
 import qualified Data.Map.Strict as Map
@@ -15,7 +16,16 @@ import Tidepool.ModuleCandidates
 requiredOriginalPackageGlobals
   :: [(String, String, Either String [ProjectedGroup])] -> [ModuleCandidate] -> [GlobalDecl]
   -> Either String [SymbolIdentity]
-requiredOriginalPackageGlobals fresh cached target = do
+requiredOriginalPackageGlobals fresh cached =
+  requiredOriginalPackageGlobalsWithExact fresh cached []
+
+-- Exact context outlines come from the same protected original products,
+-- independently of source lookup and the selected virtual lexical graph.
+requiredOriginalPackageGlobalsWithExact
+  :: [(String, String, Either String [ProjectedGroup])] -> [ModuleCandidate]
+  -> [(String, String, [(Word, [SymbolIdentity], [(SymbolIdentity, Bool)])])]
+  -> [GlobalDecl] -> Either String [SymbolIdentity]
+requiredOriginalPackageGlobalsWithExact fresh cached exact target = do
   indexed <- foldM insert Map.empty groups
   Set.toAscList <$> walk indexed Set.empty Set.empty
     [globalIdentity global | global <- target
@@ -34,10 +44,13 @@ requiredOriginalPackageGlobals fresh cached target = do
              [(candidateGlobalIdentity global, candidateGlobalGeneration global == Nothing)
               | global <- candidateGroupGlobals group])
          | candidate <- cached, group <- candidateGroups candidate ]
+      ++ [((unit, name, ordinal), binders, references)
+         | (unit, name, originals) <- exact, (ordinal, binders, references) <- originals]
     owners = Set.fromList
       ([(T.pack unit, T.pack name) | (unit, name, _) <- fresh]
        ++ [(T.pack (candidateUnit candidate), T.pack (candidateModule candidate))
-          | candidate <- cached])
+          | candidate <- cached]
+       ++ [(T.pack unit, T.pack name) | (unit, name, _) <- exact])
     failures = Map.fromList
       [((T.pack unit, T.pack name), reason) | (unit, name, Left reason) <- fresh]
     insert indexed (key, binders, globals) = foldM

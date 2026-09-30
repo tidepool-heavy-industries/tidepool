@@ -198,8 +198,23 @@ installExactLexicalGraph sourceGraph lexical env
     home = homeUnitId (hsc_home_unit env)
     known = Set.union owners (Set.fromList
       [keyOf summary | ModuleNode _ summary <- mgModSummaries' sourceGraph])
-    unadmittedHomeEdge (ModuleNode edges _) = any missing edges
+    -- Downsweep intentionally excludes admitted exact owners. It may therefore
+    -- omit the corresponding edge; textual imports still cannot expose an
+    -- implementation-only HPT entry outside the selected lexical graph.
+    unadmittedHomeEdge (ModuleNode edges summary) = any missing edges
+      || any hiddenImport (ms_textual_imps summary ++ ms_srcimps summary)
     unadmittedHomeEdge _ = False
+    hiddenImport (qualifier, imported) =
+      let name = unLoc imported
+          local = case qualifier of
+            NoPkgQual -> True
+            ThisPkg unit -> unit == home
+            OtherPkg _ -> False
+      in local && case lookupHpt (hsc_HPT env) name of
+        Nothing -> False
+        Just hmi ->
+          (unitString (moduleUnit (mi_module (hm_iface hmi))), moduleNameString name)
+            `Set.notMember` known
     missing (NodeKey_Module (ModNodeKeyWithUid (GWIB name _) unit)) =
       unit == home && (unitString unit, moduleNameString name) `Set.notMember` known
     missing _ = False
