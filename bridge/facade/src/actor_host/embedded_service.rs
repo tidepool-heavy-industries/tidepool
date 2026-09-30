@@ -172,6 +172,137 @@ pub(super) async fn attach_actor(
     })
 }
 
+pub(super) async fn attach_checkpoint_actor(
+    runtime: &EmbeddedHarnessRuntime,
+    run_root: &Path,
+    installation: LocalResidentInstallation,
+    initial_input: Option<String>,
+) -> Result<EmbeddedActor, String> {
+    let actor = installation.actor.identity();
+    let lease = installation
+        .checkpoint
+        .as_ref()
+        .ok_or("embedded child requires a checkpoint")?;
+    if installation.context_parent != Some(lease.issuer) {
+        return Err("embedded child context parent does not match checkpoint issuer".into());
+    }
+    let gate = installation
+        .fork_gate
+        .as_ref()
+        .ok_or("embedded checkpoint child requires its admitted fork gate")?;
+    gate.wait_committed()
+        .await
+        .map_err(|error| error.to_string())?;
+    if gate.publication().map_err(|error| error.to_string())?
+        == exomonad_actor::ForkGroupPublication::Deferred
+    {
+        lease
+            .wait_published()
+            .await
+            .map_err(|refusal| format!("checkpoint publication refused: {refusal:?}"))?;
+    }
+    let captured = installation
+        .checkpoint_attachment
+        .as_ref()
+        .and_then(|attachment| {
+            attachment.downcast::<super::embedded_harness::EmbeddedHostedCheckpoint>()
+        })
+        .ok_or("embedded child requires its admitted hosted checkpoint attachment")?;
+    let path = captured.child_path(actor);
+    let identity = harness::embedding::HostIdentity {
+        run: super::runtime_namespace(run_root),
+        actor: path,
+        incarnation: actor.incarnation.0.to_string(),
+    };
+    let policy = Arc::new(EmbeddedPolicyInstallation::from_installation(&installation));
+    let embedded = runtime
+        .attach_checkpoint(
+            identity,
+            installation.actor.clone(),
+            policy,
+            lease,
+            gate,
+            captured,
+        )
+        .map_err(|error| error.to_string())?;
+    if let Some(input) = initial_input {
+        embedded
+            .conversation
+            .input(
+                &format!("launch:{}:{}", actor.id.0, actor.incarnation.0),
+                "operator",
+                &input,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let conversation = Arc::clone(&embedded.conversation);
+    let (cancel, cancellation) = watch::channel(false);
+    Ok(EmbeddedActor {
+        conversation,
+        driver: embedded,
+        cancellation: cancel,
+        cancellation_rx: cancellation,
+    })
+}
+
+pub(super) async fn attach_selected_actor(
+    runtime: &EmbeddedHarnessRuntime,
+    run_root: &Path,
+    parent: super::embedded_context::SelectedProviderParent,
+    installation: LocalResidentInstallation,
+    initial_input: Option<String>,
+) -> Result<EmbeddedActor, String> {
+    if installation.checkpoint.is_some() || installation.context_parent.is_some() {
+        return Err("selected embedded child requires explicit fresh context".into());
+    }
+    let gate = installation
+        .fork_gate
+        .as_ref()
+        .ok_or("selected embedded child requires its admitted fork gate")?;
+    gate.wait_committed()
+        .await
+        .map_err(|error| error.to_string())?;
+    let actor = installation.actor.identity();
+    let run = super::runtime_namespace(run_root);
+    if parent.identity().run != run {
+        return Err("selected provider ancestor belongs to another run".into());
+    }
+    let identity = harness::embedding::HostIdentity {
+        run,
+        actor: parent.child_path(actor),
+        incarnation: actor.incarnation.0.to_string(),
+    };
+    let policy = Arc::new(EmbeddedPolicyInstallation::from_installation(&installation));
+    let embedded = runtime
+        .attach(
+            identity,
+            installation.actor.clone(),
+            policy,
+            Some(&parent.identity().actor),
+        )
+        .map_err(|error| error.to_string())?;
+    if let Some(input) = initial_input {
+        embedded
+            .conversation
+            .input(
+                &format!("launch:{}:{}", actor.id.0, actor.incarnation.0),
+                "operator",
+                &input,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let conversation = Arc::clone(&embedded.conversation);
+    let (cancel, cancellation_rx) = watch::channel(false);
+    Ok(EmbeddedActor {
+        conversation,
+        driver: embedded,
+        cancellation: cancel,
+        cancellation_rx,
+    })
+}
+
 impl Drop for EmbeddedService {
     fn drop(&mut self) {
         if let Some(server) = &self.server {

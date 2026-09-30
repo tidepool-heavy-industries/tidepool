@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Tidepool.CertifiedProducts
-  ( encodeCertifiedProducts ) where
+  ( encodeCertifiedProducts, resolvePackageGlobal ) where
 
 import Prelude hiding (product)
 import Codec.CBOR.Encoding
@@ -15,18 +15,24 @@ import qualified Data.ByteString as BS
 import Data.Foldable (fold)
 import Data.List (find)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, mapMaybe)
 import qualified Data.Set as Set
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
 import qualified Data.Text as T
 import Data.Word (Word64)
 import GHC.Driver.Env (HscEnv)
-import GHC.Unit.Module (mkModule, mkModuleName)
+import GHC.Unit.Module (Module, mkModule, mkModuleName)
+import GHC.Unit.Module.ModIface (ModIface, mi_decls, mi_exports)
+import GHC.Unit.Module.Location (ml_hi_file)
 import GHC.Unit.Types (stringToUnit)
-import GHC.Iface.Env (lookupOrig)
+import GHC.Iface.Syntax (IfaceDecl(..), ifaceDeclImplicitBndrs)
 import GHC.Iface.Load (importDecl)
 import GHC.Tc.Utils.Monad (initIfaceLoad)
-import GHC.Types.Name.Occurrence (mkVarOcc)
+import GHC.Types.Id (Id)
+import GHC.Types.Name (Name, getName, nameModule_maybe, nameOccName, wiredInNameTyThing_maybe)
+import GHC.Types.Name.Occurrence (OccName, mkVarOcc, isVarOcc)
+import GHC.Types.Avail (availNames)
+import GHC.Types.TyThing (TyThing(..), implicitTyThings)
 import GHC.Data.Maybe (MaybeErr(..))
 import Numeric (showHex)
 
@@ -41,6 +47,7 @@ import Tidepool.ModuleCandidates
   ( CandidateGlobal(..), CandidateGroup(..), ModuleCandidate(..) )
 import Tidepool.PackageWitness
   ( PackageImportRoot(..), packageImportRoot, validatePackageImportRoot )
+import Tidepool.FatIface (readExactInterface)
 
 data Product = Product
   { productOrigin :: T.Text
@@ -227,40 +234,86 @@ encodeGlobalWitness env packageRef binders homeModules identity rep signature ev
 
 packageOwner :: HscEnv -> IORef [PackageWitness] -> SymbolIdentity
   -> IO (Either String Encoding)
-packageOwner env packageRef identity
+packageOwner env packageRef identity = do
+  selected <- resolvePackageGlobal env identity
+  case selected of
+    Left reason -> pure (Left reason)
+    Right (_, witness) -> do
+      let sha = T.pack (packageSha256 witness)
+      modifyIORef' packageRef ((symbolUnit identity,
+        symbolModule identity, packagePath witness, sha) :)
+      pure (Right (array
+        [encodeString "package", encodeString (symbolUnit identity)
+        , encodeString (symbolModule identity), encodeString sha, encodeIdentity identity]))
+
+-- Recovery and certification share one canonical package owner. The Id comes
+-- from the exact interface's structural declaration, including implicit tops.
+resolvePackageGlobal :: HscEnv -> SymbolIdentity
+  -> IO (Either String (Id, PackageImportRoot))
+resolvePackageGlobal env identity
   | symbolNamespace identity /= "value" =
       pure (Left (refusal "unsupported external global namespace"))
   | otherwise = do
-      let unit = T.unpack (symbolUnit identity)
-          name = T.unpack (symbolModule identity)
-          owner = mkModule (stringToUnit unit) (mkModuleName name)
-      -- Compiled globals identify their defining module, which can be hidden
-      -- from source imports. The shared package witness owner resolves that
-      -- exact module in the pinned package closure, without an exposure filter.
+      let owner = mkModule (stringToUnit (T.unpack (symbolUnit identity)))
+            (mkModuleName (T.unpack (symbolModule identity)))
       found <- packageImportRoot env owner
       case found of
         Left reason -> pure (Left (refusal reason))
         Right witness -> do
-          original <- initIfaceLoad env (lookupOrig owner
-            (mkVarOcc (T.unpack (symbolOccurrence identity))))
-          selected <- initIfaceLoad env (importDecl original)
+          exact <- readExactInterface env owner
+          selected <- case exact of
+            Left _ -> pure (Failed ())
+            Right (iface, location)
+              | ml_hi_file location /= packagePath witness -> pure (Failed ())
+              | otherwise -> canonicalPackageGlobal env owner iface
+                  (mkVarOcc (T.unpack (symbolOccurrence identity)))
           case selected of
-            Failed _ -> pure (Left (refusal "selected package global is absent from loaded interface"))
-            Succeeded _ -> do
+            Succeeded (AnId identifier) -> do
               unchanged <- validatePackageImportRoot env witness
-              case unchanged of
-                Left reason -> pure (Left (refusal reason))
-                Right () -> do
-                  let sha = T.pack (packageSha256 witness)
-                  modifyIORef' packageRef ((symbolUnit identity,
-                    symbolModule identity, packagePath witness, sha) :)
-                  pure (Right (array
-                    [encodeString "package", encodeString (symbolUnit identity)
-                    , encodeString (symbolModule identity)
-                    , encodeString sha, encodeIdentity identity]))
+              pure $ case unchanged of
+                Left reason -> Left (refusal reason)
+                Right () -> Right (identifier, witness)
+            _ -> pure (Left (refusal "selected package global is absent from loaded interface"))
   where
     refusal reason = reason ++ ": " ++ T.unpack (symbolUnit identity) ++ ":"
       ++ T.unpack (symbolModule identity) ++ "." ++ T.unpack (symbolOccurrence identity)
+
+-- The interface supplies canonical Names, including known-key bindings.
+-- An implicit Id is authenticated by its defining parent declaration; wired
+-- parents are authenticated by the exact interface's exported canonical Name.
+-- Reconstructing a Name from Module/OccName can mint a different Unique.
+canonicalPackageGlobal :: HscEnv -> Module -> ModIface -> OccName
+  -> IO (MaybeErr () TyThing)
+canonicalPackageGlobal env owner iface wanted = do
+  let owned name = nameModule_maybe name == Just owner
+      declarations =
+        [ ifName declaration
+        | (_, declaration) <- mi_decls iface
+        , owned (ifName declaration)
+        , nameOccName (ifName declaration) == wanted
+            || wanted `elem` ifaceDeclImplicitBndrs declaration ]
+      wiredParents = mapMaybe wiredInNameTyThing_maybe
+        [ name | available <- mi_exports iface, name <- availNames available, owned name ]
+  parents <- mapM loadCanonical declarations
+  let things = [thing | Succeeded thing <- parents] ++ wiredParents
+      candidates = Map.fromList
+        [ (name, thing)
+        | parent <- things
+        , thing@(AnId _) <- parent : implicitTyThings parent
+        , let name = getName thing
+        , owned name, isVarOcc (nameOccName name), nameOccName name == wanted ]
+  pure $ case Map.elems candidates of
+    [thing] -> Succeeded thing
+    _ -> Failed ()
+  where
+    loadCanonical :: Name -> IO (MaybeErr () TyThing)
+    loadCanonical name = case wiredInNameTyThing_maybe name of
+      Just thing -> pure (Succeeded thing)
+      Nothing -> do
+        result <- initIfaceLoad env (importDecl name)
+        pure $ case result of
+          Failed _ -> Failed ()
+          Succeeded thing -> Succeeded thing
 
 encodeModule :: Product -> [(Word, [Encoding])] -> Encoding
 encodeModule product groups = array

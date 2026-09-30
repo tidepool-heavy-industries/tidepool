@@ -15,6 +15,7 @@ pub fn forks_decl() -> crate::EffectDecl {
             "ForksReleaseCheckpointWith :: Text -> Forks (Either CheckpointRefusal ())",
             "ForksPreviewWith :: ActorLaunchRole -> [ActorEffectKey] -> Maybe (Int, Int) -> Maybe Model -> Maybe ForkEffort -> ForkContext -> Maybe Text -> WorkerLifetime -> Forks (Either Text ((Text, Int, Maybe Int), Maybe WorkerLaunchPreview))",
             "ForksCommitWith :: Int -> Forks (Either Text ())",
+            "ForksCommitCapturedWith :: Int -> Forks (Either Text ())",
             "ForksAbortWith :: Int -> Forks (Either Text ())",
             "ForksCleanupWith :: Int -> Forks ForkGroupCleanupOutcome",
         ],

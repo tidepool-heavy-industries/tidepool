@@ -76,8 +76,23 @@ pub struct WatchId(pub u64);
 /// reservations created by the settling workbench or route callback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RequestReservationOwner {
-    Workbench(tidepool_runtime::session::WorkbenchExecutionId),
+    Workbench {
+        execution: tidepool_runtime::session::WorkbenchExecutionId,
+        attempt: WorkbenchReservationAttempt,
+    },
     Route(WatchId),
+}
+
+/// Distinguishes a concrete workbench attempt from a replay identity. An
+/// execution id can recur when a caller retries the same logical operation;
+/// cleanup from that earlier attempt must never release the retry's requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkbenchReservationAttempt([u8; 16]);
+
+impl WorkbenchReservationAttempt {
+    pub(crate) fn fresh() -> Self {
+        Self(*uuid::Uuid::new_v4().as_bytes())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -3321,9 +3336,10 @@ mod tests {
         let owner = actor(1);
         let other_owner = actor(2);
         let target = actor(3);
-        let operation = RequestReservationOwner::Workbench(
-            tidepool_runtime::session::WorkbenchExecutionId::from_digest([1; 16]),
-        );
+        let operation = RequestReservationOwner::Workbench {
+            execution: tidepool_runtime::session::WorkbenchExecutionId::from_digest([1; 16]),
+            attempt: WorkbenchReservationAttempt::fresh(),
+        };
         let reserve = |actor, operation: &RequestReservationOwner| {
             registry.reserve_for_operation(
                 actor,
@@ -3336,9 +3352,10 @@ mod tests {
         let leaked = reserve(owner, &operation);
         let committed = reserve(owner, &operation);
         let unrelated = reserve(other_owner, &operation);
-        let sibling_operation = RequestReservationOwner::Workbench(
-            tidepool_runtime::session::WorkbenchExecutionId::from_digest([2; 16]),
-        );
+        let sibling_operation = RequestReservationOwner::Workbench {
+            execution: tidepool_runtime::session::WorkbenchExecutionId::from_digest([2; 16]),
+            attempt: WorkbenchReservationAttempt::fresh(),
+        };
         let sibling = reserve(owner, &sibling_operation);
         let route_operation = RequestReservationOwner::Route(WatchId(1));
         let route = reserve(owner, &route_operation);
@@ -3380,6 +3397,58 @@ mod tests {
             vec![unrelated]
         );
         assert!(registry.abort_unsubmitted(owner, &operation).0.is_empty());
+    }
+
+    #[test]
+    fn stale_workbench_attempt_cleanup_cannot_abort_same_execution_retry() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let execution = tidepool_runtime::session::WorkbenchExecutionId::from_digest([7; 16]);
+        let attempt_a = RequestReservationOwner::Workbench {
+            execution: execution.clone(),
+            attempt: WorkbenchReservationAttempt::fresh(),
+        };
+        let request_a = registry.reserve_for_operation(
+            owner,
+            target,
+            "attempt A".into(),
+            true,
+            Some(attempt_a.clone()),
+        );
+
+        assert_eq!(
+            registry.abort_unsubmitted(owner, &attempt_a).0,
+            vec![request_a]
+        );
+        assert_eq!(
+            registry.observe_response(owner, request_a),
+            Err(ReplyError::Stale)
+        );
+
+        let attempt_b = RequestReservationOwner::Workbench {
+            execution,
+            attempt: WorkbenchReservationAttempt::fresh(),
+        };
+        let request_b = registry.reserve_for_operation(
+            owner,
+            target,
+            "attempt B".into(),
+            true,
+            Some(attempt_b.clone()),
+        );
+
+        // A delayed cleanup from the prior attempt is harmless even though
+        // this retry has the same logical execution id and actor incarnation.
+        assert!(registry.abort_unsubmitted(owner, &attempt_a).0.is_empty());
+        assert!(matches!(
+            registry.observe_response(owner, request_b),
+            Ok(ResponseObservation::Pending(_))
+        ));
+        assert_eq!(
+            registry.abort_unsubmitted(owner, &attempt_b).0,
+            vec![request_b]
+        );
     }
 
     #[tokio::test]

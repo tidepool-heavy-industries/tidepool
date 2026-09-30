@@ -20,8 +20,17 @@ mod custody_tests;
 #[cfg(all(test, feature = "codex-compat"))]
 mod documentation_tests;
 #[cfg(test)]
+mod embedded_captured_unfold_tests;
+#[cfg(test)]
+mod embedded_checkpoint_children_survive_later_failure_tests;
+#[cfg(test)]
+mod embedded_checkpoint_children_tests;
+#[cfg(test)]
 mod embedded_command_tests;
+mod embedded_context;
 mod embedded_harness;
+#[cfg(test)]
+mod embedded_notification_tests;
 #[cfg(test)]
 mod embedded_pending_compaction_tests;
 mod embedded_policy;
@@ -91,25 +100,34 @@ use exomonad_agent::interactive::InputProducerId;
 use exomonad_agent::{
     copy_interactive_binding, native_interactive_backend, read_interactive_binding,
 };
+#[cfg(feature = "codex-compat")]
 use exomonad_agent::{
-    BackendThreadId, InputOperationId, InputPurpose, InteractiveAgentBackend, InteractiveAgentSpec,
-    InteractiveInputEnvelope, InteractiveInputMode, InteractiveInputTarget, InteractiveLaunchMode,
-    InteractiveNativeSandbox, InteractiveNativeToolPolicy, InteractivePolicyMount,
-    QueueReadyThread, ReasoningEffort,
+    BackendThreadId, InputOperationId, InputPurpose, InteractiveAgentBackend,
+    InteractiveInputEnvelope, InteractiveInputMode, InteractiveInputTarget,
 };
+#[cfg(feature = "codex-compat")]
+use exomonad_agent::{
+    InteractiveAgentSpec, InteractiveNativeSandbox, InteractiveNativeToolPolicy,
+    InteractivePolicyMount,
+};
+use exomonad_agent::{InteractiveLaunchMode, QueueReadyThread, ReasoningEffort};
 use frunk::{hlist, HCons, HNil};
 use futures_util::FutureExt;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+use exomonad_node::DurableInbox;
+#[cfg(feature = "codex-compat")]
 use exomonad_node::{
-    DurableInbox, ProcessInvocation, ProcessMountBoundary, ProcessSupervisorClient,
-    ProcessSupervisorManifest, ServiceEnvironment, TmuxLaunch, TmuxPaneId, TmuxSession,
-    BUBBLEWRAP_PROGRAM,
+    ProcessInvocation, ProcessSupervisorClient, ProcessSupervisorManifest, ServiceEnvironment,
+    TmuxLaunch,
 };
+use exomonad_node::{ProcessMountBoundary, TmuxPaneId, TmuxSession, BUBBLEWRAP_PROGRAM};
+#[cfg(feature = "codex-compat")]
+use exomonad_worktree::WorktreeHandle;
 use exomonad_worktree::{
-    ActiveBinding, AgentRef as WorktreePrincipal, BindingTable, EventJournal, GitCli,
-    WorktreeHandle, WorktreeId, WorktreeManager, WorktreeMonitor, WorktreeRegistry,
+    ActiveBinding, AgentRef as WorktreePrincipal, BindingTable, EventJournal, GitCli, WorktreeId,
+    WorktreeManager, WorktreeMonitor, WorktreeRegistry,
 };
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_handlers::{
@@ -159,8 +177,10 @@ const EXOMONAD_REPLACED_EFFECT_NAMES: &[&str] = &[
     "worktreeHead",
     "worktreeId",
 ];
+#[cfg(feature = "codex-compat")]
 const CHILD_LIFECYCLE_NOTICE: &str = "A child actor changed lifecycle state.";
 const APPLICATION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(feature = "codex-compat")]
 const APPLICATION_TASK_GRACE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -296,6 +316,7 @@ impl Drop for ActorWorkspaceCustody {
 }
 
 impl ActorForkWorkspaceAdmission {
+    #[cfg(feature = "codex-compat")]
     fn recover_workspace(
         &self,
         predecessor: ActorRef,
@@ -431,7 +452,7 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
         owner: ActorRef,
         actor_path: String,
         seed: ForkWorkspaceSeed,
-        policy: exomonad_actor::ForkWorkspacePolicy,
+        _policy: exomonad_actor::ForkWorkspacePolicy,
     ) -> exomonad_actor::ForkWorkspaceAdmissionFuture<'_> {
         let worktrees = self.worktrees.clone();
         let custody = self.clone();
@@ -463,7 +484,7 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
             let (handle, workspace, notice) = match &custody.native {
                 Some(native) if native.layout.is_some() => {
                     let prepared = native
-                        .prepare_workspace(owner, authorized, policy)
+                        .prepare_workspace(owner, authorized, _policy)
                         .await
                         .map_err(|error| ForkWorkspaceAdmissionError {
                             detail: error.to_string(),
@@ -556,6 +577,7 @@ const PROCESS_RECOVERY_RECORD: &str = "process-recovery.json";
 // The local forest admits its root first, before any child actor identities.
 const ROOT_ACTOR_ID: exomonad_actor::ActorId = exomonad_actor::ActorId(1);
 
+#[cfg(feature = "codex-compat")]
 fn hosted_operation_journal(run_root: &Path, actor: exomonad_actor::ActorId) -> PathBuf {
     run_root
         .join("hosted-operations")
@@ -1325,7 +1347,7 @@ async fn dispatch_embedded_browser_command(
     nodes: &[exomonad_actor::ActorGraphNode],
     live: &BTreeSet<ActorRef>,
     projection: &embedded_projection::EmbeddedProjection,
-    conversations: &HashMap<ActorRef, Arc<harness::embedding::Conversation>>,
+    conversation_for: impl Fn(ActorRef) -> Option<Arc<harness::embedding::Conversation>>,
     lifecycle: &embedded_projection::LifecycleSender,
 ) -> harness::server::CommandReceiptOutcome {
     let route = |target: Option<harness::embedding::HostIdentity>, reason: String| {
@@ -1364,7 +1386,7 @@ async fn dispatch_embedded_browser_command(
     if !is_live {
         return route(Some(target), "target actor is no longer live".into());
     }
-    let Some(conversation) = conversations.get(&actor) else {
+    let Some(conversation) = conversation_for(actor) else {
         return route(Some(target), "target has no live model conversation".into());
     };
 
@@ -1408,6 +1430,7 @@ async fn dispatch_embedded_browser_command(
 }
 
 #[derive(Clone)]
+#[cfg(feature = "codex-compat")]
 struct PendingUpdateReconciliation {
     inbox: Arc<ActorInbox>,
     sequence: u64,
@@ -1415,7 +1438,9 @@ struct PendingUpdateReconciliation {
     reconciler: exomonad_actor::RequestUpdateReconciler,
 }
 
+#[cfg(feature = "codex-compat")]
 impl PendingUpdateReconciliation {
+    #[cfg(feature = "codex-compat")]
     fn retain_unconfirmed(&self, detail: String) {
         let exact_receipt = matches!(
             self.inbox.observe_receipt(self.sequence),
@@ -1465,6 +1490,7 @@ struct LaunchedInteractiveApplication {
     binding: InteractiveBindingRequest,
 }
 
+#[cfg(feature = "codex-compat")]
 struct OwnerNotification {
     owner: ActorRef,
     inbox: Arc<ActorInbox>,
@@ -1472,14 +1498,17 @@ struct OwnerNotification {
 }
 
 type ActorInbox = DurableInbox<DurableActorEvent, DeliveryProvenance>;
+#[cfg(feature = "codex-compat")]
 type WatchRetentionCheck = Arc<dyn Fn(ActorRef, exomonad_actor::WatchId) -> bool + Send + Sync>;
 /// Whether the owner has already observed a watch (via `ObserveWatchWith` or
 /// `pollWatch`) settled at or after the given `occurred_at_unix_ms`. Backed
 /// by `ResidentForest::watch_observed_since`.
+#[cfg(feature = "codex-compat")]
 type WatchObservationCheck =
     Arc<dyn Fn(ActorRef, exomonad_actor::WatchId, u64) -> bool + Send + Sync>;
 /// The request presented to an actor that it has not begun replying to.
 /// Backed by `ResidentForest::open_request_without_reply`.
+#[cfg(feature = "codex-compat")]
 type OpenRequestCheck = Arc<dyn Fn(ActorRef) -> Option<exomonad_actor::RequestId> + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1489,6 +1518,7 @@ enum DeliveryProvenance {
         sender: ActorRef,
         target: ActorRef,
     },
+    #[cfg(feature = "codex-compat")]
     RequestUpdate {
         owner: ActorRef,
         target: ActorRef,
@@ -1500,12 +1530,14 @@ enum DeliveryProvenance {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 enum DurableActorEvent {
+    #[cfg(feature = "codex-compat")]
     Typed(TypedActorEvent),
     Text(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
+#[cfg(feature = "codex-compat")]
 enum TypedActorEvent {
     ProviderTurnFailed {
         #[serde(default)]
@@ -1545,6 +1577,7 @@ enum TypedActorEvent {
 }
 
 impl DurableActorEvent {
+    #[cfg(feature = "codex-compat")]
     fn session(activation: &exomonad_actor::ResidentActivation) -> Self {
         Self::Typed(TypedActorEvent::SessionReady {
             sequence: activation.id.sequence(),
@@ -1559,6 +1592,7 @@ impl DurableActorEvent {
     /// say so: it read "since actor launch" beside a child's settlement, and a
     /// live parent was told its child had taken five and a half minutes when the
     /// child had lived seventy seconds. The figure was the parent's own age.
+    #[cfg(feature = "codex-compat")]
     fn render(&self, reader_launched_at: Option<i64>) -> String {
         let elapsed = |occurred: u64| match reader_launched_at
             .and_then(|start| i64::try_from(occurred).ok()?.checked_sub(start))
@@ -1648,6 +1682,7 @@ impl DurableActorEvent {
 }
 
 /// Why a command job's settlement ended without its report, in words.
+#[cfg(feature = "codex-compat")]
 fn command_settlement_loss(transition: &exomonad_actor::SettlementTransition) -> &'static str {
     use exomonad_actor::{ResponseFailure, SettlementTransition};
     match transition {
@@ -1672,6 +1707,7 @@ fn command_settlement_loss(transition: &exomonad_actor::SettlementTransition) ->
 /// The engine has no notion of a re-fork attempt of the same label — a
 /// relaunch under the same path is a distinct actor identity, not a
 /// numbered retry of this one — so no attempt number is rendered here.
+#[cfg(feature = "codex-compat")]
 fn settlement_identity_line(notification: &exomonad_actor::SettlementNotification) -> String {
     match (&notification.target_path, &notification.target_revision) {
         (Some(path), Some(revision)) => format!("{path} (seeded from {revision})\n"),
@@ -1713,6 +1749,7 @@ struct InteractiveCleanupReceipt {
 }
 
 impl InteractiveCleanupReceipt {
+    #[cfg(feature = "codex-compat")]
     fn degraded(&self) -> bool {
         self.components
             .iter()
@@ -1746,6 +1783,7 @@ impl InteractiveCleanupReceipt {
         }
     }
 
+    #[cfg(feature = "codex-compat")]
     fn render(&self) -> String {
         let actor = format!("{}@{}", self.actor.id.0, self.actor.incarnation.0);
         let retained = self.retained();
@@ -1761,6 +1799,7 @@ impl InteractiveCleanupReceipt {
 }
 
 struct InteractiveApplicationOwner {
+    #[cfg(feature = "codex-compat")]
     supervisor: Option<ActorRef>,
     creator_workspace: Option<BoundWorkspace>,
     cancel: Option<oneshot::Sender<NativeRetirement>>,
@@ -1772,7 +1811,9 @@ struct InteractiveApplicationOwner {
     #[cfg(feature = "codex-compat")]
     hosted: hosted_retirement::HostedSlot,
     embedded_policy: Option<Arc<embedded_policy::EmbeddedPolicyInstallation>>,
+    #[cfg(feature = "codex-compat")]
     launch: HostLaunchState,
+    #[cfg(feature = "codex-compat")]
     pending_activations: Vec<exomonad_actor::ResidentActivation>,
     terminal: Option<ActorTerminal>,
     retirement: Arc<Mutex<Option<InteractiveCleanupReceipt>>>,
@@ -1787,6 +1828,7 @@ enum NativeRetirement {
 }
 
 #[derive(Clone)]
+#[cfg(feature = "codex-compat")]
 enum HostLaunchState {
     Pending,
     Published,
@@ -1794,10 +1836,12 @@ enum HostLaunchState {
     Failed(String),
 }
 
+#[cfg(feature = "codex-compat")]
 impl HostLaunchState {
     /// Phrase describing why the host cannot yet (or ever) hand off a
     /// published application for this actor, for surfacing to a caller whose
     /// delivery landed on an admitted actor with no provider running.
+    #[cfg(feature = "codex-compat")]
     fn provider_not_started_phase(&self) -> String {
         match self {
             HostLaunchState::Pending => "launching".to_string(),
@@ -1896,6 +1940,7 @@ impl NativeForkAdmission {
 }
 
 impl InteractiveApplicationOwner {
+    #[cfg(feature = "codex-compat")]
     fn reserve_scope(
         &mut self,
         workspace: ActorWorkspaceRequest<'_>,
@@ -2163,6 +2208,7 @@ enum RootRunDisposition {
     Recover,
 }
 
+#[cfg(feature = "codex-compat")]
 #[derive(Debug, Clone, Copy)]
 enum InteractiveOperation {
     BindWorktree,
@@ -2174,6 +2220,7 @@ enum InteractiveOperation {
     DiscoverBinding,
 }
 
+#[cfg(feature = "codex-compat")]
 impl fmt::Display for InteractiveOperation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
@@ -2189,6 +2236,7 @@ impl fmt::Display for InteractiveOperation {
     }
 }
 
+#[cfg(feature = "codex-compat")]
 impl InteractiveOperation {
     fn failure_class(self) -> ExternalApplicationFailureClass {
         match self {
@@ -2203,6 +2251,7 @@ impl InteractiveOperation {
     }
 }
 
+#[cfg(feature = "codex-compat")]
 #[derive(Debug, thiserror::Error)]
 #[error("actor {actor:?} failed to {operation}: {detail}")]
 struct InteractiveApplicationError {
@@ -2212,6 +2261,7 @@ struct InteractiveApplicationError {
     disposition: LaunchDisposition,
 }
 
+#[cfg(feature = "codex-compat")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LaunchDisposition {
     Failed,
@@ -2238,6 +2288,7 @@ async fn apply_application_failure(
     }
 }
 
+#[cfg(feature = "codex-compat")]
 fn application_error(
     actor: ActorRef,
     operation: InteractiveOperation,
@@ -2255,24 +2306,34 @@ struct InteractiveFleet {
     root: LocalActorRef,
     config: ActorHostConfig,
     run_root: PathBuf,
+    #[cfg(feature = "codex-compat")]
     tmux: TmuxSession,
+    #[cfg(feature = "codex-compat")]
     backend: HostRuntimeMode,
     worktrees: WorktreeManager,
+    #[cfg(feature = "codex-compat")]
     bindings: Arc<Mutex<BindingTable>>,
     /// Readiness events are best-effort notifications: a dropped receiver
     /// means the caller stopped observing startup, not a delivery bug, so
     /// every `readiness.send(..)` below discards the `SendError` with `.ok()`.
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
     worktree_authority: ActorWorktreeAuthority,
+    #[cfg(feature = "codex-compat")]
     watch_retention: WatchRetentionCheck,
+    #[cfg(feature = "codex-compat")]
     watch_observation: WatchObservationCheck,
+    #[cfg(feature = "codex-compat")]
     open_request: OpenRequestCheck,
     /// `None` when the run has no frozen workspace to compare against, in
     /// which case source drift is never observed (see
     /// `run_delivery_pump`'s source observation loop).
+    #[cfg(feature = "codex-compat")]
     source_layers: Option<Arc<crate::exomonad::source::ExomonadSourceReload>>,
+    #[cfg(feature = "codex-compat")]
     actor_recovery: Arc<exomonad_actor::ActorRecoveryJournal>,
+    #[cfg(feature = "codex-compat")]
     recovered_threads: Arc<BTreeMap<ActorRef, (ActorRef, QueueReadyThread)>>,
+    #[cfg(feature = "codex-compat")]
     recovered_root_predecessor: Option<ActorRef>,
     host_graph: Arc<dyn Fn() -> Vec<exomonad_actor::ActorGraphNode> + Send + Sync>,
 }
@@ -2283,12 +2344,18 @@ struct InteractiveLaunchContext {
     root: ActorRef,
     config: ActorHostConfig,
     run_root: PathBuf,
+    #[cfg(feature = "codex-compat")]
     tmux: TmuxSession,
+    #[cfg(feature = "codex-compat")]
     backend: HostRuntimeMode,
     worktrees: WorktreeManager,
+    #[cfg(feature = "codex-compat")]
     source_layers: Option<Arc<crate::exomonad::source::ExomonadSourceReload>>,
+    #[cfg(feature = "codex-compat")]
     bindings: Arc<Mutex<BindingTable>>,
+    #[cfg(feature = "codex-compat")]
     actor_recovery: Arc<exomonad_actor::ActorRecoveryJournal>,
+    #[cfg(feature = "codex-compat")]
     recovered_threads: Arc<BTreeMap<ActorRef, (ActorRef, QueueReadyThread)>>,
 }
 
@@ -2300,6 +2367,7 @@ enum HostRuntimeMode {
 }
 
 impl HostRuntimeMode {
+    #[cfg(feature = "codex-compat")]
     fn codex_backend(&self) -> Option<&Arc<dyn InteractiveAgentBackend>> {
         match self {
             #[cfg(feature = "codex-compat")]
@@ -2390,6 +2458,7 @@ pub(crate) async fn run(
             config.tmux_session
         )));
     }
+    #[cfg(feature = "codex-compat")]
     let runtime_backend = match &config.backend {
         #[cfg(feature = "codex-compat")]
         crate::exomonad::HostBackendOptions::Codex(installation) => {
@@ -2506,6 +2575,7 @@ pub(crate) async fn run(
             "host recovery cannot adopt a root without complete durable actor, source, and conversation evidence",
         ));
     }
+    #[cfg(feature = "codex-compat")]
     let recovered_root_predecessor = recovered_root.map(|(predecessor, _)| predecessor);
     #[cfg(feature = "codex-compat")]
     if let (true, Some(predecessor)) = (
@@ -2576,7 +2646,7 @@ pub(crate) async fn run(
         HostRuntimeMode::Embedded => BTreeMap::new(),
     });
     #[cfg(not(feature = "codex-compat"))]
-    let recovered_threads = Arc::new(BTreeMap::new());
+    let recovered_threads = Arc::new(BTreeMap::<ActorRef, (ActorRef, QueueReadyThread)>::new());
     let recovered_predecessors = recovered_threads
         .values()
         .map(|(predecessor, _)| *predecessor)
@@ -2746,16 +2816,22 @@ pub(crate) async fn run(
     tracing::info!(socket = %operator_socket.display(), "operator control and attachment ready");
     let (shutdown, shutdown_rx) = watch::channel(None);
     let (root_config, root_config_rx) = watch::channel(config.clone());
+    #[cfg(feature = "codex-compat")]
     let watch_forest = Arc::clone(&forest);
     let host_graph_forest = Arc::clone(&forest);
     let host_graph = Arc::new(move || host_graph_forest.inspect_host_graph());
+    #[cfg(feature = "codex-compat")]
     let watch_retention: WatchRetentionCheck =
         Arc::new(move |owner, watch| watch_forest.retains_watch(owner, watch));
+    #[cfg(feature = "codex-compat")]
     let watch_observation_forest = Arc::clone(&forest);
+    #[cfg(feature = "codex-compat")]
     let watch_observation: WatchObservationCheck = Arc::new(move |owner, watch, occurred_at| {
         watch_observation_forest.watch_observed_since(owner, watch, occurred_at)
     });
+    #[cfg(feature = "codex-compat")]
     let open_request_forest = Arc::clone(&forest);
+    #[cfg(feature = "codex-compat")]
     let open_request: OpenRequestCheck =
         Arc::new(move |actor| open_request_forest.open_request_without_reply(actor));
     let mut applications_task = tokio::spawn(run_interactive_applications(
@@ -2765,18 +2841,28 @@ pub(crate) async fn run(
             root: root_actor.clone(),
             config: config.clone(),
             run_root: run_root.clone(),
+            #[cfg(feature = "codex-compat")]
             tmux: tmux.clone(),
+            #[cfg(feature = "codex-compat")]
             backend: runtime_backend,
             worktrees,
+            #[cfg(feature = "codex-compat")]
             bindings,
             readiness: readiness.clone(),
             worktree_authority: worktree_authority.clone(),
+            #[cfg(feature = "codex-compat")]
             watch_retention,
+            #[cfg(feature = "codex-compat")]
             watch_observation,
+            #[cfg(feature = "codex-compat")]
             open_request,
+            #[cfg(feature = "codex-compat")]
             source_layers,
+            #[cfg(feature = "codex-compat")]
             actor_recovery: actor_recovery.clone(),
+            #[cfg(feature = "codex-compat")]
             recovered_threads,
+            #[cfg(feature = "codex-compat")]
             recovered_root_predecessor,
             host_graph,
         },
@@ -3547,6 +3633,7 @@ fn compile_driver(
     let session_root = run_root.join("haskell-session");
     std::fs::create_dir_all(&session_root)?;
     let compiled = match run_turn(HaskellTurnRequest {
+        exact_context: None,
         session_id: None,
         turn_text: DRIVER_ENTRY,
         templates: &templates,
@@ -3979,6 +4066,7 @@ fn spawn_owned_retirement(
 /// Consume the exact retained slot without moving it out of the lifecycle row.
 /// The returned outcome is reporting evidence only: the slot still owns the
 /// cleanup receipt and the caller must account for hosted work and leases.
+#[cfg(feature = "codex-compat")]
 async fn retire_scoped_process(
     scope: Option<Arc<Mutex<scoped_custody::ScopedProcessSlot>>>,
     native_retirement: NativeRetirement,
@@ -4052,18 +4140,28 @@ async fn run_interactive_applications(
         root,
         config,
         run_root,
+        #[cfg(feature = "codex-compat")]
         tmux,
+        #[cfg(feature = "codex-compat")]
         backend,
         worktrees,
+        #[cfg(feature = "codex-compat")]
         bindings,
         readiness,
         worktree_authority,
+        #[cfg(feature = "codex-compat")]
         watch_retention,
+        #[cfg(feature = "codex-compat")]
         watch_observation,
+        #[cfg(feature = "codex-compat")]
         open_request,
+        #[cfg(feature = "codex-compat")]
         source_layers,
+        #[cfg(feature = "codex-compat")]
         actor_recovery,
+        #[cfg(feature = "codex-compat")]
         recovered_threads,
+        #[cfg(feature = "codex-compat")]
         recovered_root_predecessor,
         host_graph,
     } = fleet;
@@ -4083,12 +4181,18 @@ async fn run_interactive_applications(
         root: root_identity,
         config,
         run_root,
+        #[cfg(feature = "codex-compat")]
         tmux: tmux.clone(),
+        #[cfg(feature = "codex-compat")]
         backend: backend.clone(),
         worktrees: worktrees.clone(),
+        #[cfg(feature = "codex-compat")]
         source_layers: source_layers.clone(),
+        #[cfg(feature = "codex-compat")]
         bindings: Arc::clone(&bindings),
+        #[cfg(feature = "codex-compat")]
         actor_recovery,
+        #[cfg(feature = "codex-compat")]
         recovered_threads: Arc::clone(&recovered_threads),
     };
     #[cfg(feature = "codex-compat")]
@@ -4100,8 +4204,18 @@ async fn run_interactive_applications(
     let mut embedded_tasks: JoinSet<(ActorRef, LocalActorRef, Result<(), String>)> = JoinSet::new();
     let mut embedded_cancellations = HashMap::new();
     let mut embedded_live = BTreeSet::new();
-    let mut embedded_conversations: HashMap<ActorRef, Arc<harness::embedding::Conversation>> =
+    let mut embedded_conversations: HashMap<ActorRef, embedded_harness::EmbeddedActorBinding> =
         HashMap::new();
+    let mut embedded_pending_activations: HashMap<
+        ActorRef,
+        Vec<exomonad_actor::ResidentActivation>,
+    > = HashMap::new();
+    let (embedded_ready_tx, mut embedded_ready_rx) = mpsc::unbounded_channel::<(
+        ActorRef,
+        LocalActorRef,
+        Arc<harness::embedding::Conversation>,
+        oneshot::Sender<()>,
+    )>();
     let (embedded_lifecycle_tx, mut embedded_lifecycle_rx) =
         embedded_projection::LifecycleSender::channel();
     let mut embedded_projection = embedded_projection::EmbeddedProjection::default();
@@ -4155,9 +4269,21 @@ async fn run_interactive_applications(
                             &states,
                         );
                     }
+                    for actor in states.keys() {
+                        if let Some(binding) = embedded_conversations.get(actor).cloned() {
+                            schedule_embedded_notification_drain(*actor, binding, &mut notifications);
+                        }
+                    }
                 }
             }
             _ = health.tick() => {
+                for (actor, binding) in &embedded_conversations {
+                    schedule_embedded_notification_drain(
+                        *actor,
+                        binding.clone(),
+                        &mut notifications,
+                    );
+                }
                 if let Some(service) = embedded_service.as_mut() {
                     if service.server_finished() {
                         let detail = match service.shutdown().await {
@@ -4319,7 +4445,9 @@ async fn run_interactive_applications(
                     &nodes,
                     &embedded_live,
                     &embedded_projection,
-                    &embedded_conversations,
+                    |actor| embedded_conversations.get(&actor)
+                        .filter(|binding| binding.is_live())
+                        .and_then(|binding| binding.conversation()),
                     &embedded_lifecycle_tx,
                 )
                 .await;
@@ -4337,6 +4465,7 @@ async fn run_interactive_applications(
                     Err(error) => break Some(format!("embedded Engine task failed: {error}")),
                 };
                 embedded_live.remove(&actor);
+                embedded_pending_activations.remove(&actor);
                 let lifecycle = match local_actor.terminal().get().map(|terminal| terminal.kind) {
                     Some(ActorExitKind::Completed | ActorExitKind::Cancelled) => {
                         harness::server::HostActorLifecycle::Retired
@@ -4345,7 +4474,12 @@ async fn run_interactive_applications(
                 };
                 embedded_lifecycle_tx.publish(actor, lifecycle);
                 embedded_cancellations.remove(&actor);
-                embedded_conversations.remove(&actor);
+                    if let Some(binding) = embedded_conversations.get_mut(&actor) {
+                    binding.mark_retired();
+                }
+                if let Some(binding) = embedded_conversations.get(&actor).cloned() {
+                    schedule_embedded_notification_drain(actor, binding, &mut notifications);
+                }
                 if let Some(waiters) = release_waiters.remove(&actor) {
                     for waiter in waiters {
                         waiter.answer(exomonad_actor::ResourceRelease::Released);
@@ -4380,6 +4514,53 @@ async fn run_interactive_applications(
                     }
                 }
             }
+            Some((actor, local_actor, conversation, ready_ack)) = embedded_ready_rx.recv() => {
+                let Some(activations) = embedded_pending_activations.remove(&actor) else {
+                    continue;
+                };
+                if !embedded_live.contains(&actor) || !embedded_cancellations.contains_key(&actor) {
+                    continue;
+                }
+                let Ok(_admission) = local_actor.admit_transaction() else {
+                    continue;
+                };
+                let Some(binding) = embedded_conversations.get_mut(&actor) else {
+                    tracing::warn!(?actor, "embedded child attachment has no notification owner");
+                    continue;
+                };
+                if !binding.is_live() {
+                    tracing::warn!(?actor, "embedded child attachment identity is no longer admitted");
+                    continue;
+                }
+                if let Err(error) = binding.set_conversation(Arc::clone(&conversation)) {
+                    tracing::warn!(?actor, ?error, "embedded child attachment was not accepted");
+                    continue;
+                }
+                schedule_embedded_notification_drain(actor, binding.clone(), &mut notifications);
+                let mut activation_error = None;
+                for activation in activations {
+                    let sequence = activation.id.sequence();
+                    if let Err(error) = conversation
+                        .input(
+                            &format!("session:{}:{sequence}", activation.request.0),
+                            "resident",
+                            &activation.message,
+                        )
+                        .await
+                    {
+                        activation_error = Some(format!("embedded activation for {actor:?} was not admitted: {error}"));
+                        break;
+                    }
+                }
+                if let Some(error) = activation_error {
+                    if let Some(binding) = embedded_conversations.get(&actor) {
+                        binding.mark_retired();
+                    }
+                    tracing::warn!(?actor, %error, "embedded child attachment refused an activation");
+                    continue;
+                }
+                ready_ack.send(()).ok();
+            }
             event = lifecycle.recv() => {
                 let Some(event) = event else { break None };
                 match event {
@@ -4404,6 +4585,31 @@ async fn run_interactive_applications(
                                 break Some("embedded backend has no launch settings".into());
                             };
                             let actor = installation.actor.identity();
+                            let path = if actor == root_identity {
+                                harness::model::AgentPath("/root".into())
+                            } else {
+                                let Some(captured) = installation.checkpoint_attachment.as_ref()
+                                    .and_then(|attachment| attachment.downcast::<embedded_harness::EmbeddedHostedCheckpoint>()) else {
+                                    break Some(format!("embedded child {actor:?} has no admitted checkpoint identity"));
+                                };
+                                captured.child_path(actor)
+                            };
+                            if let std::collections::hash_map::Entry::Vacant(entry) =
+                                embedded_conversations.entry(actor)
+                            {
+                                let binding = match open_embedded_actor_binding(
+                                    &launch_context.run_root,
+                                    actor,
+                                    path.clone(),
+                                    None,
+                                ) {
+                                    Ok(binding) => binding,
+                                    Err(error) => break Some(format!(
+                                        "embedded actor {actor:?} notification owner could not open: {error}"
+                                    )),
+                                };
+                                entry.insert(binding);
+                            }
                             let is_root = actor == root_identity;
                             let mode = InteractiveLaunchMode::Fresh;
                             let model = match installation
@@ -4447,35 +4653,185 @@ async fn run_interactive_applications(
                                 Some(format!("{effort:?}")),
                             );
                             let local_actor = installation.actor.clone();
-                            if let Some(error) = embedded_root_attachment_error(
-                                actor,
-                                is_root,
-                                installation.checkpoint.is_some(),
-                                installation.context_parent,
-                            ) {
-                                break Some(error);
+                            if is_root {
+                                if let Some(error) = embedded_root_attachment_error(
+                                    actor,
+                                    true,
+                                    installation.checkpoint.is_some(),
+                                    installation.context_parent,
+                                ) {
+                                    break Some(error);
+                                }
+                            } else if installation.checkpoint.is_none() && installation.context_parent.is_some() {
+                                break Some(format!(
+                                    "embedded child actor {actor:?} requires a hosted checkpoint"
+                                ));
                             }
-                            let path = harness::model::AgentPath("/root".into());
                             let initial_input = installation.initial_user_message.clone();
                             let has_initial_input = initial_input.is_some();
-                            let embedded = match embedded_service::attach_actor(
+                            if !is_root {
+                                let selected_parent = if installation.checkpoint.is_none() {
+                                    let identities = embedded_conversations.iter().map(|(actor, conversation)| (*actor, conversation.identity().clone())).collect();
+                                    match embedded_context::selected_provider_parent(
+                                        &embedded_run, installation.creator.or(installation.supervisor_parent), &(host_graph)(), &identities,
+                                    ) {
+                                        Ok(parent) => Some(parent),
+                                        Err(error) => {
+                                            if let Some(gate) = installation.fork_gate.as_ref() {
+                                                gate.mark_failed().ok();
+                                            }
+                                            tracing::warn!(?actor, %error, "selected provider ancestry refused");
+                                            if let Err(failure) = apply_application_failure(local_actor.clone(), ExternalApplicationFailure {
+                                                class: ExternalApplicationFailureClass::ToolHostStartup,
+                                                detail: error,
+                                            }).await {
+                                                tracing::warn!(?actor, %failure, "selected child startup failure was not delivered");
+                                            }
+                                            continue;
+                                        },
+                                    }
+                                } else { None };
+                                let queue_admission = match local_actor.admit_transaction() {
+                                    Ok(admission) => admission,
+                                    Err(error) => {
+                                        tracing::warn!(?actor, %error, "embedded child queue admission refused");
+                                        continue;
+                                    }
+                                };
+                                let fork_gate = installation.fork_gate.clone();
+                                let committed_gate = fork_gate.clone();
+                                let runtime = Arc::clone(&service.runtime);
+                                let run_root = launch_context.run_root.clone();
+                                let ready = embedded_ready_tx.clone();
+                                let embedded_lifecycle = embedded_lifecycle_tx.clone();
+                                #[cfg(test)]
+                                let test_transport = service.test_transport();
+                                let (cancel, mut cancellation_rx) = watch::channel(false);
+                                embedded_cancellations.insert(actor, cancel.clone());
+                                embedded_pending_activations.insert(actor, Vec::new());
+                                embedded_live.insert(actor);
+                                embedded_tasks.spawn(async move {
+                                    let result = async {
+                                        if let Some(gate) = committed_gate {
+                                            tokio::select! {
+                                                committed = gate.wait_committed() => {
+                                                    committed.map_err(|error| format!("fork publication refused: {error}"))?;
+                                                }
+                                                _ = cancellation_rx.changed() => return Ok(()),
+                                            }
+                                        }
+                                        if *cancellation_rx.borrow() || local_actor.terminal().get().is_some() {
+                                            return Ok(());
+                                        }
+                                        let attachment = async {
+                                            match selected_parent {
+                                                Some(parent) => embedded_service::attach_selected_actor(runtime.as_ref(), &run_root, parent, *installation, initial_input).await,
+                                                None => embedded_service::attach_checkpoint_actor(runtime.as_ref(), &run_root, *installation, initial_input).await,
+                                            }
+                                        };
+                                        let mut embedded = tokio::select! {
+                                            attached = attachment => attached?,
+                                            _ = cancellation_rx.changed() => return Ok(()),
+                                        };
+                                        if *cancellation_rx.borrow() || local_actor.terminal().get().is_some() {
+                                            return Ok(());
+                                        }
+                                        embedded.cancellation = cancel;
+                                        embedded.cancellation_rx = cancellation_rx;
+                                        let (ready_ack, acknowledged) = oneshot::channel();
+                                        ready.send((actor, local_actor.clone(), Arc::clone(&embedded.conversation), ready_ack))
+                                            .map_err(|_| "embedded attachment owner stopped".to_owned())?;
+                                        tokio::select! {
+                                            accepted = acknowledged => {
+                                                accepted.map_err(|_| "embedded attachment was not accepted".to_owned())?;
+                                            }
+                                            _ = embedded.cancellation_rx.changed() => return Ok(()),
+                                        }
+                                        #[cfg(test)]
+                                        let result = if let Some(transport) = test_transport {
+                                            embedded_service::drive_conversation_with_transport::<
+                                                harness::transport::auth::CodexFileAuth, _
+                                            >(
+                                                embedded.driver, runtime, &settings, model, effort,
+                                                instructions, embedded.cancellation_rx,
+                                                embedded_lifecycle, actor, transport,
+                                            ).await
+                                        } else {
+                                            embedded_service::drive_conversation(
+                                                embedded.driver, runtime, &settings, model, effort,
+                                                instructions, embedded.cancellation_rx,
+                                                embedded_lifecycle, actor,
+                                            ).await
+                                        };
+                                        #[cfg(not(test))]
+                                        let result = embedded_service::drive_conversation(
+                                            embedded.driver, runtime, &settings, model, effort,
+                                            instructions, embedded.cancellation_rx,
+                                            embedded_lifecycle, actor,
+                                        ).await;
+                                        result
+                                    }.await;
+                                    (actor, local_actor, result)
+                                });
+                                // The child attachment may wait for checkpoint publication.
+                                // Its actor input queue is already owned here, so advertise
+                                // readiness before that wait: the issuing cell can be waiting
+                                // for this group to become ready before it delivers the capture.
+                                if let Some(gate) = fork_gate {
+                                    if let Err(error) = gate.mark_ready() {
+                                        if let Some(cancel) = embedded_cancellations.get(&actor) {
+                                            cancel.send_replace(true);
+                                        }
+                                        tracing::warn!(?actor, %error, "embedded child fork admission refused");
+                                    }
+                                }
+                                drop(queue_admission);
+                                continue;
+                            }
+                            let attachment = embedded_service::attach_actor(
                                 service,
                                 &launch_context.run_root,
-                                path.clone(),
+                                harness::model::AgentPath("/root".into()),
                                 None,
                                 *installation,
                                 initial_input,
-                            )
-                            .await {
+                            ).await;
+                            let embedded = match attachment {
                                 Ok(embedded) => embedded,
                                 Err(error) => break Some(format!(
                                     "embedded actor {actor:?} could not attach: {error}"
                                 )),
                             };
                             let root_conversation = Arc::clone(&embedded.conversation);
+                            let binding = embedded_conversations
+                                .get_mut(&actor)
+                                .expect("embedded notification owner was opened before attach");
+                            let Ok(attachment_admission) = local_actor.admit_transaction() else {
+                                binding.mark_retired();
+                                embedded.cancellation.send_replace(true);
+                                continue;
+                            };
+                            match binding.set_conversation(Arc::clone(&root_conversation)) {
+                                Ok(()) => {}
+                                Err(embedded_harness::ConversationAttachError::Retired) => {
+                                    embedded.cancellation.send_replace(true);
+                                    continue;
+                                }
+                                Err(embedded_harness::ConversationAttachError::IdentityMismatch) => {
+                                    break Some(format!(
+                                        "embedded conversation identity does not match actor {actor:?}"
+                                    ));
+                                }
+                            }
                             embedded_projection
                                 .attached(actor, root_conversation.identity());
-                            embedded_conversations.insert(actor, Arc::clone(&root_conversation));
+                            if let Some(binding) = embedded_conversations.get(&actor).cloned() {
+                                schedule_embedded_notification_drain(
+                                    actor,
+                                    binding,
+                                    &mut notifications,
+                                );
+                            }
                             embedded_cancellations.insert(actor, embedded.cancellation.clone());
                             embedded_live.insert(actor);
                             let lifecycle = if has_initial_input {
@@ -4557,6 +4913,7 @@ async fn run_interactive_applications(
                                     })
                                     .ok();
                             }
+                            drop(attachment_admission);
                             continue;
                         }
                         #[cfg(feature = "codex-compat")]
@@ -4600,6 +4957,7 @@ async fn run_interactive_applications(
                         let hosted_slot = Arc::new(Mutex::new(None));
                         let pane_slot = Arc::new(Mutex::new(None));
                         let mut owner = InteractiveApplicationOwner {
+                            #[cfg(feature = "codex-compat")]
                             supervisor: installation.supervisor_parent,
                             creator_workspace: None,
                             cancel: Some(cancel),
@@ -4611,7 +4969,9 @@ async fn run_interactive_applications(
                             #[cfg(feature = "codex-compat")]
                             hosted: hosted_slot.clone(),
                             embedded_policy: Some(embedded_policy),
+                            #[cfg(feature = "codex-compat")]
                             launch: HostLaunchState::Pending,
+                            #[cfg(feature = "codex-compat")]
                             pending_activations: Vec::new(),
                             terminal: None,
                             retirement: Arc::new(Mutex::new(None)),
@@ -4686,7 +5046,20 @@ async fn run_interactive_applications(
                     LocalResidentDeployment::SessionReady { activation } => {
                         let actor = activation.id.actor();
                         if launch_context.config.backend.kind() == crate::exomonad::ExomonadBackend::Embedded {
-                            let Some(conversation) = embedded_conversations.get(&actor) else {
+                            if let Some(pending) = embedded_pending_activations.get_mut(&actor) {
+                                pending.push(activation);
+                                continue;
+                            }
+                            let Some(conversation) = embedded_conversations.get(&actor)
+                                .filter(|binding| binding.is_live())
+                                .and_then(|binding| binding.conversation()) else {
+                                if actor != root_identity {
+                                    if let Some(cancel) = embedded_cancellations.get(&actor) {
+                                        cancel.send_replace(true);
+                                    }
+                                    tracing::warn!(?actor, "embedded child activation arrived without an attached conversation");
+                                    continue;
+                                }
                                 break Some(format!("embedded actor {actor:?} received an activation before conversation attachment"));
                             };
                             let sequence = activation.id.sequence();
@@ -4696,8 +5069,15 @@ async fn run_interactive_applications(
                                     "resident",
                                     &activation.message,
                                 )
-                                .await
+                            .await
                             {
+                                if actor != root_identity {
+                                    if let Some(cancel) = embedded_cancellations.get(&actor) {
+                                        cancel.send_replace(true);
+                                    }
+                                    tracing::warn!(?actor, %error, "embedded child activation was refused");
+                                    continue;
+                                }
                                 break Some(format!("embedded activation for {actor:?} was not admitted: {error}"));
                             }
                             continue;
@@ -4732,7 +5112,17 @@ async fn run_interactive_applications(
                         if let Some(cancel) = embedded_cancellations.remove(&actor) {
                             cancel.send_replace(true);
                         }
-                        embedded_conversations.remove(&actor);
+                        embedded_pending_activations.remove(&actor);
+                        if let Some(binding) = embedded_conversations.get_mut(&actor) {
+                            binding.mark_retired();
+                        }
+                        if let Some(binding) = embedded_conversations.get(&actor).cloned() {
+                            schedule_embedded_notification_drain(
+                                actor,
+                                binding,
+                                &mut notifications,
+                            );
+                        }
                         let lifecycle = if terminal.kind == ActorExitKind::Failed {
                             harness::server::HostActorLifecycle::Lost
                         } else {
@@ -4784,7 +5174,6 @@ async fn run_interactive_applications(
                             None => release_waiters.entry(actor).or_default().push(request),
                         }
                     }
-                    #[cfg(feature = "codex-compat")]
                     LocalResidentDeployment::CommandBackend(request) => {
                         // An actor with an agent process of its own runs its
                         // commands inside that process's sandbox. One without
@@ -4794,83 +5183,56 @@ async fn run_interactive_applications(
                         // custody of. Borrowing an ancestor's sandbox, which
                         // is what this did before, put the command somewhere
                         // the actor's own worktree is mounted read-only.
-                        let backend = launch_context.config.command_resources.clone()
-                            .ok_or_else(|| tidepool_bridge_effects::CommandError::CommandUnavailable("this run has no command resource authority".into()))
-                            .and_then(|resources| {
-                                match deployments.iter().find(|app| app.actor == request.owner).and_then(|app| app.thread.clone()) {
-                                    Some(thread) => {
-                                        let Some(backend) = launch_context.backend.codex_backend() else {
-                                            return Err(tidepool_bridge_effects::CommandError::CommandUnavailable(
-                                                "native command backend is unavailable for the embedded provider".into(),
-                                            ));
-                                        };
-                                        Ok(Arc::new(commands::NativeCommandBackend::new(
-                                            Arc::clone(backend), thread, resources, request.owner,
-                                        )) as Arc<dyn exomonad_actor::command_jobs::CommandBackend>)
-                                    },
-                                    None => {
-                                        let bubblewrap = resolve_scope_bubblewrap(
-                                            &launch_context.config.pane_environment,
-                                        )
-                                        .map_err(|error| {
-                                            tidepool_bridge_effects::CommandError::CommandUnavailable(
-                                                format!("cannot resolve bubblewrap for resident commands: {error}"),
-                                            )
-                                        })?;
-                                        Ok(Arc::new(commands::HostCommandBackend::new(
-                                            resources,
-                                            request.owner,
-                                            resident_command_roots(
-                                                &worktree_authority,
-                                                &launch_context.worktrees,
-                                                &launch_context.config.workspace,
-                                                request.owner,
-                                            ),
-                                            bubblewrap,
-                                        ))
-                                            as Arc<dyn exomonad_actor::command_jobs::CommandBackend>)
-                                    }
-                                }
-                            });
-                        request.supply(backend);
-                    }
-                    #[cfg(not(feature = "codex-compat"))]
-                    LocalResidentDeployment::CommandBackend(request) => {
-                        let backend = launch_context
-                            .config
-                            .command_resources
-                            .clone()
-                            .ok_or_else(|| {
-                                tidepool_bridge_effects::CommandError::CommandUnavailable(
-                                    "this run has no command resource authority".into(),
-                                )
-                            })
-                            .and_then(|resources| {
-                                let bubblewrap = resolve_scope_bubblewrap(
-                                    &launch_context.config.pane_environment,
-                                )
-                                .map_err(|error| {
-                                    tidepool_bridge_effects::CommandError::CommandUnavailable(
-                                        format!("cannot resolve bubblewrap for resident commands: {error}"),
-                                    )
-                                })?;
-                                Ok(Arc::new(commands::HostCommandBackend::new(
-                                    resources,
-                                    request.owner,
-                                    resident_command_roots(
-                                        &worktree_authority,
-                                        &launch_context.worktrees,
-                                        &launch_context.config.workspace,
-                                        request.owner,
-                                    ),
-                                    bubblewrap,
-                                )) as Arc<dyn exomonad_actor::command_jobs::CommandBackend>)
-                            });
-                        request.supply(backend);
+                        let owner = request.owner;
+                        let resource_client = launch_context.config.command_resources.clone();
+                        let host_resources = resource_client.clone();
+                        #[cfg(feature = "codex-compat")]
+                        supply_resident_command_backend(
+                            request,
+                            &launch_context.config,
+                            &worktree_authority,
+                            &launch_context.worktrees,
+                            owner,
+                            resource_client,
+                            host_resources,
+                            deployments
+                                .iter()
+                                .find(|app| app.actor == owner)
+                                .and_then(|app| app.thread.clone()),
+                            launch_context.backend.codex_backend().cloned(),
+                        );
+                        #[cfg(not(feature = "codex-compat"))]
+                        supply_resident_command_backend(
+                            request,
+                            &launch_context.config,
+                            &worktree_authority,
+                            &launch_context.worktrees,
+                            owner,
+                            host_resources,
+                        );
                     }
                     #[cfg(feature = "codex-compat")]
                     LocalResidentDeployment::NotificationSend(command) => {
                         let target = command.target();
+                        if launch_context.config.backend.kind()
+                            == crate::exomonad::ExomonadBackend::Embedded
+                        {
+                            if let Some(binding) = embedded_conversations
+                                .get(&target)
+                                .filter(|binding| binding.is_live())
+                            {
+                                schedule_embedded_notification_send(
+                                    command,
+                                    binding,
+                                    &mut notifications,
+                                );
+                            } else {
+                                command.rejected(
+                                    exomonad_actor::NotificationError::Unavailable,
+                                );
+                            }
+                            continue;
+                        }
                         let Some(application) = deployments.iter().find(|app| app.actor == target) else {
                             command.rejected(exomonad_actor::NotificationError::Unavailable);
                             continue;
@@ -4890,10 +5252,35 @@ async fn run_interactive_applications(
                     }
                     #[cfg(not(feature = "codex-compat"))]
                     LocalResidentDeployment::NotificationSend(command) => {
-                        command.rejected(exomonad_actor::NotificationError::Unavailable);
+                        let target = command.target();
+                        if let Some(binding) = embedded_conversations
+                            .get(&target)
+                            .filter(|binding| binding.is_live())
+                        {
+                            schedule_embedded_notification_send(
+                                command,
+                                binding,
+                                &mut notifications,
+                            );
+                        } else {
+                            command.rejected(exomonad_actor::NotificationError::Unavailable);
+                        }
                     }
                     #[cfg(feature = "codex-compat")]
                     LocalResidentDeployment::NotificationPoll(command) => {
+                        if launch_context.config.backend.kind()
+                            == crate::exomonad::ExomonadBackend::Embedded
+                        {
+                            let target = command.receipt().target();
+                            let result = match embedded_conversations.get(&target) {
+                                Some(binding) => {
+                                    observe_embedded_notification(&command, binding, target).await
+                                }
+                                None => Err(exomonad_actor::NotificationError::Unavailable),
+                            };
+                            command.observed(result);
+                            continue;
+                        }
                         let result = deployments.iter()
                             .find(|application| application.actor == command.receipt().target())
                             .ok_or(exomonad_actor::NotificationError::Unavailable)
@@ -4905,7 +5292,14 @@ async fn run_interactive_applications(
                     }
                     #[cfg(not(feature = "codex-compat"))]
                     LocalResidentDeployment::NotificationPoll(command) => {
-                        command.observed(Err(exomonad_actor::NotificationError::Unavailable));
+                        let target = command.receipt().target();
+                        let result = match embedded_conversations.get(&target) {
+                            Some(binding) => {
+                                observe_embedded_notification(&command, binding, target).await
+                            }
+                            None => Err(exomonad_actor::NotificationError::Unavailable),
+                        };
+                        command.observed(result);
                     }
                     #[cfg(feature = "codex-compat")]
                     LocalResidentDeployment::RequestUpdate { delivery } => {
@@ -5415,6 +5809,10 @@ async fn run_interactive_applications(
                     None => {}
                 }
                 }
+                #[cfg(not(feature = "codex-compat"))]
+                if let Some(Ok((actor, Err(error)))) = notified {
+                    tracing::warn!(?actor, %error, "embedded notification delivery remains pending");
+                }
             }
         }
         };
@@ -5597,12 +5995,14 @@ async fn run_interactive_applications(
     }
 }
 
+#[cfg(feature = "codex-compat")]
 struct LaunchShutdown<T> {
     completed: Vec<T>,
     failures: Vec<LaunchShutdownFailure>,
 }
 
 #[derive(Debug, thiserror::Error)]
+#[cfg(feature = "codex-compat")]
 enum LaunchShutdownFailure {
     #[error("interactive launch cleanup failed: {0}")]
     Launch(InteractiveApplicationError),
@@ -5612,6 +6012,7 @@ enum LaunchShutdownFailure {
     TimedOut { pending: usize },
 }
 
+#[cfg(feature = "codex-compat")]
 impl<T> LaunchShutdown<T> {
     fn record<A>(
         &mut self,
@@ -5629,6 +6030,7 @@ impl<T> LaunchShutdown<T> {
 /// Keep observed completed deployments outside timeout-owned futures so they can
 /// still be retired if a later launch fails or cannot finish. Aborting a task is
 /// not proof that its process, hosted work or resource cleanup completed.
+#[cfg(feature = "codex-compat")]
 async fn drain_launches_for_shutdown<A: Send + 'static, T: Send + 'static>(
     launches: &mut JoinSet<(A, Result<Option<T>, InteractiveApplicationError>)>,
     grace: Duration,
@@ -5659,6 +6061,7 @@ async fn drain_launches_for_shutdown<A: Send + 'static, T: Send + 'static>(
     outcome
 }
 
+#[cfg(feature = "codex-compat")]
 struct InteractiveInheritance {
     thread: Option<BackendThreadId>,
     build_snapshot: Option<OverlaySnapshot>,
@@ -5745,7 +6148,9 @@ fn prepare_actor_worktree(
     Ok(Some(handle))
 }
 
+#[cfg(feature = "codex-compat")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "codex-compat")]
 enum ActorWorkspaceRequest<'a> {
     /// The actor may inspect the source checkout. Only the root receives write
     /// authority for it; an ordinary actor without a worktree remains a useful
@@ -5755,6 +6160,7 @@ enum ActorWorkspaceRequest<'a> {
     Worktree(&'a str),
 }
 
+#[cfg(feature = "codex-compat")]
 fn actor_workspace_request<'a>(
     root: bool,
     launch_worktrees: &'a [String],
@@ -6674,6 +7080,7 @@ fn accepts_activation(
     )
 }
 
+#[cfg(feature = "codex-compat")]
 fn accepts_activation_id(
     actor: ActorRef,
     last_sequence: u64,
@@ -6685,6 +7092,7 @@ fn accepts_activation_id(
 
 /// Toolchain processes selected for the source checkout are not valid in a
 /// child worktree. Each worker resolves tools from its own sources instead.
+#[cfg(feature = "codex-compat")]
 fn workspace_local_toolchain_pins(is_root: bool) -> BTreeSet<String> {
     if is_root {
         return BTreeSet::new();
@@ -6700,6 +7108,7 @@ fn workspace_local_toolchain_pins(is_root: bool) -> BTreeSet<String> {
     .collect()
 }
 
+#[cfg(feature = "codex-compat")]
 struct ActorLaunchEnvironment {
     set: BTreeMap<String, String>,
     unset: BTreeSet<String>,
@@ -6709,6 +7118,7 @@ struct ActorLaunchEnvironment {
 /// them to tmux. A worker's explicit unsets win over values captured from the
 /// root process; handing the same name to both tmux channels is ambiguous and
 /// rejected by the deployment adapter.
+#[cfg(feature = "codex-compat")]
 fn actor_launch_environment(
     mut inherited: BTreeMap<String, String>,
     is_root: bool,
@@ -6734,6 +7144,7 @@ fn actor_launch_environment(
     }
 }
 
+#[cfg(feature = "codex-compat")]
 fn fresh_process_supervisor_secret() -> String {
     format!(
         "{}{}",
@@ -6770,6 +7181,59 @@ fn resolve_scope_bubblewrap(
     ))
 }
 
+fn supply_resident_command_backend(
+    request: Arc<exomonad_actor::command_jobs::CommandBackendRequest>,
+    config: &ActorHostConfig,
+    authority: &ActorWorktreeAuthority,
+    worktrees: &WorktreeManager,
+    actor: ActorRef,
+    #[cfg(feature = "codex-compat")] resource_client: Option<
+        Arc<exomonad_node::command_resources::CommandResourceClient>,
+    >,
+    host_resources: Option<Arc<exomonad_node::command_resources::CommandResourceClient>>,
+    #[cfg(feature = "codex-compat")] thread: Option<QueueReadyThread>,
+    #[cfg(feature = "codex-compat")] native: Option<Arc<dyn InteractiveAgentBackend>>,
+) {
+    let backend = (|| {
+        #[cfg(feature = "codex-compat")]
+        if let Some(thread) = thread {
+            let resources = resource_client.as_ref().cloned().ok_or_else(|| {
+                tidepool_bridge_effects::CommandError::CommandUnavailable(
+                    "this run has no command resource authority".into(),
+                )
+            })?;
+            let Some(native) = native else {
+                return Err(tidepool_bridge_effects::CommandError::CommandUnavailable(
+                    "native command backend is unavailable for the embedded provider".into(),
+                ));
+            };
+            return Ok(Arc::new(commands::NativeCommandBackend::new(
+                native, thread, resources, actor,
+            ))
+                as Arc<dyn exomonad_actor::command_jobs::CommandBackend>);
+        }
+
+        let resources = host_resources.ok_or_else(|| {
+            tidepool_bridge_effects::CommandError::CommandUnavailable(
+                "this run has no command resource authority".into(),
+            )
+        })?;
+        let bubblewrap = resolve_scope_bubblewrap(&config.pane_environment).map_err(|error| {
+            tidepool_bridge_effects::CommandError::CommandUnavailable(format!(
+                "cannot resolve bubblewrap for resident commands: {error}"
+            ))
+        })?;
+        Ok(Arc::new(commands::HostCommandBackend::new(
+            resources,
+            actor,
+            resident_command_roots(authority, worktrees, &config.workspace, actor),
+            bubblewrap,
+        ))
+            as Arc<dyn exomonad_actor::command_jobs::CommandBackend>)
+    })();
+    request.supply(backend);
+}
+
 fn orient_launch_instructions(
     message: &str,
     observation: &exomonad_actor::ActorRuntimeObservation,
@@ -6780,6 +7244,360 @@ fn orient_launch_instructions(
     }
 }
 
+fn open_embedded_actor_binding(
+    run_root: &Path,
+    actor: ActorRef,
+    actor_path: harness::model::AgentPath,
+    conversation: Option<Arc<harness::embedding::Conversation>>,
+) -> Result<embedded_harness::EmbeddedActorBinding, String> {
+    let actor_root = run_root.join(format!("{}-{}", actor.id.0, actor.incarnation.0));
+    std::fs::create_dir_all(&actor_root).map_err(|error| error.to_string())?;
+    let inbox = ActorInbox::open(
+        actor_root.join("embedded-notifications.jsonl"),
+        actor_root.join("embedded-notifications.cursor"),
+    )
+    .map_err(|error| error.to_string())?;
+    let inbox_key = format!(
+        "{}:{}:{}:embedded-notifications",
+        runtime_namespace(run_root),
+        actor.id.0,
+        actor.incarnation.0,
+    );
+    let identity = harness::embedding::HostIdentity {
+        run: runtime_namespace(run_root),
+        actor: actor_path,
+        incarnation: actor.incarnation.0.to_string(),
+    };
+    Ok(embedded_harness::EmbeddedActorBinding::new(
+        identity,
+        Arc::new(inbox),
+        inbox_key,
+        conversation,
+    ))
+}
+
+fn schedule_embedded_notification_send(
+    command: Arc<exomonad_actor::NotificationSend>,
+    binding: &embedded_harness::EmbeddedActorBinding,
+    notifications: &mut JoinSet<(ActorRef, Result<(), String>)>,
+) {
+    let target = command.target();
+    let binding = binding.clone();
+    notifications.spawn(async move {
+        let result = async {
+            let inbox = Arc::clone(&binding.inbox);
+            let event = DurableActorEvent::Text(command.message().to_owned());
+            let context = DeliveryProvenance::Notification {
+                sender: command.owner(),
+                target,
+            };
+            let published = tidepool_runtime::spawn_blocking_in_span(move || {
+                inbox.publish_tracked(event, context)
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+            match published {
+                Ok(row) => command.admitted(binding.inbox_key.clone(), row.sequence),
+                Err(error @ exomonad_node::InboxError::UncertainWrite { .. }) => {
+                    command.rejected(exomonad_actor::NotificationError::Unconfirmed(
+                        error.to_string(),
+                    ));
+                    return Err(error.to_string());
+                }
+                Err(error) => {
+                    command.rejected(exomonad_actor::NotificationError::StorageFailure(
+                        error.to_string(),
+                    ));
+                    return Err(error.to_string());
+                }
+            }
+            deliver_embedded_notifications(target, binding).await
+        }
+        .await;
+        (target, result)
+    });
+}
+
+fn schedule_embedded_notification_drain(
+    target: ActorRef,
+    binding: embedded_harness::EmbeddedActorBinding,
+    notifications: &mut JoinSet<(ActorRef, Result<(), String>)>,
+) {
+    if binding.input_observer().is_none() {
+        return;
+    }
+    let pending = match binding.inbox.front_pending() {
+        Ok(Some(pending)) => pending,
+        Ok(None) => return,
+        Err(_) => return,
+    };
+    if !binding.is_live() {
+        let receipt = match binding.inbox.observe_receipt(pending.sequence) {
+            Ok(exomonad_node::ReceiptLookup::Retained(receipt)) => receipt,
+            Ok(exomonad_node::ReceiptLookup::Unavailable) | Err(_) => return,
+        };
+        if !matches!(
+            receipt.phase,
+            exomonad_node::DeliveryPhase::InFlight
+                | exomonad_node::DeliveryPhase::Submitted
+                | exomonad_node::DeliveryPhase::Unconfirmed
+        ) {
+            return;
+        }
+    }
+    let delivery = Arc::clone(&binding.delivery);
+    let Ok(guard) = delivery.try_lock_owned() else {
+        return;
+    };
+    notifications.spawn(async move {
+        let result = deliver_embedded_notifications_locked(target, binding, guard).await;
+        (target, result)
+    });
+}
+
+fn embedded_notification_operation_id(
+    inbox_key: &str,
+    sequence: u64,
+    sender: ActorRef,
+    target: ActorRef,
+) -> String {
+    format!(
+        "notification:{inbox_key}:{}:{}:{}:{}:{sequence}",
+        sender.id.0, sender.incarnation.0, target.id.0, target.incarnation.0,
+    )
+}
+
+async fn deliver_embedded_notifications(
+    target: ActorRef,
+    binding: embedded_harness::EmbeddedActorBinding,
+) -> Result<(), String> {
+    let delivery = Arc::clone(&binding.delivery);
+    let Ok(guard) = delivery.try_lock_owned() else {
+        return Ok(());
+    };
+    deliver_embedded_notifications_locked(target, binding, guard).await
+}
+
+async fn deliver_embedded_notifications_locked(
+    target: ActorRef,
+    binding: embedded_harness::EmbeddedActorBinding,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+) -> Result<(), String> {
+    use exomonad_node::{DeliveryPhase, ReceiptLookup};
+
+    let Some(observer) = binding.input_observer() else {
+        return Ok(());
+    };
+    loop {
+        let Some(envelope) = binding
+            .inbox
+            .front_pending()
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(());
+        };
+        let Some(context) = envelope.receipt_context else {
+            return Err("embedded notification inbox contains an untracked row".into());
+        };
+        #[cfg(feature = "codex-compat")]
+        let (sender, row_target) = match context {
+            DeliveryProvenance::Notification { sender, target } => (sender, target),
+            _ => {
+                return Err("embedded notification inbox contains another delivery kind".into());
+            }
+        };
+        #[cfg(not(feature = "codex-compat"))]
+        let DeliveryProvenance::Notification {
+            sender,
+            target: row_target,
+        } = context;
+        if row_target != target {
+            return Err("embedded notification row targets another incarnation".into());
+        }
+        let evidence = match binding
+            .inbox
+            .observe_receipt(envelope.sequence)
+            .map_err(|error| error.to_string())?
+        {
+            ReceiptLookup::Retained(evidence) => evidence,
+            ReceiptLookup::Unavailable => {
+                return Err("embedded notification receipt is no longer retained".into());
+            }
+        };
+        if evidence.context
+            != (DeliveryProvenance::Notification {
+                sender,
+                target: row_target,
+            })
+        {
+            return Err("embedded notification receipt provenance changed".into());
+        }
+        if matches!(
+            evidence.phase,
+            DeliveryPhase::Presented | DeliveryPhase::Withdrawn | DeliveryPhase::Rejected
+        ) {
+            continue;
+        }
+        if evidence.phase == DeliveryPhase::Compacted {
+            return Ok(());
+        }
+
+        let operation_id = embedded_notification_operation_id(
+            &binding.inbox_key,
+            envelope.sequence,
+            sender,
+            target,
+        );
+        if matches!(
+            observer
+                .input_observation_by_operation(&operation_id)
+                .map_err(|error| error.to_string())?,
+            Some(harness::embedding::InputObservation::Included(_))
+        ) {
+            if evidence.phase == DeliveryPhase::Accepted {
+                binding
+                    .inbox
+                    .begin_tracked_delivery(envelope.sequence)
+                    .map_err(|error| error.to_string())?
+                    .submitted()
+                    .map_err(|error| error.to_string())?;
+            } else if evidence.phase == DeliveryPhase::InFlight {
+                binding
+                    .inbox
+                    .confirm_admitted(
+                        envelope.sequence,
+                        &DeliveryProvenance::Notification { sender, target },
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            binding
+                .inbox
+                .confirm_presented_exact(
+                    envelope.sequence,
+                    &DeliveryProvenance::Notification { sender, target },
+                )
+                .map_err(|error| error.to_string())?;
+            continue;
+        }
+        if !binding.is_live() {
+            return Ok(());
+        }
+        let Some(conversation) = binding.conversation() else {
+            return Ok(());
+        };
+        let attempt = if evidence.phase == DeliveryPhase::Accepted {
+            Some(
+                binding
+                    .inbox
+                    .begin_tracked_delivery(envelope.sequence)
+                    .map_err(|error| error.to_string())?,
+            )
+        } else if matches!(
+            evidence.phase,
+            DeliveryPhase::InFlight | DeliveryPhase::Submitted | DeliveryPhase::Unconfirmed
+        ) {
+            None
+        } else {
+            return Err(format!(
+                "embedded notification delivery is still {:?}",
+                evidence.phase
+            ));
+        };
+        #[cfg(feature = "codex-compat")]
+        let message = match envelope.payload {
+            DurableActorEvent::Text(message) => message,
+            _ => return Err("embedded notification row has a non-text payload".into()),
+        };
+        #[cfg(not(feature = "codex-compat"))]
+        let DurableActorEvent::Text(message) = envelope.payload;
+        let sender_label = format!("actor:{}:{}", sender.id.0, sender.incarnation.0);
+        let input = conversation
+            .input(&operation_id, &sender_label, &message)
+            .await
+            .map_err(|error| error.to_string())?;
+        if let Some(error) = input.wake_error {
+            tracing::warn!(?target, sequence = envelope.sequence, %error,
+                "embedded notification is durable but its Engine wake failed");
+        }
+        if let Some(attempt) = attempt {
+            attempt.submitted().map_err(|error| error.to_string())?;
+        } else {
+            binding
+                .inbox
+                .confirm_admitted(
+                    envelope.sequence,
+                    &DeliveryProvenance::Notification { sender, target },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        if matches!(
+            observer
+                .input_observation_by_operation(&operation_id)
+                .map_err(|error| error.to_string())?,
+            Some(harness::embedding::InputObservation::Included(_))
+        ) {
+            binding
+                .inbox
+                .confirm_presented_exact(
+                    envelope.sequence,
+                    &DeliveryProvenance::Notification { sender, target },
+                )
+                .map_err(|error| error.to_string())?;
+            continue;
+        }
+        return Ok(());
+    }
+}
+
+async fn observe_embedded_notification(
+    command: &exomonad_actor::NotificationPoll,
+    binding: &embedded_harness::EmbeddedActorBinding,
+    target: ActorRef,
+) -> Result<exomonad_actor::NotificationState, exomonad_actor::NotificationError> {
+    use exomonad_actor::{NotificationError, NotificationState};
+    use exomonad_node::{DeliveryPhase, ReceiptLookup};
+    let receipt = command.receipt();
+    if receipt.owner() != command.owner() {
+        return Err(NotificationError::Unauthorized);
+    }
+    if receipt.target() != target || receipt.inbox() != binding.inbox_key.as_str() {
+        return Err(NotificationError::InvalidReceipt);
+    }
+    if binding.input_observer().is_some() {
+        deliver_embedded_notifications(target, binding.clone())
+            .await
+            .map_err(NotificationError::StorageFailure)?;
+    }
+    match binding
+        .inbox
+        .observe_receipt(receipt.sequence())
+        .map_err(|error| NotificationError::StorageFailure(error.to_string()))?
+    {
+        ReceiptLookup::Unavailable => Err(NotificationError::Unavailable),
+        ReceiptLookup::Retained(evidence) => {
+            if evidence.context
+                != (DeliveryProvenance::Notification {
+                    sender: command.owner(),
+                    target,
+                })
+            {
+                return Err(NotificationError::Unauthorized);
+            }
+            Ok(match evidence.phase {
+                DeliveryPhase::Accepted => NotificationState::Accepted,
+                DeliveryPhase::Presented => NotificationState::Presented,
+                DeliveryPhase::InFlight
+                | DeliveryPhase::Submitted
+                | DeliveryPhase::Withdrawn
+                | DeliveryPhase::Rejected
+                | DeliveryPhase::Unconfirmed
+                | DeliveryPhase::Compacted => NotificationState::Unconfirmed,
+            })
+        }
+    }
+}
+
+#[cfg(feature = "codex-compat")]
 fn admit_notification(command: &exomonad_actor::NotificationSend, key: String, inbox: &ActorInbox) {
     match inbox.publish_tracked(
         DurableActorEvent::Text(command.message().to_owned()),
@@ -6800,6 +7618,7 @@ fn admit_notification(command: &exomonad_actor::NotificationSend, key: String, i
     }
 }
 
+#[cfg(feature = "codex-compat")]
 fn observe_notification_receipt(
     command: &exomonad_actor::NotificationPoll,
     target: ActorRef,
@@ -6843,7 +7662,7 @@ fn observe_notification_receipt(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 #[allow(clippy::too_many_arguments)]
 async fn deliver_pending(
     actor: ActorRef,
@@ -6877,23 +7696,28 @@ async fn deliver_pending(
 /// withdrawn and, when the withdrawal settles it, re-delivered. Twice the
 /// exchange deadline: a submit that timed out may still be admitted late
 /// within one more exchange.
+#[cfg(feature = "codex-compat")]
 const WITHDRAW_WITHOUT_EVIDENCE_AFTER: Duration =
     exomonad_agent::INPUT_CONTROL_DEADLINE.saturating_mul(2);
 
 /// Cadence at which an unchanged pending-delivery WARN is repeated.
+#[cfg(feature = "codex-compat")]
 const PENDING_DELIVERY_WARN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Leading line on a re-delivered message whose earlier copy native input
 /// control admitted without proving whether the model saw it.
+#[cfg(feature = "codex-compat")]
 const POSSIBLY_SEEN_PREFIX: &str = "(possibly already seen)";
 
 /// Leading line on every re-delivered message: it was queued again behind
 /// the messages that were waiting for it.
+#[cfg(feature = "codex-compat")]
 const REDELIVERED_PREFIX: &str = "(re-delivered: messages sent after it may have arrived first)";
 
 /// Pump memory for a tracked row whose native input control answers without
 /// evidence (no record, or an unknown dispatch outcome).
 #[derive(Debug, Clone, Copy)]
+#[cfg(feature = "codex-compat")]
 enum WithoutEvidence {
     /// First answered without evidence at this instant.
     Since(std::time::Instant),
@@ -6903,6 +7727,7 @@ enum WithoutEvidence {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "codex-compat")]
 async fn deliver_pending_checked(
     actor: ActorRef,
     inbox: &Arc<ActorInbox>,
@@ -7101,6 +7926,7 @@ async fn deliver_pending_checked(
 /// Whether the inbox's front tracked row is in flight: submitted or
 /// unconfirmed, and so expected to resolve. Only then may notices overtake
 /// it; any other phase keeps the barrier.
+#[cfg(feature = "codex-compat")]
 fn front_tracked_row_is_in_flight(inbox: &ActorInbox) -> bool {
     let Some(sequence) = inbox.cursor().checked_add(1) else {
         return false;
@@ -7116,12 +7942,14 @@ fn front_tracked_row_is_in_flight(inbox: &ActorInbox) -> bool {
     )
 }
 
+#[cfg(feature = "codex-compat")]
 enum WatchNoticeDisposition {
     Deliver,
     Forgotten(ActorRef, exomonad_actor::WatchId),
     Observed(ActorRef, exomonad_actor::WatchId),
 }
 
+#[cfg(feature = "codex-compat")]
 fn watch_notice_disposition(
     event: &DurableActorEvent,
     watch_retained: &(dyn Fn(ActorRef, exomonad_actor::WatchId) -> bool + Send + Sync),
@@ -7145,6 +7973,7 @@ fn watch_notice_disposition(
     WatchNoticeDisposition::Deliver
 }
 
+#[cfg(feature = "codex-compat")]
 async fn deliver_out_of_order_notices(
     actor: ActorRef,
     inbox: &Arc<ActorInbox>,
@@ -7232,6 +8061,7 @@ async fn deliver_out_of_order_notices(
 /// at the back of the queue, so messages queued after it are presented
 /// first; the re-delivered text says so.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "codex-compat")]
 async fn deliver_tracked_message(
     actor: ActorRef,
     inbox: &ActorInbox,
@@ -7523,6 +8353,7 @@ async fn deliver_tracked_message(
 /// a fresh sequence (`ActorInbox::redeliver_withdrawn`), labelled when
 /// possibly seen. A request update is never re-queued as a replacement: its
 /// owner receives `NotPresented` or `Unconfirmed` and decides.
+#[cfg(feature = "codex-compat")]
 fn redeliver_withdrawn(
     actor: ActorRef,
     inbox: &ActorInbox,
@@ -7572,6 +8403,7 @@ fn redeliver_withdrawn(
     Ok(())
 }
 
+#[cfg(feature = "codex-compat")]
 fn retain_update_unconfirmed(
     reconciliations: &Mutex<BTreeMap<String, PendingUpdateReconciliation>>,
     native_key: &str,
@@ -7582,6 +8414,7 @@ fn retain_update_unconfirmed(
     }
 }
 
+#[cfg(feature = "codex-compat")]
 fn finish_update_reconciliation(
     reconciliations: &Mutex<BTreeMap<String, PendingUpdateReconciliation>>,
     native_key: &str,
@@ -7600,6 +8433,7 @@ fn finish_update_reconciliation(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "codex-compat")]
 async fn run_delivery_pump(
     actor: ActorRef,
     inbox: Arc<ActorInbox>,
@@ -7748,6 +8582,7 @@ async fn run_delivery_pump(
 /// Own the single inbox future and both background observers through the same
 /// retirement boundary. An admitted observation finishes or makes delivery
 /// cleanup forced, which retains the checkout it might still be reading.
+#[cfg(feature = "codex-compat")]
 async fn supervise_delivery<D, PF, P, SF, S>(
     actor: ActorRef,
     runtime_observation: &exomonad_actor::ActorRuntimeObservationHandle,
@@ -7812,6 +8647,7 @@ async fn supervise_delivery<D, PF, P, SF, S>(
 }
 
 #[derive(Debug)]
+#[cfg(feature = "codex-compat")]
 enum ActorObservation {
     Provider,
     Source,
@@ -7821,6 +8657,7 @@ enum ActorObservation {
 /// that probe to finish, so retirement can retain its workspace if it exceeds
 /// the delivery grace period. Dropping the owning JoinSet aborts async tasks;
 /// a detached blocking Git read is then covered by the forced retirement.
+#[cfg(feature = "codex-compat")]
 async fn run_periodic_observation<F, Fut>(
     mut shutdown: oneshot::Receiver<()>,
     period: Duration,
@@ -7843,6 +8680,7 @@ async fn run_periodic_observation<F, Fut>(
 /// Run `work` until `shutdown` fires, dropping it at whatever await it is
 /// parked on. Shutdown is sent only by retirement, which joins the pump and
 /// its observation tasks within `APPLICATION_TASK_GRACE_TIMEOUT`.
+#[cfg(feature = "codex-compat")]
 async fn until_shutdown(shutdown: &mut oneshot::Receiver<()>, work: impl std::future::Future) {
     tokio::select! {
         biased;
@@ -7851,6 +8689,7 @@ async fn until_shutdown(shutdown: &mut oneshot::Receiver<()>, work: impl std::fu
     }
 }
 
+#[cfg(feature = "codex-compat")]
 const PROVIDER_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Push one reminder to an actor whose provider turn ended after its current
@@ -7860,6 +8699,7 @@ const PROVIDER_POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// once per request in this actor pump. A later turn for the same request does
 /// not make waiting for a dependency a new failure to respond.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "codex-compat")]
 async fn remind_turn_ended_without_respond(
     actor: ActorRef,
     thread: &QueueReadyThread,
@@ -7921,6 +8761,7 @@ async fn remind_turn_ended_without_respond(
     Ok(())
 }
 
+#[cfg(feature = "codex-compat")]
 fn turn_end_reminder(request: exomonad_actor::RequestId) -> String {
     format!(
         "Request {} appeared open when this reminder was queued. If you already submitted its reply, ignore this notice. If the work is finished, use respond with the assigned reply type. If you are waiting for a prerequisite, keep the request open; inform the requester of the specific prerequisite and its owner if you have not already done so, then resume when an update arrives.",
@@ -7932,6 +8773,7 @@ fn turn_end_reminder(request: exomonad_actor::RequestId) -> String {
 /// the same durable front row, cell check and no-evidence memory that
 /// `deliver_tracked_message` acts on. `last_message` is pump memory of the
 /// most recent tracked front row and when its current state was first seen.
+#[cfg(feature = "codex-compat")]
 fn observe_inbound_delivery(
     inbox: &ActorInbox,
     producer: &InputProducerId,
@@ -8059,6 +8901,7 @@ fn observe_inbound_delivery(
 /// The delivery pump's WARN for a front row that keeps failing: logged when
 /// the error changes and again every `PENDING_DELIVERY_WARN_INTERVAL` while
 /// it repeats, with the tick count and how long delivery has been pending.
+#[cfg(feature = "codex-compat")]
 struct PendingDeliveryWarning {
     error: String,
     since: std::time::Instant,
@@ -8066,6 +8909,7 @@ struct PendingDeliveryWarning {
     ticks: u64,
 }
 
+#[cfg(feature = "codex-compat")]
 impl PendingDeliveryWarning {
     fn observe(pending: &mut Option<Self>, actor: ActorRef, error: String) {
         let now = std::time::Instant::now();
@@ -8103,6 +8947,7 @@ impl PendingDeliveryWarning {
 /// every attempted poll publishes pending before I/O and unavailable on error.
 /// All filesystem and Git work
 /// runs on a blocking thread; nothing here runs on the async executor.
+#[cfg(feature = "codex-compat")]
 async fn poll_source_drift(
     actor: ActorRef,
     runtime_observation: &exomonad_actor::ActorRuntimeObservationHandle,
@@ -8155,12 +9000,14 @@ async fn poll_source_drift(
     publish_source_drift_result(runtime_observation, targets, result);
 }
 
+#[cfg(feature = "codex-compat")]
 type SourceDriftResults = (
     Option<Result<exomonad_actor::SourceLayerDrift, String>>,
     Option<Result<exomonad_actor::FrozenSourceDrift, String>>,
     Option<Result<exomonad_actor::CheckoutGitDrift, String>>,
 );
 
+#[cfg(feature = "codex-compat")]
 fn publish_source_drift_result(
     observation: &exomonad_actor::ActorRuntimeObservationHandle,
     targets: exomonad_actor::SourceDriftTargets,
@@ -8209,7 +9056,7 @@ fn publish_source_drift_result(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "codex-compat"))]
 #[tokio::test]
 async fn source_drift_join_failure_marks_attempted_rows_unavailable() {
     let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
@@ -8276,6 +9123,7 @@ async fn source_drift_join_failure_marks_attempted_rows_unavailable() {
 /// sanctioned way to invoke git in this repository. There is no recorded
 /// build revision for the running binary to compare `head` against; see
 /// `exomonad_actor::CheckoutGitDrift`.
+#[cfg(feature = "codex-compat")]
 fn checkout_git_drift(
     worktrees: &WorktreeManager,
     worktree_id: &str,
@@ -8288,6 +9136,7 @@ fn checkout_git_drift(
 }
 
 /// A checkout's Git head and dirty files at `cwd`.
+#[cfg(feature = "codex-compat")]
 fn git_drift_at(
     git: &GitCli,
     cwd: &std::path::Path,
@@ -8330,12 +9179,14 @@ fn prepare_owner_notification(
     })
 }
 
+#[cfg(feature = "codex-compat")]
 async fn publish_owner_notification(
     notification: OwnerNotification,
 ) -> (ActorRef, Result<(), String>) {
     publish_inbox_event_for(notification.owner, notification.inbox, notification.event).await
 }
 
+#[cfg(feature = "codex-compat")]
 async fn publish_inbox_event_for(
     actor: ActorRef,
     inbox: Arc<ActorInbox>,
@@ -8344,6 +9195,7 @@ async fn publish_inbox_event_for(
     (actor, publish_inbox_event(inbox, event).await)
 }
 
+#[cfg(feature = "codex-compat")]
 async fn publish_inbox_event(
     inbox: Arc<ActorInbox>,
     event: DurableActorEvent,
@@ -8401,6 +9253,7 @@ async fn retire_interactive_application_guarded(
 /// A lost retirement task cannot identify which owner panicked or which later
 /// owners it never reached. Preserve every cleanup domain as unknown rather
 /// than mislabelling one component and silently omitting the rest.
+#[cfg(feature = "codex-compat")]
 fn panicked_cleanup_receipt(actor: ActorRef) -> InteractiveCleanupReceipt {
     InteractiveCleanupReceipt {
         actor,
@@ -8592,6 +9445,7 @@ async fn retire_interactive_application(
     InteractiveCleanupReceipt { actor, components }
 }
 
+#[cfg(feature = "codex-compat")]
 fn mark_process_recovery_retired(path: &Path) -> std::io::Result<()> {
     let mut record: ProcessRecoveryRecord =
         serde_json::from_slice(&std::fs::read(path)?).map_err(std::io::Error::other)?;
@@ -8641,6 +9495,7 @@ async fn stop_retired_tool_service(
     }
 }
 
+#[cfg(feature = "codex-compat")]
 async fn stop_retired_delivery(
     actor: ActorRef,
     delivery: &mut tokio::task::JoinHandle<()>,
@@ -8665,6 +9520,7 @@ async fn stop_retired_delivery(
     }
 }
 
+#[cfg(feature = "codex-compat")]
 async fn retire_native_pane(
     tmux: &TmuxSession,
     pane: &TmuxPaneId,
@@ -8686,6 +9542,7 @@ async fn retire_native_pane(
 
 /// Once an exact scope owner accounted for the process, tmux is only a UI
 /// artifact. Its disappearance cannot strengthen the process observation.
+#[cfg(feature = "codex-compat")]
 async fn retire_pane_artifact(
     tmux: &TmuxSession,
     pane: &TmuxPaneId,
@@ -8958,6 +9815,7 @@ struct ResidentCommandRoots {
 /// stay under the managed root, which is read-only to everyone including the
 /// root: the root reads a child's work through the shared Git namespace and
 /// typed observation, never by writing in the child's checkout.
+#[cfg(feature = "codex-compat")]
 fn writable_repository_roots(
     root: bool,
     workspace_access: exomonad_actor::WorkspaceAccess,

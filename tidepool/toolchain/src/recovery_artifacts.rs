@@ -92,9 +92,81 @@ impl CertifiedRecoveryProduct {
         &self.product_bytes
     }
 
+    pub(crate) fn package_imports_bytes(&self) -> &[u8] {
+        &self.package_imports_bytes
+    }
+    pub(crate) fn certification_bytes(&self) -> &[u8] {
+        &self.certification_bytes
+    }
+
     pub(crate) fn with_source_sha256(mut self, source_sha256: [u8; 32]) -> Self {
         self.source_sha256 = Some(source_sha256);
         self
+    }
+}
+
+/// A source-less interface sealed by declaration certification or verified
+/// recovery admission. Only the toolchain's owning workflows construct it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CertifiedJoinedInterface {
+    toolchain_identity_sha256: [u8; 32],
+    unit: String,
+    module: String,
+    interface_bytes: Vec<u8>,
+    package_imports_bytes: Vec<u8>,
+}
+
+impl CertifiedJoinedInterface {
+    pub(crate) fn from_certification(
+        producer: [u8; 32],
+        unit: String,
+        module: String,
+        interface_bytes: Vec<u8>,
+        package_imports_bytes: Vec<u8>,
+    ) -> Result<Self, RecoveryArtifactError> {
+        if producer == [0; 32] || unit.is_empty() || module.is_empty() {
+            return Err(RecoveryArtifactError::InvalidReference);
+        }
+        let digest: [u8; 32] = Sha256::digest(&interface_bytes).into();
+        validate_package_imports(
+            &package_imports_bytes,
+            &unit,
+            &module,
+            &digest,
+            Path::new("owned-join.hi.packages"),
+        )?;
+        Ok(Self {
+            toolchain_identity_sha256: producer,
+            unit,
+            module,
+            interface_bytes,
+            package_imports_bytes,
+        })
+    }
+    pub fn unit(&self) -> &str {
+        &self.unit
+    }
+    pub fn module(&self) -> &str {
+        &self.module
+    }
+    pub fn interface_bytes(&self) -> &[u8] {
+        &self.interface_bytes
+    }
+    pub fn package_imports_bytes(&self) -> &[u8] {
+        &self.package_imports_bytes
+    }
+    pub fn toolchain_identity_sha256(&self) -> [u8; 32] {
+        self.toolchain_identity_sha256
+    }
+    pub fn materialize(&self, root: &Path) -> Result<RecoveryJoinRef, RecoveryArtifactError> {
+        materialize_owned_join(
+            root,
+            self.toolchain_identity_sha256,
+            &self.unit,
+            &self.module,
+            &self.interface_bytes,
+            &self.package_imports_bytes,
+        )
     }
 }
 
@@ -506,6 +578,35 @@ pub fn materialize_joined_interface(
         module,
         &skinny_iface_sha256,
     )?;
+    materialize_owned_join(
+        recovery_root,
+        toolchain_identity_sha256,
+        unit,
+        module,
+        &bytes,
+        &package_imports,
+    )
+}
+
+fn materialize_owned_join(
+    recovery_root: &Path,
+    toolchain_identity_sha256: [u8; 32],
+    unit: &str,
+    module: &str,
+    bytes: &[u8],
+    package_imports: &[u8],
+) -> Result<RecoveryJoinRef, RecoveryArtifactError> {
+    if toolchain_identity_sha256 == [0; 32] || unit.is_empty() || module.is_empty() {
+        return Err(RecoveryArtifactError::InvalidReference);
+    }
+    let skinny_iface_sha256: [u8; 32] = Sha256::digest(bytes).into();
+    validate_package_imports(
+        package_imports,
+        unit,
+        module,
+        &skinny_iface_sha256,
+        Path::new("owned-join.hi.packages"),
+    )?;
     let package_imports_sha256: [u8; 32] = Sha256::digest(&package_imports).into();
     let owned = prepare_owned_directory(recovery_root)?;
     let interface_path =
@@ -517,7 +618,7 @@ pub fn materialize_joined_interface(
                 .file_name()
                 .ok_or(RecoveryArtifactError::InvalidReference)?,
         ),
-        &bytes,
+        bytes,
         &skinny_iface_sha256,
     )?;
     durable_copy(
@@ -526,7 +627,7 @@ pub fn materialize_joined_interface(
                 .file_name()
                 .ok_or(RecoveryArtifactError::InvalidReference)?,
         ),
-        &package_imports,
+        package_imports,
         &package_imports_sha256,
     )?;
     File::open(&owned)?.sync_all()?;

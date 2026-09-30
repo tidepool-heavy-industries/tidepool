@@ -147,7 +147,7 @@ impl RoutingFixture {
             &self.nodes,
             &self.live,
             &self.projection,
-            &self.conversations,
+            |actor| self.conversations.get(&actor).cloned(),
             &self.lifecycle,
         )
         .await
@@ -351,4 +351,74 @@ async fn refused_retirement_does_not_publish_retiring_lifecycle() {
         "refusal should retain host error context: {reason}"
     );
     assert!(!fixture.lifecycle_rx.borrow().contains_key(&actor));
+}
+
+#[cfg(not(feature = "codex-compat"))]
+use super::test_campaign::TestCampaign;
+#[cfg(not(feature = "codex-compat"))]
+use exomonad_tool::{ToolArguments, ToolInvocation};
+
+#[cfg(not(feature = "codex-compat"))]
+#[tokio::test]
+#[ignore = "requires delegated cgroups and bubblewrap"]
+async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
+    let mut campaign = TestCampaign::start().await;
+
+    let policy = campaign.root_installation.policy.clone();
+    let invocation = ToolInvocation {
+        context: None,
+        name: "bash".into(),
+        arguments: ToolArguments::Structured(serde_json::json!({
+            "cmd": "printf embedded-host-command",
+            "memory_mib": 256
+        })),
+    };
+    let execution = tokio::spawn(async move { policy.dispatch_boxed(invocation).await });
+    let request = campaign
+        .next_deployment(
+            "resident command backend",
+            Duration::from_secs(30),
+            |event| match event {
+                LocalResidentDeployment::CommandBackend(request) => Ok(request),
+                other => Err(other),
+            },
+        )
+        .await;
+    let actor = request.owner;
+    let owner = exomonad_node::command_resources::CommandResources::delegated(
+        exomonad_node::command_resources::CommandResourcePolicy {
+            general_bytes: 512 * 1024 * 1024,
+            protected_bytes: 0,
+            swap_max_bytes: 0,
+            ..Default::default()
+        },
+    )
+    .expect("the admitted test service delegates cgroups");
+    let resources = exomonad_node::command_resources::CommandResourceClient::local(owner);
+    supply_resident_command_backend(
+        request,
+        &campaign.config,
+        &campaign.authority,
+        &campaign.worktrees,
+        actor,
+        Some(resources),
+    );
+
+    let result = tokio::time::timeout(Duration::from_secs(30), execution)
+        .await
+        .expect("resident command settles")
+        .expect("resident command task joins")
+        .expect("resident command succeeds");
+    assert_eq!(result["status"], "committed", "{result}");
+    let output = result["items"][0]["output"]
+        .as_str()
+        .expect("command result is presented");
+    assert!(
+        output.contains("terminal: yes · CommandExited 0 · cleanup: clean"),
+        "{output}"
+    );
+    assert!(output.contains("stdout · bytes "), "{output}");
+    assert!(output.contains("embedded-host-command"), "{output}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
 }

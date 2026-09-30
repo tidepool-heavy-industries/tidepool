@@ -5,7 +5,11 @@ import Control.Monad (forM_, unless, void)
 import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
-import Data.List (sort)
+import Data.List (isInfixOf, sort)
+import Data.String (fromString)
+import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobals)
+import qualified Tidepool.ExecutionSchema as Execution
+import Tidepool.ModuleCandidates
 import GHC
 import GHC.Builtin.Types (doubleTy)
 import GHC.Core.InstEnv (instEnvElts, is_dfun_name, is_tys)
@@ -30,6 +34,7 @@ import Tidepool.ExactHydration
 
 main :: IO ()
 main = getArgs >>= \case
+  ["--original-product-roots"] -> originalProductRootsProof
   ["--consumer", root] -> recoveredConsumer root
   ["--next-consumer", root] -> recoveredNextConsumer root
   ["--wire-fixture", root] -> do
@@ -44,6 +49,7 @@ main = getArgs >>= \case
     writeFile (root </> "join-typed-v3.json") (renderDeclarationJoinOutcome
       (DeclarationJoinOutcome typedWireInput (Just (ModuleSnapshot "Join" "/scratch/Join.hi" (replicate 64 '0'))) JoinAccepted))
   [] -> bracket temporary removeDirectoryRecursive $ \root -> do
+    originalProductRootsProof
     golden <- BS.readFile "test-cell-splitter/fixtures/declaration-join/join-v3.cbor"
     unless (golden == encodeDeclarationJoin emptyWireInput) (fail "join CBOR differs from cross-language fixture")
     expectedReceipt <- readFile "test-cell-splitter/fixtures/declaration-join/join-v3.json"
@@ -368,3 +374,52 @@ typedWireInput = emptyWireInput
     selected = identity TypeNamespace "AssociatedAxiom"
     standalone = identity TypeNamespace "StandaloneAxiom"
     hidden = identity TypeNamespace "HiddenAxiom"
+
+-- Exercise exact original-group traversal without compiling an unrelated
+-- fixture. The real parser package dictionary is admitted by the worker gate.
+originalProductRootsProof :: IO ()
+originalProductRootsProof = do
+  let identity unit name occurrence = Execution.SymbolIdentity
+        (fromString unit) (fromString name) (fromString "value") (fromString occurrence) Nothing
+      source = identity "main" "Tidepool.Aeson.FromJSON" "$fFromJSONInt_$cparseJSON"
+      sibling = identity "main" "Tidepool.Aeson.FromJSON" "parseSibling"
+      caller = identity "main" "Caller" "parseInput"
+      package = identity "ghc-internal" "GHC.Internal.Real" "$fIntegralInt"
+      unused = identity "ghc-internal" "GHC.Internal.Real" "$fIntegralWord"
+      global value = Execution.GlobalDecl value Execution.LiftedRefRep Nothing False Nothing
+      candidate name groups = ModuleCandidate "main" name "/fixture/Source.hs"
+        (replicate 64 '0') "/fixture/Source.hi" (replicate 64 '0')
+        (replicate 64 '1') (replicate 64 '2') (replicate 64 '3') [] groups
+        "/fixture/Source.hi.packages" (replicate 64 '4')
+      imported value generation = CandidateGlobal value Execution.LiftedRefRep Nothing False generation
+      parserCandidate = candidate "Tidepool.Aeson.FromJSON"
+        [CandidateGroup 137 [source, sibling] [imported sibling Nothing, imported package Nothing]]
+      input = candidate "Caller" [CandidateGroup 2 [caller] [imported source Nothing]]
+      other = candidate "Unused" [CandidateGroup 7 [identity "main" "Unused" "entry"]
+        [imported unused Nothing]]
+      roots targets = requiredOriginalPackageGlobals [] [parserCandidate, input, other] targets
+  unless (roots [global caller] == Right [package])
+    (fail "demanded parser original-group package closure changed")
+  unless (roots [global (identity "other-unit" "Caller" "parseInput")] == Right [])
+    (fail "package root selection inferred a different unit from occurrence")
+  unless (roots [(global caller) { Execution.globalRequiredGeneration = Just 7 }] == Right [])
+    (fail "retained generation reopened original implementation closure")
+  case requiredOriginalPackageGlobals [] [parserCandidate, parserCandidate] [global caller] of
+    Left _ -> pure ()
+    Right _ -> fail "duplicate original binder was accepted in package root inventory"
+  let failedOwner = ("main", "Broken", Left "fixture projection failure")
+      broken = identity "main" "Broken" "entry"
+  unless (requiredOriginalPackageGlobals [failedOwner] [parserCandidate, input] [global caller]
+          == Right [package])
+    (fail "unrelated fresh product miss became fatal")
+  case requiredOriginalPackageGlobals [failedOwner] [] [global broken] of
+    Left reason | "fixture projection failure" `isInfixOf` reason -> pure ()
+    _ -> fail "reached failed fresh home owner lost its projection diagnostic"
+  let newlyReached = identity "main" "Later" "entry"
+      later = candidate "Later" [CandidateGroup 3 [newlyReached] [imported unused Nothing]]
+      first = requiredOriginalPackageGlobals [] [parserCandidate, input, later] [global caller]
+      second = requiredOriginalPackageGlobals [] [parserCandidate, input, later]
+        [global caller, global newlyReached]
+  unless (first == Right [package] && second == Right (sort [package, unused]))
+    (fail "recovery-induced source global did not extend exact package roots")
+  putStrLn "original-product-roots: PASS (demanded parser, whole group, unrelated omission, exact unit, retained boundary, duplicate refusal, failed home owner, recovery-induced source root)"

@@ -1,5 +1,6 @@
-//! Join logical jobs to the existing native process owner and resource authority.
+//! Join logical command jobs to a provider or the bounded host process owner.
 use exomonad_actor::command_jobs::{CommandBackend, CommandControl};
+#[cfg(feature = "codex-compat")]
 use exomonad_agent::{
     InteractiveAgentBackend, NativeCommandOperation as Op, NativeCommandReply as Reply,
     QueueReadyThread,
@@ -16,6 +17,7 @@ use tidepool_bridge_effects::{
 };
 use tokio::sync::watch;
 
+#[cfg(feature = "codex-compat")]
 pub(super) struct NativeCommandBackend {
     native: Arc<dyn InteractiveAgentBackend>,
     thread: QueueReadyThread,
@@ -45,6 +47,7 @@ impl OutputReadiness {
     }
 }
 
+#[cfg(feature = "codex-compat")]
 impl NativeCommandBackend {
     fn output_readiness(&self) -> Result<(), CommandError> {
         self.ready.borrow().check()
@@ -220,6 +223,7 @@ async fn wait_until_set(cancelled: &mut watch::Receiver<bool>) {
     }
 }
 
+#[cfg(feature = "codex-compat")]
 impl CommandBackend for NativeCommandBackend {
     fn execute<'a>(
         &'a self,

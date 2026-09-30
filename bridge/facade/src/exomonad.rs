@@ -15,6 +15,7 @@ use exomonad_agent::{
     copy_interactive_binding, read_interactive_binding, InteractiveAgentInstallation,
 };
 use exomonad_agent::{BackendThreadId, InteractiveLaunchMode, ReasoningEffort};
+#[cfg(feature = "codex-compat")]
 use exomonad_node::host_command::{HostCommand, HostCommandSpec, HostExit, HostStdin, HostStream};
 use exomonad_node::{TmuxLaunch, TmuxSession};
 use serde::{Deserialize, Serialize};

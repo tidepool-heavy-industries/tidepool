@@ -1,17 +1,17 @@
 use std::{
     path::Path,
     sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
     },
 };
 
 use parking_lot::Mutex as ParkingMutex;
 
 use exomonad_actor::{
-    ActorAdmissionLease, ActorExitKind, ActorTerminal, HostedCheckpointAttachment,
-    HostedCheckpointCapture, HostedCheckpointCaptureError, LocalActorRef, ResidentToolError,
-    WorkbenchCancellationOutcome,
+    ActorAdmissionLease, ActorExitKind, ActorRef, ActorTerminal, CheckpointLease,
+    HostedCheckpointAttachment, HostedCheckpointCapture, HostedCheckpointCaptureError,
+    LocalActorRef, ResidentToolError, WorkbenchCancellationOutcome,
 };
 use exomonad_tool::{ToolArguments, ToolInvocationContext};
 use harness::{
@@ -88,6 +88,60 @@ impl EmbeddedHarnessRuntime {
             self.store.clone(),
             host.clone(),
             parent,
+        )?);
+        Ok(EmbeddedConversation {
+            conversation,
+            incoming,
+            round_control,
+        })
+    }
+
+    pub(super) fn attach_checkpoint(
+        &self,
+        identity: HostIdentity,
+        actor: LocalActorRef,
+        installation: Arc<EmbeddedPolicyInstallation>,
+        lease: &CheckpointLease,
+        gate: &exomonad_actor::ForkGroupGate,
+        captured: Arc<EmbeddedHostedCheckpoint>,
+    ) -> Result<EmbeddedConversation, EmbeddedError> {
+        if identity.run != self.run {
+            return Err(EmbeddedError::Binding(
+                "embedded checkpoint child belongs to another run".into(),
+            ));
+        }
+        if captured.issuer != lease.issuer {
+            return Err(EmbeddedError::Binding(
+                "embedded checkpoint issuer mismatch".into(),
+            ));
+        }
+        let checkpoint = match gate
+            .publication()
+            .map_err(|error| EmbeddedError::Binding(error.to_string()))?
+        {
+            exomonad_actor::ForkGroupPublication::Deferred => captured.cuts.deferred(),
+            exomonad_actor::ForkGroupPublication::Captured => captured.cuts.before_call(),
+        };
+        let parent = checkpoint.origin().clone();
+        let (wakes, incoming) = mpsc::unbounded_channel();
+        let round_control = Arc::new(EmbeddedRoundControl::default());
+        let host = Arc::new(EmbeddedHostActor::new(
+            identity,
+            actor,
+            installation,
+            self.store.clone(),
+            wakes,
+            round_control.clone(),
+        )?);
+        // The embedded root also records an empty contract. This installation
+        // has no authoritative checkout revision to record for the child.
+        let conversation = Arc::new(Conversation::from_checkpoint(
+            self.store.clone(),
+            host,
+            &parent,
+            checkpoint,
+            &json!({}),
+            &json!({}),
         )?);
         Ok(EmbeddedConversation {
             conversation,
@@ -184,6 +238,101 @@ impl Drop for EmbeddedRoundLease {
     }
 }
 
+/// Durable notification owner for one exact embedded actor incarnation. The
+/// read-only observer survives retirement; `live` fences new input admission.
+#[derive(Clone)]
+pub(super) struct EmbeddedActorBinding {
+    identity: HostIdentity,
+    conversation: Arc<Mutex<Option<Arc<Conversation>>>>,
+    observer: Arc<Mutex<Option<Arc<harness::embedding::InputObserver>>>>,
+    pub(super) inbox: Arc<super::ActorInbox>,
+    pub(super) inbox_key: String,
+    pub(super) delivery: Arc<tokio::sync::Mutex<()>>,
+    live: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ConversationAttachError {
+    Retired,
+    IdentityMismatch,
+}
+
+impl EmbeddedActorBinding {
+    pub(super) fn new(
+        identity: HostIdentity,
+        inbox: Arc<super::ActorInbox>,
+        inbox_key: String,
+        conversation: Option<Arc<Conversation>>,
+    ) -> Self {
+        let observer = conversation
+            .as_ref()
+            .map(|conversation| Arc::new(conversation.input_observer()));
+        Self {
+            identity,
+            conversation: Arc::new(Mutex::new(conversation)),
+            observer: Arc::new(Mutex::new(observer)),
+            inbox,
+            inbox_key,
+            delivery: Arc::new(tokio::sync::Mutex::new(())),
+            live: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    pub(super) fn is_live(&self) -> bool {
+        self.live.load(Ordering::Acquire)
+    }
+
+    pub(super) fn mark_retired(&self) {
+        let mut conversation = self
+            .conversation
+            .lock()
+            .expect("embedded conversation lock poisoned");
+        self.live.store(false, Ordering::Release);
+        conversation.take();
+    }
+
+    pub(super) fn conversation(&self) -> Option<Arc<Conversation>> {
+        self.conversation
+            .lock()
+            .expect("embedded conversation lock poisoned")
+            .clone()
+    }
+
+    pub(super) fn set_conversation(
+        &self,
+        conversation: Arc<Conversation>,
+    ) -> Result<(), ConversationAttachError> {
+        let mut current = self
+            .conversation
+            .lock()
+            .expect("embedded conversation lock poisoned");
+        if !self.is_live() {
+            return Err(ConversationAttachError::Retired);
+        }
+        if conversation.identity() != &self.identity {
+            return Err(ConversationAttachError::IdentityMismatch);
+        }
+        *self
+            .observer
+            .lock()
+            .expect("embedded observer lock poisoned") =
+            Some(Arc::new(conversation.input_observer()));
+        *current = Some(conversation);
+        Ok(())
+    }
+
+    pub(super) fn input_observer(&self) -> Option<Arc<harness::embedding::InputObserver>> {
+        self.observer
+            .lock()
+            .expect("embedded observer lock poisoned")
+            .clone()
+    }
+
+    pub(super) fn identity(&self) -> &HostIdentity {
+        &self.identity
+    }
+}
+
 /// The exact actor and installation used by one bound harness conversation.
 /// The run runtime owns Store and its scheduler; this host supplies authority
 /// and an identity-only wake channel for their existing mailbox path.
@@ -233,6 +382,25 @@ impl HostActor for EmbeddedHostActor {
         &self.identity
     }
 
+    async fn output_committed(&self, operation: &OperationId) -> Result<(), String> {
+        let expected = ConversationIdentity::Embedded {
+            run: self.identity.run.clone(),
+            actor: self.identity.actor.clone(),
+            incarnation: self.identity.incarnation.clone(),
+        };
+        if operation.origin != expected {
+            return Err("foreign embedded output acknowledgment".into());
+        }
+        self.installation
+            .complete(tidepool_runtime::session::WorkbenchForkBoundary {
+                thread_id: format!("{}:{}", self.identity.run, self.identity.actor.0),
+                call_id: operation.call.0.clone(),
+            })
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
     fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
         self.actor
             .admit_transaction()
@@ -260,6 +428,7 @@ impl HostActor for EmbeddedHostActor {
         let tools = snapshot.tools().to_vec();
         let dispatcher: Arc<dyn Provider> = Arc::new(EmbeddedDispatcher {
             identity: self.identity.clone(),
+            issuer: self.actor.identity(),
             snapshot,
             store: self.store.clone(),
         });
@@ -295,19 +464,33 @@ impl HostActor for EmbeddedHostActor {
 #[derive(Clone)]
 struct EmbeddedDispatcher {
     identity: HostIdentity,
+    issuer: ActorRef,
     snapshot: Arc<EmbeddedPolicySnapshot>,
     store: Arc<Store>,
 }
 
-/// Host-owned durable half of a Haskell checkpoint. The actor retains this
-/// value on its existing checkpoint lease and revokes it with that lease.
+/// Host-owned durable half of a Haskell checkpoint. Registry release refuses
+/// new children; an admitted child keeps its captured attachment for install.
 pub(super) struct EmbeddedHostedCheckpoint {
-    pub(super) checkpoint: harness::checkpoint::Checkpoint<()>,
+    issuer: ActorRef,
+    pub(super) cuts: harness::checkpoint::CheckpointCuts<()>,
+}
+
+impl EmbeddedHostedCheckpoint {
+    pub(super) fn child_path(&self, actor: ActorRef) -> AgentPath {
+        AgentPath(format!(
+            "{}/a{}_i{}",
+            self.cuts.deferred().origin().0,
+            actor.id.0,
+            actor.incarnation.0
+        ))
+    }
 }
 
 struct EmbeddedCheckpointCapture {
     store: Arc<Store>,
     identity: HostIdentity,
+    issuer: ActorRef,
     operation: OperationId,
     thread_id: String,
 }
@@ -340,18 +523,15 @@ impl HostedCheckpointCapture for EmbeddedCheckpointCapture {
             "name": name,
             "operation": self.operation,
         });
-        let checkpoint = self
+        let cuts = self
             .store
-            .capture_checkpoint(
-                self.operation.origin.actor(),
-                &self.operation.request,
-                &self.operation.call,
-                &metadata,
-                Arc::new(()),
-            )
+            .capture_checkpoint_cuts(&self.operation, &metadata, Arc::new(()))
             .map_err(|_| HostedCheckpointCaptureError::CaptureFailed)?;
-        Ok(HostedCheckpointAttachment::new(Arc::new(
-            EmbeddedHostedCheckpoint { checkpoint },
+        Ok(HostedCheckpointAttachment::captured(Arc::new(
+            EmbeddedHostedCheckpoint {
+                issuer: self.issuer,
+                cuts,
+            },
         )))
     }
 }
@@ -398,6 +578,7 @@ impl EmbeddedDispatcher {
             Arc::new(EmbeddedCheckpointCapture {
                 store: self.store.clone(),
                 identity: self.identity.clone(),
+                issuer: self.issuer,
                 operation: operation.clone(),
                 thread_id: invocation_context.thread_id.clone(),
             }) as Arc<dyn HostedCheckpointCapture>
@@ -762,10 +943,11 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
         let command = service.commands.recv().await.unwrap();
-        let receipt = submit_browser_command(command, &conversation, &service.control)
+        let command_id = command.command_id.clone();
+        let input_receipt = submit_browser_command(command, &conversation, &service.control)
             .await
             .unwrap();
-        assert!(receipt.wake_error.is_none(), "{receipt:?}");
+        assert!(input_receipt.wake_error.is_none(), "{input_receipt:?}");
         let store = service.runtime.store();
         let call = harness::model::CallId("raw-cell-1".into());
         let host_identity = conversation.identity().clone();
@@ -866,7 +1048,9 @@ mod tests {
             requests[2].input
         );
         assert!(matches!(
-            conversation.input_observation(receipt.envelope_id).unwrap(),
+            conversation
+                .input_observation(input_receipt.envelope_id)
+                .unwrap(),
             InputObservation::Included(_)
         ));
         drop(requests);
@@ -878,6 +1062,7 @@ mod tests {
             &campaign.forest.inspect_host_graph(),
             &LifecycleState::default(),
         );
+        let mut reconnect_identity = None;
         for _ in 0..2 {
             let mut request = format!("ws://{}/api/ws", service.address)
                 .into_client_request()
@@ -896,6 +1081,26 @@ mod tests {
             assert_eq!(frame["snapshot"]["actors"].as_array().unwrap().len(), 1);
             assert_eq!(frame["snapshot"]["actors"][0]["modelConversation"], "/root");
             assert_eq!(frame["snapshot"]["conversations"][0]["path"], "/root");
+            let actor_identity = frame["snapshot"]["actors"][0]["identity"].clone();
+            if let Some(previous) = reconnect_identity.as_ref() {
+                assert_eq!(
+                    &actor_identity, previous,
+                    "actor identity changed on reconnect"
+                );
+            } else {
+                reconnect_identity = Some(actor_identity);
+            }
+            let command_receipts = frame["snapshot"]["commandReceipts"]
+                .as_array()
+                .expect("reconnect snapshot retains command receipts");
+            assert!(
+                command_receipts.iter().any(|command_receipt| {
+                    command_receipt["commandId"] == command_id
+                        && command_receipt["outcome"] == "admitted"
+                        && command_receipt["envelopeId"] == input_receipt.envelope_id.to_string()
+                }),
+                "reconnect snapshot lost the admitted browser input receipt: {command_receipts:?}"
+            );
             socket.close(None).await.unwrap();
         }
         service.shutdown().await.unwrap();

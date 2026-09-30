@@ -294,6 +294,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "ForksReleaseCheckpointWith",
             "ForksPreviewWith",
             "ForksCommitWith",
+            "ForksCommitCapturedWith",
             "ForksAbortWith",
             "ForksCleanupWith",
         ],

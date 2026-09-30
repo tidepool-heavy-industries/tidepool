@@ -57,12 +57,14 @@ import GHC.Unit.Module.ModDetails (ModDetails(..))
 import GHC.Unit.Types (unitString, stringToUnit)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Numeric (showHex)
-import System.Directory (getFileSize, removeFile)
+import System.Directory (doesFileExist, getFileSize, removeFile)
 import System.FilePath (isAbsolute, takeDirectory)
 import System.IO (openBinaryTempFile, hClose)
 import System.Posix.Files (createLink)
 import Tidepool.ExactHydration
 import Tidepool.Json (jsonString)
+import Tidepool.PackageWitness
+  ( PackageImportRoot(..), readPackageImports, sealPackageImports, validatePackageImportRoot )
 
 data ModuleSnapshot = ModuleSnapshot
   { snapshotModule :: String, snapshotPath :: FilePath, snapshotSha256 :: String
@@ -510,15 +512,58 @@ validateDeclarationJoin initial input = do
           Left diagnostic -> reject ArtifactChanged diagnostic
           Right verified -> do
             hydrated <- hydrateExactScope fresh verified
-            let joined = mkModule (stringToUnit (reservedUnit reservation)) (mkModuleName (reservedModule reservation))
-            result <- buildJoinedInterface hydrated joined (reservedPath reservation)
-              (map snd verified) (expectedExports input) (expectedInstances input) (retainedFamilyClosure input)
-            case result of
-              Left (reason, diagnostic) -> reject reason diagnostic
-              Right output -> do
-                unchangedAfter <- artifactsUnchanged artifacts
-                if not unchangedAfter then reject ArtifactChanged "implementation artifacts changed during validation"
-                  else pure (DeclarationJoinOutcome input (Just output) JoinAccepted)
+            writeChecks <- forM (declarationWrites input) $ \write -> do
+              let original = [iface | (_, iface) <- verified,
+                    moduleNameString (moduleName (mi_module iface)) == snapshotModule (writeModule write)]
+              case original of
+                [iface] -> do
+                  exported <- interfaceExports hydrated iface
+                  let local = filter (\entry -> exportUnit (exportHead entry) == unitString (moduleUnit (mi_module iface))
+                        && exportModule (exportHead entry) == snapshotModule (writeModule write)) exported
+                  pure (sort (map normalizeExport local) == sort (map normalizeExport (writeExports write)))
+                _ -> pure False
+            packageRoots <- joinPackageRoots hydrated artifacts
+            case (and writeChecks, packageRoots) of
+              (False, _) -> reject ExportMismatch "authored write delta differs from its exact original interface"
+              (_, Left diagnostic) -> reject ArtifactChanged diagnostic
+              (True, Right roots) -> do
+                let joined = mkModule (stringToUnit (reservedUnit reservation)) (mkModuleName (reservedModule reservation))
+                result <- buildJoinedInterface hydrated joined (reservedPath reservation)
+                  (map snd verified) (expectedExports input) (expectedInstances input) (retainedFamilyClosure input)
+                case result of
+                  Left (reason, diagnostic) -> reject reason diagnostic
+                  Right output -> do
+                    let exact = ExactIfaceArtifact (reservedUnit reservation) (reservedModule reservation)
+                          (snapshotPath output) (snapshotSha256 output) []
+                    sealPackageImports (snapshotPath output ++ ".packages") exact roots
+                    unchangedAfter <- artifactsUnchanged artifacts
+                    rootsAfter <- joinPackageRoots hydrated artifacts
+                    if not unchangedAfter || rootsAfter /= Right roots
+                      then reject ArtifactChanged "implementation artifacts changed during validation"
+                      else pure (DeclarationJoinOutcome input (Just output) JoinAccepted)
+
+-- Advisory interface-only inspection can operate without authored package
+-- seals. The protected Rust certification front door additionally requires
+-- every input seal to match its owned bytes before and after this request.
+joinPackageRoots :: HscEnv -> [DeclarationArtifact] -> IO (Either String [PackageImportRoot])
+joinPackageRoots env artifacts = do
+  captured <- forM artifacts $ \artifact -> do
+    let exact = artifactInterface artifact
+        path = exactPath exact ++ ".packages"
+    exists <- doesFileExist path
+    if not exists then pure (Right []) else do
+      bytes <- BS.readFile path
+      readPackageImports path (sha256 bytes) exact
+  case sequence captured of
+    Left diagnostic -> pure (Left diagnostic)
+    Right entries -> do
+      let roots = sort (nubBy (==) (concat entries))
+          sameOwner a b = packageUnit a == packageUnit b && packageModule a == packageModule b
+      if length (nubBy sameOwner roots) /= length roots
+        then pure (Left "package witness owner has differing exact selections")
+        else do
+          validated <- mapM (validatePackageImportRoot env) roots
+          pure (roots <$ sequence validated)
 
 artifactsUnchanged :: [DeclarationArtifact] -> IO Bool
 artifactsUnchanged artifacts = and <$> forM artifacts (\artifact -> do

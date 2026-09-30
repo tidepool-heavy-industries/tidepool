@@ -241,6 +241,13 @@ impl ActorCompileView {
         self.session.session_root()
     }
 
+    pub(crate) fn exact_declaration_context(
+        &self,
+    ) -> Option<&std::sync::Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>
+    {
+        self.session.exact_declaration_context()
+    }
+
     /// This view's session incarnation identity, forwarded to a spawned
     /// compile so its worker-side memo can retain `Tidepool.Session.*`
     /// entries across transactions within this incarnation.
@@ -293,6 +300,13 @@ impl ActorCompileView {
             hasher.update(bytes);
         }
         let mut hasher = blake3::Hasher::new();
+        match self.exact_declaration_context() {
+            Some(context) => {
+                field(&mut hasher, &[1]);
+                field(&mut hasher, &context.semantic_sha256());
+            }
+            None => field(&mut hasher, &[0]),
+        }
         field(&mut hasher, &self.session.session().0.to_le_bytes());
         field(&mut hasher, &self.session.lexical_scope().0.to_le_bytes());
         field(

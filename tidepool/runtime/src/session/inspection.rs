@@ -341,6 +341,9 @@ fn render_query_error(error: &QueryError) -> String {
 }
 
 pub struct InspectionRequest<'a> {
+    /// Protected original declarations shared by every query in this batch.
+    pub exact_context:
+        Option<std::sync::Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
     pub preamble: &'a str,
     pub imports: &'a str,
     pub include: &'a [&'a Path],
@@ -375,6 +378,11 @@ fn run_inspections_with_policy(
     request: InspectionRequest<'_>,
     strict: bool,
 ) -> Result<Vec<InspectionResult>, CompileError> {
+    if request.exact_context.is_some() {
+        return Err(CompileError::ExtractFailed(
+            "exact declaration contexts require exact compiler admission".into(),
+        ));
+    }
     if request.queries.is_empty() {
         return Ok(Vec::new());
     }
@@ -1390,6 +1398,7 @@ mod tests {
         // a request's `respond` is bound this way.
         queries.push(InspectionQuery::Info("localPreambleValue".into()));
         let results = run_inspections(InspectionRequest {
+            exact_context: None,
             preamble,
             imports: "",
             include: &[include.path()],
@@ -1600,6 +1609,7 @@ mod tests {
         eval_harness::require_extract();
         let session = tempfile::tempdir().unwrap();
         let results = run_inspections(InspectionRequest {
+            exact_context: None,
             preamble: concat!(
                 "{-# LANGUAGE NoImplicitPrelude, DataKinds #-}\n",
                 "module Expr where\n",
@@ -1637,6 +1647,7 @@ mod tests {
         ];
         let inspect = |queries: &[InspectionQuery]| {
             run_inspections(InspectionRequest {
+                exact_context: None,
                 preamble,
                 imports: "",
                 include: &[],
@@ -1776,6 +1787,7 @@ mod tests {
             .map(|_| InspectionQuery::TypeOf("id".into()))
             .collect::<Vec<_>>();
         let results = run_inspections(InspectionRequest {
+            exact_context: None,
             preamble: concat!(
                 "{-# LANGUAGE NoImplicitPrelude #-}\n",
                 "module Expr where\n",

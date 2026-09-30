@@ -21,12 +21,14 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Arc;
 
 use ciborium::value::Value as CborValue;
 use tempfile::TempDir;
 use tidepool_extract_cmd::{ExtractCmd, SpawnError};
 use tidepool_toolchain::artifacts::{seal_turn_outputs, ModuleCandidateOffer};
 use tidepool_toolchain::certified_products::{PendingCertifiedGroup, PendingImportOwner};
+use tidepool_toolchain::declaration_join::ExactDeclarationContext;
 use tidepool_toolchain::extract_module_name;
 use tidepool_toolchain::recovery_artifacts::CertifiedRecoveryProduct;
 
@@ -367,6 +369,8 @@ impl From<std::io::Error> for CellCheckFailure {
 
 /// Runtime-owned inputs to the compiler worker's whole-cell request.
 pub struct CellCheckRequest<'a> {
+    /// Protected original products and selected lexical graph for this check.
+    pub exact_context: Option<Arc<ExactDeclarationContext>>,
     pub cell_text: &'a str,
     pub template: &'a str,
     pub include: &'a [&'a Path],
@@ -479,6 +483,8 @@ pub const DECL_TEMPLATE_SOURCE: &str = "{-# LANGUAGE GADTs, OverloadedStrings, T
 /// batch-classify case, where a caller already holds a GHC-sourced verdict
 /// for the whole block (from [`classify_block`]). GHC-sourced either way.
 pub struct TurnRequest<'a> {
+    /// Protected original products and selected lexical graph for this turn.
+    pub exact_context: Option<Arc<ExactDeclarationContext>>,
     /// The raw turn text (`x <- e` / `let x = e` / a bare expression / a
     /// declaration), written to `turn.txt` and spliced by the extract into
     /// whichever template the verdict selects.
@@ -1578,6 +1584,8 @@ pub struct CompiledTurn {
 pub struct TurnCertification {
     pub groups: Vec<PendingCertifiedGroup>,
     pub target_owners: Vec<PendingImportOwner>,
+    pub package_interfaces:
+        tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces,
     /// Exact owned compiler products for recovery publication after admission.
     pub recovery_products: Vec<CertifiedRecoveryProduct>,
 }
@@ -2190,6 +2198,12 @@ fn check_cell_impl(
     req: CellCheckRequest<'_>,
     fold: Option<CellFoldTurn<'_>>,
 ) -> Result<(CellCheck, Option<TurnResult>), CellCheckFailure> {
+    if req.exact_context.is_some() {
+        return Err(CompileError::ExtractFailed(
+            "exact declaration contexts require exact compiler admission".into(),
+        )
+        .into());
+    }
     let temp = TempDir::new()?;
     let cell_path = temp.path().join("cell.txt");
     let template_path = temp.path().join("CellCheckTemplate.hs");
@@ -2431,6 +2445,12 @@ fn run_turn_with_pin(
     pin: Option<&str>,
     activation_preview: bool,
 ) -> Result<TurnResult, TurnFailure> {
+    if req.exact_context.is_some() {
+        return Err(CompileError::ExtractFailed(
+            "exact declaration contexts require exact compiler admission".into(),
+        )
+        .into());
+    }
     let verdict_arg = match &req.verdict {
         Some(TurnClassification { kind, binders, .. }) => {
             #[allow(
@@ -2673,6 +2693,7 @@ fn read_compiled_turn(
         certification: sealed.map(|sealed| TurnCertification {
             groups: sealed.certified_groups,
             target_owners: sealed.pending_imports,
+            package_interfaces: sealed.package_interfaces,
             recovery_products: sealed.recovery_products,
         }),
     })
@@ -4030,6 +4051,48 @@ mod ambiguity_advice_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn generic_tool_policy_certifies_canonical_constraint_tuple_selector() {
+        use tidepool_repr::{Generation, SessionModule};
+        use tidepool_testing::effect_surface::TestEffectSurface;
+        use tidepool_toolchain::artifacts::{compile_invocation, CompileInvocation};
+
+        tidepool_testing::eval_harness::require_extract();
+        let surface = TestEffectSurface::minimal(&[tidepool_mcp::agent_tools_decl()])
+            .expect("owned AgentTools effect surface");
+        let source_root = tempfile::tempdir().unwrap();
+        let path = source_root
+            .path()
+            .join(SessionModule::lib(Generation(1)).relative_hs_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, include_str!("fixtures/constraint-tuple-G1.hs")).unwrap();
+        let mut includes = vec![source_root.path().to_path_buf()];
+        includes.extend_from_slice(surface.include_paths());
+        let artifacts = compile_invocation(&CompileInvocation {
+            source: "module TidepoolConstraintTupleProbe where\nimport qualified Tidepool.Session.Lib.G1 as Original\nresult = Original.policy\n",
+            targets: &["result"],
+            include: &includes,
+            fallback_module_name: "TidepoolConstraintTupleProbe",
+        }, |_, _, _| {}).expect("generic policy must retain a complete package witness");
+        let imports = artifacts
+            .certified_groups
+            .iter()
+            .flat_map(|group| group.imports())
+            .chain(
+                artifacts
+                    .targets
+                    .values()
+                    .flat_map(|target| target.pending_imports.iter()),
+            );
+        assert!(imports.into_iter().any(|owner| matches!(owner,
+            PendingImportOwner::Package { unit, module, binder, interface_digest }
+                if binder.occurrence == "$p1CTuple2"
+                    && unit == &binder.unit
+                    && module == &binder.module
+                    && *interface_digest != [0; 32]
+        )), "generic policy must certify the original constraint-tuple selector as an exact package import");
+    }
+
     /// Force tests that replace `TIDEPOOL_EXTRACT` to exercise that process
     /// boundary even when the surrounding test runner owns a compile daemon.
     /// Each nextest case has its own process, but it still inherits the
@@ -4100,6 +4163,7 @@ mod tests {
             "value\n",
         );
         let checked = check_cell(CellCheckRequest {
+            exact_context: None,
             session_id: None,
             cell_text: cell,
             template,
@@ -4136,6 +4200,7 @@ mod tests {
         let first_pins = checked.pins_for_item(0).unwrap();
         let first = run_turn_pinned(
             TurnRequest {
+                exact_context: None,
                 session_id: None,
                 turn_text: &checked.items[0].source,
                 templates: &first_templates,
@@ -4160,6 +4225,7 @@ mod tests {
         let second_pins = checked.pins_for_item(1).unwrap();
         let second = run_turn_pinned(
             TurnRequest {
+                exact_context: None,
                 session_id: None,
                 turn_text: &checked.items[1].source,
                 templates: &second_templates,
@@ -4219,6 +4285,7 @@ mod tests {
             "fixed\n",
         );
         let checked = check_cell(CellCheckRequest {
+            exact_context: None,
             session_id: None,
             cell_text: cell,
             template,
@@ -4277,6 +4344,7 @@ mod tests {
         }];
         let staged = run_turn_pinned(
             TurnRequest {
+                exact_context: None,
                 session_id: None,
                 turn_text: &checked.items[1].source,
                 templates: &templates,
@@ -4348,6 +4416,7 @@ mod tests {
             "let boxed = (1 :: Int, [Alias.Box])\n",
         );
         let checked = check_cell(CellCheckRequest {
+            exact_context: None,
             session_id: None,
             cell_text: cell,
             template,
@@ -4401,6 +4470,7 @@ mod tests {
         }];
         let staged = run_turn_pinned(
             TurnRequest {
+                exact_context: None,
                 session_id: None,
                 turn_text: &saved_item.source,
                 templates: &templates,
@@ -4426,6 +4496,7 @@ mod tests {
         );
         let (_, folded) = check_cell_with_fold(
             CellCheckRequest {
+                exact_context: None,
                 session_id: None,
                 cell_text: "let saved = (pure () :: Handler ())\n",
                 template: &fold_template,
@@ -4511,6 +4582,7 @@ mod tests {
         let declaration = "data MergeRequest = MergeRequest { mergeSourceHead :: Int, mergeSourceWorktree :: Int }\n";
         let partial = format!("{declaration}request = MergeRequest {{ mergeSourceHead = 1 }}\n");
         let checked = check_cell(CellCheckRequest {
+            exact_context: None,
             session_id: None,
             cell_text: &partial,
             template: &template,
@@ -4547,6 +4619,7 @@ mod tests {
             "{declaration}request = MergeRequest {{ mergeSourceHead = 1, mergeSourceWorktree = 2 }}\n"
         );
         let checked = check_cell(CellCheckRequest {
+            exact_context: None,
             session_id: None,
             cell_text: &complete,
             template: &template,
@@ -4627,6 +4700,7 @@ mod tests {
         ] {
             let evidence = "compile-view-a";
             let checked = check_cell(CellCheckRequest {
+                exact_context: None,
                 session_id: None,
                 cell_text: cell,
                 template: &template,
@@ -4697,6 +4771,7 @@ mod tests {
         // Named class defaulting selects the exact effect row in the first
         // whole-cell check; no diagnostic-triggered retry is involved.
         let checked = check_cell(CellCheckRequest {
+            exact_context: None,
             session_id: None,
             cell_text: &cell,
             template: &template,
@@ -4750,6 +4825,7 @@ mod tests {
         let cell = format!("{EFF_DECLS}1 + 1 :: Int\n");
 
         let checked = check_cell(CellCheckRequest {
+            exact_context: None,
             session_id: None,
             cell_text: &cell,
             template: &template,
@@ -4771,6 +4847,7 @@ mod tests {
 
         // Repeating the same request makes the same compiler-owned decision.
         let repeated = check_cell(CellCheckRequest {
+            exact_context: None,
             session_id: None,
             cell_text: &cell,
             template: &template,
@@ -5181,6 +5258,7 @@ mod tests {
     fn run_turn_missing_template_is_clean_error_not_panic() {
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", "/nonexistent/tidepool-extract-test");
         let req = TurnRequest {
+            exact_context: None,
             session_id: None,
             turn_text: "1 + 1",
             templates: &[],
@@ -5222,6 +5300,7 @@ mod tests {
             },
         ];
         let err = run_turn(TurnRequest {
+            exact_context: None,
             session_id: None,
             turn_text: "1 :: Int",
             templates: &templates,
@@ -5261,6 +5340,7 @@ mod tests {
             source: format!("module Expr where\n__result = {name}\n"),
         });
         let failure = run_turn(TurnRequest {
+            exact_context: None,
             session_id: None,
             turn_text: "()",
             templates: &templates,

@@ -240,6 +240,7 @@ mod tests {
             next_value_generation: Generation(1),
             shadowing: Vec::new(),
             staged_hiding: Vec::new(),
+            exact_context: None,
         }
         .canonicalize();
         let surface = ExactExportSurface::new(

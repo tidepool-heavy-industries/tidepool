@@ -364,6 +364,7 @@ pub fn forks() -> Effect {
                 extract: None,
             },
             group_verb("ForksCommitWith", "forks_commit_with"),
+            group_verb("ForksCommitCapturedWith", "forks_commit_captured_with"),
             group_verb("ForksAbortWith", "forks_abort_with"),
             Verb {
                 ctor: "ForksCleanupWith",

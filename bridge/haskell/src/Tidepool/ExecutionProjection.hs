@@ -17,6 +17,7 @@ module Tidepool.ExecutionProjection
   , combinePreparedTargetReferences
   , preparedModuleReachFacts
   , preparedSeedUniques
+  , preparedRootIdentity
   , PreparedReachability(..)
   , emptyPreparedReachability
   , admitReachFacts
@@ -2377,6 +2378,9 @@ integerBytes bits value = BS.pack
 wordBytes :: Int -> Word64 -> BS.ByteString
 wordBytes count value = BS.pack
   [ fromIntegral (value `shiftR` (byte * 8)) | byte <- reverse [0 .. count - 1] ]
+
+preparedRootIdentity :: Id -> SymbolIdentity
+preparedRootIdentity = idSymbol "value"
 
 idSymbol :: Text -> Id -> SymbolIdentity
 idSymbol namespace = nameSymbol namespace . varName

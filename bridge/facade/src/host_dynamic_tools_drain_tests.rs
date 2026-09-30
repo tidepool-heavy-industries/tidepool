@@ -589,6 +589,7 @@ mod actual_seal {
         let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
         let root = tempfile::tempdir().unwrap();
         let compile = |text: &str, gen| match run_turn(TurnRequest {
+            exact_context: None,
             session_id: None,
             turn_text: text,
             templates: &templates,

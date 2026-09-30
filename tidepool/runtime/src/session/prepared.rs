@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use tidepool_bridge::{BridgeError, HaskellValue, HaskellVisitor};
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
+use tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces;
 
 use super::binding_table::BindingIndex;
 use tidepool_codegen::machine_state::MachineFailure;
@@ -395,17 +396,35 @@ pub(crate) struct InstallSnapshot {
 pub(crate) struct CertifiedTargetImage {
     prepared: PreparedProgram,
     image: Arc<CompiledProgram>,
+    package_interfaces: CertifiedTargetPackageInterfaces,
 }
 
 impl CertifiedTargetImage {
+    #[cfg(test)]
     pub(crate) fn compile(
         prepared: PreparedProgram,
         registry: &ImageRegistry,
     ) -> Result<Self, CompileError> {
+        Self::compile_certified(
+            prepared,
+            registry,
+            CertifiedTargetPackageInterfaces::default(),
+        )
+    }
+
+    pub(crate) fn compile_certified(
+        prepared: PreparedProgram,
+        registry: &ImageRegistry,
+        package_interfaces: CertifiedTargetPackageInterfaces,
+    ) -> Result<Self, CompileError> {
         let image = registry.get_or_compile_prepared(&prepared, || {
             CompiledProgram::compile_prepared_definitions(&prepared).map(Arc::new)
         })?;
-        Ok(Self { prepared, image })
+        Ok(Self {
+            prepared,
+            image,
+            package_interfaces,
+        })
     }
 
     pub(crate) fn globals(&self) -> &[tidepool_repr::execution_schema::GlobalDecl] {
@@ -419,8 +438,8 @@ pub(crate) struct CertifiedTurnInstall {
     pub leases: Vec<SourceInstanceLease>,
     facts: Vec<ProgramFacts>,
     plans: Vec<EvidencePlan>,
-    exports: Vec<(SymbolIdentity, ValueId, Option<Signature>)>,
     package_updates: BTreeMap<SymbolIdentity, [u8; 32]>,
+    exports: BTreeMap<SymbolIdentity, CodeExport>,
 }
 
 /// Which installed program's site table is authoritative for one site id.
@@ -2067,17 +2086,7 @@ impl PreparedEngine {
         let mut engine = Self::from_machine(machine, registry);
         // The first program can conflict only with itself.
         let plan = engine.plan_evidence(&facts)?;
-        engine.programs.insert(program, facts);
-        engine.publish_evidence(program, plan);
-        engine.publish_code_exports(program, exports);
-        // Held live across the install-to-first-run gap; the turn's
-        // bind/complete path (`resident.rs`) unpins it once the run's
-        // outcome is bound, released or parked.
-        engine
-            .machine
-            .pin(program)
-            .map_err(PreparedRuntimeError::Run)?;
-        engine.installs_since_major += 1;
+        engine.finish_program_install(program, facts, plan, exports)?;
         Ok((engine, program))
     }
 
@@ -2250,38 +2259,84 @@ impl PreparedEngine {
         Ok(plans)
     }
 
-    /// Offer `program`'s package tops to every later turn as executable
-    /// imports, so the next turn's projection drops their bodies instead of
-    /// handing this machine a second copy to compile.
-    ///
-    /// Called only after `program` is installed and published, so a refused
-    /// install offers nothing. An identity already exported keeps its
-    /// existing handle: the first program to define it stays the one every
-    /// later turn imports, and no second root is taken for it. A top that
-    /// will not retain (no managed value at its slot) is simply not offered
-    /// -- later turns keep projecting their own body for it, exactly as
-    /// before -- so this can lose a speedup but never a program.
-    fn publish_code_exports(
+    /// Retain exports before any session metadata or source custody publishes.
+    /// An existing export keeps its root. Optional absence is benign only on a
+    /// reusable machine; retention failures release this stage's earlier roots
+    /// and return the original error without publishing a partial export map.
+    fn stage_code_exports(
         &mut self,
         program: ProgramId,
         exports: Vec<(SymbolIdentity, ValueId, Option<Signature>)>,
-    ) {
+        required: &BTreeMap<SymbolIdentity, (ValueId, [u8; 32])>,
+    ) -> Result<BTreeMap<SymbolIdentity, CodeExport>, PreparedRuntimeError> {
+        let mut staged = BTreeMap::<SymbolIdentity, CodeExport>::new();
         for (identity, value, entry) in exports {
             if self.code_exports.contains_key(&identity) {
                 continue;
             }
-            let Ok(handle) = self.machine.retain_export_top(program, value) else {
-                continue;
+            let handle = match self.machine.retain_export_top(program, value) {
+                Ok(handle) => handle,
+                Err(ExecutionError::MissingEntry(_))
+                    if !required.contains_key(&identity)
+                        && self.machine.disposition() == MachineDisposition::Reusable =>
+                {
+                    continue;
+                }
+                Err(error) => {
+                    for export in staged.into_values() {
+                        assert!(
+                            self.release(export.handle),
+                            "failed export stage retains its earlier root"
+                        );
+                    }
+                    return Err(PreparedRuntimeError::Run(error));
+                }
             };
-            self.code_exports.insert(
+            let interface_digest = required.get(&identity).map(|(_, digest)| *digest);
+            staged.insert(
                 identity,
                 CodeExport {
                     handle,
                     entry,
-                    interface_digest: None,
+                    interface_digest,
                 },
             );
         }
+        Ok(staged)
+    }
+
+    /// Complete an ordinary install at its fallible owner. Its pin protects
+    /// the install-to-first-run gap; no retention runs after publication.
+    fn finish_program_install(
+        &mut self,
+        program: ProgramId,
+        facts: ProgramFacts,
+        plan: EvidencePlan,
+        exports: Vec<(SymbolIdentity, ValueId, Option<Signature>)>,
+    ) -> Result<(), PreparedRuntimeError> {
+        self.machine
+            .pin(program)
+            .map_err(PreparedRuntimeError::Run)?;
+        let exports = match self.stage_code_exports(program, exports, &BTreeMap::new()) {
+            Ok(exports) => exports,
+            Err(error) => {
+                assert!(self.unpin(program), "refused install retains its pin");
+                // Integrity failures keep native code/heap custody intact.
+                // Cleanup must neither collect an unavailable machine nor
+                // replace the first retention failure with a cleanup failure.
+                if self.machine.disposition() == MachineDisposition::Reusable {
+                    if let Err(cleanup) = self.quiesce_and_collect_now() {
+                        tracing::warn!(?cleanup, "failed to collect refused export installation");
+                    }
+                }
+                return Err(error);
+            }
+        };
+        self.programs.insert(program, facts);
+        self.publish_evidence(program, plan);
+        self.code_exports.extend(exports);
+        self.installs_since_major += 1;
+        Ok(())
     }
 
     /// Every package top this machine already carries, as the extractor
@@ -2293,6 +2348,61 @@ impl PreparedEngine {
         self.code_exports
             .keys()
             .map(|identity| (identity.clone(), CODE_EXPORT_GENERATION))
+    }
+
+    /// Resolve an advertised immutable export through this engine's exact live
+    /// ledger. Native `ValueHandle` identities are issued process-wide and
+    /// never reused; retaining that identity fences a later install against a
+    /// different machine or a replacement root, even at the same generation.
+    pub(crate) fn retained_code_export_owner(
+        &self,
+        identity: &SymbolIdentity,
+        generation: u64,
+    ) -> Option<ImportOwner> {
+        if generation != CODE_EXPORT_GENERATION {
+            return None;
+        }
+        let export = self.code_exports.get(identity)?;
+        (self.machine.prepared_handle_of(export.handle.raw()) == Some(export.handle)).then(|| {
+            ImportOwner::CodeExport {
+                binder: identity.clone(),
+                generation,
+                root_id: export.handle.raw().0,
+            }
+        })
+    }
+
+    fn code_export_import(
+        &self,
+        owner: &ImportOwner,
+        declaration: &tidepool_repr::execution_schema::GlobalDecl,
+    ) -> Result<BatchImport, PreparedRuntimeError> {
+        let ImportOwner::CodeExport {
+            binder,
+            generation,
+            root_id,
+        } = owner
+        else {
+            unreachable!("code export import has a code export owner")
+        };
+        let export = self
+            .code_exports
+            .get(binder)
+            .filter(|export| {
+                binder == &declaration.identity
+                    && declaration.required_generation == Some(*generation)
+                    && *generation == CODE_EXPORT_GENERATION
+                    && export.handle.raw().0 == *root_id
+                    && export.handle.rep() == declaration.rep
+                    && self.machine.prepared_handle_of(export.handle.raw()) == Some(export.handle)
+            })
+            .ok_or_else(|| PreparedRuntimeError::MissingCertifiedOwner(owner.clone()))?;
+        // The batch owner checks the declared callable signature and required
+        // evaluatedness against this producer's signature and live native root.
+        Ok(BatchImport::Existing {
+            handle: export.handle,
+            entry_signature: export.entry.clone(),
+        })
     }
 
     /// How many package tops later turns can import instead of recompiling.
@@ -2367,16 +2477,7 @@ impl PreparedEngine {
             compiled_off_checkout = false,
             "prepared install"
         );
-        self.programs.insert(program, facts);
-        self.publish_evidence(program, plan);
-        self.publish_code_exports(program, exports);
-        // Held live across the install-to-first-run gap; the turn's
-        // bind/complete path (`resident.rs`) unpins it once the run's
-        // outcome is bound, released or parked.
-        self.machine
-            .pin(program)
-            .map_err(PreparedRuntimeError::Run)?;
-        self.installs_since_major += 1;
+        self.finish_program_install(program, facts, plan, exports)?;
         Ok(program)
     }
 
@@ -2520,6 +2621,9 @@ impl PreparedEngine {
                             entry_signature: None,
                         });
                     }
+                    ImportOwner::CodeExport { .. } => {
+                        imports.push(self.code_export_import(owner, declaration)?);
+                    }
                     ImportOwner::Package {
                         unit,
                         module,
@@ -2601,6 +2705,75 @@ impl PreparedEngine {
         exact_external: &HashMap<ImportOwner, PreparedHandle>,
         bindings: &BindingTable,
     ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
+        let target_exports: BTreeMap<_, _> = exportable_code_tops(&target.prepared)
+            .into_iter()
+            .map(|(identity, value, _)| (identity, value))
+            .collect();
+        let mut target_packages = BTreeMap::new();
+        let matches_target = target.package_interfaces.matches_target(&target.prepared);
+        for owner in target_owners.iter().chain(
+            demanded
+                .iter()
+                .flat_map(|selected| selected.group().imports()),
+        ) {
+            let ImportOwner::Package {
+                unit,
+                module,
+                binder,
+                interface_digest,
+            } = owner
+            else {
+                continue;
+            };
+            if self.code_exports.contains_key(binder) {
+                continue;
+            }
+            let value = target_exports
+                .get(binder)
+                .copied()
+                .filter(|_| {
+                    binder.unit == *unit
+                        && binder.module == *module
+                        && matches_target
+                        && target.package_interfaces.interface_digest(unit, module)
+                            == Some(*interface_digest)
+                })
+                .ok_or_else(|| PreparedRuntimeError::MissingCertifiedOwner(owner.clone()))?;
+            if target_packages
+                .insert(binder.clone(), (value, *interface_digest))
+                .is_some_and(|previous| previous != (value, *interface_digest))
+            {
+                return Err(PreparedRuntimeError::MissingCertifiedOwner(owner.clone()));
+            }
+        }
+        self.install_certified_turn_admitted(
+            target,
+            target_owners,
+            source_evidence,
+            demanded,
+            inherited_needed,
+            inherited,
+            exact_external,
+            bindings,
+            target_packages,
+        )
+    }
+
+    // The only production caller supplies package tops admitted against the
+    // protected target/interface certificate above. Native installation still
+    // checks their full identity, representation and callable signature.
+    fn install_certified_turn_admitted(
+        &mut self,
+        target: CertifiedTargetImage,
+        target_owners: &[ImportOwner],
+        source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
+        demanded: Vec<DemandedImage>,
+        inherited_needed: &[InheritedSourceDemand],
+        inherited: &BTreeMap<SourceBinder, SourceInstanceLease>,
+        exact_external: &HashMap<ImportOwner, PreparedHandle>,
+        bindings: &BindingTable,
+        target_packages: BTreeMap<SymbolIdentity, (ValueId, [u8; 32])>,
+    ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
         if target.prepared.globals().len() != target_owners.len() {
             return Err(PreparedRuntimeError::CertifiedTargetOwners);
         }
@@ -2611,6 +2784,12 @@ impl PreparedEngine {
                 }
                 ImportOwner::Retained { generation, .. } => {
                     declaration.required_generation == Some(*generation)
+                }
+                ImportOwner::CodeExport {
+                    binder, generation, ..
+                } => {
+                    binder == &declaration.identity
+                        && declaration.required_generation == Some(*generation)
                 }
                 ImportOwner::Package {
                     unit,
@@ -2678,7 +2857,9 @@ impl PreparedEngine {
                     version: version.clone(),
                     binder: binder.clone(),
                 }),
-                ImportOwner::Retained { .. } | ImportOwner::Package { .. } => None,
+                ImportOwner::Retained { .. }
+                | ImportOwner::CodeExport { .. }
+                | ImportOwner::Package { .. } => None,
             })
             .collect::<Vec<_>>();
         let mut reachable = BTreeSet::new();
@@ -2696,7 +2877,9 @@ impl PreparedEngine {
                                     version: version.clone(),
                                     binder: binder.clone(),
                                 }),
-                                ImportOwner::Retained { .. } | ImportOwner::Package { .. } => None,
+                                ImportOwner::Retained { .. }
+                                | ImportOwner::CodeExport { .. }
+                                | ImportOwner::Package { .. } => None,
                             }),
                     );
                 }
@@ -2845,27 +3028,49 @@ impl PreparedEngine {
                                 entry_signature: None,
                             }
                         }
+                        ImportOwner::CodeExport { .. } => {
+                            self.code_export_import(owner, declaration)?
+                        }
                         ImportOwner::Package {
                             unit,
                             module,
                             binder,
                             interface_digest,
                         } => {
-                            let export = self
-                                .code_exports
-                                .get(binder)
-                                .filter(|export| {
-                                    declaration.identity == *binder
-                                        && binder.unit == *unit
-                                        && binder.module == *module
-                                        && export
-                                            .interface_digest
-                                            .is_none_or(|known| known == *interface_digest)
-                                })
-                                .ok_or_else(|| {
-                                    PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
-                                })?;
-                            let handle = export.handle;
+                            if declaration.identity != *binder
+                                || binder.unit != *unit
+                                || binder.module != *module
+                            {
+                                return Err(PreparedRuntimeError::MissingCertifiedOwner(
+                                    owner.clone(),
+                                ));
+                            }
+                            let import = if let Some(export) = self.code_exports.get(binder) {
+                                if export
+                                    .interface_digest
+                                    .is_some_and(|known| known != *interface_digest)
+                                {
+                                    return Err(PreparedRuntimeError::MissingCertifiedOwner(
+                                        owner.clone(),
+                                    ));
+                                }
+                                BatchImport::Existing {
+                                    handle: export.handle,
+                                    entry_signature: export.entry.clone(),
+                                }
+                            } else {
+                                let &(binding, digest) = target_packages
+                                    .get(binder)
+                                    .filter(|(_, digest)| digest == interface_digest)
+                                    .ok_or_else(|| {
+                                        PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
+                                    })?;
+                                debug_assert_eq!(digest, *interface_digest);
+                                BatchImport::Source {
+                                    group: demanded.len(),
+                                    binding,
+                                }
+                            };
                             if package_updates
                                 .insert(binder.clone(), *interface_digest)
                                 .is_some_and(|previous| previous != *interface_digest)
@@ -2874,10 +3079,7 @@ impl PreparedEngine {
                                     owner.clone(),
                                 ));
                             }
-                            BatchImport::Existing {
-                                handle,
-                                entry_signature: export.entry.clone(),
-                            }
+                            import
                         }
                     };
                     imports.push(import);
@@ -2921,15 +3123,26 @@ impl PreparedEngine {
                     .pin(id)
                     .expect("batch returned installed program");
             }
-            Ok(CertifiedTurnInstall {
+            let mut staged = CertifiedTurnInstall {
                 target: target_id,
                 groups: installed.programs[..installed.programs.len() - 1].to_vec(),
                 leases: installed.leases,
                 facts,
                 plans,
-                exports,
                 package_updates,
-            })
+                exports: BTreeMap::new(),
+            };
+            staged.exports = match self.stage_code_exports(target_id, exports, &target_packages) {
+                Ok(exports) => exports,
+                Err(error) => {
+                    let tokens = std::mem::take(&mut staged.leases);
+                    if let Err(cleanup) = self.abort_certified_turn(staged, tokens) {
+                        tracing::warn!(?cleanup, "failed to collect refused export batch");
+                    }
+                    return Err(error);
+                }
+            };
+            Ok(staged)
         })();
         match result {
             Ok(mut staged) => {
@@ -2956,6 +3169,7 @@ impl PreparedEngine {
             staged.leases.is_empty(),
             "source leases must enter scope custody"
         );
+        self.code_exports.extend(staged.exports);
         for (binder, digest) in staged.package_updates {
             self.code_exports
                 .get_mut(&binder)
@@ -2971,7 +3185,6 @@ impl PreparedEngine {
             self.programs.insert(id, facts);
             self.publish_evidence(id, plan);
         }
-        self.publish_code_exports(staged.target, staged.exports);
         self.installs_since_major += staged.groups.len() + 1;
         for group in staged.groups {
             assert!(self.unpin(group), "scoped source root replaces install pin");
@@ -2995,6 +3208,12 @@ impl PreparedEngine {
             assert!(
                 self.release(token.handle()),
                 "rejected source token remains rooted"
+            );
+        }
+        for export in staged.exports.into_values() {
+            assert!(
+                self.release(export.handle),
+                "unpublished export remains rooted"
             );
         }
         for program in staged
@@ -3101,16 +3320,7 @@ impl PreparedEngine {
             compiled_off_checkout = true,
             "prepared install"
         );
-        self.programs.insert(program, snapshot.facts);
-        self.publish_evidence(program, snapshot.plan);
-        self.publish_code_exports(program, snapshot.exports);
-        // Held live across the install-to-first-run gap; the turn's
-        // bind/complete path (`resident.rs`) unpins it once the run's
-        // outcome is bound, released or parked.
-        self.machine
-            .pin(program)
-            .map_err(PreparedRuntimeError::Run)?;
-        self.installs_since_major += 1;
+        self.finish_program_install(program, snapshot.facts, snapshot.plan, snapshot.exports)?;
         Ok(Some(program))
     }
 
@@ -5293,6 +5503,388 @@ pub(super) mod tests {
         engine.quiesce_and_collect_now().unwrap();
         assert_eq!(engine.residency().programs, 1);
         assert!(engine.unpin(bootstrap));
+    }
+
+    #[test]
+    fn retained_code_export_owners_fence_identity_generation_and_native_root() {
+        let prepared = testing::prepare(testing::wire_program()).unwrap();
+        let binder = testing::identity("Fixture", "entry");
+        let (mut engine, bootstrap) = PreparedEngine::bootstrap(prepared.clone()).unwrap();
+        let (foreign, _) = PreparedEngine::bootstrap(prepared).unwrap();
+        let owner = engine.retained_code_export_owner(&binder, 0).unwrap();
+        let foreign_owner = foreign.retained_code_export_owner(&binder, 0).unwrap();
+        assert_ne!(owner, foreign_owner);
+        assert!(engine.retained_code_export_owner(&binder, 1).is_none());
+        let mut wrong_identity = binder.clone();
+        wrong_identity.unit = "another-package".into();
+        assert!(engine
+            .retained_code_export_owner(&wrong_identity, 0)
+            .is_none());
+        let ImportOwner::CodeExport { root_id, .. } = owner.clone() else {
+            panic!("native export must have a distinct owner");
+        };
+        let registry = ImageRegistry::new();
+        let target = |identity: SymbolIdentity, generation, bad_signature| {
+            let mut wire = testing::wire_program();
+            let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+                unreachable!()
+            };
+            top.identity.unit = HOME_UNIT.into();
+            if bad_signature {
+                wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+            }
+            wire.expressions.nodes[0] = ExprFrame::Call {
+                callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+                signature: SignatureId(0),
+                arguments: vec![],
+            };
+            wire.globals.push(GlobalDecl {
+                identity,
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: Some(SignatureId(0)),
+                required_evaluated: true,
+                required_generation: Some(generation),
+            });
+            CertifiedTargetImage::compile(testing::prepare(wire).unwrap(), &registry).unwrap()
+        };
+        let install = |engine: &mut PreparedEngine, owner: ImportOwner, target| {
+            engine.install_certified_turn(
+                target,
+                &[owner],
+                &BTreeMap::new(),
+                vec![],
+                &[],
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &BindingTable::new(),
+            )
+        };
+        let before = engine.residency();
+        for (refused, image) in [
+            (foreign_owner, target(binder.clone(), 0, false)),
+            (
+                ImportOwner::CodeExport {
+                    binder: binder.clone(),
+                    generation: 1,
+                    root_id,
+                },
+                target(binder.clone(), 1, false),
+            ),
+            (
+                ImportOwner::CodeExport {
+                    binder: wrong_identity.clone(),
+                    generation: 0,
+                    root_id,
+                },
+                target(wrong_identity, 0, false),
+            ),
+        ] {
+            assert!(matches!(install(&mut engine, refused.clone(), image),
+                Err(PreparedRuntimeError::MissingCertifiedOwner(actual)) if actual == refused));
+            assert_eq!(engine.residency(), before);
+        }
+        assert!(matches!(
+            install(&mut engine, owner.clone(), target(binder.clone(), 0, true)),
+            Err(PreparedRuntimeError::Run(
+                ExecutionError::BatchSourceContract(_)
+            ))
+        ));
+        assert_eq!(engine.residency(), before);
+        let staged = install(&mut engine, owner, target(binder.clone(), 0, false)).unwrap();
+        assert!(staged.leases.is_empty());
+        let program = engine.commit_certified_turn(staged);
+        let result = engine
+            .machine
+            .run_entry_retained(
+                program,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 0,
+                    collect_before_observation: true,
+                },
+                RealmId::ROOT,
+            )
+            .unwrap();
+        assert_eq!(result.values, vec![PreparedResult::Scalar(42)]);
+        assert!(engine.unpin(program));
+        assert!(engine.unpin(bootstrap));
+        engine.quiesce_and_collect_now().unwrap();
+        let export = engine.code_exports.remove(&binder).unwrap();
+        assert!(engine.release(export.handle));
+        assert!(engine.retained_code_export_owner(&binder, 0).is_none());
+        engine.quiesce_and_collect_now().unwrap();
+        assert_eq!(engine.residency().programs, 0);
+    }
+
+    #[test]
+    fn export_staging_rolls_back_prior_roots_on_required_absence() {
+        let prepared = testing::prepare(testing::wire_program()).unwrap();
+        let image = Arc::new(CompiledProgram::compile_prepared_definitions(&prepared).unwrap());
+        let mut engine = PreparedEngine::empty_certified(64 * 1024, None).unwrap();
+        let program = engine
+            .machine
+            .install_shared_batch(vec![BatchProgram {
+                image,
+                imports: vec![],
+            }])
+            .unwrap()[0];
+        engine.machine.pin(program).unwrap();
+        let before = engine.residency();
+        let optional = testing::identity("Fixture", "entry");
+        let required = testing::identity("Fixture", "missing");
+        let error = engine
+            .stage_code_exports(
+                program,
+                vec![
+                    (optional, ValueId(0), Some(prepared.signatures()[0].clone())),
+                    (required.clone(), ValueId(999), None),
+                ],
+                &BTreeMap::from([(required.clone(), (ValueId(999), [9; 32]))]),
+            )
+            .err()
+            .expect("required missing export must refuse the stage");
+        assert!(matches!(
+            error,
+            PreparedRuntimeError::Run(ExecutionError::MissingEntry(ValueId(999)))
+        ));
+        assert_eq!(engine.residency(), before);
+        assert!(engine.programs.is_empty());
+        assert!(engine.code_exports.is_empty());
+        assert_eq!(engine.disposition(), MachineDisposition::Reusable);
+        let absent = engine
+            .stage_code_exports(
+                program,
+                vec![(required, ValueId(999), None)],
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert!(absent.is_empty());
+        assert_eq!(engine.residency(), before);
+        assert!(engine.unpin(program));
+        engine.quiesce_and_collect_now().unwrap();
+        assert_eq!(engine.residency().programs, 0);
+    }
+
+    #[test]
+    fn cold_certified_package_forward_edge_executes_and_rolls_back() {
+        use tidepool_codegen::prepared_program::GroupInventory;
+        use tidepool_repr::execution_schema::{CertifiedGroup, ModuleVersion};
+
+        let package = SymbolIdentity {
+            unit: "fixture-package".into(),
+            module: "FixturePackage".into(),
+            ..testing::identity("FixturePackage", "packageValue")
+        };
+        let optional = SymbolIdentity {
+            unit: package.unit.clone(),
+            ..testing::identity("FixturePackage", "optionalValue")
+        };
+        let source = testing::identity("Fixture", "cached");
+        let package_owner = |digest| ImportOwner::Package {
+            unit: package.unit.clone(),
+            module: package.module.clone(),
+            binder: package.clone(),
+            interface_digest: digest,
+        };
+        let source_owner = ImportOwner::Source {
+            version: ModuleVersion([1; 32]),
+            binder: source.clone(),
+        };
+        let group = |bad_signature: bool, digest| {
+            let mut wire = testing::wire_program();
+            let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+                unreachable!()
+            };
+            top.identity = source.clone();
+            if bad_signature {
+                wire.signatures.push(Signature {
+                    arguments: vec![],
+                    results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+                });
+            } else {
+                wire.expressions.nodes[0] = ExprFrame::Call {
+                    callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+                    signature: SignatureId(0),
+                    arguments: vec![],
+                };
+            }
+            wire.globals.push(GlobalDecl {
+                identity: package.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: Some(SignatureId(u32::from(bad_signature))),
+                required_evaluated: false,
+                required_generation: None,
+            });
+            CertifiedGroup::admit(
+                CachedHomeOwner {
+                    unit: "fixture".into(),
+                    module: "Fixture".into(),
+                    module_version: ModuleVersion([1; 32]),
+                    skinny_iface_sha256: [2; 32],
+                    product_sha256: [3; 32],
+                },
+                testing::projected_group(wire, 2).unwrap(),
+                vec![package_owner(digest)],
+            )
+            .unwrap()
+        };
+        let registry = ImageRegistry::new();
+        let target = || {
+            let mut wire = testing::wire_program();
+            let Group::NonRecursive(mut package_top) = wire.bindings[0].clone() else {
+                unreachable!()
+            };
+            package_top.identity = package.clone();
+            package_top.binding.id = ValueId(1);
+            let HeapRhs::Function { body, .. } = &mut package_top.binding.rhs else {
+                unreachable!()
+            };
+            *body = 1;
+            wire.expressions
+                .nodes
+                .push(wire.expressions.nodes[0].clone());
+            let mut optional_top = package_top.clone();
+            optional_top.identity = optional.clone();
+            optional_top.binding.id = ValueId(2);
+            let HeapRhs::Function { body, .. } = &mut optional_top.binding.rhs else {
+                unreachable!()
+            };
+            *body = 2;
+            wire.expressions
+                .nodes
+                .push(wire.expressions.nodes[1].clone());
+            wire.bindings.push(Group::NonRecursive(package_top));
+            wire.bindings.push(Group::NonRecursive(optional_top));
+            let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+                unreachable!()
+            };
+            top.identity.unit = HOME_UNIT.into();
+            wire.expressions.nodes[0] = ExprFrame::Call {
+                callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+                signature: SignatureId(0),
+                arguments: vec![],
+            };
+            wire.globals.push(GlobalDecl {
+                identity: source.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: Some(SignatureId(0)),
+                required_evaluated: false,
+                required_generation: None,
+            });
+            CertifiedTargetImage::compile(testing::prepare(wire).unwrap(), &registry).unwrap()
+        };
+        let selected = |group: &CertifiedGroup| {
+            GroupInventory::new(std::slice::from_ref(group))
+                .unwrap()
+                .seal([SourceBinder {
+                    version: ModuleVersion([1; 32]),
+                    binder: source.clone(),
+                }])
+                .unwrap()
+                .compile(&registry)
+                .unwrap()
+        };
+        let mut engine = PreparedEngine::empty_certified(64 * 1024, None).unwrap();
+        let before = engine.residency();
+        let good = group(false, [9; 32]);
+        let evidence = certified_source_evidence(std::slice::from_ref(&good));
+        // An unsigned target cannot authorize a package body merely because
+        // it has the same identity. Producer-sealed admission is tested by the
+        // real compiler lane; these fixtures exercise its native transaction.
+        assert!(matches!(engine.install_certified_turn(
+            target(), std::slice::from_ref(&source_owner), &evidence, selected(&good), &[],
+            &BTreeMap::new(), &HashMap::new(), &BindingTable::new(),
+        ), Err(PreparedRuntimeError::MissingCertifiedOwner(owner)) if owner == package_owner([9; 32])));
+        assert_eq!(engine.residency(), before);
+        let admitted = || BTreeMap::from([(package.clone(), (ValueId(1), [9; 32]))]);
+        let install = |engine: &mut PreparedEngine, group: &CertifiedGroup| {
+            engine.install_certified_turn_admitted(
+                target(),
+                std::slice::from_ref(&source_owner),
+                &evidence,
+                selected(group),
+                &[],
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &BindingTable::new(),
+                admitted(),
+            )
+        };
+        let bad = group(true, [9; 32]);
+        assert!(matches!(
+            install(&mut engine, &bad),
+            Err(PreparedRuntimeError::Run(
+                ExecutionError::BatchSourceContract(_)
+            ))
+        ));
+        assert_eq!(engine.residency(), before);
+        assert!(engine.code_exports.is_empty());
+        assert!(engine.programs.is_empty());
+        let wrong_digest = group(false, [8; 32]);
+        assert!(matches!(install(&mut engine, &wrong_digest),
+            Err(PreparedRuntimeError::MissingCertifiedOwner(owner)) if owner == package_owner([8; 32])));
+        assert_eq!(engine.residency(), before);
+        let mut aborted = install(&mut engine, &good).unwrap();
+        assert_eq!(aborted.exports.len(), 2);
+        assert_eq!(aborted.exports[&optional].interface_digest, None);
+        assert_eq!(aborted.exports[&package].interface_digest, Some([9; 32]));
+        assert_eq!(engine.residency().code_exports, before.code_exports + 2);
+        assert!(engine.code_exports.is_empty());
+        let tokens = std::mem::take(&mut aborted.leases);
+        engine.abort_certified_turn(aborted, tokens).unwrap();
+        // First native installation interns the boxed-array, mutable-variable
+        // and byte-array descriptors for the machine's lifetime. Program
+        // retirement releases callable descriptors, not these shared layouts.
+        let initialized = tidepool_codegen::prepared_program::ResidencyCounts {
+            descriptor_rows: 3,
+            ..before
+        };
+        assert_eq!(engine.residency(), initialized);
+        assert!(engine.code_exports.is_empty());
+        assert!(engine.programs.is_empty());
+        let mut repeated_abort = install(&mut engine, &good).unwrap();
+        let tokens = std::mem::take(&mut repeated_abort.leases);
+        engine.abort_certified_turn(repeated_abort, tokens).unwrap();
+        assert_eq!(engine.residency(), initialized);
+        let mut staged = install(&mut engine, &good).unwrap();
+        let staged_roots = engine.persistent_roots_count();
+        let staged_residency = engine.residency();
+        let tokens = std::mem::take(&mut staged.leases);
+        let program = engine.commit_certified_turn(staged);
+        assert_eq!(
+            engine.residency().code_exports,
+            staged_residency.code_exports
+        );
+        assert_eq!(engine.persistent_roots_count(), staged_roots);
+        assert_eq!(engine.code_exports[&optional].interface_digest, None);
+        assert_eq!(
+            engine.code_exports[&package].interface_digest,
+            Some([9; 32])
+        );
+        let result = engine
+            .machine
+            .run_entry_retained(
+                program,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 0,
+                    collect_before_observation: false,
+                },
+                RealmId::ROOT,
+            )
+            .unwrap();
+        assert!(matches!(
+            result.values.as_slice(),
+            [PreparedResult::Scalar(42)]
+        ));
+        for token in tokens {
+            assert!(engine.release(token.handle()));
+        }
+        assert!(engine.unpin(program));
+        engine.quiesce_and_collect_now().unwrap();
+        assert_eq!(engine.code_export_count(), 2);
     }
 
     #[test]

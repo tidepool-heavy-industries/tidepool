@@ -1639,6 +1639,10 @@ pub(crate) enum ForkGroupBoundary {
         continuation: ResidentHole,
         group: crate::ForkGroupId,
     },
+    CommitCaptured {
+        continuation: ResidentHole,
+        group: crate::ForkGroupId,
+    },
     Abort {
         continuation: ResidentHole,
         group: crate::ForkGroupId,
@@ -1688,6 +1692,9 @@ impl ResidentActorBoundary {
             }
             Self::ForkGroup(ForkGroupBoundary::Begin { .. }) => "begin context-fork group",
             Self::ForkGroup(ForkGroupBoundary::Commit { .. }) => "commit context-fork group",
+            Self::ForkGroup(ForkGroupBoundary::CommitCaptured { .. }) => {
+                "commit captured context-fork group"
+            }
             Self::ForkGroup(ForkGroupBoundary::Abort { .. }) => "abort context-fork group",
             Self::ForkGroup(ForkGroupBoundary::Cleanup { .. }) => "cleanup context-fork group",
             Self::Start(_) => "startActor",
@@ -1984,6 +1991,9 @@ impl ResidentRequest {
             }
             Self::Forks(crate::generated::forks::ForksReq::ForksCommitWith(..)) => {
                 "commit context-fork group"
+            }
+            Self::Forks(crate::generated::forks::ForksReq::ForksCommitCapturedWith(..)) => {
+                "commit captured context-fork group"
             }
             Self::Forks(crate::generated::forks::ForksReq::ForksAbortWith(..)) => {
                 "abort context-fork group"
@@ -3397,6 +3407,7 @@ where
                 let include: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
                 let retained = session.prepared_retained();
                 let result = run_activation_turn(TurnRequest {
+                exact_context: view.exact_declaration_context().cloned(),
                 session_id: Some(view.session_id()),
                     turn_text: "sessionInput <- pure undefined",
                     templates: &templates,
@@ -3955,6 +3966,7 @@ where
                             .map(PathBuf::as_path)
                             .collect::<Vec<_>>();
                         let cell_check_request = || CellCheckRequest {
+                            exact_context: compile_view.exact_declaration_context().cloned(),
                             session_id: Some(compile_view.session_id()),
                             cell_text: &cell_source,
                             template: &template,
@@ -4143,6 +4155,7 @@ where
                             return Ok(vec![]);
                         }
                         run_inspections(InspectionRequest {
+                            exact_context: view.exact_declaration_context().cloned(),
                             preamble: &prepared.preamble,
                             imports: &prepared.imports,
                             include: &include,
@@ -4619,6 +4632,7 @@ where
                     .map(PathBuf::as_path)
                     .collect::<Vec<_>>();
                 run_inspections(InspectionRequest {
+                    exact_context: compile_view.exact_declaration_context().cloned(),
                     preamble: &prepared.preamble,
                     imports: &prepared.imports,
                     include: &include,
@@ -5233,6 +5247,7 @@ fn compile_fragment_off_checkout(
         None
     };
     let request = TurnRequest {
+        exact_context: snapshot.view.exact_declaration_context().cloned(),
         session_id: Some(snapshot.view.session_id()),
         turn_text: &block.source,
         templates: &templates,
@@ -6715,6 +6730,14 @@ where
                                 ResidentActorWorkbenchError::ActorProtocol(format!(
                                     "invalid fork group id {group}"
                                 ))
+                            })?),
+                        },
+                    )),
+                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksCommitCapturedWith(group)) => Ok(ResidentActorBoundary::ForkGroup(
+                        ForkGroupBoundary::CommitCaptured {
+                            continuation: hole,
+                            group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
+                                ResidentActorWorkbenchError::ActorProtocol(format!("invalid fork group id {group}"))
                             })?),
                         },
                     )),
@@ -9252,6 +9275,7 @@ fn check_cell_off_checkout(
         .map(PathBuf::as_path)
         .collect::<Vec<_>>();
     let cell_check_request = || CellCheckRequest {
+        exact_context: compile_view.exact_declaration_context().cloned(),
         session_id: Some(compile_view.session_id()),
         cell_text: cell_source,
         template: &template,
@@ -10076,6 +10100,7 @@ fn compile_host_binding_off_checkout(
         )
     };
     let result = run_turn(TurnRequest {
+        exact_context: view.exact_declaration_context().cloned(),
         session_id: Some(view.session_id()),
         turn_text: &turn,
         templates: &templates,
@@ -10663,6 +10688,7 @@ fn compile_block_off_checkout(
         "compiling resident actor workbench item"
     );
     let request = TurnRequest {
+        exact_context: compile_view.exact_declaration_context().cloned(),
         session_id: Some(compile_view.session_id()),
         turn_text: &block.source,
         templates: &templates,
@@ -10842,6 +10868,7 @@ fn inspect_compile_view(
         .map(PathBuf::as_path)
         .collect::<Vec<_>>();
     match run_inspections(InspectionRequest {
+        exact_context: compile_view.exact_declaration_context().cloned(),
         preamble: &prepared.preamble,
         imports: &prepared.imports,
         include: &include_refs,
@@ -12243,6 +12270,7 @@ mod request_tests {
             prepared: &'a WorkbenchCompilation,
         ) -> CellCheckRequest<'a> {
             CellCheckRequest {
+                exact_context: compile_view.exact_declaration_context().cloned(),
                 session_id: None,
                 cell_text: cell_2,
                 template,
@@ -12340,6 +12368,7 @@ mod request_tests {
             .map(PathBuf::as_path)
             .collect::<Vec<_>>();
         let expression_checked = check_cell(CellCheckRequest {
+            exact_context: expression_view.exact_declaration_context().cloned(),
             session_id: None,
             cell_text: expression,
             template: &expression_template,
@@ -12411,6 +12440,7 @@ mod request_tests {
                 .map(PathBuf::as_path)
                 .collect::<Vec<_>>();
             let checked = check_cell(CellCheckRequest {
+                exact_context: compile_view.exact_declaration_context().cloned(),
                 session_id: None,
                 cell_text,
                 template: &template,
@@ -12593,6 +12623,7 @@ mod request_tests {
             .map(PathBuf::as_path)
             .collect::<Vec<_>>();
         let direct_checked = check_cell(CellCheckRequest {
+            exact_context: direct_view.exact_declaration_context().cloned(),
             session_id: None,
             cell_text: cell,
             template: &direct_template,
@@ -13155,6 +13186,7 @@ mod request_tests {
             .collect();
         let text = format!("{name} <- pure ({expr})");
         let result = run_turn(TurnRequest {
+            exact_context: None,
             session_id: Some(session_id),
             turn_text: &text,
             templates: &templates,

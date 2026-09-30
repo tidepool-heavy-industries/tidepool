@@ -17,6 +17,7 @@ use tidepool_repr::serial::ReadError;
 pub mod artifacts;
 pub mod cache;
 pub mod certified_products;
+mod declaration_context;
 pub mod declaration_join;
 pub mod diag;
 pub mod digest;

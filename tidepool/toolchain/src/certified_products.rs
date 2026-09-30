@@ -112,6 +112,52 @@ pub struct PackageInterfaceWitness {
     pub sha256: [u8; 32],
 }
 
+/// The selected package closure of one sealed target. A digest from another
+/// transaction cannot authorize a local package definition in this target.
+#[derive(Clone, Debug, Default)]
+pub struct CertifiedTargetPackageInterfaces {
+    target: Option<std::sync::Arc<PreparedProgram>>,
+    interfaces: BTreeMap<(String, String), [u8; 32]>,
+}
+
+impl CertifiedTargetPackageInterfaces {
+    pub fn matches_target(&self, target: &PreparedProgram) -> bool {
+        self.target.as_deref().is_some_and(|bound| bound == target)
+    }
+
+    pub fn interface_digest(&self, unit: &str, module: &str) -> Option<[u8; 32]> {
+        self.interfaces
+            .get(&(unit.to_owned(), module.to_owned()))
+            .copied()
+    }
+}
+
+pub(crate) fn certify_target_package_interfaces(
+    target: &PreparedProgram,
+    packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+) -> CertResult<CertifiedTargetPackageInterfaces> {
+    let mut interfaces = BTreeMap::new();
+    for (owner, witness) in packages {
+        if owner.0.is_empty() || owner.1.is_empty() || !witness.selected_path.is_absolute() {
+            return Err(CertificationError::Mismatch(
+                "target package interface owner",
+            ));
+        }
+        if sha(&read_bounded(
+            &witness.selected_path,
+            PACKAGE_INTERFACE_LIMIT,
+        )?) != witness.sha256
+        {
+            return Err(CertificationError::StaleEvidence);
+        }
+        interfaces.insert(owner.clone(), witness.sha256);
+    }
+    Ok(CertifiedTargetPackageInterfaces {
+        target: Some(std::sync::Arc::new(target.clone())),
+        interfaces,
+    })
+}
+
 /// A group whose retained globals still need the authoritative lexical
 /// `SessionVarId` and live handle. Runtime resolves those under checkout,
 /// then constructs `CertifiedGroup`; it never infers a retained ID from text.
@@ -1046,6 +1092,16 @@ pub fn validate_home_certification(bytes: &[u8], owner: &CachedHomeOwner) -> Cer
     verify_home_witness(bytes, owner).map(|_| ())
 }
 
+pub(crate) fn certified_home_requirements(
+    bytes: &[u8],
+    owner: &CachedHomeOwner,
+) -> CertResult<Vec<CachedHomeOwner>> {
+    Ok(verify_home_witness(bytes, owner)?
+        .sources
+        .into_values()
+        .collect())
+}
+
 fn verify_home_witness(bytes: &[u8], owner: &CachedHomeOwner) -> CertResult<HomeCertification> {
     let witness = decode_home_witness(bytes)?;
     if &witness.owner != owner {
@@ -1698,6 +1754,41 @@ mod tests {
     use crate::cache::{ModuleEvidence, SourceEvidence};
     use tidepool_repr::execution_schema::testing;
     use tidepool_repr::execution_schema::DecodeLimits;
+
+    #[test]
+    fn target_package_interfaces_remain_bound_to_exact_target_and_selected_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("Package.hi");
+        std::fs::write(&path, b"selected interface").unwrap();
+        let packages = BTreeMap::from([(
+            ("fixture-unit".into(), "Package".into()),
+            PackageInterfaceWitness {
+                selected_path: path.clone(),
+                sha256: sha(b"selected interface"),
+            },
+        )]);
+        let target = testing::prepare(testing::wire_program()).unwrap();
+        let retained = certify_target_package_interfaces(&target, &packages).unwrap();
+        assert!(retained.matches_target(&target));
+        assert_eq!(
+            retained.interface_digest("fixture-unit", "Package"),
+            Some(sha(b"selected interface"))
+        );
+        assert_eq!(retained.interface_digest("other-unit", "Package"), None);
+        let mut other = testing::wire_program();
+        let tidepool_repr::execution_schema::Group::NonRecursive(binding) = &mut other.bindings[0]
+        else {
+            unreachable!()
+        };
+        binding.identity.occurrence.push_str("Changed");
+        assert!(!retained.matches_target(&testing::prepare(other).unwrap()));
+        assert!(!CertifiedTargetPackageInterfaces::default().matches_target(&target));
+        std::fs::write(&path, b"changed interface").unwrap();
+        assert!(matches!(
+            certify_target_package_interfaces(&target, &packages),
+            Err(CertificationError::StaleEvidence)
+        ));
+    }
 
     fn inherited_owner(module: &str) -> CachedHomeOwner {
         CachedHomeOwner {

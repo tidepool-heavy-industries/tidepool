@@ -965,9 +965,12 @@ impl PendingPreparedSource {
                 registry,
                 ..
             } => {
-                let target =
-                    super::prepared::CertifiedTargetImage::compile(prepared.clone(), registry)
-                        .map_err(PreparedRuntimeError::Compile)?;
+                let target = super::prepared::CertifiedTargetImage::compile_certified(
+                    prepared.clone(),
+                    registry,
+                    resolved.package_interfaces.clone(),
+                )
+                .map_err(PreparedRuntimeError::Compile)?;
                 let demanded = resolved
                     .groups
                     .iter()
@@ -1878,24 +1881,6 @@ where
         scope: ScopeId,
     ) -> Option<super::PublicVisibilitySnapshot> {
         self.state.public_visibility_snapshot_in(scope)
-    }
-
-    /// Publish the exact roots acquired by one native installation into the
-    /// lexical source view. Registration is all-or-nothing; on rejection the
-    /// caller still owns every token and must roll back the unpublished batch.
-    pub fn register_source_instances_in(
-        &mut self,
-        scope: ScopeId,
-        tokens: Vec<tidepool_codegen::prepared_program::SourceInstanceLease>,
-    ) -> Result<
-        Vec<tidepool_codegen::binding_table::SourceLeaseKey>,
-        Vec<tidepool_codegen::prepared_program::SourceInstanceLease>,
-    > {
-        let keys = self.state.register_source_instances_in(scope, tokens)?;
-        if !keys.is_empty() {
-            self.advance_public_visibility(scope);
-        }
-        Ok(keys)
     }
 
     /// Admit one compiler-certified target and its demanded source closure
@@ -3285,8 +3270,12 @@ where
                 .state
                 .resolve_certification_in(scope, &prepared, certification)?;
             let registry = self.state.certified_image_registry();
-            let target = super::prepared::CertifiedTargetImage::compile(prepared, &registry)
-                .map_err(PreparedRuntimeError::Compile)?;
+            let target = super::prepared::CertifiedTargetImage::compile_certified(
+                prepared,
+                &registry,
+                resolved.package_interfaces.clone(),
+            )
+            .map_err(PreparedRuntimeError::Compile)?;
             let demanded = resolved
                 .groups
                 .into_iter()
@@ -3801,8 +3790,12 @@ where
                 self.state
                     .resolve_certification_in(lexical_scope, &prepared, certification)?;
             let registry = self.state.certified_image_registry();
-            let target = super::prepared::CertifiedTargetImage::compile(prepared, &registry)
-                .map_err(PreparedRuntimeError::Compile)?;
+            let target = super::prepared::CertifiedTargetImage::compile_certified(
+                prepared,
+                &registry,
+                resolved.package_interfaces.clone(),
+            )
+            .map_err(PreparedRuntimeError::Compile)?;
             let demanded = resolved
                 .groups
                 .into_iter()
@@ -4330,8 +4323,12 @@ where
                 self.state
                     .resolve_certification_in(lexical_scope, &prepared, certification)?;
             let registry = self.state.certified_image_registry();
-            let target = super::prepared::CertifiedTargetImage::compile(prepared, &registry)
-                .map_err(PreparedRuntimeError::Compile)?;
+            let target = super::prepared::CertifiedTargetImage::compile_certified(
+                prepared,
+                &registry,
+                resolved.package_interfaces.clone(),
+            )
+            .map_err(PreparedRuntimeError::Compile)?;
             let demanded = resolved
                 .groups
                 .into_iter()
@@ -5533,6 +5530,7 @@ mod authored_publication_tests {
         includes.push(root.path().to_path_buf());
         let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         let TurnResult::Bind { bound, compiled, .. } = run_turn(TurnRequest {
+            exact_context: None,
             session_id: None,
             turn_text: "let (page, metadata, cellDisplay) = ((42 :: Int), (\"page\", False, False), (42 :: Int))",
             templates: &templates,

@@ -3013,17 +3013,9 @@ fn collect_on(
 }
 
 impl<'code> InstalledProgram<'code> {
-    /// The root-block slots that may hold a managed or static reference:
-    /// every slot but a byte top's, whose word is a raw literal-pool address
-    /// (its liveness is edge (c), not a heap edge).
+    /// Use the same representation classification as root registration.
     fn reference_slots(&self) -> impl Iterator<Item = usize> + '_ {
-        let compiled = self.program.get();
-        let byte_slots: HashSet<usize> = compiled
-            .byte_tops
-            .keys()
-            .filter_map(|top| compiled.top_slots.get(top).copied())
-            .collect();
-        (0..compiled.root_words).filter(move |slot| !byte_slots.contains(slot))
+        self.program.get().reference_slots()
     }
 
     #[expect(

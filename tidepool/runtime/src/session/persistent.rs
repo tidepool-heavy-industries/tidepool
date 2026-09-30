@@ -48,11 +48,14 @@ use super::{
 type DeclarationStagingContext = (SourceImports, Vec<String>, Vec<(SessionVarId, String)>);
 
 /// Exact compiler owners after retained names have been resolved through one
-/// live lexical scope. Native installation rechecks the handles under the
-/// final checkout; this record carries no permission to publish a binding.
+/// live lexical scope or the same machine's immutable export ledger. Native
+/// installation rechecks the handles under the final checkout; this record
+/// carries no permission to publish a binding.
 pub(crate) struct ResolvedCertifiedTurn {
     pub groups: Vec<CertifiedGroup>,
     pub target_owners: Vec<ImportOwner>,
+    pub package_interfaces:
+        tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces,
     pub source_evidence: BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
     pub inherited_needed: Vec<InheritedSourceDemand>,
 }
@@ -264,7 +267,7 @@ impl PersistentSession {
     /// into this lexical scope. Rejection returns every original token so the
     /// installing checkout can release all roots and retire its unpublished
     /// candidates without a partially visible source instance.
-    pub fn register_source_instances_in(
+    fn register_source_instances_in(
         &mut self,
         scope: ScopeId,
         tokens: Vec<SourceInstanceLease>,
@@ -274,9 +277,10 @@ impl PersistentSession {
     }
 
     /// Resolve the worker's retained imports against the exact inherited
-    /// lexical view, before native compilation. The worker never supplies a
-    /// `SessionVarId`; spelling or the globally newest binding cannot choose
-    /// a mutable value owned by another scope.
+    /// lexical view or owning engine's immutable export ledger, before native
+    /// compilation. The worker never supplies a `SessionVarId` or native root
+    /// id; spelling or the globally newest binding cannot choose a mutable
+    /// value owned by another scope.
     pub(crate) fn resolve_certification_in(
         &self,
         scope: ScopeId,
@@ -330,17 +334,27 @@ impl PersistentSession {
                         {
                             return Err(PreparedRuntimeError::CertifiedTargetOwners);
                         }
-                        let entry = self
-                            .bindings
-                            .resolve_exact_prepared_in(&self.scopes, scope, identity, *generation)
+                        if let Some(entry) = self.bindings.resolve_exact_prepared_in(
+                            &self.scopes,
+                            scope,
+                            identity,
+                            *generation,
+                        ) {
+                            return Ok(ImportOwner::Retained {
+                                id: entry.id,
+                                generation: *generation,
+                            });
+                        }
+                        return self
+                            .machine
+                            .as_ref()
+                            .and_then(|engine| {
+                                engine.retained_code_export_owner(identity, *generation)
+                            })
                             .ok_or_else(|| PreparedRuntimeError::MissingRetainedCertifiedOwner {
                                 identity: identity.clone(),
                                 generation: *generation,
-                            })?;
-                        return Ok(ImportOwner::Retained {
-                            id: entry.id,
-                            generation: *generation,
-                        });
+                            });
                     }
                     let PendingImportOwner::Package {
                         unit,
@@ -426,7 +440,9 @@ impl PersistentSession {
                 version: version.clone(),
                 binder: binder.clone(),
             }),
-            ImportOwner::Retained { .. } | ImportOwner::Package { .. } => None,
+            ImportOwner::Retained { .. }
+            | ImportOwner::CodeExport { .. }
+            | ImportOwner::Package { .. } => None,
         });
         let selected = PendingGroupInventory::new(outlines)?
             .seal_with_inherited(roots, &inherited, &anchors)?;
@@ -444,6 +460,7 @@ impl PersistentSession {
         Ok(ResolvedCertifiedTurn {
             groups,
             target_owners,
+            package_interfaces: certification.package_interfaces.clone(),
             source_evidence,
             inherited_needed,
         })
@@ -1117,6 +1134,7 @@ impl PersistentSession {
                 next_value_generation: self.val_gen.next(),
                 shadowing,
                 staged_hiding: Vec::new(),
+                exact_context: lib.log.joined_context_at(lib.scope_tip(scope)),
             }
             .canonicalize(),
         )
@@ -1664,18 +1682,10 @@ impl PersistentSession {
             .as_ref()
             .ok_or(SessionError::MissingDeclarationLibrary)?;
         let graph_is_current = lib.public_manifest_ticket_is_current(&ticket)?;
-        if !self.scopes.is_live(ticket.public_scope) || !self.scopes.is_live(ticket.private_scope) {
-            return Ok(PublicManifestCommit::Stale);
-        }
         if !graph_is_current
-            || self
-                .public_visibility_snapshot_in(ticket.public_scope)
-                .as_ref()
-                != Some(&ticket.expected_public)
-            || self
-                .public_visibility_snapshot_in(ticket.private_scope)
-                .as_ref()
-                != Some(&ticket.expected_private)
+            || !lib.declaration_publication_is_ready(&ticket)
+            || !self
+                .publication_views_are_current(&ticket.expected_public, &ticket.expected_private)
         {
             return Ok(PublicManifestCommit::Stale);
         }
@@ -1690,6 +1700,11 @@ impl PersistentSession {
                 &ticket.source_keys,
             )
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        let declared_names = ticket
+            .declaration
+            .as_ref()
+            .map(|declaration| declaration.declared_names.clone())
+            .unwrap_or_default();
         let Some(claim) = decision.claim_commit() else {
             return Ok(PublicManifestCommit::Cancelled);
         };
@@ -1706,6 +1721,9 @@ impl PersistentSession {
             PublicManifestCommit::Durable
             | PublicManifestCommit::PublishedDurabilityUnconfirmed { .. } => {
                 self.bindings.commit_exact_binding_promotion(prepared);
+                for name in declared_names {
+                    self.bindings.remove_current_in(public_scope, &name);
+                }
                 self.public_visibility_epochs
                     .insert(public_scope, next_epoch);
                 claim.published();
@@ -1715,6 +1733,15 @@ impl PersistentSession {
             }
         }
         Ok(outcome)
+    }
+
+    pub(super) fn publication_views_are_current(
+        &self,
+        public: &super::PublicVisibilitySnapshot,
+        private: &super::PublicVisibilitySnapshot,
+    ) -> bool {
+        self.public_visibility_snapshot_in(public.scope).as_ref() == Some(public)
+            && self.public_visibility_snapshot_in(private.scope).as_ref() == Some(private)
     }
 
     /// Record a materialized value binding in `scope`'s frame.
@@ -2207,6 +2234,68 @@ mod checkpoint_scope_tests {
         lib.attach_recovery_graph_v2(root.join("declarations.json"))
             .unwrap();
         PersistentSession::new(Some(lib), 1024)
+    }
+
+    #[test]
+    fn certification_resolves_advertised_native_exports_without_session_binding_ids() {
+        use tidepool_repr::execution_schema::{
+            testing, Atom, ExprFrame, GlobalId, Group, RuntimeRep, SignatureId, ValueRef,
+        };
+        let binder = testing::identity("Fixture", "entry");
+        let (engine, _) =
+            PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
+        let expected = engine.retained_code_export_owner(&binder, 0).unwrap();
+        let mut session = PersistentSession::new(None, 64 * 1024);
+        session.machine = Some(engine);
+        assert!(session.prepared_retained().contains(&(binder.clone(), 0)));
+        let mut wire = testing::wire_program();
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.identity.unit = "main".into();
+        wire.expressions.nodes[0] = ExprFrame::Call {
+            callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+            signature: SignatureId(0),
+            arguments: vec![],
+        };
+        wire.globals.push(GlobalDecl {
+            identity: binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: Some(SignatureId(0)),
+            required_evaluated: true,
+            required_generation: Some(0),
+        });
+        let prepared = testing::prepare(wire).unwrap();
+        let certification = TurnCertification {
+            target_owners: vec![PendingImportOwner::Retained {
+                identity: binder.clone(),
+                generation: 0,
+            }],
+            ..TurnCertification::default()
+        };
+        let resolved = session
+            .resolve_certification_in(ScopeId::ROOT, &prepared, &certification)
+            .unwrap();
+        assert_eq!(resolved.target_owners, vec![expected]);
+        let registry = ImageRegistry::new();
+        let target = CertifiedTargetImage::compile(prepared.clone(), &registry).unwrap();
+        let (program, keys) = session
+            .install_certified_turn_in(
+                ScopeId::ROOT,
+                target,
+                &resolved.target_owners,
+                &resolved.source_evidence,
+                vec![],
+                &resolved.inherited_needed,
+            )
+            .unwrap();
+        assert!(keys.is_empty());
+        assert!(session.machine.as_mut().unwrap().unpin(program));
+        session.machine = None;
+        assert!(
+            matches!(session.resolve_certification_in(ScopeId::ROOT, &prepared, &certification),
+            Err(PreparedRuntimeError::MissingRetainedCertifiedOwner { identity, generation: 0 }) if identity == binder)
+        );
     }
 
     #[test]

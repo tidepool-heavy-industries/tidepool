@@ -21,6 +21,7 @@ mod dialect;
 pub mod facade;
 pub mod inspection;
 pub mod kernel;
+mod paired_publication;
 pub mod persistent;
 pub mod prepared;
 mod publication;
@@ -50,6 +51,10 @@ pub use persistent::{
     ScopeRetirement, ValuePlaneCommit,
 };
 
+pub use paired_publication::{
+    AcceptedDeclarationPublication, CertifiedDeclarationPublication, DeclarationPublicationBase,
+    DeclarationPublicationRejection, RejectedDeclarationPublication,
+};
 pub use prepared::{
     CancelHandle, PreparedEngine, PreparedFailureKind, PreparedRuntimeError, PreparedSettlement,
     RealmId, SiteTypeEvidence,
@@ -434,6 +439,7 @@ pub struct StagedPublicManifest {
     base_checksum: String,
     base_high_water: Generation,
     staged: recovery::StagedRecoveryManifest,
+    declaration: Option<paired_publication::PreparedDeclarationPublication>,
 }
 
 /// A stale stage preserves the execution's intent; its caller can stage again
@@ -501,6 +507,7 @@ impl PublicManifestBase {
             base_checksum: self.graph.checksum,
             base_high_water: self.graph.high_water,
             staged,
+            declaration: None,
         })
     }
 }
@@ -525,6 +532,26 @@ fn authored_identity(
         namespace: namespace.into(),
         occurrence: identity.occurrence.clone(),
         record_parent: None,
+    })
+}
+
+fn certified_recovery_export(
+    export: &tidepool_toolchain::declaration_join::DeclarationExport,
+) -> Option<recovery::RecoveryExport> {
+    use tidepool_toolchain::declaration_join::DeclarationKind;
+
+    Some(recovery::RecoveryExport {
+        identity: authored_identity(&export.head)?,
+        kind: match export.kind {
+            DeclarationKind::Value => recovery::RecoveryExportKind::Value,
+            DeclarationKind::Type => recovery::RecoveryExportKind::Type,
+            DeclarationKind::Class => recovery::RecoveryExportKind::Class,
+        },
+        children: export
+            .children
+            .iter()
+            .map(authored_identity)
+            .collect::<Option<_>>()?,
     })
 }
 
@@ -598,6 +625,8 @@ pub struct StagedDeclaration {
     reserved: bool,
     module: SessionModule,
     receipt: DeclarationReceipt,
+    exact_context:
+        Option<std::sync::Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
     session_id: SessionId,
     root: PathBuf,
     scope: ScopeId,
@@ -663,6 +692,8 @@ impl StagedDeclaration {
 /// checkout that is released immediately after.
 #[derive(Clone, Debug)]
 pub struct DeclarationCandidateRender {
+    exact_context:
+        Option<std::sync::Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
     session_id: SessionId,
     root: PathBuf,
     extra_include: Vec<PathBuf>,
@@ -923,31 +954,52 @@ impl SessionLib {
         &self,
         ticket: &StagedPublicManifest,
     ) -> Result<bool, SessionError> {
+        self.public_manifest_baseline_is_current(
+            ticket.session,
+            &ticket.path,
+            &ticket.owner,
+            ticket.public_scope,
+            &ticket.base_checksum,
+            ticket.base_high_water,
+        )
+    }
+
+    fn public_manifest_baseline_is_current(
+        &self,
+        session: SessionId,
+        path: &Path,
+        owner: &RecoveryPublicOwner,
+        public_scope: ScopeId,
+        checksum: &str,
+        high_water: Generation,
+    ) -> Result<bool, SessionError> {
         let state = self
             .durable_graph
             .as_ref()
             .ok_or(SessionError::WrongPublicManifestTicket)?;
-        if ticket.session != self.id
-            || ticket.path != state.path
-            || self.durable_public_scopes.get(&ticket.owner) != Some(&ticket.public_scope)
+        if session != self.id
+            || path != state.path
+            || self.durable_public_scopes.get(owner) != Some(&public_scope)
         {
             return Err(SessionError::WrongPublicManifestTicket);
         }
         Ok(!(state.unconfirmed.is_some()
-            || state.graph.checksum != ticket.base_checksum
-            || state.graph.high_water != ticket.base_high_water))
+            || state.graph.checksum != checksum
+            || state.graph.high_water != high_water))
     }
 
     fn publish_staged_public_manifest_unchecked(
         &mut self,
-        ticket: StagedPublicManifest,
+        mut ticket: StagedPublicManifest,
     ) -> PublicManifestCommit {
+        let declaration = ticket.declaration.take();
+        let public_scope = ticket.public_scope;
         let outcome = self.publish_recovery_manifest(ticket.staged);
         let state = self
             .durable_graph
             .as_mut()
             .expect("ticket preflight found manifest");
-        match outcome {
+        let committed = match outcome {
             recovery::RecoveryPublishOutcome::BeforeRename { detail, .. } => {
                 PublicManifestCommit::BeforeRename { detail }
             }
@@ -964,7 +1016,17 @@ impl SessionLib {
                 state.unconfirmed = Some(publication);
                 PublicManifestCommit::PublishedDurabilityUnconfirmed { detail }
             }
+        };
+        if matches!(
+            committed,
+            PublicManifestCommit::Durable
+                | PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+        ) {
+            if let Some(declaration) = declaration {
+                self.commit_prepared_declaration(public_scope, declaration);
+            }
         }
+        committed
     }
 
     /// Burn a unique authored or Join module identity before exposing it to the compiler.
@@ -1520,6 +1582,7 @@ impl SessionLib {
             ),
         };
         let turn_result = run_turn(TurnRequest {
+            exact_context: None,
             session_id: Some(self.session_id()),
             turn_text: &combined,
             templates: std::slice::from_ref(&decl_template),
@@ -1661,6 +1724,7 @@ impl SessionLib {
         let generation = log.push(turn.clone());
         let rendered = render::render_module_with_vals(&log, generation, &self.env, import_modules);
         DeclarationCandidateRender {
+            exact_context: self.log.joined_context_at(self.scope_tip(scope)),
             session_id: self.id,
             root: self.root.clone(),
             extra_include: self.extra_include.clone(),
@@ -1736,6 +1800,7 @@ impl SessionLib {
             || staged.root != self.root
             || (!staged.reserved && staged.base_generation != self.log.generation())
             || staged.base_tip != self.scope_tip(staged.scope)
+            || staged.exact_context != self.log.joined_context_at(staged.base_tip)
             || !slot_matches
             || staged.visible_values != visible_values
         {
@@ -1857,14 +1922,14 @@ impl SessionLib {
             || !staged.import_modules.is_empty()
             || !staged.inject_modules.is_empty()
             || !staged.visible_values.is_empty()
-            || !certified.instances.classes.is_empty()
-            || !certified.instances.families.is_empty()
-            || !certified.family_closure.is_empty()
+            || !certified.instances().classes.is_empty()
+            || !certified.instances().families.is_empty()
+            || !certified.family_closure().is_empty()
         {
             return Err(invalid("authored recovery evidence has unsupported ancestry, live, or instance dependencies"));
         }
-        if certified.product.source_sha256() != Some(certified.source_sha256)
-            || certified.product.owner().module != staged.module.module_name()
+        if certified.product().source_sha256() != Some(certified.source_sha256())
+            || certified.product().owner().module != staged.module.module_name()
         {
             return Err(invalid(
                 "authored recovery product does not match validated source",
@@ -1876,11 +1941,11 @@ impl SessionLib {
             .ok_or_else(|| invalid("recovery manifest has no parent"))?;
         let refs = tidepool_toolchain::recovery_artifacts::materialize_certified_products(
             root,
-            certified.toolchain_identity_sha256,
-            &certified.recovery_products,
+            certified.toolchain_identity_sha256(),
+            certified.recovery_products(),
         )
         .map_err(|error| invalid(&error.to_string()))?;
-        let own = certified.product.owner();
+        let own = certified.product().owner();
         if refs
             .iter()
             .filter(|reference| {
@@ -1897,7 +1962,7 @@ impl SessionLib {
                 "authored recovery closure lacks its exact declaration owner",
             ));
         }
-        if certified.exports.iter().any(|export| {
+        if certified.introduced_exports().iter().any(|export| {
             export.head.unit != own.unit
                 || export.head.module != own.module
                 || export
@@ -1910,32 +1975,11 @@ impl SessionLib {
             ));
         }
         let exports = certified
-            .exports
+            .introduced_exports()
             .iter()
             .map(|export| {
-                Ok(recovery::RecoveryExport {
-                    identity: authored_identity(&export.head)
-                        .ok_or_else(|| invalid("unsupported authored export identity"))?,
-                    kind: match export.kind {
-                        tidepool_toolchain::declaration_join::DeclarationKind::Value => {
-                            recovery::RecoveryExportKind::Value
-                        }
-                        tidepool_toolchain::declaration_join::DeclarationKind::Type => {
-                            recovery::RecoveryExportKind::Type
-                        }
-                        tidepool_toolchain::declaration_join::DeclarationKind::Class => {
-                            recovery::RecoveryExportKind::Class
-                        }
-                    },
-                    children: export
-                        .children
-                        .iter()
-                        .map(|child| {
-                            authored_identity(child)
-                                .ok_or_else(|| invalid("unsupported authored child identity"))
-                        })
-                        .collect::<Result<_, _>>()?,
-                })
+                certified_recovery_export(export)
+                    .ok_or_else(|| invalid("unsupported authored export identity"))
             })
             .collect::<Result<Vec<_>, SessionError>>()?;
         let artifacts = refs
@@ -2150,6 +2194,7 @@ impl SessionLib {
             &includes,
             &self.root,
             &self.env.pragmas,
+            None,
         )
     }
 
@@ -2210,6 +2255,9 @@ fn validate_rendered_module(
     includes: &[PathBuf],
     session_root: &Path,
     pragmas: &str,
+    exact_context: Option<
+        &std::sync::Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+    >,
 ) -> Result<BTreeMap<String, String>, SessionError> {
     let mut values = Vec::new();
     for item in items {
@@ -2256,6 +2304,7 @@ fn validate_rendered_module(
     let preamble = format!("{pragmas}\nmodule TidepoolDeclarationTypes where\n");
     let include_refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let results = match inspection::run_inspections_strict(InspectionRequest {
+        exact_context: exact_context.cloned(),
         preamble: &preamble,
         imports: &imports,
         include: &include_refs,
@@ -2341,6 +2390,7 @@ pub fn validate_declaration_candidate(
         &includes,
         &candidate.root,
         &candidate.pragmas,
+        candidate.exact_context.as_ref(),
     ) {
         Ok(types) => types,
         Err(error) => {
@@ -2375,6 +2425,7 @@ pub fn validate_declaration_candidate(
         reserved: candidate.reserved,
         module: candidate.rendered.module,
         receipt: candidate.receipt,
+        exact_context: candidate.exact_context,
         session_id: candidate.session_id,
         root: candidate.root,
         scope: candidate.scope,
@@ -2928,6 +2979,7 @@ mod tests {
             effects[1].as_path(),
         ];
         let bound = run_turn(TurnRequest {
+            exact_context: None,
             session_id: None,
             turn_text: "old <- pure (OldVersion 1)",
             templates: std::slice::from_ref(&bind_template),
