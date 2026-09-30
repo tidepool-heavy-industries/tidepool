@@ -1673,3 +1673,64 @@ fn hex(bytes: &[u8; 32]) -> String {
 fn failure(error: impl std::fmt::Display) -> CompileError {
     CompileError::ExtractFailed(format!("checked cell: {error}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::CheckedPrefixSequence;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[test]
+    fn completed_prefix_snapshots_keep_order_without_copying_historical_links() {
+        #[derive(Debug)]
+        struct Link {
+            ordinal: usize,
+            copies: Arc<AtomicUsize>,
+        }
+        impl Clone for Link {
+            fn clone(&self) -> Self {
+                self.copies.fetch_add(1, Ordering::Relaxed);
+                Self {
+                    ordinal: self.ordinal,
+                    copies: self.copies.clone(),
+                }
+            }
+        }
+        let copies = Arc::new(AtomicUsize::new(0));
+        let mut prefix = CheckedPrefixSequence::new();
+        let mut snapshots = Vec::new();
+        for ordinal in 0..100 {
+            let mut next = prefix.clone();
+            next.push(Link {
+                ordinal,
+                copies: copies.clone(),
+            });
+            assert_eq!(prefix.len(), ordinal);
+            assert!(prefix.get(ordinal).is_none());
+            prefix = next;
+            if [1, 10, 100].contains(&prefix.len()) {
+                snapshots.push(prefix.clone());
+            }
+        }
+        for snapshot in snapshots {
+            assert_eq!(
+                snapshot.iter().map(|link| link.ordinal).collect::<Vec<_>>(),
+                (0..snapshot.len()).collect::<Vec<_>>()
+            );
+            for ordinal in 0..snapshot.len() {
+                assert_eq!(snapshot.get(ordinal).unwrap().ordinal, ordinal);
+                assert!(std::ptr::eq(
+                    snapshot.get(ordinal).unwrap(),
+                    prefix.get(ordinal).unwrap()
+                ));
+            }
+        }
+        assert_eq!(
+            copies.load(Ordering::Relaxed),
+            0,
+            "snapshot append copied historical proof links"
+        );
+    }
+}
