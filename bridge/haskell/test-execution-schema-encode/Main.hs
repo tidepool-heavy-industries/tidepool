@@ -28,13 +28,14 @@ candidateManifestChecks = do
     (\(path, handle) -> do
       hClose handle
       let digest = T.pack (replicate 64 'a')
-          candidate = encodeListLen 8
+          candidate = encodeListLen 11
             <> encodeString "main" <> encodeString "Fixture"
             <> encodeString "/tmp/Fixture.hs" <> encodeString digest
             <> encodeString "/tmp/Fixture.hi" <> encodeString digest
-            <> encodeString digest <> encodeString digest
+            <> encodeString digest <> encodeString digest <> encodeString digest
+            <> encodeListLen 0 <> encodeListLen 0
           manifest items = toStrictByteString
-            (encodeListLen 3 <> encodeString "TPMCAN" <> encodeString "2"
+            (encodeListLen 3 <> encodeString "TPMCAN" <> encodeString "4"
               <> encodeListLen (fromIntegral (length items)) <> mconcat items)
       BS.writeFile path (manifest [candidate])
       valid <- readModuleCandidates path
@@ -48,11 +49,12 @@ candidateManifestChecks = do
       duplicate <- readModuleCandidates path
       assert (case duplicate of Left _ -> True; _ -> False)
         "candidate manifest accepted duplicate owners"
-      BS.writeFile path (manifest [encodeListLen 8
+      BS.writeFile path (manifest [encodeListLen 11
         <> encodeString "main" <> encodeString "Fixture"
         <> encodeString "relative.hs" <> encodeString digest
         <> encodeString "/tmp/Fixture.hi" <> encodeString digest
-        <> encodeString digest <> encodeString digest])
+        <> encodeString digest <> encodeString digest <> encodeString digest
+        <> encodeListLen 0 <> encodeListLen 0])
       relative <- readModuleCandidates path
       assert (case relative of Left _ -> True; _ -> False)
         "candidate manifest accepted a relative source path")

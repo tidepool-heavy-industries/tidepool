@@ -254,6 +254,10 @@ impl Decoder {
                 "invalid prepared program magic".into(),
             ));
         }
+        let schema_version = unsigned(&header[1], "schema version")?;
+        if schema_version != super::SCHEMA_VERSION {
+            return Err(ParseError::UnsupportedVersion(schema_version));
+        }
         let fields = array(value, 17, "program")?;
         let definition_fields = fields[1..12]
             .iter()

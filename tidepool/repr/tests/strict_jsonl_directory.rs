@@ -37,26 +37,31 @@ fn strict_jsonl_append_syncs_new_and_existing_directory_entries() {
         }
     }
     let _remove = Remove(root.clone());
-    let source = root.join("fault.c");
-    fs::write(
-        &source,
-        include_str!("../../../bridge/atomic-write/tests/fixtures/directory_fault.c"),
-    )
-    .unwrap();
-    let library = root.join("fault.so");
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "short synchronous probe: compiles a throwaway fault-injection shared object and exits, not a long-lived child"
-    )]
-    let cc_status = Command::new("cc")
-        .args(["-shared", "-fPIC", "-Wall", "-Werror"])
-        .arg(source)
-        .arg("-o")
-        .arg(&library)
-        .arg("-ldl")
-        .status()
+    let library = if let Some(library) = std::env::var_os("TIDEPOOL_DIRECTORY_FAULT_LIBRARY") {
+        Path::new(&library).to_path_buf()
+    } else {
+        let source = root.join("fault.c");
+        fs::write(
+            &source,
+            include_str!("../../../bridge/atomic-write/tests/fixtures/directory_fault.c"),
+        )
         .unwrap();
-    assert!(cc_status.success());
+        let library = root.join("fault.so");
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "short synchronous probe: compiles a throwaway fault-injection shared object and exits, not a long-lived child"
+        )]
+        let cc_status = Command::new("cc")
+            .args(["-shared", "-fPIC", "-Wall", "-Werror"])
+            .arg(source)
+            .arg("-o")
+            .arg(&library)
+            .arg("-ldl")
+            .status()
+            .unwrap();
+        assert!(cc_status.success());
+        library
+    };
     for policy in ["all", "data", "none"] {
         for existing in [false, true] {
             let dir = root.join(format!("{policy}-{existing}"));

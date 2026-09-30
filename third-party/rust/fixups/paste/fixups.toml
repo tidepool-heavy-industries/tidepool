@@ -1,0 +1,2 @@
+# The pinned Rust compiler is newer than the old literal FromStr workaround.
+buildscript.run = false

@@ -18,6 +18,7 @@
     reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
 )]
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{Mutex, MutexGuard};
 use tidepool_heap::gc::raw::{
     clear_checked_scanning_override, for_each_pointer_field, set_checked_scanning,
 };
@@ -26,13 +27,26 @@ use tidepool_heap::layout::*;
 #[repr(align(8))]
 struct AlignedBuf<const N: usize>([u8; N]);
 
-/// Clears the checked-scanning override on drop (including panic unwind),
-/// returning to the (tri-state) unset default so a test can't leak its mode
-/// into whatever runs next in the same process. Unlike `set_checked_scanning
-/// (false)`, clearing the override defers back to `TIDEPOOL_HEAP_VERIFY`
-/// rather than forcing normal mode — the correct reset for a guard, since
-/// "reset" should mean "no longer testing", not "force off, ignore the env".
-struct CheckedScanningGuard;
+/// The override is process-global, so serialize tests that change it.
+static CHECKED_SCANNING_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Holds the process-global scanner mode stable for one test and clears it on
+/// drop (including panic unwind), returning to the environment-derived default.
+struct CheckedScanningGuard {
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl CheckedScanningGuard {
+    fn new() -> Self {
+        // Expected panic tests poison the mutex while unwinding; the next test
+        // can safely continue after the guard has cleared the global override.
+        let lock = CHECKED_SCANNING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self { _lock: lock }
+    }
+}
+
 impl Drop for CheckedScanningGuard {
     fn drop(&mut self) {
         clear_checked_scanning_override();
@@ -74,7 +88,7 @@ unsafe fn write_smallarray_lit(buf: &mut [u8], payload: *mut u8) -> *mut u8 {
 
 #[test]
 fn well_formed_con_scans_every_field() {
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(false);
     let mut buf = AlignedBuf::<256>([0u8; 256]);
     unsafe {
@@ -96,7 +110,7 @@ fn well_formed_con_scans_every_field() {
 
 #[test]
 fn well_formed_closure_scans_every_field() {
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(false);
     let mut buf = AlignedBuf::<256>([0u8; 256]);
     unsafe {
@@ -118,7 +132,7 @@ fn well_formed_closure_scans_every_field() {
 
 #[test]
 fn well_formed_evaluated_thunk_scans_indirection() {
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(false);
     let mut buf = AlignedBuf::<64>([0u8; 64]);
     unsafe {
@@ -137,7 +151,7 @@ fn well_formed_evaluated_thunk_scans_indirection() {
 
 #[test]
 fn well_formed_boxed_array_scans_every_slot() {
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(false);
     let mut payload_buf = AlignedBuf::<64>([0u8; 64]);
     let mut lit_buf = AlignedBuf::<64>([0u8; 64]);
@@ -163,7 +177,7 @@ fn well_formed_boxed_array_scans_every_slot() {
 #[test]
 #[should_panic(expected = "size below header minimum")]
 fn size_below_header_minimum_panics_in_diagnostic_mode() {
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(true);
     let mut buf = AlignedBuf::<64>([0u8; 64]);
     unsafe {
@@ -176,7 +190,7 @@ fn size_below_header_minimum_panics_in_diagnostic_mode() {
 
 #[test]
 fn size_below_header_minimum_skips_in_normal_mode() {
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(false);
     let mut buf = AlignedBuf::<64>([0u8; 64]);
     unsafe {
@@ -196,7 +210,7 @@ fn size_below_header_minimum_skips_in_normal_mode() {
 #[test]
 #[should_panic(expected = "Con num_fields=5")]
 fn con_inflated_num_fields_panics_in_diagnostic_mode() {
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(true);
     let mut buf = AlignedBuf::<64>([0u8; 64]);
     unsafe {
@@ -210,7 +224,7 @@ fn con_inflated_num_fields_panics_in_diagnostic_mode() {
 
 #[test]
 fn con_inflated_num_fields_skips_in_normal_mode() {
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(false);
     let mut buf = AlignedBuf::<64>([0u8; 64]);
     unsafe {
@@ -235,7 +249,7 @@ fn con_inflated_num_fields_skips_in_normal_mode() {
 #[test]
 #[should_panic(expected = "Closure num_captured=3")]
 fn closure_inflated_num_captured_panics_in_diagnostic_mode() {
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(true);
     let mut buf = AlignedBuf::<64>([0u8; 64]);
     unsafe {
@@ -246,7 +260,7 @@ fn closure_inflated_num_captured_panics_in_diagnostic_mode() {
 
 #[test]
 fn closure_inflated_num_captured_skips_in_normal_mode() {
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(false);
     let mut buf = AlignedBuf::<64>([0u8; 64]);
     unsafe {
@@ -277,7 +291,7 @@ fn closure_inflated_num_captured_skips_in_normal_mode() {
 #[test]
 #[should_panic(expected = "THUNK_MIN_SIZE")]
 fn undersized_thunk_panics_in_diagnostic_mode() {
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(true);
     let mut buf = AlignedBuf::<64>([0u8; 64]);
     unsafe {
@@ -290,7 +304,7 @@ fn undersized_thunk_panics_in_diagnostic_mode() {
 
 #[test]
 fn undersized_thunk_skips_in_normal_mode() {
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(false);
     let mut buf = AlignedBuf::<64>([0u8; 64]);
     unsafe {
@@ -311,7 +325,7 @@ fn minimum_sized_blackhole_thunk_has_no_captures() {
     // THUNK_MIN_SIZE floor above doesn't reject legitimate minimum-sized
     // thunks — companion to `undersized_thunk_*` (23 bytes, one less, is
     // rejected).
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(true);
     let mut buf = AlignedBuf::<64>([0u8; 64]);
     unsafe {
@@ -329,7 +343,7 @@ fn minimum_sized_blackhole_thunk_has_no_captures() {
 #[test]
 #[should_panic(expected = "overflows its byte-span computation")]
 fn boxed_array_len_overflow_panics_in_diagnostic_mode() {
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(true);
     let mut payload_buf = AlignedBuf::<64>([0u8; 64]);
     let mut lit_buf = AlignedBuf::<64>([0u8; 64]);
@@ -347,7 +361,7 @@ fn boxed_array_len_overflow_panics_in_diagnostic_mode() {
 
 #[test]
 fn boxed_array_len_overflow_skips_in_normal_mode() {
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(false);
     let mut payload_buf = AlignedBuf::<64>([0u8; 64]);
     let mut lit_buf = AlignedBuf::<64>([0u8; 64]);
@@ -370,7 +384,7 @@ fn boxed_array_len_overflow_skips_in_normal_mode() {
 
 #[test]
 fn diagnostic_panic_is_a_catchable_unwind_not_a_process_abort() {
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(true);
     let mut buf = AlignedBuf::<64>([0u8; 64]);
     let ptr = buf.0.as_mut_ptr() as usize;
@@ -419,7 +433,7 @@ fn diagnostic_panic_is_a_catchable_unwind_not_a_process_abort() {
 #[test]
 #[should_panic(expected = "only 24 bytes are readable")]
 fn con_num_fields_exceeding_exact_allocation_panics_in_diagnostic_mode() {
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(true);
     // Exactly CON_FIELDS_OFFSET (24) bytes — room for the header + con_tag +
     // num_fields, and NOTHING else. No field slot fits.
@@ -435,7 +449,7 @@ fn con_num_fields_exceeding_exact_allocation_panics_in_diagnostic_mode() {
 
 #[test]
 fn con_num_fields_exceeding_exact_allocation_skips_in_normal_mode() {
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(false);
     let mut buf = AlignedBuf::<{ CON_FIELDS_OFFSET }>([0u8; CON_FIELDS_OFFSET]);
     unsafe {
@@ -454,7 +468,7 @@ fn con_num_fields_exceeding_exact_allocation_skips_in_normal_mode() {
 #[test]
 #[should_panic(expected = "avail=16")]
 fn closure_num_captured_field_unreadable_at_exact_allocation_end() {
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(true);
     // Exactly CLOSURE_NUM_CAPTURED_OFFSET (16) bytes: room for the header
     // and code_ptr, but not even the 2-byte num_captured field itself — the
@@ -472,7 +486,7 @@ fn closure_num_captured_field_unreadable_at_exact_allocation_end() {
 
 #[test]
 fn closure_num_captured_field_unreadable_at_exact_allocation_end_skips_in_normal_mode() {
-    let _guard = CheckedScanningGuard;
+    let _guard = CheckedScanningGuard::new();
     set_checked_scanning(false);
     let mut buf = AlignedBuf::<{ CLOSURE_NUM_CAPTURED_OFFSET }>([0u8; CLOSURE_NUM_CAPTURED_OFFSET]);
     unsafe {

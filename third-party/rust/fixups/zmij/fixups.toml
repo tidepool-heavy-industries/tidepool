@@ -1,0 +1,2 @@
+# Rust 1.93 with dependency opt-level 2 emits no build-script cfg.
+buildscript.run = false

@@ -118,3 +118,7 @@ bridge/haskell/spike-build-products/work/
 # Python test/import caches
 __pycache__/
 *.pyc
+
+# Buck uses a mounted per-checkout XFS output directory.
+/buck-out
+/.buckconfig.local

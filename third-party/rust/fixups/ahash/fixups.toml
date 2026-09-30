@@ -1,0 +1,3 @@
+# Stable x86_64 has folded multiplication but not nightly specialization.
+cfgs = ["folded_multiply"]
+buildscript.run = false

@@ -1,0 +1,2 @@
+# The Linux build has no MemorySanitizer cfg.
+buildscript.run = false
