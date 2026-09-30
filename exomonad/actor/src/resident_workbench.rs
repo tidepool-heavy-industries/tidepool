@@ -15939,6 +15939,7 @@ mod request_tests {
             boundary.clone(),
             None,
             retained,
+            crate::ActorPersistencePolicy::Ephemeral,
         );
         groups
             .settle_checkpoint(&token, context.placement.session, true)

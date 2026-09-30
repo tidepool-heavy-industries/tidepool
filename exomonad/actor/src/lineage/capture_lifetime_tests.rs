@@ -33,6 +33,7 @@ fn capture(
         boundary.clone(),
         None,
         retained,
+        crate::ActorPersistencePolicy::Durable,
     );
     (token, original, retained_scope, boundary)
 }
@@ -47,6 +48,14 @@ fn released_capture_preserves_two_admissions_until_last_lexical_share() {
         .unwrap();
     let first = groups.admitted_checkpoint(&token, SessionId(7)).unwrap().0;
     let second = groups.admitted_checkpoint(&token, SessionId(7)).unwrap().0;
+    assert_eq!(
+        first.issuer_persistence_policy,
+        crate::ActorPersistencePolicy::Durable
+    );
+    assert_eq!(
+        second.issuer_persistence_policy,
+        crate::ActorPersistencePolicy::Durable
+    );
     // Both admissions won while the parent's enclosing execution is unfinished.
     assert!(groups
         .settle_checkpoints(first.issuer, &boundary, false)

@@ -370,6 +370,7 @@ pub struct CheckpointLease {
     pub issuer: ActorRef,
     budget_sponsors: Vec<ActorRef>,
     pub issuer_role: crate::EffectiveRole,
+    pub(crate) issuer_persistence_policy: crate::ActorPersistencePolicy,
     pub issuer_model: Option<crate::Model>,
     pub issuer_effort: Option<crate::ForkEffort>,
     pub issuer_source_layer: crate::CheckpointSourceLayer,
@@ -556,6 +557,7 @@ impl ForkGroupRegistry {
             boundary,
             host_attachment,
             None,
+            crate::ActorPersistencePolicy::Ephemeral,
         )
     }
 
@@ -574,6 +576,7 @@ impl ForkGroupRegistry {
         boundary: WorkbenchForkBoundary,
         host_attachment: Option<HostedCheckpointAttachment>,
         retained_scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+        issuer_persistence_policy: crate::ActorPersistencePolicy,
     ) -> String {
         self.capture_checkpoint_inner(
             name,
@@ -587,6 +590,7 @@ impl ForkGroupRegistry {
             boundary,
             host_attachment,
             Some(retained_scope),
+            issuer_persistence_policy,
         )
     }
 
@@ -603,6 +607,7 @@ impl ForkGroupRegistry {
         boundary: WorkbenchForkBoundary,
         host_attachment: Option<HostedCheckpointAttachment>,
         retained_scope: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
+        issuer_persistence_policy: crate::ActorPersistencePolicy,
     ) -> String {
         let token = format!("{}:{}", self.checkpoint_namespace, uuid::Uuid::new_v4());
         let (phase, _) = tokio::sync::watch::channel(CheckpointPhase::Pending);
@@ -627,6 +632,7 @@ impl ForkGroupRegistry {
                 issuer,
                 budget_sponsors,
                 issuer_role,
+                issuer_persistence_policy,
                 issuer_model,
                 issuer_effort,
                 issuer_source_layer,
