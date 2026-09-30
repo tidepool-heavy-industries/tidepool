@@ -1336,6 +1336,47 @@ mod authored_tests {
 
     #[test]
     #[ignore = "requires the matched Haskell worker and frontend"]
+    fn typeable_tuple_retains_canonical_package_global_certificate() {
+        let root = tempfile::tempdir().unwrap();
+        let module = SessionModule::lib(Generation(1));
+        let source = include_str!("../tests/fixtures/typeable-tuple/G1.hs");
+        let path = root.path().join(module.relative_hs_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, source).unwrap();
+        let certified = certify_authored_declaration(
+            module,
+            &path,
+            source,
+            &[root.path().to_path_buf()],
+            root.path(),
+        )
+        .expect("the pinned tuple representation binding has exact package evidence");
+        assert!(certified
+            .introduced_exports()
+            .iter()
+            .any(|export| { export.head.occurrence == "answer" }));
+        assert!(!certified.recovery_products().is_empty());
+        let context =
+            ExactDeclarationContext::new(&[std::sync::Arc::new(certified)], &[], Vec::new())
+                .unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        let groups = context.inherited_groups(artifacts.path()).unwrap();
+        assert!(
+            groups
+                .iter()
+                .flat_map(|group| group.imports())
+                .any(|import| {
+                    matches!(import, crate::certified_products::PendingImportOwner::Package {
+                unit, module, binder, ..
+            } if unit == "ghc-prim" && module == "GHC.Tuple"
+                && binder.namespace == "value" && binder.occurrence == "$tcTuple3")
+                }),
+            "the real tuple type representation must be certified, not optimized out"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
     fn empty_authored_module_still_has_owned_product_and_inventory() {
         let root = tempfile::tempdir().unwrap();
         let module = SessionModule::lib(Generation(1));

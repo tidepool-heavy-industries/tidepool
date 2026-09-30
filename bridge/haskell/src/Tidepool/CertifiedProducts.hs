@@ -22,11 +22,15 @@ import qualified Data.Text as T
 import Data.Word (Word64)
 import GHC.Driver.Env (HscEnv)
 import GHC.Unit.Module (mkModule, mkModuleName)
+import GHC.Unit.Module.ModIface (mi_decls)
+import GHC.Unit.Module.Location (ml_hi_file)
 import GHC.Unit.Types (stringToUnit)
+import GHC.Iface.Syntax (IfaceDecl(..))
 import GHC.Iface.Env (lookupOrig)
 import GHC.Iface.Load (importDecl)
 import GHC.Tc.Utils.Monad (initIfaceLoad)
-import GHC.Types.Name.Occurrence (mkVarOcc)
+import GHC.Types.Name (nameModule_maybe, nameOccName)
+import GHC.Types.Name.Occurrence (mkVarOcc, isVarOcc)
 import GHC.Data.Maybe (MaybeErr(..))
 import Numeric (showHex)
 
@@ -41,6 +45,7 @@ import Tidepool.ModuleCandidates
   ( CandidateGlobal(..), CandidateGroup(..), ModuleCandidate(..) )
 import Tidepool.PackageWitness
   ( PackageImportRoot(..), packageImportRoot, validatePackageImportRoot )
+import Tidepool.FatIface (readExactInterface)
 
 data Product = Product
   { productOrigin :: T.Text
@@ -241,9 +246,33 @@ packageOwner env packageRef identity
       case found of
         Left reason -> pure (Left (refusal reason))
         Right witness -> do
-          original <- initIfaceLoad env (lookupOrig owner
-            (mkVarOcc (T.unpack (symbolOccurrence identity))))
-          selected <- initIfaceLoad env (importDecl original)
+          exact <- readExactInterface env owner
+          selected <- case exact of
+            Left _ -> pure (Failed ())
+            Right (iface, location)
+              | ml_hi_file location /= packagePath witness -> pure (Failed ())
+              | otherwise -> do
+                  let occurrence = mkVarOcc (T.unpack (symbolOccurrence identity))
+                      declarations =
+                        [ original
+                        | (_, IfaceId { ifName = original }) <- mi_decls iface
+                        , nameModule_maybe original == Just owner
+                        , isVarOcc (nameOccName original)
+                        , nameOccName original == occurrence ]
+                  -- Known-key representation bindings are decoded with their
+                  -- canonical GHC Name. Reconstructing one with lookupOrig
+                  -- before loading its interface can mint a different Unique.
+                  original <- case declarations of
+                    [canonical] -> pure (Just canonical)
+                    [] -> Just <$> initIfaceLoad env (lookupOrig owner occurrence)
+                    _ -> pure Nothing
+                  case original of
+                    Nothing -> pure (Failed ())
+                    Just name -> do
+                      result <- initIfaceLoad env (importDecl name)
+                      pure $ case result of
+                        Failed _ -> Failed ()
+                        Succeeded thing -> Succeeded thing
           case selected of
             Failed _ -> pure (Left (refusal "selected package global is absent from loaded interface"))
             Succeeded _ -> do
