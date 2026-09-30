@@ -14,6 +14,7 @@ mod clock_wait;
 mod command_presentation;
 mod command_settlement;
 mod commands;
+mod inspection_wait;
 mod owned_workbench;
 #[cfg(test)]
 mod provider_owner_tests;

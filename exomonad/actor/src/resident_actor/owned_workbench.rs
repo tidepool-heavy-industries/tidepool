@@ -103,7 +103,7 @@ pub(crate) struct WorkbenchPublicOwner {
 /// Plain resource owners retained by the existing native continuation entry.
 /// No abort callback, session registry, or input-retirement callback belongs here.
 pub(crate) struct ExecutionResourceOwners {
-    _compilation: Arc<WorkbenchCompilationAuthority>,
+    _compilation: Option<Arc<WorkbenchCompilationAuthority>>,
     public: Arc<WorkbenchPublicOwner>,
     private: std::sync::OnceLock<Arc<tidepool_runtime::session::PrivateExecutionAdmission>>,
 }
@@ -114,7 +114,15 @@ impl ExecutionResourceOwners {
         public: Arc<WorkbenchPublicOwner>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            _compilation: compilation,
+            _compilation: Some(compilation),
+            public,
+            private: std::sync::OnceLock::new(),
+        })
+    }
+
+    fn for_inspection(public: Arc<WorkbenchPublicOwner>) -> Arc<Self> {
+        Arc::new(Self {
+            _compilation: None,
             public,
             private: std::sync::OnceLock::new(),
         })
@@ -136,6 +144,11 @@ impl ExecutionResourceOwners {
         &self,
         admission: Arc<tidepool_runtime::session::PrivateExecutionAdmission>,
     ) -> Result<(), ResidentActorWorkbenchError> {
+        if self._compilation.is_none() {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "inspection resources cannot admit a private authored execution".into(),
+            ));
+        }
         if admission.view().session() != self.public.placement.session
             || admission.admitted_public().scope != self.public.placement.lexical_scope
         {
@@ -471,12 +484,11 @@ where
         invocation: crate::ActorWorkbenchInvocation,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
     ) -> WorkbenchDispatch<Self> {
-        // Builtin repair and inspection paths retain their serial admission.
+        // Repair paths retain their serial admission until their source-publication task is converted.
         if invocation.request.tool_call().is_some_and(|call| {
             matches!(
                 call.name.as_str(),
-                crate::status_tool::STATUS_TOOL
-                    | crate::reload_spec_tool::RELOAD_SPEC_TOOL
+                crate::reload_spec_tool::RELOAD_SPEC_TOOL
                     | crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
             )
         }) {
@@ -497,25 +509,33 @@ where
             request,
             compilation_authority,
             public_owner,
+            installed_tools,
+            admitted_source,
             capture,
             control,
             invocation,
             ..
         } = admitted;
-        let compilation_authority = compilation_authority
-            .expect("authored owned execution has admitted source and tool authority");
-        let installed_tools = compilation_authority.installed_tools().cloned();
-        let admitted_source = compilation_authority.source().clone();
-        tracing::debug!(actor = ?context.actor,
-            authority_digest = ?compilation_authority.authority_digest(),
-            "workbench source and tool owners admitted");
+        let inspection = request
+            .tool_call()
+            .filter(|call| call.name == crate::status_tool::STATUS_TOOL)
+            .map(|call| crate::status_tool::parse(call.arguments.clone()));
+        if inspection.is_none() && compilation_authority.is_none() {
+            return terminal_task(Err(KernelInvocationFailure::Rejected {
+                actor: context.actor,
+                detail: "authored execution has no compilation authority".into(),
+            }));
+        }
         let Some(workbench) = self.active_workbench() else {
             return terminal_task(Err(KernelInvocationFailure::Rejected {
                 actor: context.actor,
                 detail: "actor application has no active Haskell workbench".into(),
             }));
         };
-        let workbench = workbench.with_compilation_authority(compilation_authority.clone());
+        let workbench = match &compilation_authority {
+            Some(authority) => workbench.with_compilation_authority(authority.clone()),
+            None => workbench,
+        };
         let workbench = workbench.with_json_input(
             request
                 .input
@@ -541,7 +561,10 @@ where
             .unwrap_or_else(|| "cell".into());
         let (actor, incarnation) = actor_address(context.actor);
         let timing = crate::call_timing::CallScope::new(kind, actor as u64, incarnation as u64);
-        let resources = ExecutionResourceOwners::new(compilation_authority, public_owner);
+        let resources = match compilation_authority {
+            Some(authority) => ExecutionResourceOwners::new(authority, public_owner),
+            None => ExecutionResourceOwners::for_inspection(public_owner),
+        };
         let control = Some(control.unwrap_or_else(crate::WorkbenchExecutionControl::untracked));
         let cleanup = workbench.continuation_cleanup_owner(
             context.clone(),
@@ -576,6 +599,20 @@ where
             cleanup,
             resources,
         };
+        if let Some(inspection) = inspection {
+            return WorkbenchDispatch::Owned(match inspection {
+                Ok(view) => self.owned_inspection_task(kernel, owned, view),
+                Err(error) => Self::finish_owned_task(
+                    owned,
+                    Err(workbench_failure(
+                        &[],
+                        0,
+                        1,
+                        ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
+                    )),
+                ),
+            });
+        }
         let runner = self.environment.runner.clone();
         WorkbenchDispatch::Owned(Self::owned_step_task(
             owned,
@@ -665,6 +702,100 @@ where
                 Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
             },
         ))
+    }
+
+    fn owned_inspection_task(
+        &self,
+        kernel: &KernelContext,
+        owned: OwnedExecution<H, O>,
+        view: crate::status_tool::StatusView,
+    ) -> OwnedWorkbenchTask<Self> {
+        use crate::status_tool::StatusView as View;
+        use inspection_wait::{InspectionRequest, InspectionResult};
+        let actor = owned.state.effects.context.actor;
+        enum Selection {
+            Native(InspectionRequest),
+            Rendered(String),
+        }
+        let selection = match view {
+            View::Recovery => Selection::Native(InspectionRequest::Recovery),
+            View::Bindings => Selection::Native(InspectionRequest::Bindings),
+            View::Live => Selection::Native(InspectionRequest::Live),
+            View::Changed => {
+                Selection::Rendered(self.status_text(kernel, actor, StatusView::Concise, true))
+            }
+            View::Summary => {
+                Selection::Rendered(self.status_text(kernel, actor, StatusView::Concise, false))
+            }
+            View::Revisions => Selection::Rendered(self.revisions_status_text(kernel, actor)),
+            View::Detailed => {
+                Selection::Rendered(self.status_text(kernel, actor, StatusView::Expanded, false))
+            }
+            View::Lineage => {
+                Selection::Rendered(self.status_text(kernel, actor, StatusView::Lineage, false))
+            }
+            View::Trace => {
+                Selection::Rendered(self.status_text(kernel, actor, StatusView::Trace, false))
+            }
+            View::Watches => {
+                Selection::Rendered(self.status_text(kernel, actor, StatusView::Watches, false))
+            }
+        };
+        Self::owned_step_task(
+            owned,
+            move |owned| {
+                Box::pin(async move {
+                    match selection {
+                        Selection::Native(request) => {
+                            inspection_wait::inspect(
+                                owned
+                                    .workbench
+                                    .as_ref()
+                                    .expect("inspection retains original workbench"),
+                                owned.state.effects.context.clone(),
+                                request,
+                            )
+                            .await
+                        }
+                        Selection::Rendered(output) => Ok(InspectionResult::Rendered(output)),
+                    }
+                })
+            },
+            |behavior, _kernel, owned, inspected| {
+                let result = inspected
+                    .map(|inspected| {
+                        let output = match inspected {
+                            InspectionResult::Rendered(output) => output,
+                            InspectionResult::Live(bindings) => behavior
+                                .live_status_text(owned.state.effects.context.actor, &bindings),
+                        };
+                        KernelStep::Continue(workbench_response(
+                            WorkbenchRunStatus::Committed,
+                            vec![WorkbenchItemReceipt {
+                                diagnostics: Vec::new(),
+                                index: 0,
+                                kind: None,
+                                span: None,
+                                source_items: Vec::new(),
+                                status: WorkbenchItemStatus::Committed,
+                                output,
+                                warnings: Vec::new(),
+                                installed_bindings: Vec::new(),
+                                operations: Vec::new(),
+                                terminal_transfer: None,
+                                failure_layer: None,
+                            }],
+                            1,
+                            1,
+                            None,
+                        ))
+                    })
+                    .map_err(|error| workbench_failure(&[], 0, 1, error));
+                Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
+                    owned, result,
+                )))
+            },
+        )
     }
 
     /// The existing serial driver keeps all unconverted handlers and terminal
