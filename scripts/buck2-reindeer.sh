@@ -163,21 +163,20 @@ def use_local_harness_source(buck):
         '    cp = read_root_config("nix", "coreutils") + "/cp",\n'
         '    store_path = read_root_config("nix", "matched_harness_source"),\n'
         '    visibility = [],\n'
-        ')\n'
-        'filegroup(\n'
-        f'    name = "{fetch_name}",\n'
-        f'    srcs = [":{directory_name}"],\n'
-        '    visibility = [],\n'
         ')'
     )
     buck = buck.replace(f'git_fetch(\n{stanza}\n)', rendered, 1)
+    source_reference = f'srcs = [":{fetch_name}"]'
+    if buck.count(source_reference) != 1:
+        raise SystemExit('Cannot select matched harness source: expected one harness crate source reference')
+    buck = buck.replace(source_reference, f'srcs = [":{directory_name}"]', 1)
     buck = buck.replace(
         'load("@prelude//rust:cargo_package.bzl", "cargo")',
         'load("@prelude//rust:cargo_package.bzl", "cargo")\n'
         'load("@toolchains//:tidepool.bzl", "nix_directory")',
         1,
     )
-    return buck, fetch_name
+    return buck, directory_name
 with tempfile.TemporaryDirectory(prefix='tidepool-buck-deps-') as temporary:
     stage = Path(temporary)
     shutil.copy2(dest / 'reindeer.toml', stage / 'reindeer.toml')
@@ -196,7 +195,7 @@ with tempfile.TemporaryDirectory(prefix='tidepool-buck-deps-') as temporary:
     buck = (stage / 'BUCK').read_text()
     if local_harness_source:
         buck, harness_fetch = use_local_harness_source(buck)
-        harness_web_source = harness_fetch[:-4]
+        harness_web_source = harness_fetch
     else:
         harness_fetch = next(
             (

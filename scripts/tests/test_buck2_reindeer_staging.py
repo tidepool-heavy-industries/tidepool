@@ -213,9 +213,9 @@ else:
         self.assertIn('load("@toolchains//:tidepool.bzl", "nix_directory")', buck)
         self.assertIn('name = "harness-source",', buck)
         self.assertIn('store_path = read_root_config("nix", "matched_harness_source")', buck)
-        self.assertIn('name = "harness-source.git",', buck)
+        self.assertNotIn('name = "harness-source.git",', buck)
         self.assertIn('srcs = [":harness-source"]', buck)
-        self.assertIn('srcs = [":harness-source.git"]', buck)
+        self.assertNotIn('srcs = [":harness-source.git"]', buck)
         self.assertIn('crate_root = "harness-source/crates/harness/src/lib.rs"', buck)
         self.assertIn('name = "matched_harness_source"', buck)
         web_group = buck.split('name = "matched_harness_source",', 1)[1]
