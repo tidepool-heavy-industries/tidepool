@@ -11,6 +11,8 @@ mod after_tool_wait;
 mod background_command_wait;
 #[cfg(test)]
 mod capture_workspace_tests;
+pub(crate) mod child_initialization;
+pub use child_initialization::ForkChildRelease;
 mod clock_wait;
 mod command_presentation;
 mod command_settlement;
@@ -1055,6 +1057,7 @@ pub struct ResidentKernelBehavior<H, O> {
     shutdown_hook: Option<RootCustody>,
     checkpoint: Option<StateCheckpoint>,
     admitted_checkpoint: Option<(crate::CheckpointLease, Option<HostedCheckpointAttachment>)>,
+    child_scope_lease: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
     pending_checkpoint: Option<StateCheckpoint>,
     active_input: Option<RetainedActorInput>,
     input_origin: ActorInputOrigin,
@@ -1595,7 +1598,7 @@ impl ForkPublication {
 struct PendingForkPublication {
     boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
     phase: PendingForkPublicationPhase,
-    releases: Vec<(
+    releases: std::collections::VecDeque<(
         ActorRef,
         tidepool_repr::SessionId,
         tidepool_codegen::scope::ScopeId,
@@ -1605,7 +1608,7 @@ struct PendingForkPublication {
 
 enum PendingForkPublicationPhase {
     Prepared(Vec<crate::ForkGroupId>),
-    Committed(crate::lineage::CommittedForkGroups),
+    Committed(Arc<crate::lineage::CommittedForkGroups>),
 }
 
 impl<H, O> ResidentKernelBehavior<H, O> {
@@ -1760,6 +1763,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             shutdown_hook: None,
             checkpoint: None,
             admitted_checkpoint: None,
+            child_scope_lease: None,
             pending_checkpoint: None,
             active_input: None,
             input_origin: ActorInputOrigin::ActorStartup,
@@ -2776,6 +2780,7 @@ where
         self.shutdown_hook.take();
         self.checkpoint.take();
         self.admitted_checkpoint.take();
+        self.child_scope_lease.take();
         self.pending_checkpoint.take();
         self.active_input.take();
         self.boot.take();
@@ -8796,7 +8801,7 @@ where
         let index = self.pending_fork_publications.len();
         self.pending_fork_publications.push(PendingForkPublication {
             boundary: publication.boundary().cloned(),
-            phase: PendingForkPublicationPhase::Committed(authority),
+            phase: PendingForkPublicationPhase::Committed(Arc::new(authority)),
             releases,
             unused_scopes: Vec::new(),
         });
@@ -8841,7 +8846,9 @@ where
                 .fork_groups
                 .publish_groups(groups, context.actor)
             {
-                Ok(authority) => pending.phase = PendingForkPublicationPhase::Committed(authority),
+                Ok(authority) => {
+                    pending.phase = PendingForkPublicationPhase::Committed(Arc::new(authority))
+                }
                 Err(error) => {
                     self.pending_fork_publications.push(pending);
                     return Err(KernelBehaviorError {
@@ -8877,17 +8884,53 @@ where
                 detail: "fork release differs from committed admission".into(),
             });
         }
-        for (child, session, scope) in pending.releases.drain(..) {
-            let sent = kernel.resolve(child).is_some_and(|child| {
-                child.terminal().get().is_none()
-                    && child
+        let authority = Arc::clone(authority);
+        while let Some((child, session, scope)) = pending.releases.front().copied() {
+            let admitted = self
+                .environment
+                .actors
+                .lock()
+                .get(&child)
+                .filter(|record| record.terminal.is_none())
+                .map(|record| record.descriptor.clone());
+            if let (Some(admitted), Some(target)) = (admitted, kernel.resolve(child)) {
+                if target.terminal().get().is_none() {
+                    let lexical = match self
+                        .environment
+                        .runner
+                        .retain_fork_release_scope(session, scope)
+                        .await
+                    {
+                        Ok(lexical) => lexical,
+                        Err(error) => {
+                            self.pending_fork_publications.push(pending);
+                            return Err(Self::failure(error));
+                        }
+                    };
+                    let release = match ForkChildRelease::issue(
+                        child,
+                        admitted,
+                        pending.boundary.clone(),
+                        Arc::clone(&authority),
+                        lexical,
+                    ) {
+                        Ok(release) => release,
+                        Err(error) => {
+                            self.pending_fork_publications.push(pending);
+                            return Err(error);
+                        }
+                    };
+                    target
                         .address()
-                        .send_message(crate::KernelMessage::ReleaseFork { scope })
-                        .is_ok()
-            });
-            if !sent {
-                pending.unused_scopes.push((session, scope));
+                        .send_message(crate::KernelMessage::ReleaseFork { release })
+                        .ok();
+                }
             }
+            pending.releases.pop_front();
+            // The release owns an independent detached root. The original
+            // prepared root is retired by this publication owner in either
+            // delivery outcome; an undelivered capsule queues its own root.
+            pending.unused_scopes.push((session, scope));
         }
         while let Some((session, _)) = pending.unused_scopes.first().copied() {
             let scopes = pending
@@ -9413,13 +9456,36 @@ where
     fn release_fork<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
-        scope: tidepool_codegen::scope::ScopeId,
+        release: ForkChildRelease,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
         Box::pin(async move {
+            if !release.matches(kernel.identity(), &self.descriptor) {
+                return Err(Self::failure(
+                    "fork release does not match this child's admitted allocation",
+                ));
+            }
+            let selected_context = self
+                .descriptor
+                .clone()
+                .with_lexical_scope(release.lexical().scope())
+                .session_context(kernel.identity());
+            self.environment
+                .runner
+                .validate_fork_child_scope(selected_context, Arc::clone(release.lexical()))
+                .await
+                .map_err(Self::failure)?;
+            if let Some(terminal) = kernel.requested_shutdown() {
+                return Ok(KernelStep::Stop {
+                    output: (),
+                    terminal,
+                });
+            }
             let boot = self.boot.take().ok_or_else(|| KernelBehaviorError {
                 detail: "deferred fork was already released".into(),
             })?;
-            self.descriptor.set_lexical_scope(scope);
+            let lexical = release.into_lexical();
+            self.descriptor.set_lexical_scope(lexical.scope());
+            self.child_scope_lease = Some(lexical);
             let context = self.context(kernel.identity());
             kernel.install_session_context(context.clone())?;
             if let Some(record) = self.environment.actors.lock().get_mut(&context.actor) {

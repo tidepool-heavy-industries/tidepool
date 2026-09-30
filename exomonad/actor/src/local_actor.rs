@@ -738,7 +738,7 @@ pub trait KernelBehavior: Send + 'static {
     fn release_fork<'a>(
         &'a mut self,
         _context: &'a KernelContext,
-        _scope: tidepool_codegen::scope::ScopeId,
+        _release: crate::ForkChildRelease,
     ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
         Box::pin(async {
             Err(KernelBehaviorError {
@@ -753,7 +753,7 @@ pub trait KernelBehavior: Send + 'static {
     fn dispatch_release_fork(
         &mut self,
         _context: &KernelContext,
-        scope: tidepool_codegen::scope::ScopeId,
+        release: crate::ForkChildRelease,
     ) -> Result<OwnedActorTask<Self, ()>, KernelBehaviorError>
     where
         Self: Sized,
@@ -762,7 +762,7 @@ pub trait KernelBehavior: Send + 'static {
             move |mut behavior: Self, context| {
                 Box::pin(async move {
                     let result = behavior
-                        .release_fork(&context, scope)
+                        .release_fork(&context, release)
                         .await
                         .map_err(|error| KernelInvocationFailure::Failed {
                             actor: context.identity(),
@@ -1553,15 +1553,19 @@ where
                     });
                 reply.send(result).ok();
             }
-            KernelMessage::ReleaseFork { scope } => {
+            KernelMessage::ReleaseFork { release } => {
                 if matches!(state.hosted_admission, HostedAdmission::Closing) {
+                    return Ok(());
+                }
+                if release.child() != state.context.identity() {
+                    tracing::warn!(actor = %state.context.identity(), release = ?release, "foreign child release refused");
                     return Ok(());
                 }
                 start_kernel_task(
                     &myself,
                     state,
                     KernelTaskOperation::ReleaseFork,
-                    |behavior, context| behavior.dispatch_release_fork(context, scope),
+                    |behavior, context| behavior.dispatch_release_fork(context, release),
                 )
                 .await;
                 return Ok(());
@@ -2725,11 +2729,11 @@ mod tests {
 
         fn dispatch_release_fork(
             &mut self,
-            _context: &KernelContext,
-            scope: tidepool_codegen::scope::ScopeId,
+            context: &KernelContext,
+            release: crate::ForkChildRelease,
         ) -> Result<OwnedActorTask<Self, ()>, KernelBehaviorError> {
             let probe = self.kernel_probe.clone().expect("configured kernel probe");
-            assert_eq!(scope, tidepool_codegen::scope::ScopeId(33));
+            assert_eq!(release.child(), context.identity());
             let abandoned = Arc::clone(&probe.abandoned);
             Ok(OwnedActorTask::new(Box::pin(async move {
                 probe.first.0.notify_one();
@@ -3197,13 +3201,14 @@ mod tests {
         }
     }
 
-    fn send_kernel_release(actor: &LocalActorRef) {
+    fn send_kernel_release(actor: &LocalActorRef) -> tidepool_runtime::session::PersistentSession {
+        let (release, _, machine) =
+            crate::resident_actor::child_initialization::scheduler_fixture(actor.identity());
         actor
             .address()
-            .send_message(KernelMessage::ReleaseFork {
-                scope: tidepool_codegen::scope::ScopeId(33),
-            })
+            .send_message(KernelMessage::ReleaseFork { release })
             .expect("release child");
+        machine
     }
 
     #[tokio::test]
@@ -3212,7 +3217,7 @@ mod tests {
         let probe = kernel_probe(false);
         fixture.behavior.kernel_probe = Some(probe.clone());
         let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
-        send_kernel_release(&actor);
+        let _machine = send_kernel_release(&actor);
         probe.first.0.notified().await;
         let mut workbench = send_workbench(&actor);
         probe.first.1.notify_one();
@@ -3274,7 +3279,7 @@ mod tests {
         let probe = kernel_probe(true);
         fixture.behavior.kernel_probe = Some(probe.clone());
         let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
-        send_kernel_release(&actor);
+        let _machine = send_kernel_release(&actor);
         probe.first.0.notified().await;
         probe.first.1.notify_one();
         probe.next.0.notified().await;
@@ -3297,7 +3302,7 @@ mod tests {
         let probe = kernel_probe(false);
         fixture.behavior.kernel_probe = Some(probe.clone());
         let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
-        send_kernel_release(&actor);
+        let _machine = send_kernel_release(&actor);
         probe.first.0.notified().await;
         probe.first.1.notify_one();
         probe.next.0.notified().await;

@@ -290,7 +290,7 @@ pub enum KernelMessage {
         reply: RpcReplyPort<KernelInvocationReply>,
     },
     ReleaseFork {
-        scope: tidepool_codegen::scope::ScopeId,
+        release: crate::ForkChildRelease,
     },
     /// Drain one mailbox request retained while the resident behavior was
     /// parked on an external interaction rather than on `receive`.
@@ -400,8 +400,8 @@ impl std::fmt::Debug for KernelMessage {
                 .debug_tuple("ToolCompleted")
                 .field(boundary)
                 .finish(),
-            Self::ReleaseFork { scope } => {
-                formatter.debug_tuple("ReleaseFork").field(scope).finish()
+            Self::ReleaseFork { release } => {
+                formatter.debug_tuple("ReleaseFork").field(release).finish()
             }
             Self::DrainMailbox => formatter.write_str("DrainMailbox"),
             Self::Resume => formatter.write_str("Resume"),

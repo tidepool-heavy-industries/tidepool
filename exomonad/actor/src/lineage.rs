@@ -267,6 +267,7 @@ pub enum ForkGroupPublication {
 pub(crate) struct CommittedForkGroups {
     owner: ActorRef,
     groups: Vec<ForkGroupId>,
+    children: Vec<(ForkGroupId, ActorRef)>,
 }
 
 impl CommittedForkGroups {
@@ -275,6 +276,9 @@ impl CommittedForkGroups {
     }
     pub(crate) fn groups(&self) -> &[ForkGroupId] {
         &self.groups
+    }
+    pub(crate) fn permits_child(&self, group: ForkGroupId, child: ActorRef) -> bool {
+        self.children.contains(&(group, child))
     }
 }
 
@@ -1582,6 +1586,7 @@ impl ForkGroupRegistry {
         Ok(CommittedForkGroups {
             owner,
             groups: vec![id],
+            children: group.children.iter().map(|child| (id, *child)).collect(),
         })
     }
 
@@ -1604,8 +1609,10 @@ impl ForkGroupRegistry {
                 return Err(ForkGroupError::NotReady(id.0));
             }
         }
+        let mut children = Vec::new();
         for id in ids {
             let group = state.groups.get_mut(id).expect("validated group");
+            children.extend(group.children.iter().map(|child| (*id, *child)));
             group.publication = Some(publication);
             group.phase.send_replace(ForkGroupPhase::Committed);
             tracing::info!(group = id.0, actor = ?owner, "fork group published");
@@ -1613,6 +1620,7 @@ impl ForkGroupRegistry {
         Ok(CommittedForkGroups {
             owner,
             groups: ids.to_vec(),
+            children,
         })
     }
 
