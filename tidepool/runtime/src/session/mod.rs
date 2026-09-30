@@ -52,7 +52,10 @@ pub use persistent::{
     ScopeRetirement, ValuePlaneCommit,
 };
 
-pub use admission::{PrivateExecutionAdmission, RuntimeCellAdmission};
+pub use admission::{
+    PrivateExecutionAdmission, RuntimeCellAdmission, RuntimeCheckedPrefix,
+    RuntimeCheckedPrefixSnapshot,
+};
 pub use paired_publication::FinalExecutionIntent;
 pub use paired_publication::{
     AcceptedDeclarationPublication, CertifiedDeclarationPublication, DeclarationPublicationBase,

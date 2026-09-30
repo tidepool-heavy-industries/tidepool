@@ -1621,6 +1621,7 @@ pub struct TurnCertification {
     pub recovery_products: Vec<CertifiedRecoveryProduct>,
     pub(crate) checked_item: Option<ExactCheckedItem>,
     pub(crate) checked_execution: Option<Arc<ExactCompiledItem>>,
+    pub(crate) checked_prefix: Option<Arc<super::RuntimeCheckedPrefix>>,
 }
 
 impl TurnCertification {
@@ -1629,6 +1630,9 @@ impl TurnCertification {
     }
     pub fn checked_execution(&self) -> Option<&Arc<ExactCompiledItem>> {
         self.checked_execution.as_ref()
+    }
+    pub fn checked_prefix(&self) -> Option<&Arc<super::RuntimeCheckedPrefix>> {
+        self.checked_prefix.as_ref()
     }
 
     pub(crate) fn validate_checked_bind(
@@ -2991,6 +2995,7 @@ fn read_compiled_turn(
             recovery_products: sealed.recovery_products,
             checked_item: None,
             checked_execution: sealed.checked_execution,
+            checked_prefix: None,
         }),
     })
 }

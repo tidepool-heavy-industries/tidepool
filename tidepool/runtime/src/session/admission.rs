@@ -44,6 +44,7 @@ impl PrivateExecutionAdmission {
 pub struct RuntimeCellAdmission {
     owner: Arc<RuntimeAdmissionOwner>,
     retained_scope: ScopeId,
+    prefix_started: std::sync::atomic::AtomicBool,
     view: SessionCompileView,
     visibility: PublicVisibilitySnapshot,
     reserved_generations: Vec<Generation>,
@@ -80,10 +81,238 @@ impl Drop for RuntimeCellAdmission {
 /// Exact injected interface bytes captured by the runtime owner. These
 /// snapshots travel with an admission rather than being re-read from a mutable
 /// session include tree when the compiler offer runs off checkout.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct AdmittedValueInterface {
     module: tidepool_repr::SessionModule,
     bytes: Arc<[u8]>,
+}
+
+/// Only resident settlement can extend this same-cell execution prefix.
+/// Snapshots remain immutable while compilation runs off checkout.
+#[derive(Debug)]
+pub struct RuntimeCheckedPrefix {
+    admission: Arc<RuntimeCellAdmission>,
+    state: parking_lot::Mutex<RuntimeCheckedState>,
+}
+
+#[derive(Debug)]
+struct RuntimeCheckedState {
+    snapshot: Arc<RuntimeCheckedPrefixSnapshot>,
+    in_flight: Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>>,
+    retained_scopes: Vec<ScopeId>,
+}
+
+#[derive(Debug)]
+pub struct RuntimeCheckedPrefixSnapshot {
+    view: SessionCompileView,
+    visibility: PublicVisibilitySnapshot,
+    interfaces: Vec<AdmittedValueInterface>,
+    native_shares: Vec<SourceLeaseKey>,
+    compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
+    digest: [u8; 32],
+}
+
+impl RuntimeCheckedPrefixSnapshot {
+    pub fn view(&self) -> &SessionCompileView {
+        &self.view
+    }
+    pub fn interfaces(&self) -> &[AdmittedValueInterface] {
+        &self.interfaces
+    }
+    pub fn native_shares(&self) -> &[SourceLeaseKey] {
+        &self.native_shares
+    }
+    pub fn compiler_prefix(&self) -> &tidepool_toolchain::checked_cell::ExactCompiledPrefix {
+        &self.compiler_prefix
+    }
+    pub fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+}
+
+impl RuntimeCheckedPrefix {
+    pub fn admission(&self) -> &Arc<RuntimeCellAdmission> {
+        &self.admission
+    }
+    pub fn snapshot(&self) -> Arc<RuntimeCheckedPrefixSnapshot> {
+        self.state.lock().snapshot.clone()
+    }
+
+    pub(crate) fn start(
+        self: &Arc<Self>,
+        session: &PersistentSession,
+        scope: ScopeId,
+        execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
+    ) -> Result<Arc<CheckedTurnCompletion>, SessionError> {
+        let mut state = self.state.lock();
+        if !self.admission.belongs_to(session)
+            || self.admission.visibility.scope != scope
+            || state.in_flight.is_some()
+            || execution.item().admission_digest() != self.admission.digest()
+            || session.public_visibility_snapshot_in(scope).as_ref()
+                != Some(&state.snapshot.visibility)
+            || session.compile_view_in(scope).is_none_or(|view| {
+                view.admission_digest() != state.snapshot.view.admission_digest()
+            })
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        // Appending checks the compiler-owned same-cell identity and order.
+        state.snapshot.compiler_prefix.append(execution.clone())?;
+        state.in_flight = Some(execution.clone());
+        Ok(Arc::new(CheckedTurnCompletion {
+            prefix: self.clone(),
+            execution,
+            scope,
+        }))
+    }
+}
+
+impl Drop for RuntimeCheckedPrefix {
+    fn drop(&mut self) {
+        self.admission
+            .owner
+            .retired
+            .lock()
+            .extend(std::mem::take(&mut self.state.get_mut().retained_scopes));
+    }
+}
+
+/// Travels with the existing resident continuation token. It records no
+/// completed prefix while an effect is parked or an execution has failed.
+#[derive(Debug)]
+pub(crate) struct CheckedTurnCompletion {
+    prefix: Arc<RuntimeCheckedPrefix>,
+    execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
+    scope: ScopeId,
+}
+
+impl CheckedTurnCompletion {
+    pub(crate) fn settle(&self, session: &mut PersistentSession) -> Result<(), SessionError> {
+        let mut state = self.prefix.state.lock();
+        if !self.prefix.admission.belongs_to(session)
+            || state
+                .in_flight
+                .as_ref()
+                .is_none_or(|execution| !Arc::ptr_eq(execution, &self.execution))
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let compiler_prefix = state
+            .snapshot
+            .compiler_prefix
+            .append(self.execution.clone())?;
+        let view = session
+            .compile_view_in(self.scope)
+            .ok_or(SessionError::DeadScope(self.scope))?;
+        let visibility = session
+            .public_visibility_snapshot_in(self.scope)
+            .ok_or(SessionError::DeadScope(self.scope))?;
+        let mut interfaces = self.prefix.admission.interfaces.clone();
+        for (module, bytes) in compiler_prefix.completed_interfaces() {
+            let module = checked_value_module(module)?;
+            if interfaces
+                .iter()
+                .any(|existing| existing.module == module && existing.bytes.as_ref() != bytes)
+            {
+                return Err(SessionError::StaleStagedDeclaration);
+            }
+            if !interfaces.iter().any(|existing| existing.module == module) {
+                interfaces.push(AdmittedValueInterface {
+                    module,
+                    bytes: Arc::from(bytes),
+                });
+            }
+        }
+        let snapshot = Arc::new(checked_snapshot(
+            view,
+            visibility,
+            interfaces,
+            compiler_prefix,
+            self.prefix.admission.digest(),
+        ));
+        let retained = session
+            .mint_detached_scope(self.scope)
+            .ok_or(SessionError::DeadScope(self.scope))?;
+        state.retained_scopes.push(retained);
+        state.snapshot = snapshot;
+        state.in_flight = None;
+        Ok(())
+    }
+}
+
+fn checked_value_module(name: &str) -> Result<tidepool_repr::SessionModule, SessionError> {
+    let generation = name
+        .strip_prefix("Tidepool.Session.Val.G")
+        .and_then(|suffix| suffix.parse::<u64>().ok())
+        .ok_or_else(|| {
+            SessionError::Compile(crate::CompileError::ExtractFailed(
+                "checked value interface lacks its exact Val.G identity".into(),
+            ))
+        })?;
+    Ok(tidepool_repr::SessionModule::val(Generation(generation)))
+}
+
+fn checked_snapshot(
+    view: SessionCompileView,
+    visibility: PublicVisibilitySnapshot,
+    interfaces: Vec<AdmittedValueInterface>,
+    compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
+    admission: [u8; 32],
+) -> RuntimeCheckedPrefixSnapshot {
+    let native_shares = visibility.source_instances.clone();
+    let mut digest = blake3::Hasher::new();
+    let mut frame = |bytes: &[u8]| {
+        digest.update(&(bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+    };
+    frame(b"TidepoolRuntimeCheckedPrefix1");
+    frame(&admission);
+    frame(&(compiler_prefix.next_item() as u64).to_le_bytes());
+    frame(&view.admission_digest());
+    frame(&visibility.epoch.to_le_bytes());
+    frame(&visibility.declaration_tip.0.to_le_bytes());
+    match visibility.machine_incarnation {
+        Some(incarnation) => {
+            frame(&[1]);
+            frame(&incarnation.0.to_le_bytes());
+        }
+        None => frame(&[0]),
+    }
+    for (name, id) in &visibility.bindings {
+        frame(b"binding");
+        frame(name.as_bytes());
+        frame(&id.raw().to_le_bytes());
+    }
+    for interface in &interfaces {
+        frame(b"interface");
+        frame(interface.module.module_name().as_bytes());
+        frame(&interface.bytes);
+    }
+    for key in &native_shares {
+        frame(b"native");
+        frame(&key.instance.raw().to_le_bytes());
+        frame(&key.binder.version.0);
+        frame(key.binder.binder.unit.as_bytes());
+        frame(key.binder.binder.module.as_bytes());
+        frame(key.binder.binder.namespace.as_bytes());
+        frame(key.binder.binder.occurrence.as_bytes());
+        match &key.binder.binder.record_parent {
+            Some(parent) => {
+                frame(&[1]);
+                frame(parent.as_bytes());
+            }
+            None => frame(&[0]),
+        }
+    }
+    RuntimeCheckedPrefixSnapshot {
+        view,
+        visibility,
+        interfaces,
+        native_shares,
+        compiler_prefix,
+        digest: *digest.finalize().as_bytes(),
+    }
 }
 
 impl AdmittedValueInterface {
@@ -141,6 +370,40 @@ impl RuntimeCellAdmission {
 }
 
 impl PersistentSession {
+    pub fn begin_checked_prefix(
+        &self,
+        admission: Arc<RuntimeCellAdmission>,
+        first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
+    ) -> Result<Arc<RuntimeCheckedPrefix>, SessionError> {
+        if !admission.belongs_to(self)
+            || first_item.admission_digest() != admission.digest()
+            || self
+                .public_visibility_snapshot_in(admission.visibility.scope)
+                .as_ref()
+                != Some(&admission.visibility)
+            || self
+                .compile_view_in(admission.visibility.scope)
+                .is_none_or(|view| view.admission_digest() != admission.view.admission_digest())
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let snapshot = Arc::new(checked_snapshot(
+            admission.view.clone(),
+            admission.visibility.clone(),
+            admission.interfaces.clone(),
+            first_item.initial_prefix()?,
+            admission.digest(),
+        ));
+        admission.prefix_started.compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire).map_err(|_| SessionError::StaleStagedDeclaration)?;
+        Ok(Arc::new(RuntimeCheckedPrefix {
+            admission,
+            state: parking_lot::Mutex::new(RuntimeCheckedState {
+                snapshot,
+                in_flight: None,
+                retained_scopes: Vec::new(),
+            }),
+        }))
+    }
     /// Capsule drops happen outside checkout. The next owner entry retires
     /// their detached lease scopes through the same binding/native owner.
     pub(crate) fn reap_admission_leases(&mut self) {
@@ -273,6 +536,7 @@ impl PersistentSession {
         Ok(Arc::new(RuntimeCellAdmission {
             owner: self.admission_owner().clone(),
             retained_scope,
+            prefix_started: std::sync::atomic::AtomicBool::new(false),
             view,
             visibility,
             reserved_generations,
