@@ -5260,8 +5260,10 @@ mod tests {
         let specification = CheckedCellSpecification {
             admission_digest: [0; 32],
             cell_source: "let value = RootChoice.value".into(),
-            template_source: include_str!("fixtures/checked-fold-outcome-template.hs")
-                .replace("{{CELL_IMPORTS}}", "{{CELL_IMPORTS}}\nimport qualified RootChoice"),
+            template_source: include_str!("fixtures/checked-fold-outcome-template.hs").replace(
+                "{{CELL_IMPORTS}}",
+                "{{CELL_IMPORTS}}\nimport qualified RootChoice",
+            ),
             turn_templates: Vec::new(),
             injected_modules: Vec::new(),
             reserved_declaration_modules: Vec::new(),
@@ -5321,11 +5323,14 @@ mod tests {
         )
         .unwrap();
         let receipts = std::fs::read_dir(alternate_artifacts.path().join(".exact-compilations"))
-            .unwrap().map(|entry| entry.unwrap().path().join("receipt.cbor")).collect::<Vec<_>>();
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("receipt.cbor"))
+            .collect::<Vec<_>>();
         assert!(!receipts.is_empty());
         let selected = alternate_root.join("RootChoice.hs");
         assert!(receipts.iter().any(|receipt| {
-            let value: ciborium::value::Value = ciborium::de::from_reader(std::fs::read(receipt).unwrap().as_slice()).unwrap();
+            let value: ciborium::value::Value =
+                ciborium::de::from_reader(std::fs::read(receipt).unwrap().as_slice()).unwrap();
             let evidence = value.as_array().unwrap()[7].as_text().unwrap();
             evidence.contains(selected.to_str().unwrap())
         }));
@@ -5838,7 +5843,11 @@ mod tests {
         let execution = Arc::new(session.begin_private_execution(public).unwrap());
         let view = execution.view();
         let imports = view.turn_imports(&crate::session::SourceImports::new());
-        let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
+        let declaration_preamble = effects
+            .preamble()
+            .replace("module Expr where", "module Tidepool.Session.Lib.G1 where");
+        assert!(declaration_preamble.contains("module Tidepool.Session.Lib.G1 where"));
+        let template = resident_cell_check_template(&declaration_preamble, effects.row(), &imports);
         let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
         let source = include_str!("fixtures/checked-local-declaration.hs");
         let specification = CheckedCellSpecification {
@@ -6082,7 +6091,11 @@ mod tests {
                     .unwrap();
                 assert_eq!(
                     rendered.result().to_json(),
-                    serde_json::json!(["(41, 40)", false, false]),
+                    serde_json::json!([
+                        "(41, 40, True, \"LocalBox {localNumber = 41}\")",
+                        false,
+                        false
+                    ]),
                     "private replacement or qualified historical declaration changed"
                 );
             }

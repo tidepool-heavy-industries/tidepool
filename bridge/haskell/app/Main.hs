@@ -94,7 +94,7 @@ import Tidepool.ExactScope
   , readExactScope, revalidateExactScope, writeExactCompilation )
 import Tidepool.CheckedCell (CheckedSignature(..), encodeCheckedSignature)
 import Tidepool.PlannedDeclaration
-  ( PlannedDeclaration, PlannedDeclarationInventory, plannedSource, plannedCheckPlan
+  ( PlannedDeclaration, PlannedDeclarationInventory, plannedSource, plannedCheckPlan, replaceTemplateModuleHeader
   , preparePlannedDeclaration, certifyPlannedDeclaration
   , renderPlannedDeclarationInventory )
 import Tidepool.Session
@@ -1099,8 +1099,12 @@ runCellMode compiler caches args cellPath = do
       (requestSessionArtifacts args)
     forM_ admittedScope $ \scope -> forM_ (scopeCheckedCell scope) $ \admission ->
       validateCheckedCellAdmission args admission cellSource template
+    checkingTemplate <- case admittedScope >>= scopeCheckedCell of
+      Nothing -> pure template
+      Just _ -> either (throwIO . InvalidCheckingWrapper) pure
+        (replaceTemplateModuleHeader "module CellCheck where" template)
     initialPlan <- analyzeCell template cellSource >>= either throwCellSplitError pure
-    initialSource <- either fail pure (renderCellCheckSource template initialPlan)
+    initialSource <- either fail pure (renderCellCheckSource checkingTemplate initialPlan)
     let outDir = fromMaybe
           (takeDirectory cellPath </> takeBaseName cellPath ++ "_cell")
           (requestOutDir args)
@@ -1122,25 +1126,25 @@ runCellMode compiler caches args cellPath = do
         checkPlan plan = maybe plan (\(_,planned,_,_) -> plannedCheckPlan planned) preparedDeclaration
     (analyzed, provisional) <- checkCellInstances (\plan -> do
       let effective = checkPlan plan
-      rendered <- either fail pure (renderCellCheckSource template effective)
+      rendered <- either fail pure (renderCellCheckSource checkingTemplate effective)
       writeFile modulePath rendered
       -- Preserve the latest plan for failure diagnostics without encoding and
       -- writing a provisional result before every successful check attempt.
       writeIORef provisionalOutput (Just (out, plan, rendered))
       compiler checkedSelection Set.empty checkPurpose scope modulePath (requestIncludes args) (requestBuildProductsDir args))
         (maybe initialPlan (\(plan,_,_,_) -> plan) preparedDeclaration)
-    checkedSource <- either fail pure (renderCellCheckSource template (checkPlan analyzed))
+    checkedSource <- either fail pure (renderCellCheckSource checkingTemplate (checkPlan analyzed))
     (finalPlan, finalSource, compiled) <- if isJust preparedDeclaration || null (cellPlanDisplayTargets analyzed)
       then pure (analyzed, checkedSource, provisional)
       else do
         contextDeclarations <- cellDisplayDeclarations DisplayInstanceContexts provisional analyzed
         let contextual = installCellDisplayDeclarations contextDeclarations analyzed
-        contextualSource <- either fail pure (renderCellCheckSource template contextual)
+        contextualSource <- either fail pure (renderCellCheckSource checkingTemplate contextual)
         writeFile modulePath contextualSource
         contextChecked <- compiler (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args)) Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
         declarations <- cellDisplayDeclarations DisplayInstanceFields contextChecked analyzed
         let finalized = installCellDisplayDeclarations declarations analyzed
-        finalizedSource <- either fail pure (renderCellCheckSource template finalized)
+        finalizedSource <- either fail pure (renderCellCheckSource checkingTemplate finalized)
         writeFile modulePath finalizedSource
         finalizedResult <- compiler (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args)) Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
         pure (finalized, finalizedSource, finalizedResult)

@@ -3,7 +3,7 @@
 -- declarations; it never creates substitute Names for them.
 module Tidepool.PlannedDeclaration
   ( PlannedDeclaration, plannedModule, plannedSource, plannedCheckPlan
-  , preparePlannedDeclaration
+  , preparePlannedDeclaration, replaceTemplateModuleHeader
   , PlannedDeclarationInventory, plannedExports, plannedInstances
   , plannedOriginalOwner, plannedInterfaceFingerprint, plannedFamilyClosure
   , renderPlannedDeclarationInventory
@@ -110,7 +110,7 @@ preparePlannedDeclaration reserved wrapper plan = do
   unless (all ((/= scaffoldTargetName) . snd) heads)
     (Left "authored declaration uses the compiler result binder")
   let header = "module " ++ reserved ++ " (" ++ intercalate ", " (map renderExport exports) ++ ") where"
-  originalWrapper <- replaceHeader header wrapper
+  originalWrapper <- replaceTemplateModuleHeader header wrapper
   source <- renderDeclarationForTemplate originalWrapper
     (DeclarationSource (cellPlanPrologue plan) (cellAnalysisSource declaration))
   let cleared item
@@ -130,13 +130,6 @@ preparePlannedDeclaration reserved wrapper plan = do
   pure (PlannedDeclaration reserved source check heads)
   where
     occurrences needle = length . filter (needle `isPrefixOf`) . tails
-    replaceHeader header source = case
-        [index | (index, line) <- zip [0 :: Int ..] (lines source)
-          , "module " `isPrefixOf` dropWhile isSpace line] of
-      [index] -> Right (unlines
-        [if position == index then header else line
-        | (position, line) <- zip [0 :: Int ..] (lines source)])
-      _ -> Left "planned declaration wrapper requires one module header"
     exportHead (EValue name) = (ValueDeclaration, name)
     exportHead (EType name _) = (TypeDeclaration, name)
     exportHead (EClass name _) = (ClassDeclaration, name)
@@ -147,6 +140,18 @@ preparePlannedDeclaration reserved wrapper plan = do
     renderName occurrence name
       | isSymOcc (occurrence name) = "(" ++ name ++ ")"
       | otherwise = name
+
+-- Generated original and checking wrappers share one strict header renderer.
+-- Their module owners are selected by the compiler, independently of the
+-- source declarations whose GHC Names the original module certifies.
+replaceTemplateModuleHeader :: String -> String -> Either String String
+replaceTemplateModuleHeader header source = case
+    [index | (index, line) <- zip [0 :: Int ..] (lines source)
+      , "module " `isPrefixOf` dropWhile isSpace line] of
+  [index] -> Right (unlines
+    [if position == index then header else line
+    | (position, line) <- zip [0 :: Int ..] (lines source)])
+  _ -> Left "compiler wrapper requires one module header"
 
 -- Certification reads compiler identities and inventories from the original
 -- interface. Rendered names are never evidence that two owners are equal.
