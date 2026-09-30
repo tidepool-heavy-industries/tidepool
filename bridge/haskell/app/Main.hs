@@ -94,7 +94,7 @@ import Tidepool.ExactScope
   , readExactScope, revalidateExactScope, writeExactCompilation )
 import Tidepool.CheckedCell (CheckedSignature(..), encodeCheckedSignature)
 import Tidepool.PlannedDeclaration
-  ( PlannedDeclaration, PlannedDeclarationInventory, plannedSource, plannedCheckPlan, replaceTemplateModuleHeader
+  ( PlannedDeclaration, PlannedDeclarationRejection(..), PlannedDeclarationInventory, plannedSource, plannedCheckPlan, replaceTemplateModuleHeader
   , preparePlannedDeclaration, certifyPlannedDeclaration
   , renderPlannedDeclarationInventory )
 import Tidepool.Session
@@ -1203,11 +1203,11 @@ prepareOriginalCellDeclaration
 prepareOriginalCellDeclaration compiler caches args template outDir scope exact admission initial = do
   reserved <- case checkedReservedModules admission of
     [owner] -> pure owner
-    _ -> fail "local declaration requires exactly one reserved original Lib module"
+    _ -> throwIO InvalidDeclarationReservation
   wrapper <- originalDeclarationWrapper template
   let directory = outDir </> "planned-declaration"
       sourcePath = directory </> reserved ++ ".hs"
-      planned plan = either fail pure (preparePlannedDeclaration reserved wrapper plan)
+      planned plan = either rejectPlan pure (preparePlannedDeclaration reserved wrapper plan)
       writeOriginal plan = do
         original <- planned plan
         writeFile sourcePath (plannedSource original)
@@ -1265,6 +1265,13 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
   BS.writeFile packagesPath packageBytes
   BS.writeFile (outDir </> "planned-declaration.cbor") (toStrictByteString receipt)
   pure (finalized, original, inventory, extended)
+  where
+    rejectPlan UnsupportedDeclarationOrder = throwIO (SourceRejection
+      "local declarations currently require one initial group before bindings or expressions")
+    rejectPlan ReservedResultDeclaration = throwIO (SourceRejection
+      "authored declarations use the compiler-reserved __result binder")
+    rejectPlan InvalidOriginalReservation = throwIO InvalidDeclarationReservation
+    rejectPlan rejection = throwIO (InvalidDeclarationWrapper (show rejection))
 
 originalDeclarationWrapper :: String -> IO String
 originalDeclarationWrapper template = do

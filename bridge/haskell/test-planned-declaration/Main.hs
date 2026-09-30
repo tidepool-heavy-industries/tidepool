@@ -53,7 +53,7 @@ main = withScratch $ \work -> do
   checkWrapper <- readFile "test-planned-declaration/fixtures/check-wrapper.hs"
   initial <- analyzeCell checkWrapper authored >>= either (fail . show) pure
   let originalName = sessionModuleString (SessionModule LibMod (Generation 7))
-  planned <- either fail pure (preparePlannedDeclaration originalName wrapper initial)
+  planned <- either (fail . show) pure (preparePlannedDeclaration originalName wrapper initial)
   let originalFile = work </> "Tidepool/Session/Lib/G7.hs"
       checkFile = work </> "PlannedCheck.hs"
   createDirectoryIfMissing True (work </> "Tidepool/Session/Lib")
@@ -107,7 +107,7 @@ main = withScratch $ \work -> do
   unless (not (null (crCheckedBinderPins checked))) $
     fail "declaration, binding and expression cell did not check"
   changed <- analyzeCell checkWrapper (authored ++ "\nother = 99\n") >>= either (fail . show) pure
-  stale <- either fail pure (preparePlannedDeclaration originalName wrapper changed)
+  stale <- either (fail . show) pure (preparePlannedDeclaration originalName wrapper changed)
   refused <- certifyPlannedDeclaration stale (prHscEnv (pprPipelineResult original))
   unless (case refused of Left _ -> True; Right _ -> False) $
     fail "old original interface certified a changed declaration source"
@@ -117,7 +117,7 @@ main = withScratch $ \work -> do
     fail "value-module reservation admitted declaration ownership"
   automatic <- readFile "test-planned-declaration/fixtures/automatic.hs"
   automaticPlan <- analyzeCell checkWrapper automatic >>= either (fail . show) pure
-  automaticOriginal <- either fail pure (preparePlannedDeclaration originalName wrapper automaticPlan)
+  automaticOriginal <- either (fail . show) pure (preparePlannedDeclaration originalName wrapper automaticPlan)
   unless ("Generic" `isInfixOf` plannedSource automaticOriginal
       && "displayTree" `isInfixOf` plannedSource automaticOriginal
       && null (cellPlanGenericDeclarations (plannedCheckPlan automaticOriginal))
@@ -127,7 +127,7 @@ main = withScratch $ \work -> do
   importedCheckWrapper <- readFile "test-planned-declaration/fixtures/import-check-wrapper.hs"
   importedDeclWrapper <- readFile "test-planned-declaration/fixtures/import-decl-wrapper.hs"
   importedPlan <- analyzeCell importedCheckWrapper imported >>= either (fail . show) pure
-  importedOriginal <- either fail pure (preparePlannedDeclaration originalName importedDeclWrapper importedPlan)
+  importedOriginal <- either (fail . show) pure (preparePlannedDeclaration originalName importedDeclWrapper importedPlan)
   foreignSource <- readFile "test-planned-declaration/fixtures/Foreign.hs"
   writeFile (work </> "Foreign.hs") foreignSource
   writeFile originalFile (plannedSource importedOriginal)
@@ -147,7 +147,7 @@ main = withScratch $ \work -> do
     _ <- checkImports checkFile importedEnv importedInventory Nothing
     pure ()
   forbidden <- analyzeCell importedCheckWrapper (imported ++ "\nForeign.hidden\n") >>= either (fail . show) pure
-  forbiddenOriginal <- either fail pure (preparePlannedDeclaration originalName importedDeclWrapper forbidden)
+  forbiddenOriginal <- either (fail . show) pure (preparePlannedDeclaration originalName importedDeclWrapper forbidden)
   forbiddenSource <- either fail pure (renderCellCheckSource importedCheckWrapper (plannedCheckPlan forbiddenOriginal))
   forM_ ["import Foreign (Box(..), Remaining(..), ForeignRecord(..), (<+>))", "import Foreign hiding (hidden)"] $ \selection -> do
     writeFile checkFile (replaceForeignImport selection forbiddenSource)
@@ -161,7 +161,7 @@ main = withScratch $ \work -> do
   fieldCell <- readFile "test-planned-declaration/fixtures/field-cell.hs"
   fieldCheckWrapper <- readFile "test-planned-declaration/fixtures/field-check-wrapper.hs"
   fieldPlan <- analyzeCell fieldCheckWrapper fieldCell >>= either (fail . show) pure
-  fieldOriginal <- either fail pure (preparePlannedDeclaration originalName wrapper fieldPlan)
+  fieldOriginal <- either (fail . show) pure (preparePlannedDeclaration originalName wrapper fieldPlan)
   writeFile originalFile (plannedSource fieldOriginal)
   fieldProducts <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty
     CertifyHomeProductsCompile Nothing originalFile [work] Nothing

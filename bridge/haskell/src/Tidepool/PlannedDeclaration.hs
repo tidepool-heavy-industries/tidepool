@@ -3,7 +3,7 @@
 -- declarations; it never creates substitute Names for them.
 module Tidepool.PlannedDeclaration
   ( PlannedDeclaration, plannedModule, plannedSource, plannedCheckPlan
-  , preparePlannedDeclaration, replaceTemplateModuleHeader
+  , PlannedDeclarationRejection(..), preparePlannedDeclaration, replaceTemplateModuleHeader
   , PlannedDeclarationInventory, plannedExports, plannedInstances
   , plannedOriginalOwner, plannedInterfaceFingerprint, plannedFamilyClosure
   , renderPlannedDeclarationInventory
@@ -54,6 +54,15 @@ data PlannedDeclaration = PlannedDeclaration
   , authoredHeads :: [(DeclarationKind, String)]
   }
 
+data PlannedDeclarationRejection
+  = InvalidOriginalReservation
+  | UnsupportedDeclarationOrder
+  | InvalidTurnPlaceholder
+  | ReservedResultDeclaration
+  | InvalidOriginalHeader String
+  | InvalidOriginalRendering String
+  deriving (Eq, Show)
+
 data PlannedDeclarationInventory = PlannedDeclarationInventory
   { plannedExports :: [DeclarationExport]
   , plannedInstances :: InstanceInventory
@@ -91,28 +100,30 @@ renderPlannedDeclarationInventory inventory = "{" ++ intercalate ","
 -- plan comes from the existing cell parser; source ordinals remain intact in
 -- the checking plan even though the original declarations live elsewhere.
 preparePlannedDeclaration
-  :: String -> String -> CellSourcePlan -> Either String PlannedDeclaration
+  :: String -> String -> CellSourcePlan -> Either PlannedDeclarationRejection PlannedDeclaration
 preparePlannedDeclaration reserved wrapper plan = do
-  owner <- maybe (Left "planned declaration has no canonical session owner") Right
+  owner <- maybe (Left InvalidOriginalReservation) Right
     (parseSessionModule reserved)
   unless (smKind owner == LibMod && sessionModuleString owner == reserved)
-    (Left "planned declaration requires the canonical reserved Lib owner")
+    (Left InvalidOriginalReservation)
   declaration <- case cellPlanItems plan of
     item : rest
       | sbKind (cellAnalysisVerdict item) == KDecl
       , not (cellAnalysisPrologueOnly item)
       , all ((/= KDecl) . sbKind . cellAnalysisVerdict) rest -> Right item
-    _ -> Left "planned declaration requires one initial parser-owned declaration group"
+    _ -> Left UnsupportedDeclarationOrder
   unless (occurrences "{{TURN}}" wrapper == 1)
-    (Left "planned declaration wrapper requires one turn placeholder")
+    (Left InvalidTurnPlaceholder)
   let exports = nub (sbDeclItems (cellAnalysisVerdict declaration))
       heads = nub (map exportHead exports)
   unless (all ((/= scaffoldTargetName) . snd) heads)
-    (Left "authored declaration uses the compiler result binder")
+    (Left ReservedResultDeclaration)
   let header = "module " ++ reserved ++ " (" ++ intercalate ", " (map renderExport exports) ++ ") where"
-  originalWrapper <- replaceTemplateModuleHeader header wrapper
-  source <- renderDeclarationForTemplate originalWrapper
-    (DeclarationSource (cellPlanPrologue plan) (cellAnalysisSource declaration))
+  originalWrapper <- either (Left . InvalidOriginalHeader) Right
+    (replaceTemplateModuleHeader header wrapper)
+  source <- either (Left . InvalidOriginalRendering) Right
+    (renderDeclarationForTemplate originalWrapper
+      (DeclarationSource (cellPlanPrologue plan) (cellAnalysisSource declaration)))
   let cleared item
         | sbKind (cellAnalysisVerdict item) == KDecl = item {cellAnalysisSource = ""}
         | otherwise = item

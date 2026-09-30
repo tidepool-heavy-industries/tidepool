@@ -5926,6 +5926,80 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_declaration_order_is_a_source_contract_rejection() {
+        use crate::session::{
+            resident_cell_check_template, ModuleEnv, PersistentSession, SessionLib,
+        };
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_repr::SessionId;
+        use tidepool_testing::effect_surface::TestEffectSurface;
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let effects = TestEffectSurface::minimal(&[]).unwrap();
+        let lib = SessionLib::open(
+            SessionId(1011),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(effects.include_paths().to_vec());
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let execution = Arc::new(session.begin_private_execution(public).unwrap());
+        let view = execution.view();
+        let template = resident_cell_check_template(
+            effects.preamble(),
+            effects.row(),
+            &view.turn_imports(&crate::session::SourceImports::new()),
+        );
+        let source = include_str!("fixtures/checked-interleaved-declaration.hs");
+        let specification = CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: source.into(),
+            template_source: template.clone(),
+            turn_templates: Vec::new(),
+            injected_modules: view.injected_module_names(),
+            reserved_declaration_modules: Vec::new(),
+        };
+        let include = view.include_paths(effects.include_paths());
+        let admission = session
+            .admit_cell_for_execution(
+                execution,
+                1,
+                Arc::new(specification.clone()),
+                specification.specification_digest(),
+                [1; 32],
+                include,
+            )
+            .unwrap();
+        let view = admission.view();
+        let include = view.include_paths(effects.include_paths());
+        let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        let failure = check_cell_admitted(
+            CellCheckRequest {
+                exact_context: view.exact_declaration_context().cloned(),
+                session_id: Some(view.session()),
+                cell_text: source,
+                template: &template,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &view.injected_module_names(),
+                compile_generation: admission.initial_value_generation().0,
+                compile_view_evidence: "",
+            },
+            admission,
+            &[],
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(failure.error, CompileError::Diagnostics(_)));
+        assert_eq!(
+            crate::failclass::classify_compile(&failure.error).class,
+            crate::failclass::FailureClass::UserHaskell
+        );
+    }
+
+    #[test]
     fn admitted_cell_certifies_original_local_declaration_before_its_bind_and_expression() {
         use crate::session::{
             resident_cell_check_template, resident_workbench_templates, ModuleEnv,

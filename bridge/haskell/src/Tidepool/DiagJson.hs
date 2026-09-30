@@ -42,7 +42,13 @@ data ReportOutcome
   | ReportWorkerFailure
 
 -- Compiler-request authority errors occur before GHC source checking.
-data InputRejection = SearchInputsChanged | CheckedPurposeMismatch | InvalidCheckingWrapper String deriving Show
+data InputRejection
+  = SearchInputsChanged
+  | CheckedPurposeMismatch
+  | InvalidCheckingWrapper String
+  | InvalidDeclarationReservation
+  | InvalidDeclarationWrapper String
+  deriving Show
 instance Exception InputRejection
 
 -- | A source contract rejected during extraction, after GHC typechecking.
