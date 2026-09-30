@@ -1242,6 +1242,8 @@ pub struct ResidentActorWorkbench<H, O> {
     request: Option<crate::RequestId>,
     type_modules: Arc<[String]>,
     json_input: Option<serde_json::Value>,
+    compilation_authority: Option<Arc<crate::resident_actor::WorkbenchCompilationAuthority>>,
+    private_execution: Option<Arc<ExecutionPrivateScope>>,
 }
 
 #[derive(tidepool_bridge_derive::ToHaskell)]
@@ -2634,12 +2636,27 @@ impl<H, O> ResidentActorWorkbench<H, O> {
             request,
             type_modules: type_modules.into(),
             json_input: None,
+            compilation_authority: None,
+            private_execution: None,
         }
     }
 
     #[must_use]
     pub(crate) fn with_json_input(mut self, input: Option<serde_json::Value>) -> Self {
         self.json_input = input;
+        self
+    }
+
+    pub(crate) fn with_compilation_authority(
+        mut self,
+        authority: Arc<crate::resident_actor::WorkbenchCompilationAuthority>,
+    ) -> Self {
+        self.compilation_authority = Some(authority);
+        self
+    }
+
+    pub(crate) fn with_private_execution(mut self, execution: Arc<ExecutionPrivateScope>) -> Self {
+        self.private_execution = Some(execution);
         self
     }
 }
@@ -9233,6 +9250,23 @@ struct ReadyBlock {
 
 pub(crate) struct PreparedCellItem {
     ready: PreparedCellStep,
+}
+
+/// The cell cursor retains the mounted input owner until its final native
+/// item and publication settle. Each compiler capsule retains the exact
+/// source and tool owners separately.
+pub(crate) struct CellPreparationLease {
+    _bindings: tidepool_runtime::session::resident::BindingLease,
+    _input: Option<HostInputRetirement>,
+}
+
+impl From<tidepool_runtime::session::resident::BindingLease> for CellPreparationLease {
+    fn from(bindings: tidepool_runtime::session::resident::BindingLease) -> Self {
+        Self {
+            _bindings: bindings,
+            _input: None,
+        }
+    }
 }
 
 enum PreparedCellStep {
