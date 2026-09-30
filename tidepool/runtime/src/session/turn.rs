@@ -5320,9 +5320,15 @@ mod tests {
             &alternate_include,
         )
         .unwrap();
-        let evidence =
-            std::fs::read_to_string(alternate_artifacts.path().join("dependencies.json")).unwrap();
-        assert!(evidence.contains(alternate_root.join("RootChoice.hs").to_str().unwrap()));
+        let receipts = std::fs::read_dir(alternate_artifacts.path().join(".exact-compilations"))
+            .unwrap().map(|entry| entry.unwrap().path().join("receipt.cbor")).collect::<Vec<_>>();
+        assert!(!receipts.is_empty());
+        let selected = alternate_root.join("RootChoice.hs");
+        assert!(receipts.iter().any(|receipt| {
+            let value: Value = ciborium::de::from_reader(std::fs::read(receipt).unwrap().as_slice()).unwrap();
+            let evidence = value.as_array().unwrap()[7].as_text().unwrap();
+            evidence.contains(selected.to_str().unwrap())
+        }));
         assert_eq!(
             alternate.specification_digest(),
             admission.specification_digest()
