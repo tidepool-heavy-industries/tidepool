@@ -141,6 +141,49 @@ pub struct RuntimeCheckedItemAdmission {
     observation_name: Option<String>,
     digest: [u8; 32],
 }
+
+/// A pure display of an exact observation that this runtime already captured.
+/// It retains that binding and its native dependency closure independently of
+/// later private items and owns the display's fresh value identity.
+#[derive(Debug)]
+pub struct RuntimeCheckedDisplayAdmission {
+    prefix: Arc<RuntimeCheckedPrefix>,
+    snapshot: Arc<RuntimeCheckedPrefixSnapshot>,
+    execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
+    captured_binding: super::BoundBinder,
+    generation: Generation,
+    budget: usize,
+    presented: Vec<String>,
+    digest: [u8; 32],
+    _retained_scope: Arc<RuntimeLexicalScopeLease>,
+}
+
+impl RuntimeCheckedDisplayAdmission {
+    pub fn prefix(&self) -> &Arc<RuntimeCheckedPrefix> {
+        &self.prefix
+    }
+    pub fn snapshot(&self) -> &Arc<RuntimeCheckedPrefixSnapshot> {
+        &self.snapshot
+    }
+    pub fn execution(&self) -> &Arc<tidepool_toolchain::checked_cell::ExactCompiledItem> {
+        &self.execution
+    }
+    pub fn captured_binding(&self) -> &super::BoundBinder {
+        &self.captured_binding
+    }
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+    pub fn budget(&self) -> usize {
+        self.budget
+    }
+    pub fn presented(&self) -> &[String] {
+        &self.presented
+    }
+    pub fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+}
 impl RuntimeCheckedItemAdmission {
     pub fn prefix(&self) -> &Arc<RuntimeCheckedPrefix> {
         &self.prefix
@@ -429,6 +472,85 @@ impl RuntimeCellAdmission {
 }
 
 impl PersistentSession {
+    pub fn admit_checked_display(
+        &mut self,
+        prefix: Arc<RuntimeCheckedPrefix>,
+        execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
+        captured_binding: &super::BoundBinder,
+        budget: usize,
+        presented: Vec<String>,
+    ) -> Result<Arc<RuntimeCheckedDisplayAdmission>, SessionError> {
+        self.reap_admission_leases();
+        let state = prefix.state.lock();
+        let scope = prefix.admission.visibility.scope;
+        let id = tidepool_repr::SessionVarId::from_extract(captured_binding.var_id);
+        if !prefix.admission.belongs_to(self)
+            || prefix.admission.private_execution().is_none()
+            || state.in_flight.is_some()
+            || state.reservation.is_some()
+            || state
+                .snapshot
+                .compiler_prefix
+                .completed_item(execution.item().index())
+                .is_none_or(|completed| !Arc::ptr_eq(completed, &execution))
+            || execution.observation_name() != Some(captured_binding.name.as_str())
+            || self.bindings().get(id).is_none_or(|entry| {
+                entry.scope != scope
+                    || entry.name.0 != captured_binding.name
+                    || entry.module.module_name() != captured_binding.module
+                    || entry.module
+                        != tidepool_repr::SessionModule::val(Generation(execution.generation()))
+            })
+            || self.public_visibility_snapshot_in(scope).as_ref()
+                != Some(&state.snapshot.visibility)
+            || self.compile_view_in(scope).is_none_or(|view| {
+                view.admission_digest() != state.snapshot.view.admission_digest()
+            })
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        execution.validate_bound_binders(&[super::turn::encode_bound_binder_authority(
+            captured_binding,
+        )])?;
+        let snapshot = state.snapshot.clone();
+        drop(state);
+        let generation = self
+            .compile_view_in(scope)
+            .ok_or(SessionError::DeadScope(scope))?
+            .next_value_generation();
+        self.set_val_gen(generation);
+        let retained_scope = self.retain_lexical_scope(scope)?;
+        let mut digest = blake3::Hasher::new();
+        let mut frame = |bytes: &[u8]| {
+            digest.update(&(bytes.len() as u64).to_le_bytes());
+            digest.update(bytes);
+        };
+        frame(b"TidepoolRuntimeCheckedDisplay1");
+        frame(&snapshot.digest());
+        frame(&(execution.item().index() as u64).to_le_bytes());
+        frame(&execution.generation().to_le_bytes());
+        frame(&generation.0.to_le_bytes());
+        frame(&captured_binding.var_id.to_le_bytes());
+        frame(captured_binding.name.as_bytes());
+        frame(captured_binding.module.as_bytes());
+        frame(&(budget as u64).to_le_bytes());
+        frame(&(presented.len() as u64).to_le_bytes());
+        for key in &presented {
+            frame(key.as_bytes());
+        }
+        Ok(Arc::new(RuntimeCheckedDisplayAdmission {
+            prefix,
+            snapshot,
+            execution,
+            captured_binding: captured_binding.clone(),
+            generation,
+            budget,
+            presented,
+            digest: *digest.finalize().as_bytes(),
+            _retained_scope: retained_scope,
+        }))
+    }
+
     pub fn admit_checked_item(
         &mut self,
         prefix: Arc<RuntimeCheckedPrefix>,

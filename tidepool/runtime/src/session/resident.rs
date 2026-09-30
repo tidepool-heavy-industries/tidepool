@@ -2110,6 +2110,19 @@ where
         self.state.admit_checked_item(prefix, item)
     }
 
+    pub fn admit_checked_display(
+        &mut self,
+        prefix: Arc<super::RuntimeCheckedPrefix>,
+        execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
+        captured_binding: &BoundBinder,
+        budget: usize,
+        presented: Vec<String>,
+    ) -> Result<Arc<super::RuntimeCheckedDisplayAdmission>, SessionError> {
+        self.settle_dropped_custody();
+        self.state
+            .admit_checked_display(prefix, execution, captured_binding, budget, presented)
+    }
+
     pub fn freeze_execution_intent(
         &mut self,
         admission: &super::PrivateExecutionAdmission,
