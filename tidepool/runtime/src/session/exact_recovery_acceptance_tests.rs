@@ -424,8 +424,25 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         .unwrap()
         .unwrap()
         .graph;
-    assert_eq!(graph.public_surfaces[0].owner, owner(2));
-    assert_eq!(graph.public_surfaces[0].epoch, expected.epoch + 1);
+    let successor = graph
+        .public_surfaces
+        .iter()
+        .find(|surface| surface.owner == owner(2))
+        .expect("exact root successor surface");
+    assert_eq!(successor.epoch, expected.epoch + 1);
+    assert!(graph
+        .public_surfaces
+        .iter()
+        .all(|surface| surface.owner != owner(1)));
+    for child in [child_owner, uncertain_owner] {
+        let surface = graph
+            .public_surfaces
+            .iter()
+            .find(|surface| surface.owner == child)
+            .expect("retained nonempty child surface");
+        assert_eq!(surface.epoch, 1);
+        assert_eq!(surface.declaration_root, Some(expected.declaration_tip));
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
