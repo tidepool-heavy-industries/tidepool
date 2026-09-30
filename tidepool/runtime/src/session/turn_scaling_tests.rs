@@ -98,6 +98,7 @@ fn execute_cell(
         injected_modules: view.injected_module_names(),
         reserved_declaration_modules: Vec::new(),
     };
+    let admitted_include = view.include_paths(effects.include_paths());
     let admission = resident
         .admit_cell_for_execution(
             execution.clone(),
@@ -105,6 +106,7 @@ fn execute_cell(
             Arc::new(specification.clone()),
             specification.specification_digest(),
             [1; 32],
+            admitted_include,
         )
         .unwrap();
     let view = admission.view();

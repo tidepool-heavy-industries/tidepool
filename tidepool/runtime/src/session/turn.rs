@@ -2598,6 +2598,12 @@ pub fn check_cell_admitted(
         || req.session_root != view.session_root()
         || req.compile_generation != view.next_value_generation().0
         || req.inject_modules != view.injected_module_names()
+        || req.include.len() != admission.include_paths().len()
+        || req
+            .include
+            .iter()
+            .zip(admission.include_paths())
+            .any(|(requested, admitted)| requested.as_os_str() != admitted.as_os_str())
         || req.exact_context.as_deref() != view.exact_declaration_context().map(Arc::as_ref)
     {
         return Err(CompileError::ExtractFailed(
@@ -5149,6 +5155,56 @@ mod tests {
         );
     }
 
+    fn compile_public_checked_offer(
+        admission: &Arc<crate::session::RuntimeCellAdmission>,
+        mut specification: CheckedCellSpecification,
+    ) -> (TempDir, ExactCheckedItem) {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("cell.txt");
+        let template = temp.path().join("CellCheckTemplate.hs");
+        std::fs::write(&source, &specification.cell_source).unwrap();
+        std::fs::write(&template, &specification.template_source).unwrap();
+        specification.admission_digest = admission.digest();
+        let include = admission.include_paths().to_vec();
+        let include_paths = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        let mut cmd = extract_cmd().unwrap();
+        cmd.input(&source)
+            .cell()
+            .cell_template(&template)
+            .cell_out(temp.path().join("cell.cbor"))
+            .output_dir(temp.path())
+            .includes(&include_paths)
+            .session_incarnation(admission.view().session().0.to_string());
+        let endpoint = cmd.bind().unwrap();
+        let offer = ModuleCandidateOffer::select_checked_cell(
+            endpoint.identity().producer_bytes(),
+            &include,
+            temp.path(),
+            admission.view().exact_declaration_context().cloned(),
+            specification,
+            Vec::new(),
+        )
+        .unwrap();
+        cmd.session_root(offer.checked_value_root().unwrap())
+            .session_artifacts(offer.exact_scope_path().unwrap());
+        crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
+        let run = endpoint.execute(&cmd).unwrap();
+        assert!(
+            run.success(),
+            "{}",
+            String::from_utf8_lossy(&run.output.stderr)
+        );
+        let cell = offer
+            .admit_checked_cell(temp.path())
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}",
+                    offer.retain_failure(temp.path(), &run.output.stderr, error)
+                )
+            });
+        (temp, cell.item(0).unwrap())
+    }
+
     #[test]
     fn substituted_checked_specification_refuses_before_claiming_prefix() {
         use crate::session::{ModuleEnv, PersistentSession, SessionLib};
@@ -5176,47 +5232,12 @@ mod tests {
                 Arc::new(specification.clone()),
                 specification.specification_digest(),
                 [1; 32],
+                vec![root.path().to_path_buf()],
             )
             .unwrap();
-        let compile_public_offer = |mut specification: CheckedCellSpecification| {
-            let temp = TempDir::new().unwrap();
-            let source = temp.path().join("cell.txt");
-            let template = temp.path().join("CellCheckTemplate.hs");
-            std::fs::write(&source, &specification.cell_source).unwrap();
-            std::fs::write(&template, &specification.template_source).unwrap();
-            specification.admission_digest = admission.digest();
-            let mut cmd = extract_cmd().unwrap();
-            cmd.input(&source)
-                .cell()
-                .cell_template(&template)
-                .cell_out(temp.path().join("cell.cbor"))
-                .output_dir(temp.path())
-                .session_incarnation(admission.view().session().0.to_string());
-            let endpoint = cmd.bind().unwrap();
-            let offer = ModuleCandidateOffer::select_checked_cell(
-                endpoint.identity().producer_bytes(),
-                &[],
-                temp.path(),
-                admission.view().exact_declaration_context().cloned(),
-                specification,
-                Vec::new(),
-            )
-            .unwrap();
-            cmd.session_root(offer.checked_value_root().unwrap())
-                .session_artifacts(offer.exact_scope_path().unwrap());
-            crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
-            let run = endpoint.execute(&cmd).unwrap();
-            assert!(
-                run.success(),
-                "{}",
-                String::from_utf8_lossy(&run.output.stderr)
-            );
-            let cell = offer.admit_checked_cell(temp.path()).unwrap();
-            (temp, cell.item(0).unwrap())
-        };
         let mut alternate = specification.clone();
         alternate.cell_source = "let value = (43 :: Int)".into();
-        let (_alternate_artifacts, alternate) = compile_public_offer(alternate);
+        let (_alternate_artifacts, alternate) = compile_public_checked_offer(&admission, alternate);
         assert_eq!(alternate.admission_digest(), admission.digest());
         assert_ne!(
             alternate.specification_digest(),
@@ -5225,7 +5246,7 @@ mod tests {
         assert!(state
             .begin_checked_prefix(admission.clone(), alternate)
             .is_err());
-        let (_legitimate_artifacts, legitimate) = compile_public_offer(specification);
+        let (_legitimate_artifacts, legitimate) = compile_public_checked_offer(&admission, specification);
         assert_eq!(
             legitimate.specification_digest(),
             admission.specification_digest()
@@ -5233,6 +5254,71 @@ mod tests {
         let prefix = state
             .begin_checked_prefix(admission, legitimate)
             .expect("refused alternate specification must not claim the one-shot prefix");
+        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
+    }
+
+    #[test]
+    fn substituted_reserved_original_refuses_before_claiming_prefix() {
+        use crate::session::{ModuleEnv, PersistentSession, SessionLib};
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_repr::{SessionId, SessionModule};
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let lib = SessionLib::open(
+            SessionId(1000),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        let mut state = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = state.mint_scope(ScopeId::ROOT).unwrap();
+        let execution = Arc::new(state.begin_private_execution(public).unwrap());
+        let mut specification = CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: "originalValue = (42 :: Int)".into(),
+            template_source: include_str!("fixtures/checked-fold-outcome-template.hs").into(),
+            turn_templates: Vec::new(),
+            injected_modules: Vec::new(),
+            reserved_declaration_modules: Vec::new(),
+        };
+        let admission = state
+            .admit_cell_for_execution(
+                execution,
+                1,
+                Arc::new(specification.clone()),
+                specification.specification_digest(),
+                [1; 32],
+                vec![root.path().to_path_buf()],
+            )
+            .unwrap();
+        let reserved = admission.reserved_generations()[0];
+        specification.reserved_declaration_modules =
+            vec![SessionModule::lib(reserved).module_name()];
+        let mut alternate = specification.clone();
+        alternate.reserved_declaration_modules =
+            vec![SessionModule::lib(tidepool_repr::Generation(reserved.0 + 1)).module_name()];
+        let (_alternate_artifacts, alternate) = compile_public_checked_offer(&admission, alternate);
+        assert_eq!(alternate.admission_digest(), admission.digest());
+        assert_eq!(
+            alternate.specification_digest(),
+            admission.specification_digest()
+        );
+        assert_ne!(
+            alternate.reserved_declaration_modules(),
+            specification.reserved_declaration_modules
+        );
+        assert!(state
+            .begin_checked_prefix(admission.clone(), alternate)
+            .is_err());
+        let (_legitimate_artifacts, legitimate) =
+            compile_public_checked_offer(&admission, specification);
+        assert_eq!(
+            legitimate.reserved_declaration_modules(),
+            [SessionModule::lib(reserved).module_name()]
+        );
+        let prefix = state
+            .begin_checked_prefix(admission, legitimate)
+            .expect("refused alternate original owner must not claim the one-shot prefix");
         assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
     }
 
@@ -5292,6 +5378,9 @@ mod tests {
                 injected_modules: view.injected_module_names(),
                 reserved_declaration_modules: Vec::new(),
             };
+            let mut roots = effects.include_paths().to_vec();
+            roots.insert(0, root.path().to_owned());
+            let admitted_include = view.include_paths(&roots);
             let admission = session
                 .admit_cell_for_execution(
                     execution,
@@ -5299,12 +5388,11 @@ mod tests {
                     Arc::new(specification.clone()),
                     specification.specification_digest(),
                     [1; 32],
+                    admitted_include,
                 )
                 .unwrap();
             let view = admission.view();
-            let mut roots = effects.include_paths().to_vec();
-            roots.insert(0, root.path().to_owned());
-            let include = view.include_paths(&roots);
+            let include = admission.include_paths();
             let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
             let injected = view.injected_module_names();
             let started = std::time::Instant::now();
@@ -5395,6 +5483,7 @@ mod tests {
             injected_modules: view.injected_module_names(),
             reserved_declaration_modules: Vec::new(),
         };
+        let admitted_include = view.include_paths(effects.include_paths());
         let admission = state
             .admit_cell_for_execution(
                 execution.clone(),
@@ -5402,6 +5491,7 @@ mod tests {
                 Arc::new(specification.clone()),
                 specification.specification_digest(),
                 [1; 32],
+                admitted_include,
             )
             .unwrap();
         let view = admission.view();
@@ -5624,6 +5714,7 @@ mod tests {
             injected_modules: view.injected_module_names(),
             reserved_declaration_modules: vec![],
         };
+        let admitted_include = view.include_paths(effects.include_paths());
         let admission = session
             .admit_cell_for_execution(
                 execution.clone(),
@@ -5631,6 +5722,7 @@ mod tests {
                 Arc::new(specification.clone()),
                 specification.specification_digest(),
                 [1; 32],
+                admitted_include,
             )
             .unwrap();
         let view = admission.view();
@@ -6121,6 +6213,7 @@ mod tests {
                 Arc::new(admission_specification.clone()),
                 admission_specification.specification_digest(),
                 [0; 32],
+                include.iter().map(|path| path.to_path_buf()).collect(),
             )
             .unwrap();
         let (checked, mut folded) = check_cell_admitted(
@@ -6253,6 +6346,7 @@ mod tests {
                 Arc::new(expression_specification.clone()),
                 expression_specification.specification_digest(),
                 [0; 32],
+                include.iter().map(|path| path.to_path_buf()).collect(),
             )
             .unwrap();
         let (expression_check, expression_fold) = check_cell_admitted(
