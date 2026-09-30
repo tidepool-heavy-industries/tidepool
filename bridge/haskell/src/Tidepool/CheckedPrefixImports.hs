@@ -3,7 +3,7 @@
 module Tidepool.CheckedPrefixImports
   ( CompletedValueImport(..), CompletedValueImports
   , hydrateCompletedValueImports, transformCompletedValueImports
-  , refineOriginalDeclarationImports
+  , refineOriginalDeclarationImports, refineOriginalDeclarationImportsWithCompleted
   ) where
 
 import Control.Exception (evaluate)
@@ -66,6 +66,7 @@ hydrateCompletedValueImports
   :: [CompletedValueImport] -> HscEnv
   -> IO (Either String (HscEnv, CompletedValueImports))
 hydrateCompletedValueImports requested env
+  | null requested = pure (Right (env, CompletedValueImports []))
   | any invalidOwner requested = pure (Left "completed values require canonical Val owners and nonempty selections")
   | length winners /= length (nub winners) = pure (Left "completed value selections contain duplicate lexical winners")
   | otherwise = do
@@ -107,7 +108,7 @@ hydrateCompletedValueImports requested env
 
 transformCompletedValueImports
   :: CompletedValueImports -> HscEnv -> ParsedModule -> IO ParsedModule
-transformCompletedValueImports (CompletedValueImports owners) = refineImports owners
+transformCompletedValueImports (CompletedValueImports owners) = refineImports owners []
 
 -- Planned declaration certification supplies the full authored-only original
 -- export inventory. Keep its direct wildcard import contract distinct from the
@@ -115,11 +116,29 @@ transformCompletedValueImports (CompletedValueImports owners) = refineImports ow
 refineOriginalDeclarationImports
   :: Module -> Fingerprint -> [ExportIdentity] -> HscEnv -> ParsedModule -> IO ParsedModule
 refineOriginalDeclarationImports owner fingerprint names env parsed = do
+  original <- originalRefinement env owner fingerprint names
+  refineImports [original] [] env parsed
+
+-- A completed value may replace a Lib value. Protect only the completed cap's
+-- verified exact direct selections during the Lib pass, then give the value
+-- winners precedence over that Lib and every historical unqualified import.
+refineOriginalDeclarationImportsWithCompleted
+  :: Module -> Fingerprint -> [ExportIdentity] -> CompletedValueImports
+  -> HscEnv -> ParsedModule -> IO ParsedModule
+refineOriginalDeclarationImportsWithCompleted owner fingerprint names
+    (CompletedValueImports completed) env parsed = do
+  original <- originalRefinement env owner fingerprint names
+  intermediate <- refineImports [original] completed env parsed
+  refineImports completed [] env intermediate
+
+originalRefinement
+  :: HscEnv -> Module -> Fingerprint -> [ExportIdentity] -> IO RefinementOwner
+originalRefinement env owner fingerprint names = do
   original <- currentOwner env owner fingerprint
   unless (sort (nub names) == sort (nub (map exportIdentity
       (concatMap availNames (mi_exports (hm_iface original)))))) $
     fail "planned import refinement lacks its complete original export inventory"
-  refineImports [RefinementOwner owner fingerprint names OriginalDeclarations Nothing] env parsed
+  pure (RefinementOwner owner fingerprint names OriginalDeclarations Nothing)
 
 currentOwner :: HscEnv -> Module -> Fingerprint -> IO HomeModInfo
 currentOwner env owner fingerprint = case lookupHpt (hsc_HPT env) (moduleName owner) of
@@ -127,8 +146,9 @@ currentOwner env owner fingerprint = case lookupHpt (hsc_HPT env) (moduleName ow
       && mi_iface_hash (mi_final_exts (hm_iface original)) == fingerprint -> pure original
   _ -> fail "checked import refinement lacks its exact original interface"
 
-refineImports :: [RefinementOwner] -> HscEnv -> ParsedModule -> IO ParsedModule
-refineImports owners env parsed = do
+refineImports :: [RefinementOwner] -> [RefinementOwner] -> HscEnv -> ParsedModule -> IO ParsedModule
+refineImports [] [] _ parsed = pure parsed
+refineImports owners protected env parsed = do
   let syntax = unLoc (pm_parsed_source parsed)
       originalImports = hsmodImports syntax
       direct owner imported = let declaration = unLoc imported in
@@ -137,7 +157,7 @@ refineImports owners env parsed = do
           && ideclAs declaration == Nothing
           && (case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False)
           && ideclSource declaration == NotBoot
-  forM_ owners $ \owner -> do
+  forM_ (owners ++ protected) $ \owner -> do
     original <- currentOwner env (refinementOwner owner) (refinementFingerprint owner)
     case refinementReadback owner of
       Nothing -> pure ()
@@ -170,7 +190,7 @@ refineImports owners env parsed = do
       shadowKeys = map key (concatMap refinementNames owners)
   refined <- fmap concat $ forM imports $ \located -> do
     let declaration = unLoc located
-    if any (`direct` located) owners || ideclQualified declaration /= NotQualified
+    if any (`direct` located) (owners ++ protected) || ideclQualified declaration /= NotQualified
       then pure [located]
       else do
         let importedName = unLoc (ideclName declaration)

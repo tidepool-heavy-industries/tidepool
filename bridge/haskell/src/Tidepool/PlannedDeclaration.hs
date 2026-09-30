@@ -8,7 +8,7 @@ module Tidepool.PlannedDeclaration
   , plannedOriginalOwner, plannedInterfaceFingerprint, plannedFamilyClosure
   , renderPlannedDeclarationInventory
   , certifyPlannedDeclaration, hydratePlannedDeclarationInventory
-  , transformPlannedDeclarationImports
+  , transformPlannedDeclarationImports, transformPlannedDeclarationImportsWithCompleted
   ) where
 
 import Control.Monad (unless)
@@ -31,7 +31,9 @@ import GHC.Unit.Types (unitString)
 import GHC.Utils.Fingerprint (Fingerprint, fingerprintByteString)
 import GHC.Types.Name.Occurrence
   ( isSymOcc, mkTcOcc, mkVarOcc )
-import Tidepool.CheckedPrefixImports (refineOriginalDeclarationImports)
+import Tidepool.CheckedPrefixImports
+  ( CompletedValueImports, refineOriginalDeclarationImports
+  , refineOriginalDeclarationImportsWithCompleted )
 import Tidepool.Binders
   ( CellSourcePlan(..), CellAnalysisItem(..), CellSourceSpan(..)
   , StmtBinders(..), TurnKind(..), ExportItem(..), LocatedImport(..)
@@ -232,5 +234,11 @@ readPlannedDeclarationInventory env original = do
 transformPlannedDeclarationImports
   :: PlannedDeclarationInventory -> HscEnv -> ParsedModule -> IO ParsedModule
 transformPlannedDeclarationImports inventory = refineOriginalDeclarationImports
+  (inventoryOwner inventory) (inventoryInterface inventory)
+  (concatMap (\item -> exportHead item : exportChildren item) (plannedExports inventory))
+
+transformPlannedDeclarationImportsWithCompleted
+  :: PlannedDeclarationInventory -> CompletedValueImports -> HscEnv -> ParsedModule -> IO ParsedModule
+transformPlannedDeclarationImportsWithCompleted inventory = refineOriginalDeclarationImportsWithCompleted
   (inventoryOwner inventory) (inventoryInterface inventory)
   (concatMap (\item -> exportHead item : exportChildren item) (plannedExports inventory))
