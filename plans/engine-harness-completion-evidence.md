@@ -13,7 +13,10 @@ showed successful whole-cell checking (14.49 seconds) and item compilation
 120-second completion deadline expired. This identifies a premature fixture
 deadline rather than proving a lost reply. The raw-host completion allowance is
 now 300 seconds; readiness and cancellation deadlines are unchanged. The strict
-result check is being rerun in
+result check passed: one executed test proving the completed original call,
+single committed item, exact `42`, HTTP command retention and reconnect. Its
+frozen input preceded the canonical harness814 and native-literal joins, so
+it does not accept their combined revision or the browser journey. See
 `target/completion-evidence/final-delivery/budgeted-raw-host.log`.
 The diagnostic's computing flag is explicitly labeled legacy Codex state:
 it does not describe embedded workbench activity.
@@ -22,8 +25,21 @@ Error classification now follows owning stages: prepared failures distinguish
 installation from execution, and checked-fold outcomes distinguish not requested,
 ineligible, attempted failure, and successful compilation. Rendered causes remain
 diagnostics rather than control flow. Publication's reserved-module identity
-validation and the actor retirement/terminal-wait race remain under repair;
-neither boundary is accepted yet.
+validation and the actor retirement/terminal-wait race now have reviewed source
+repairs joined; their combined native acceptance remains open. The receipt schema
+adds an explicit `install` tag (four focused classification tests passed), without
+promising rollback of earlier committed input units. A separate confirmed gap in
+binding include-root selection to retained actor compilation authority is being
+repaired before publication admission can be accepted.
+
+Canonical harness `814b1697` Rust, browser provenance, typed recovery, and strict
+cold fixtures are now joined with the package-literal repair and retirement/wake
+repair. Exact toolchain/browser/test closures were materialized, configuration
+and dependency/first-party Buck regeneration passed (18.554 seconds). Remote
+execution remains disabled and Codex was not built. Combined consumer compilation
+and production cold restart are still pending. The preceding consumer-build
+attempt used a nonexistent runtime target; its exit status was failure, despite
+other actions compiling, and is not recorded as a passing build.
 
 On `83c46c44a2` plus strict result checks, the TPCERT3 matched native gate
 executed five cases: the expanded checked-cell original/publication case,
