@@ -238,6 +238,9 @@ impl ExactCompiledItem {
 }
 
 impl ExactCompiledPrefix {
+    pub fn completed_item(&self,index:usize)->Option<&Arc<ExactCompiledItem>> {
+        self.completed.get(index)
+    }
     pub fn next_item(&self) -> usize {
         self.completed.len()
     }
