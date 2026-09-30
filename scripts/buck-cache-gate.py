@@ -558,6 +558,7 @@ def main(argv=None):
         old_handlers[signum] = signal.signal(signum, _interrupt_probe)
     try:
         evidence = run_probe(options)
+        check_interrupted()
     except ProbeInterrupted as error:
         print(f"Buck cache gate interrupted by signal {error.signum}; input restoration ran", file=sys.stderr)
         return 128 + error.signum

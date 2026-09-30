@@ -8,7 +8,9 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'buck-cache-gate.py'
 spec = importlib.util.spec_from_file_location('buck_cache_gate', SCRIPT)
@@ -217,6 +219,58 @@ print("leader finished")
             timer.join(timeout=2)
             gate.INTERRUPTED_BY = previous_interrupt
             signal.signal(signal.SIGTERM, old_handler)
+
+    def test_signal_during_restored_build_returns_interrupted_after_restore(self):
+        previous_interrupt = gate.INTERRUPTED_BY
+        gate.INTERRUPTED_BY = None
+        self.addCleanup(setattr, gate, 'INTERRUPTED_BY', previous_interrupt)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'checkout'
+            root.mkdir()
+            probe = root / 'input.rs'
+            baseline = b'baseline source\n'
+            probe.write_bytes(baseline)
+            evidence = Path(directory) / 'evidence'
+            relative = 'input.rs'
+            options = SimpleNamespace(
+                target=['//pkg:target'], mutation_bytes=b'// probe\n',
+                build_timeout=60, buck2='buck2', expect_mutated_action=[],
+                expect_unaffected_action=[],
+            )
+            snapshot = {
+                'head': 'baseline-head', 'full_status_porcelain': '',
+                'probe_status_porcelain': '',
+            }
+
+            def run_phase(_options, _root, _evidence, _executable, phase):
+                if phase == 'restored':
+                    gate._interrupt_probe(signal.SIGTERM, None)
+                    gate.check_interrupted()
+                return {'phase': phase, 'what_ran_records': []}
+
+            completed = SimpleNamespace(stdout='mock')
+            with (
+                patch.object(gate, 'checked_paths', return_value=(root, evidence, probe, relative)),
+                patch.object(gate, 'validate_checkout', return_value='/bin/true'),
+                patch.object(gate, 'git_snapshot', return_value=snapshot),
+                patch.object(gate, 'input_status', return_value=''),
+                patch.object(gate, 'run_build_phase', side_effect=run_phase),
+                patch.object(
+                    subprocess, 'run',
+                    side_effect=lambda command, **_kwargs: SimpleNamespace(
+                        stdout='baseline-head' if 'rev-parse' in command else completed.stdout,
+                    ),
+                ),
+            ):
+                with self.assertRaises(gate.ProbeInterrupted) as raised:
+                    gate.run_probe(options)
+
+            self.assertEqual(raised.exception.signum, signal.SIGTERM)
+            self.assertEqual(probe.read_bytes(), baseline)
+            report = json.loads((evidence / 'gate-report.json').read_text())
+            self.assertTrue(report['probe_restored'])
+            self.assertTrue(report['restored_build_skipped'])
+        gate.INTERRUPTED_BY = previous_interrupt
 
 
 if __name__ == '__main__':
