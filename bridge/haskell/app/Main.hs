@@ -72,7 +72,7 @@ import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots )
 import Tidepool.ModuleCandidates (ModuleCandidate(..))
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
-import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithExact)
+import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.PackageWitness (PackageImportRoot, encodePackageImports)
 import qualified Crypto.Hash.SHA256 as SHA256
@@ -641,7 +641,8 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
               (closureModules recovered) (closureReachability recovered))
           (program, constructors) <- requireProjection (projectSelected selected)
           required <- either (ioError . userError) pure
-            (requiredOriginalPackageGlobalsWithExact originalProducts candidates exactOriginals (programGlobals program))
+            (requiredOriginalPackageGlobalsWithRetained originalProducts candidates exactOriginals
+              (Map.keysSet (projectionRetainedGenerations context)) (programGlobals program))
           let nextRoots = Set.toAscList (Set.fromList (roots ++ required))
           if nextRoots == roots
             then pure (recovered, program, constructors, roots)
@@ -1178,7 +1179,7 @@ prepareOriginalCellDeclaration
 prepareOriginalCellDeclaration compiler caches args template outDir scope exact admission initial = do
   reserved <- case checkedReservedModules admission of
     [owner] -> pure owner
-    _ -> fail "local declaration requires one reserved original Lib module"
+    _ -> fail "local declaration requires exactly one reserved original Lib module"
   wrapper <- originalDeclarationWrapper template
   let directory = outDir </> "planned-declaration"
       sourcePath = directory </> reserved ++ ".hs"

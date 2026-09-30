@@ -1,5 +1,6 @@
 module Main where
 
+import qualified Data.Set as Set
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (forM_, unless, void)
 import Control.Monad.IO.Class (liftIO)
@@ -7,7 +8,7 @@ import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.List (isInfixOf, sort)
 import Data.String (fromString)
-import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobals)
+import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobals, requiredOriginalPackageGlobalsWithRetained)
 import qualified Tidepool.ExecutionSchema as Execution
 import Tidepool.ModuleCandidates
 import GHC
@@ -398,6 +399,13 @@ originalProductRootsProof = do
       other = candidate "Unused" [CandidateGroup 7 [identity "main" "Unused" "entry"]
         [imported unused Nothing]]
       roots targets = requiredOriginalPackageGlobals [] [parserCandidate, input, other] targets
+  let retainedRoots retained targets = requiredOriginalPackageGlobalsWithRetained [] [parserCandidate, input, other] [] retained targets
+  unless (retainedRoots (Set.singleton package) [global caller] == Right [])
+    (fail "retained package import reopened original executable recovery")
+  unless (retainedRoots (Set.singleton unused) [global caller] == Right [package])
+    (fail "different retained package identity hid a required executable root")
+  unless (retainedRoots (Set.singleton source) [global caller] == Right [])
+    (fail "retained original home import reopened its implementation closure")
   unless (roots [global caller] == Right [package])
     (fail "demanded parser original-group package closure changed")
   unless (roots [global (identity "other-unit" "Caller" "parseInput")] == Right [])
@@ -412,7 +420,7 @@ originalProductRootsProof = do
   unless (requiredOriginalPackageGlobals [failedOwner] [parserCandidate, input] [global caller]
           == Right [package])
     (fail "unrelated fresh product miss became fatal")
-  case requiredOriginalPackageGlobals [failedOwner] [] [global broken] of
+  case requiredOriginalPackageGlobalsWithRetained [failedOwner] [] [] (Set.singleton package) [global broken] of
     Left reason | "fixture projection failure" `isInfixOf` reason -> pure ()
     _ -> fail "reached failed fresh home owner lost its projection diagnostic"
   let newlyReached = identity "main" "Later" "entry"

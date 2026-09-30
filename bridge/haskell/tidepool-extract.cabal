@@ -137,6 +137,7 @@ test-suite declaration-join-test
   hs-source-dirs:   test-cell-splitter
   build-depends:
     base >= 4.20 && < 5,
+    containers,
     bytestring,
     cryptohash-sha256,
     directory,
