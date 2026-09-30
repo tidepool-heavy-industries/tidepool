@@ -955,6 +955,7 @@ pub(crate) struct ParkedHoleAbortGuard {
 }
 
 struct ParkedHoleAbortState {
+    owner: Option<(crate::ActorRef, crate::ActorPlacement)>,
     abort: Arc<dyn Fn(String) + Send + Sync>,
     state: Mutex<ParkedHoleState>,
     reason: String,
@@ -1035,6 +1036,7 @@ impl ParkedHoleAbortGuard {
                 });
             });
             ParkedHoleAbortState {
+                owner: Some((context.actor, context.placement)),
                 abort,
                 state: Mutex::new(ParkedHoleState::Owned(latest.into_iter().collect())),
                 reason,
@@ -1088,6 +1090,59 @@ impl Clone for ParkedHoleAbortRegistration {
 }
 
 impl ParkedHoleAbortRegistration {
+    fn abandon_for_acknowledgement(
+        &self,
+        context: &crate::ActorSessionContext,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        let owner_matches = self.0.owner.is_some_and(|(actor, placement)| {
+            actor == context.actor && placement == context.placement
+        });
+        let private_matches = self
+            .0
+            .retained_authority
+            .as_ref()
+            .and_then(|authority| {
+                authority.downcast_ref::<crate::resident_actor::ExecutionResourceOwners>()
+            })
+            .is_some_and(|resources| resources.authorizes_cleanup_context(context));
+        if !owner_matches && !private_matches {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "continuation cleanup differs from its admitted actor placement".into(),
+            ));
+        }
+        let mut state = self.0.state.lock();
+        if let ParkedHoleState::Owned(current) = &mut *state {
+            *state = ParkedHoleState::Abandoned(std::mem::take(current));
+        }
+        Ok(())
+    }
+
+    fn awaiting_acknowledgement(&self) -> Vec<String> {
+        match &*self.0.state.lock() {
+            ParkedHoleState::Owned(current) | ParkedHoleState::Abandoned(current) => {
+                current.iter().cloned().collect()
+            }
+            ParkedHoleState::Settled => Vec::new(),
+        }
+    }
+
+    fn confirm_acknowledgement_in_checkout(&self) -> Result<(), ResidentActorWorkbenchError> {
+        let mut state = self.0.state.lock();
+        match &*state {
+            ParkedHoleState::Owned(current) | ParkedHoleState::Abandoned(current)
+                if !current.is_empty() =>
+            {
+                Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "native continuation cleanup remains unconfirmed".into(),
+                ))
+            }
+            _ => {
+                *state = ParkedHoleState::Owned(Default::default());
+                Ok(())
+            }
+        }
+    }
+
     pub(crate) async fn scope<F: std::future::Future>(&self, operation: F) -> F::Output {
         SLOT_CONTINUATION_OWNER.scope(self.clone(), operation).await
     }
@@ -3103,6 +3158,28 @@ where
             reason,
             Some(authority),
         )
+    }
+
+    /// Abandon this invocation before waiting for checkout. A blocking native
+    /// action can still create a successor; its existing observer registers it
+    /// with this same abandoned owner. Publication may continue only after the
+    /// checkout proves every registered continuation has actually retired.
+    pub(crate) async fn abort_owned_continuations(
+        &self,
+        context: crate::ActorSessionContext,
+        registration: ParkedHoleAbortRegistration,
+        reason: String,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        registration.abandon_for_acknowledgement(&context)?;
+        self.access
+            .with_machine(context, move |session, _, _| {
+                for cont_id in registration.awaiting_acknowledgement() {
+                    abort_owned_hole(session, cont_id.clone(), reason.clone())?;
+                    registration.observe(ResidentContinuationEvent::Retired(cont_id));
+                }
+                registration.confirm_acknowledgement_in_checkout()
+            })
+            .await
     }
 
     pub(crate) async fn with_exact_continuation_cleanup<T>(
@@ -16916,6 +16993,68 @@ mod request_tests {
         failed_abort_frame_owner(true).await;
     }
 
+    #[tokio::test]
+    async fn exact_cleanup_acknowledgement_allows_a_later_native_fragment() {
+        let (machines, mut context, source, _root) = actor_registry_fixture();
+        context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
+        let workbench =
+            ResidentActorWorkbench::new(machines.clone(), source.clone(), None, None, vec![]);
+        let guard = ParkedHoleAbortGuard::with_latest(
+            &workbench.access,
+            context.clone(),
+            None,
+            "test exact cleanup".into(),
+        );
+        let registration = guard.registration();
+        for attempt in 0..2 {
+            let (block, verdict) = suspending_fragment();
+            let step = registration
+                .scope(workbench.begin_fragment_split(
+                    context.clone(),
+                    source.clone(),
+                    vec![],
+                    block,
+                    Some(verdict),
+                ))
+                .await
+                .expect("real native fragment starts");
+            let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
+                panic!("fixture must retain a native continuation");
+            };
+            let id = outcome_continuation_id(&outcome).expect("fixture suspends");
+            assert!(registration.awaiting_acknowledgement().contains(&id));
+            let mut foreign = context.clone();
+            foreign.actor.incarnation.0 += 1;
+            assert!(workbench
+                .abort_owned_continuations(foreign, registration.clone(), "foreign cleanup".into(),)
+                .await
+                .is_err());
+            assert!(registration.awaiting_acknowledgement().contains(&id));
+            workbench
+                .abort_owned_continuations(
+                    context.clone(),
+                    registration.clone(),
+                    format!("test attempt {attempt}"),
+                )
+                .await
+                .expect("exact checkout confirms native abort");
+            assert!(registration.awaiting_acknowledgement().is_empty());
+            assert!(
+                matches!(&*registration.0.state.lock(), ParkedHoleState::Owned(ids) if ids.is_empty())
+            );
+            workbench
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    assert!(!session.parked_holes().contains(&id.as_str()));
+                    Ok(())
+                })
+                .await
+                .expect("aborted hole is actually gone");
+            drop((fragment, outcome));
+        }
+        drop(guard);
+    }
+
     async fn failed_abort_frame_owner(lose_machine: bool) {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
@@ -17022,6 +17161,7 @@ mod request_tests {
             let aborted = Arc::clone(&aborted);
             ParkedHoleAbortGuard {
                 shared: Arc::new(ParkedHoleAbortState {
+                    owner: None,
                     abort: Arc::new(move |id| aborted.lock().push(id)),
                     state: Mutex::new(ParkedHoleState::Owned(Default::default())),
                     reason: "test".into(),
