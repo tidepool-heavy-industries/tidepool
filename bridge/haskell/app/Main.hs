@@ -1085,14 +1085,18 @@ runCellMode compiler caches args cellPath = do
 -- worker invocation does not have before the check runs, so an eligible
 -- expression-only cell still falls back to the ordinary two-request path.
 --
--- Any failure here (no matching template, a real compile rejection) is
--- caught by the caller and simply leaves '--turn-out' unwritten; this never
--- touches '--cell-out', which the whole-cell check already wrote.
+-- A synchronous failure emits a bounded diagnostic and leaves '--turn-out'
+-- unwritten; this never touches the successful '--cell-out'. Asynchronous
+-- cancellation propagates through the worker's existing exception boundary.
 attemptCellFoldTurn
   :: Compiler -> RecoveryCaches -> WorkerRequest -> Bool -> FilePath
   -> CellSourcePlan -> CheckedEnvironmentResult -> IO ()
-attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled =
-  attempt `catch` \(_ :: SomeException) -> pure ()
+attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled = do
+  result <- trySynchronous attempt
+  case result of
+    Right () -> pure ()
+    Left exception -> hPutStrLn stderr
+      ("cell fold unavailable: " ++ take 8192 (show exception))
   where
     attempt = case soleBindItem finalPlan of
       Nothing -> pure ()
