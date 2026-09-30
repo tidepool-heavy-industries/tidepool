@@ -180,6 +180,62 @@ fn persistent_membership_observation_fallback_handles_cycles_resave_and_cross_ow
 }
 
 #[test]
+fn observation_retraction_preserves_frozen_membership_and_removes_unleased_own_ids() {
+    let mut tree = ScopeTree::new();
+    let parent = tree.mint_isolated();
+    let foreign = tree.mint_isolated();
+    let child = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let mut slots = [std::ptr::null_mut(); 4];
+    let inherited = table
+        .bind_in(parent, entry("inherited", 1, &mut slots[0]))
+        .unwrap();
+    let extra = table
+        .bind_in(foreign, entry("foreign", 2, &mut slots[1]))
+        .unwrap();
+    let own = table
+        .bind_in(child, entry("own", 3, &mut slots[2]))
+        .unwrap();
+    table.save_observation(inherited, &[], 10);
+    table.save_observation(extra, &[], 10);
+    table.save_observation(own, &[inherited.var(), extra.var()], 10);
+    let old = tree.mint_isolated();
+    table.seed_detached_scope(&tree, child, old);
+    table.seed_detached_scope(&tree, parent, child);
+    table.save_observation(own, &[], 10);
+    let removable = table
+        .bind_in(child, entry("removed", 4, &mut slots[3]))
+        .unwrap();
+    assert_eq!(table.remove_live(removable).unwrap().id, removable);
+    let latest = tree.mint_isolated();
+    table.seed_detached_scope(&tree, child, latest);
+    assert_eq!(
+        table.scope_reachable_binding_ids(&tree, latest),
+        vec![inherited, own]
+    );
+    assert_eq!(
+        table.scope_reachable_binding_ids(&tree, old),
+        vec![inherited, extra, own]
+    );
+    let grandchild = tree.mint_isolated();
+    table.seed_detached_scope(&tree, latest, grandchild);
+    tree.retire(old);
+    assert!(table.drain_scope(old).is_empty());
+    assert_eq!(
+        table.lease_count(extra),
+        0,
+        "a new reader retains the frozen member but not the removed foreign edge"
+    );
+    for scope in [parent, foreign, child, latest, grandchild] {
+        tree.retire(scope);
+        table.drain_scope(scope);
+    }
+    assert!(table.is_empty());
+    assert!(table.capturable_membership.is_empty());
+    assert_indexes(&table);
+}
+
+#[test]
 fn immutable_identity_reinsertion_is_idempotent_and_conflicts_are_atomic() {
     let mut tree = ScopeTree::new();
     let scope = tree.mint_isolated();

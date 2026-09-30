@@ -157,10 +157,13 @@ struct CaptureLeaseHistory {
 struct CapturableMembership {
     retained: HashTrieSetSync<SessionVarId>,
     source_instances: HashTrieSetSync<SourceLeaseKey>,
+    /// Mutable observation closure outside the scope's own binding set.
+    /// Frozen inherited/promoted membership is maintained independently.
+    dependency_ids: HashSet<SessionVarId>,
     dependency_revision: u64,
     dependencies_dirty: bool,
     // Nonzero epochs prove that every mutation since the latest capture only
-    // added exact membership. A removal or dependency refresh breaks the proof.
+    // added exact membership. A removal or retracting graph refresh breaks it.
     append_epoch: u64,
     added_bindings: HashSet<SessionVarId>,
     added_sources: HashSet<SourceLeaseKey>,
@@ -595,6 +598,7 @@ impl BindingTable {
                 source_instances: tip
                     .map(|tip| tip.source_instances.clone())
                     .unwrap_or_default(),
+                dependency_ids: HashSet::new(),
                 dependency_revision: self.dependency_revision,
                 dependencies_dirty: false,
                 append_epoch: 1,
@@ -646,7 +650,8 @@ impl BindingTable {
             projected.break_append_proof();
             if observations {
                 projected.dependencies_dirty = true;
-            } else if !frozen {
+            }
+            if !frozen {
                 projected.retained.remove_mut(&id);
             }
         }
@@ -708,18 +713,31 @@ impl BindingTable {
         }
         self.membership_mut(scope);
         if !self.membership_dependencies_current(scope, &self.capturable_membership[&scope]) {
-            let retained = self.scope_dependency_ids_slow(tree, scope);
+            // Validate the complete mutable owner graph, including cycles and
+            // foreign observation edits. Own bindings already have mutation-
+            // maintained trie paths; only foreign dependency membership needs
+            // reconciliation with the previous graph closure.
+            let own = self.owned.get(&scope);
+            let mut dependency_ids =
+                self.dependency_closure(own.into_iter().flat_map(HashSet::iter).copied());
+            dependency_ids.retain(|id| !own.is_some_and(|ids| ids.contains(id)));
+            let tip = self.tips.get(&scope);
+            let promoted = self.promoted.get(&scope);
             let revision = self.dependency_revision;
             let projected = self
                 .capturable_membership
                 .get_mut(&scope)
                 .expect("membership exists");
-            // Full mutable graph validation stays conservative. Preserve the
-            // existing immutable root and copy paths only for actual changes.
+            // A removed mutable edge cannot retract separately frozen custody.
             let removed = projected
-                .retained
+                .dependency_ids
                 .iter()
-                .filter(|id| !retained.contains(id))
+                .filter(|id| {
+                    !dependency_ids.contains(id)
+                        && !own.is_some_and(|ids| ids.contains(id))
+                        && !tip.is_some_and(|tip| tip.retained.contains(id))
+                        && !promoted.is_some_and(|ids| ids.contains(id))
+                })
                 .copied()
                 .collect::<Vec<_>>();
             if !removed.is_empty() {
@@ -728,12 +746,16 @@ impl BindingTable {
                     projected.retained.remove_mut(&id);
                 }
             }
-            for id in retained {
+            for id in dependency_ids
+                .difference(&projected.dependency_ids)
+                .copied()
+            {
                 if !projected.retained.contains(&id) {
                     projected.retained.insert_mut(id);
                     projected.added_bindings.insert(id);
                 }
             }
+            projected.dependency_ids = dependency_ids;
             projected.dependency_revision = revision;
             projected.dependencies_dirty = false;
         }
@@ -1706,6 +1728,7 @@ impl BindingTable {
         let mut child_membership = CapturableMembership {
             retained: self.tips[&child].retained.clone(),
             source_instances: self.tips[&child].source_instances.clone(),
+            dependency_ids: HashSet::new(),
             dependency_revision: self.dependency_revision,
             dependencies_dirty: self.observation_owners.contains_key(&child),
             append_epoch: 1,
@@ -1714,6 +1737,7 @@ impl BindingTable {
         };
         if let Some(previous) = self.capturable_membership.remove(&child) {
             child_membership.dependencies_dirty |= previous.dependencies_dirty;
+            child_membership.dependency_ids = previous.dependency_ids;
             for id in previous.retained.iter() {
                 child_membership.retained.insert_mut(*id);
             }
