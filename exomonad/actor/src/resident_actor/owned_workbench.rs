@@ -3,11 +3,101 @@
 use super::*;
 use crate::{OwnedWorkbenchCompletion, OwnedWorkbenchTask, WorkbenchAdvance, WorkbenchDispatch};
 
+/// Source and tool owners admitted once for this hosted execution. Compiler
+/// recipe observations are added by the workbench's original snapshot owner.
+pub(crate) struct WorkbenchCompilationAuthority {
+    source: crate::CheckpointSourceLayer,
+    installed_tools: Option<crate::InstalledToolLease>,
+    authority_digest: [u8; 32],
+}
+
+impl WorkbenchCompilationAuthority {
+    pub(super) fn admit(
+        context: ActorSessionContext,
+        source: crate::CheckpointSourceLayer,
+        installed_tools: Option<crate::InstalledToolLease>,
+        source_layers: Option<&crate::ActorSourceLayerResolver>,
+    ) -> Result<(ActorSessionContext, Arc<Self>), KernelInvocationFailure> {
+        let actor = context.actor;
+        let reject = |detail| KernelInvocationFailure::Rejected { actor, detail };
+        if let Some(layers) = source_layers {
+            layers
+                .validate_source_authority(&source)
+                .map_err(|error| reject(format!("cannot admit source authority: {error}")))?;
+        } else if source.is_owned() {
+            return Err(reject(
+                "no configured owner validates issued source authority".into(),
+            ));
+        }
+        let context = context
+            .with_issued_source(&source)
+            .map_err(|error| reject(format!("cannot select retained source authority: {error}")))?;
+        if let Some(lease) = &installed_tools {
+            if lease.actor() != actor || lease.source() != &source {
+                return Err(reject(
+                    "issued tool installation does not match admitted actor and source".into(),
+                ));
+            }
+        }
+        let mut digest = blake3::Hasher::new();
+        let mut frame = |bytes: &[u8]| {
+            digest.update(&(bytes.len() as u64).to_le_bytes());
+            digest.update(bytes);
+        };
+        frame(b"exomonad-workbench-compilation-authority-v1");
+        frame(&actor.id.0.to_le_bytes());
+        frame(&actor.incarnation.0.to_le_bytes());
+        frame(&source.semantic_digest());
+        match &installed_tools {
+            Some(lease) => {
+                frame(b"issued-tool-lease");
+                frame(&lease.source().semantic_digest());
+                match lease.tools() {
+                    Some(tools) => {
+                        frame(b"installed-handler");
+                        frame(&tools.install.to_le_bytes());
+                        match &tools.revision {
+                            Some(revision) => {
+                                frame(b"revision");
+                                frame(revision.as_bytes());
+                            }
+                            None => frame(b"no-revision"),
+                        }
+                    }
+                    None => frame(b"no-handler"),
+                }
+            }
+            None => frame(b"no-tool-lease"),
+        }
+        Ok((
+            context,
+            Arc::new(Self {
+                source,
+                installed_tools,
+                authority_digest: *digest.finalize().as_bytes(),
+            }),
+        ))
+    }
+
+    pub(crate) fn source(&self) -> &crate::CheckpointSourceLayer {
+        &self.source
+    }
+
+    pub(crate) fn installed_tools(&self) -> Option<&crate::InstalledToolLease> {
+        self.installed_tools.as_ref()
+    }
+
+    pub(crate) fn authority_digest(&self) -> [u8; 32] {
+        self.authority_digest
+    }
+}
+
 struct OwnedExecution<H, O> {
     state: WorkbenchExecutionState,
     workbench: crate::ResidentActorWorkbench<H, O>,
     timing: Option<crate::call_timing::CallScope>,
     cleanup: crate::resident_workbench::ParkedHoleAbortGuard,
+    _compilation_authority: Arc<WorkbenchCompilationAuthority>,
 }
 
 impl<H, O> OwnedExecution<H, O> {
@@ -62,13 +152,19 @@ where
         let WorkbenchAdmission {
             context,
             request,
-            installed_tools,
-            admitted_source,
+            compilation_authority,
             capture,
             control,
             invocation,
             ..
         } = admitted;
+        let compilation_authority = compilation_authority
+            .expect("authored owned execution has admitted source and tool authority");
+        let installed_tools = compilation_authority.installed_tools().cloned();
+        let admitted_source = compilation_authority.source().clone();
+        tracing::debug!(actor = ?context.actor,
+            authority_digest = ?compilation_authority.authority_digest(),
+            "workbench source and tool owners admitted");
         let Some(workbench) = self.active_workbench() else {
             return terminal_task(Err(KernelInvocationFailure::Rejected {
                 actor: context.actor,
@@ -103,6 +199,7 @@ where
         let cleanup = workbench.continuation_cleanup_owner(
             context.clone(),
             "hosted execution abandoned before exact continuation settlement".into(),
+            compilation_authority.clone(),
         );
         let owned = OwnedExecution {
             state: WorkbenchExecutionState {
@@ -128,6 +225,7 @@ where
             workbench,
             timing: Some(timing),
             cleanup,
+            _compilation_authority: compilation_authority,
         };
         let runner = self.environment.runner.clone();
         WorkbenchDispatch::Owned(OwnedWorkbenchTask::new(Box::pin(async move {
@@ -412,5 +510,125 @@ where
             if consumed { control.acknowledge_cancellation(); }
             outcome
         }
+    }
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::WorkbenchCompilationAuthority;
+    use std::{path::PathBuf, sync::Arc};
+
+    struct SourceOwner {
+        identities: Vec<String>,
+        roots: Vec<PathBuf>,
+    }
+
+    impl crate::RetainedSourceLayer for SourceOwner {
+        fn identities(&self) -> &[String] {
+            &self.identities
+        }
+
+        fn include_paths(&self) -> &[PathBuf] {
+            &self.roots
+        }
+    }
+
+    struct SourceService(crate::SourceLayerIssuer);
+
+    impl crate::ActorSourceLayers for SourceService {
+        fn validate_source_authority(
+            &self,
+            source: &crate::CheckpointSourceLayer,
+        ) -> Result<(), String> {
+            self.0
+                .owns(source)
+                .then_some(())
+                .ok_or_else(|| "foreign source issuer".into())
+        }
+
+        fn layer_include(&self, _: &[String]) -> Result<Vec<PathBuf>, String> {
+            Ok(Vec::new())
+        }
+
+        fn bind(&self, _: tidepool_repr::PrincipalId, _: &[String]) {}
+    }
+
+    fn context() -> crate::ActorSessionContext {
+        crate::ActorSessionContext {
+            actor: crate::ActorRef::first(crate::ActorId(8)),
+            placement: crate::ActorPlacement {
+                session: tidepool_repr::SessionId(1),
+                resource_scope: tidepool_codegen::suspension::RealmId(0),
+                lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+            },
+            effect_policy: Default::default(),
+            live_payload: Default::default(),
+            source_imports: Default::default(),
+            haskell_effects_alias: String::new(),
+            source_layer: Arc::from([PathBuf::from("original-root")]),
+        }
+    }
+
+    #[test]
+    fn admitted_authority_keeps_exact_source_owner_until_last_release() {
+        let issuer = crate::SourceLayerIssuer::default();
+        let owner = Arc::new(SourceOwner {
+            identities: vec!["exact-revision".into()],
+            roots: vec!["captured-root".into()],
+        });
+        let weak = Arc::downgrade(&owner);
+        let source = issuer.issue(owner.clone());
+        let tool = crate::InstalledToolLease::new(context().actor, source.clone(), None);
+        let layers: crate::ActorSourceLayerResolver = Arc::new(SourceService(issuer));
+        let (selected, authority) = WorkbenchCompilationAuthority::admit(
+            context(),
+            source.clone(),
+            Some(tool),
+            Some(&layers),
+        )
+        .unwrap_or_else(|error| panic!("admit owned source: {error:?}"));
+        assert_eq!(selected.source_layer.as_ref(), source.include_paths());
+        assert_eq!(authority.source(), &source);
+        assert_eq!(authority.installed_tools().unwrap().source(), &source);
+        assert_ne!(authority.authority_digest(), [0; 32]);
+        drop(owner);
+        drop(source);
+        drop(layers);
+        assert!(weak.upgrade().is_some());
+        drop(authority);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn authority_refuses_foreign_issuer_even_with_identical_source_observations() {
+        let owner = Arc::new(SourceOwner {
+            identities: vec!["same-revision".into()],
+            roots: vec!["same-root".into()],
+        });
+        let foreign = crate::SourceLayerIssuer::default().issue(owner);
+        let layers: crate::ActorSourceLayerResolver =
+            Arc::new(SourceService(crate::SourceLayerIssuer::default()));
+        assert!(
+            WorkbenchCompilationAuthority::admit(context(), foreign, None, Some(&layers),).is_err()
+        );
+    }
+
+    #[test]
+    fn authority_refuses_unowned_roots_and_foreign_tool_incarnation() {
+        assert!(
+            WorkbenchCompilationAuthority::admit(context(), Default::default(), None, None,)
+                .is_err()
+        );
+        let mut empty = context();
+        empty.source_layer = Arc::from([]);
+        let tool = crate::InstalledToolLease::new(
+            crate::ActorRef::first(crate::ActorId(9)),
+            Default::default(),
+            None,
+        );
+        assert!(
+            WorkbenchCompilationAuthority::admit(empty, Default::default(), Some(tool), None,)
+                .is_err()
+        );
     }
 }

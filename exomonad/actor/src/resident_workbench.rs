@@ -957,6 +957,30 @@ struct ParkedHoleAbortState {
     abort: Arc<dyn Fn(String) + Send + Sync>,
     state: Mutex<ParkedHoleState>,
     reason: String,
+    retained_authority: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    // An abandoned hole keeps its original resource owners until a checkout
+    // acknowledges retirement. An error or panic leaves this claim retained.
+    unconfirmed_owner: Mutex<Option<Arc<ParkedHoleAbortState>>>,
+}
+
+impl ParkedHoleAbortState {
+    fn retain_abandoned_claim(shared: &Arc<Self>) {
+        let state = shared.state.lock();
+        if shared.retained_authority.is_some()
+            && matches!(&*state, ParkedHoleState::Abandoned(holes) if !holes.is_empty())
+        {
+            *shared.unconfirmed_owner.lock() = Some(shared.clone());
+        }
+    }
+
+    fn release_acknowledged_claim(&self) {
+        let state = self.state.lock();
+        if matches!(&*state, ParkedHoleState::Settled)
+            || matches!(&*state, ParkedHoleState::Owned(holes) | ParkedHoleState::Abandoned(holes) if holes.is_empty())
+        {
+            self.unconfirmed_owner.lock().take();
+        }
+    }
 }
 
 enum ParkedHoleState {
@@ -989,36 +1013,61 @@ impl ParkedHoleAbortGuard {
         H: DispatchEffect<O> + Send + 'static,
         O: OutputSink + Sync + 'static,
     {
+        Self::with_retained_latest(access, context, latest, reason, None)
+    }
+
+    fn with_retained_latest<H, O>(
+        access: &ResidentMachineAccess<H, O>,
+        context: crate::ActorSessionContext,
+        latest: Option<String>,
+        reason: String,
+        retained_authority: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    ) -> Self
+    where
+        H: DispatchEffect<O> + Send + 'static,
+        O: OutputSink + Sync + 'static,
+    {
         let machines = Arc::clone(&access.machines);
         let source = access.source.clone();
         let cleanup_context = context.clone();
         let cleanup_reason = reason.clone();
         let runtime = tokio::runtime::Handle::current();
-        let abort: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |cont_id| {
-            let machines = Arc::clone(&machines);
-            let source = source.clone();
-            let context = cleanup_context.clone();
-            let reason = cleanup_reason.clone();
-            let cleanup_id = cont_id.clone();
-            runtime.spawn(async move {
+        let shared = Arc::new_cyclic(|weak: &std::sync::Weak<ParkedHoleAbortState>| {
+            let weak = weak.clone();
+            let abort: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |cont_id| {
+                let machines = Arc::clone(&machines);
+                let source = source.clone();
+                let context = cleanup_context.clone();
+                let reason = cleanup_reason.clone();
+                let cleanup_id = cont_id.clone();
+                let owner = weak.upgrade();
+                if let Some(owner) = &owner {
+                    ParkedHoleAbortState::retain_abandoned_claim(owner);
+                }
+                runtime.spawn(async move {
                 let access = ResidentMachineAccess::new(machines, source);
-                if let Err(error) = access
+                let result = access
                     .with_machine(context, move |session, _, _| {
                         abort_owned_hole(session, cont_id.clone(), reason)
                     })
-                    .await
-                {
+                    .await;
+                if let Err(error) = result {
                     tracing::warn!(cont_id = %cleanup_id, %error, "failed to abort an abandoned continuation");
+                } else if let Some(owner) = owner {
+                    ParkedHoleAbortRegistration(owner)
+                        .observe(ResidentContinuationEvent::Retired(cleanup_id));
                 }
             });
-        });
-        Self {
-            shared: Arc::new(ParkedHoleAbortState {
+            });
+            ParkedHoleAbortState {
                 abort,
                 state: Mutex::new(ParkedHoleState::Owned(latest.into_iter().collect())),
                 reason,
-            }),
-        }
+                retained_authority,
+                unconfirmed_owner: Mutex::new(None),
+            }
+        });
+        Self { shared }
     }
 
     pub(crate) fn registration(&self) -> ParkedHoleAbortRegistration {
@@ -1030,6 +1079,8 @@ impl ParkedHoleAbortGuard {
     fn disarm(self) {
         let mut state = self.shared.state.lock();
         *state = ParkedHoleState::Settled;
+        drop(state);
+        self.shared.release_acknowledged_claim();
     }
 }
 
@@ -1049,6 +1100,7 @@ impl Drop for ParkedHoleAbortGuard {
                 ParkedHoleState::Settled => std::collections::BTreeSet::new(),
             }
         };
+        ParkedHoleAbortState::retain_abandoned_claim(&self.shared);
         for cont_id in abandoned {
             (self.shared.abort)(cont_id);
         }
@@ -1097,6 +1149,7 @@ impl ParkedHoleAbortRegistration {
                 }
             }
         };
+        self.0.release_acknowledged_claim();
         if let Some(cont_id) = abort {
             (self.0.abort)(cont_id);
         }
@@ -1139,9 +1192,12 @@ impl ParkedHoleAbortRegistration {
                 if let Err(error) = abort_owned_hole(session, cont_id.clone(), reason) {
                     tracing::warn!(%cont_id, %error, "failed to abort a late continuation after its owner was dropped");
                     (self.0.abort)(cont_id);
+                } else {
+                    self.observe(ResidentContinuationEvent::Retired(cont_id));
                 }
             }
         }
+        self.0.release_acknowledged_claim();
     }
 }
 
@@ -2970,8 +3026,15 @@ where
         &self,
         context: crate::ActorSessionContext,
         reason: String,
+        authority: Arc<crate::resident_actor::WorkbenchCompilationAuthority>,
     ) -> ParkedHoleAbortGuard {
-        ParkedHoleAbortGuard::with_latest(&self.access, context, None, reason)
+        ParkedHoleAbortGuard::with_retained_latest(
+            &self.access,
+            context,
+            None,
+            reason,
+            Some(authority),
+        )
     }
 
     pub(crate) async fn with_exact_continuation_cleanup<T>(
@@ -15821,6 +15884,45 @@ mod request_tests {
     }
 
     #[test]
+    fn abandoned_cleanup_retains_authority_until_exact_retirement_acknowledgement() {
+        let authority = Arc::new(());
+        let authority_weak = Arc::downgrade(&authority);
+        let aborted = Arc::new(Mutex::new(Vec::<String>::new()));
+        let guard = ParkedHoleAbortGuard {
+            shared: Arc::new(ParkedHoleAbortState {
+                abort: {
+                    let aborted = aborted.clone();
+                    Arc::new(move |id| aborted.lock().push(id))
+                },
+                state: Mutex::new(ParkedHoleState::Owned(Default::default())),
+                reason: "test unknown cleanup".into(),
+                retained_authority: Some(authority),
+                unconfirmed_owner: Mutex::new(None),
+            }),
+        };
+        let owner_weak = Arc::downgrade(&guard.shared);
+        let registration = guard.registration();
+        registration.observe(ResidentContinuationEvent::Parked("exact-hole".into()));
+        drop(guard);
+        drop(registration);
+        assert_eq!(&*aborted.lock(), &["exact-hole"]);
+        assert!(
+            authority_weak.upgrade().is_some(),
+            "unknown cleanup retains source/tool owners"
+        );
+        let acknowledgement = ParkedHoleAbortRegistration(owner_weak.upgrade().unwrap());
+        acknowledgement.observe(ResidentContinuationEvent::Retired("unrelated-hole".into()));
+        assert!(
+            authority_weak.upgrade().is_some(),
+            "unrelated retirement cannot release authority"
+        );
+        acknowledgement.observe(ResidentContinuationEvent::Retired("exact-hole".into()));
+        drop(acknowledgement);
+        assert!(owner_weak.upgrade().is_none());
+        assert!(authority_weak.upgrade().is_none());
+    }
+
+    #[test]
     fn slot_owner_tracks_resuspension_and_does_not_abort_a_completed_turn() {
         let aborted = Arc::new(Mutex::new(Vec::<String>::new()));
         let make_guard = || {
@@ -15830,6 +15932,8 @@ mod request_tests {
                     abort: Arc::new(move |id| aborted.lock().push(id)),
                     state: Mutex::new(ParkedHoleState::Owned(Default::default())),
                     reason: "test".into(),
+                    retained_authority: None,
+                    unconfirmed_owner: Mutex::new(None),
                 }),
             }
         };

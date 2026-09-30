@@ -14,6 +14,8 @@ mod replacement;
 mod status_rendering;
 mod workbench_ledger;
 
+pub(crate) use owned_workbench::WorkbenchCompilationAuthority;
+
 use status_rendering::{
     render_bindings_section, render_job_line, render_revisions_section, render_roster_changes,
     render_source_drift_section, RevisionIdentities, RosterSnapshot,
@@ -1289,6 +1291,7 @@ struct WorkbenchAdmission {
     request: WorkbenchRequest,
     installed_tools: Option<crate::InstalledToolLease>,
     admitted_source: crate::CheckpointSourceLayer,
+    compilation_authority: Option<Arc<WorkbenchCompilationAuthority>>,
     current_builtin: bool,
     capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
     control: Option<Arc<crate::WorkbenchExecutionControl>>,
@@ -1579,27 +1582,24 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 actor: context.actor,
                 detail: format!("cannot admit exact source layer: {error}"),
             })?;
-        if !current_builtin {
-            if let Some(layers) = &self.environment.source_layers {
-                layers
-                    .validate_source_authority(&admitted_source)
-                    .map_err(|error| KernelInvocationFailure::Rejected {
-                        actor: context.actor,
-                        detail: format!("cannot admit source authority: {error}"),
-                    })?;
-            }
-            context = context
-                .with_issued_source(&admitted_source)
-                .map_err(|error| KernelInvocationFailure::Rejected {
-                    actor,
-                    detail: format!("cannot select retained source authority: {error}"),
-                })?;
-        }
+        let compilation_authority = if current_builtin {
+            None
+        } else {
+            let (selected, authority) = WorkbenchCompilationAuthority::admit(
+                context,
+                admitted_source.clone(),
+                installed_tools.clone(),
+                self.environment.source_layers.as_ref(),
+            )?;
+            context = selected;
+            Some(authority)
+        };
         Ok(WorkbenchPreflight::Admitted(WorkbenchAdmission {
             context,
             request,
             installed_tools,
             admitted_source,
+            compilation_authority,
             current_builtin,
             capture: invocation.hosted_checkpoint_capture,
             control,
@@ -9335,6 +9335,7 @@ where
                 request,
                 installed_tools,
                 admitted_source,
+                compilation_authority: _compilation_authority,
                 current_builtin,
                 capture,
                 control,
