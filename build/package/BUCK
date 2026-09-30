@@ -36,8 +36,7 @@ genrule(
         "//web:dist",
         ":embedded_web_provenance",
     ],
-    out = "matched-runtime",
-    is_directory = True,
+    out = ".",
     bash = """set -euo pipefail
 OUTPUT="$PWD/$OUT"
 mkdir -p "$OUTPUT/bin" "$OUTPUT/share/exomonad/web" "$OUTPUT/share/exomonad"

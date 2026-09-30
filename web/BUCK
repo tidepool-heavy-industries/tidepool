@@ -6,8 +6,7 @@ load("@prelude//:rules.bzl", "genrule")
 genrule(
     name = "web_manifests",
     srcs = ["//third-party/rust:matched_harness_source"],
-    out = "web-manifests",
-    is_directory = True,
+    out = ".",
     bash = """set -euo pipefail
 SOURCE="$PWD/$(location //third-party/rust:matched_harness_source)/web"
 OUTPUT="$PWD/$OUT"
@@ -25,8 +24,7 @@ genrule(
         ":web_manifests",
         "toolchains//:npm_cache",
     ],
-    out = "node_modules",
-    is_directory = True,
+    out = ".",
     bash = """set -euo pipefail
 NODE='$(exe toolchains//:node)'
 NPM='$(exe toolchains//:npm)'
@@ -39,7 +37,7 @@ mkdir -p "$TMP/npm"
 cp "$SOURCE/package.json" "$SOURCE/package-lock.json" "$TMP/npm/"
 cd "$TMP/npm"
 "$NPM" ci --offline --ignore-scripts --cache "$NPM_CACHE" --no-audit --no-fund
-cp -a node_modules "$OUTPUT"
+cp -a node_modules/. "$OUTPUT/"
 """,
     visibility = ["PUBLIC"],
 )
@@ -50,8 +48,7 @@ genrule(
         "//third-party/rust:matched_harness_source",
         ":npm_dependencies",
     ],
-    out = "embedded-web",
-    is_directory = True,
+    out = ".",
     bash = """set -euo pipefail
 NODE='$(exe toolchains//:node)'
 NPM='$(exe toolchains//:npm)'
@@ -62,7 +59,8 @@ export PATH="${NODE%/*}:$PATH"
 export CI=1 TZ=UTC npm_config_update_notifier=false npm_config_logs_dir="$TMP/npm-logs"
 mkdir -p "$TMP/web"
 cp -a "$SOURCE/." "$TMP/web/"
-cp -a "$NPM_DEPS" "$TMP/web/node_modules"
+mkdir -p "$TMP/web/node_modules"
+cp -a "$NPM_DEPS/." "$TMP/web/node_modules/"
 cd "$TMP/web"
 "$NPM" run build
 mkdir -p "$OUTPUT/web"
