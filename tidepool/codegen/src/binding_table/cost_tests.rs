@@ -188,7 +188,7 @@ fn source_image() -> (DemandedImage, SourceBinder) {
         CachedHomeOwner {
             unit: "fixture".into(),
             module: "CostFixture".into(),
-            module_version: binder.version,
+            module_version: binder.version.clone(),
             skinny_iface_sha256: [92; 32],
             product_sha256: [93; 32],
         },
@@ -225,7 +225,7 @@ impl Scenario {
     fn entry(&mut self, name: String) -> BindingEntry {
         let generation = self.next_id;
         self.next_id += 1;
-        let mut slot = Box::new(std::ptr::null_mut());
+        let mut slot = Box::new(std::ptr::null_mut::<u8>());
         // These value slots measure binding-table bookkeeping only; the table
         // never dereferences them. Native source roots below are machine-owned.
         let root = unsafe { RootSlot::new(slot.as_mut() as *mut *mut u8) };
@@ -394,7 +394,7 @@ fn binding_scope_cost_matrix_preserves_shadow_alias_and_native_lifetimes() {
                 let modules = scenario
                     .table
                     .scope_reachable_modules(&scenario.tree, scope)
-                    .collect::<HashSet<_>>();
+                    .collect::<Vec<_>>();
                 assert!(!modules.is_empty());
                 assert_eq!(
                     scenario

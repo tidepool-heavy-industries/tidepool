@@ -9914,8 +9914,12 @@ mod tests {
         let old_slot = unsafe { crate::old_space::RootSlot::new(old_root.as_mut()) };
         let new_slot = unsafe { crate::old_space::RootSlot::new(new_root.as_mut()) };
         let old = SessionVarId::from_extract(1);
-        bindings.bind_in(original, captured_binding("value", 1, old_slot));
-        bindings.bind_in(original, captured_binding("value", 2, new_slot));
+        bindings
+            .bind_in(original, captured_binding("value", 1, old_slot))
+            .expect("fresh immutable binding");
+        bindings
+            .bind_in(original, captured_binding("value", 2, new_slot))
+            .expect("fresh immutable binding");
 
         let first = scopes.mint_isolated();
         bindings.seed_detached_scope(&scopes, original, first);
@@ -9975,8 +9979,12 @@ mod tests {
         let old_slot = unsafe { crate::old_space::RootSlot::new(old_root.as_mut()) };
         let new_slot = unsafe { crate::old_space::RootSlot::new(new_root.as_mut()) };
         let old = SessionVarId::from_extract(11);
-        bindings.bind_in(original, captured_binding("value", 11, old_slot));
-        bindings.bind_in(original, captured_binding("value", 12, new_slot));
+        bindings
+            .bind_in(original, captured_binding("value", 11, old_slot))
+            .expect("fresh immutable binding");
+        bindings
+            .bind_in(original, captured_binding("value", 12, new_slot))
+            .expect("fresh immutable binding");
 
         let source = scopes.mint_isolated();
         bindings.seed_detached_scope(&scopes, original, source);
@@ -10025,7 +10033,9 @@ mod tests {
         let alias_slot = unsafe { crate::old_space::RootSlot::new(alias_root.as_mut()) };
         let value = SessionVarId::from_extract(21);
         let alias = SessionVarId::from_extract(22);
-        bindings.bind_in(original, captured_binding("value", 21, value_slot));
+        bindings
+            .bind_in(original, captured_binding("value", 21, value_slot))
+            .expect("fresh immutable binding");
 
         let receiver = scopes.mint_isolated();
         bindings.seed_detached_scope(&scopes, original, receiver);

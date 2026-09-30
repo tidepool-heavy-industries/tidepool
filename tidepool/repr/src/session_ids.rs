@@ -78,7 +78,7 @@ pub struct BindingName(pub String);
 /// - `Lib`: user-written declarations, accumulated as source text.
 /// - `Val`: synthesized value-binding ifaces; construction lives in
 ///   `tidepool-runtime`, not in this crate.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum SessionModuleKind {
     Val,
     Lib,
@@ -96,7 +96,7 @@ impl SessionModuleKind {
 /// A gen-versioned session module. **The one place** the module-name string
 /// `"Tidepool.Session.{Val|Lib}.G<g>"` is constructed — render through this type
 /// so no bare module strings drift across the codebase.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct SessionModule {
     pub kind: SessionModuleKind,
     pub gen: Generation,
