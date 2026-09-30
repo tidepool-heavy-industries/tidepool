@@ -36,6 +36,8 @@ mod embedded_pending_compaction_tests;
 mod embedded_policy;
 mod embedded_projection;
 mod embedded_recovery;
+#[cfg(test)]
+mod embedded_recovery_tests;
 mod embedded_service;
 mod host_incarnation;
 #[cfg(feature = "codex-compat")]
