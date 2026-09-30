@@ -7,7 +7,10 @@
 use std::{any::Any, future::Future, pin::Pin, sync::Arc};
 
 use exomonad_tool::{HostedTool, ToolInvocation, ToolInvocationContext};
-use tidepool_runtime::session::{ResidentHole, WorkbenchExecutionId, WorkbenchRequest};
+use tidepool_runtime::session::{
+    PublicationCancellation, PublicationDecision, PublicationPhase, ResidentHole,
+    WorkbenchExecutionId, WorkbenchRequest,
+};
 use tokio::sync::oneshot;
 
 const WORKBENCH_IDLE: u8 = 0;
@@ -28,6 +31,10 @@ pub enum WorkbenchCancellationOutcome {
         reply: crate::KernelWorkbenchReply,
     },
     Expired {
+        execution: WorkbenchExecutionId,
+        reply: crate::KernelWorkbenchReply,
+    },
+    PublicationSettled {
         execution: WorkbenchExecutionId,
         reply: crate::KernelWorkbenchReply,
     },
@@ -52,6 +59,8 @@ pub enum WorkbenchBoundaryReconciliation {
 
 pub struct WorkbenchExecutionControl {
     pub(crate) invocation: Option<WorkbenchCallKey>,
+    publication: Arc<PublicationDecision>,
+    publication_waited: std::sync::atomic::AtomicBool,
     phase: std::sync::atomic::AtomicU8,
     sleep_outcome: std::sync::atomic::AtomicU8,
     changed: tokio::sync::Notify,
@@ -82,6 +91,8 @@ impl WorkbenchExecutionControl {
     fn new(invocation: Option<WorkbenchCallKey>) -> Arc<Self> {
         Arc::new(Self {
             invocation,
+            publication: PublicationDecision::new(),
+            publication_waited: std::sync::atomic::AtomicBool::new(false),
             phase: std::sync::atomic::AtomicU8::new(WORKBENCH_IDLE),
             sleep_outcome: std::sync::atomic::AtomicU8::new(SLEEP_NONE),
             changed: tokio::sync::Notify::new(),
@@ -89,6 +100,10 @@ impl WorkbenchExecutionControl {
             cancellation_observed: parking_lot::Mutex::new(None),
             settlement: tokio::sync::watch::channel(None).0,
         })
+    }
+
+    pub(crate) fn publication_decision(&self) -> Arc<PublicationDecision> {
+        Arc::clone(&self.publication)
     }
 
     pub(crate) fn arm_sleep(&self) {
@@ -180,20 +195,39 @@ impl WorkbenchExecutionControl {
         }
     }
 
-    pub(crate) fn request_cancellation(&self) -> bool {
-        let claimed = self
-            .phase
-            .compare_exchange(
-                WORKBENCH_SLEEPING,
-                WORKBENCH_CANCEL_REQUESTED,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .is_ok();
+    fn admit_cancellation(&self) -> (bool, Option<PublicationCancellation>) {
+        let mut claimed = false;
+        let publication = self.publication.request_cancellation_if(|| {
+            claimed = self
+                .phase
+                .compare_exchange(
+                    WORKBENCH_SLEEPING,
+                    WORKBENCH_CANCEL_REQUESTED,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok();
+            claimed
+        });
         if claimed {
             self.changed.notify_waiters();
         }
-        claimed
+        if matches!(
+            publication,
+            Some(
+                PublicationCancellation::PendingCommitOutcome
+                    | PublicationCancellation::AlreadyPublished
+                    | PublicationCancellation::AlreadyTerminated
+            )
+        ) {
+            self.publication_waited
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        (claimed, publication)
+    }
+
+    pub(crate) fn request_cancellation(&self) -> bool {
+        self.admit_cancellation().0
     }
 
     pub(crate) fn cancellation_requested(&self) -> bool {
@@ -243,6 +277,13 @@ impl WorkbenchExecutionControl {
             .load(std::sync::atomic::Ordering::Acquire)
         {
             SLEEP_CANCELLED => WorkbenchCancellationOutcome::Cancelled { execution, reply },
+            _ if self.publication.phase() == PublicationPhase::Published
+                || self
+                    .publication_waited
+                    .load(std::sync::atomic::Ordering::Acquire) =>
+            {
+                WorkbenchCancellationOutcome::PublicationSettled { execution, reply }
+            }
             SLEEP_EXPIRED => WorkbenchCancellationOutcome::Expired { execution, reply },
             SLEEP_NONE if phase == WORKBENCH_CANCEL_REQUESTED => {
                 WorkbenchCancellationOutcome::Unconfirmed { execution }
@@ -634,9 +675,17 @@ impl ResidentToolClient {
         if let Some(reply) = control.terminal_reply() {
             return Ok(control.cancellation_outcome(execution, reply));
         }
-        let claimed = control.request_cancellation();
+        let (claimed, publication) = control.admit_cancellation();
         let phase = control.phase.load(std::sync::atomic::Ordering::Acquire);
         if !claimed
+            && !matches!(
+                publication,
+                Some(
+                    PublicationCancellation::PendingCommitOutcome
+                        | PublicationCancellation::AlreadyPublished
+                        | PublicationCancellation::AlreadyTerminated
+                )
+            )
             && !matches!(
                 phase,
                 WORKBENCH_CANCEL_REQUESTED | WORKBENCH_EXPIRED | WORKBENCH_CANCELLED
@@ -1121,6 +1170,7 @@ mod tests {
         let control = WorkbenchExecutionControl::untracked();
         control.arm_sleep();
         assert!(control.request_cancellation());
+        assert!(control.publication_decision().claim_commit().is_none());
         assert!(!control.request_cancellation());
         control.acknowledge_cancellation();
         control.settle(terminal_reply());
@@ -1129,6 +1179,54 @@ mod tests {
             WORKBENCH_CANCELLED
         );
         assert!(control.settled().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn publication_claim_keeps_cancellation_pending_until_owner_settles() {
+        let control = WorkbenchExecutionControl::untracked();
+        control.arm_sleep();
+        let decision = control.publication_decision();
+        let claim = decision.claim_commit().unwrap();
+        let (claimed, admitted) = control.admit_cancellation();
+        assert!(!claimed);
+        assert_eq!(
+            admitted,
+            Some(PublicationCancellation::PendingCommitOutcome)
+        );
+        assert!(!control.cancellation_requested());
+        assert_eq!(
+            control.phase.load(std::sync::atomic::Ordering::Acquire),
+            WORKBENCH_SLEEPING,
+            "a commit claim must prevent the native abort transition"
+        );
+        assert!(control.terminal_reply().is_none());
+        assert!(claim.published());
+        let execution = WorkbenchExecutionId::from_digest([7; 16]);
+        control.settle(terminal_reply());
+        assert!(matches!(
+            control.cancellation_outcome(execution, control.settled().await),
+            WorkbenchCancellationOutcome::PublicationSettled { reply: Ok(_), .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_claim_preserves_before_rename_failure_reply() {
+        let control = WorkbenchExecutionControl::untracked();
+        let claim = control.publication_decision().claim_commit().unwrap();
+        assert_eq!(
+            control.admit_cancellation().1,
+            Some(PublicationCancellation::PendingCommitOutcome)
+        );
+        assert!(claim.before_rename_failure());
+        let execution = WorkbenchExecutionId::from_digest([8; 16]);
+        control.settle(Err(crate::KernelInvocationFailure::Failed {
+            actor: crate::ActorRef::first(crate::ActorId(1)),
+            detail: "publication failed before visibility".into(),
+        }));
+        assert!(matches!(
+            control.cancellation_outcome(execution, control.settled().await),
+            WorkbenchCancellationOutcome::PublicationSettled { reply: Err(_), .. }
+        ));
     }
 
     #[tokio::test]
