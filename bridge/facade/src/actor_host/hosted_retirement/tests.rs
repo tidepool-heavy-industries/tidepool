@@ -1272,8 +1272,8 @@ impl exomonad_actor::KernelBehavior for GatedBehavior {
     ) -> BoxFuture<'a, ()> {
         Box::pin(async {})
     }
-    fn child_exited(&mut self, _: exomonad_actor::ChildExitNotice) -> BoxFuture<'_, ()> {
-        Box::pin(async { panic!("unexpected child") })
+    fn child_exited(&mut self, _: exomonad_actor::ChildExitNotice) {
+        panic!("unexpected child")
     }
 }
 
