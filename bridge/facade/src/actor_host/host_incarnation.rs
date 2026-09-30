@@ -95,7 +95,7 @@ impl HostIncarnationLease {
         self.incarnation
     }
 
-    pub(super) fn owns_run(&self, run_root: &Path) -> io::Result<bool> {
+    pub(crate) fn owns_run(&self, run_root: &Path) -> io::Result<bool> {
         Ok(self.run_root == fs::canonicalize(run_root)?)
     }
 }
