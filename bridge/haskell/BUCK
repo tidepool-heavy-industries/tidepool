@@ -13,7 +13,6 @@ haskell_library(
     name = "tidepool_extract_internal",
     srcs = {
         "Tidepool/Binders.hs": "src/Tidepool/Binders.hs",
-        "Tidepool/CheckedCell.hs": "src/Tidepool/CheckedCell.hs",
         "Tidepool/CborEncode.hs": "src/Tidepool/CborEncode.hs",
         "Tidepool/DependencyEvidence.hs": "src/Tidepool/DependencyEvidence.hs",
         "Tidepool/DeclarationJoin.hs": "src/Tidepool/DeclarationJoin.hs",
