@@ -474,6 +474,34 @@ impl ModuleCandidateOffer {
             })
     }
 
+    /// Retain this request and its selected checked inputs for diagnosis.
+    /// The saved files are evidence only; they cannot issue compiler authority.
+    pub fn retain_failure(
+        &self,
+        directory: &Path,
+        stderr: &[u8],
+        error: CompileError,
+    ) -> CompileError {
+        retain_compiler_failure_inner(directory, stderr, error, Some(self))
+    }
+
+    fn retain_checked_inputs(&self, destination: &Path) -> std::io::Result<()> {
+        if let Some(inputs) = &self.checked_values {
+            inputs.retain_diagnostics(None, destination)
+        } else if let Some(offer) = &self.checked_item {
+            offer
+                .item
+                .retain_input_diagnostics(&offer.prefix, destination)
+        } else if let Some(offer) = &self.checked_display {
+            offer
+                .capture
+                .item()
+                .retain_input_diagnostics(&offer.prefix, destination)
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn admit_checked_cell(
         &self,
         root: &Path,
@@ -1467,10 +1495,19 @@ pub fn retain_compiler_failure(
     stderr: &[u8],
     error: CompileError,
 ) -> CompileError {
+    retain_compiler_failure_inner(directory, stderr, error, None)
+}
+
+fn retain_compiler_failure_inner(
+    directory: &Path,
+    stderr: &[u8],
+    error: CompileError,
+    offer: Option<&ModuleCandidateOffer>,
+) -> CompileError {
     if std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() != Ok("1") {
         return error;
     }
-    match retain_failed_compiler_artifacts(directory) {
+    match retain_failed_compiler_artifacts(directory, offer) {
         Ok(retained) => {
             if let Err(failure) = std::fs::write(retained.join("compiler.stderr"), stderr) {
                 tracing::warn!(%failure, "could not retain compiler stderr");
@@ -1491,7 +1528,10 @@ pub fn retain_compiler_failure(
     }
 }
 
-fn retain_failed_compiler_artifacts(directory: &Path) -> std::io::Result<PathBuf> {
+fn retain_failed_compiler_artifacts(
+    directory: &Path,
+    offer: Option<&ModuleCandidateOffer>,
+) -> std::io::Result<PathBuf> {
     let retained_root = match std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
         Some(root) => PathBuf::from(root),
         None => std::env::current_dir()?.join("target/tidepool-test-runs"),
@@ -1499,6 +1539,11 @@ fn retain_failed_compiler_artifacts(directory: &Path) -> std::io::Result<PathBuf
     .join("compiler-failures");
     std::fs::create_dir_all(&retained_root)?;
     let retained = TempDir::new_in(&retained_root)?;
+    if let Some(offer) = offer {
+        if let Err(failure) = offer.retain_checked_inputs(retained.path()) {
+            tracing::warn!(%failure, "could not retain selected checked input diagnostics");
+        }
+    }
     for entry in std::fs::read_dir(directory)? {
         let entry = entry?;
         if entry.file_type()?.is_file() {

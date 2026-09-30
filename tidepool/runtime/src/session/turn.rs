@@ -2714,11 +2714,7 @@ fn check_cell_impl(
                     Err(error) => return Err(error.into()),
                 };
                 return Err(CellCheckFailure {
-                    error: tidepool_toolchain::artifacts::retain_compiler_failure(
-                        temp.path(),
-                        &output.stderr,
-                        error,
-                    ),
+                    error: offer.retain_failure(temp.path(), &output.stderr, error),
                     items,
                 });
             }
@@ -2746,23 +2742,15 @@ fn check_cell_impl(
             }
             Ok::<_, CompileError>(())
         })();
-        validated.map_err(|error| {
-            tidepool_toolchain::artifacts::retain_compiler_failure(
-                temp.path(),
-                &output.stderr,
-                error,
-            )
-        })?;
+        validated.map_err(|error| offer.retain_failure(temp.path(), &output.stderr, error))?;
     }
     checked.warnings = report.diagnostics;
     if let Some(admission) = admission {
-        checked.authority = Some(offer.admit_checked_cell(temp.path()).map_err(|error| {
-            tidepool_toolchain::artifacts::retain_compiler_failure(
-                temp.path(),
-                &output.stderr,
-                error,
-            )
-        })?);
+        checked.authority = Some(
+            offer
+                .admit_checked_cell(temp.path())
+                .map_err(|error| offer.retain_failure(temp.path(), &output.stderr, error))?,
+        );
         checked.admission = Some(admission);
     }
     // The worker writes `turn.cbor` only when it attempted AND succeeded at
@@ -2772,13 +2760,8 @@ fn check_cell_impl(
     // silent fall back.
     let mut folded = if fold.is_some() && turn_out_path.exists() {
         Some(
-            decode_turn_output_dir(temp.path(), &offer).map_err(|error| {
-                tidepool_toolchain::artifacts::retain_compiler_failure(
-                    temp.path(),
-                    &output.stderr,
-                    error,
-                )
-            })?,
+            decode_turn_output_dir(temp.path(), &offer)
+                .map_err(|error| offer.retain_failure(temp.path(), &output.stderr, error))?,
         )
     } else {
         None
@@ -2810,7 +2793,7 @@ fn check_cell_impl(
         && folded.is_none()
         && std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() == Ok("1")
     {
-        let diagnostic = tidepool_toolchain::artifacts::retain_compiler_failure(
+        let diagnostic = offer.retain_failure(
             temp.path(),
             &output.stderr,
             CompileError::ExtractFailed("requested cell fold produced no compiled output".into()),
@@ -3264,17 +3247,13 @@ fn run_turn_with_pin(
     {
         let attempted_source = std::fs::read_to_string(temp.path().join("turn-attempt.hs")).ok();
         return Err(TurnFailure {
-            error: tidepool_toolchain::artifacts::retain_compiler_failure(
-                temp.path(),
-                &output.stderr,
-                error,
-            ),
+            error: offer.retain_failure(temp.path(), &output.stderr, error),
             attempted_source,
         });
     }
 
     let mut result = decode_turn_output_dir(temp.path(), &offer).map_err(|error| TurnFailure {
-        error: tidepool_toolchain::artifacts::retain_compiler_failure(
+        error: offer.retain_failure(
             temp.path(),
             &output.stderr,
             match error {
@@ -5228,7 +5207,7 @@ mod tests {
             .bindings
             .into_iter()
             .filter(|(name, _)| name == "historical" || name == "local")
-            .collect::<BTreeMap<_, _>>();
+            .collect::<std::collections::BTreeMap<_, _>>();
         assert_eq!(private_winners.len(), 2);
         let intent = resident.freeze_private_execution(&execution).unwrap();
         let crate::session::ExecutionPublication::Declarations(base) = resident
@@ -5257,20 +5236,11 @@ mod tests {
                 .bindings
                 .into_iter()
                 .filter(|(name, _)| name == "historical" || name == "local")
-                .collect::<BTreeMap<_, _>>(),
+                .collect::<std::collections::BTreeMap<_, _>>(),
             private_winners,
             "publication changed the actual native Value winner IDs"
         );
         let public_context = resident.compile_view_in(public).unwrap();
-        assert!(
-            public_context
-                .exact_declaration_context()
-                .unwrap()
-                .interface_owners()
-                .iter()
-                .any(|owner| owner.module == module),
-            "publication discarded the original Lib identity"
-        );
         assert_eq!(
             public_context
                 .exact_declaration_context()

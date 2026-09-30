@@ -205,6 +205,54 @@ impl CheckedValueInputs {
         )
     }
 
+    pub(crate) fn retain_diagnostics(
+        &self,
+        prefix: Option<&ExactCompiledPrefix>,
+        destination: &Path,
+    ) -> std::io::Result<()> {
+        let inputs = match prefix {
+            Some(prefix) => prefix.value_artifacts().map_err(std::io::Error::other)?,
+            None => self
+                .baseline
+                .iter()
+                .map(|artifact| (artifact.module.as_str(), artifact.as_ref()))
+                .collect(),
+        };
+        let destination = destination.join("checked-value-inputs");
+        std::fs::create_dir(&destination)?;
+        let mut captured = Vec::with_capacity(inputs.len());
+        for artifact in inputs.into_values() {
+            let relative = artifact.owner.relative_hi_path();
+            let expected = destination.join("expected").join(&relative);
+            std::fs::create_dir_all(expected.parent().expect("generated interface parent"))?;
+            std::fs::write(expected, &artifact.bytes)?;
+            let (observed_digest, observation_error) = match read(&artifact.path, 32 * 1024 * 1024)
+            {
+                Ok(bytes) => {
+                    let observed = destination.join("observed").join(&relative);
+                    std::fs::create_dir_all(
+                        observed.parent().expect("generated interface parent"),
+                    )?;
+                    std::fs::write(observed, &bytes)?;
+                    (Some(hash(&bytes)), None)
+                }
+                Err(error) => (None, Some(error.to_string())),
+            };
+            captured.push(serde_json::json!({
+                "module": artifact.module,
+                "original_path": artifact.path,
+                "relative_path": relative,
+                "expected_sha256": artifact.digest,
+                "observed_sha256": observed_digest,
+                "observation_error": observation_error,
+            }));
+        }
+        std::fs::write(
+            destination.join("inputs.json"),
+            serde_json::to_vec(&captured).map_err(std::io::Error::other)?,
+        )
+    }
+
     fn capture_output(&self, generation: u64) -> Result<Arc<CheckedValueArtifact>, CompileError> {
         let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation));
         let path = self.root().join(owner.relative_hi_path());
@@ -917,7 +965,7 @@ impl ExactCompiledPrefix {
         }
         retained.into_iter().collect()
     }
-    fn value_interface_authorization(&self) -> Result<Value, CompileError> {
+    fn value_artifacts(&self) -> Result<BTreeMap<&str, &CheckedValueArtifact>, CompileError> {
         let mut inputs = self
             .cell
             .value_inputs
@@ -942,8 +990,11 @@ impl ExactCompiledPrefix {
                 return Err(failure("duplicate checked display interface"));
             }
         }
+        Ok(inputs)
+    }
+    fn value_interface_authorization(&self) -> Result<Value, CompileError> {
         Ok(Value::Array(
-            inputs
+            self.value_artifacts()?
                 .into_values()
                 .map(CheckedValueArtifact::authorization)
                 .collect(),
@@ -1033,6 +1084,15 @@ impl Eq for ExactCheckedItem {}
 impl ExactCheckedItem {
     pub(crate) fn value_input_root(&self) -> &Path {
         self.cell.value_inputs.root()
+    }
+    pub(crate) fn retain_input_diagnostics(
+        &self,
+        prefix: &ExactCompiledPrefix,
+        destination: &Path,
+    ) -> std::io::Result<()> {
+        self.cell
+            .value_inputs
+            .retain_diagnostics(Some(prefix), destination)
     }
     pub fn baseline_value_interfaces(
         &self,
@@ -1676,11 +1736,44 @@ fn failure(error: impl std::fmt::Display) -> CompileError {
 
 #[cfg(test)]
 mod tests {
-    use super::CheckedPrefixSequence;
+    use super::{CheckedPrefixSequence, CheckedValueInputs};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    #[test]
+    fn failed_checked_inputs_retain_sealed_and_observed_bytes_after_owner_drop() {
+        let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(3));
+        let inputs = CheckedValueInputs::capture(vec![(owner, Arc::from(&b"sealed"[..]))])
+            .expect("capture exact input");
+        std::fs::write(inputs.root().join(owner.relative_hi_path()), b"edited")
+            .expect("alter observed file");
+        std::fs::write(inputs.root().join("unselected.hi"), b"unselected")
+            .expect("unselected directory member");
+        let retained = tempfile::tempdir().expect("retained diagnostic directory");
+        inputs
+            .retain_diagnostics(None, retained.path())
+            .expect("retain checked inputs");
+        drop(inputs);
+        let saved = retained.path().join("checked-value-inputs");
+        assert_eq!(
+            std::fs::read(saved.join("expected").join(owner.relative_hi_path())).unwrap(),
+            b"sealed"
+        );
+        assert_eq!(
+            std::fs::read(saved.join("observed").join(owner.relative_hi_path())).unwrap(),
+            b"edited"
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(saved.join("inputs.json")).unwrap()).unwrap();
+        assert_eq!(manifest.as_array().unwrap().len(), 1);
+        assert_ne!(
+            manifest[0]["expected_sha256"],
+            manifest[0]["observed_sha256"]
+        );
+        assert!(!saved.join("expected/unselected.hi").exists());
+    }
 
     #[test]
     fn completed_prefix_snapshots_keep_order_without_copying_historical_links() {
