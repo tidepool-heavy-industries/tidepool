@@ -1256,6 +1256,9 @@ impl ExactCheckedItem {
     pub fn injected_modules(&self) -> &[String] {
         &self.cell.specification.injected_modules
     }
+    pub fn include_paths(&self) -> &[std::path::PathBuf] {
+        &self.cell.include
+    }
     pub fn input_work(&self) -> CheckedInputWork {
         self.cell.value_inputs.work()
     }
