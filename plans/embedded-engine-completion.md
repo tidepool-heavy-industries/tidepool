@@ -443,3 +443,40 @@ Private-only recovery restart admission is checkpointed at `702c90264` with
 two focused tests passing. Exact private nodes/artifacts and burned high-water
 survive reopening without exposing private declarations; published roots still
 require hydration. This does not itself certify or publish new authored nodes.
+
+### 2026-09-30 authored admission and native Haskell checkpoint
+
+Compiler candidate `a41fa76dd` certifies first authored declarations with owned
+products and current-request dependency evidence. It refreshes downsweep summaries
+when ordered import roots change and refuses untracked preprocessor/dependent-file
+inputs. Two focused Haskell witness runs, 24 request tests, the full prepared
+corpus (Suite: 261 source-mapped targets / 799 STG tops), and seven embedded
+artifacts passed. This is still constrained first-generation admission, not
+multi-turn exact lexical hydration or accepted declaration joins.
+
+Runtime candidate `dd5dedd42` retains authored evidence in declaration slots,
+records class/family inventory at node scope, and finishes binding visibility and
+resident epoch updates even when manifest publication has occurred but durability
+is unconfirmed. Ten selected tests passed, including two real-publication fault
+cases. The joined revision `d93f046cae` compile-checks through the Tidepool facade.
+Retained root evidence: `target/completion-evidence/compiler-final-fixtures.log`
+and `target/completion-evidence/runtime-authored-admission.log`.
+
+Native Haskell Buck components are committed at `e7a56a73c1` (toolchain additions
+`be204ffb38`, `3293590f75`). The extractor builds and links; the native encoder
+executes through `buck2 test` (one test passed). Component sources use module paths
+for Prelude object/interface identities. Nix packages are selected explicitly at
+compile and link time. The encoder fixture was stale at TPMCAN v2 on this build
+branch and now matches its current v4 decoder; the newer engine candidate owns its
+separate v5 migration. Evidence: `target/completion-evidence/buck/native-haskell-components.log`.
+
+A real resident Haskell actor-start regression passes on the normal test stack
+after heap-owning large private startup/workbench futures. Full child-capture
+host-loop cases remain under execution. Browser addressing/projection, atomic
+snapshot publication, embedded-only product separation, paired publication,
+multi-turn compiler evidence and immediate captured worker trees remain open.
+
+An investigation of replacing an already-linked quasiquoter observed retained
+old compile-time behavior in the evidence probe. A fresh-module negative fixture
+now proves dependent-file refusal; changed-result hot-reload semantics remain an
+unconfirmed finding requiring an independent test, not a claimed repair.
