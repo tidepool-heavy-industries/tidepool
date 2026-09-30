@@ -133,6 +133,7 @@ impl Notebook {
         let templates = self.templates();
         let include: Vec<&Path> = self.include.iter().map(PathBuf::as_path).collect();
         run_turn(TurnRequest {
+            exact_context: None,
             session_id: None,
             turn_text: text,
             templates: &templates,
@@ -180,6 +181,7 @@ impl Notebook {
         let injected = self.session.inject_val_modules();
         let retained = self.session.prepared_retained();
         run_turn(TurnRequest {
+            exact_context: None,
             session_id: None,
             turn_text: text,
             templates: &templates,
@@ -898,6 +900,7 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
         let injected = notebook.session.inject_val_modules();
         let retained = notebook.session.prepared_retained();
         run_turn(TurnRequest {
+            exact_context: None,
             session_id: None,
             turn_text: text,
             templates: &templates,
@@ -1351,6 +1354,7 @@ impl Incarnation {
         let injected = self.session.inject_val_modules();
         let retained = self.session.prepared_retained();
         run_turn(TurnRequest {
+            exact_context: None,
             session_id: self.send_incarnation.then_some(self.id),
             turn_text: text,
             templates: &templates,
