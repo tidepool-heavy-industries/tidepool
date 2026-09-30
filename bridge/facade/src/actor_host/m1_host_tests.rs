@@ -23,6 +23,9 @@ mod browser_process;
 #[path = "m1_browser_runner.rs"]
 mod browser_runner;
 
+#[path = "m1_real_host_late_output_tests.rs"]
+mod real_host_late_output_tests;
+
 #[tokio::test]
 #[ignore = "requires declared matched web, Node, Playwright and resident compiler inputs"]
 async fn production_browser_executes_resident_haskell_retries_and_controls_root() {
