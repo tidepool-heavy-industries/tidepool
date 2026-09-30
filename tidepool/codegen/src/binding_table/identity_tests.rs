@@ -286,3 +286,221 @@ fn observation_witness_covers_mutable_cross_scope_dependency_metadata() {
     assert!(!table.scope_reachable_binding_ids(&tree, a).contains(&c_id));
     assert_indexes(&table);
 }
+
+fn assert_projected_names(table: &BindingTable, tree: &ScopeTree, scope: ScopeId) {
+    let expected = table
+        .iter_current_in(tree, scope)
+        .into_iter()
+        .filter(|(_, entry)| !table.scope_local_aliases.contains(&entry.id))
+        .map(|(name, entry)| (name.clone(), entry.id))
+        .collect::<HashMap<_, _>>();
+    let actual = table
+        .capturable_names
+        .get(&scope)
+        .into_iter()
+        .flat_map(|names| names.iter())
+        .map(|(name, id)| (name.clone(), *id))
+        .collect::<HashMap<_, _>>();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn persistent_name_roots_keep_alias_masks_hiding_and_reader_winners_exact() {
+    let mut tree = ScopeTree::new();
+    let parent = tree.mint_isolated();
+    let child = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let mut old_slot = std::ptr::null_mut();
+    let original = table
+        .bind_in(parent, entry("answer", 1, &mut old_slot))
+        .unwrap();
+    table.seed_detached_scope(&tree, parent, child);
+    assert!(table.tips[&child]
+        .visible
+        .ptr_eq(&table.capturable_names[&parent]));
+    let unchanged = tree.mint_isolated();
+    table.seed_detached_scope(&tree, child, unchanged);
+    assert!(table.tips[&unchanged]
+        .visible
+        .ptr_eq(&table.tips[&child].visible));
+
+    let mut source_slot = std::ptr::null_mut();
+    let source = table
+        .bind_in(child, entry("source", 3, &mut source_slot))
+        .unwrap();
+    let mut alias_slot = std::ptr::null_mut();
+    let mut alias = entry("answer", 4, &mut alias_slot);
+    alias.value = table.get(source).unwrap().value.clone();
+    let alias = table.bind_alias_in(child, alias, source).unwrap().0;
+    assert_eq!(table.resolve_in(&tree, child, "answer").unwrap().id, alias);
+    assert_projected_names(&table, &tree, child);
+    let masked = tree.mint_isolated();
+    table.seed_detached_scope(&tree, child, masked);
+    assert!(table.resolve_in(&tree, masked, "answer").is_none());
+    assert_eq!(
+        table.resolve_in(&tree, unchanged, "answer").unwrap().id,
+        original
+    );
+
+    table.remove_current_in(child, "answer");
+    assert!(table.resolve_in(&tree, child, "answer").is_none());
+    assert_projected_names(&table, &tree, child);
+    let hidden = tree.mint_isolated();
+    table.seed_detached_scope(&tree, child, hidden);
+    assert!(table.resolve_in(&tree, hidden, "answer").is_none());
+    let mut new_slot = std::ptr::null_mut();
+    let newer = table
+        .bind_in(child, entry("answer", 5, &mut new_slot))
+        .unwrap();
+    assert_projected_names(&table, &tree, child);
+    let latest = tree.mint_isolated();
+    table.seed_detached_scope(&tree, child, latest);
+    assert_eq!(table.resolve_in(&tree, latest, "answer").unwrap().id, newer);
+    assert!(table.resolve_in(&tree, masked, "answer").is_none());
+    assert!(table.resolve_in(&tree, hidden, "answer").is_none());
+    assert!(
+        table.retire_owner(newer).is_none(),
+        "latest reader keeps its exact owner"
+    );
+    assert_projected_names(&table, &tree, child);
+    let restored = tree.mint_isolated();
+    table.seed_detached_scope(&tree, child, restored);
+    assert_eq!(
+        table.resolve_in(&tree, restored, "answer").unwrap().id,
+        original
+    );
+    assert_eq!(table.resolve_in(&tree, latest, "answer").unwrap().id, newer);
+    for scope in [parent, child, unchanged, masked, hidden, latest, restored] {
+        tree.retire(scope);
+        table.drain_scope(scope);
+    }
+    assert!(table.is_empty());
+    assert!(table.capturable_names.is_empty());
+}
+
+#[test]
+fn persistent_names_follow_promotion_observation_expiry_and_legacy_ancestry() {
+    let mut tree = ScopeTree::new();
+    let parent = tree.mint_isolated();
+    let legacy = tree.mint_child(parent).unwrap();
+    let target = tree.mint_isolated();
+    let source = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let mut parent_slot = std::ptr::null_mut();
+    table
+        .bind_in(parent, entry("answer", 10, &mut parent_slot))
+        .unwrap();
+    let mut legacy_slot = std::ptr::null_mut();
+    let legacy_id = table
+        .bind_in(legacy, entry("answer", 2, &mut legacy_slot))
+        .unwrap();
+    let before = tree.mint_isolated();
+    let mut before_slot = std::ptr::null_mut();
+    let preexisting = table
+        .bind_in(before, entry("before_seed", 12, &mut before_slot))
+        .unwrap();
+    table.seed_detached_scope(&tree, legacy, before);
+    assert_eq!(
+        table.resolve_in(&tree, before, "answer").unwrap().id,
+        legacy_id
+    );
+    assert_eq!(
+        table.resolve_in(&tree, before, "before_seed").unwrap().id,
+        preexisting
+    );
+    assert_projected_names(&table, &tree, before);
+    let mut extra_slot = std::ptr::null_mut();
+    let extra = table
+        .bind_in(parent, entry("ancestor_progress", 11, &mut extra_slot))
+        .unwrap();
+    let after = tree.mint_isolated();
+    table.seed_detached_scope(&tree, legacy, after);
+    assert!(table
+        .resolve_in(&tree, before, "ancestor_progress")
+        .is_none());
+    assert_eq!(
+        table
+            .resolve_in(&tree, after, "ancestor_progress")
+            .unwrap()
+            .id,
+        extra
+    );
+    assert_eq!(
+        table.resolve_in(&tree, after, "answer").unwrap().id,
+        legacy_id
+    );
+
+    table.seed_detached_scope(&tree, parent, target);
+    let mut newer_slot = std::ptr::null_mut();
+    let newer = table
+        .bind_in(target, entry("answer", 99, &mut newer_slot))
+        .unwrap();
+    let old_reader = tree.mint_isolated();
+    table.seed_detached_scope(&tree, target, old_reader);
+    let mut promoted_slot = std::ptr::null_mut();
+    let promoted = table
+        .bind_in(source, entry("answer", 5, &mut promoted_slot))
+        .unwrap();
+    table
+        .promote_exact_bindings_in(source, target, &[promoted])
+        .unwrap();
+    assert_projected_names(&table, &tree, target);
+    let promoted_reader = tree.mint_isolated();
+    table.seed_detached_scope(&tree, target, promoted_reader);
+    assert_eq!(
+        table.resolve_in(&tree, old_reader, "answer").unwrap().id,
+        newer
+    );
+    assert_eq!(
+        table
+            .resolve_in(&tree, promoted_reader, "answer")
+            .unwrap()
+            .id,
+        promoted
+    );
+
+    let mut first_slot = std::ptr::null_mut();
+    let first = table
+        .bind_in(target, entry("observation1", 100, &mut first_slot))
+        .unwrap();
+    table.save_observation(first, &[], 1);
+    let observed = tree.mint_isolated();
+    table.seed_detached_scope(&tree, target, observed);
+    let mut second_slot = std::ptr::null_mut();
+    let second = table
+        .bind_in(target, entry("observation2", 101, &mut second_slot))
+        .unwrap();
+    table.save_observation(second, &[], 1);
+    assert_projected_names(&table, &tree, target);
+    let expired = tree.mint_isolated();
+    table.seed_detached_scope(&tree, target, expired);
+    assert_eq!(
+        table
+            .resolve_in(&tree, observed, "observation1")
+            .unwrap()
+            .id,
+        first
+    );
+    assert!(table.resolve_in(&tree, expired, "observation1").is_none());
+    assert_eq!(
+        table.resolve_in(&tree, expired, "observation2").unwrap().id,
+        second
+    );
+    for scope in [
+        legacy,
+        parent,
+        target,
+        source,
+        before,
+        after,
+        old_reader,
+        promoted_reader,
+        observed,
+        expired,
+    ] {
+        tree.retire(scope);
+        table.drain_scope(scope);
+    }
+    assert!(table.is_empty());
+    assert!(table.capturable_names.is_empty());
+}

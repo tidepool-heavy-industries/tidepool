@@ -50,6 +50,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Weak};
 
+use rpds::HashTrieMapSync;
 use tidepool_repr::{BindingName, SessionModule, SessionVarId, VarId};
 
 use crate::old_space::RootSlot;
@@ -128,7 +129,7 @@ pub struct ScopeDrain {
 #[derive(Debug)]
 struct BindingTip {
     id: BindingTipId,
-    visible: HashMap<BindingName, SessionVarId>,
+    visible: HashTrieMapSync<BindingName, SessionVarId>,
     /// Frozen exact ancestor values, including shadowed generations needed by
     /// inherited declaration code. Leasing them keeps observations alive if
     /// their original owner later stops naming them.
@@ -207,6 +208,10 @@ pub struct BindingTable {
     /// Shadowing layer, one frame per scope: scope → (name → newest gen's id).
     /// A scope with no bindings has no frame (absent, not empty).
     current: HashMap<ScopeId, HashMap<BindingName, SessionVarId>>,
+    /// The exact name projection this frame passes to a new child. Seeded
+    /// frames start at their inherited root; mutation changes only trie paths.
+    /// Own aliases stay in `current` but suppress the captured name.
+    capturable_names: HashMap<ScopeId, HashTrieMapSync<BindingName, SessionVarId>>,
     /// Append-only-by-id store of every live binding (old gens retained),
     /// flat and globally keyed across every scope.
     live: HashMap<SessionVarId, BindingEntry>,
@@ -442,6 +447,7 @@ impl Default for BindingTable {
     fn default() -> Self {
         Self {
             current: HashMap::new(),
+            capturable_names: HashMap::new(),
             live: HashMap::new(),
             owned: HashMap::new(),
             modules: HashMap::new(),
@@ -544,6 +550,46 @@ impl BindingTable {
         }
     }
 
+    /// Project one mutated local name over its immutable inherited winner.
+    /// A current alias masks that inherited winner even though children do
+    /// not inherit the alias itself. Explicit hiding masks both namespaces.
+    fn refresh_capturable_name(&mut self, scope: ScopeId, name: &BindingName) {
+        let current = self.current.get(&scope).and_then(|frame| frame.get(name));
+        let selected = if let Some(id) = current {
+            (!self.scope_local_aliases.contains(id) && self.live.contains_key(id)).then_some(*id)
+        } else if self
+            .hidden
+            .get(&scope)
+            .is_some_and(|hidden| hidden.contains(name))
+        {
+            None
+        } else {
+            self.tips
+                .get(&scope)
+                .and_then(|tip| tip.visible.get(name))
+                .copied()
+                .filter(|id| self.live.contains_key(id))
+        };
+        match selected {
+            Some(id) => {
+                let projected = self.capturable_names.entry(scope).or_default();
+                if projected.get(name) != Some(&id) {
+                    projected.insert_mut(name.clone(), id);
+                }
+            }
+            None => {
+                if let Some(projected) = self.capturable_names.get_mut(&scope) {
+                    if projected.contains_key(name) {
+                        projected.remove_mut(name);
+                    }
+                    if projected.is_empty() && !self.tips.contains_key(&scope) {
+                        self.capturable_names.remove(&scope);
+                    }
+                }
+            }
+        }
+    }
+
     fn remove_entry(&mut self, id: SessionVarId) -> Option<BindingEntry> {
         let entry = self.live.remove(&id)?;
         self.remove_observation(id);
@@ -561,6 +607,7 @@ impl BindingTable {
         if *count == 0 {
             self.modules.remove(&entry.module);
         }
+        self.refresh_capturable_name(entry.scope, &entry.name);
         self.changed(entry.scope);
         Some(entry)
     }
@@ -685,11 +732,14 @@ impl BindingTable {
                 .expect("existing observation");
             observation.recent = None;
             if let Some(entry) = self.live.get(&id) {
+                let scope = entry.scope;
+                let name = entry.name.clone();
                 if let Some(frame) = self.current.get_mut(&entry.scope) {
                     if frame.get(&entry.name) == Some(&id) {
                         frame.remove(&entry.name);
                     }
                 }
+                self.refresh_capturable_name(scope, &name);
             }
         }
         self.collect_observations()
@@ -1006,6 +1056,7 @@ impl BindingTable {
         }
         entry.scope = scope;
         let id = entry.id;
+        let name = entry.name.clone();
         // NEWEST GEN WINS BY COMPARISON, not by insertion order: with
         // With any-order resume, a bind minted at gen 6 can
         // MATERIALIZE after a same-name bind minted at gen 7 — arrival order
@@ -1032,6 +1083,7 @@ impl BindingTable {
         self.owned.entry(scope).or_default().insert(id);
         *self.modules.entry(entry.module).or_default() += 1;
         self.live.insert(id, entry);
+        self.refresh_capturable_name(scope, &name);
         self.changed(scope);
         Ok(id)
     }
@@ -1138,12 +1190,15 @@ impl BindingTable {
             .collect();
         existing_source.extend(added_source.iter().cloned());
         self.acquire_source_shares(&added_source);
-        let frame = self.current.entry(target).or_default();
         for (name, id) in writes {
             if let Some(hidden) = self.hidden.get_mut(&target) {
                 hidden.remove(&name);
             }
-            frame.insert(name, id);
+            self.current
+                .entry(target)
+                .or_default()
+                .insert(name.clone(), id);
+            self.refresh_capturable_name(target, &name);
         }
         self.changed(target);
     }
@@ -1169,6 +1224,8 @@ impl BindingTable {
         }
         let id = self.bind_in(scope, entry).ok()?;
         self.scope_local_aliases.insert(id);
+        let name = self.live[&id].name.clone();
+        self.refresh_capturable_name(scope, &name);
         self.insert_observation(
             id,
             ObservationBinding {
@@ -1204,9 +1261,10 @@ impl BindingTable {
             .get(&scope)
             .is_some_and(|tip| tip.visible.contains_key(&name))
         {
-            changed |= self.hidden.entry(scope).or_default().insert(name);
+            changed |= self.hidden.entry(scope).or_default().insert(name.clone());
         }
         if changed {
+            self.refresh_capturable_name(scope, &name);
             self.changed(scope);
         }
     }
@@ -1239,6 +1297,7 @@ impl BindingTable {
             }
         }
         self.scope_local_aliases.remove(&id);
+        self.refresh_capturable_name(entry.scope, &entry.name);
         Some(entry)
     }
 
@@ -1248,6 +1307,7 @@ impl BindingTable {
     pub fn retire_owner(&mut self, id: SessionVarId) -> Option<BindingEntry> {
         let entry = self.live.get(&id)?;
         let scope = entry.scope;
+        let name = entry.name.clone();
         let mut changed = false;
         if let Some(frame) = self.current.get_mut(&entry.scope) {
             if frame.get(&entry.name) == Some(&id) {
@@ -1255,6 +1315,7 @@ impl BindingTable {
                 changed = true;
             }
         }
+        self.refresh_capturable_name(scope, &name);
         if self.leases.get(&id).copied().unwrap_or(0) > 0 {
             changed |= self.retired_owners.insert(id);
             if changed {
@@ -1315,6 +1376,7 @@ impl BindingTable {
             .collect();
         ids.sort_by_key(|id| id.raw());
         self.current.remove(&scope);
+        self.capturable_names.remove(&scope);
         self.hidden.remove(&scope);
         self.changed(scope);
         for id in ids {
@@ -1375,22 +1437,30 @@ impl BindingTable {
             .next_tip
             .checked_add(1)
             .expect("binding tip identity exhausted");
-        let inherited: Vec<_> = self
-            .iter_current_in(tree, parent)
-            .into_iter()
-            .map(|(name, entry)| (name.clone(), entry.id))
-            .collect();
+        let visible = if !tree.is_live(parent) {
+            HashTrieMapSync::new_sync()
+        } else if self.tips.contains_key(&parent) || tree.parent_of(parent).is_none() {
+            self.capturable_names
+                .get(&parent)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            // Unseeded legacy children still read mutable ancestor frames.
+            // Their exact current view cannot reuse an owner-local projection.
+            self.iter_current_in(tree, parent)
+                .into_iter()
+                .filter(|(_, entry)| !self.scope_local_aliases.contains(&entry.id))
+                .map(|(name, entry)| (name.clone(), entry.id))
+                .collect()
+        };
         // Inherited custody is already closed at its capture. Only the
         // parent's own mutable owner dependencies may grow this new capture.
         let retained = self.scope_dependency_ids(tree, parent);
         let retained = Arc::new(retained);
         let source_instances = Arc::new(self.source_instance_keys_in(tree, parent));
         let leases = self.capture_leases(parent, &retained, &source_instances);
-        let visible = inherited
-            .into_iter()
-            .filter(|(_, id)| !self.scope_local_aliases.contains(id))
-            .collect();
         self.next_tip = next_tip;
+        self.capturable_names.insert(child, visible.clone());
         self.tips.insert(
             child,
             BindingTip {
@@ -1401,6 +1471,16 @@ impl BindingTable {
                 leases,
             },
         );
+        let local_names = self
+            .current
+            .get(&child)
+            .into_iter()
+            .flat_map(HashMap::keys)
+            .cloned()
+            .collect::<Vec<_>>();
+        for name in local_names {
+            self.refresh_capturable_name(child, &name);
+        }
         self.changed(child);
         id
     }
@@ -1767,7 +1847,7 @@ impl BindingTable {
                 .filter_map(|(name, id)| self.live.get(id).map(|entry| (name, entry)))
                 .collect();
             let mut names: HashSet<_> = seen.iter().map(|(name, _)| *name).collect();
-            for (name, id) in &tip.visible {
+            for (name, id) in tip.visible.iter() {
                 if names.contains(name) || hidden.is_some_and(|hidden| hidden.contains(name)) {
                     continue;
                 }
