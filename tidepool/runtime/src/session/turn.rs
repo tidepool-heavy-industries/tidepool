@@ -5267,6 +5267,236 @@ mod tests {
     }
 
     #[test]
+    fn failed_checked_display_keeps_only_actual_page_and_allows_next_item() {
+        use crate::session::{
+            resident_cell_check_template, resident_workbench_templates, CheckedDisplaySettlement,
+            ModuleEnv, PersistentSession, SessionLib,
+        };
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_repr::SessionId;
+        use tidepool_testing::effect_surface::TestEffectSurface;
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let effects = TestEffectSurface::minimal(&[]).unwrap();
+        let lib = SessionLib::open(SessionId(998), root.path(), ModuleEnv::standalone_default())
+            .unwrap()
+            .with_validation_include(effects.include_paths().to_vec());
+        let mut state = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = state.mint_scope(ScopeId::ROOT).unwrap();
+        let execution = Arc::new(state.begin_private_execution(public).unwrap());
+        let view = state.compile_view_for_execution(&execution).unwrap();
+        let imports = view.turn_imports(&crate::session::SourceImports::from_specs([
+            "qualified Prelude as P",
+        ]));
+        let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
+        let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
+        let source = include_str!("fixtures/checked-failed-display-cell.hs");
+        let specification = CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: source.into(),
+            template_source: template.clone(),
+            turn_templates: templates
+                .iter()
+                .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                .collect(),
+            injected_modules: view.injected_module_names(),
+            reserved_declaration_modules: Vec::new(),
+        };
+        let admission = state
+            .admit_cell_for_execution(
+                execution.clone(),
+                0,
+                Arc::new(specification.clone()),
+                specification.specification_digest(),
+                [1; 32],
+            )
+            .unwrap();
+        let view = admission.view();
+        let include = view.include_paths(effects.include_paths());
+        let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        let injected = view.injected_module_names();
+        let (checked, _) = check_cell_admitted(
+            CellCheckRequest {
+                exact_context: view.exact_declaration_context().cloned(),
+                session_id: Some(view.session()),
+                cell_text: source,
+                template: &template,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                compile_generation: admission.initial_value_generation().0,
+                compile_view_evidence: "",
+            },
+            admission.clone(),
+            &templates,
+            None,
+        )
+        .unwrap();
+        assert_eq!(checked.items.len(), 2);
+        let first = checked.checked_item(0).unwrap();
+        let prefix = state
+            .begin_checked_prefix(admission, first.clone())
+            .unwrap();
+        #[derive(Clone)]
+        struct QuietOutput;
+        impl crate::session::OutputSink for QuietOutput {
+            fn drain(&self) -> Vec<String> {
+                Vec::new()
+            }
+            fn snapshot(&self) -> Vec<String> {
+                Vec::new()
+            }
+        }
+        let mut resident = crate::session::ResidentSession::from_persistent_for_test(
+            frunk::HNil,
+            QuietOutput,
+            state,
+        );
+        resident
+            .set_run_context(crate::session::SessionRunContext {
+                lexical_scope: execution.private_scope(),
+                ..Default::default()
+            })
+            .unwrap();
+        let reservation = resident
+            .admit_checked_item(prefix.clone(), first.clone())
+            .unwrap();
+        let snapshot = reservation.snapshot();
+        let view = snapshot.view();
+        let injected = snapshot.compiler_prefix().injected_modules();
+        let TurnResult::Bind {
+            bound, compiled, ..
+        } = run_checked_item(
+            TurnRequest {
+                exact_context: view.exact_declaration_context().cloned(),
+                session_id: Some(view.session()),
+                turn_text: first.source(),
+                templates: &templates,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                gen: reservation.generation().0,
+                verdict: Some(checked.items[0].verdict.clone()),
+                target: None,
+                retained_imports: &[],
+            },
+            reservation.clone(),
+        )
+        .unwrap()
+        else {
+            panic!("expression requires its capture recipe")
+        };
+        resident
+            .run_observation_with_sites(compiled.code(), &bound[0], reservation.generation(), false)
+            .unwrap();
+        let observation_id = bound[0].var_id;
+        let display = resident
+            .admit_checked_display(
+                prefix.clone(),
+                compiled
+                    .certification
+                    .as_ref()
+                    .unwrap()
+                    .checked_execution()
+                    .unwrap()
+                    .clone(),
+                &bound[0],
+                256,
+                Vec::new(),
+            )
+            .unwrap();
+        let TurnResult::Bind {
+            bound: display_bound,
+            compiled: display_compiled,
+            ..
+        } = run_checked_display(display.clone(), &include).unwrap()
+        else {
+            panic!("display requires its sealed bundle")
+        };
+        let [page, metadata, alias] = display_bound.as_slice() else {
+            panic!("canonical display rows")
+        };
+        let failure = resident
+            .run_checked_display_bundle_with_sites(
+                display_compiled.code(),
+                page,
+                metadata,
+                alias,
+                display.generation(),
+                display,
+            )
+            .unwrap_err();
+        assert!(
+            failure.to_string().contains("checked-display-sentinel"),
+            "{failure}"
+        );
+        let snapshot = prefix.snapshot();
+        assert_eq!(
+            snapshot.display_settlement(),
+            Some(CheckedDisplaySettlement::Failed)
+        );
+        assert_eq!(snapshot.compiler_prefix().next_item(), 1);
+        let actual = snapshot
+            .settled_native_bindings()
+            .map(|(name, _, _, _)| name.to_owned())
+            .collect::<Vec<_>>();
+        assert!(actual.contains(&page.name));
+        assert!(!actual.contains(&metadata.name));
+        assert!(!actual.contains(&alias.name));
+        let visibility = resident
+            .public_visibility_snapshot_in(execution.private_scope())
+            .unwrap();
+        assert!(visibility
+            .bindings
+            .iter()
+            .any(|(name, id)| name == &bound[0].name && id.raw() == observation_id));
+        let next = checked.checked_item(1).unwrap();
+        let next_reservation = resident
+            .admit_checked_item(prefix.clone(), next.clone())
+            .unwrap();
+        let snapshot = next_reservation.snapshot();
+        let view = snapshot.view();
+        let injected = snapshot.compiler_prefix().injected_modules();
+        let TurnResult::Bind {
+            bound, compiled, ..
+        } = run_checked_item(
+            TurnRequest {
+                exact_context: view.exact_declaration_context().cloned(),
+                session_id: Some(view.session()),
+                turn_text: next.source(),
+                templates: &templates,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                gen: next_reservation.generation().0,
+                verdict: Some(checked.items[1].verdict.clone()),
+                target: None,
+                retained_imports: &[],
+            },
+            next_reservation.clone(),
+        )
+        .unwrap()
+        else {
+            panic!("next checked bind recipe")
+        };
+        resident
+            .run_bind_with_sites(
+                &bound[0].name,
+                compiled.code(),
+                &bound[0],
+                next_reservation.generation(),
+            )
+            .unwrap();
+        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 2);
+        assert!(resident
+            .public_visibility_snapshot_in(execution.private_scope())
+            .unwrap()
+            .bindings
+            .iter()
+            .any(|(name, id)| name == "afterFailedDisplay" && id.raw() == bound[0].var_id));
+    }
+
+    #[test]
     fn admitted_cell_certifies_original_local_declaration_before_its_bind_and_expression() {
         use crate::session::{
             resident_cell_check_template, resident_workbench_templates, ModuleEnv,
