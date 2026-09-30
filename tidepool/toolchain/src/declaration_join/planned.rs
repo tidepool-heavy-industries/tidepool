@@ -1,0 +1,510 @@
+//! Same-offer original declaration certification. The owning offer binds the
+//! worker inventory to its request, final source, and sealed interface bytes.
+
+use super::*;
+use crate::artifacts::SealedTurnProducts;
+use crate::declaration_context::ExactSourceAdmission;
+
+pub(super) fn admit_authored_artifact_closure(
+    products: &[CertifiedRecoveryProduct],
+    toolchain_identity_sha256: [u8; 32],
+    evidence: &[crate::cache::ModuleEvidence],
+    source_admission: Option<&ExactSourceAdmission>,
+    context: Option<&Arc<ExactDeclarationContext>>,
+    includes: &[PathBuf],
+) -> Result<
+    (
+        tempfile::TempDir,
+        Vec<DeclarationArtifact>,
+        Vec<ExactInterfaceOwner>,
+        Vec<crate::recovery_artifacts::CertifiedJoinedInterface>,
+    ),
+    CompileError,
+> {
+    let scratch = tempfile::tempdir()?;
+    let references = crate::recovery_artifacts::materialize_certified_products(
+        scratch.path(),
+        toolchain_identity_sha256,
+        products,
+    )
+    .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
+    let verified = references
+        .iter()
+        .map(|reference| {
+            crate::recovery_artifacts::verify_materialized_ref(scratch.path(), reference)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
+    crate::certified_products::certify_inherited_products(
+        &verified
+            .iter()
+            .map(|artifact| crate::certified_products::InheritedProductInput { artifact })
+            .collect::<Vec<_>>(),
+        &[],
+    )
+    .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
+    let mut artifacts = Vec::with_capacity(products.len());
+    let mut original_imports = Vec::new();
+    for (product, reference) in products.iter().zip(&references) {
+        let owner = product.owner();
+        let identity = ExactModuleIdentity {
+            unit: owner.unit.clone(),
+            module: owner.module.clone(),
+        };
+        let row = evidence
+            .iter()
+            .find(|row| !row.boot && row.unit == owner.unit && row.module == owner.module);
+        let mut requirements = if let Some(row) = row {
+            let mut imports = Vec::new();
+            for imported in &row.imports {
+                let Some(path) = &imported.selected else {
+                    continue;
+                };
+                let import_owner = evidence.iter().find(|candidate| {
+                    !candidate.boot
+                        && candidate.module == imported.module
+                        && candidate.source == *path
+                });
+                if let Some(import_owner) = import_owner {
+                    let key = ExactModuleIdentity {
+                        unit: import_owner.unit.clone(),
+                        module: import_owner.module.clone(),
+                    };
+                    if !imports.contains(&key) {
+                        imports.push(key);
+                    }
+                } else if includes.iter().any(|root| path.starts_with(root)) {
+                    return Err(contract(
+                        "authored home import has no exact dependency owner",
+                    ));
+                }
+            }
+            if let Some(admitted) = source_admission {
+                let exact = admitted
+                    .exact_imports
+                    .get(&identity)
+                    .ok_or_else(|| contract("fresh authored module lacks exact import witness"))?;
+                imports.extend_from_slice(exact);
+            }
+            imports.sort();
+            imports.dedup();
+            original_imports.push(ExactInterfaceOwner {
+                owner: identity.clone(),
+                requirements: imports.clone(),
+            });
+            imports
+        } else {
+            context
+                .and_then(|context| {
+                    context
+                        .interface_owners()
+                        .iter()
+                        .find(|entry| entry.owner == identity)
+                })
+                .ok_or_else(|| {
+                    contract("certified product absent from source graph and exact context")
+                })?
+                .requirements
+                .clone()
+        };
+        requirements.sort();
+        requirements.dedup();
+        let requirements = requirements
+            .into_iter()
+            .map(|owner| (owner.unit, owner.module))
+            .collect();
+        let interface_path = scratch.path().join(&reference.interface_path);
+        let product_path = scratch.path().join(&reference.product_path);
+        artifacts.push(DeclarationArtifact {
+            interface: ExactIfaceArtifact {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+                path: interface_path,
+                sha256: sha256(product.interface_bytes()),
+                requirements,
+            },
+            product: Some(ModuleSnapshot {
+                module: owner.module.clone(),
+                path: product_path,
+                sha256: sha256(product.product_bytes()),
+            }),
+        });
+    }
+    let joined_interfaces =
+        context.map_or_else(Vec::new, |context| context.joined_interfaces().to_vec());
+    if let Some(context) = context {
+        let inherited = context.materialize(scratch.path())?;
+        artifacts.extend(
+            inherited
+                .artifacts
+                .into_iter()
+                .filter(|artifact| artifact.product.is_none()),
+        );
+    }
+    Ok((scratch, artifacts, original_imports, joined_interfaces))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlannedInventory {
+    original_unit: String,
+    original_module: String,
+    interface_fingerprint: String,
+    selection: PlannedSelection,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlannedSelection {
+    exports: Vec<DeclarationExport>,
+    instances: InstanceInventory,
+    family_closure: Vec<ExportIdentity>,
+}
+
+impl PlannedInventory {
+    fn validate(
+        &self,
+        owner: &ExactModuleIdentity,
+        interfaces: &[ExactInterfaceOwner],
+    ) -> Result<(), CompileError> {
+        use std::collections::BTreeSet;
+        if self.original_unit != owner.unit
+            || self.original_module != owner.module
+            || self.interface_fingerprint.len() != 32
+            || !self
+                .interface_fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(contract(
+                "planned inventory has a different original interface owner",
+            ));
+        }
+        let owned = |identity: &ExportIdentity| {
+            identity.unit == owner.unit && identity.module == owner.module
+        };
+        let valid_identity = |identity: &ExportIdentity| {
+            !identity.unit.is_empty()
+                && !identity.module.is_empty()
+                && !identity.occurrence.is_empty()
+                && (identity.record_parent.is_none()
+                    || identity.namespace == ExportNamespace::Field)
+                && identity
+                    .record_parent
+                    .as_ref()
+                    .is_none_or(|parent| !parent.is_empty())
+        };
+        let mut exported = BTreeSet::new();
+        for export in &self.selection.exports {
+            let head_namespace = match export.kind {
+                DeclarationKind::Value => ExportNamespace::Value,
+                DeclarationKind::Type | DeclarationKind::Class => ExportNamespace::Type,
+            };
+            if !owned(&export.head)
+                || !valid_identity(&export.head)
+                || export.head.namespace != head_namespace
+                || !exported.insert(&export.head)
+                || export.children.iter().collect::<BTreeSet<_>>().len() != export.children.len()
+                || export
+                    .children
+                    .iter()
+                    .any(|child| !owned(child) || !valid_identity(child))
+            {
+                return Err(contract(
+                    "planned authored exports have invalid exact identities",
+                ));
+            }
+        }
+        validate_instance_inventory(&self.selection.instances)?;
+        if self.selection.instances.classes.iter().any(|entry| {
+            !owned(&entry.dfun)
+                || !valid_identity(&entry.dfun)
+                || !valid_identity(&entry.class)
+                || entry
+                    .selected_axioms
+                    .iter()
+                    .any(|axiom| !owned(axiom) || !valid_identity(axiom))
+        }) || self
+            .selection
+            .instances
+            .families
+            .iter()
+            .any(|axiom| !owned(axiom) || !valid_identity(axiom))
+        {
+            return Err(contract(
+                "planned instances are not owned by the original declaration",
+            ));
+        }
+        let closure = self
+            .selection
+            .family_closure
+            .iter()
+            .collect::<BTreeSet<_>>();
+        if closure.len() != self.selection.family_closure.len()
+            || self
+                .selection
+                .instances
+                .families
+                .iter()
+                .any(|axiom| !closure.contains(axiom))
+            || closure.iter().any(|axiom| {
+                !valid_identity(axiom)
+                    || !interfaces.iter().any(|entry| {
+                        entry.owner.unit == axiom.unit && entry.owner.module == axiom.module
+                    })
+            })
+        {
+            return Err(contract(
+                "planned family closure differs from retained home interfaces",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Called only after the owning offer has bound TPEXACTDECL8 to the original
+/// request, final source, reserved module, and sealed original interface SHA.
+/// The JSON carries compiler facts; it does not independently authorize them.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn certify_same_offer_planned_declaration(
+    module: SessionModule,
+    normalized_source: &str,
+    producer_identity: &[u8],
+    sealed: &SealedTurnProducts,
+    source_admission: &ExactSourceAdmission,
+    includes: &[PathBuf],
+    baseline: Option<&Arc<ExactDeclarationContext>>,
+    inventory_json: &[u8],
+) -> Result<CertifiedAuthoredDeclaration, CompileError> {
+    use std::collections::BTreeSet;
+    let module_name = module.module_name();
+    let source_path = source_admission.witness.source_path();
+    let source_sha256: [u8; 32] = Sha256::digest(normalized_source.as_bytes()).into();
+    if module.kind != SessionModuleKind::Lib
+        || module.gen.0 == 0
+        || producer_identity.is_empty()
+        || includes.is_empty()
+        || !source_path.is_absolute()
+        || !source_admission
+            .witness
+            .matches_source(source_path, normalized_source)
+        || std::fs::read(source_path)? != normalized_source.as_bytes()
+    {
+        return Err(contract(
+            "planned original source differs from its exact admission",
+        ));
+    }
+    let toolchain_identity_sha256: [u8; 32] = Sha256::digest(producer_identity).into();
+    if baseline
+        .is_some_and(|context| context.toolchain_identity_sha256() != toolchain_identity_sha256)
+    {
+        return Err(contract(
+            "planned original producer differs from retained context",
+        ));
+    }
+    if inventory_json.len() > 4 * 1024 * 1024 {
+        return Err(contract("planned inventory receipt exceeds its bound"));
+    }
+    let inventory: PlannedInventory = serde_json::from_slice(inventory_json)
+        .map_err(|error| contract(format!("invalid planned inventory receipt: {error}")))?;
+    let evidence = &source_admission.evidence.modules;
+    let candidates = evidence
+        .iter()
+        .filter(|row| row.module == module_name)
+        .collect::<Vec<_>>();
+    if candidates.len() != 1
+        || candidates[0].boot
+        || candidates[0].product != ProductAvailability::Ready
+        || std::fs::canonicalize(&candidates[0].source)? != std::fs::canonicalize(source_path)?
+    {
+        return Err(contract(
+            "planned original is absent or ambiguous in its final source graph",
+        ));
+    }
+    let original_owner = ExactModuleIdentity {
+        unit: candidates[0].unit.clone(),
+        module: module_name,
+    };
+    // Later whole-check modules are transient consumers, not original owners.
+    // Retain only the original graph and its already admitted baseline closure.
+    let products = sealed
+        .recovery_products
+        .iter()
+        .filter(|product| {
+            evidence.iter().any(|row| {
+                !row.boot
+                    && row.unit == product.owner().unit
+                    && row.module == product.owner().module
+            }) || baseline.is_some_and(|context| {
+                context
+                    .recovery_products()
+                    .iter()
+                    .any(|retained| retained.owner() == product.owner())
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut owners = BTreeSet::new();
+    if products
+        .iter()
+        .any(|product| !owners.insert((&product.owner().unit, &product.owner().module)))
+    {
+        return Err(contract(
+            "planned original closure has duplicate product owners",
+        ));
+    }
+    let selected = products
+        .iter()
+        .find(|product| {
+            product.owner().unit == original_owner.unit
+                && product.owner().module == original_owner.module
+        })
+        .ok_or_else(|| contract("planned original has no sealed recovery product"))?;
+    if selected.source_sha256() != Some(source_sha256) {
+        return Err(contract(
+            "planned original sealed product has a different source digest",
+        ));
+    }
+    let (_scratch, artifacts, original_imports, joined_interfaces) =
+        admit_authored_artifact_closure(
+            &products,
+            toolchain_identity_sha256,
+            evidence,
+            Some(source_admission),
+            baseline,
+            includes,
+        )?;
+    let interfaces = artifacts
+        .iter()
+        .map(|artifact| ExactInterfaceOwner {
+            owner: ExactModuleIdentity {
+                unit: artifact.interface.unit.clone(),
+                module: artifact.interface.module.clone(),
+            },
+            requirements: artifact
+                .interface
+                .requirements
+                .iter()
+                .map(|(unit, module)| ExactModuleIdentity {
+                    unit: unit.clone(),
+                    module: module.clone(),
+                })
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    inventory.validate(&original_owner, &interfaces)?;
+    Ok(CertifiedAuthoredDeclaration {
+        product: selected.clone(),
+        recovery_products: products,
+        lexical_exports: inventory.selection.exports.clone(),
+        introduced_exports: inventory.selection.exports,
+        instances: inventory.selection.instances,
+        family_closure: inventory.selection.family_closure,
+        source_sha256,
+        toolchain_identity_sha256,
+        interfaces,
+        joined_interfaces,
+        original_imports,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn identity(module: &str, namespace: ExportNamespace, occurrence: &str) -> ExportIdentity {
+        ExportIdentity {
+            unit: "main".into(),
+            module: module.into(),
+            namespace,
+            occurrence: occurrence.into(),
+            record_parent: None,
+        }
+    }
+
+    fn inventory() -> PlannedInventory {
+        let mut field = identity("Lib.G7", ExportNamespace::Field, "value");
+        field.record_parent = Some("Box".into());
+        PlannedInventory {
+            original_unit: "main".into(),
+            original_module: "Lib.G7".into(),
+            interface_fingerprint: "1234567890abcdef1234567890abcdef".into(),
+            selection: PlannedSelection {
+                exports: vec![DeclarationExport {
+                    kind: DeclarationKind::Type,
+                    head: identity("Lib.G7", ExportNamespace::Type, "Box"),
+                    children: vec![
+                        identity("Lib.G7", ExportNamespace::Constructor, "Box"),
+                        field,
+                    ],
+                }],
+                instances: InstanceInventory {
+                    classes: vec![ClassInstanceEvidence {
+                        dfun: identity("Lib.G7", ExportNamespace::Value, "$fEqBox"),
+                        class: ExportIdentity {
+                            unit: "ghc-internal".into(),
+                            module: "GHC.Internal.Classes".into(),
+                            namespace: ExportNamespace::Type,
+                            occurrence: "Eq".into(),
+                            record_parent: None,
+                        },
+                        selected_axioms: vec![identity(
+                            "Lib.G7",
+                            ExportNamespace::Type,
+                            "D:R:ResultBox",
+                        )],
+                    }],
+                    families: vec![identity("Lib.G7", ExportNamespace::Type, "D:R:ResultBox")],
+                },
+                family_closure: vec![
+                    identity("Lib.G7", ExportNamespace::Type, "D:R:ResultBox"),
+                    identity("Retained", ExportNamespace::Type, "D:R:OtherInt"),
+                ],
+            },
+        }
+    }
+
+    #[test]
+    fn original_inventory_refuses_foreign_exports_and_incomplete_family_closure() {
+        let original = ExactModuleIdentity {
+            unit: "main".into(),
+            module: "Lib.G7".into(),
+        };
+        let interfaces = vec![
+            ExactInterfaceOwner {
+                owner: original.clone(),
+                requirements: vec![],
+            },
+            ExactInterfaceOwner {
+                owner: ExactModuleIdentity {
+                    unit: "main".into(),
+                    module: "Retained".into(),
+                },
+                requirements: vec![],
+            },
+        ];
+        inventory().validate(&original, &interfaces).unwrap();
+        let mut changed = inventory();
+        changed.original_module = "Lib.G8".into();
+        assert!(changed.validate(&original, &interfaces).is_err());
+        let mut changed = inventory();
+        changed.selection.exports[0].children[0].module = "Old".into();
+        assert!(changed.validate(&original, &interfaces).is_err());
+        let mut changed = inventory();
+        changed.selection.exports[0].children[1].record_parent = Some(String::new());
+        assert!(changed.validate(&original, &interfaces).is_err());
+        let mut changed = inventory();
+        changed.selection.instances.classes[0].dfun.module = "Old".into();
+        assert!(changed.validate(&original, &interfaces).is_err());
+        let mut changed = inventory();
+        changed.selection.family_closure.remove(0);
+        assert!(changed.validate(&original, &interfaces).is_err());
+        assert!(inventory().validate(&original, &interfaces[..1]).is_err());
+        let mut changed = inventory();
+        changed
+            .selection
+            .family_closure
+            .push(changed.selection.family_closure[0].clone());
+        assert!(changed.validate(&original, &interfaces).is_err());
+    }
+}

@@ -13,6 +13,9 @@ use crate::{
     cache::ProductAvailability, recovery_artifacts::CertifiedRecoveryProduct, CompileError,
 };
 
+mod planned;
+pub(crate) use planned::certify_same_offer_planned_declaration;
+
 pub use crate::declaration_context::{
     ExactDeclarationContext, ExactSourceWitness, MaterializedExactDeclarationContext,
 };
@@ -355,128 +358,15 @@ fn certify_authored_declaration_inner(
         return Err(contract("certified authored source digest differs"));
     }
 
-    let scratch = tempfile::tempdir()?;
-    let references = crate::recovery_artifacts::materialize_certified_products(
-        scratch.path(),
-        toolchain_identity_sha256,
-        &products,
-    )
-    .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
-    let verified = references
-        .iter()
-        .map(|reference| {
-            crate::recovery_artifacts::verify_materialized_ref(scratch.path(), reference)
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
-    crate::certified_products::certify_inherited_products(
-        &verified
-            .iter()
-            .map(|artifact| crate::certified_products::InheritedProductInput { artifact })
-            .collect::<Vec<_>>(),
-        &[],
-    )
-    .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
-    let mut artifacts = Vec::with_capacity(products.len());
-    let mut original_imports = Vec::new();
-    for (product, reference) in products.iter().zip(&references) {
-        let owner = product.owner();
-        let identity = ExactModuleIdentity {
-            unit: owner.unit.clone(),
-            module: owner.module.clone(),
-        };
-        let row = evidence
-            .iter()
-            .find(|row| !row.boot && row.unit == owner.unit && row.module == owner.module);
-        let mut requirements = if let Some(row) = row {
-            let mut imports = Vec::new();
-            for imported in &row.imports {
-                let Some(path) = &imported.selected else {
-                    continue;
-                };
-                let import_owner = evidence.iter().find(|candidate| {
-                    !candidate.boot
-                        && candidate.module == imported.module
-                        && candidate.source == *path
-                });
-                if let Some(import_owner) = import_owner {
-                    let key = ExactModuleIdentity {
-                        unit: import_owner.unit.clone(),
-                        module: import_owner.module.clone(),
-                    };
-                    if !imports.contains(&key) {
-                        imports.push(key);
-                    }
-                } else if includes.iter().any(|root| path.starts_with(root)) {
-                    return Err(contract(
-                        "authored home import has no exact dependency owner",
-                    ));
-                }
-            }
-            if let Some(admitted) = &compiled.exact_source_admission {
-                let exact = admitted
-                    .exact_imports
-                    .get(&identity)
-                    .ok_or_else(|| contract("fresh authored module lacks exact import witness"))?;
-                imports.extend_from_slice(exact);
-            }
-            imports.sort();
-            imports.dedup();
-            original_imports.push(ExactInterfaceOwner {
-                owner: identity.clone(),
-                requirements: imports.clone(),
-            });
-            imports
-        } else {
-            context
-                .as_ref()
-                .and_then(|context| {
-                    context
-                        .interface_owners()
-                        .iter()
-                        .find(|entry| entry.owner == identity)
-                })
-                .ok_or_else(|| {
-                    contract("certified product absent from source graph and exact context")
-                })?
-                .requirements
-                .clone()
-        };
-        requirements.sort();
-        requirements.dedup();
-        let requirements = requirements
-            .into_iter()
-            .map(|owner| (owner.unit, owner.module))
-            .collect();
-        let interface_path = scratch.path().join(&reference.interface_path);
-        let product_path = scratch.path().join(&reference.product_path);
-        artifacts.push(DeclarationArtifact {
-            interface: ExactIfaceArtifact {
-                unit: owner.unit.clone(),
-                module: owner.module.clone(),
-                path: interface_path,
-                sha256: sha256(product.interface_bytes()),
-                requirements,
-            },
-            product: Some(ModuleSnapshot {
-                module: owner.module.clone(),
-                path: product_path,
-                sha256: sha256(product.product_bytes()),
-            }),
-        });
-    }
-    let joined_interfaces = context
-        .as_ref()
-        .map_or_else(Vec::new, |context| context.joined_interfaces().to_vec());
-    if let Some(context) = &context {
-        let inherited = context.materialize(scratch.path())?;
-        artifacts.extend(
-            inherited
-                .artifacts
-                .into_iter()
-                .filter(|artifact| artifact.product.is_none()),
-        );
-    }
+    let (_scratch, artifacts, original_imports, joined_interfaces) =
+        planned::admit_authored_artifact_closure(
+            &products,
+            toolchain_identity_sha256,
+            &evidence,
+            compiled.exact_source_admission.as_ref(),
+            context.as_ref(),
+            includes,
+        )?;
     let outcome = inspect_declaration_artifacts_with_producer(
         &artifacts,
         includes,
