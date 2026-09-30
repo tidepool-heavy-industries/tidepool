@@ -487,17 +487,6 @@ impl EmbeddedHostedCheckpoint {
     }
 }
 
-impl EmbeddedHostedCheckpoint {
-    pub(super) fn child_path(&self, actor: ActorRef) -> AgentPath {
-        AgentPath(format!(
-            "{}/a{}_i{}",
-            self.checkpoint.origin().0,
-            actor.id.0,
-            actor.incarnation.0
-        ))
-    }
-}
-
 struct EmbeddedCheckpointCapture {
     store: Arc<Store>,
     identity: HostIdentity,
