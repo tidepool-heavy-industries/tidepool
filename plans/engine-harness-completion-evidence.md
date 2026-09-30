@@ -7,6 +7,51 @@ supersedes the earlier completion-wave sequencing.
 
 ## Final delivery wave: joined checkpoint
 
+Joined private execution `ddd36f2436` plus the terminal reply consumer and
+generated source mappings passed **3/3 real host tests**, exit 0: raw Haskell,
+retained HTTP commands/reconnect without replay, cancellation of a running
+Haskell cell, and root Ready/authentication-failure retirement. The native
+group reused one linked binary and ran three fresh processes concurrently.
+Its admitted service took 380.034 seconds. Exact command:
+
+```sh
+bash scripts/buck2-run.sh test --print-passing-details --local-only \
+  -c remote.enabled=false //bridge/facade:facade_host_tests \
+  -- --timeout 1860 --test-arg=--jobs --test-arg=3
+```
+
+See [`private-m1-host-parallel.log`](../target/completion-evidence/final-delivery/private-m1-host-parallel.log).
+The preceding serial invocation passed the first case, then the pinned Buck
+executor's default 600-second cap ended the group during the second case;
+[`private-m1-host.log`](../target/completion-evidence/final-delivery/private-m1-host.log)
+retains that timeout. The executor requires its own `--timeout`; the rule's
+timeout attribute did not extend it. Browser, late-output/compaction, cold
+production recovery and M2 remain separate gates. The new terminal cancellation
+wire status also requires the matched Codex consumer migration before fallback
+acceptance.
+
+Native checked-cell gates passed **2/2** on `aedbe164f1` plus the declared-library
+resource graph committed as `ad27f9258`: original declaration/binding/expression
+and empty-prefix Fresh → Cached → changed-source Fresh. The admitted service
+took 274.073 seconds; see
+[`native-checked-runtime.log`](../target/completion-evidence/final-delivery/native-checked-runtime.log).
+These precede the later artifact-sharing and completed-value overlay repairs.
+
+The matched native assembly built successfully on the private checkpoint;
+[`private-package-build.log`](../target/completion-evidence/final-delivery/private-package-build.log)
+retains exit 0 and eight local actions. Its elapsed time includes waiting for
+the preceding test command on the same daemon. This build did not execute the
+package's smoke tests again.
+
+Nix packaging candidate `bff789ed7c1e94e5ff67f89263144969d0372095` uses the same
+hash-verified harness source for Cargo and browser assets. Actual pinned
+`importCargoLock` vendoring of the complete canonical-814 Cargo lock passed,
+exit 0, in 2.941 seconds. A mismatched revision was refused during evaluation.
+Inputs, hashes and logs are retained under
+[`nix-matched-source/`](../target/completion-evidence/final-delivery/nix-matched-source/).
+This validates vendoring; a full distribution build is still pending. The full
+Git flake source capture previously failed at the unpublished Codex submodule.
+
 Main `d6955f602` joins the original/native compiler candidate through `595b2f72f`,
 protected display consumption, runtime nonempty child initialization and
 confirmation-only publication, actor command ownership/resource retention,

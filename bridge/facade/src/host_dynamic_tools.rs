@@ -387,6 +387,10 @@ enum WorkbenchCancellationResponse {
         execution: tidepool_runtime::session::WorkbenchExecutionId,
         reply: CallResponse,
     },
+    PublicationSettled {
+        execution: tidepool_runtime::session::WorkbenchExecutionId,
+        reply: CallResponse,
+    },
     Unconfirmed {
         execution: tidepool_runtime::session::WorkbenchExecutionId,
     },
@@ -409,6 +413,12 @@ impl WorkbenchCancellationResponse {
                 execution,
                 reply: workbench_reply(reply),
             },
+            WorkbenchCancellationOutcome::PublicationSettled { execution, reply } => {
+                Self::PublicationSettled {
+                    execution,
+                    reply: workbench_reply(reply),
+                }
+            }
             WorkbenchCancellationOutcome::Unconfirmed { execution } => {
                 Self::Unconfirmed { execution }
             }
@@ -480,6 +490,9 @@ async fn cancel_workbench(
                     ("Cancelled", execution)
                 }
                 WorkbenchCancellationOutcome::Expired { execution, .. } => ("Expired", execution),
+                WorkbenchCancellationOutcome::PublicationSettled { execution, .. } => {
+                    ("PublicationSettled", execution)
+                }
                 WorkbenchCancellationOutcome::Unconfirmed { execution } => {
                     ("Unconfirmed", execution)
                 }

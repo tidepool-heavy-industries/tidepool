@@ -664,7 +664,10 @@ impl CancellationOwner for EmbeddedDispatcher {
             Ok(WorkbenchCancellationOutcome::Cancelled { .. }) => {
                 CancellationAcknowledgment::Stopped
             }
-            Ok(WorkbenchCancellationOutcome::Expired { reply, .. }) => {
+            Ok(
+                WorkbenchCancellationOutcome::Expired { reply, .. }
+                | WorkbenchCancellationOutcome::PublicationSettled { reply, .. },
+            ) => {
                 let result = reply
                     .map_err(ResidentToolError::Invocation)
                     .and_then(|response| {
