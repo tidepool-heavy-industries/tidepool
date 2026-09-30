@@ -31,6 +31,7 @@ library tidepool-extract-internal
     Tidepool.Binders
     Tidepool.CborEncode
     Tidepool.CheckedCell
+    Tidepool.CheckedPrefixImports
     Tidepool.CompileInputPolicy
     Tidepool.DependencyEvidence
     Tidepool.DeclarationJoin

@@ -11,46 +11,33 @@ module Tidepool.PlannedDeclaration
   , transformPlannedDeclarationImports
   ) where
 
-import Control.Monad (forM, unless)
+import Control.Monad (unless)
 import Data.Char (isSpace)
 import Data.List (intercalate, isPrefixOf, nub, sort, tails)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import GHC (ParsedModule(..), ModSummary(ms_hspp_opts))
+import GHC (ParsedModule)
 import GHC.Core.Coercion.Axiom (coAxiomName)
 import GHC.Core.FamInstEnv (FamInst(..))
-import GHC.Data.Maybe (MaybeErr(..))
-import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_HUG, hscEPS, hsc_home_unit, hsc_unit_env)
-import GHC.Driver.Session (xopt)
-import GHC.Hs
-import GHC.Iface.Load (loadInterface, WhereFrom(..))
-import GHC.LanguageExtensions.Type (Extension(ImplicitPrelude))
-import GHC.Rename.Names (renameRawPkgQual)
-import GHC.Tc.Utils.Monad (initIfaceCheck)
-import GHC.Types.Avail (AvailInfo, availName, availNames)
-import GHC.Types.Name (Name, nameOccName)
-import GHC.Types.Name.Reader (mkRdrUnqual, rdrNameOcc)
-import GHC.Types.PkgQual (RawPkgQual(..))
-import GHC.Types.SrcLoc (GenLocated(..), unLoc)
+import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_HUG, hscEPS, hsc_home_unit)
 import GHC.Unit.Env (unitEnv_hpts)
 import GHC.Unit.External (ExternalPackageState(..))
 import GHC.Unit.Home (homeUnitAsUnit)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), eltsHpt, lookupHpt)
-import GHC.Unit.Module (Module, moduleName, moduleUnit)
-import GHC.Unit.Finder (FindResult(..), findImportedModule)
+import GHC.Unit.Module (Module, moduleName, moduleNameString, moduleUnit, mkModuleName)
 import GHC.Unit.Module.ModDetails (ModDetails(..))
-import GHC.Unit.Module.ModIface (mi_module, mi_src_hash, mi_iface_hash, mi_final_exts, mi_exports)
+import GHC.Unit.Module.ModIface (mi_module, mi_src_hash, mi_iface_hash, mi_final_exts)
 import GHC.Unit.Types (unitString)
 import GHC.Utils.Fingerprint (Fingerprint, fingerprintByteString)
-import GHC.Utils.Outputable (ppr)
 import GHC.Types.Name.Occurrence
-  ( isSymOcc, mkTcOcc, mkVarOcc, isTcOcc, isDataOcc, occNameString )
+  ( isSymOcc, mkTcOcc, mkVarOcc )
+import Tidepool.CheckedPrefixImports (refineOriginalDeclarationImports)
 import Tidepool.Binders
   ( CellSourcePlan(..), CellAnalysisItem(..), CellSourceSpan(..)
   , StmtBinders(..), TurnKind(..), ExportItem(..), LocatedImport(..)
   , SourcePrologue(..), DeclarationSource(..), renderDeclarationForTemplate )
 import Tidepool.DeclarationJoin
-  ( DeclarationExport(..), DeclarationKind(..), ExportIdentity(..), ExportNamespace(..), exportIdentity
+  ( DeclarationExport(..), DeclarationKind(..), ExportIdentity(..), exportIdentity
   , InstanceInventory(..), ClassInstanceEvidence(..), JoinDecision(..)
   , interfaceExports, interfaceInventory, validateRetainedFamilyInstances
   , renderDeclarationSelection )
@@ -240,111 +227,10 @@ readPlannedDeclarationInventory env original = do
         (sort (nub (map (exportIdentity . coAxiomName . fi_axiom) families))))
       JoinRejected _ diagnostic -> Left diagnostic
 
--- The checking recipe retains historical imports alongside the new original
--- owner. Give its certified authored names the declaration wrapper's lexical
--- precedence: subtract them from other unqualified selections, preserving each
--- unchanged selection in a qualified clone. Aliases, packages and SOURCE edges
--- remain intact; this does not make an invalid original declaration valid.
+-- The checked recipe gives the certified original authored names lexical
+-- precedence while preserving each historical qualified import selection.
 transformPlannedDeclarationImports
   :: PlannedDeclarationInventory -> HscEnv -> ParsedModule -> IO ParsedModule
-transformPlannedDeclarationImports inventory env parsed = do
-  let owner = inventoryOwner inventory
-      ownerName = moduleName owner
-      syntax = unLoc (pm_parsed_source parsed)
-      originalImports = hsmodImports syntax
-      direct imported = let declaration = unLoc imported in
-        unLoc (ideclName declaration) == ownerName
-          && ideclQualified declaration == NotQualified
-          && ideclAs declaration == Nothing
-          && (case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False)
-          && ideclSource declaration == NotBoot
-          && ideclImportList declaration == Nothing
-      ownerInterface = lookupHpt (hsc_HPT env) ownerName
-  unless (length (filter direct originalImports) == 1
-      && maybe False (\hmi -> mi_module (hm_iface hmi) == owner
-        && mi_iface_hash (mi_final_exts (hm_iface hmi)) == inventoryInterface inventory) ownerInterface) $
-    fail "planned import refinement lacks its exact certified original interface"
-  let flags = ms_hspp_opts (pm_mod_summary parsed)
-      imports = if xopt ImplicitPrelude flags
-          && not (any ((== mkModuleName "Prelude") . unLoc . ideclName . unLoc) originalImports)
-        then noLocA (simpleImportDecl (mkModuleName "Prelude")) : originalImports
-        else originalImports
-      shadows = concatMap (\item -> exportHead item : exportChildren item) (plannedExports inventory)
-      namespace TypeNamespace = TypeNamespace
-      namespace ConstructorNamespace = ConstructorNamespace
-      namespace _ = ValueNamespace
-      key identity = (namespace (exportNamespace identity), exportOccurrence identity)
-      shadowKeys = map key shadows
-  refined <- fmap concat $ forM imports $ \located -> do
-    let declaration = unLoc located
-    if direct located || ideclQualified declaration /= NotQualified
-      then pure [located]
-      else do
-        let importedName = unLoc (ideclName declaration)
-            qualifier = renameRawPkgQual (hsc_unit_env env) importedName (ideclPkgQual declaration)
-        resolved <- findImportedModule env importedName qualifier
-        importedOwner <- case resolved of
-          Found _ found -> pure found
-          _ -> fail "planned import refinement cannot resolve an original import"
-        iface <- initIfaceCheck (ppr importedName) env $
-          loadInterface (ppr importedName) importedOwner (ImportByUser (ideclSource declaration))
-        available <- case iface of
-          Succeeded found -> pure (mi_exports found)
-          Failed _ -> fail "planned import refinement cannot load an original import interface"
-        selected <- either fail pure (selectedImportNames available (ideclImportList declaration))
-        let retained = filter ((`notElem` shadowKeys) . key . exportIdentity) selected
-        if length retained == length selected
-          then pure [located]
-          else do
-            let qualified = declaration {ideclQualified = QualifiedPre}
-                narrowed = declaration
-                  {ideclImportList = Just (Exactly, noLocA (map importName retained))}
-                replace value = case located of L location _ -> L location value
-            pure [replace narrowed, replace qualified]
-  pure parsed {pm_parsed_source = case pm_parsed_source parsed of
-    L location _ -> L location syntax {hsmodImports = refined}}
-
-selectedImportNames
-  :: [AvailInfo] -> Maybe (ImportListInterpretation, LocatedLI [LIE GhcPs])
-  -> Either String [Name]
-selectedImportNames available selection = do
-  chosen <- case selection of
-    Nothing -> Right allNames
-    Just (interpretation, entries) -> do
-      names <- nub . concat <$> mapM (select . unLoc) (unLoc entries)
-      pure $ case interpretation of
-        Exactly -> names
-        EverythingBut -> filter (`notElem` names) allNames
-  pure (nub chosen)
-  where
-    allNames = nub (concatMap availNames available)
-    matches wrapped name =
-      let occurrence = rdrNameOcc (ieWrappedName (unLoc wrapped))
-          actual = nameOccName name
-       in occNameString occurrence == occNameString actual
-          && case unLoc wrapped of
-            IEType {} -> isTcOcc actual
-            IEPattern {} -> isDataOcc actual
-            _ | isTcOcc occurrence -> isTcOcc actual
-              | isDataOcc occurrence -> isDataOcc actual
-              | otherwise -> not (isTcOcc actual || isDataOcc actual)
-    select entry = case entry of
-      IEVar _ wrapped _ -> Right (filter (matches wrapped) allNames)
-      IEThingAbs _ wrapped _ -> Right (filter (matches wrapped) allNames)
-      IEThingAll _ wrapped _ -> Right (concatMap availNames (filter (matches wrapped . availName) available))
-      IEThingWith _ wrapped wildcard children _ -> Right
-        [name | avail <- available, matches wrapped (availName avail), name <- availNames avail
-          , name == availName avail || wildcard /= NoIEWildcard || any (`matches` name) children]
-      _ -> Left "planned import refinement encountered a non-name import selection"
-
--- Keep the GHC occurrence namespace, including a record field's parent. This
--- avoids broadening T(field) to every same-spelled field exported by a module.
-importName :: Name -> LIE GhcPs
-importName name
-  | isTcOcc occurrence = noLocA (IEThingAbs Nothing wrapped Nothing)
-  | isDataOcc occurrence = noLocA (IEVar Nothing
-      (noLocA (IEPattern noAnn (noLocA (mkRdrUnqual occurrence)))) Nothing)
-  | otherwise = noLocA (IEVar Nothing wrapped Nothing)
-  where
-    occurrence = nameOccName name
-    wrapped = noLocA (IEName noExtField (noLocA (mkRdrUnqual occurrence)))
+transformPlannedDeclarationImports inventory = refineOriginalDeclarationImports
+  (inventoryOwner inventory) (inventoryInterface inventory)
+  (concatMap (\item -> exportHead item : exportChildren item) (plannedExports inventory))
