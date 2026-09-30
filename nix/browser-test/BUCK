@@ -1,0 +1,4 @@
+load("@prelude//:rules.bzl", "filegroup")
+
+filegroup(name = "package_json", srcs = ["package.json"], visibility = ["PUBLIC"])
+filegroup(name = "package_lock", srcs = ["package-lock.json"], visibility = ["PUBLIC"])

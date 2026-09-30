@@ -134,6 +134,16 @@
             src = "${harnessWeb}/web";
             hash = "sha256-yJrPGaSazF06w91mddpNlOyoB6d1cYKXumyaoeWCfeU=";
           };
+          browserTestNpmCache = harnessPkgs.fetchNpmDeps {
+            src = ./nix/browser-test;
+            hash = pkgs.lib.fakeHash;
+          };
+          playwrightChromium = harnessPkgs.playwright-driver.browsers.override {
+            withFirefox = false;
+            withWebkit = false;
+            withChromiumHeadlessShell = false;
+            withFfmpeg = false;
+          };
           # rust-toolchain.toml is the single source of truth for the Rust
           # version + components; the flake reads it rather than pinning
           # `stable.latest` (which drifts silently on every flake.lock update).
@@ -464,6 +474,9 @@
           packages.buck-binutils = pkgs.binutils;
           packages.buck-node = pkgs.nodejs_24;
           packages.buck-npm-cache = embeddedWebNpmCache;
+          packages.buck-browser-node = harnessPkgs.nodejs_24;
+          packages.buck-browser-npm-cache = browserTestNpmCache;
+          packages.buck-playwright-browsers = playwrightChromium;
           packages.buck-bash = pkgs.bash;
           packages.buck-coreutils = pkgs.coreutils;
           packages.buck-tar = pkgs.gnutar;
@@ -491,6 +504,13 @@
               pkgs.perl
               pkgs.pkg-config
               pkgs.openssl
+            ];
+          };
+          packages.buck-browser-test-closure = pkgs.closureInfo {
+            rootPaths = [
+              harnessPkgs.nodejs_24
+              browserTestNpmCache
+              playwrightChromium
             ];
           };
 

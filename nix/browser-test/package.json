@@ -1,0 +1,11 @@
+{
+  "name": "tidepool-browser-gate",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "playwright-core": "1.57.0"
+  }
+}

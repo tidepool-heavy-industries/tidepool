@@ -1,0 +1,48 @@
+load("@prelude//:rules.bzl", "genrule")
+
+# Keep browser dependency installation content-addressed by its npm manifests.
+genrule(
+    name = "npm_dependencies",
+    srcs = [
+        "//nix/browser-test:package_json",
+        "//nix/browser-test:package_lock",
+        "toolchains//:browser_npm_cache",
+    ],
+    out = ".",
+    bash = """set -euo pipefail
+NODE='$(exe toolchains//:browser_node)'
+NPM='$(exe toolchains//:browser_npm)'
+NPM_CACHE="$PWD/$(location toolchains//:browser_npm_cache)"
+MANIFEST="$PWD/$(location //nix/browser-test:package_json)"
+LOCK="$PWD/$(location //nix/browser-test:package_lock)"
+OUTPUT="$PWD/$OUT"
+export PATH="${NODE%/*}:$PATH"
+export CI=1 TZ=UTC npm_config_update_notifier=false npm_config_logs_dir="$TMP/npm-logs"
+mkdir -p "$TMP/npm"
+cp "$MANIFEST" "$LOCK" "$TMP/npm/"
+cd "$TMP/npm"
+"$NPM" ci --offline --ignore-scripts --cache "$NPM_CACHE" --no-audit --no-fund
+cp -a node_modules/. "$OUTPUT/"
+""",
+    visibility = ["PUBLIC"],
+)
+
+# The driver and node_modules are separate from harness-web dist compilation.
+# Rust's integration test supplies the actual server address over JSONL stdin.
+genrule(
+    name = "driver_bundle",
+    srcs = [
+        ":npm_dependencies",
+        "driver.mjs",
+    ],
+    out = ".",
+    bash = """set -euo pipefail
+DEPS="$PWD/$(location :npm_dependencies)"
+DRIVER="$PWD/$(location :driver.mjs)"
+OUTPUT="$PWD/$OUT"
+mkdir -p "$OUTPUT/node_modules"
+cp -a "$DEPS/." "$OUTPUT/node_modules/"
+cp "$DRIVER" "$OUTPUT/driver.mjs"
+""",
+    visibility = ["PUBLIC"],
+)
