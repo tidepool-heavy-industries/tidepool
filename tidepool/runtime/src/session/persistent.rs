@@ -1603,6 +1603,35 @@ impl PersistentSession {
                 path: lib.root.clone(),
                 detail: "exact recovery graph is not attached".into(),
             })?;
+        let manifest_owner =
+            state
+                .owner
+                .as_ref()
+                .ok_or_else(|| SessionError::RecoveryManifest {
+                    path: state.path.clone(),
+                    detail: "public recovery requires its configured manifest owner".into(),
+                })?;
+        manifest_owner.validate_owner()?;
+        let bytes = std::fs::read(&state.path).map_err(|error| SessionError::RecoveryManifest {
+            path: state.path.clone(),
+            detail: error.to_string(),
+        })?;
+        let current = super::recovery::read_v2_bytes(
+            &state.path,
+            state.path.parent().expect("attached manifest parent"),
+            &bytes,
+        )
+        .map_err(|error| SessionError::RecoveryManifest {
+            path: state.path.clone(),
+            detail: error.to_string(),
+        })?;
+        if state.unconfirmed.is_some()
+            || current.is_none_or(|read| {
+                !read.artifact_losses.is_empty() || read.graph.checksum != state.graph.checksum
+            })
+        {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
         if lib.durable_public_scopes.contains_key(owner) {
             return Err(SessionError::RecoveryManifest {
                 path: state.path.clone(),
@@ -1635,6 +1664,153 @@ impl PersistentSession {
         }
         self.public_visibility_epochs.insert(scope, epoch);
         Ok(scope)
+    }
+
+    /// Transfer the retained root to the exact durably admitted successor.
+    /// The run owner and actor journal are checked before staging and again
+    /// before rename. No heap values or mutable source instances are reminted.
+    pub fn transfer_recovered_public_owner(
+        &mut self,
+        predecessor: &RecoveryPublicOwner,
+        successor: RecoveryPublicOwner,
+        target: ScopeId,
+        authority: Arc<dyn super::RecoverySuccessorAuthority>,
+    ) -> Result<PublicManifestCommit, SessionError> {
+        if !self.scopes.is_live(target) {
+            return Err(SessionError::DeadScope(target));
+        }
+        let snapshot = self
+            .public_visibility_snapshot_in(target)
+            .ok_or(SessionError::MissingDeclarationLibrary)?;
+        if target == ScopeId::ROOT
+            || snapshot.declaration_tip != Generation(0)
+            || !snapshot.bindings.is_empty()
+            || !snapshot.source_instances.is_empty()
+        {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        let lib = self
+            .lib
+            .as_ref()
+            .ok_or(SessionError::MissingDeclarationLibrary)?;
+        let state = lib
+            .durable_graph
+            .as_ref()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        let invalid = |detail: String| SessionError::RecoveryManifest {
+            path: state.path.clone(),
+            detail,
+        };
+        let owner = state.owner.as_ref().ok_or_else(|| {
+            invalid("root successor transfer requires the configured manifest owner".into())
+        })?;
+        owner.validate_owner()?;
+        if state.unconfirmed.is_some()
+            || predecessor == &successor
+            || !lib.durable_public_scopes.is_empty()
+            || state
+                .graph
+                .public_surfaces
+                .iter()
+                .any(|surface| surface.owner == successor)
+        {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        let index = state
+            .graph
+            .public_surfaces
+            .iter()
+            .position(|surface| &surface.owner == predecessor)
+            .ok_or_else(|| {
+                invalid("manifest owner differs from the exact durable predecessor".into())
+            })?;
+        let surface = &state.graph.public_surfaces[index];
+        let generation = surface.declaration_root.unwrap_or(Generation(0));
+        if generation != Generation(0) && lib.log.recovered_at(generation).is_none() {
+            return Err(invalid(
+                "successor declaration root has not been hydrated".into(),
+            ));
+        }
+        let root = state
+            .path
+            .parent()
+            .ok_or_else(|| invalid("manifest has no canonical run parent".into()))?;
+        if !authority
+            .validate_successor(root, predecessor, &successor, lib.id, target)
+            .map_err(|error| invalid(error.to_string()))?
+        {
+            return Err(invalid(
+                "actual actor journal or placement refuses successor transfer".into(),
+            ));
+        }
+        let current_bytes =
+            std::fs::read(&state.path).map_err(|error| invalid(error.to_string()))?;
+        let current = super::recovery::read_v2_bytes(&state.path, root, &current_bytes)
+            .map_err(|error| invalid(error.to_string()))?
+            .ok_or_else(|| invalid("current manifest is not the exact retained graph".into()))?;
+        if !current.artifact_losses.is_empty()
+            || current.graph.checksum != state.graph.checksum
+            || current.graph.high_water != state.graph.high_water
+        {
+            return Err(invalid("manifest changed before successor transfer".into()));
+        }
+        let epoch = surface
+            .epoch
+            .checked_add(1)
+            .ok_or_else(|| invalid("public visibility epoch exhausted".into()))?;
+        let mut graph = state.graph.clone();
+        graph.public_surfaces[index].owner = successor.clone();
+        graph.public_surfaces[index].epoch = epoch;
+        graph.seal().map_err(|error| invalid(error.to_string()))?;
+        let staged = super::recovery::stage_v2(&state.path, root, &graph)
+            .map_err(|error| invalid(error.to_string()))?;
+        owner.validate_owner()?;
+        if std::fs::read(&state.path).map_err(|error| invalid(error.to_string()))? != current_bytes
+            || !authority
+                .validate_successor(root, predecessor, &successor, lib.id, target)
+                .map_err(|error| invalid(error.to_string()))?
+        {
+            return Err(invalid(
+                "durable owner evidence changed before successor rename".into(),
+            ));
+        }
+        self.public_visibility_epochs
+            .try_reserve(1)
+            .map_err(|error| invalid(error.to_string()))?;
+        // Admission epoch advancement is preflighted before the durable write.
+        let admission_epoch = self.prepare_execution_admission_epoch_advance()?;
+        let lib = self
+            .lib
+            .as_mut()
+            .expect("transfer preflight checked declaration library");
+        let outcome = lib.publish_recovery_manifest(staged);
+        let state = lib
+            .durable_graph
+            .as_mut()
+            .expect("transfer preflight checked manifest");
+        let committed = match outcome {
+            super::recovery::RecoveryPublishOutcome::BeforeRename { detail, .. } => {
+                return Ok(PublicManifestCommit::BeforeRename { detail })
+            }
+            super::recovery::RecoveryPublishOutcome::Durable { graph, .. } => {
+                state.graph = graph;
+                PublicManifestCommit::Durable
+            }
+            super::recovery::RecoveryPublishOutcome::PublishedDurabilityUnconfirmed {
+                graph,
+                publication,
+                detail,
+            } => {
+                state.graph = graph;
+                state.unconfirmed = Some(publication);
+                PublicManifestCommit::PublishedDurabilityUnconfirmed { detail }
+            }
+        };
+        lib.seed_scope(target, generation);
+        lib.durable_public_scopes.insert(successor, target);
+        self.public_visibility_epochs.insert(target, epoch);
+        self.invalidate_execution_admissions_after_owner_transfer(admission_epoch);
+        Ok(committed)
     }
 
     /// Capture a binding-only publication against one exact private and public

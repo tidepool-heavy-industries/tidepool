@@ -552,10 +552,19 @@ pub(crate) fn read_v2(
             ))
         }
     };
+    read_v2_bytes(path, recovery_root, &bytes)
+}
+
+/// Validate bytes read once by the configured manifest owner.
+pub(crate) fn read_v2_bytes(
+    path: &Path,
+    recovery_root: &Path,
+    bytes: &[u8],
+) -> Result<Option<RecoveryV2Read>, RecoveryError> {
     if bytes.len() > MAX_MANIFEST_BYTES {
         return Err(at(path, "recovery manifest exceeds the bounded size"));
     }
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
+    let value: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|e| at(path, format!("invalid recovery manifest JSON: {e}")))?;
     let version = value
         .get("version")

@@ -28,6 +28,7 @@ pub mod prepared;
 mod publication;
 mod recovery;
 mod recovery_hydration;
+pub use recovery_hydration::{RecoveryRunAuthority, RecoverySuccessorAuthority};
 pub mod registry;
 pub mod render;
 pub mod resident;
@@ -420,6 +421,7 @@ pub struct PublicVisibilitySnapshot {
 pub struct PublicManifestBase {
     admission_owner: Option<std::sync::Arc<admission::RuntimeAdmissionOwner>>,
     admission_owner_epoch: Option<u64>,
+    manifest_owner: Option<std::sync::Arc<recovery_hydration::OwnedRecoveryManifest>>,
     session: SessionId,
     path: PathBuf,
     owner: RecoveryPublicOwner,
@@ -439,6 +441,7 @@ pub struct PublicManifestBase {
 pub struct StagedPublicManifest {
     admission_owner: Option<std::sync::Arc<admission::RuntimeAdmissionOwner>>,
     admission_owner_epoch: Option<u64>,
+    manifest_owner: Option<std::sync::Arc<recovery_hydration::OwnedRecoveryManifest>>,
     session: SessionId,
     path: PathBuf,
     owner: RecoveryPublicOwner,
@@ -509,6 +512,7 @@ impl PublicManifestBase {
         Ok(StagedPublicManifest {
             admission_owner: self.admission_owner,
             admission_owner_epoch: self.admission_owner_epoch,
+            manifest_owner: self.manifest_owner,
             session: self.session,
             path: self.path,
             owner: self.owner,
@@ -629,6 +633,7 @@ pub struct SessionLib {
 }
 
 struct DurableDeclarationGraph {
+    owner: Option<std::sync::Arc<recovery_hydration::OwnedRecoveryManifest>>,
     path: PathBuf,
     graph: recovery::RecoveryGraph,
     /// A visible rename whose directory sync still needs confirmation. The
@@ -822,70 +827,6 @@ impl SessionLib {
         })
     }
 
-    /// Attach the exact recovery graph before any declaration is allocated.
-    /// Public roots are hydrated from verified original artifacts through the
-    /// bound compiler; private nodes and heap values stay inaccessible.
-    pub fn attach_recovery_graph_v2(
-        &mut self,
-        path: impl Into<PathBuf>,
-    ) -> Result<(), SessionError> {
-        let path = path.into();
-        if self.log.generation() != Generation(0)
-            || self.recovery_manifest_path.is_some()
-            || self.durable_graph.is_some()
-        {
-            return Err(SessionError::RecoveryManifest {
-                path,
-                detail: "recovery must attach before declarations are admitted".into(),
-            });
-        }
-        let root = path
-            .parent()
-            .ok_or_else(|| SessionError::RecoveryManifest {
-                path: path.clone(),
-                detail: "recovery manifest has no run-owned parent directory".into(),
-            })?;
-        let graph = match recovery::read_v2(&path, root).map_err(|error| {
-            SessionError::RecoveryManifest {
-                path: path.clone(),
-                detail: error.to_string(),
-            }
-        })? {
-            Some(read) => {
-                if !read.artifact_losses.is_empty() {
-                    return Err(SessionError::RecoveryManifest {
-                        path,
-                        detail: "private recovery graph has unavailable or corrupt artifacts"
-                            .into(),
-                    });
-                }
-                read.graph
-            }
-            None if path.exists() => {
-                return Err(SessionError::RecoveryManifest {
-                    path,
-                    detail: "legacy recovery manifest requires explicit v1 migration".into(),
-                });
-            }
-            None => recovery::RecoveryGraph::empty(self.id.0, self.id.0).map_err(|error| {
-                SessionError::RecoveryManifest {
-                    path: path.clone(),
-                    detail: error.to_string(),
-                }
-            })?,
-        };
-        // Build every recovered slot before changing admission state. A failed
-        // compiler readback leaves the allocator and all public scopes empty.
-        let recovered_log = self.hydrate_recovery_graph(&graph, root)?;
-        self.log = recovered_log;
-        self.durable_graph = Some(DurableDeclarationGraph {
-            path,
-            graph,
-            unconfirmed: None,
-        });
-        Ok(())
-    }
-
     /// Bind one actor incarnation to its public lexical scope in this process.
     /// Another actor may share the manifest but cannot claim this scope.
     fn bind_durable_public_scope(
@@ -942,6 +883,7 @@ impl SessionLib {
         Ok(PublicManifestBase {
             admission_owner: None,
             admission_owner_epoch: None,
+            manifest_owner: state.owner.clone(),
             session: self.id,
             path: state.path.clone(),
             owner,
@@ -961,6 +903,13 @@ impl SessionLib {
         &self,
         ticket: &StagedPublicManifest,
     ) -> Result<bool, SessionError> {
+        let live = self
+            .durable_graph
+            .as_ref()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        if !recovery_hydration::same_manifest_owner(&live.owner, &ticket.manifest_owner) {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
         self.public_manifest_baseline_is_current(
             ticket.session,
             &ticket.path,
