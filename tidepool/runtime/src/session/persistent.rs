@@ -9,7 +9,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BindingTipId, SourceLeaseKey};
+use tidepool_codegen::binding_table::{
+    BindingEntry, BindingScopeWitness, BindingTable, BindingTipId, SourceLeaseKey,
+};
 use tidepool_codegen::machine::{CancelHandle, MachineDisposition};
 use tidepool_codegen::prepared_program::{
     DemandedImage, ImageRegistry, InheritedSourceDemand, PendingGroupInventory, ProgramId,
@@ -119,6 +121,12 @@ pub struct PersistentSession {
     /// The persistent binding store: `name → (SessionVarId, RootSlot, Val.G<g>)` for each
     /// materialized bind, seeded into a later fragment's [`ExternalEnv`].
     bindings: BindingTable,
+    /// Immutable scoped semantics, keyed by witnesses from the mutation owners.
+    /// Request counters and the ambient injection inventory are refreshed separately.
+    compile_views: parking_lot::Mutex<HashMap<ScopeId, Arc<CachedCompileView>>>,
+    stub_revision: u64,
+    #[cfg(test)]
+    compile_view_bytes_hashed: std::sync::atomic::AtomicUsize,
     /// Incremental indexes over `bindings`' live set (prepared-import
     /// resolution, retained-import pairs, live module names, root-slot
     /// aliasing refcounts), kept in sync at every bind/evict site below so
@@ -164,6 +172,20 @@ pub struct PersistentSession {
     retired_stub_sources: Vec<Generation>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct CompileViewKey {
+    library: uuid::Uuid,
+    tip: Generation,
+    bindings: BindingScopeWitness,
+    stubs: u64,
+}
+
+struct CachedCompileView {
+    key: Option<CompileViewKey>,
+    view: SessionCompileView,
+    digest: [u8; 32],
+}
+
 /// The committed fact from moving one name into the persistent binding store.
 /// Callers use this rather than inferring success from a partly-mutated view.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -203,6 +225,10 @@ impl PersistentSession {
             session_table: DataConTable::new(),
             lib,
             bindings: BindingTable::new(),
+            compile_views: parking_lot::Mutex::new(HashMap::new()),
+            stub_revision: 1,
+            #[cfg(test)]
+            compile_view_bytes_hashed: std::sync::atomic::AtomicUsize::new(0),
             binding_index: BindingIndex::new(),
             val_gen: Generation(0),
             scopes: ScopeTree::new(),
@@ -223,7 +249,17 @@ impl PersistentSession {
     /// stub (a [`super::resident::HostCarrier`] mount), never an extract
     /// `.hi`. Idempotent.
     pub(super) fn mark_stub_generation(&mut self, generation: Generation) {
-        self.stub_generations.insert(generation.0);
+        if self.stub_generations.insert(generation.0) {
+            self.advance_stub_revision();
+        }
+    }
+
+    fn advance_stub_revision(&mut self) {
+        self.stub_revision = if self.stub_revision == 0 {
+            0
+        } else {
+            self.stub_revision.checked_add(1).unwrap_or(0)
+        };
     }
 
     fn is_stub_module(&self, module: SessionModule) -> bool {
@@ -626,6 +662,7 @@ impl PersistentSession {
                 && !self.binding_index.is_module_live(&module.module_name())
             {
                 self.stub_generations.remove(&module.gen().0);
+                self.advance_stub_revision();
                 self.retired_stub_sources.push(module.gen());
             }
             if !safe_to_release {
@@ -1083,10 +1120,61 @@ impl PersistentSession {
     /// `None` for a dead scope or a session without a declaration/include
     /// persistent binding store.
     pub fn compile_view_in(&self, scope: ScopeId) -> Option<SessionCompileView> {
+        let cached = self.scoped_compile_view_in(scope)?;
+        let mut view = cached.view.clone();
+        view.injected_values = self
+            .bindings
+            .live_modules()
+            .filter(|module| !self.is_stub_module(*module))
+            .collect();
+        view.next_value_generation = self.val_gen.next();
+        Some(view.canonicalize())
+    }
+
+    pub(super) fn compile_view_digest_in(&self, scope: ScopeId) -> Option<[u8; 32]> {
+        self.scoped_compile_view_in(scope).map(|view| view.digest)
+    }
+
+    fn scoped_compile_view_in(&self, scope: ScopeId) -> Option<Arc<CachedCompileView>> {
         if !self.scopes.is_live(scope) {
             return None;
         }
         let lib = self.lib.as_ref()?;
+        let key = self
+            .bindings
+            .scope_witness(&self.scopes, scope)
+            .filter(|_| self.stub_revision != 0)
+            .map(|bindings| CompileViewKey {
+                library: lib.compile_view_identity,
+                tip: lib.scope_tip(scope),
+                bindings,
+                stubs: self.stub_revision,
+            });
+        if let Some(key) = &key {
+            if let Some(cached) = self
+                .compile_views
+                .lock()
+                .get(&scope)
+                .filter(|cached| cached.key.as_ref() == Some(key))
+            {
+                return Some(cached.clone());
+            }
+        }
+        let view = self.build_scoped_compile_view(scope, lib);
+        let (digest, bytes_hashed) = view.admission_commitment();
+        #[cfg(test)]
+        self.compile_view_bytes_hashed
+            .fetch_add(bytes_hashed, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(test))]
+        let _ = bytes_hashed;
+        let cached = Arc::new(CachedCompileView { digest, view, key });
+        if cached.key.is_some() {
+            self.compile_views.lock().insert(scope, cached.clone());
+        }
+        Some(cached)
+    }
+
+    fn build_scoped_compile_view(&self, scope: ScopeId, lib: &SessionLib) -> SessionCompileView {
         let visible_entries = self
             .bindings
             .iter_current_in(&self.scopes, scope)
@@ -1096,27 +1184,15 @@ impl PersistentSession {
             .iter()
             .map(|(_, entry)| entry.module)
             .collect();
-        // A value interface may carry generated helpers beside its published
-        // binder. Keep the exact visible names so source compilation imports
-        // only bindings that reached the persistent binding store. This deliberately uses
-        // a tiny vector: `SessionModule` has identity equality, not an
-        // ordering contract, and a scope normally has few live modules.
-        let mut visible_value_names = Vec::<(SessionModule, Vec<String>)>::new();
+        // A generated interface can also carry unpublished helper binders.
+        let mut grouped = HashMap::<SessionModule, Vec<String>>::new();
         for (name, entry) in &visible_entries {
-            if let Some((_, names)) = visible_value_names
-                .iter_mut()
-                .find(|(module, _)| *module == entry.module)
-            {
-                names.push(name.0.clone());
-            } else {
-                visible_value_names.push((entry.module, vec![name.0.clone()]));
-            }
+            grouped
+                .entry(entry.module)
+                .or_default()
+                .push(name.0.clone());
         }
-        let injected_values = self
-            .bindings
-            .live_modules()
-            .filter(|module| !self.is_stub_module(*module))
-            .collect();
+        let visible_value_names = grouped.into_iter().collect();
         let reachable_values = self
             .bindings
             .scope_reachable_modules(&self.scopes, scope)
@@ -1128,31 +1204,28 @@ impl PersistentSession {
             .map(|(item, _)| item)
             .collect::<Vec<_>>();
         shadowing.extend(
-            self.bindings
-                .iter_current_in(&self.scopes, scope)
-                .into_iter()
+            visible_entries
+                .iter()
                 .map(|(name, _)| super::ExportItem::Value {
                     name: name.0.clone(),
                 }),
         );
-        Some(
-            SessionCompileView {
-                session: lib.session_id(),
-                lexical_scope: scope,
-                root: PathBuf::from(lib.include_dir()),
-                persistent_imports: self.workbench_imports_in(scope),
-                library: lib.current_module_in(scope),
-                visible_values,
-                visible_value_names,
-                injected_values,
-                reachable_values,
-                next_value_generation: self.val_gen.next(),
-                shadowing,
-                staged_hiding: Vec::new(),
-                exact_context: lib.log.joined_context_at(lib.scope_tip(scope)),
-            }
-            .canonicalize(),
-        )
+        SessionCompileView {
+            session: lib.session_id(),
+            lexical_scope: scope,
+            root: PathBuf::from(lib.include_dir()),
+            persistent_imports: self.workbench_imports_in(scope),
+            library: lib.current_module_in(scope),
+            visible_values,
+            visible_value_names,
+            injected_values: Vec::new(),
+            reachable_values,
+            next_value_generation: self.val_gen.next(),
+            shadowing,
+            staged_hiding: Vec::new(),
+            exact_context: lib.log.joined_context_at(lib.scope_tip(scope)),
+        }
+        .canonicalize()
     }
 
     /// Capture selected declaration heads from `scope` as an exact export
@@ -2745,6 +2818,7 @@ impl PersistentSession {
         let mut retired = Vec::new();
         let mut source_instances = Vec::new();
         for dead in &doomed {
+            self.compile_views.lock().remove(dead);
             let drained = self.bindings.drain_scope_with_sources(*dead);
             retired.extend(drained.bindings);
             source_instances.extend(drained.source_instances);
@@ -2846,6 +2920,118 @@ pub struct ScopeRetirement {
 #[cfg(test)]
 mod checkpoint_scope_tests {
     use super::*;
+
+    #[test]
+    fn scoped_view_commitment_reuses_unchanged_binding_owner_witness() {
+        use std::sync::atomic::Ordering;
+        for count in [1, 10, 100] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut session = publication_session(dir.path(), 410);
+            let public = session.mint_isolated_scope();
+            let scope = session.mint_detached_scope(public).unwrap();
+            for index in 0..count {
+                let entry = super::super::prepared::tests::rooted_publication_fixture(
+                    &mut session,
+                    &format!("value{index}"),
+                    410 + index,
+                );
+                session.bind_in(scope, entry).unwrap();
+            }
+            let cached = session.scoped_compile_view_in(scope).unwrap();
+            let hashed = session.compile_view_bytes_hashed.load(Ordering::Relaxed);
+            for _ in 0..100 {
+                assert_eq!(session.compile_view_digest_in(scope), Some(cached.digest));
+            }
+            assert_eq!(
+                session.compile_view_bytes_hashed.load(Ordering::Relaxed),
+                hashed
+            );
+            assert!(Arc::ptr_eq(
+                &session.scoped_compile_view_in(scope).unwrap(),
+                &cached
+            ));
+            eprintln!("scoped view bindings={count} initial_hashed_bytes={hashed} repeated_checks=100 additional_hashed_bytes=0");
+            session.retire_scope(scope);
+            assert!(!session.compile_views.lock().contains_key(&scope));
+        }
+    }
+
+    #[test]
+    fn scoped_view_refreshes_sibling_inventory_and_counter_without_staleness() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = publication_session(dir.path(), 411);
+        let public = session.mint_isolated_scope();
+        let private = session.mint_detached_scope(public).unwrap();
+        let cached = session.scoped_compile_view_in(private).unwrap();
+        let sibling = session.mint_isolated_scope();
+        let entry =
+            super::super::prepared::tests::rooted_publication_fixture(&mut session, "sibling", 411);
+        let module = entry.module;
+        session.bind_in(sibling, entry).unwrap();
+        session.set_val_gen(Generation(500));
+        let view = session.compile_view_in(private).unwrap();
+        assert_eq!(view.next_value_generation(), Generation(501));
+        assert!(view.injected_values().contains(&module));
+        assert!(view.visible_values().is_empty());
+        assert!(!view.reachable_values().contains(&module));
+        assert_eq!(view.admission_digest(), cached.digest);
+        assert!(Arc::ptr_eq(
+            &session.scoped_compile_view_in(private).unwrap(),
+            &cached
+        ));
+    }
+
+    #[test]
+    fn scoped_view_rebuilds_for_direct_hiding_declaration_and_library_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = publication_session(dir.path(), 412);
+        let entry =
+            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 412);
+        session.bind(entry).unwrap();
+        let scope = ScopeId::ROOT;
+        let before = session.scoped_compile_view_in(scope).unwrap();
+        // The mutation owner stamps even direct writes through bindings_mut.
+        session.bindings_mut().remove_current_in(scope, "value");
+        let hidden = session.scoped_compile_view_in(scope).unwrap();
+        assert!(!Arc::ptr_eq(&before, &hidden));
+        assert_ne!(before.digest, hidden.digest);
+        let turn = super::super::render::DeclTurn {
+            normalized: Default::default(),
+            external_imports: SourceImports::new(),
+            sources: Vec::new(),
+            workbench_imports: SourceImports::from_specs(["qualified Data.Set as Set"]),
+            items: Vec::new(),
+            value_types: BTreeMap::new(),
+            retracts: Vec::new(),
+            parent: None,
+        };
+        let generation = session.lib_mut().log.push(turn);
+        session.lib_mut().tips.insert(scope, generation);
+        let declared = session.scoped_compile_view_in(scope).unwrap();
+        assert_ne!(declared.digest, hidden.digest);
+        // Same session/path/tip counters cannot reuse another library's cache.
+        let mut replacement = SessionLib::open(
+            session.lib().session_id(),
+            session.lib().include_dir(),
+            super::super::ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        let generation = replacement.log.push(super::super::render::DeclTurn {
+            normalized: Default::default(),
+            external_imports: SourceImports::new(),
+            sources: Vec::new(),
+            workbench_imports: SourceImports::from_specs(["qualified Data.Map as Map"]),
+            items: Vec::new(),
+            value_types: BTreeMap::new(),
+            retracts: Vec::new(),
+            parent: None,
+        });
+        replacement.tips.insert(scope, generation);
+        *session.lib_mut() = replacement;
+        let replaced = session.scoped_compile_view_in(scope).unwrap();
+        assert!(!Arc::ptr_eq(&declared, &replaced));
+        assert_ne!(declared.digest, replaced.digest);
+    }
 
     #[test]
     fn immutable_binding_reinsertion_preserves_index_and_native_owner() {

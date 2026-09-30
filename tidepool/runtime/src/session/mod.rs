@@ -617,6 +617,8 @@ fn certified_recovery_export(
 /// monotonic generation, and the on-disk include tree.
 pub struct SessionLib {
     id: SessionId,
+    /// Local cache identity; replacing a library cannot reuse its old view.
+    compile_view_identity: uuid::Uuid,
     /// Root of the session include tree: gen modules live at
     /// `<root>/Tidepool/Session/Lib/G<g>.hs`. Placed on the GHC include path at
     /// highest precedence so they shadow any same-named module.
@@ -850,6 +852,7 @@ impl SessionLib {
         }
         Ok(SessionLib {
             id,
+            compile_view_identity: uuid::Uuid::new_v4(),
             root,
             log: DeclLog::new(),
             env,

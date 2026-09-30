@@ -74,6 +74,7 @@ pub struct RuntimeCellAdmission {
     _retained_scope: Arc<RuntimeLexicalScopeLease>,
     prefix_started: std::sync::atomic::AtomicBool,
     view: SessionCompileView,
+    view_digest: [u8; 32],
     visibility: PublicVisibilitySnapshot,
     reserved_generations: Vec<Generation>,
     initial_value_generation: Generation,
@@ -356,6 +357,7 @@ impl RuntimeCheckedItemAdmission {
 #[derive(Clone, Debug)]
 pub struct RuntimeCheckedPrefixSnapshot {
     view: SessionCompileView,
+    view_digest: [u8; 32],
     visibility: PublicVisibilitySnapshot,
     interfaces: CheckedInterfaces,
     _retained_scope: Arc<RuntimeLexicalScopeLease>,
@@ -418,9 +420,7 @@ impl RuntimeCheckedPrefix {
             || execution.item().admission_digest() != self.admission.digest()
             || session.public_visibility_snapshot_in(scope).as_ref()
                 != Some(&state.snapshot.visibility)
-            || session.compile_view_in(scope).is_none_or(|view| {
-                view.admission_digest() != state.snapshot.view.admission_digest()
-            })
+            || session.compile_view_digest_in(scope) != Some(state.snapshot.view_digest)
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
@@ -530,9 +530,7 @@ impl CheckedDisplayPlan {
             || !Arc::ptr_eq(self.proof.capture(), self.admission.execution())
             || session.public_visibility_snapshot_in(scope).as_ref()
                 != Some(&state.snapshot.visibility)
-            || session.compile_view_in(scope).is_none_or(|view| {
-                view.admission_digest() != state.snapshot.view.admission_digest()
-            })
+            || session.compile_view_digest_in(scope) != Some(state.snapshot.view_digest)
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
@@ -712,10 +710,14 @@ fn settle_checked_snapshot(
     let view = session
         .compile_view_in(scope)
         .ok_or(SessionError::DeadScope(scope))?;
+    let view_digest = session
+        .compile_view_digest_in(scope)
+        .ok_or(SessionError::DeadScope(scope))?;
     let visibility = session
         .public_visibility_snapshot_in(scope)
         .ok_or(SessionError::DeadScope(scope))?;
     let mut interfaces = state.snapshot.interfaces.clone();
+    let mut added_interface = None;
     if let Some((module, bytes)) = interface {
         let module = checked_value_module(module)?;
         let digest = interfaces.interface_digest(bytes);
@@ -732,7 +734,7 @@ fn settle_checked_snapshot(
                     },
                     digest,
                 );
-                state.interface_index.insert(module.gen.0, digest);
+                added_interface = Some((module.gen.0, digest));
             }
         }
     }
@@ -742,6 +744,7 @@ fn settle_checked_snapshot(
     let retained = session.retain_lexical_scope(scope)?;
     let snapshot = Arc::new(checked_snapshot(
         view,
+        view_digest,
         visibility,
         interfaces,
         compiler_prefix,
@@ -750,6 +753,9 @@ fn settle_checked_snapshot(
         display_settlement,
         state.snapshot.native_imports.clone(),
     ));
+    if let Some((generation, digest)) = added_interface {
+        state.interface_index.insert(generation, digest);
+    }
     state.snapshot = snapshot;
     Ok(())
 }
@@ -768,6 +774,7 @@ fn checked_value_module(name: &str) -> Result<tidepool_repr::SessionModule, Sess
 
 fn checked_snapshot(
     view: SessionCompileView,
+    view_digest: [u8; 32],
     visibility: PublicVisibilitySnapshot,
     interfaces: CheckedInterfaces,
     compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
@@ -785,7 +792,7 @@ fn checked_snapshot(
     frame(b"TidepoolRuntimeCheckedPrefix1");
     frame(&admission);
     frame(&(compiler_prefix.next_item() as u64).to_le_bytes());
-    frame(&view.admission_digest());
+    frame(&view_digest);
     frame(&visibility.epoch.to_le_bytes());
     frame(&visibility.declaration_tip.0.to_le_bytes());
     match visibility.machine_incarnation {
@@ -825,6 +832,7 @@ fn checked_snapshot(
     }
     RuntimeCheckedPrefixSnapshot {
         view,
+        view_digest,
         visibility,
         interfaces,
         _retained_scope: retained_scope,
@@ -976,9 +984,7 @@ impl PersistentSession {
             })
             || self.public_visibility_snapshot_in(scope).as_ref()
                 != Some(&state.snapshot.visibility)
-            || self.compile_view_in(scope).is_none_or(|view| {
-                view.admission_digest() != state.snapshot.view.admission_digest()
-            })
+            || self.compile_view_digest_in(scope) != Some(state.snapshot.view_digest)
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
@@ -987,10 +993,7 @@ impl PersistentSession {
         )])?;
         let snapshot = state.snapshot.clone();
         drop(state);
-        let generation = self
-            .compile_view_in(scope)
-            .ok_or(SessionError::DeadScope(scope))?
-            .next_value_generation();
+        let generation = self.val_gen().next();
         self.set_val_gen(generation);
         let retained_scope = self.retain_lexical_scope(scope)?;
         let mut digest = blake3::Hasher::new();
@@ -1040,19 +1043,14 @@ impl PersistentSession {
             || state.reservation.is_some()
             || self.public_visibility_snapshot_in(scope).as_ref()
                 != Some(&state.snapshot.visibility)
-            || self.compile_view_in(scope).is_none_or(|view| {
-                view.admission_digest() != state.snapshot.view.admission_digest()
-            })
+            || self.compile_view_digest_in(scope) != Some(state.snapshot.view_digest)
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
         let generation = if item.index() == 0 {
             prefix.admission.initial_value_generation
         } else {
-            let generation = self
-                .compile_view_in(scope)
-                .ok_or(SessionError::DeadScope(scope))?
-                .next_value_generation();
+            let generation = self.val_gen().next();
             self.set_val_gen(generation);
             generation
         };
@@ -1125,9 +1123,7 @@ impl PersistentSession {
             })
             || self.public_visibility_snapshot_in(scope).as_ref()
                 != Some(&state.snapshot.visibility)
-            || self.compile_view_in(scope).is_none_or(|view| {
-                view.admission_digest() != state.snapshot.view.admission_digest()
-            })
+            || self.compile_view_digest_in(scope) != Some(state.snapshot.view_digest)
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
@@ -1284,15 +1280,15 @@ impl PersistentSession {
                 .public_visibility_snapshot_in(admission.visibility.scope)
                 .as_ref()
                 != Some(&admission.visibility)
-            || self
-                .compile_view_in(admission.visibility.scope)
-                .is_none_or(|view| view.admission_digest() != admission.view.admission_digest())
+            || self.compile_view_digest_in(admission.visibility.scope)
+                != Some(admission.view_digest)
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
         let (interfaces, interface_index) = CheckedInterfaces::base(&admission.interfaces);
         let snapshot = Arc::new(checked_snapshot(
             admission.view.clone(),
+            admission.view_digest,
             admission.visibility.clone(),
             interfaces,
             first_item.initial_prefix()?,
@@ -1455,6 +1451,9 @@ impl PersistentSession {
         let view = self
             .compile_view_in(scope)
             .ok_or(SessionError::DeadScope(scope))?;
+        let view_digest = self
+            .compile_view_digest_in(scope)
+            .ok_or(SessionError::DeadScope(scope))?;
         // The lazy machine has one reserved lifetime identity before any
         // compiler offer captures it. Bootstrap adopts this identity rather
         // than invalidating another independently admitted private cell.
@@ -1514,7 +1513,7 @@ impl PersistentSession {
             None => frame(&[0]),
         }
         frame(&view.next_value_generation().0.to_le_bytes());
-        frame(&view.admission_digest());
+        frame(&view_digest);
         frame(&native_imports.commitment);
         if let Some(context) = view.exact_declaration_context() {
             frame(&context.semantic_sha256());
@@ -1550,6 +1549,7 @@ impl PersistentSession {
             _retained_scope: retained_scope,
             prefix_started: std::sync::atomic::AtomicBool::new(false),
             view,
+            view_digest,
             visibility,
             reserved_generations,
             initial_value_generation,

@@ -168,6 +168,10 @@ impl SessionCompileView {
     /// Canonical runtime view identity; rendered diagnostic observations never
     /// participate in compiler admission authority.
     pub(super) fn admission_digest(&self) -> [u8; 32] {
+        self.admission_commitment().0
+    }
+
+    pub(super) fn admission_commitment(&self) -> ([u8; 32], usize) {
         let items = |items: &[super::ExportItem]| {
             items.iter().map(|item| {
             serde_json::json!({"kind": match item { super::ExportItem::Value { .. } => "value", super::ExportItem::Type { .. } => "type", super::ExportItem::Class { .. } => "class" },
@@ -184,7 +188,7 @@ impl SessionCompileView {
             "hiding": self.staged_hiding.iter().map(|(module, hidden)| (module.module_name(), items(hidden))).collect::<Vec<_>>(),
             "exact": self.exact_context.as_ref().map(|context| context.semantic_sha256()),
         })).expect("runtime view contains serializable identities");
-        *blake3::hash(&bytes).as_bytes()
+        (*blake3::hash(&bytes).as_bytes(), bytes.len())
     }
 
     pub(super) fn canonicalize(mut self) -> Self {
