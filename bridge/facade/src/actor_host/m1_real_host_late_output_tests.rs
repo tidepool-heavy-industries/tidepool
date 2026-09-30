@@ -2,9 +2,11 @@ use super::*;
 use async_trait::async_trait;
 use harness::{
     engine::ResponsesTransport,
-    model::{AgentPath, CallId},
+    item::{Item, ToolKind},
+    model::{AgentPath, CallId, ConversationIdentity, OperationId},
     store::ClaimState,
     transport::{ResponsesRequest, ResponsesTurn, TransportError, Usage},
+    turn::JobOutput,
 };
 use serde_json::json;
 use std::sync::{
@@ -160,10 +162,9 @@ impl ResponsesTransport for PendingCellTransport {
                     )));
                 }
                 let output = output_for_call(&request).next().expect("count checked");
-                let serialized = output.0.to_string();
-                if !serialized.contains("42") {
+                if !cell_output_matches(output, CELL_CALL_ID, "42") {
                     return Err(TransportError::Stream(format!(
-                        "late Haskell output did not contain the real result: {serialized}"
+                        "late Haskell output did not retain the exact committed result: {output:?}"
                     )));
                 }
                 self.late_output.send(request).map_err(|_| {
@@ -181,14 +182,113 @@ impl ResponsesTransport for PendingCellTransport {
     }
 }
 
-async fn wait_for_cell_state(host: &RunningBrowserHost, computing: bool, timeout: Duration) {
-    tokio::time::timeout(timeout, async {
-        while host.campaign.actor.hosted_cell_computing() != computing {
+#[derive(Clone, Copy, Debug)]
+enum CellState {
+    Pending,
+    Completed,
+}
+
+fn resident_cell_operation(
+    host: &RunningBrowserHost,
+    target: &harness::embedding::HostIdentity,
+) -> OperationId {
+    let claims = host
+        .runtime
+        .store()
+        .claims(&CallId(CELL_CALL_ID.into()))
+        .expect("read admitted resident tool claim");
+    assert_eq!(
+        claims.len(),
+        1,
+        "one original resident operation was admitted"
+    );
+    let operation = claims[0].operation.clone();
+    assert_eq!(
+        operation.origin,
+        ConversationIdentity::Embedded {
+            run: target.run.clone(),
+            actor: target.actor.clone(),
+            incarnation: target.incarnation.clone(),
+        },
+        "resident operation must belong to the actual embedded host",
+    );
+    operation
+}
+
+async fn wait_for_cell_state(
+    host: &RunningBrowserHost,
+    operation: &OperationId,
+    expected: CellState,
+    timeout: Duration,
+) {
+    let result = tokio::time::timeout(timeout, async {
+        loop {
+            let store = host.runtime.store();
+            let claims = store
+                .claims(&operation.call)
+                .expect("read original resident tool claim");
+            assert_eq!(claims.len(), 1, "resident operation must keep one claim");
+            let claim = &claims[0];
+            assert_eq!(&claim.operation, operation, "original operation changed");
+            let persisted = store
+                .replay_output_operation(operation)
+                .expect("read original resident output");
+            let scheduler = host.runtime.scheduler();
+            let output = scheduler
+                .output(operation)
+                .await
+                .expect("original resident operation must remain in the scheduler");
+            match output {
+                None => {
+                    assert_eq!(claim.state, ClaimState::Pending);
+                    assert!(persisted.is_none(), "pending operation already has output");
+                    if matches!(expected, CellState::Pending) {
+                        assert!(
+                            scheduler
+                                .provider_completion(operation)
+                                .await
+                                .expect("read original provider completion")
+                                .is_none(),
+                            "pending operation's provider already completed",
+                        );
+                        return;
+                    }
+                }
+                Some(output @ JobOutput::Completed(Ok(_))) => {
+                    assert!(
+                        matches!(expected, CellState::Completed),
+                        "resident operation completed before the pending barrier",
+                    );
+                    assert!(
+                        cell_output_matches(
+                            &Item::tool_output(&operation.call, ToolKind::Custom, &output),
+                            CELL_CALL_ID,
+                            "42",
+                        ),
+                        "scheduler did not retain the exact committed resident result: {output:?}",
+                    );
+                    if claim.state == ClaimState::Settled {
+                        let persisted = persisted.expect("settled claim must retain its output");
+                        assert!(
+                            cell_output_matches(&persisted, CELL_CALL_ID, "42"),
+                            "persisted original output must match the completed result: {persisted:?}",
+                        );
+                        return;
+                    }
+                    assert_eq!(claim.state, ClaimState::Pending);
+                }
+                Some(output) => panic!("resident operation did not complete successfully: {output:?}"),
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .unwrap_or_else(|_| panic!("resident cell did not reach computing={computing}"));
+    .await;
+    if result.is_err() {
+        panic!(
+            "resident operation did not reach {expected:?}: {}",
+            host.cell_settlement_diagnostic(CELL_CALL_ID).await,
+        );
+    }
 }
 
 async fn submit_host_input(
@@ -286,7 +386,14 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
         .iter()
         .any(|item| item.0["call_id"] == CELL_CALL_ID));
     assert_eq!(output_for_call(&pending_request).count(), 0);
-    wait_for_cell_state(&host, true, Duration::from_secs(180)).await;
+    let operation = resident_cell_operation(&host, &target);
+    wait_for_cell_state(
+        &host,
+        &operation,
+        CellState::Pending,
+        Duration::from_secs(180),
+    )
+    .await;
     pending_reply
         .send(usage_turn(
             "m1-late-cell-trigger-compaction",
@@ -298,7 +405,13 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
         .await
         .expect("provider did not enter compaction")
         .expect("provider dropped compaction signal");
-    wait_for_cell_state(&host, true, Duration::from_secs(30)).await;
+    wait_for_cell_state(
+        &host,
+        &operation,
+        CellState::Pending,
+        Duration::from_secs(30),
+    )
+    .await;
     compaction_release_tx
         .send(())
         .expect("compaction request was no longer waiting");
@@ -313,7 +426,13 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
         .iter()
         .any(|item| item.0["call_id"] == CELL_CALL_ID));
     assert_eq!(output_for_call(&successor_request).count(), 0);
-    wait_for_cell_state(&host, true, Duration::from_secs(30)).await;
+    wait_for_cell_state(
+        &host,
+        &operation,
+        CellState::Pending,
+        Duration::from_secs(30),
+    )
+    .await;
     successor_reply
         .send(final_turn(
             "m1-late-cell-waiting",
@@ -321,7 +440,13 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
         ))
         .expect("Engine stopped before pending output could settle");
 
-    wait_for_cell_state(&host, false, Duration::from_secs(60)).await;
+    wait_for_cell_state(
+        &host,
+        &operation,
+        CellState::Completed,
+        Duration::from_secs(60),
+    )
+    .await;
     submit_host_input(
         &client,
         host.address,
