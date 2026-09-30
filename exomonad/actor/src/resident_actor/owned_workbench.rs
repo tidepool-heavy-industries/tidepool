@@ -646,6 +646,7 @@ where
                         .as_ref()
                         .expect("owned execution retains its original control")
                         .publication_decision();
+                    tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "private_begin_started", "workbench phase");
                     let private = Arc::new(
                         runner
                             .begin_private_execution(
@@ -655,6 +656,7 @@ where
                             )
                             .await?,
                     );
+                    tracing::info!(target: "exomonad_actor::workbench_phase", actor = %owned.state.effects.context.actor, phase = "private_begin_completed", "workbench phase");
                     owned.resources.retain_private(private.admission.clone())?;
                     owned.state.effects.public_visibility = Some(private.admitted_public.clone());
                     owned.state.effects.context.placement.lexical_scope = private.private_scope;
@@ -664,6 +666,7 @@ where
                         .expect("original workbench is installed once");
                     owned.workbench = Some(workbench.with_private_execution(private.clone()));
                     owned.private = Some(private);
+                    tracing::info!(target: "exomonad_actor::workbench_phase", actor = %owned.state.effects.context.actor, phase = "cell_prepare_started", "workbench phase");
                     let cell = match owned.state.request.cell_source() {
                         Some(source) => Some(
                             owned
@@ -678,6 +681,7 @@ where
                         ),
                         None => None,
                     };
+                    tracing::info!(target: "exomonad_actor::workbench_phase", actor = %owned.state.effects.context.actor, phase = "cell_prepare_completed", "workbench phase");
                     Ok::<_, ResidentActorWorkbenchError>(cell)
                 })
             },
@@ -1571,7 +1575,13 @@ where
                     .expect("publication retains original private admission")
                     .clone();
                 let context = owned.state.effects.context.clone();
-                Box::pin(async move { runner.publish_private_execution(context, private).await })
+                Box::pin(async move {
+                    let actor = context.actor;
+                    tracing::info!(target: "exomonad_actor::workbench_phase", actor = %actor, phase = "private_publish_started", "workbench phase");
+                    let published = runner.publish_private_execution(context, private).await;
+                    tracing::info!(target: "exomonad_actor::workbench_phase", actor = %actor, phase = "private_publish_completed", "workbench phase");
+                    published
+                })
             },
             move |behavior, _kernel, owned, published| {
                 use crate::resident_workbench::PrivateExecutionPublication;

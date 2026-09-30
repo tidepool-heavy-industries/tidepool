@@ -4654,6 +4654,7 @@ where
             .await
     }
 
+    #[tracing::instrument(target = "exomonad_actor::workbench_phase", skip_all, fields(actor = %context.actor, item = block.ordinal))]
     pub(crate) async fn begin_prepared_cell_item(
         &self,
         context: crate::ActorSessionContext,
@@ -4670,6 +4671,7 @@ where
         {
             let item = item.clone();
             let prefix = prefix.clone();
+            tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_item_admit_started", "workbench phase");
             let reservation = self
                 .access
                 .with_machine(context.clone(), move |session, _, _| {
@@ -4678,6 +4680,7 @@ where
                     })
                 })
                 .await?;
+            tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_item_admitted", "workbench phase");
             if reservation.item().kind()
                 == tidepool_toolchain::checked_cell::CheckedItemKind::Declaration
             {
@@ -4705,6 +4708,7 @@ where
             let verdict = verdict.clone();
             let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
             let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
+            tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_item_compile_started", "workbench phase");
             let ready = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                 tidepool_runtime::with_compiler_transaction_cancellable(cancellation, || {
                     compile_admitted_cell_item(
@@ -4717,6 +4721,7 @@ where
             }))
             .await
             .map_err(ResidentActorWorkbenchError::Join)??;
+            tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_item_compile_completed", "workbench phase");
             cancel_on_drop.0 = None;
             let ready = match ready {
                 CompiledBlock::Ready(ready) => *ready,
@@ -5645,6 +5650,7 @@ where
         .await
 }
 
+#[tracing::instrument(target = "exomonad_actor::workbench_phase", skip_all, fields(actor = %context.actor))]
 async fn render_checked_observation_off_checkout<H, O>(
     access: &ResidentMachineAccess<H, O>,
     context: &crate::ActorSessionContext,
@@ -5661,6 +5667,7 @@ where
     let include = protected.include.clone();
     let budget = request.budget;
     let presented = request.presented.clone();
+    tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_admit_started", "workbench phase");
     let admission = access
         .with_machine(context.clone(), move |session, _, _| {
             session
@@ -5676,8 +5683,10 @@ where
                 })
         })
         .await?;
+    tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_admit_completed", "workbench phase");
     let compile_admission = admission.clone();
     let compile_cancellation = cancellation.clone();
+    tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_compile_started", "workbench phase");
     let result = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
         tidepool_runtime::with_compiler_transaction_cancellable(compile_cancellation, || {
             let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
@@ -5691,6 +5700,7 @@ where
     }))
     .await
     .map_err(ResidentActorWorkbenchError::Join)??;
+    tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_compile_completed", "workbench phase");
     let TurnResult::Bind {
         bound, compiled, ..
     } = result
@@ -5723,6 +5733,7 @@ where
                 .map_err(ResidentActorWorkbenchError::Resident)
         })
         .await?;
+    tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_native_snapshot_completed", "workbench phase");
     let (pending, compiled) =
         crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
             let mut pending = pending;
@@ -5733,9 +5744,11 @@ where
         .map_err(ResidentActorWorkbenchError::Join)?;
     let compiled = compiled
         .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Prepared(error)))?;
+    tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_jit_completed", "workbench phase");
     let name = request.name.clone();
     access
         .with_machine(context.clone(), move |session, _, _| {
+            tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_run_started", "workbench phase");
             let [page, _, alias] = bound.as_ref();
             let bundle = session
                 .revalidate_and_run_display_bundle(pending, compiled, page, alias)
@@ -5745,6 +5758,7 @@ where
                         "checked display native install became stale".into(),
                     )
                 })?;
+            tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_run_completed", "workbench phase");
             decode_display_bundle(&bundle, &name)
         })
         .await
@@ -6237,6 +6251,7 @@ where
 
 /// [`begin_ready_block_split`] up to the step its run produced, with an
 /// observation display still unrendered.
+#[tracing::instrument(target = "exomonad_actor::workbench_phase", skip_all, fields(actor = %context.actor, item = block.ordinal))]
 async fn run_ready_block_split<H, O>(
     access: &ResidentMachineAccess<H, O>,
     context: crate::ActorSessionContext,
@@ -6307,6 +6322,7 @@ where
     let protected = protected_observation(&compiled_turn, &bound)?;
 
     'split: for install_attempt in 1..=CHEAP_RETRY_ATTEMPTS {
+        tracing::info!(target: "exomonad_actor::workbench_phase", install_attempt, phase = "native_item_snapshot_started", "workbench phase");
         let code = cloned_turn_code(&compiled_turn);
         let mode = pending_mode_for(&bound, generation, &observation);
         let attempt = access
@@ -6324,6 +6340,7 @@ where
             PreparedSnapshotAttempt::Bootstrap => break 'split,
             PreparedSnapshotAttempt::Ready(pending) => pending,
         };
+        tracing::info!(target: "exomonad_actor::workbench_phase", install_attempt, phase = "native_item_snapshot_completed", "workbench phase");
 
         // No checkout held here: the Cranelift compile runs concurrently
         // with every other actor's turn against this session.
@@ -6338,6 +6355,7 @@ where
         let compiled_program = compiled_program.map_err(|error| {
             ResidentActorWorkbenchError::Resident(ResidentError::Prepared(error))
         })?;
+        tracing::info!(target: "exomonad_actor::workbench_phase", install_attempt, phase = "native_item_jit_completed", "workbench phase");
 
         let finish_bound = bound.clone();
         let finish_warnings = warnings.clone();
@@ -6348,6 +6366,7 @@ where
         let finish_source = turn_source.clone();
         let step = access
             .with_machine(context.clone(), move |session, context, _| {
+                tracing::info!(target: "exomonad_actor::workbench_phase", install_attempt, phase = "native_item_run_started", "workbench phase");
                 match session.revalidate_and_run_prepared(*pending, compiled_program) {
                     Ok(Some(outcome)) => finish_bind_step(
                         session,
@@ -6368,6 +6387,7 @@ where
                 }
             })
             .await?;
+        tracing::info!(target: "exomonad_actor::workbench_phase", install_attempt, phase = "native_item_run_completed", "workbench phase");
         if let Some(step) = step {
             return Ok(step);
         }
@@ -6388,6 +6408,7 @@ where
     // Single checkout, exactly as `begin_ready_block`'s Bind arm.
     access
         .with_machine(context, move |session, context, _| {
+            tracing::info!(target: "exomonad_actor::workbench_phase", phase = "native_item_bootstrap_started", "workbench phase");
             let outcome = match bound.as_slice() {
                 [] => session
                     .run_with_sites("actor_interactive_discard_bind", compiled_turn.into_code()),
@@ -6413,6 +6434,7 @@ where
                     generation,
                 ),
             };
+            tracing::info!(target: "exomonad_actor::workbench_phase", phase = "native_item_bootstrap_completed", "workbench phase");
             finish_bind_step(
                 session,
                 context,

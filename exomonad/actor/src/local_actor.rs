@@ -1701,6 +1701,7 @@ fn spawn_workbench_task<B: KernelBehavior>(
         .expect("admitted task")
         .step
         .clone();
+    tracing::info!(target: "exomonad_actor::workbench_phase", ?step, phase = "task_dispatched", "workbench phase");
     let myself = myself.clone();
     let worker = match dispatch {
         WorkbenchDispatch::Owned(task) => match task.into_execution() {
@@ -1799,6 +1800,7 @@ async fn complete_workbench<B: KernelBehavior>(
         .pending_workbench
         .take()
         .expect("matching pending workbench");
+    tracing::info!(target: "exomonad_actor::workbench_phase", ?step, phase = "task_completion_admitted", "workbench phase");
     let outcome = match outcome.downcast::<WorkbenchTaskOutcome<B>>() {
         Ok(outcome) => *outcome,
         Err(_) => {
@@ -1961,7 +1963,8 @@ fn settle_pending_workbench(pending: PendingWorkbench, reply: crate::KernelWorkb
         control.settle(reply.clone());
         pending.hosted_cell.complete(&control);
     }
-    pending.reply.send(reply).ok();
+    let delivered = pending.reply.send(reply).is_ok();
+    tracing::info!(target: "exomonad_actor::workbench_phase", step = ?pending.step, delivered, phase = "reply_settled", "workbench phase");
 }
 
 fn retain_unconfirmed_exit(terminal: &RetainedActorExit, actor: ActorRef, detail: &str) {
