@@ -92,12 +92,80 @@ impl WorkbenchCompilationAuthority {
     }
 }
 
+/// Issued only from the actor owner's actual descriptor and selected plane.
+/// It is retained with the original private execution, never rebuilt at resume.
+pub(crate) struct WorkbenchPublicOwner {
+    actor: ActorRef,
+    placement: crate::ActorPlacement,
+    durable: Option<tidepool_runtime::session::RecoveryPublicOwner>,
+}
+
+impl WorkbenchPublicOwner {
+    pub(super) fn issue(
+        context: &ActorSessionContext,
+        descriptor: &ActorDescriptor,
+        durable: Option<tidepool_runtime::session::RecoveryPublicOwner>,
+    ) -> Result<Arc<Self>, KernelInvocationFailure> {
+        let refuse = |detail: &str| KernelInvocationFailure::Rejected {
+            actor: context.actor,
+            detail: detail.into(),
+        };
+        if context.placement != descriptor.placement() {
+            return Err(refuse(
+                "publication owner differs from the admitted actor placement",
+            ));
+        }
+        match (descriptor.persistence_policy(), &durable) {
+            (crate::ActorPersistencePolicy::Ephemeral, None) => {}
+            (crate::ActorPersistencePolicy::Durable, Some(owner)) => {
+                let expected = descriptor.actor_path().and_then(|path| {
+                    tidepool_runtime::session::RecoveryPublicOwner::new(
+                        path,
+                        context.actor.incarnation.0,
+                    )
+                });
+                if expected.as_ref() != Some(owner) {
+                    return Err(refuse(
+                        "durable publication owner differs from canonical actor identity",
+                    ));
+                }
+            }
+            _ => {
+                return Err(refuse(
+                    "publication plane differs from requested persistence",
+                ))
+            }
+        }
+        Ok(Arc::new(Self {
+            actor: context.actor,
+            placement: context.placement,
+            durable,
+        }))
+    }
+
+    pub(crate) fn durable(&self) -> Option<&tidepool_runtime::session::RecoveryPublicOwner> {
+        self.durable.as_ref()
+    }
+
+    pub(crate) fn matches_context(&self, context: &ActorSessionContext) -> bool {
+        self.actor == context.actor && self.placement == context.placement
+    }
+
+    pub(super) fn actor(&self) -> ActorRef {
+        self.actor
+    }
+    pub(super) fn placement(&self) -> crate::ActorPlacement {
+        self.placement
+    }
+}
+
 struct OwnedExecution<H, O> {
     state: WorkbenchExecutionState,
     workbench: crate::ResidentActorWorkbench<H, O>,
     timing: Option<crate::call_timing::CallScope>,
     cleanup: crate::resident_workbench::ParkedHoleAbortGuard,
     _compilation_authority: Arc<WorkbenchCompilationAuthority>,
+    _public_owner: Arc<WorkbenchPublicOwner>,
 }
 
 impl<H, O> OwnedExecution<H, O> {
@@ -153,6 +221,7 @@ where
             context,
             request,
             compilation_authority,
+            public_owner,
             capture,
             control,
             invocation,
@@ -227,6 +296,7 @@ where
             timing: Some(timing),
             cleanup,
             _compilation_authority: compilation_authority,
+            _public_owner: public_owner,
         };
         let runner = self.environment.runner.clone();
         WorkbenchDispatch::Owned(OwnedWorkbenchTask::new(Box::pin(async move {
