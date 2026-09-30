@@ -147,7 +147,7 @@ impl RoutingFixture {
             &self.nodes,
             &self.live,
             &self.projection,
-            &self.conversations,
+            |actor| self.conversations.get(&actor).cloned(),
             &self.lifecycle,
         )
         .await

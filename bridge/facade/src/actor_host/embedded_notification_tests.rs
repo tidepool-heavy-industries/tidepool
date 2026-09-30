@@ -229,8 +229,7 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
         Some(conversation.clone()),
     )
     .unwrap();
-    let (lifecycle, _lifecycle_rx) =
-        tokio::sync::watch::channel((Some(actor), harness::server::HostActorLifecycle::Waiting));
+    let (lifecycle, _lifecycle_rx) = super::embedded_projection::LifecycleSender::channel();
     let runtime = Arc::clone(&service.runtime);
     let engine_settings = settings.clone();
     let engine_transport = transport.clone();

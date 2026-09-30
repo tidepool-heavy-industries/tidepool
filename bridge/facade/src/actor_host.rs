@@ -1344,7 +1344,7 @@ async fn dispatch_embedded_browser_command(
     nodes: &[exomonad_actor::ActorGraphNode],
     live: &BTreeSet<ActorRef>,
     projection: &embedded_projection::EmbeddedProjection,
-    conversations: &HashMap<ActorRef, Arc<harness::embedding::Conversation>>,
+    conversation_for: impl Fn(ActorRef) -> Option<Arc<harness::embedding::Conversation>>,
     lifecycle: &embedded_projection::LifecycleSender,
 ) -> harness::server::CommandReceiptOutcome {
     let route = |target: Option<harness::embedding::HostIdentity>, reason: String| {
@@ -1383,7 +1383,7 @@ async fn dispatch_embedded_browser_command(
     if !is_live {
         return route(Some(target), "target actor is no longer live".into());
     }
-    let Some(conversation) = conversations.get(&actor) else {
+    let Some(conversation) = conversation_for(actor) else {
         return route(Some(target), "target has no live model conversation".into());
     };
 
@@ -4442,7 +4442,9 @@ async fn run_interactive_applications(
                     &nodes,
                     &embedded_live,
                     &embedded_projection,
-                    &embedded_conversations,
+                    |actor| embedded_conversations.get(&actor)
+                        .filter(|binding| binding.is_live())
+                        .and_then(|binding| binding.conversation.clone()),
                     &embedded_lifecycle_tx,
                 )
                 .await;
