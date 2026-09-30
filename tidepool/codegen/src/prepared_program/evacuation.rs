@@ -321,6 +321,27 @@ impl PreparedMachine<'_> {
         outcome
     }
 
+    /// Distinct imported identities that importing this parcel would bind.
+    /// Already installed instances preserve their existing bindings and add
+    /// no identities. This read-only query uses the importer's exact instance
+    /// selection so a session can refuse occupied IDs before native mutations.
+    #[must_use]
+    pub fn pending_parcel_import_identities(&self, parcel: &Parcel) -> Vec<SymbolIdentity> {
+        self.missing_parcel_images(&parcel.images)
+            .into_iter()
+            .flat_map(|entry| entry.imports.iter().map(|(identity, _)| identity.clone()))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    fn missing_parcel_images<'p>(&self, images: &'p [ParcelImage]) -> Vec<&'p ParcelImage> {
+        images
+            .iter()
+            .filter(|entry| !self.has_instance(&entry.instance))
+            .collect()
+    }
+
     /// Import a parcel exported by another machine: its objects become one
     /// new old-space arena, its payloads become ledger allocations, every
     /// image it names that this machine lacks is installed (bound to the
@@ -333,6 +354,9 @@ impl PreparedMachine<'_> {
     /// exactly as it would on the machine the parcel came from. An identity
     /// belonging to an image that was already installed here contributes
     /// nothing (its value already had a live root before this import).
+    ///
+    /// [`Self::pending_parcel_import_identities`] exposes the exact identities
+    /// that require new session bindings before this method mutates the machine.
     pub fn import_parcel(
         &mut self,
         parcel: Parcel,
@@ -350,10 +374,7 @@ impl PreparedMachine<'_> {
                 DescriptorTraceError::TaggedNull { value: 0 },
             ));
         }
-        let missing: Vec<&ParcelImage> = images
-            .iter()
-            .filter(|entry| !self.has_instance(&entry.instance))
-            .collect();
+        let missing = self.missing_parcel_images(&images);
         let new_constructors: Vec<&ParcelConstructor> = constructors
             .iter()
             .filter(|entry| {

@@ -4536,10 +4536,31 @@ mod tests {
         )
         .expect("right installs an unrelated base image");
         let before = right.residency().programs;
-        let (arrived, _imports) = right
+        let pending = right.pending_parcel_import_identities(&parcel);
+        assert_eq!(pending, vec![thunk_to_closure_identity()]);
+        assert!(left.pending_parcel_import_identities(&parcel).is_empty());
+        assert_eq!(right.residency().programs, before);
+        let (arrived, imports) = right
             .import_parcel(parcel, RealmId::ROOT)
             .expect("right imports, installing both images");
+        assert_eq!(
+            imports
+                .iter()
+                .map(|(identity, _)| identity.clone())
+                .collect::<Vec<_>>(),
+            pending
+        );
         assert_eq!(right.residency().programs, before + 2);
+        let repeated = left
+            .export_parcel(entry)
+            .expect("export the same instances again");
+        assert!(right.pending_parcel_import_identities(&repeated).is_empty());
+        let (repeated_value, repeated_imports) = right
+            .import_parcel(repeated, RealmId::ROOT)
+            .expect("already installed instances retain their bindings");
+        assert!(repeated_imports.is_empty());
+        assert_eq!(right.residency().programs, before + 2);
+        assert!(right.release(repeated_value));
         // Call the imported entry through a caller that takes a closure.
         let call_site =
             install_linked(&mut right, &closure_caller_program(), ImportBindings::new())
