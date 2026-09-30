@@ -114,6 +114,27 @@ sh_test(
     visibility = ["PUBLIC"],
 )
 
+# The test compiles each original family producer once and shares its immutable
+# axioms across conflict cases. --benchmark measures only pure validation.
+haskell_binary(
+    name = "family_consistency_test",
+    srcs = {"Main.hs": "test-family-consistency/Main.hs"},
+    deps = [":tidepool_extract_internal"],
+    compiler_flags = extractor_binary_flags("-package", "process"),
+    linker_flags = extractor_binary_link_flags() + ["-package", "process", "-rtsopts", "-with-rtsopts=-T"],
+    visibility = ["PUBLIC"],
+)
+
+sh_test(
+    name = "family_consistency",
+    test = ":family_consistency_test",
+    env = {
+        "PATH": read_root_config("nix", "ghc_bin") + ":" + read_root_config("nix", "action_path"),
+        "TIDEPOOL_GHC_LIBDIR": read_root_config("nix", "ghc_libdir"),
+    },
+    visibility = ["PUBLIC"],
+)
+
 # Native parity for the accepted Cabal SOURCE SCC product-reuse suite. The
 # shell test stages its four fixture sources at the relative paths the test
 # executable consumes, then runs the same cold/resident/fresh-worker cases.

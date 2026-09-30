@@ -409,3 +409,20 @@ test-suite prepared-recovery-test
     tidepool-extract-internal
   default-language: GHC2024
   ghc-options:      -Wall
+
+-- Original GHC axioms are compiled once, then shared by semantic cases and
+-- optional pure-validation measurements: cabal run family-consistency-test
+-- -- --benchmark +RTS -T. Compiler startup/loading is outside the measurement.
+test-suite family-consistency-test
+  type:             exitcode-stdio-1.0
+  main-is:          Main.hs
+  hs-source-dirs:   test-family-consistency
+  build-depends:
+    base >= 4.20 && < 5,
+    directory,
+    filepath,
+    process,
+    ghc >= 9.12 && < 9.13,
+    tidepool-extract-internal
+  default-language: GHC2024
+  ghc-options:      -Wall -rtsopts -with-rtsopts=-T

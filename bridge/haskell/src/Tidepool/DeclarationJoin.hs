@@ -46,6 +46,7 @@ import GHC.Tc.Utils.Monad (initIfaceCheck)
 import GHC.Types.Avail (AvailInfo(..), availName, availNames)
 import GHC.Types.Name
 import GHC.Types.TyThing (TyThing(..))
+import GHC.Types.Unique.Set (addOneToUniqSet, elementOfUniqSet, emptyUniqSet)
 import GHC.Unit.Module (Module, moduleName, moduleNameString, moduleUnit, stableModuleCmp, mkModule, mkModuleName)
 import GHC.Unit.Module.Env (mkModuleSet, emptyModuleSet)
 import GHC.Unit.Module.Deps (Dependencies(..), noDependencies)
@@ -225,7 +226,17 @@ validateRetainedFamilyInstances :: FamInstEnv -> [FamInst] -> JoinDecision
 validateRetainedFamilyInstances packages retained = validateInstances
   (InstEnvs emptyInstEnv emptyInstEnv emptyModuleSet)
   (packages, extendFamInstEnvList emptyFamInstEnv
-    (nubBy (\a b -> fi_axiom a == fi_axiom b) retained))
+    (uniqueFamilyInstances retained))
+
+-- CoAxiom equality is equality of its Unique. Preserve the first original
+-- instance without comparing it to every preceding retained axiom.
+uniqueFamilyInstances :: [FamInst] -> [FamInst]
+uniqueFamilyInstances = go emptyUniqSet
+  where
+    go _ [] = []
+    go seen (family : rest)
+      | fi_axiom family `elementOfUniqSet` seen = go seen rest
+      | otherwise = family : go (addOneToUniqSet seen (fi_axiom family)) rest
 
 normalizeExport :: DeclarationExport -> DeclarationExport
 normalizeExport e = e { exportChildren = sort (exportChildren e) }
@@ -253,7 +264,7 @@ interfaceInventory hsc iface = pure $ do
       [instance_ | hmi <- hmis, instance_ <- instEnvElts (md_insts (hm_details hmi))]
     localClasses = [instance_ | instance_ <- implementationClasses,
       exportIdentity (is_dfun_name instance_) `elem` map (exportIdentity . ifDFun) (mi_insts iface)]
-    localFamilies = nubBy (\a b -> fi_axiom a == fi_axiom b)
+    localFamilies = uniqueFamilyInstances
       [family | hmi <- hmis, family <- md_fam_insts (hm_details hmi),
       exportIdentity (coAxiomName (fi_axiom family)) `elem`
         map (exportIdentity . ifFamInstAxiom) (mi_fam_insts iface)]
@@ -335,11 +346,12 @@ validateInstances classes families
     allFamilies = famInstEnvElts (fst families) ++ famInstEnvElts (snd families)
     familyConflicts = [(a,b) | a <- allFamilies
       , b <- lookupFamInstEnvConflicts families a, fi_axiom a /= fi_axiom b]
+    -- GHC's injectiveBranches accepts a branch compared with itself, including
+    -- polymorphic branches. Keeping self changes no conflict result; GHC's
+    -- per-family lookup can reuse the complete package/home indices directly.
     injectivityConflicts = [branch | a <- allFamilies
       , Injective flags <- [tyConInjectivityInfo (famInstTyCon a)]
-      , let others = extendFamInstEnvList emptyFamInstEnv
-              (filter (\b -> fi_axiom a /= fi_axiom b) allFamilies)
-      , branch <- lookupFamInstEnvInjectivityConflicts flags (emptyFamInstEnv, others) a]
+      , branch <- lookupFamInstEnvInjectivityConflicts flags families a]
 
 -- | The runtime owns the ordered merge and opaque public snapshot. Compiler
 -- validation certifies that manifest without deriving a second merge policy.
