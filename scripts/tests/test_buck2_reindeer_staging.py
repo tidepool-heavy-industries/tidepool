@@ -210,7 +210,7 @@ else:
         self.assertEqual(result.returncode, 0, result.stderr)
         buck = (self.root / "third-party/rust/BUCK").read_text()
         self.assertNotIn("git_fetch(", buck)
-        self.assertIn('load("root//toolchains:tidepool.bzl", "nix_directory")', buck)
+        self.assertIn('load("@toolchains//:tidepool.bzl", "nix_directory")', buck)
         self.assertIn('name = "harness-source",', buck)
         self.assertIn('store_path = read_root_config("nix", "matched_harness_source")', buck)
         self.assertIn('name = "harness-source.git",', buck)
@@ -225,7 +225,7 @@ else:
         self.assertEqual(result.returncode, 0, result.stderr)
         buck = (self.root / "third-party/rust/BUCK").read_text()
         self.assertIn("git_fetch(", buck)
-        self.assertNotIn('load("root//toolchains:tidepool.bzl", "nix_directory")', buck)
+        self.assertNotIn('load("@toolchains//:tidepool.bzl", "nix_directory")', buck)
 
     def test_source_lock_mismatch_refuses_without_publishing(self):
         self.prepare_local_harness_fixture()

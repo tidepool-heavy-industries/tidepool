@@ -154,7 +154,7 @@ def use_local_harness_source(buck):
         raise SystemExit('Cannot select matched harness source: generated harness crate root layout changed')
     if f'srcs = [":{fetch_name}"]' not in buck:
         raise SystemExit('Cannot select matched harness source: generated harness target does not reference its git_fetch source')
-    if 'load("root//toolchains:tidepool.bzl", "nix_directory")' in buck:
+    if 'load("@toolchains//:tidepool.bzl", "nix_directory")' in buck:
         raise SystemExit('Cannot select matched harness source: generated BUCK already has a local source rule')
 
     rendered = (
@@ -174,7 +174,7 @@ def use_local_harness_source(buck):
     buck = buck.replace(
         'load("@prelude//rust:cargo_package.bzl", "cargo")',
         'load("@prelude//rust:cargo_package.bzl", "cargo")\n'
-        'load("root//toolchains:tidepool.bzl", "nix_directory")',
+        'load("@toolchains//:tidepool.bzl", "nix_directory")',
         1,
     )
     return buck, fetch_name
