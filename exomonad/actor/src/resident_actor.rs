@@ -16,6 +16,7 @@ mod owned_workbench;
 #[cfg(test)]
 mod provider_owner_tests;
 mod replacement;
+mod request_wait;
 mod status_rendering;
 mod workbench_ledger;
 
@@ -5309,7 +5310,7 @@ where
                     .control()
                     .unwrap_or_else(crate::WorkbenchExecutionControl::untracked);
                 control.arm_sleep();
-                Box::pin(owned_workbench::await_watch(
+                Box::pin(request_wait::await_watch(
                     self.environment.clone(),
                     kernel.clone(),
                     context.clone(),

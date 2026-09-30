@@ -956,7 +956,7 @@ where
 {
     let result = match wait {
         OwnedWorkbenchWait::Watch(poll) => {
-            await_watch(environment, kernel, context, control, poll).await
+            request_wait::await_watch(environment, kernel, context, control, poll).await
         }
         OwnedWorkbenchWait::Sleep {
             continuation,
@@ -1164,52 +1164,6 @@ where
                 control.finish_sleep();
                 outcome
             }
-        }
-    }
-}
-
-pub(super) async fn await_watch<H, O>(
-    environment: ResidentEnvironment<H, O>,
-    kernel: KernelContext,
-    context: ActorSessionContext,
-    control: Arc<crate::WorkbenchExecutionControl>,
-    poll: crate::request_effect::WatchPoll,
-) -> Result<ResidentOutcome, ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send + 'static,
-    O: OutputSink + Sync + 'static,
-{
-    tracing::debug!(actor = ?context.actor, watch = ?poll.watch, "owned watch awaiting settlement");
-    let waiting = environment.requests.await_watch(context.actor, poll.watch);
-    tokio::pin!(waiting);
-    tokio::select! {
-        observation = &mut waiting => {
-            tracing::debug!(actor = ?context.actor, watch = ?poll.watch, observation = ?observation,
-                "owned watch received settlement");
-            if control.claim_expiry() {
-                let observation = observation.map(|observation| watch_pending_observation(&environment, poll.watch, observation));
-                let outcome = environment.runner.resume_watch_observation(context.clone(), poll.continuation, observation).await;
-                control.finish_sleep();
-                outcome
-            } else {
-                let (outcome, consumed) = environment.runner.abort_live(context.clone(), poll.continuation,
-                    "awaitWatch interrupted by delivered input".into()).await;
-                if consumed { control.acknowledge_cancellation(); }
-                outcome
-            }
-        }
-        () = control.wait_for_cancellation() => {
-            let (outcome, consumed) = environment.runner.abort_live(context.clone(), poll.continuation,
-                "awaitWatch interrupted by delivered input".into()).await;
-            if consumed { control.acknowledge_cancellation(); }
-            outcome
-        }
-        terminal = kernel.wait_requested_shutdown() => {
-            control.request_cancellation();
-            let (outcome, consumed) = environment.runner.abort_live(context.clone(), poll.continuation,
-                format!("awaitWatch interrupted by actor retirement: {}", terminal.summary)).await;
-            if consumed { control.acknowledge_cancellation(); }
-            outcome
         }
     }
 }
