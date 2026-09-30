@@ -1,7 +1,6 @@
 //! Exact actor terminal observation retains the original native continuation.
 
 use super::*;
-use std::future::Future;
 
 enum ExitWaitEvent {
     Observed(ActorTerminal),
@@ -12,18 +11,19 @@ enum ExitWaitEvent {
 async fn wait_exit_event(
     target: &crate::RetainedActorExit,
     control: &Arc<crate::WorkbenchExecutionControl>,
-    retirement: impl Future<Output = ActorTerminal>,
+    retirement: &crate::RetainedActorExit,
 ) -> ExitWaitEvent {
     tokio::select! {
+        biased;
+        terminal = retirement.wait_requested_shutdown() => ExitWaitEvent::Retired(terminal),
+        () = control.wait_for_cancellation() => ExitWaitEvent::Cancelled,
         terminal = target.wait() => {
-            if control.claim_expiry() {
-                ExitWaitEvent::Observed(terminal)
-            } else {
-                ExitWaitEvent::Cancelled
+            match retirement.claim_before_shutdown(|| control.claim_expiry()) {
+                Ok(true) => ExitWaitEvent::Observed(terminal),
+                Ok(false) => ExitWaitEvent::Cancelled,
+                Err(terminal) => ExitWaitEvent::Retired(terminal),
             }
         }
-        () = control.wait_for_cancellation() => ExitWaitEvent::Cancelled,
-        terminal = retirement => ExitWaitEvent::Retired(terminal),
     }
 }
 
@@ -39,8 +39,7 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    let reason = match wait_exit_event(&terminal, &control, kernel.wait_requested_shutdown()).await
-    {
+    let reason = match wait_exit_event(&terminal, &control, &kernel.retained_exit()).await {
         ExitWaitEvent::Observed(terminal) => {
             let outcome = environment
                 .runner

@@ -1,7 +1,6 @@
 use super::*;
 use crate::request::{RequestId, ResponseFailure};
 use crate::{ActorExitKind, ActorId, ActorRef, ActorTerminal, Incarnation, RetainedActorExit};
-use std::future::pending;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -12,6 +11,7 @@ struct Fixture {
     request: RequestId,
     watch: WatchId,
     control: Arc<crate::WorkbenchExecutionControl>,
+    retirement: RetainedActorExit,
 }
 
 impl Fixture {
@@ -33,6 +33,7 @@ impl Fixture {
             request,
             watch,
             control,
+            retirement: RetainedActorExit::new(),
         }
     }
 
@@ -51,7 +52,7 @@ impl Fixture {
                 self.owner,
                 self.watch,
                 &self.control,
-                pending(),
+                &self.retirement,
             ),
         )
         .await
@@ -139,6 +140,25 @@ async fn cancellation_before_ready_never_resumes_even_when_both_wakes_are_ready(
 }
 
 #[tokio::test]
+async fn prior_retirement_wins_when_watch_settlement_is_also_ready() {
+    let fixture = Fixture::new();
+    let terminal = ActorTerminal {
+        kind: ActorExitKind::Cancelled,
+        summary: "owner retirement before ready watch".into(),
+    };
+    fixture.retirement.request_shutdown(terminal.clone());
+    fixture.complete();
+    assert!(
+        matches!(fixture.wait().await, WatchWaitEvent::Retired(observed) if observed == terminal)
+    );
+    assert!(!fixture.control.cancellation_requested());
+    assert!(matches!(
+        fixture.registry.observe_watch(fixture.owner, fixture.watch),
+        Ok(WatchObservation::Ready(_))
+    ));
+}
+
+#[tokio::test]
 async fn retirement_preserves_the_owner_terminal_without_claiming_or_acknowledging() {
     let fixture = Fixture::new();
     let retirement = RetainedActorExit::new();
@@ -147,7 +167,7 @@ async fn retirement_preserves_the_owner_terminal_without_claiming_or_acknowledgi
         fixture.owner,
         fixture.watch,
         &fixture.control,
-        retirement.wait_requested_shutdown(),
+        &retirement,
     ));
     assert!(matches!(futures_util::poll!(&mut wait), Poll::Pending));
     let terminal = ActorTerminal {
@@ -198,7 +218,7 @@ async fn stale_watch_and_replacement_incarnation_remain_typed_refusals() {
         replacement,
         fixture.watch,
         &replacement_control,
-        pending(),
+        &fixture.retirement,
     )
     .await;
     assert!(matches!(

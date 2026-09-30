@@ -1,6 +1,5 @@
 use super::*;
 use crate::{ActorExitKind, ActorTerminal, RetainedActorExit};
-use std::future::{pending, ready};
 use std::task::Poll;
 
 fn control() -> Arc<crate::WorkbenchExecutionControl> {
@@ -18,11 +17,12 @@ fn terminal() -> ActorTerminal {
 
 #[tokio::test(start_paused = true)]
 async fn timer_expiry_claims_the_original_control_once() {
+    let idle_owner = crate::RetainedActorExit::new();
     let control = control();
     let mut wait = Box::pin(wait_sleep_event(
         &control,
         Duration::from_secs(5),
-        pending(),
+        &idle_owner,
     ));
     assert!(matches!(futures_util::poll!(&mut wait), Poll::Pending));
     tokio::time::advance(Duration::from_secs(5)).await;
@@ -34,11 +34,12 @@ async fn timer_expiry_claims_the_original_control_once() {
 
 #[tokio::test(start_paused = true)]
 async fn cancellation_before_expiry_wins_when_both_wakes_are_ready() {
+    let idle_owner = crate::RetainedActorExit::new();
     let control = control();
     let mut wait = Box::pin(wait_sleep_event(
         &control,
         Duration::from_secs(5),
-        pending(),
+        &idle_owner,
     ));
     assert!(matches!(futures_util::poll!(&mut wait), Poll::Pending));
     assert!(control.request_cancellation());
@@ -50,14 +51,15 @@ async fn cancellation_before_expiry_wins_when_both_wakes_are_ready() {
 
 #[tokio::test(start_paused = true)]
 async fn expiry_before_late_cancellation_never_becomes_abort_cleanup() {
+    let idle_owner = crate::RetainedActorExit::new();
     let control = control();
     assert!(matches!(
-        wait_sleep_event(&control, Duration::ZERO, pending()).await,
+        wait_sleep_event(&control, Duration::ZERO, &idle_owner).await,
         SleepWaitEvent::Expired
     ));
     assert!(!control.request_cancellation());
     assert!(matches!(
-        wait_sleep_event(&control, Duration::from_secs(300), ready(terminal())).await,
+        wait_sleep_event(&control, Duration::from_secs(300), &retiring_owner()).await,
         SleepWaitEvent::Expired
     ));
     assert!(!control.cancellation_requested());
@@ -70,16 +72,17 @@ async fn expiry_before_late_cancellation_never_becomes_abort_cleanup() {
 
 #[tokio::test(start_paused = true)]
 async fn cancellation_wake_preserves_unacknowledged_native_cleanup() {
+    let idle_owner = crate::RetainedActorExit::new();
     let control = control();
     assert!(control.request_cancellation());
     assert!(matches!(
-        wait_sleep_event(&control, Duration::from_secs(300), pending()).await,
+        wait_sleep_event(&control, Duration::from_secs(300), &idle_owner).await,
         SleepWaitEvent::Cancelled
     ));
     assert!(control.cancellation_requested());
     // The pure selector cannot claim that the actual native hole was consumed.
     assert!(matches!(
-        wait_sleep_event(&control, Duration::from_secs(300), pending()).await,
+        wait_sleep_event(&control, Duration::from_secs(300), &idle_owner).await,
         SleepWaitEvent::Cancelled
     ));
     assert!(control.cancellation_requested());
@@ -92,7 +95,7 @@ async fn retirement_claims_cancellation_and_keeps_the_exact_terminal() {
     let mut wait = Box::pin(wait_sleep_event(
         &control,
         Duration::from_secs(300),
-        retirement.wait_requested_shutdown(),
+        &retirement,
     ));
     assert!(matches!(futures_util::poll!(&mut wait), Poll::Pending));
     let requested = terminal();
@@ -104,12 +107,13 @@ async fn retirement_claims_cancellation_and_keeps_the_exact_terminal() {
 
 #[tokio::test(start_paused = true)]
 async fn dropped_timer_retains_no_independent_control_owner() {
+    let idle_owner = crate::RetainedActorExit::new();
     let original = control();
     let weak = Arc::downgrade(&original);
     let mut wait = Box::pin(wait_sleep_event(
         &original,
         Duration::from_secs(300),
-        pending(),
+        &idle_owner,
     ));
     assert!(matches!(futures_util::poll!(&mut wait), Poll::Pending));
     drop(wait);
@@ -121,18 +125,37 @@ async fn dropped_timer_retains_no_independent_control_owner() {
 
 #[tokio::test(start_paused = true)]
 async fn one_cancelled_execution_never_claims_another_timer() {
+    let idle_owner = crate::RetainedActorExit::new();
     let first = control();
     let second = control();
     assert!(first.request_cancellation());
     assert!(matches!(
-        wait_sleep_event(&first, Duration::from_secs(300), pending()).await,
+        wait_sleep_event(&first, Duration::from_secs(300), &idle_owner).await,
         SleepWaitEvent::Cancelled
     ));
     assert!(matches!(
-        wait_sleep_event(&second, Duration::ZERO, pending()).await,
+        wait_sleep_event(&second, Duration::ZERO, &idle_owner).await,
         SleepWaitEvent::Expired
     ));
     assert!(first.cancellation_requested());
     assert!(!second.cancellation_requested());
     assert!(!second.request_cancellation());
+}
+
+fn retiring_owner() -> crate::RetainedActorExit {
+    let owner = crate::RetainedActorExit::new();
+    owner.request_shutdown(terminal());
+    owner
+}
+
+#[tokio::test(start_paused = true)]
+async fn prior_retirement_wins_when_timer_expiry_is_also_ready() {
+    let control = control();
+    let owner = retiring_owner();
+    assert!(matches!(
+        wait_sleep_event(&control, Duration::ZERO, &owner).await,
+        SleepWaitEvent::Retired(observed) if observed == terminal()
+    ));
+    assert!(control.cancellation_requested());
+    assert!(!control.claim_expiry());
 }

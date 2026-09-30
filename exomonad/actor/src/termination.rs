@@ -159,6 +159,20 @@ impl RetainedActorExit {
         self.state.requested_shutdown.lock().clone()
     }
 
+    /// Order a synchronous wake claim against this incarnation's retirement.
+    /// The callback may only claim the caller's control boundary; native work
+    /// starts after this lock is released.
+    pub(crate) fn claim_before_shutdown(
+        &self,
+        claim: impl FnOnce() -> bool,
+    ) -> Result<bool, ActorTerminal> {
+        let shutdown = self.state.requested_shutdown.lock();
+        match shutdown.as_ref() {
+            Some(terminal) => Err(terminal.clone()),
+            None => Ok(claim()),
+        }
+    }
+
     pub(crate) async fn wait_requested_shutdown(&self) -> ActorTerminal {
         let mut changed = self.state.changed.subscribe();
         loop {
@@ -347,6 +361,58 @@ mod tests {
         assert_eq!(retained.get(), None);
         retained.publish(requested.clone()).unwrap();
         assert_eq!(retained.get(), Some(requested));
+    }
+
+    #[test]
+    fn shutdown_intent_prevents_a_later_wake_claim() {
+        let owner = RetainedActorExit::new();
+        let terminal = completed("retirement owns this boundary");
+        owner.request_shutdown(terminal.clone());
+        assert_eq!(
+            owner.claim_before_shutdown(|| panic!("retirement must refuse native wake")),
+            Err(terminal)
+        );
+    }
+
+    #[test]
+    fn wake_claim_orders_before_concurrent_shutdown_intent() {
+        let owner = RetainedActorExit::new();
+        let control = crate::WorkbenchExecutionControl::untracked();
+        control.arm_sleep();
+        let claiming_owner = owner.clone();
+        let claiming_control = control.clone();
+        let (entered, observed) = std::sync::mpsc::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let claiming = std::thread::spawn(move || {
+            claiming_owner.claim_before_shutdown(|| {
+                entered.send(()).unwrap();
+                proceed.recv().unwrap();
+                claiming_control.claim_expiry()
+            })
+        });
+        observed.recv().unwrap();
+        let retiring_owner = owner.clone();
+        let (started, starting) = std::sync::mpsc::channel();
+        let (done, completed_request) = std::sync::mpsc::channel();
+        let retiring = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            let terminal = retiring_owner.request_shutdown(completed("later retirement"));
+            done.send(terminal).unwrap();
+        });
+        starting.recv().unwrap();
+        assert!(matches!(
+            completed_request.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        release.send(()).unwrap();
+        assert_eq!(claiming.join().unwrap(), Ok(true));
+        let terminal = completed_request.recv().unwrap();
+        retiring.join().unwrap();
+        assert_eq!(owner.requested_shutdown(), Some(terminal));
+        assert!(
+            !control.request_cancellation(),
+            "wake already owns native delivery"
+        );
     }
 
     #[tokio::test]

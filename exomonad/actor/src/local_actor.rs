@@ -351,7 +351,7 @@ impl KernelContext {
             .requested_shutdown()
     }
 
-    pub(crate) async fn wait_requested_shutdown(&self) -> ActorTerminal {
+    pub(crate) fn retained_exit(&self) -> RetainedActorExit {
         #[allow(
             clippy::expect_used,
             reason = "called on this actor's own KernelContext while it is \
@@ -363,8 +363,11 @@ impl KernelContext {
             .resolve(self.identity)
             .expect("running actor remains in its local directory")
             .terminal()
-            .wait_requested_shutdown()
-            .await
+            .clone()
+    }
+
+    pub(crate) async fn wait_requested_shutdown(&self) -> ActorTerminal {
+        self.retained_exit().wait_requested_shutdown().await
     }
 
     #[must_use]
@@ -4113,7 +4116,8 @@ mod tests {
         control.arm_sleep();
         assert!(control.request_cancellation());
         assert!(matches!(
-            crate::resident_actor::wait_drain_event(&actor, &control, std::future::pending()).await,
+            crate::resident_actor::wait_drain_event(&actor, &control, &RetainedActorExit::new())
+                .await,
             crate::resident_actor::DrainWaitEvent::Cancelled
         ));
         assert!(control.cancellation_requested());
@@ -4152,10 +4156,11 @@ mod tests {
         entered.notified().await;
         let control = crate::WorkbenchExecutionControl::untracked();
         control.arm_sleep();
+        let retirement = RetainedActorExit::new();
         let mut drain = Box::pin(crate::resident_actor::wait_drain_event(
             &actor,
             &control,
-            std::future::pending(),
+            &retirement,
         ));
         assert!(matches!(
             futures_util::poll!(&mut drain),
@@ -4175,6 +4180,36 @@ mod tests {
             .expect("accepted drain remains owned by its target");
         assert_eq!(terminal.kind, ActorExitKind::Completed);
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prior_owned_retirement_wins_when_target_drain_is_already_ready() {
+        let fixture = behavior(false);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "target completed".into(),
+            })
+            .await
+            .unwrap();
+        task.await.unwrap();
+        let control = crate::WorkbenchExecutionControl::untracked();
+        control.arm_sleep();
+        let retirement = RetainedActorExit::new();
+        let terminal = ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "original caller retires".into(),
+        };
+        retirement.request_shutdown(terminal.clone());
+        assert!(matches!(
+            crate::resident_actor::wait_drain_event(&actor, &control, &retirement).await,
+            crate::resident_actor::DrainWaitEvent::Retired(observed) if observed == terminal
+        ));
+        assert!(
+            control.request_cancellation(),
+            "drain never claimed native delivery"
+        );
     }
 
     #[tokio::test]

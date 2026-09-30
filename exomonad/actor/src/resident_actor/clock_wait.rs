@@ -1,7 +1,6 @@
 //! Timed waits retain the original execution control and native continuation.
 
 use super::*;
-use std::future::Future;
 use std::time::Duration;
 
 enum SleepWaitEvent {
@@ -14,24 +13,28 @@ enum SleepWaitEvent {
 async fn wait_sleep_event(
     control: &Arc<crate::WorkbenchExecutionControl>,
     duration: Duration,
-    retirement: impl Future<Output = crate::ActorTerminal>,
+    retirement: &crate::RetainedActorExit,
 ) -> SleepWaitEvent {
     let timer = tokio::time::sleep(duration);
     tokio::pin!(timer);
     tokio::select! {
-        () = &mut timer => {
-            if control.claim_expiry() {
-                SleepWaitEvent::Expired
-            } else {
-                SleepWaitEvent::Cancelled
-            }
-        }
-        () = control.wait_for_cancellation() => SleepWaitEvent::Cancelled,
-        terminal = retirement => {
+        biased;
+        terminal = retirement.wait_requested_shutdown() => {
             if control.request_cancellation() || control.cancellation_requested() {
                 SleepWaitEvent::Retired(terminal)
             } else {
                 SleepWaitEvent::Expired
+            }
+        }
+        () = control.wait_for_cancellation() => SleepWaitEvent::Cancelled,
+        () = &mut timer => {
+            match retirement.claim_before_shutdown(|| control.claim_expiry()) {
+                Ok(true) => SleepWaitEvent::Expired,
+                Ok(false) => SleepWaitEvent::Cancelled,
+                Err(terminal) => {
+                    control.request_cancellation();
+                    SleepWaitEvent::Retired(terminal)
+                }
             }
         }
     }
@@ -49,7 +52,7 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    match wait_sleep_event(&control, duration, kernel.wait_requested_shutdown()).await {
+    match wait_sleep_event(&control, duration, &kernel.retained_exit()).await {
         SleepWaitEvent::Expired => {
             let outcome = environment.runner.resume_unit(context, continuation).await;
             control.finish_sleep();

@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::request::{ReplyError, RequestRegistry, WatchId, WatchObservation};
-use std::future::Future;
 
 enum WatchWaitEvent {
     Resume(Result<WatchObservation, ReplyError>),
@@ -17,21 +16,22 @@ async fn wait_watch_event(
     actor: crate::ActorRef,
     watch: WatchId,
     control: &Arc<crate::WorkbenchExecutionControl>,
-    retirement: impl Future<Output = crate::ActorTerminal>,
+    retirement: &crate::RetainedActorExit,
 ) -> WatchWaitEvent {
     let waiting = requests.await_watch(actor, watch);
     tokio::pin!(waiting);
     tokio::select! {
+        biased;
+        terminal = retirement.wait_requested_shutdown() => WatchWaitEvent::Retired(terminal),
+        () = control.wait_for_cancellation() => WatchWaitEvent::Cancelled,
         observation = &mut waiting => {
             tracing::debug!(?actor, ?watch, ?observation, "owned watch received settlement");
-            if control.claim_expiry() {
-                WatchWaitEvent::Resume(observation)
-            } else {
-                WatchWaitEvent::Cancelled
+            match retirement.claim_before_shutdown(|| control.claim_expiry()) {
+                Ok(true) => WatchWaitEvent::Resume(observation),
+                Ok(false) => WatchWaitEvent::Cancelled,
+                Err(terminal) => WatchWaitEvent::Retired(terminal),
             }
         }
-        () = control.wait_for_cancellation() => WatchWaitEvent::Cancelled,
-        terminal = retirement => WatchWaitEvent::Retired(terminal),
     }
 }
 
@@ -52,7 +52,7 @@ where
         context.actor,
         poll.watch,
         &control,
-        kernel.wait_requested_shutdown(),
+        &kernel.retained_exit(),
     )
     .await
     {
