@@ -1096,6 +1096,7 @@ impl NativeForkAdmission {
 }
 
 impl BoundWorkspace {
+    #[cfg(feature = "codex-compat")]
     pub(super) async fn settle_publication(
         &self,
         publication: &mut WorkspacePublication,
