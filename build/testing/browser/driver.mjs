@@ -325,7 +325,8 @@ async function runJourney(ready) {
     };
     let lastOperation;
       await signIn(page, { baseUrl, value: sessionSecret });
-      const sessionCookie = (await context.cookies(baseUrl)).find((cookie) => cookie.name === 'harness_session');
+      const sessionCookie = (await context.cookies(new URL('/api/session', baseUrl).href))
+        .find((cookie) => cookie.name === 'harness_session');
       assert.ok(sessionCookie, 'browser login did not store the session cookie');
       assert.equal(sessionCookie.httpOnly, true, 'session cookie must be HttpOnly');
       assert.equal(sessionCookie.sameSite, 'Strict', 'session cookie must be SameSite=Strict');
