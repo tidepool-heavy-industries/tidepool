@@ -9,6 +9,7 @@ module Tidepool.ExactHydration
   , installExactLexicalGraph
   ) where
 
+import Tidepool.Timing (readTimingEnabled, emitCount)
 import Control.Monad (forM, forM_, unless)
 import Control.Exception
   ( IOException, SomeException, SomeAsyncException, bracket, try, fromException, throwIO )
@@ -101,12 +102,16 @@ readExactIfaceArtifacts env artifacts
 
 readOne :: HscEnv -> ExactIfaceArtifact -> IO (Either String (ExactIfaceArtifact, ModIface))
 readOne env artifact = do
+  timing <- readTimingEnabled
+  emitCount timing ("exact_iface_read_calls." ++ exactModule artifact) 1
   readResult <- try (BS.readFile (exactPath artifact)) :: IO (Either IOException BS.ByteString)
   case readResult of
     Left _ -> pure (Left ("interface unavailable: " ++ exactModule artifact))
-    Right bytes -> readVerified bytes
+    Right bytes -> do
+      emitCount timing ("exact_iface_read_bytes." ++ exactModule artifact) (fromIntegral (BS.length bytes))
+      readVerified timing bytes
   where
-   readVerified bytes =
+   readVerified timing bytes =
     if hexBytes (SHA256.hash bytes) /= map toLower (exactSha256 artifact)
     then pure (Left ("interface digest mismatch: " ++ exactModule artifact))
     else do
@@ -116,7 +121,8 @@ readOne env artifact = do
       -- original bytes restored.
       let owner = mkModule (stringToUnit (exactUnit artifact))
             (mkModuleName (exactModule artifact))
-      decoded <- try @SomeException (withCapturedIface bytes $ \path ->
+      decoded <- try @SomeException (withCapturedIface timing (exactModule artifact) bytes $ \path -> do
+        emitCount timing ("exact_iface_decode_reads." ++ exactModule artifact) 1
         readIface (hsc_dflags env) (hsc_NC env) owner path)
       case decoded of
         Left failure -> case fromException failure :: Maybe SomeAsyncException of
@@ -132,8 +138,8 @@ readOne env artifact = do
                 Left ("interface contains defining Core: " ++ exactModule artifact)
             | otherwise -> Right (artifact, iface)
 
-withCapturedIface :: BS.ByteString -> (FilePath -> IO a) -> IO a
-withCapturedIface bytes consume = do
+withCapturedIface :: Bool -> String -> BS.ByteString -> (FilePath -> IO a) -> IO a
+withCapturedIface timing owner bytes consume = do
   directory <- getTemporaryDirectory
   bracket (openBinaryTempFile directory "tidepool-exact-iface.hi")
     (\(path, handle) -> do
@@ -142,6 +148,7 @@ withCapturedIface bytes consume = do
       removeFile path)
     (\(path, handle) -> do
       BS.hPut handle bytes
+      emitCount timing ("exact_iface_capture_write_bytes." ++ owner) (fromIntegral (BS.length bytes))
       hClose handle
       consume path)
 

@@ -76,6 +76,7 @@ module Tidepool.Session
   , evalUserBinder
   ) where
 
+import Tidepool.Timing (readTimingEnabled, emitCount)
 import GHC.Driver.Env
   ( HscEnv, hsc_dflags, hsc_NC, hsc_home_unit, hsc_FC, hscUpdateHPT )
 import GHC.Driver.Session (targetProfile)
@@ -299,6 +300,8 @@ injectSessionIface root sm hsc0 = liftIO $ do
       modNm = renderSessionModule sm
       theMod = mkModule (homeUnitAsUnit homeU) modNm
       path = sessionHiPath root sm
+  timing <- readTimingEnabled
+  emitCount timing ("session_iface_decode_reads." ++ sessionModuleString sm) 1
   readRes <- readIface (hsc_dflags hsc0) (hsc_NC hsc0) theMod path
   case readRes of
     MErr.Failed _ ->
