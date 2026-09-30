@@ -2516,6 +2516,7 @@ pub(crate) async fn run(
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
     host_incarnation: HostIncarnationLease,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let host_incarnation = Arc::new(host_incarnation);
     let run_root = config.run_root.clone();
     std::fs::create_dir_all(&run_root)?;
     let workspace = config.workspace.clone();
@@ -2688,9 +2689,13 @@ pub(crate) async fn run(
             .as_ref()
             .ok_or_else(|| runtime_error("embedded backend requires [launch.embedded]"))?;
         Some(
-            embedded_service::EmbeddedService::prepare(&run_root, settings)
-                .await
-                .map_err(runtime_error)?,
+            embedded_service::EmbeddedService::prepare_owned(
+                &run_root,
+                settings,
+                Arc::clone(&host_incarnation),
+            )
+            .await
+            .map_err(runtime_error)?,
         )
     } else {
         None
