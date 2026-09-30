@@ -274,15 +274,25 @@ async fn resident_primary_await_watch_cancels_an_unpublished_cell() {
     resident_await_watch_case(WatchCase::PrimaryCancellation).await;
 }
 
+#[tokio::test]
+async fn resident_primary_sleep_parks_and_cancels_the_same_owned_step() {
+    resident_await_watch_case(WatchCase::PrimarySleepCancellation).await;
+}
+
 enum WatchCase {
     PrimaryRoundTrip,
     StructuredRoundTrip,
     PrimaryCancellation,
+    PrimarySleepCancellation,
 }
 
 async fn resident_await_watch_case(case: WatchCase) {
     let primary = !matches!(case, WatchCase::StructuredRoundTrip);
-    let cancel_first = matches!(case, WatchCase::PrimaryCancellation);
+    let cancel_first = matches!(
+        case,
+        WatchCase::PrimaryCancellation | WatchCase::PrimarySleepCancellation
+    );
+    let cancel_sleep = matches!(case, WatchCase::PrimarySleepCancellation);
     if std::env::var_os("TIDEPOOL_ACTOR_TEST_TRACE").is_some() {
         tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -292,7 +302,9 @@ async fn resident_await_watch_case(case: WatchCase) {
     }
     eval_harness::require_extract();
 
-    let session = support::process_unique_session(if cancel_first {
+    let session = support::process_unique_session(if cancel_sleep {
+        183
+    } else if cancel_first {
         182
     } else if primary {
         180
@@ -532,21 +544,54 @@ async fn resident_await_watch_case(case: WatchCase) {
                 .dispatch_boxed(ToolInvocation {
                     context: Some(context),
                     name: exomonad_actor::HASKELL_TOOL.into(),
-                    arguments: ToolArguments::Raw(
+                    arguments: ToolArguments::Raw(if cancel_sleep {
+                        include_str!("resident_local_actor/await_sleep_cell.hs").into()
+                    } else {
                         include_str!("resident_local_actor/await_watch_cell.hs")
-                            .replace("DELAY", "3"),
-                    ),
+                            .replace("DELAY", "3")
+                    }),
                 })
                 .await
         })
     };
-    let cancellation_start_bound = if cancel_first { 180 } else { 60 };
-    tokio::time::timeout(std::time::Duration::from_secs(cancellation_start_bound), async {
+    if cancel_sleep {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !actor.hosted_cell_computing() {
+                assert!(
+                    !cancelled_call.is_finished(),
+                    "sleep must admit its hosted control"
+                );
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("hosted sleep admission is prompt");
+        tokio::time::timeout(std::time::Duration::from_secs(180), async {
+            while actor.hosted_cell_computing() {
+                assert!(
+                    !cancelled_call.is_finished(),
+                    "sleep must reach its captured wait"
+                );
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("captured owned sleep parks after compiler preparation");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut cancelled_call)
+                .await
+                .is_err(),
+            "captured sleep keeps the original reply pending"
+        );
+    } else {
+        let cancellation_start_bound = if cancel_first { 180 } else { 60 };
+        tokio::time::timeout(std::time::Duration::from_secs(cancellation_start_bound), async {
         tokio::select! {
             () = supply_command_until_started(&mut deployments, command_backend.clone(), actor.identity()) => {},
             reply = &mut cancelled_call => panic!("cancellable watch cell settled before starting its command: {reply:?}"),
         }
     }).await.expect("cancellable command start is bounded");
+    }
     let cancellation = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             match policy
@@ -563,15 +608,27 @@ async fn resident_await_watch_case(case: WatchCase) {
     })
     .await
     .expect("awaitWatch cancellation is prompt");
-    assert!(matches!(
-        cancellation,
-        exomonad_actor::WorkbenchCancellationOutcome::Cancelled { .. }
-    ));
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), &mut cancelled_call)
-        .await
-        .expect("cancelled workbench settles")
-        .expect("cancelled workbench task");
-    wait_for_command_completions(&command_backend, if cancel_first { 1 } else { 2 }).await;
+    let retained_reply = match cancellation {
+        exomonad_actor::WorkbenchCancellationOutcome::Cancelled { reply, .. } => reply,
+        other => panic!("exact native continuation was not cancelled: {other:?}"),
+    };
+    let returned_reply =
+        tokio::time::timeout(std::time::Duration::from_secs(2), &mut cancelled_call)
+            .await
+            .expect("cancelled workbench settles")
+            .expect("cancelled workbench task");
+    match (retained_reply, returned_reply) {
+        (Ok(retained), Ok(returned)) => {
+            assert_eq!(serde_json::to_value(retained).unwrap(), returned)
+        }
+        (Err(retained), Err(exomonad_actor::ResidentToolError::Invocation(returned))) => {
+            assert_eq!(retained, returned)
+        }
+        other => panic!("cancellation and original terminal reply differ: {other:?}"),
+    }
+    if !cancel_sleep {
+        wait_for_command_completions(&command_backend, if cancel_first { 1 } else { 2 }).await;
+    }
 
     forest.shutdown().await;
     assert_eq!(

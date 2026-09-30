@@ -1151,7 +1151,7 @@ fn install_cell_preparation(
 }
 
 struct WorkbenchEffectState {
-    park_watch: bool,
+    park_effects: bool,
     context: ActorSessionContext,
     public_visibility: Option<tidepool_runtime::session::PublicVisibilitySnapshot>,
     control: Option<Arc<crate::resident_tools::WorkbenchExecutionControl>>,
@@ -1178,7 +1178,7 @@ struct WorkbenchCursor {
 }
 
 struct WorkbenchFragmentExecution {
-    parked_watch: Option<ParkedWorkbenchWatch>,
+    parked_effect: Option<ParkedWorkbenchEffect>,
     resume_failure: Option<ResidentActorWorkbenchError>,
     fragment: Option<ResidentWorkbenchFragment>,
     outcome: Option<ResidentOutcome>,
@@ -1188,7 +1188,7 @@ struct WorkbenchFragmentExecution {
 impl WorkbenchFragmentExecution {
     fn new(fragment: ResidentWorkbenchFragment, outcome: ResidentOutcome) -> Self {
         Self {
-            parked_watch: None,
+            parked_effect: None,
             resume_failure: None,
             fragment: Some(fragment),
             outcome: Some(outcome),
@@ -1222,21 +1222,63 @@ impl Default for WorkbenchCursor {
     }
 }
 
-struct ParkedWorkbenchWatch {
-    poll: crate::request_effect::WatchPoll,
+struct ParkedWorkbenchEffect {
+    wait: OwnedWorkbenchWait,
     ordinal: usize,
     effect: String,
     started: std::time::Instant,
 }
 
+enum OwnedWorkbenchWait {
+    Watch(crate::request_effect::WatchPoll),
+    Sleep {
+        continuation: ResidentHole,
+        duration: std::time::Duration,
+    },
+    External {
+        continuation: ResidentHole,
+        work: tidepool_effect::DeferredEffect,
+    },
+    Jev {
+        continuation: ResidentHole,
+        request: String,
+    },
+}
+
+impl OwnedWorkbenchWait {
+    fn capture(boundary: ResidentActorBoundary) -> Result<Self, ResidentActorBoundary> {
+        match boundary {
+            ResidentActorBoundary::WatchAwait(poll) => Ok(Self::Watch(poll)),
+            ResidentActorBoundary::Sleep {
+                continuation,
+                duration,
+            } => Ok(Self::Sleep {
+                continuation,
+                duration,
+            }),
+            ResidentActorBoundary::External { continuation, work } => {
+                Ok(Self::External { continuation, work })
+            }
+            ResidentActorBoundary::Jev {
+                continuation,
+                request,
+            } => Ok(Self::Jev {
+                continuation,
+                request,
+            }),
+            other => Err(other),
+        }
+    }
+}
+
 enum WorkbenchRunAdvance {
     Complete(KernelStep<WorkbenchResponse>),
-    ParkWatch,
+    ParkEffect,
 }
 
 enum FragmentAdvance {
     Settled(ResidentWorkbenchStep),
-    ParkWatch,
+    ParkEffect,
 }
 
 /// Structured actor turns retain actor publication authority. Workbench effects
@@ -3427,25 +3469,14 @@ where
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
         > = match boundary {
             ResidentActorBoundary::External { continuation, work } => Box::pin(async move {
-                let cancellation = work.cancellation_signal();
-                let running =
-                    self.environment
-                        .runner
-                        .run_external(context.clone(), continuation, work);
-                tokio::pin!(running);
-                if let Some(cancellation) = cancellation {
-                    tokio::select! {
-                        outcome = &mut running => outcome,
-                        _ = kernel.wait_requested_shutdown() => {
-                            cancellation.request();
-                            // Requesting retirement does not prove that external
-                            // work stopped. Its owner must observe and settle it.
-                            running.await
-                        }
-                    }
-                } else {
-                    running.await
-                }
+                owned_workbench::await_external(
+                    self.environment.clone(),
+                    kernel.clone(),
+                    context.clone(),
+                    continuation,
+                    work,
+                )
+                .await
             }),
             ResidentActorBoundary::Console { continuation, text } => Box::pin(async move {
                 tracing::debug!(actor = ?context.actor, output = %crate::workbench_display::bounded_output(&text, 8192), "actor console");
@@ -3458,118 +3489,32 @@ where
                 continuation,
                 request,
             } => Box::pin(async move {
-                let backend = Arc::clone(&self.environment.jev);
-                // The packet is opaque JSON from here: `Jev.Operators` on the
-                // Haskell side already carries the questions, labels and
-                // (on the way back) likelihoods. Full bodies are debug-only
-                // and bounded; `info` stays one compact line either way.
-                tracing::debug!(
-                    actor = %context.actor,
-                    packet = %crate::workbench_display::bounded_output(&request, 4096),
-                    "jev call packet"
-                );
-                let started = std::time::Instant::now();
-                let answer = backend.ask(request).await;
-                let elapsed_ms = started.elapsed().as_millis();
-                crate::call_timing::add_jev_ms(elapsed_ms);
-                match &answer {
-                    Ok(body) => {
-                        tracing::debug!(
-                            actor = %context.actor,
-                            answer = %crate::workbench_display::bounded_output(body, 4096),
-                            "jev call answer"
-                        );
-                        tracing::info!(actor = %context.actor, elapsed_ms, "jev call answered");
-                    }
-                    Err(failure) => {
-                        tracing::info!(
-                            actor = %context.actor,
-                            ?failure,
-                            elapsed_ms,
-                            "jev call failed"
-                        );
-                    }
-                }
-                self.environment
-                    .runner
-                    .resume_value(context.clone(), continuation, answer)
-                    .await
+                owned_workbench::ask_jev(
+                    self.environment.clone(),
+                    kernel.clone(),
+                    context.clone(),
+                    continuation,
+                    request,
+                )
+                .await
             }),
             ResidentActorBoundary::Sleep {
                 continuation,
                 duration,
             } => Box::pin(async move {
-                // Mailbox handlers and direct local workbenches have no hosted
-                // evaluation to cancel, but still share the actor-owned timer
-                // and retirement path.
                 let control = effect_owner
                     .control()
-                    .unwrap_or_else(crate::resident_tools::WorkbenchExecutionControl::untracked);
+                    .unwrap_or_else(crate::WorkbenchExecutionControl::untracked);
                 control.arm_sleep();
-                let timer = tokio::time::sleep(duration);
-                tokio::pin!(timer);
-                tokio::select! {
-                    () = &mut timer => {
-                        if control.claim_expiry() {
-                            let outcome = self.environment
-                                .runner
-                                .resume_unit(context.clone(), continuation)
-                                .await;
-                            control.finish_sleep();
-                            outcome
-                        } else {
-                            let (outcome, consumed) = self.environment
-                                .runner
-                                .abort_live(
-                                    context.clone(),
-                                    continuation,
-                                    "sleep interrupted by delivered input".into(),
-                                )
-                                .await;
-                            if consumed {
-                                control.acknowledge_cancellation();
-                            }
-                            outcome
-                        }
-                    }
-                    () = control.wait_for_cancellation() => {
-                        let (outcome, consumed) = self.environment
-                            .runner
-                            .abort_live(
-                                context.clone(),
-                                continuation,
-                                "sleep interrupted by delivered input".into(),
-                            )
-                            .await;
-                        if consumed {
-                            control.acknowledge_cancellation();
-                        }
-                        outcome
-                    }
-                    terminal = kernel.wait_requested_shutdown() => {
-                        if control.request_cancellation() || control.cancellation_requested() {
-                            let (outcome, consumed) = self.environment
-                                .runner
-                                .abort_live(
-                                    context.clone(),
-                                    continuation,
-                                    format!("sleep interrupted by actor retirement: {}", terminal.summary),
-                                )
-                                .await;
-                            if consumed {
-                                control.acknowledge_cancellation();
-                            }
-                            outcome
-                        } else {
-                            let outcome = self.environment
-                                .runner
-                                .resume_unit(context.clone(), continuation)
-                                .await;
-                            control.finish_sleep();
-                            outcome
-                        }
-                    }
-                }
+                owned_workbench::await_sleep(
+                    self.environment.clone(),
+                    kernel.clone(),
+                    context.clone(),
+                    control,
+                    continuation,
+                    duration,
+                )
+                .await
             }),
             ResidentActorBoundary::Command {
                 continuation,
@@ -6477,21 +6422,35 @@ where
                         effect = %effect,
                         "effect boundary captured"
                     );
-                    if execution_state.park_watch && !execution_state.after_tool_active {
-                        if let ResidentActorBoundary::WatchAwait(poll) = boundary {
-                            execution_state
-                                .control
-                                .get_or_insert_with(crate::WorkbenchExecutionControl::untracked)
-                                .arm_sleep();
-                            current.parked_watch = Some(ParkedWorkbenchWatch {
-                                poll,
-                                ordinal,
-                                effect,
-                                started: effect_started,
-                            });
-                            return Ok(FragmentAdvance::ParkWatch);
+                    let boundary = if execution_state.park_effects
+                        && !execution_state.after_tool_active
+                    {
+                        match OwnedWorkbenchWait::capture(boundary) {
+                            Ok(wait) => {
+                                if matches!(
+                                    &wait,
+                                    OwnedWorkbenchWait::Watch(_) | OwnedWorkbenchWait::Sleep { .. }
+                                ) {
+                                    execution_state
+                                        .control
+                                        .get_or_insert_with(
+                                            crate::WorkbenchExecutionControl::untracked,
+                                        )
+                                        .arm_sleep();
+                                }
+                                current.parked_effect = Some(ParkedWorkbenchEffect {
+                                    wait,
+                                    ordinal,
+                                    effect,
+                                    started: effect_started,
+                                });
+                                return Ok(FragmentAdvance::ParkEffect);
+                            }
+                            Err(boundary) => boundary,
                         }
-                    }
+                    } else {
+                        boundary
+                    };
                     match boundary {
                         ResidentActorBoundary::ReplyAttempt(attempt) => match self
                             .environment
@@ -7148,7 +7107,7 @@ where
                     .await?
                 {
                     FragmentAdvance::Settled(step) => step,
-                    FragmentAdvance::ParkWatch => unreachable!("nested after-tool remains serial"),
+                    FragmentAdvance::ParkEffect => unreachable!("nested after-tool remains serial"),
                 }
             }
             settled => settled,
@@ -7587,8 +7546,8 @@ where
                             .await
                         {
                             Ok(FragmentAdvance::Settled(step)) => step,
-                            Ok(FragmentAdvance::ParkWatch) => {
-                                return Ok(WorkbenchRunAdvance::ParkWatch)
+                            Ok(FragmentAdvance::ParkEffect) => {
+                                return Ok(WorkbenchRunAdvance::ParkEffect)
                             }
                             Err(source) => {
                                 self.abort_incomplete_groups(
@@ -9389,7 +9348,7 @@ where
             };
             let mut execution_state = WorkbenchExecutionState {
                 effects: WorkbenchEffectState {
-                    park_watch: false,
+                    park_effects: false,
                     context: context.clone(),
                     public_visibility,
                     control,
@@ -9438,7 +9397,7 @@ where
                 .await
                 .map(|advance| match advance {
                     WorkbenchRunAdvance::Complete(step) => step,
-                    WorkbenchRunAdvance::ParkWatch => {
+                    WorkbenchRunAdvance::ParkEffect => {
                         unreachable!("legacy workbench remains serial")
                     }
                 });

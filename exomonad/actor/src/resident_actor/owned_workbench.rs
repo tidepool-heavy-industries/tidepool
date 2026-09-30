@@ -205,7 +205,7 @@ where
         let owned = OwnedExecution {
             state: WorkbenchExecutionState {
                 effects: WorkbenchEffectState {
-                    park_watch: true,
+                    park_effects: true,
                     context: context.clone(),
                     public_visibility: None,
                     control,
@@ -297,7 +297,7 @@ where
     }
 
     /// The existing serial driver keeps all unconverted handlers and terminal
-    /// cleanup. It resumes this same cursor and yields before awaiting a watch.
+    /// cleanup. It resumes this same cursor and yields its captured effect wait.
     fn continue_owned_task(mut owned: OwnedExecution<H, O>) -> OwnedWorkbenchTask<Self> {
         OwnedWorkbenchTask::serial(move |mut behavior: Self, kernel| {
             Box::pin(async move {
@@ -310,16 +310,16 @@ where
                     )))
                     .await;
                 match result {
-                    Ok(WorkbenchRunAdvance::ParkWatch) => {
+                    Ok(WorkbenchRunAdvance::ParkEffect) => {
                         tracing::debug!(actor = ?owned.state.effects.context.actor,
-                        input_unit_index = owned.state.cursor.index, "serial cursor yielded its captured watch");
+                        input_unit_index = owned.state.cursor.index, "serial cursor yielded its captured effect wait");
                         let completion = OwnedWorkbenchCompletion::advance(
                             move |behavior: &mut Self, kernel| {
                                 let (timing, cleanup) = owned.scopes();
                                 timing.sync_scope(|| {
                                     cleanup.sync_scope(|| {
                                         Ok(WorkbenchAdvance::Park(
-                                            behavior.owned_watch_task(owned, kernel.clone()),
+                                            behavior.owned_effect_task(owned, kernel.clone()),
                                         ))
                                     })
                                 })
@@ -330,7 +330,9 @@ where
                     result => {
                         let result = result.map(|advance| match advance {
                             WorkbenchRunAdvance::Complete(step) => step,
-                            WorkbenchRunAdvance::ParkWatch => unreachable!("watch handled above"),
+                            WorkbenchRunAdvance::ParkEffect => {
+                                unreachable!("effect wait handled above")
+                            }
                         });
                         Self::finish_owned(behavior, owned, result).await
                     }
@@ -339,7 +341,7 @@ where
         })
     }
 
-    fn owned_watch_task(
+    fn owned_effect_task(
         &self,
         mut owned: OwnedExecution<H, O>,
         kernel: KernelContext,
@@ -349,10 +351,10 @@ where
             .cursor
             .running
             .as_mut()
-            .expect("watch retains running fragment")
-            .parked_watch
+            .expect("effect wait retains running fragment")
+            .parked_effect
             .take()
-            .expect("one captured watch");
+            .expect("one captured effect wait");
         let environment = self.environment.clone();
         let context = owned.state.effects.context.clone();
         let control = owned
@@ -364,12 +366,12 @@ where
         OwnedWorkbenchTask::new(Box::pin(async move {
             let (timing, cleanup) = owned.scopes();
             let result = timing
-                .scope(cleanup.scope(await_watch(
+                .scope(cleanup.scope(await_effect(
                     environment,
                     kernel,
                     context,
                     control,
-                    pending.poll,
+                    pending.wait,
                 )))
                 .await;
             OwnedWorkbenchCompletion::advance(move |_behavior: &mut Self, _kernel| {
@@ -466,6 +468,203 @@ fn terminal_task<B: 'static>(
     WorkbenchDispatch::Owned(OwnedWorkbenchTask::new(Box::pin(async move {
         OwnedWorkbenchCompletion::new(move |_| result)
     })))
+}
+
+async fn await_effect<H, O>(
+    environment: ResidentEnvironment<H, O>,
+    kernel: KernelContext,
+    context: ActorSessionContext,
+    control: Arc<crate::WorkbenchExecutionControl>,
+    wait: OwnedWorkbenchWait,
+) -> Result<ResidentOutcome, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    match wait {
+        OwnedWorkbenchWait::Watch(poll) => {
+            await_watch(environment, kernel, context, control, poll).await
+        }
+        OwnedWorkbenchWait::Sleep {
+            continuation,
+            duration,
+        } => {
+            await_sleep(
+                environment,
+                kernel,
+                context,
+                control,
+                continuation,
+                duration,
+            )
+            .await
+        }
+        OwnedWorkbenchWait::External { continuation, work } => {
+            await_external(environment, kernel, context, continuation, work).await
+        }
+        OwnedWorkbenchWait::Jev {
+            continuation,
+            request,
+        } => ask_jev(environment, kernel, context, continuation, request).await,
+    }
+}
+
+pub(super) async fn await_external<H, O>(
+    environment: ResidentEnvironment<H, O>,
+    kernel: KernelContext,
+    context: ActorSessionContext,
+    continuation: ResidentHole,
+    work: tidepool_effect::DeferredEffect,
+) -> Result<ResidentOutcome, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    let cancellation = work.cancellation_signal();
+    let running = environment
+        .runner
+        .run_external(context.clone(), continuation, work);
+    tokio::pin!(running);
+    if let Some(cancellation) = cancellation {
+        tokio::select! {
+            outcome = &mut running => outcome,
+            _ = kernel.wait_requested_shutdown() => {
+                cancellation.request();
+                // Requesting retirement does not prove that external
+                // work stopped. Its owner must observe and settle it.
+                running.await
+            }
+        }
+    } else {
+        running.await
+    }
+}
+
+pub(super) async fn ask_jev<H, O>(
+    environment: ResidentEnvironment<H, O>,
+    _kernel: KernelContext,
+    context: ActorSessionContext,
+    continuation: ResidentHole,
+    request: String,
+) -> Result<ResidentOutcome, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    let backend = Arc::clone(&environment.jev);
+    // The packet is opaque JSON from here: `Jev.Operators` on the
+    // Haskell side already carries the questions, labels and
+    // (on the way back) likelihoods. Full bodies are debug-only
+    // and bounded; `info` stays one compact line either way.
+    tracing::debug!(
+        actor = %context.actor,
+        packet = %crate::workbench_display::bounded_output(&request, 4096),
+        "jev call packet"
+    );
+    let started = std::time::Instant::now();
+    let answer = backend.ask(request).await;
+    let elapsed_ms = started.elapsed().as_millis();
+    crate::call_timing::add_jev_ms(elapsed_ms);
+    match &answer {
+        Ok(body) => {
+            tracing::debug!(
+                actor = %context.actor,
+                answer = %crate::workbench_display::bounded_output(body, 4096),
+                "jev call answer"
+            );
+            tracing::info!(actor = %context.actor, elapsed_ms, "jev call answered");
+        }
+        Err(failure) => {
+            tracing::info!(
+                actor = %context.actor,
+                ?failure,
+                elapsed_ms,
+                "jev call failed"
+            );
+        }
+    }
+    environment
+        .runner
+        .resume_value(context.clone(), continuation, answer)
+        .await
+}
+
+pub(super) async fn await_sleep<H, O>(
+    environment: ResidentEnvironment<H, O>,
+    kernel: KernelContext,
+    context: ActorSessionContext,
+    control: Arc<crate::WorkbenchExecutionControl>,
+    continuation: ResidentHole,
+    duration: std::time::Duration,
+) -> Result<ResidentOutcome, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    let timer = tokio::time::sleep(duration);
+    tokio::pin!(timer);
+    tokio::select! {
+        () = &mut timer => {
+            if control.claim_expiry() {
+                let outcome = environment
+                    .runner
+                    .resume_unit(context.clone(), continuation)
+                    .await;
+                control.finish_sleep();
+                outcome
+            } else {
+                let (outcome, consumed) = environment
+                    .runner
+                    .abort_live(
+                        context.clone(),
+                        continuation,
+                        "sleep interrupted by delivered input".into(),
+                    )
+                    .await;
+                if consumed {
+                    control.acknowledge_cancellation();
+                }
+                outcome
+            }
+        }
+        () = control.wait_for_cancellation() => {
+            let (outcome, consumed) = environment
+                .runner
+                .abort_live(
+                    context.clone(),
+                    continuation,
+                    "sleep interrupted by delivered input".into(),
+                )
+                .await;
+            if consumed {
+                control.acknowledge_cancellation();
+            }
+            outcome
+        }
+        terminal = kernel.wait_requested_shutdown() => {
+            if control.request_cancellation() || control.cancellation_requested() {
+                let (outcome, consumed) = environment
+                    .runner
+                    .abort_live(
+                        context.clone(),
+                        continuation,
+                        format!("sleep interrupted by actor retirement: {}", terminal.summary),
+                    )
+                    .await;
+                if consumed {
+                    control.acknowledge_cancellation();
+                }
+                outcome
+            } else {
+                let outcome = environment
+                    .runner
+                    .resume_unit(context.clone(), continuation)
+                    .await;
+                control.finish_sleep();
+                outcome
+            }
+        }
+    }
 }
 
 pub(super) async fn await_watch<H, O>(
