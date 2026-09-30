@@ -156,6 +156,17 @@ headroom and the separately capped Nix daemon. Buck stays local-only with
 4. Enable keyed admission only after single-admission lifecycle/publication gates.
 5. Complete M2, scaling, cache, corpus and packaged acceptance on the joined tip.
 
+After M1, engine and M2 each pass their acceptance gates, commission a separate
+fresh-context Sol 6.1 adversarial review of that exact milestone revision.
+Review the production workflow and owning source for awkward data structures,
+duplicated ownership, workaround layers, unnecessary conversions and performance
+costs. Give the reviewer the source revision, intended contracts and retained
+acceptance evidence without the implementation conversation. Record concrete
+failure paths and measurements; return findings to the owning implementation
+lane for repair and affected verification before closing the milestone. These
+reviews supplement the ongoing candidate reviews; reused reviewer context does
+not satisfy this gate.
+
 Required evidence:
 
 - Protected hidden/original native execution, completed-value replacement and
