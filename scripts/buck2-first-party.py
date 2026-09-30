@@ -233,7 +233,7 @@ def linux_dependency(package, dependency):
     return resolved_package
 
 
-def dependency_sets(package, enabled_dependencies, forwarded_features, include_dev=False):
+def dependency_sets(package, enabled_dependencies, forwarded_features, include_dev=False, include_build=False):
     deps = []
     named = {}
     for dependency in package["dependencies"]:
@@ -250,9 +250,12 @@ def dependency_sets(package, enabled_dependencies, forwarded_features, include_d
                 and dependency["rename"] is None
                 and dependency["target"] is None
             )
-            if not (codegen_native or facade_native):
+            if codegen_native:
+                continue
+            if not facade_native:
                 raise SystemExit(f"Unmodeled build dependency in {package['name']}: {dependency['name']}")
-            continue
+            if not include_build:
+                continue
         if dependency["kind"] == "dev" and not include_dev:
             continue
         dependency_key = cargo_dependency_key(dependency)
@@ -542,7 +545,7 @@ load("//build/rust:facade_build_inputs.bzl", "tidepool_facade_build_inputs")
             dependency for dependency in package["dependencies"] if dependency["kind"] == "build"
         ]
         build_deps, build_named = dependency_sets(
-            build_package, enabled_dependencies, forwarded_features
+            build_package, enabled_dependencies, forwarded_features, include_build=True
         )
         rules.append(render_rule(
             "tidepool_rust_binary", "tidepool_build_script", build_targets[0],

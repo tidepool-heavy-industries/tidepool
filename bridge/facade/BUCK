@@ -22,6 +22,9 @@ tidepool_rust_binary(
     crate_root = "bridge/facade/build.rs",
     edition = "2021",
     srcs_filegroup = ":tidepool_build_script_sources",
+    deps = [
+        "//tidepool/toolchain:tidepool_toolchain",
+    ],
     visibility = ["PUBLIC"],
 )
 

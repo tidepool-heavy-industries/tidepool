@@ -135,7 +135,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
 
     def package(self, name, directory, targets):
         return {"id": name, "name": name, "manifest_path": str(self.root / directory / "Cargo.toml"),
-                "version": "0.1.0", "features": {"default": []}, "dependencies": [],
+                "version": "0.1.0", "source": None, "features": {"default": []}, "dependencies": [],
                 "targets": [{"name": target_name, "kind": [kind],
                              "src_path": str(self.root / directory / source), "edition": "2021"}
                             for target_name, kind, source in targets]}
@@ -188,10 +188,30 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         )
 
     def test_facade_buildscript_declares_embedded_sources_and_out_dir(self):
+        metadata = json.loads(self.metadata.read_text())
+        facade = next(p for p in metadata["packages"] if p["name"] == "tidepool")
+        toolchain = next(p for p in metadata["packages"] if p["name"] == "tidepool-toolchain")
+        facade["dependencies"].append({
+            "name": "tidepool-toolchain", "rename": None, "kind": "build",
+            "target": None, "optional": False, "uses_default_features": True,
+            "features": [], "req": "*",
+        })
+        node = next(n for n in metadata["resolve"]["nodes"] if n["id"] == facade["id"])
+        node["deps"].append({
+            "name": "tidepool_toolchain", "pkg": toolchain["id"],
+            "dep_kinds": [{"kind": "build", "target": None}],
+        })
+        self.metadata.write_text(json.dumps(metadata))
         result = self.generate("--package", "tidepool", "--no-default-features", "tidepool")
         self.assertEqual(result.returncode, 0, result.stderr)
         buck, groups = self.groups("bridge/facade")
         self.assertIn('name = "tidepool_build_script"', buck)
+        build_rule = buck.split('name = "tidepool_build_script",', 1)[1].split('\n)\n', 1)[0]
+        self.assertIn("//tidepool/toolchain:tidepool_toolchain", build_rule)
+        library_rule = buck.split('tidepool_rust_library(\n    name = "tidepool",', 1)[1].split('\n)\n', 1)[0]
+        self.assertNotIn("//tidepool/toolchain:tidepool_toolchain", library_rule)
+        self.assertIn('crate_root = "bridge/facade/build.rs"', build_rule)
+        self.assertEqual(groups["tidepool_build_script_sources"]["build.rs"], "bridge/facade/build.rs")
         self.assertIn('name = "tidepool_build_script_run"', buck)
         self.assertIn('"TIDEPOOL_EMBED_HASKELL": "1"', buck)
         self.assertIn('"TIDEPOOL_BUILD_SOURCE_ROOT": "."', buck)
