@@ -327,6 +327,7 @@ struct ReleasedCheckpoint {
     session: SessionId,
     scope: Option<ScopeId>,
     cleanup_pending: bool,
+    retained_scope: Option<std::sync::Weak<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
 }
 
 /// Admission ledger for one applicative context-unfold layer.
@@ -374,12 +375,21 @@ pub struct CheckpointLease {
     pub issuer_source_layer: crate::CheckpointSourceLayer,
     pub session: SessionId,
     pub scope: ScopeId,
+    retained_scope: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
     pub boundary: WorkbenchForkBoundary,
     host_attachment: Arc<Mutex<Option<HostedCheckpointAttachment>>>,
     phase: tokio::sync::watch::Sender<CheckpointPhase>,
 }
 
 impl CheckpointLease {
+    pub(crate) fn retained_scope(
+        &self,
+    ) -> Result<&Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>, CheckpointRefusal> {
+        self.retained_scope
+            .as_ref()
+            .ok_or(CheckpointRefusal::UnavailableCheckpoint)
+    }
+
     #[must_use]
     pub fn host_attachment<T: std::any::Any + Send + Sync>(&self) -> Option<Arc<T>> {
         if matches!(
@@ -534,6 +544,66 @@ impl ForkGroupRegistry {
         boundary: WorkbenchForkBoundary,
         host_attachment: Option<HostedCheckpointAttachment>,
     ) -> String {
+        self.capture_checkpoint_inner(
+            name,
+            issuer,
+            issuer_role,
+            issuer_model,
+            issuer_effort,
+            issuer_source_layer,
+            session,
+            scope,
+            boundary,
+            host_attachment,
+            None,
+        )
+    }
+
+    /// Runtime captures retain a detached lexical share independently of the
+    /// token's original scope and every later parent settlement.
+    pub fn capture_checkpoint_with_retained_scope(
+        &self,
+        name: String,
+        issuer: ActorRef,
+        issuer_role: crate::EffectiveRole,
+        issuer_model: Option<crate::Model>,
+        issuer_effort: Option<crate::ForkEffort>,
+        issuer_source_layer: crate::CheckpointSourceLayer,
+        session: SessionId,
+        scope: ScopeId,
+        boundary: WorkbenchForkBoundary,
+        host_attachment: Option<HostedCheckpointAttachment>,
+        retained_scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    ) -> String {
+        self.capture_checkpoint_inner(
+            name,
+            issuer,
+            issuer_role,
+            issuer_model,
+            issuer_effort,
+            issuer_source_layer,
+            session,
+            scope,
+            boundary,
+            host_attachment,
+            Some(retained_scope),
+        )
+    }
+
+    fn capture_checkpoint_inner(
+        &self,
+        name: String,
+        issuer: ActorRef,
+        issuer_role: crate::EffectiveRole,
+        issuer_model: Option<crate::Model>,
+        issuer_effort: Option<crate::ForkEffort>,
+        issuer_source_layer: crate::CheckpointSourceLayer,
+        session: SessionId,
+        scope: ScopeId,
+        boundary: WorkbenchForkBoundary,
+        host_attachment: Option<HostedCheckpointAttachment>,
+        retained_scope: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
+    ) -> String {
         let token = format!("{}:{}", self.checkpoint_namespace, uuid::Uuid::new_v4());
         let (phase, _) = tokio::sync::watch::channel(CheckpointPhase::Pending);
         let mut state = self.state.lock();
@@ -562,6 +632,7 @@ impl ForkGroupRegistry {
                 issuer_source_layer,
                 session,
                 scope,
+                retained_scope,
                 boundary,
                 host_attachment: Arc::new(Mutex::new(host_attachment)),
                 phase,
@@ -678,6 +749,7 @@ impl ForkGroupRegistry {
             return Err(CheckpointRefusal::WrongSession);
         }
         let lease = state.checkpoints.remove(token).expect("checked checkpoint");
+        let retained_scope = lease.retained_scope.as_ref().map(Arc::downgrade);
         let phase = *lease.phase.borrow();
         let scope = match phase {
             CheckpointPhase::Pending => {
@@ -700,6 +772,7 @@ impl ForkGroupRegistry {
                 session,
                 scope,
                 cleanup_pending: scope.is_some(),
+                retained_scope,
             },
         );
         Ok(scope)
@@ -748,6 +821,7 @@ impl ForkGroupRegistry {
         let mut state = self.state.lock();
         let mut retired = Vec::new();
         let mut attachments = Vec::new();
+        let mut scopes = Vec::new();
         for lease in state.checkpoints.values_mut() {
             if lease.issuer == issuer
                 && &lease.boundary == boundary
@@ -761,11 +835,13 @@ impl ForkGroupRegistry {
                 if !success {
                     retired.push((lease.session, lease.scope));
                     attachments.extend(lease.host_attachment.lock().take());
+                    scopes.extend(lease.retained_scope.take());
                 }
             }
         }
         drop(state);
         drop(attachments);
+        drop(scopes);
         retired
     }
 
@@ -788,6 +864,7 @@ impl ForkGroupRegistry {
         }
         let phase = *lease.phase.borrow();
         let mut attachment = None;
+        let mut retained_scope = None;
         let result = match phase {
             CheckpointPhase::Pending => {
                 lease.phase.send_replace(if delivered {
@@ -797,6 +874,7 @@ impl ForkGroupRegistry {
                 });
                 if !delivered {
                     attachment = lease.host_attachment.lock().take();
+                    retained_scope = lease.retained_scope.take();
                 }
                 Ok((!delivered).then_some(lease.scope))
             }
@@ -809,20 +887,24 @@ impl ForkGroupRegistry {
         };
         drop(state);
         drop(attachment);
+        drop(retained_scope);
         result
     }
 
     pub fn fail_issuer_checkpoints(&self, issuer: ActorRef) {
         let mut state = self.state.lock();
         let mut attachments = Vec::new();
+        let mut scopes = Vec::new();
         for lease in state.checkpoints.values_mut() {
             if lease.issuer == issuer && *lease.phase.borrow() == CheckpointPhase::Pending {
                 lease.phase.send_replace(CheckpointPhase::Failed);
                 attachments.extend(lease.host_attachment.lock().take());
+                scopes.extend(lease.retained_scope.take());
             }
         }
         drop(state);
         drop(attachments);
+        drop(scopes);
     }
 
     pub fn failed_checkpoint_scopes(&self, issuer: ActorRef) -> Vec<(SessionId, ScopeId)> {
@@ -843,10 +925,14 @@ impl ForkGroupRegistry {
         let state = self.state.lock();
         state.checkpoints.values().any(|lease| {
             lease.session == session && *lease.phase.borrow() == CheckpointPhase::Published
-        }) || state
-            .released_checkpoints
-            .values()
-            .any(|released| released.session == session && released.cleanup_pending)
+        }) || state.released_checkpoints.values().any(|released| {
+            released.session == session
+                && (released.cleanup_pending
+                    || released
+                        .retained_scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.strong_count() != 0))
+        })
     }
 
     pub fn begin(
@@ -1944,6 +2030,10 @@ fn lowest_available(
 #[cfg(test)]
 #[path = "lineage/captured_tests.rs"]
 mod captured_tests;
+
+#[cfg(test)]
+#[path = "lineage/capture_lifetime_tests.rs"]
+mod capture_lifetime_tests;
 
 #[cfg(test)]
 mod tests {

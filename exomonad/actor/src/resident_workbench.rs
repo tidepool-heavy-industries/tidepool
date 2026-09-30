@@ -26,6 +26,7 @@ use serde::Serialize;
 use tidepool_bridge::HaskellValue;
 use tidepool_bridge::{BridgeError, FromHaskell, HaskellVisitor, ToHaskell};
 use tidepool_bridge_derive::FromHaskell as DeriveFromHaskell;
+use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{request_constructor, DispatchEffect};
 use tidepool_repr::execution_schema::SymbolIdentity;
@@ -6552,6 +6553,62 @@ where
                             "checkpoint scope is no longer live".into(),
                         )
                     })?;
+                if !session.retain_scope_dependencies(source_scope, scope) {
+                    session.retire_scope(scope);
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "authored entry dependencies were unavailable".into(),
+                    ));
+                }
+                session.retire_scope(provisional_scope);
+                Ok(scope)
+            })
+            .await
+    }
+
+    /// Capture the token root and an independently retained runtime capsule
+    /// under one checkout. Admission may keep the capsule after token release.
+    pub(crate) async fn capture_retained_context_scope(
+        &self,
+        context: crate::ActorSessionContext,
+    ) -> Result<
+        (
+            ScopeId,
+            Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+        ),
+        ResidentActorWorkbenchError,
+    > {
+        self.access
+            .with_machine(context, |session, context, _| {
+                let scope = session
+                    .mint_detached_scope(context.placement.lexical_scope)
+                    .ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "checkpoint source scope was retired".into(),
+                        )
+                    })?;
+                match session.retain_lexical_scope(scope) {
+                    Ok(retained) => Ok((scope, retained)),
+                    Err(error) => {
+                        session.retire_scope(scope);
+                        Err(error.into())
+                    }
+                }
+            })
+            .await
+    }
+
+    pub(crate) async fn remint_checkpoint_child_scope_from_lease(
+        &self,
+        context: crate::ActorSessionContext,
+        checkpoint: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+        provisional_scope: ScopeId,
+    ) -> Result<ScopeId, ResidentActorWorkbenchError> {
+        let source_scope = context.placement.lexical_scope;
+        self.access
+            .with_machine(context, move |session, _, _| {
+                // The runtime validates the capsule's owner before creating any
+                // child scope. Opaque scope IDs alone carry no ownership.
+                let scope = session.mint_scope_from_lease(&checkpoint)?;
                 if !session.retain_scope_dependencies(source_scope, scope) {
                     session.retire_scope(scope);
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
