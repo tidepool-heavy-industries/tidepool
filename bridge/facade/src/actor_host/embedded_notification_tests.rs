@@ -352,6 +352,16 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
         .unwrap();
     assert!(matches!(engine_result, Err(ref error) if error == "engine cancelled"));
     binding.mark_retired();
+    assert!(binding.conversation().is_none());
+    let observer = binding
+        .input_observer()
+        .expect("retirement keeps read-only observer");
+    assert!(matches!(
+        observer
+            .input_observation_by_operation(&operation_id)
+            .unwrap(),
+        Some(harness::embedding::InputObservation::Included(_))
+    ));
     schedule_embedded_notification_drain(actor, binding.clone(), &mut notifications);
     let (_, result) = tokio::time::timeout(Duration::from_secs(5), notifications.join_next())
         .await

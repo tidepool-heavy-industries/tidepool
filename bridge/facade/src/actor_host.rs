@@ -4444,7 +4444,7 @@ async fn run_interactive_applications(
                     &embedded_projection,
                     |actor| embedded_conversations.get(&actor)
                         .filter(|binding| binding.is_live())
-                        .and_then(|binding| binding.conversation.clone()),
+                        .and_then(|binding| binding.conversation()),
                     &embedded_lifecycle_tx,
                 )
                 .await;
@@ -4789,7 +4789,7 @@ async fn run_interactive_applications(
                                 root_conversation.identity(),
                                 "embedded binding must match the attached host identity"
                             );
-                            binding.conversation = Some(Arc::clone(&root_conversation));
+                            binding.set_conversation(Arc::clone(&root_conversation));
                             if let Some(binding) = embedded_conversations.get(&actor).cloned() {
                                 schedule_embedded_notification_drain(
                                     actor,
@@ -5016,7 +5016,7 @@ async fn run_interactive_applications(
                             }
                             let Some(conversation) = embedded_conversations.get(&actor)
                                 .filter(|binding| binding.is_live())
-                                .and_then(|binding| binding.conversation.as_ref()) else {
+                                .and_then(|binding| binding.conversation()) else {
                                 if actor != root_identity {
                                     if let Some(cancel) = embedded_cancellations.get(&actor) {
                                         cancel.send_replace(true);
@@ -7287,7 +7287,7 @@ fn schedule_embedded_notification_drain(
     binding: embedded_harness::EmbeddedActorBinding,
     notifications: &mut JoinSet<(ActorRef, Result<(), String>)>,
 ) {
-    if binding.conversation.is_none() {
+    if binding.input_observer().is_none() {
         return;
     }
     let pending = match binding.inbox.front_pending() {
@@ -7349,7 +7349,7 @@ async fn deliver_embedded_notifications_locked(
 ) -> Result<(), String> {
     use exomonad_node::{DeliveryPhase, ReceiptLookup};
 
-    let Some(conversation) = binding.conversation.as_ref() else {
+    let Some(observer) = binding.input_observer() else {
         return Ok(());
     };
     loop {
@@ -7413,7 +7413,7 @@ async fn deliver_embedded_notifications_locked(
             target,
         );
         if matches!(
-            conversation
+            observer
                 .input_observation_by_operation(&operation_id)
                 .map_err(|error| error.to_string())?,
             Some(harness::embedding::InputObservation::Included(_))
@@ -7446,6 +7446,9 @@ async fn deliver_embedded_notifications_locked(
         if !binding.is_live() {
             return Ok(());
         }
+        let Some(conversation) = binding.conversation() else {
+            return Ok(());
+        };
         let attempt = if evidence.phase == DeliveryPhase::Accepted {
             Some(
                 binding
@@ -7492,7 +7495,7 @@ async fn deliver_embedded_notifications_locked(
                 .map_err(|error| error.to_string())?;
         }
         if matches!(
-            conversation
+            observer
                 .input_observation_by_operation(&operation_id)
                 .map_err(|error| error.to_string())?,
             Some(harness::embedding::InputObservation::Included(_))
@@ -7524,7 +7527,7 @@ async fn observe_embedded_notification(
     if receipt.target() != target || receipt.inbox() != binding.inbox_key.as_str() {
         return Err(NotificationError::InvalidReceipt);
     }
-    if binding.conversation.is_some() {
+    if binding.input_observer().is_some() {
         deliver_embedded_notifications(target, binding.clone())
             .await
             .map_err(NotificationError::StorageFailure)?;

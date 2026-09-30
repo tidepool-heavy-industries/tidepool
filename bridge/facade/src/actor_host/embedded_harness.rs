@@ -2,7 +2,7 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 
@@ -231,12 +231,12 @@ impl Drop for EmbeddedRoundLease {
 }
 
 /// Durable notification owner for one exact embedded actor incarnation. The
-/// conversation stays available for read-only inclusion reconciliation after
-/// retirement, while `live` fences any new input admission.
+/// read-only observer survives retirement; `live` fences new input admission.
 #[derive(Clone)]
 pub(super) struct EmbeddedActorBinding {
     identity: HostIdentity,
-    pub(super) conversation: Option<Arc<Conversation>>,
+    conversation: Arc<Mutex<Option<Arc<Conversation>>>>,
+    observer: Arc<Mutex<Option<Arc<harness::embedding::InputObserver>>>>,
     pub(super) inbox: Arc<super::ActorInbox>,
     pub(super) inbox_key: String,
     pub(super) delivery: Arc<tokio::sync::Mutex<()>>,
@@ -250,9 +250,13 @@ impl EmbeddedActorBinding {
         inbox_key: String,
         conversation: Option<Arc<Conversation>>,
     ) -> Self {
+        let observer = conversation
+            .as_ref()
+            .map(|conversation| Arc::new(conversation.input_observer()));
         Self {
             identity,
-            conversation,
+            conversation: Arc::new(Mutex::new(conversation)),
+            observer: Arc::new(Mutex::new(observer)),
             inbox,
             inbox_key,
             delivery: Arc::new(tokio::sync::Mutex::new(())),
@@ -266,6 +270,36 @@ impl EmbeddedActorBinding {
 
     pub(super) fn mark_retired(&self) {
         self.live.store(false, Ordering::Release);
+        self.conversation
+            .lock()
+            .expect("embedded conversation lock poisoned")
+            .take();
+    }
+
+    pub(super) fn conversation(&self) -> Option<Arc<Conversation>> {
+        self.conversation
+            .lock()
+            .expect("embedded conversation lock poisoned")
+            .clone()
+    }
+
+    pub(super) fn set_conversation(&self, conversation: Arc<Conversation>) {
+        *self
+            .observer
+            .lock()
+            .expect("embedded observer lock poisoned") =
+            Some(Arc::new(conversation.input_observer()));
+        *self
+            .conversation
+            .lock()
+            .expect("embedded conversation lock poisoned") = Some(conversation);
+    }
+
+    pub(super) fn input_observer(&self) -> Option<Arc<harness::embedding::InputObserver>> {
+        self.observer
+            .lock()
+            .expect("embedded observer lock poisoned")
+            .clone()
     }
 
     pub(super) fn identity(&self) -> &HostIdentity {
