@@ -1490,6 +1490,24 @@ impl PersistentSession {
         if !admission.belongs_to(self)
             || first_item.admission_digest() != admission.digest()
             || first_item.specification_digest() != admission.specification_digest()
+            || first_item.reserved_declaration_modules().len()
+                != admission.reserved_generations.len()
+            || !admission
+                .reserved_generations
+                .iter()
+                .zip(first_item.reserved_declaration_modules())
+                .all(|(generation, module)| {
+                    tidepool_repr::SessionModule::lib(*generation)
+                        .module_name()
+                        .eq(module)
+                })
+            || first_item.injected_modules().len() != admission.view.injected_values.len()
+            || !admission
+                .view
+                .injected_values
+                .iter()
+                .zip(first_item.injected_modules())
+                .all(|(module, supplied)| module.module_name().eq(supplied))
             || !initial_interfaces_match(
                 &admission.interfaces,
                 first_item.baseline_value_interfaces(),
