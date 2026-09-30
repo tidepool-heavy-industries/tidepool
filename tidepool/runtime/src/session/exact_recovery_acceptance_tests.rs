@@ -155,7 +155,12 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         1024 * 1024,
     );
     let public = producer.mint_isolated_scope();
-    assert_eq!(producer.initialize_durable_public_scope(owner(1), public).unwrap(), PublicManifestCommit::Durable);
+    assert_eq!(
+        producer
+            .initialize_durable_public_scope(owner(1), public)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    );
     let admission = producer.begin_private_execution(public).unwrap();
     let original = producer
         .define_scoped_in(
@@ -318,8 +323,22 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
         if alter_lexical {
             // Same exact retained products, but an unauthorized wider lexical
             // selector/root set cannot replace the already owned byte read.
-            root.lexical.extend(original_lexical);
-            root.lexical_roots.extend(original_roots);
+            let joined = root.lexical_roots[0].clone();
+            root.lexical
+                .iter_mut()
+                .find(|node| node.owner == joined)
+                .unwrap()
+                .imports
+                .extend(original_roots);
+            for node in original_lexical {
+                if !root
+                    .lexical
+                    .iter()
+                    .any(|existing| existing.owner == node.owner)
+                {
+                    root.lexical.push(node);
+                }
+            }
         } else {
             root.exports[0].identity.occurrence = "ghostRecoveredExport".into();
         }
