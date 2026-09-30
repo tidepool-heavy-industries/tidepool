@@ -37,8 +37,12 @@ pkg_config="$(output_path pkg-config)"
 remote_enabled=false
 remote_toolchain=""
 if [ "${TIDEPOOL_BUCK_REMOTE:-false}" = true ]; then
-  test -r /etc/swarm-build/platform || { echo "Missing remote platform identity" >&2; exit 1; }
-  remote_toolchain="$(cat /etc/swarm-build/platform)"
+  platform_file=${TIDEPOOL_BUCK_PLATFORM_FILE:-/etc/swarm-build/platform}
+  test -r "$platform_file" || { echo "Missing remote platform identity: $platform_file" >&2; exit 1; }
+  remote_toolchain="$(cat "$platform_file")"
+  [[ $remote_toolchain =~ ^[0-9a-f]{64}$ ]] || { echo 'Invalid remote platform identity' >&2; exit 1; }
+  remote_address=${TIDEPOOL_BUCK_REMOTE_ADDRESS:-grpc://localhost:50051}
+  [[ $remote_address =~ ^grpc://(localhost|127\.0\.0\.1):[0-9]+$ ]] || { echo 'Remote endpoint must use an SSH tunnel on loopback' >&2; exit 1; }
   remote_enabled=true
 fi
 
@@ -88,12 +92,12 @@ enabled = $remote_enabled
 toolchain = $remote_toolchain
 EOF
 if [ "$remote_enabled" = true ]; then
-  cat >> .buckconfig.local <<'EOF'
+  cat >> .buckconfig.local <<EOF
 
 [buck2_re_client]
-action_cache_address = grpc://localhost:50051
-engine_address = grpc://localhost:50051
-cas_address = grpc://localhost:50051
+action_cache_address = $remote_address
+engine_address = $remote_address
+cas_address = $remote_address
 tls = false
 instance_name = swarm
 EOF
