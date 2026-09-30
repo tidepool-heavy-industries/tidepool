@@ -493,10 +493,12 @@ pub(crate) fn compile_authored_products(
         source,
         targets: &[target],
         include,
-        fallback_module_name: "TidepoolAuthoredProductProbe",
+        fallback_module_name: AUTHORED_PRODUCT_PROBE_MODULE,
     };
     compile_invocation_inner(&inv, &mut |_, _, _| {}, false, Some(session_root))
 }
+
+pub(crate) const AUTHORED_PRODUCT_PROBE_MODULE: &str = "TidepoolAuthoredProductProbe";
 
 fn compile_invocation_inner(
     inv: &CompileInvocation<'_>,

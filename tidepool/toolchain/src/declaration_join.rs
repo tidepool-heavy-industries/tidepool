@@ -184,6 +184,17 @@ impl CertifiedAuthoredDeclaration {
     pub fn toolchain_identity_sha256(&self) -> [u8; 32] {
         self.toolchain_identity_sha256
     }
+
+    /// Direct resolved home imports of the original compiler-owned modules.
+    /// This inventory describes authored imports; the caller selects which
+    /// nodes and edges belong to its virtual lexical graph.
+    pub fn original_home_imports(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&ExactModuleIdentity, &[ExactModuleIdentity])> {
+        self.interfaces
+            .iter()
+            .map(|entry| (&entry.owner, entry.requirements.as_slice()))
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -232,7 +243,8 @@ pub fn certify_authored_declaration(
     }
     let module_name = module.module_name();
     let probe = format!(
-        "module TidepoolAuthoredProductProbe where\nimport {module_name} ()\nauthoredProductProbe = (0 :: Int)\n"
+        "module {} where\nimport {module_name} ()\nauthoredProductProbe = (0 :: Int)\n",
+        crate::artifacts::AUTHORED_PRODUCT_PROBE_MODULE,
     );
     let compiled = crate::artifacts::compile_authored_products(
         &probe,
@@ -264,7 +276,18 @@ pub fn certify_authored_declaration(
             "authored module is absent or ambiguous in final graph",
         ));
     }
-    let products = compiled.recovery_products;
+    // The generated entry probe is not an authored implementation. Keeping
+    // its owner would make successive declarations retain different probes
+    // under one module identity. The shared closure admission below refuses
+    // any unexpected retained reference to that transient owner.
+    let products = compiled
+        .recovery_products
+        .into_iter()
+        .filter(|product| {
+            product.owner().unit != candidates[0].unit
+                || product.owner().module != crate::artifacts::AUTHORED_PRODUCT_PROBE_MODULE
+        })
+        .collect::<Vec<_>>();
     let matches = products
         .iter()
         .filter(|product| {
@@ -289,6 +312,21 @@ pub fn certify_authored_declaration(
         scratch.path(),
         toolchain_identity_sha256,
         &products,
+    )
+    .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
+    let verified = references
+        .iter()
+        .map(|reference| {
+            crate::recovery_artifacts::verify_materialized_ref(scratch.path(), reference)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
+    crate::certified_products::certify_inherited_products(
+        &verified
+            .iter()
+            .map(|artifact| crate::certified_products::InheritedProductInput { artifact })
+            .collect::<Vec<_>>(),
+        &[],
     )
     .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
     let mut artifacts = Vec::with_capacity(products.len());
@@ -1412,6 +1450,16 @@ mod authored_tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, source).unwrap();
         }
+        let first_certificate = std::sync::Arc::new(
+            certify_authored_declaration(
+                first,
+                &root.path().join(first.relative_hs_path()),
+                first_source,
+                &[root.path().to_path_buf()],
+                root.path(),
+            )
+            .unwrap(),
+        );
         let result = certify_authored_declaration(
             second,
             &root.path().join(second.relative_hs_path()),
@@ -1425,6 +1473,19 @@ mod authored_tests {
                 product.owner().module == module.module_name() && product.source_sha256().is_some()
             }));
         }
+        assert!(result.original_home_imports().any(|(owner, imports)| {
+            owner.module == second.module_name()
+                && imports
+                    .iter()
+                    .any(|import| import.module == first.module_name())
+        }));
+        let merged = ExactDeclarationContext::new(
+            &[first_certificate, std::sync::Arc::new(result.clone())],
+            &[],
+            Vec::new(),
+        )
+        .expect("successive authored certificates retain one exact original owner");
+        assert_eq!(merged.recovery_products().len(), 2);
         assert!(result
             .introduced_exports()
             .iter()
@@ -1484,6 +1545,9 @@ mod authored_tests {
         )
         .unwrap();
         let worker_root = tempfile::tempdir().unwrap();
+        let unselected =
+            ExactDeclarationContext::new(&[certificate.clone()], &[], Vec::new()).unwrap();
+        assert_ne!(context.semantic_sha256(), unselected.semantic_sha256());
         let materialized = context.materialize(worker_root.path()).unwrap();
         let original = materialized
             .artifacts
@@ -1578,9 +1642,11 @@ mod authored_tests {
         )
         .unwrap();
         assert_eq!(recovered.toolchain_identity_sha256(), expected_producer);
+        let recovered_identity = recovered.semantic_sha256();
         let extended = recovered
             .extend(&[certificate], &[Arc::new(accepted)], lexical)
             .unwrap();
+        assert_eq!(extended.semantic_sha256(), recovered_identity);
         let next_worker = tempfile::tempdir().unwrap();
         let exact = extended.materialize(next_worker.path()).unwrap();
         extended.validate_artifacts(&exact.artifacts).unwrap();

@@ -1,6 +1,7 @@
 //! Exact declaration inputs retain original products independently of source
 //! lookup, while their explicit virtual graph owns lexical visibility.
 
+use ciborium::value::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -185,6 +186,65 @@ impl ExactDeclarationContext {
     }
     pub fn lexical_graph(&self) -> &[ExactLexicalNode] {
         &self.lexical
+    }
+
+    /// Logical identity is independent of materialization paths and of the
+    /// optional source bytes retained only by a fresh authored certificate.
+    pub fn semantic_sha256(&self) -> [u8; 32] {
+        use sha2::Digest;
+        let mut lexical = self.lexical.iter().collect::<Vec<_>>();
+        lexical.sort_by_key(|node| &node.owner);
+        let value = Value::Array(vec![
+            text("TPEXACTCONTEXT"),
+            text("1"),
+            text(hex(&self.producer)),
+            Value::Array(
+                self.products
+                    .iter()
+                    .map(|product| {
+                        let owner = product.owner();
+                        Value::Array(vec![
+                            text(&owner.unit),
+                            text(&owner.module),
+                            text(hex(&owner.module_version.0)),
+                            text(hex(&owner.skinny_iface_sha256)),
+                            text(hex(&owner.product_sha256)),
+                            text(sha256(product.package_imports_bytes())),
+                            text(sha256(product.certification_bytes())),
+                        ])
+                    })
+                    .collect(),
+            ),
+            Value::Array(
+                self.joins
+                    .iter()
+                    .map(|join| {
+                        Value::Array(vec![
+                            text(join.unit()),
+                            text(join.module()),
+                            text(sha256(join.interface_bytes())),
+                            text(sha256(join.package_imports_bytes())),
+                        ])
+                    })
+                    .collect(),
+            ),
+            Value::Array(
+                lexical
+                    .into_iter()
+                    .map(|node| {
+                        let mut imports = node.imports.iter().collect::<Vec<_>>();
+                        imports.sort();
+                        Value::Array(vec![
+                            module_value(&node.owner),
+                            Value::Array(imports.into_iter().map(module_value).collect()),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut bytes).expect("owned value encoding");
+        sha2::Sha256::digest(bytes).into()
     }
 
     pub(crate) fn validate_artifacts(
@@ -434,6 +494,13 @@ impl ExactDeclarationContext {
         )
         .map_err(failure)
     }
+}
+
+fn text(value: impl Into<String>) -> Value {
+    Value::Text(value.into())
+}
+fn module_value(owner: &ExactModuleIdentity) -> Value {
+    Value::Array(vec![text(&owner.unit), text(&owner.module)])
 }
 
 fn hex(bytes: &[u8; 32]) -> String {
