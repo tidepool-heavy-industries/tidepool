@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use ciborium::value::Value;
@@ -155,6 +156,19 @@ pub struct ExactCheckedCell {
 pub(crate) struct CheckedValueInputs {
     directory: tempfile::TempDir,
     baseline: Vec<Arc<CheckedValueArtifact>>,
+    initial_bytes: u64,
+    output_files_hashed: AtomicU64,
+    output_bytes_hashed: AtomicU64,
+}
+
+/// Work performed by the immutable checked input owner. These observations
+/// exclude compiler-side reads and publication copies and grant no authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CheckedInputWork {
+    pub initial_files_written: u64,
+    pub initial_bytes_written_and_hashed: u64,
+    pub output_files_hashed: u64,
+    pub output_bytes_hashed: u64,
 }
 
 #[derive(Debug)]
@@ -174,10 +188,12 @@ impl CheckedValueInputs {
             .prefix("tidepool-checked-values-")
             .tempdir()?;
         let mut baseline = Vec::with_capacity(values.len());
+        let mut initial_bytes = 0;
         for (owner, bytes) in values {
             let path = directory.path().join(owner.relative_hi_path());
             std::fs::create_dir_all(path.parent().expect("generated interface parent"))?;
             std::fs::write(&path, &bytes)?;
+            initial_bytes += bytes.len() as u64;
             baseline.push(Arc::new(CheckedValueArtifact {
                 owner,
                 module: owner.module_name(),
@@ -189,7 +205,19 @@ impl CheckedValueInputs {
         Ok(Arc::new(Self {
             directory,
             baseline,
+            initial_bytes,
+            output_files_hashed: AtomicU64::new(0),
+            output_bytes_hashed: AtomicU64::new(0),
         }))
+    }
+
+    fn work(&self) -> CheckedInputWork {
+        CheckedInputWork {
+            initial_files_written: self.baseline.len() as u64,
+            initial_bytes_written_and_hashed: self.initial_bytes,
+            output_files_hashed: self.output_files_hashed.load(Ordering::Relaxed),
+            output_bytes_hashed: self.output_bytes_hashed.load(Ordering::Relaxed),
+        }
     }
 
     pub(crate) fn root(&self) -> &Path {
@@ -257,10 +285,14 @@ impl CheckedValueInputs {
         let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation));
         let path = self.root().join(owner.relative_hi_path());
         let bytes: Arc<[u8]> = read(&path, 32 * 1024 * 1024)?.into();
+        let digest = hash(&bytes);
+        self.output_files_hashed.fetch_add(1, Ordering::Relaxed);
+        self.output_bytes_hashed
+            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
         Ok(Arc::new(CheckedValueArtifact {
             owner,
             module: owner.module_name(),
-            digest: hash(&bytes),
+            digest,
             bytes,
             path,
         }))
@@ -1017,39 +1049,43 @@ impl ExactCompiledPrefix {
         ))
     }
     fn completed_value_authorization(&self) -> Result<Value, CompileError> {
+        let mut executions = BTreeMap::new();
+        for execution in self
+            .completed
+            .iter()
+            .filter_map(CompletedCheckedItem::native)
+        {
+            let Some(artifact) = execution.value_interface.as_ref() else {
+                continue;
+            };
+            let mut binders = BTreeMap::new();
+            for binder in &execution.bound_binders {
+                let fields = row(binder, 7)?;
+                if binders.insert(string(&fields[0])?, &fields[1]).is_some() {
+                    return Err(failure("completed value has duplicate binder identities"));
+                }
+            }
+            if executions
+                .insert(artifact.module.as_str(), (artifact, binders))
+                .is_some()
+            {
+                return Err(failure("duplicate completed value interface"));
+            }
+        }
         let values = self
             .value_imports()
             .into_iter()
             .map(|(module, names)| {
-                let execution = self
-                    .completed
-                    .iter()
-                    .filter_map(CompletedCheckedItem::native)
-                    .find(|item| {
-                        item.value_interface()
-                            .is_some_and(|(owner, _)| owner == module)
-                    })
+                let (artifact, binder_ids) = executions
+                    .get(module.as_str())
                     .ok_or_else(|| failure("completed value has no exact native proof"))?;
-                let artifact = execution
-                    .value_interface
-                    .as_ref()
-                    .ok_or_else(|| failure("completed value interface missing"))?;
                 let binders = names
                     .iter()
                     .map(|name| {
-                        let rows = execution
-                            .bound_binders
-                            .iter()
-                            .map(|value| row(value, 7))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        let selected = rows
-                            .iter()
-                            .filter(|fields| string(&fields[0]).is_ok_and(|binder| binder == name))
-                            .collect::<Vec<_>>();
-                        if selected.len() != 1 {
-                            return Err(failure("completed value lacks exact binder identity"));
-                        }
-                        Ok(array([text(name), selected[0][1].clone()]))
+                        let selected = binder_ids.get(name.as_str()).ok_or_else(|| {
+                            failure("completed value lacks exact binder identity")
+                        })?;
+                        Ok(array([text(name), (*selected).clone()]))
                     })
                     .collect::<Result<Vec<_>, CompileError>>()?;
                 Ok(array([
@@ -1098,6 +1134,9 @@ impl PartialEq for ExactCheckedItem {
 impl Eq for ExactCheckedItem {}
 
 impl ExactCheckedItem {
+    pub fn input_work(&self) -> CheckedInputWork {
+        self.cell.value_inputs.work()
+    }
     pub(crate) fn value_input_root(&self) -> &Path {
         self.cell.value_inputs.root()
     }

@@ -5255,6 +5255,12 @@ mod tests {
             Some(&original_product),
             "publication changed the certified original product or interface bytes"
         );
+        let input_work = checked.checked_item(0).unwrap().input_work();
+        assert_eq!(input_work.initial_files_written, 0);
+        assert_eq!(input_work.initial_bytes_written_and_hashed, 0);
+        assert_eq!(input_work.output_files_hashed, 4);
+        assert!(input_work.output_bytes_hashed > 0);
+        eprintln!("checked-original input_work={input_work:?}");
     }
 
     #[test]
