@@ -17,6 +17,11 @@ pub use crate::declaration_context::{
     ExactDeclarationContext, ExactSourceWitness, MaterializedExactDeclarationContext,
 };
 
+mod recovery;
+pub use recovery::{
+    certify_recovered_declaration_tip, RecoveredDeclarationTip, RecoveryDeclarationSelection,
+};
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleSnapshot {
