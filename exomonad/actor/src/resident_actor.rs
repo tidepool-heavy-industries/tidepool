@@ -1474,13 +1474,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                         detail: format!("cannot admit source authority: {error}"),
                     })?;
             }
-            if !admitted_source.is_owned() && !context.source_layer.is_empty() {
-                return Err(KernelInvocationFailure::Rejected {
-                    actor: context.actor,
-                    detail: "selected helper source roots have no retained source owner".into(),
-                });
-            }
-            context = context.with_issued_source(&admitted_source);
+            context = context
+                .with_issued_source(&admitted_source)
+                .map_err(|error| KernelInvocationFailure::Rejected {
+                    actor,
+                    detail: format!("cannot select retained source authority: {error}"),
+                })?;
         }
         Ok(WorkbenchPreflight::Admitted(WorkbenchAdmission {
             context,
