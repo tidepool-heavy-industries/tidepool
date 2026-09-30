@@ -184,8 +184,9 @@ installExactLexicalGraph sourceGraph lexical env
         mkModule (stringToUnit (exactUnit artifact))
           (mkModuleName (exactModule artifact))) lexical =
       pure (Left "virtual lexical interface missing from exact HPT")
-  | any unadmittedHomeEdge sourceNodes =
-      pure (Left "source graph imports unadmitted home implementation")
+  | not (null unadmittedHomeEdges) =
+      pure (Left ("source graph imports unadmitted home implementation: "
+        ++ show unadmittedHomeEdges))
   | otherwise = do
       forM_ lexical $ \(artifact, _) ->
         addHomeModuleToFinder (hsc_FC env) (hsc_home_unit env)
@@ -201,23 +202,28 @@ installExactLexicalGraph sourceGraph lexical env
     -- Downsweep intentionally excludes admitted exact owners. It may therefore
     -- omit the corresponding edge; textual imports still cannot expose an
     -- implementation-only HPT entry outside the selected lexical graph.
-    unadmittedHomeEdge (ModuleNode edges summary) = any missing edges
-      || any hiddenImport (ms_textual_imps summary ++ ms_srcimps summary)
-    unadmittedHomeEdge _ = False
+    unadmittedHomeEdges =
+      [(keyOf summary, requested)
+      | ModuleNode edges summary <- sourceNodes
+      , requested <- Set.toAscList (Set.fromList
+          ([owner | edge <- edges, Just owner <- [missing edge]]
+           ++ [owner | imported <- ms_textual_imps summary ++ ms_srcimps summary
+              , Just owner <- [hiddenImport imported]]))]
     hiddenImport (qualifier, imported) =
       let name = unLoc imported
           local = case qualifier of
             NoPkgQual -> True
             ThisPkg unit -> unit == home
             OtherPkg _ -> False
-      in local && case lookupHpt (hsc_HPT env) name of
-        Nothing -> False
+      in if not local then Nothing else case lookupHpt (hsc_HPT env) name of
+        Nothing -> Nothing
         Just hmi ->
-          (unitString (moduleUnit (mi_module (hm_iface hmi))), moduleNameString name)
-            `Set.notMember` known
-    missing (NodeKey_Module (ModNodeKeyWithUid (GWIB name _) unit)) =
-      unit == home && (unitString unit, moduleNameString name) `Set.notMember` known
-    missing _ = False
+          let owner = (unitString (moduleUnit (mi_module (hm_iface hmi))), moduleNameString name)
+          in if owner `Set.member` known then Nothing else Just owner
+    missing (NodeKey_Module (ModNodeKeyWithUid (GWIB name _) unit))
+      | unit == home, (unitString unit, moduleNameString name) `Set.notMember` known =
+          Just (unitString unit, moduleNameString name)
+    missing _ = Nothing
     keyOf summary =
       (unitString (moduleUnit (ms_mod summary)), moduleNameString (moduleName (ms_mod summary)))
     nodeKey (_, moduleName') = NodeKey_Module
