@@ -1285,6 +1285,64 @@ impl ResidentWorkbenchFragment {
     }
 }
 
+#[derive(Clone)]
+struct ProtectedObservation {
+    prefix: Arc<tidepool_runtime::session::RuntimeCheckedPrefix>,
+    execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
+    binder: BoundBinder,
+    include: Vec<PathBuf>,
+}
+
+fn protected_observation(
+    compiled: &CompiledTurn,
+    bound: &[BoundBinder],
+) -> Result<Option<ProtectedObservation>, ResidentActorWorkbenchError> {
+    let Some(execution) = compiled
+        .certification
+        .as_ref()
+        .and_then(|certificate| certificate.checked_execution())
+    else {
+        return Ok(None);
+    };
+    if execution.item().kind() != tidepool_toolchain::checked_cell::CheckedItemKind::Expression {
+        return Ok(None);
+    }
+    let prefix = compiled
+        .certification
+        .as_ref()
+        .and_then(|certificate| certificate.checked_prefix())
+        .ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "checked observation lacks its private prefix".into(),
+            )
+        })?;
+    let [binder] = bound else {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "checked observation has no exact single capture binder".into(),
+        ));
+    };
+    if execution.observation_name() != Some(binder.name.as_str()) {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "checked observation capture name differs".into(),
+        ));
+    }
+    let specification = prefix
+        .admission()
+        .specification()
+        .downcast_ref::<WorkbenchCompilationSpec>()
+        .ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "checked observation lacks its owning workbench specification".into(),
+            )
+        })?;
+    Ok(Some(ProtectedObservation {
+        prefix: prefix.clone(),
+        execution: execution.clone(),
+        binder: binder.clone(),
+        include: specification.include.clone(),
+    }))
+}
+
 enum WorkbenchDisplay {
     Binding(Vec<BoundBinder>),
     Opaque,
@@ -1295,6 +1353,7 @@ enum WorkbenchDisplay {
         presentation: ExpressionPresentation,
         source: ActorWorkbenchSource,
         type_modules: Vec<String>,
+        protected: Option<ProtectedObservation>,
     },
 }
 
@@ -4532,6 +4591,27 @@ where
                     })
                 })
                 .await?;
+            if reservation.item().kind()
+                == tidepool_toolchain::checked_cell::CheckedItemKind::Declaration
+            {
+                let binders = reservation.item().binders().to_vec();
+                let prologue_only = reservation.item().source().is_empty();
+                let commit = self
+                    .access
+                    .with_machine(context.clone(), move |session, _, _| {
+                        session
+                            .adopt_checked_declaration(reservation)
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                            })
+                    })
+                    .await?;
+                return Ok(ResidentWorkbenchStep::Committed {
+                    output: declaration_receipt(&binders, prologue_only, commit.generation.0),
+                    warnings: Vec::new(),
+                    installed_bindings: binders,
+                });
+            }
             let specification = specification.clone();
             let compile_specification = specification.clone();
             let compile_block = block.clone();
@@ -5118,6 +5198,7 @@ where
         presentation,
         source,
         type_modules,
+        protected,
     } = fragment.display
     else {
         return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -5139,6 +5220,7 @@ where
         presented: fragment.presented,
         presentation,
         name,
+        protected,
     };
     let committed = |receipt: String| {
         let mut output = fragment.output.join("\n");
@@ -5155,6 +5237,21 @@ where
 
     let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
     let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
+    if request.protected.is_some() {
+        let receipt = match render_checked_observation_off_checkout(
+            access,
+            &context,
+            &request,
+            &cancellation,
+        )
+        .await
+        {
+            Ok(receipt) => receipt,
+            Err(error) => request.failed(&error),
+        };
+        cancel_on_drop.0 = None;
+        return Ok(committed(receipt));
+    }
     for attempt in 1..=CHEAP_RETRY_ATTEMPTS {
         let (stage, changed) = match render_observation_off_checkout(
             access,
@@ -5219,6 +5316,7 @@ struct ObservationRender {
     budget: usize,
     presented: Vec<String>,
     presentation: ExpressionPresentation,
+    protected: Option<ProtectedObservation>,
 }
 
 impl ObservationRender {
@@ -5456,6 +5554,111 @@ where
                     changed: SplitStaleView::PreparedImports,
                 }),
             }
+        })
+        .await
+}
+
+async fn render_checked_observation_off_checkout<H, O>(
+    access: &ResidentMachineAccess<H, O>,
+    context: &crate::ActorSessionContext,
+    request: &ObservationRender,
+    cancellation: &tidepool_runtime::CompilerTransactionCancellation,
+) -> Result<String, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    let protected = request.protected.clone().ok_or_else(|| {
+        ResidentActorWorkbenchError::ActorProtocol("protected display has no capture".into())
+    })?;
+    let include = protected.include.clone();
+    let budget = request.budget;
+    let presented = request.presented.clone();
+    let admission = access
+        .with_machine(context.clone(), move |session, _, _| {
+            session
+                .admit_checked_display(
+                    protected.prefix,
+                    protected.execution,
+                    &protected.binder,
+                    budget,
+                    presented,
+                )
+                .map_err(|error| {
+                    ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                })
+        })
+        .await?;
+    let compile_admission = admission.clone();
+    let compile_cancellation = cancellation.clone();
+    let result = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+        tidepool_runtime::with_compiler_transaction_cancellable(compile_cancellation, || {
+            let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+            tidepool_runtime::session::turn::run_checked_display(compile_admission, &include)
+                .map_err(|failure| {
+                    ResidentActorWorkbenchError::CompileInfrastructure(
+                        classify_compile(&failure.error).message,
+                    )
+                })
+        })
+    }))
+    .await
+    .map_err(ResidentActorWorkbenchError::Join)??;
+    let TurnResult::Bind {
+        bound, compiled, ..
+    } = result
+    else {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "checked display did not compile its bundle".into(),
+        ));
+    };
+    let [page, metadata, alias] = bound.as_slice() else {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "checked display has no exact three-binder bundle".into(),
+        ));
+    };
+    let bound = Arc::new([page.clone(), metadata.clone(), alias.clone()]);
+    let install_bound = bound.clone();
+    let install_admission = admission.clone();
+    let code = compiled.into_code();
+    let pending = access
+        .with_machine(context.clone(), move |session, _, _| {
+            let [page, metadata, alias] = install_bound.as_ref();
+            session
+                .snapshot_checked_display_bundle(
+                    code,
+                    page,
+                    metadata,
+                    alias,
+                    install_admission.generation(),
+                    install_admission,
+                )
+                .map_err(ResidentActorWorkbenchError::Resident)
+        })
+        .await?;
+    let (pending, compiled) =
+        crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+            let mut pending = pending;
+            let compiled = pending.compile_off_checkout();
+            (pending, compiled)
+        }))
+        .await
+        .map_err(ResidentActorWorkbenchError::Join)?;
+    let compiled = compiled
+        .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Prepared(error)))?;
+    let name = request.name.clone();
+    access
+        .with_machine(context.clone(), move |session, _, _| {
+            let [page, _, alias] = bound.as_ref();
+            let bundle = session
+                .revalidate_and_run_display_bundle(pending, compiled, page, alias)
+                .map_err(ResidentActorWorkbenchError::Resident)?
+                .ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "checked display native install became stale".into(),
+                    )
+                })?;
+            decode_display_bundle(&bundle, &name)
         })
         .await
 }
@@ -5755,6 +5958,7 @@ where
             ..
         } => {
             let warnings = compiled.warnings.warnings.clone();
+            let protected = protected_observation(&compiled, &bound)?;
             let outcome = match bound.as_slice() {
                 [] => {
                     session.run_with_sites("actor_interactive_discard_bind", compiled.into_code())
@@ -5790,6 +5994,7 @@ where
                 bound,
                 warnings,
                 observation,
+                protected,
                 display_budget,
                 outcome,
             )
@@ -5814,6 +6019,7 @@ fn finish_bind_step<H, O>(
     bound: Vec<BoundBinder>,
     warnings: Vec<String>,
     observation: Option<(String, ExpressionPresentation, Option<bool>)>,
+    protected: Option<ProtectedObservation>,
     display_budget: usize,
     outcome: Result<ResidentOutcome, ResidentError>,
 ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
@@ -5832,6 +6038,7 @@ where
             presentation,
             source: source.clone(),
             type_modules: type_modules.to_vec(),
+            protected,
         }
     } else if names.is_empty() {
         WorkbenchDisplay::Opaque
@@ -6010,6 +6217,7 @@ where
         }
     };
     let warnings = compiled_turn.warnings.warnings.clone();
+    let protected = protected_observation(&compiled_turn, &bound)?;
 
     'split: for install_attempt in 1..=CHEAP_RETRY_ATTEMPTS {
         let code = cloned_turn_code(&compiled_turn);
@@ -6047,6 +6255,7 @@ where
         let finish_bound = bound.clone();
         let finish_warnings = warnings.clone();
         let finish_observation = observation.clone();
+        let finish_protected = protected.clone();
         let finish_type_modules = type_modules.clone();
         let finish_block = block.clone();
         let finish_source = turn_source.clone();
@@ -6062,6 +6271,7 @@ where
                         finish_bound,
                         finish_warnings,
                         finish_observation,
+                        finish_protected,
                         display_budget,
                         Ok(outcome),
                     )
@@ -6125,6 +6335,7 @@ where
                 bound,
                 warnings,
                 observation,
+                protected,
                 display_budget,
                 outcome,
             )
