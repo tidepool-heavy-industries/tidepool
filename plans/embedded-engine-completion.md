@@ -614,3 +614,34 @@ a second queued message from progressing without another external trigger.
 WIP snapshots: `target/completion-evidence/active-wip/20260930T025247Z`.
 No push, live provider trial or backend-default change occurred. Full M1, M2,
 source-hidden compiler consumers and final package acceptance remain open.
+
+### 2026-09-30 joined command and captured-cut checks
+
+Product integration `44b6459c6` joins the matched `0331cc3` pin, the real
+delegated command backend/runner, and request reservation attempt identities.
+Facade library and test targets compile with default features disabled. Two
+executed actor tests pass: sibling reservation isolation and stale cleanup of a
+retry sharing the same logical execution ID. This narrows an already
+execution-scoped owner; it does not enable actor concurrency. Logs:
+`/tmp/joined-command-check.log`, `/tmp/reservation-attempt-gate.log`.
+
+Mounted native harness `c6c86052b5` passes four executed Buck tests for paired
+cuts, schema migration, two live child Engines finishing with the parent call
+pending, and stale-incarnation/nonpending refusal. Log:
+`/tmp/harness-native-captured-gate.log`. The resident captured-unfold caller is
+still in progress. A subsequent read-only Store observation API is under review
+and native verification; it is not yet an accepted application pin.
+
+The bounded original-group package-root compiler repair passes its focused
+Haskell test and clears the prior missing-package-owner failure in the actual
+watch regression. That regression still fails with
+`IncompletePromotion(InvalidManagedPointer)` before its first policy boundary
+completes (`/tmp/product-watch-package-roots-gate7.log`). General package closure
+needs a monotone fixed-point walk, which is being added before this compiler
+parcel is committed. Detailed diagnostics remain uncommitted and opt-in.
+
+A separate native ownership finding is retained: optional code-export retention
+currently ignores an error even if it makes the machine unavailable. All such
+fallible retentions must be staged before publication, with exact cleanup on
+failure; commit must remain infallible. This is not yet established as the cause
+of the invalid pointer.
