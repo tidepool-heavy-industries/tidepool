@@ -148,18 +148,18 @@ where
             }
             CommandsReq::CommandAwaitAndNotifyWith(id, milliseconds) => answer!({
                 let settlements = super::command_settlement::CommandSettlements::new(environment);
-                match jobs.owner(&id) {
-                    Ok(job_owner) if job_owner == owner => {
-                        match observe!(jobs.wait(owner, &id, milliseconds)) {
-                            Ok(observed) => {
-                                settlements
-                                    .notify_after_observation(owner, &id, observed)
-                                    .await
-                            }
-                            Err(error) => Err(error),
-                        }
+                let observed = observe!(async {
+                    if jobs.owner(&id)? != owner {
+                        return Err(CommandError::CommandUnauthorized);
                     }
-                    Ok(_) => Err(CommandError::CommandUnauthorized),
+                    jobs.wait(owner, &id, milliseconds).await
+                });
+                match observed {
+                    Ok(observed) => {
+                        settlements
+                            .notify_after_observation(owner, &id, observed)
+                            .await
+                    }
                     Err(error) => Err(error),
                 }
             }),
