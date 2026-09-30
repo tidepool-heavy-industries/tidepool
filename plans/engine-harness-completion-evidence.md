@@ -22,10 +22,38 @@ the admitted service took 38.737 seconds. Generator tests passed 18/18. Logs:
 and [`focused-generator-tests.log`](../target/completion-evidence/final-delivery/focused-generator-tests.log).
 This exercises process framing/cleanup, not a real browser or resident Haskell
 journey. Independent review subsequently found cancellation/discovery/descendant
-cleanup gaps in the **Buck runner itself**; repairs and regressions are pending.
+cleanup gaps in the **Buck runner itself**; repair `a382aa1448` passed 15/15
+runner regressions and source review. The six native process tests passed again
+on that repaired runner; see
+[`native-haskell-authority-r2.log`](../target/completion-evidence/final-delivery/native-haskell-authority-r2.log).
 Nine actions executed locally with zero action-cache hits. Incremental reuse is
 not evidence of an action-cache hit. The service's 57.5 MiB peak excludes the
 pre-existing Buck daemon.
+
+Native compiler suites `//bridge/haskell:planned_declaration` and
+`//bridge/haskell:source_boot_product_reuse` both executed and passed on joined
+`a382aa1448` plus the fixture graph committed as `bb72aaa55`. The former includes
+the exact-byte thin-interface authority proof from `bfc688640`/`d3ae6ac32`.
+The latter includes cold/resident/fresh-worker SOURCE reuse and invalidation.
+The combined invocation with the six process tests took 45.106 seconds and
+executed 29 local actions (zero action-cache hits). An initial graph parse error
+ran no tests; the corrected invocation is the `r2` log above.
+
+Runtime authority `851a1221b` and its scoped identity prerequisite `58f046fc7`
+are joined as `c8a243cc02` and `7a745b65dd`. Native
+`//tidepool/runtime:runtime_admission_tests` passed **3/3**, exit 0, on `c8a243cc02`
+plus the graph committed as `7a2264df2`; generator tests passed 18/18. The
+admitted service took 22.768 seconds, while the counted test action took 0.1
+seconds. See [`native-runtime-admission.log`](../target/completion-evidence/final-delivery/native-runtime-admission.log).
+This checks interface inventory, exact native scope membership and original
+native-owner retention; it does not replace real checked-cell execution.
+
+Native package smoke and packaged worker compilation passed **2/2** at
+`d6955f602` (34.005 seconds service time, 13 local actions). The packaged worker
+produced a nonempty prepared artifact from its declared `WorkerSmoke.hs` input.
+See [`native-package.log`](../target/completion-evidence/final-delivery/native-package.log).
+This is bounded startup/compiler evidence, not production embedded restart or
+final matched-package acceptance after later source changes.
 
 The original declaration → binding → expression → display native gate passed
 on compiler candidate `595b2f72f`: one passed, 307 skipped, 171.833 seconds,

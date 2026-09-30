@@ -19,8 +19,8 @@ bash scripts/dev-shell.sh scripts/buck2-reindeer.sh
 Add `--check` to either command to verify generated inputs without retaining
 regenerated output.
 
-The accepted native slice is `tidepool-atomic-write`, `tidepool-repr`, and
-`tidepool-heap`:
+The initial accepted native test slice covers `tidepool-atomic-write`,
+`tidepool-repr`, and `tidepool-heap`:
 
 - `//bridge/atomic-write:tidepool_atomic_write_unit_tests`
 - `//bridge/atomic-write:strict_directory`
@@ -36,6 +36,36 @@ export individual files. Fault-injection shared libraries are separate native C
 actions supplied through the test environment, without becoming Rust link inputs.
 A Buck test result is evidence only for its selected target; all
 other packages retain their existing `just` checks until migrated and accepted.
+
+Additional focused native gates are recorded in
+[`engine-harness-completion-evidence.md`](../plans/engine-harness-completion-evidence.md).
+Current execution targets include:
+
+| Target | Execution boundary |
+| --- | --- |
+| `//tidepool/runtime:runtime_admission_tests` | Three counted admission tests; no compiler worker |
+| `//bridge/facade:facade_process_tests` | Six counted framing and process cleanup tests |
+| `//bridge/facade:facade_host_tests` | Three real host tests; compiler and browser assets |
+| `//bridge/facade:facade_late_output_test` | One retained-output/compaction test |
+| `//bridge/facade:facade_browser_test` | One explicitly selected ignored Chromium journey |
+| `//bridge/haskell:planned_declaration` | Original declaration/interface authority suite |
+| `//bridge/haskell:source_boot_product_reuse` | SOURCE/boot product reuse and invalidation suite |
+| `//build/package:matched_runtime_smoke` | Assembled CLI, worker protocol and asset checks |
+| `//build/package/worker-compile-smoke:packaged_worker_compile` | Packaged worker compiles a declared Haskell fixture |
+
+Target availability is not a passing acceptance result. In particular, the
+real host/browser gates remain subject to the evidence ledger. Runtime and
+facade execution groups share their package's linked `*_unit_tests` binary;
+that binary target is build-only. The counted wrappers refuse missing names,
+zero matches and wrong counts, run each selected case in its own process, and
+own timeout/cancellation cleanup. Run `buck2 test` on the execution targets.
+`//bridge/facade:tidepool_unit_tests_all` is the explicit broad nonignored action;
+do not use it for routine spot checks.
+
+Haskell test fixture trees are declared filegroups copied into private scratch
+before execution. Changing a fixture does not relink its test binary. Compiler,
+browser and process resources belong to the groups that use them, so a process
+framing test does not build Chromium or start GHC.
 
 ## Toolchain and output setup
 
