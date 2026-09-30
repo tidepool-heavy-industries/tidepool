@@ -15422,7 +15422,7 @@ mod request_tests {
         assert!(!groups.retains_session(context.placement.session));
         workbench
             .access
-            .with_machine(context.clone(), |session, context, _| {
+            .with_machine(context.clone(), move |session, context, _| {
                 // Ordinary owner admission reaps the dropped lexical capsule.
                 let temporary = session.retain_lexical_scope(ScopeId::ROOT)?;
                 let scope = temporary.scope();
