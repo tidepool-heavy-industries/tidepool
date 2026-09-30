@@ -17,10 +17,13 @@ use crate::module_candidates::CandidateSet;
 
 const RECEIPT_LIMIT: usize = 4 << 20;
 const MODULE_LIMIT: usize = 128;
-// Tidepool.Effects.Core alone produces 5,930 neutral groups in a normal
-// resident turn. The separate 4 MiB receipt bound limits aggregate memory.
 const GROUP_LIMIT: usize = 8192;
 const GLOBAL_LIMIT: usize = 65536;
+// Dictionary references retain full witnesses after decoding. Bound both the
+// number of references and their expanded canonical bytes independently of
+// the compact encoded receipt, so sharing cannot hide unbounded allocation.
+const GLOBAL_REFERENCE_LIMIT: usize = 65536;
+const EXPANDED_GLOBAL_BYTES_LIMIT: usize = 16 << 20;
 const PACKAGE_LIMIT: usize = 4096;
 const PACKAGE_INTERFACE_LIMIT: u64 = 32 << 20;
 const SOURCE_LIMIT: u64 = 32 << 20;
@@ -453,18 +456,46 @@ fn validate_global_witness(
     Ok(selected.owner.clone())
 }
 
-/// Decode the worker's bounded `TPCERT` v2 CBOR tuple. Original module
-/// groups and each executable target retain their own ordered global rows.
+/// Decode the worker's bounded `TPCERT` tuple. Version 3 shares complete exact
+/// global rows through an immutable dictionary; version 2 retains inline rows.
+/// Original groups and executable targets preserve their ordered witnesses.
 pub fn decode_receipt(bytes: &[u8]) -> CertResult<CertifiedReceipt> {
     if bytes.len() > RECEIPT_LIMIT {
         return Err(CertificationError::Receipt("receipt size"));
     }
-    let value: Value =
-        ciborium::de::from_reader(bytes).map_err(|_| CertificationError::Receipt("CBOR"))?;
-    let header = sized(&value, 5)?;
-    if string(&header[0])? != "TPCERT" || number(&header[1])? != 2 {
+    let mut cursor = std::io::Cursor::new(bytes);
+    let value: Value = ciborium::de::from_reader_with_recursion_limit(&mut cursor, 32)
+        .map_err(|_| CertificationError::Receipt("CBOR"))?;
+    if cursor.position() != bytes.len() as u64 {
+        return Err(CertificationError::Receipt("trailing bytes"));
+    }
+    decode_receipt_value(&value)
+}
+
+fn decode_receipt_value(value: &Value) -> CertResult<CertifiedReceipt> {
+    let header = array(value)?;
+    if header.len() < 2 || string(&header[0])? != "TPCERT" {
         return Err(CertificationError::Receipt("receipt header"));
     }
+    let version = number(&header[1])?;
+    let mut dictionary = match (version, header.len()) {
+        (2, 5) => None,
+        (3, 6) => Some(GlobalDictionary::decode(&header[5])?),
+        _ => return Err(CertificationError::Receipt("receipt header")),
+    };
+    let mut read_globals = |value: &Value| {
+        let globals = array(value)?;
+        if globals.len() > GLOBAL_LIMIT {
+            return Err(CertificationError::Receipt("global count"));
+        }
+        match dictionary.as_mut() {
+            Some(dictionary) => dictionary.resolve(globals),
+            None => globals
+                .iter()
+                .map(accepted_global)
+                .collect::<CertResult<_>>(),
+        }
+    };
     let modules = array(&header[2])?;
     if modules.len() > MODULE_LIMIT {
         return Err(CertificationError::Receipt("module count"));
@@ -486,17 +517,10 @@ pub fn decode_receipt(bytes: &[u8]) -> CertResult<CertifiedReceipt> {
                 .iter()
                 .map(|group| {
                     let row = sized(group, 2)?;
-                    let globals = array(&row[1])?;
-                    if globals.len() > GLOBAL_LIMIT {
-                        return Err(CertificationError::Receipt("global count"));
-                    }
                     Ok(AcceptedGroup {
                         original_ordinal: u32::try_from(number(&row[0])?)
                             .map_err(|_| CertificationError::Receipt("group ordinal"))?,
-                        globals: globals
-                            .iter()
-                            .map(accepted_global)
-                            .collect::<CertResult<_>>()?,
+                        globals: read_globals(&row[1])?,
                     })
                 })
                 .collect::<CertResult<_>>()?;
@@ -528,18 +552,17 @@ pub fn decode_receipt(bytes: &[u8]) -> CertResult<CertifiedReceipt> {
         if globals.len() > GLOBAL_LIMIT {
             return Err(CertificationError::Receipt("target global count"));
         }
-        if targets
-            .insert(
-                name,
-                globals
-                    .iter()
-                    .map(accepted_global)
-                    .collect::<CertResult<_>>()?,
-            )
-            .is_some()
-        {
+        if targets.insert(name, read_globals(&row[1])?).is_some() {
             return Err(CertificationError::Receipt("duplicate target"));
         }
+    }
+    if dictionary
+        .as_ref()
+        .is_some_and(|dictionary| dictionary.used.len() != dictionary.rows.len())
+    {
+        return Err(CertificationError::Receipt(
+            "unreferenced global dictionary row",
+        ));
     }
     let package_rows = array(&header[4])?;
     if package_rows.len() > PACKAGE_LIMIT {
@@ -572,6 +595,70 @@ pub fn decode_receipt(bytes: &[u8]) -> CertResult<CertifiedReceipt> {
         targets,
         packages,
     })
+}
+
+struct GlobalDictionary {
+    rows: Vec<(AcceptedGlobal, usize)>,
+    used: BTreeSet<usize>,
+    references: usize,
+    expanded_bytes: usize,
+}
+
+impl GlobalDictionary {
+    fn decode(value: &Value) -> CertResult<Self> {
+        let rows = array(value)?;
+        if rows.len() > GLOBAL_LIMIT {
+            return Err(CertificationError::Receipt("global dictionary count"));
+        }
+        let mut unique = BTreeSet::new();
+        let rows = rows
+            .iter()
+            .map(|value| {
+                let global = accepted_global(value)?;
+                let mut canonical = Vec::new();
+                ciborium::ser::into_writer(&value_global(&global), &mut canonical)
+                    .map_err(|_| CertificationError::Receipt("global dictionary encoding"))?;
+                let length = canonical.len();
+                if !unique.insert(canonical) {
+                    return Err(CertificationError::Receipt(
+                        "duplicate global dictionary row",
+                    ));
+                }
+                Ok((global, length))
+            })
+            .collect::<CertResult<_>>()?;
+        Ok(Self {
+            rows,
+            used: BTreeSet::new(),
+            references: 0,
+            expanded_bytes: 0,
+        })
+    }
+
+    fn resolve(&mut self, indices: &[Value]) -> CertResult<Vec<AcceptedGlobal>> {
+        if indices.len() > GLOBAL_REFERENCE_LIMIT - self.references {
+            return Err(CertificationError::Receipt("expanded global count"));
+        }
+        let selected = indices
+            .iter()
+            .map(|value| {
+                let index = usize::try_from(number(value)?)
+                    .map_err(|_| CertificationError::Receipt("global dictionary index"))?;
+                let (global, length) = self
+                    .rows
+                    .get(index)
+                    .ok_or(CertificationError::Receipt("global dictionary index"))?;
+                if *length > EXPANDED_GLOBAL_BYTES_LIMIT - self.expanded_bytes {
+                    return Err(CertificationError::Receipt("expanded global bytes"));
+                }
+                self.expanded_bytes += length;
+                self.used.insert(index);
+                Ok(global.clone())
+            })
+            .collect::<CertResult<_>>()?;
+        self.references += indices.len();
+        Ok(selected)
+    }
 }
 
 fn sha(bytes: &[u8]) -> [u8; 32] {
@@ -907,6 +994,15 @@ fn value_import(owner: &ReceiptImportOwner) -> Value {
         ]),
     }
 }
+fn value_global(global: &AcceptedGlobal) -> Value {
+    value_array([
+        value_identity(&global.identity),
+        value_rep(&global.rep),
+        value_signature(&global.entry_signature),
+        Value::Bool(global.required_evaluated),
+        value_import(&global.owner),
+    ])
+}
 fn encode_home_witness(witness: &HomeCertification) -> CertResult<Vec<u8>> {
     let value = value_array([
         value_text("TPHOMEOWNERS"),
@@ -916,15 +1012,7 @@ fn encode_home_witness(witness: &HomeCertification) -> CertResult<Vec<u8>> {
             value_array([
                 Value::Integer((*ordinal).into()),
                 value_array(binders.iter().map(value_identity)),
-                value_array(globals.iter().map(|global| {
-                    value_array([
-                        value_identity(&global.identity),
-                        value_rep(&global.rep),
-                        value_signature(&global.entry_signature),
-                        Value::Bool(global.required_evaluated),
-                        value_import(&global.owner),
-                    ])
-                })),
+                value_array(globals.iter().map(value_global)),
             ])
         })),
         value_array(witness.sources.values().map(value_home)),
@@ -1848,7 +1936,10 @@ mod tests {
         )]);
         let target = std::sync::Arc::new(testing::prepare(testing::wire_program()).unwrap());
         let retained = certify_target_package_interfaces(&target, &packages).unwrap();
-        assert!(std::sync::Arc::ptr_eq(retained.target.as_ref().unwrap(), &target));
+        assert!(std::sync::Arc::ptr_eq(
+            retained.target.as_ref().unwrap(),
+            &target
+        ));
         assert!(retained.matches_target(&target));
         assert_eq!(
             retained.interface_digest("fixture-unit", "Package"),
@@ -2471,6 +2562,222 @@ mod tests {
             None,
         )
         .is_err());
+    }
+
+    #[test]
+    fn receipt_dictionary_preserves_legacy_facts_and_refuses_invalid_references() {
+        let mut legacy = empty_legacy_receipt();
+        let global = dictionary_test_global();
+        let Value::Array(header) = &mut legacy else {
+            unreachable!()
+        };
+        header[3] = value_array([value_array([
+            value_text("target"),
+            value_array([value_global(&global), value_global(&global)]),
+        ])]);
+        let compact = dictionary_receipt(&legacy);
+        let encoded = receipt_bytes(&compact);
+        assert_eq!(
+            decode_receipt(&encoded).unwrap(),
+            decode_receipt(&receipt_bytes(&legacy)).unwrap()
+        );
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(matches!(
+            decode_receipt(&trailing),
+            Err(CertificationError::Receipt("trailing bytes"))
+        ));
+        for reference in [
+            Value::Integer(1.into()),
+            Value::Integer((-1).into()),
+            Value::Null,
+        ] {
+            let mut altered = compact.clone();
+            let Value::Array(header) = &mut altered else {
+                unreachable!()
+            };
+            let Value::Array(targets) = &mut header[3] else {
+                unreachable!()
+            };
+            let Value::Array(target) = &mut targets[0] else {
+                unreachable!()
+            };
+            target[1] = value_array([reference]);
+            assert!(decode_receipt(&receipt_bytes(&altered)).is_err());
+        }
+        let mut duplicate = compact.clone();
+        let Value::Array(header) = &mut duplicate else {
+            unreachable!()
+        };
+        let Value::Array(rows) = &mut header[5] else {
+            unreachable!()
+        };
+        rows.push(rows[0].clone());
+        assert!(matches!(
+            decode_receipt(&receipt_bytes(&duplicate)),
+            Err(CertificationError::Receipt(
+                "duplicate global dictionary row"
+            ))
+        ));
+        let mut unreferenced = compact;
+        let Value::Array(header) = &mut unreferenced else {
+            unreachable!()
+        };
+        header[3] = value_array([]);
+        assert!(matches!(
+            decode_receipt(&receipt_bytes(&unreferenced)),
+            Err(CertificationError::Receipt(
+                "unreferenced global dictionary row"
+            ))
+        ));
+    }
+
+    #[test]
+    fn receipt_dictionary_bounds_expanded_witnesses() {
+        let global = dictionary_test_global();
+        let mut dictionary =
+            GlobalDictionary::decode(&value_array([value_global(&global)])).unwrap();
+        let indices = vec![Value::Integer(0.into()); GLOBAL_REFERENCE_LIMIT];
+        assert_eq!(
+            dictionary.resolve(&indices).unwrap().len(),
+            GLOBAL_REFERENCE_LIMIT
+        );
+        assert!(matches!(
+            dictionary.resolve(&[Value::Integer(0.into())]),
+            Err(CertificationError::Receipt("expanded global count"))
+        ));
+        let mut large = global;
+        large.identity.occurrence = "large".repeat(32 * 1024);
+        let mut dictionary =
+            GlobalDictionary::decode(&value_array([value_global(&large)])).unwrap();
+        let row_bytes = dictionary.rows[0].1;
+        let indices = vec![Value::Integer(0.into()); EXPANDED_GLOBAL_BYTES_LIMIT / row_bytes + 1];
+        assert!(matches!(
+            dictionary.resolve(&indices),
+            Err(CertificationError::Receipt("expanded global bytes"))
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires the retained oversized production tools receipt"]
+    fn receipt_dictionary_preserves_retained_production_facts() {
+        let path = std::env::var_os("TIDEPOOL_RETAINED_PRODUCT_RECEIPT")
+            .expect("explicit retained production receipt path");
+        let bytes = std::fs::read(path).unwrap();
+        assert!(
+            bytes.len() > RECEIPT_LIMIT,
+            "must exercise the actual size refusal"
+        );
+        let legacy: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let compact = dictionary_receipt(&legacy);
+        let encoded = receipt_bytes(&compact);
+        let expected = decode_receipt_value(&legacy).unwrap();
+        let admitted = decode_receipt(&encoded).unwrap();
+        assert_eq!(
+            admitted, expected,
+            "compression changed ordered full owner/contract facts"
+        );
+        assert!(encoded.len() <= RECEIPT_LIMIT);
+        eprintln!(
+            "retained-product-receipt legacy_bytes={} dictionary_bytes={} modules={} global_references={}",
+            bytes.len(), encoded.len(), admitted.modules.len(),
+            admitted.modules.iter().flat_map(|module| &module.groups).map(|group| group.globals.len()).sum::<usize>()
+                + admitted.targets.values().map(Vec::len).sum::<usize>()
+        );
+    }
+
+    fn empty_legacy_receipt() -> Value {
+        value_array([
+            value_text("TPCERT"),
+            Value::Integer(2.into()),
+            value_array([]),
+            value_array([]),
+            value_array([]),
+        ])
+    }
+
+    fn dictionary_test_global() -> AcceptedGlobal {
+        let identity = testing::identity("Support", "value");
+        AcceptedGlobal {
+            owner: ReceiptImportOwner::Retained {
+                identity: identity.clone(),
+                generation: 7,
+            },
+            identity,
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+        }
+    }
+
+    fn receipt_bytes(value: &Value) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(value, &mut bytes).unwrap();
+        bytes
+    }
+
+    fn dictionary_receipt(legacy: &Value) -> Value {
+        let mut compact = legacy.clone();
+        let Value::Array(header) = &mut compact else {
+            panic!("legacy receipt tuple")
+        };
+        assert_eq!(header[1], Value::Integer(2.into()));
+        let mut dictionary = BTreeMap::new();
+        let mut rows = |value: &Value| {
+            for row in array(value).unwrap() {
+                dictionary.insert(receipt_bytes(row), row.clone());
+            }
+        };
+        for module in array(&header[2]).unwrap() {
+            for group in array(&array(module).unwrap()[8]).unwrap() {
+                rows(&array(group).unwrap()[1]);
+            }
+        }
+        for target in array(&header[3]).unwrap() {
+            rows(&array(target).unwrap()[1]);
+        }
+        let indexed = dictionary
+            .into_iter()
+            .enumerate()
+            .map(|(index, (bytes, row))| (bytes, (index, row)))
+            .collect::<BTreeMap<_, _>>();
+        let rewrite = |value: &mut Value| {
+            let Value::Array(rows) = value else {
+                panic!("global rows")
+            };
+            for row in rows {
+                *row = Value::Integer((indexed[&receipt_bytes(row)].0 as u64).into());
+            }
+        };
+        let Value::Array(modules) = &mut header[2] else {
+            panic!("modules")
+        };
+        for module in modules {
+            let Value::Array(module) = module else {
+                panic!("module")
+            };
+            let Value::Array(groups) = &mut module[8] else {
+                panic!("groups")
+            };
+            for group in groups {
+                let Value::Array(group) = group else {
+                    panic!("group")
+                };
+                rewrite(&mut group[1]);
+            }
+        }
+        let Value::Array(targets) = &mut header[3] else {
+            panic!("targets")
+        };
+        for target in targets {
+            let Value::Array(target) = target else {
+                panic!("target")
+            };
+            rewrite(&mut target[1]);
+        }
+        header[1] = Value::Integer(3.into());
+        header.push(value_array(indexed.into_values().map(|(_, row)| row)));
+        compact
     }
 
     #[test]

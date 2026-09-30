@@ -6,7 +6,7 @@ module Tidepool.CertifiedProducts
 import Prelude hiding (product)
 import Codec.CBOR.Encoding
   ( Encoding, encodeBool, encodeListLen, encodeNull, encodeString, encodeWord
-  , encodeWord64 )
+  , encodeWord64, encodePreEncoded )
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (IOException, try)
 import Control.Monad (forM)
@@ -160,16 +160,24 @@ encodeCertifiedProducts env cached exact fresh targets evidence productBytes evi
       case failures of
         first : _ -> pure (Left first)
         [] -> do
-          let byModule = Map.fromListWith (flip (++))
+          let globalBytes = Set.toAscList (Set.fromList
+                [toStrictByteString witness
+                | witnesses <- [rows | (_, _, Right rows) <- modules]
+                    ++ [rows | (_, Right rows) <- targetRows]
+                , witness <- witnesses])
+              globalIndices = Map.fromList (zip globalBytes [(0 :: Word)..])
+              encodeReference witness = encodeWord
+                (globalIndices Map.! toStrictByteString witness)
+              byModule = Map.fromListWith (flip (++))
                 [ ((productUnit product, productModule product),
-                   [(candidateGroupOrdinal group, witnesses)])
+                   [(candidateGroupOrdinal group, map encodeReference witnesses)])
                 | (product, group, Right witnesses) <- modules ]
               encodedModules =
                 [ encodeModule product (Map.findWithDefault []
                     (productUnit product, productModule product) byModule)
                 | product <- products ]
               encodedTargets =
-                [ array [encodeString (T.pack target), list id witnesses]
+                [ array [encodeString (T.pack target), list encodeReference witnesses]
                 | (target, Right witnesses) <- targetRows ]
               encodedPackages =
                 [ array [encodeString unit, encodeString name
@@ -177,9 +185,9 @@ encodeCertifiedProducts env cached exact fresh targets evidence productBytes evi
                 | ((unit, name), options) <- Map.toList packages
                 , (path, sha) <- Set.toList options ]
           pure (Right (toStrictByteString (array
-            [encodeString "TPCERT", encodeWord 2
+            [encodeString "TPCERT", encodeWord 3
             , list id encodedModules, list id encodedTargets
-            , list id encodedPackages])))
+            , list id encodedPackages, list encodePreEncoded globalBytes])))
 
 freshGroup :: ProjectedGroup -> Maybe CandidateGroup
 freshGroup group = do
