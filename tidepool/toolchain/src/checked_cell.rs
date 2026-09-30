@@ -1250,6 +1250,12 @@ impl ExactCheckedItem {
     pub fn specification_digest(&self) -> [u8; 32] {
         self.cell.specification.specification_digest()
     }
+    pub fn reserved_declaration_modules(&self) -> &[String] {
+        &self.cell.specification.reserved_declaration_modules
+    }
+    pub fn injected_modules(&self) -> &[String] {
+        &self.cell.specification.injected_modules
+    }
     pub fn input_work(&self) -> CheckedInputWork {
         self.cell.value_inputs.work()
     }
