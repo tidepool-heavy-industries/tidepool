@@ -349,7 +349,7 @@ struct ProgramFacts {
     /// `ConstructorId`, so two programs' type graphs compare by identity
     /// rather than local index, and a bridge `HaskellValue`'s constructor resolves
     /// to the row that admits it.
-    constructors: Vec<(SymbolIdentity, DataConId)>,
+    constructors: Vec<(SymbolIdentity, DataConId, SymbolIdentity)>,
     /// Compiler-authenticated runtime IDs for the JSON constructors. This is
     /// the only JSON role inventory consumed by answer validation.
     json_layout: Option<JsonLayout<DataConId>>,
@@ -493,13 +493,70 @@ struct SettledIds {
 impl SettledIds {
     const MODULE: &'static str = "Tidepool.Internal.Resume";
 
-    fn of(by_identity: &BTreeMap<(String, String), DataConId>) -> Option<Self> {
-        let host_id =
-            |occurrence: &str| by_identity.get(&(Self::MODULE.to_string(), occurrence.to_string()));
-        Some(Self {
-            done: *host_id("Done")?,
-            suspended: *host_id("Suspended")?,
-        })
+    fn of(constructors: &[(SymbolIdentity, DataConId, SymbolIdentity)]) -> Option<Self> {
+        Self::from_constructor_facts(constructors.iter())
+            .ok()
+            .flatten()
+    }
+
+    /// Recover the settled constructor pair from exact admitted constructor
+    /// declarations. A reduced entry can import the two constructors from
+    /// separate source owners, so requiring one `ProgramFacts` value to carry
+    /// both declarations loses valid evidence. Conflicting declarations for
+    /// either qualified identity remain a refusal.
+    fn from_facts<'a>(
+        facts: impl IntoIterator<Item = &'a ProgramFacts>,
+    ) -> Result<Option<Self>, PreparedRuntimeError> {
+        Self::from_constructor_facts(
+            facts
+                .into_iter()
+                .flat_map(|facts| facts.constructors.iter()),
+        )
+    }
+
+    fn from_constructor_facts<'a>(
+        constructors: impl IntoIterator<Item = &'a (SymbolIdentity, DataConId, SymbolIdentity)>,
+    ) -> Result<Option<Self>, PreparedRuntimeError> {
+        let mut done = None;
+        let mut suspended = None;
+        for (identity, host_id, family) in constructors {
+            if identity.module != Self::MODULE {
+                continue;
+            }
+            let slot = match identity.occurrence.as_str() {
+                "Done" => &mut done,
+                "Suspended" => &mut suspended,
+                _ => continue,
+            };
+            if identity.namespace != "constructor"
+                || identity.record_parent.is_some()
+                || family.module != Self::MODULE
+                || family.namespace != "type"
+                || family.occurrence != "Settled"
+                || family.record_parent.is_some()
+                || family.unit != identity.unit
+            {
+                return Err(PreparedRuntimeError::ConflictingSettledConstructors);
+            }
+            let current = (identity, *host_id, family);
+            if slot.is_some_and(|known| known != current) {
+                return Err(PreparedRuntimeError::ConflictingSettledConstructors);
+            }
+            *slot = Some(current);
+        }
+        match (done, suspended) {
+            (
+                Some((done_identity, done, done_family)),
+                Some((suspended_identity, suspended, suspended_family)),
+            ) if done != suspended
+                && done_identity != suspended_identity
+                && done_family == suspended_family =>
+            {
+                Ok(Some(Self { done, suspended }))
+            }
+            (Some(_), Some(_)) => Err(PreparedRuntimeError::ConflictingSettledConstructors),
+            _ => Ok(None),
+        }
     }
 }
 
@@ -548,10 +605,16 @@ impl ProgramFacts {
                     .then_some(*id)
             })
         });
-        let constructors: Vec<(SymbolIdentity, DataConId)> = prepared
+        let constructors: Vec<(SymbolIdentity, DataConId, SymbolIdentity)> = prepared
             .constructors()
             .iter()
-            .map(|declaration| (declaration.identity.clone(), declaration.host_id))
+            .map(|declaration| {
+                (
+                    declaration.identity.clone(),
+                    declaration.host_id,
+                    declaration.family.clone(),
+                )
+            })
             .collect();
         let by_identity: BTreeMap<(String, String), DataConId> = constructors
             .iter()
@@ -580,7 +643,7 @@ impl ProgramFacts {
         Self {
             entry,
             tops,
-            settled: SettledIds::of(&by_identity),
+            settled: SettledIds::of(&constructors),
             resume,
             apply_entry,
             apply_value,
@@ -958,7 +1021,7 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
                         self.facts
                             .constructors
                             .get(row.constructor.0 as usize)
-                            .is_some_and(|(_, declared)| *declared == host_id)
+                            .is_some_and(|(_, declared, _)| *declared == host_id)
                     });
                     if !admitted {
                         return Err(self.bridge_abort(PreparedRuntimeError::AnswerConstructor {
@@ -974,7 +1037,7 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
                         self.facts
                             .constructors
                             .get(row.constructor.0 as usize)
-                            .is_some_and(|(_, declared)| *declared == host_id)
+                            .is_some_and(|(_, declared, _)| *declared == host_id)
                     })
                     .ok_or_else(|| {
                         self.bridge_abort(PreparedRuntimeError::AnswerConstructor {
@@ -1845,7 +1908,7 @@ impl PreparedEngine {
             constructors: facts
                 .constructors
                 .iter()
-                .map(|(identity, _)| identity.clone())
+                .map(|(identity, _, _)| identity.clone())
                 .collect(),
             input: *row.inputs.first()?,
             answer: row.wire,
@@ -2952,18 +3015,7 @@ impl PreparedEngine {
             // by an earlier target or one of this batch's source groups.
             // ProgramFacts still carries the constructor identities used by
             // the decoder, and a conflicting host-id pair is never accepted.
-            let mut settled = None;
-            for ids in self
-                .programs
-                .values()
-                .chain(facts.iter())
-                .filter_map(|facts| facts.settled)
-            {
-                if settled.is_some_and(|known| known != ids) {
-                    return Err(PreparedRuntimeError::ConflictingSettledConstructors);
-                }
-                settled = Some(ids);
-            }
+            let settled = SettledIds::from_facts(self.programs.values().chain(facts.iter()))?;
             if let Some(target_facts) = facts.last_mut() {
                 target_facts.settled = settled;
             }
@@ -4746,6 +4798,73 @@ pub(super) mod tests {
                 })
             })
             .collect()
+    }
+
+    fn settled_test_facts(declarations: &[(&str, &str, DataConId)]) -> ProgramFacts {
+        let constructors = declarations
+            .iter()
+            .map(|(unit, occurrence, host_id)| {
+                let mut identity = testing::identity("Tidepool.Internal.Resume", occurrence);
+                identity.unit = (*unit).into();
+                identity.namespace = "constructor".into();
+                let mut family = testing::identity("Tidepool.Internal.Resume", "Settled");
+                family.unit = (*unit).into();
+                family.namespace = "type".into();
+                (identity, *host_id, family)
+            })
+            .collect::<Vec<_>>();
+        let by_identity = constructors
+            .iter()
+            .map(|(identity, host_id, _)| {
+                (
+                    (identity.module.clone(), identity.occurrence.clone()),
+                    *host_id,
+                )
+            })
+            .collect();
+        ProgramFacts {
+            entry: None,
+            tops: BTreeMap::new(),
+            settled: SettledIds::of(&constructors),
+            resume: None,
+            apply_entry: None,
+            apply_value: None,
+            sites: Vec::new(),
+            types: Vec::new(),
+            verb_sites: Vec::new(),
+            constructors,
+            json_layout: None,
+            by_identity,
+        }
+    }
+
+    #[test]
+    fn certified_settled_pair_joins_exact_constructors_across_live_owners() {
+        let done = settled_test_facts(&[("fixture", "Done", DataConId(1))]);
+        let suspended = settled_test_facts(&[("fixture", "Suspended", DataConId(2))]);
+        let target = settled_test_facts(&[]);
+
+        assert_eq!(done.settled, None);
+        assert_eq!(suspended.settled, None);
+        assert_eq!(
+            SettledIds::from_facts([&done, &suspended, &target]).unwrap(),
+            Some(SettledIds {
+                done: DataConId(1),
+                suspended: DataConId(2),
+            })
+        );
+
+        let conflicting_done = settled_test_facts(&[("other-unit", "Done", DataConId(1))]);
+        assert!(matches!(
+            SettledIds::from_facts([&done, &suspended, &conflicting_done]),
+            Err(PreparedRuntimeError::ConflictingSettledConstructors)
+        ));
+
+        let split_units = settled_test_facts(&[("other-unit", "Suspended", DataConId(2))]);
+        assert!(matches!(
+            SettledIds::from_facts([&done, &split_units]),
+            Err(PreparedRuntimeError::ConflictingSettledConstructors)
+        ));
     }
 
     #[test]
