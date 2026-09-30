@@ -474,7 +474,16 @@ async fn resident_await_watch_case(primary: bool) {
     .expect("watch tool call");
     if primary {
         assert_eq!(settled["status"], "committed", "{settled:?}");
-        assert_eq!(settled["items"][0]["output"], "True", "{settled:?}");
+        let operations = settled["items"][0]["operations"]
+            .as_array()
+            .expect("operation receipts");
+        assert_eq!(operations.len(), 4, "{settled:?}");
+        for (ordinal, operation) in operations.iter().enumerate() {
+            assert_eq!(operation["id"]["effectOrdinal"], ordinal, "{settled:?}");
+            assert_eq!(operation["id"]["inputUnitIndex"], 0, "{settled:?}");
+            assert_eq!(operation["disposition"], "committed", "{settled:?}");
+        }
+        assert_eq!(operations[2]["effect"], "awaitWatch", "{settled:?}");
     } else {
         assert_eq!(settled, serde_json::json!({"settled": true}));
         forest.shutdown().await;
@@ -564,6 +573,7 @@ async fn resident_await_watch_case(primary: bool) {
             other => panic!("unexpected final deployment: {}", other.kind()),
         }
     }
+    assert_eq!(settled["items"][0]["output"], "True", "{settled:?}");
 }
 
 async fn resident_cleanup_case(fail_hook: bool) {
