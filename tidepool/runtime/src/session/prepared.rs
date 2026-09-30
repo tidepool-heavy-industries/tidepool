@@ -618,7 +618,7 @@ impl ProgramFacts {
             .collect();
         let by_identity: BTreeMap<(String, String), DataConId> = constructors
             .iter()
-            .map(|(identity, host_id)| {
+            .map(|(identity, host_id, _)| {
                 (
                     (identity.module.clone(), identity.occurrence.clone()),
                     *host_id,
@@ -635,7 +635,7 @@ impl ProgramFacts {
             .verb_sites()
             .iter()
             .filter_map(|(constructor, site)| {
-                let (_, host_id) = constructors.get(constructor.0 as usize)?;
+                let (_, host_id, _) = constructors.get(constructor.0 as usize)?;
                 let row = sites.iter().position(|row| row.site == *site)?;
                 Some((*host_id, row))
             })
@@ -666,7 +666,7 @@ impl ProgramFacts {
     ) -> Option<&SymbolIdentity> {
         self.constructors
             .get(id.0 as usize)
-            .map(|(identity, _)| identity)
+            .map(|(identity, _, _)| identity)
     }
 
     fn json_layout(&self) -> Option<JsonLayout<DataConId>> {
@@ -707,7 +707,7 @@ impl ProgramFacts {
     ) -> Option<DataConId> {
         self.constructors
             .get(id.0 as usize)
-            .map(|(_, host_id)| *host_id)
+            .map(|(_, host_id, _)| *host_id)
     }
 
     fn is_json_list_constructor(&self, host_id: DataConId) -> bool {
@@ -730,7 +730,7 @@ impl ProgramFacts {
             TypeNode::Data { rows, .. } => rows.iter().find(|row| {
                 self.constructors
                     .get(row.constructor.0 as usize)
-                    .is_some_and(|(_, declared)| *declared == host_id)
+                    .is_some_and(|(_, declared, _)| *declared == host_id)
             }),
             _ => None,
         }
