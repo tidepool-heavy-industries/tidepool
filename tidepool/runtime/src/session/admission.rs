@@ -84,6 +84,7 @@ pub struct RuntimeCellAdmission {
     specification: Arc<dyn Any + Send + Sync>,
     specification_digest: [u8; 32],
     authority_digest: [u8; 32],
+    include_paths: Vec<PathBuf>,
     digest: [u8; 32],
 }
 
@@ -1137,6 +1138,12 @@ impl RuntimeCellAdmission {
     pub fn authority_digest(&self) -> [u8; 32] {
         self.authority_digest
     }
+    /// Ordered search inputs selected by the original specification owner.
+    /// The source/tool capsule retains their lifetime; compiler evidence
+    /// independently validates every consumed byte and resolution witness.
+    pub fn include_paths(&self) -> &[PathBuf] {
+        &self.include_paths
+    }
     pub(super) fn belongs_to(&self, session: &PersistentSession) -> bool {
         Arc::ptr_eq(&self.owner, session.admission_owner())
             && self.owner_epoch == session.admission_owner().epoch()
@@ -1490,6 +1497,12 @@ impl PersistentSession {
         if !admission.belongs_to(self)
             || first_item.admission_digest() != admission.digest()
             || first_item.specification_digest() != admission.specification_digest()
+            || first_item.include_paths().len() != admission.include_paths().len()
+            || !first_item
+                .include_paths()
+                .iter()
+                .zip(admission.include_paths())
+                .all(|(consumed, admitted)| consumed.as_os_str() == admitted.as_os_str())
             || first_item.reserved_declaration_modules().len()
                 != admission.reserved_generations.len()
             || !admission
@@ -1685,6 +1698,7 @@ impl PersistentSession {
         specification: Arc<dyn Any + Send + Sync>,
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
+        include_paths: Vec<PathBuf>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         self.reap_admission_leases();
         let view = self
@@ -1736,11 +1750,15 @@ impl PersistentSession {
             digest.update(&(bytes.len() as u64).to_le_bytes());
             digest.update(bytes);
         };
-        frame(b"TidepoolRuntimeCellAdmission1");
+        frame(b"TidepoolRuntimeCellAdmission2");
         frame(self.admission_owner().identity.as_bytes());
         frame(&self.admission_owner().epoch().to_le_bytes());
         frame(&specification_digest);
         frame(&authority_digest);
+        frame(&(include_paths.len() as u64).to_le_bytes());
+        for path in &include_paths {
+            frame(path.as_os_str().as_encoded_bytes());
+        }
         frame(&view.session().0.to_le_bytes());
         frame(&scope.0.to_le_bytes());
         frame(&visibility.epoch.to_le_bytes());
@@ -1799,6 +1817,7 @@ impl PersistentSession {
             specification,
             specification_digest,
             authority_digest,
+            include_paths,
             digest,
         }))
     }
@@ -1958,6 +1977,7 @@ impl PersistentSession {
         specification: Arc<dyn Any + Send + Sync>,
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
+        include_paths: Vec<PathBuf>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         self.compile_view_for_execution(&execution)?;
         let mut admission = self.admit_cell_in(
@@ -1966,6 +1986,7 @@ impl PersistentSession {
             specification,
             specification_digest,
             authority_digest,
+            include_paths,
         )?;
         Arc::get_mut(&mut admission)
             .expect("fresh runtime admission has one owner")
@@ -2107,7 +2128,14 @@ mod tests {
             std::fs::write(path, [1, 2, 3]).unwrap();
         }
         let admitted = session
-            .admit_cell_for_execution(private.clone(), 0, Arc::new(()), [7; 32], [8; 32])
+            .admit_cell_for_execution(
+                private.clone(),
+                0,
+                Arc::new(()),
+                [7; 32],
+                [8; 32],
+                Vec::new(),
+            )
             .unwrap();
         let ledger = admitted.native_imports.clone();
         assert!(admitted
@@ -2455,7 +2483,14 @@ mod tests {
             std::fs::write(path, [1, 2, 3]).unwrap();
         }
         let admitted = session
-            .admit_cell_for_execution(execution.clone(), 0, Arc::new(()), [7; 32], [8; 32])
+            .admit_cell_for_execution(
+                execution.clone(),
+                0,
+                Arc::new(()),
+                [7; 32],
+                [8; 32],
+                Vec::new(),
+            )
             .unwrap();
         assert_eq!(
             admitted.view().injected_values(),
@@ -2509,10 +2544,17 @@ mod tests {
         let second = Arc::new(session.begin_private_execution(public).unwrap());
         assert_eq!(first.admitted_public().machine_incarnation, None);
         let first_cell = session
-            .admit_cell_for_execution(first.clone(), 0, Arc::new(()), [7; 32], [8; 32])
+            .admit_cell_for_execution(first.clone(), 0, Arc::new(()), [7; 32], [8; 32], Vec::new())
             .unwrap();
         let second_cell = session
-            .admit_cell_for_execution(second.clone(), 0, Arc::new(()), [7; 32], [8; 32])
+            .admit_cell_for_execution(
+                second.clone(),
+                0,
+                Arc::new(()),
+                [7; 32],
+                [8; 32],
+                Vec::new(),
+            )
             .unwrap();
         let incarnation = first_cell.visibility().machine_incarnation;
         assert!(incarnation.is_some());
@@ -2567,7 +2609,14 @@ mod tests {
             .unwrap();
         let private = Arc::new(session.begin_private_execution(public).unwrap());
         let cell = session
-            .admit_cell_for_execution(private.clone(), 0, Arc::new(()), [7; 32], [8; 32])
+            .admit_cell_for_execution(
+                private.clone(),
+                0,
+                Arc::new(()),
+                [7; 32],
+                [8; 32],
+                Vec::new(),
+            )
             .unwrap();
         let intent = session
             .freeze_execution_intent(&private, vec![], vec![])
@@ -2583,7 +2632,14 @@ mod tests {
         session.invalidate_execution_admissions_after_owner_transfer(next);
         assert!(!cell.belongs_to(&session));
         assert!(matches!(
-            session.admit_cell_for_execution(private.clone(), 0, Arc::new(()), [7; 32], [8; 32]),
+            session.admit_cell_for_execution(
+                private.clone(),
+                0,
+                Arc::new(()),
+                [7; 32],
+                [8; 32],
+                Vec::new()
+            ),
             Err(SessionError::StaleStagedDeclaration)
         ));
         assert!(matches!(
@@ -2605,7 +2661,7 @@ mod tests {
         assert!(session.scope_tree().is_live(private.private_scope()));
         let fresh = Arc::new(session.begin_private_execution(public).unwrap());
         let current = session
-            .admit_cell_for_execution(fresh, 0, Arc::new(()), [7; 32], [8; 32])
+            .admit_cell_for_execution(fresh, 0, Arc::new(()), [7; 32], [8; 32], Vec::new())
             .unwrap();
         assert!(current.belongs_to(&session));
         assert_ne!(cell.digest(), current.digest());
@@ -2778,7 +2834,14 @@ mod tests {
             Err(SessionError::StaleStagedDeclaration)
         ));
         let first_cell = first
-            .admit_cell_in(private.private_scope(), 0, Arc::new(()), [7; 32], [8; 32])
+            .admit_cell_in(
+                private.private_scope(),
+                0,
+                Arc::new(()),
+                [7; 32],
+                [8; 32],
+                Vec::new(),
+            )
             .unwrap();
         let second_cell = second
             .admit_cell_in(
@@ -2787,6 +2850,7 @@ mod tests {
                 Arc::new(()),
                 [7; 32],
                 [8; 32],
+                Vec::new(),
             )
             .unwrap();
         assert_ne!(first_cell.digest(), second_cell.digest());

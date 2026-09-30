@@ -4233,6 +4233,7 @@ where
                         specification.clone(),
                         specification.cell.specification_digest(),
                         authority.authority_digest(),
+                        specification.include.clone(),
                     )
                     .map_err(|error| {
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))

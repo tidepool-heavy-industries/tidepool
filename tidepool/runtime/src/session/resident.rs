@@ -2261,6 +2261,7 @@ where
         specification: Arc<dyn std::any::Any + Send + Sync>,
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
+        include_paths: Vec<PathBuf>,
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
         self.state.admit_cell_in(
@@ -2269,6 +2270,7 @@ where
             specification,
             specification_digest,
             authority_digest,
+            include_paths,
         )
     }
 
@@ -2297,6 +2299,7 @@ where
         specification: Arc<dyn std::any::Any + Send + Sync>,
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
+        include_paths: Vec<PathBuf>,
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
         self.state.admit_cell_for_execution(
@@ -2305,6 +2308,7 @@ where
             specification,
             specification_digest,
             authority_digest,
+            include_paths,
         )
     }
 
@@ -6595,7 +6599,7 @@ mod authored_publication_tests {
                 &super::super::SourceImports::new(),
             )
             .unwrap();
-        let private = session.begin_private_execution(ScopeId::ROOT).unwrap();
+        let private = Arc::new(session.begin_private_execution(ScopeId::ROOT).unwrap());
         let scope = private.private_scope();
         session.run_context.lexical_scope = scope;
         let view = session.state.compile_view_in(scope).unwrap();
@@ -6623,16 +6627,17 @@ mod authored_publication_tests {
             injected_modules: injected.clone(),
             reserved_declaration_modules: Vec::new(),
         };
+        let includes = view.include_paths(effects.include_paths());
         let admission = session
-            .admit_cell_in(
-                scope,
+            .admit_cell_for_execution(
+                private,
                 0,
                 Arc::new(specification.clone()),
                 specification.specification_digest(),
                 [0; 32],
+                includes.clone(),
             )
             .unwrap();
-        let includes = view.include_paths(effects.include_paths());
         let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         let (checked, _) = check_cell_admitted(
             CellCheckRequest {
