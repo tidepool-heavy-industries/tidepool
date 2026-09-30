@@ -708,19 +708,34 @@ impl BindingTable {
         }
         self.membership_mut(scope);
         if !self.membership_dependencies_current(scope, &self.capturable_membership[&scope]) {
-            let retained = self
-                .scope_dependency_ids_slow(tree, scope)
-                .into_iter()
-                .collect();
+            let retained = self.scope_dependency_ids_slow(tree, scope);
             let revision = self.dependency_revision;
             let projected = self
                 .capturable_membership
                 .get_mut(&scope)
                 .expect("membership exists");
-            projected.retained = retained;
+            // Full mutable graph validation stays conservative. Preserve the
+            // existing immutable root and copy paths only for actual changes.
+            let removed = projected
+                .retained
+                .iter()
+                .filter(|id| !retained.contains(id))
+                .copied()
+                .collect::<Vec<_>>();
+            if !removed.is_empty() {
+                projected.break_append_proof();
+                for id in removed {
+                    projected.retained.remove_mut(&id);
+                }
+            }
+            for id in retained {
+                if !projected.retained.contains(&id) {
+                    projected.retained.insert_mut(id);
+                    projected.added_bindings.insert(id);
+                }
+            }
             projected.dependency_revision = revision;
             projected.dependencies_dirty = false;
-            projected.break_append_proof();
         }
         let projected = self
             .capturable_membership
@@ -2304,6 +2319,10 @@ impl BindingTable {
 #[cfg(test)]
 #[path = "binding_table/identity_tests.rs"]
 mod identity_tests;
+
+#[cfg(test)]
+#[path = "binding_table/persistent_membership_cost_tests.rs"]
+mod persistent_membership_cost_tests;
 
 #[cfg(test)]
 #[path = "binding_table/cost_tests.rs"]
