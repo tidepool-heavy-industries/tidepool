@@ -21,7 +21,7 @@ is required.
 Publication is deferred at the user's request. GitHub authentication
 also remains unavailable in this session. SSH dry-run
 fails host-key verification; HTTPS has no usable credential helper. Publish
-the pinned harness revision `814b1697226344e8fd16196666e41c184a73531d` and
+the pinned harness revision `9986ca3cf8b1e4be9826cb7420de01e4371922c7` and
 verify availability of the Codex gitlink
 `d2d1d7c754a72f51087a54c230185831c649913b` before publishing Tidepool. Harness
 origin currently names a local bundle, so publication must explicitly target
