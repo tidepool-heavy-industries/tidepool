@@ -328,6 +328,8 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.write("bridge/facade/src/actor_host/m1_host_tests.rs", "#[path = \"m1_browser_runner.rs\"] mod browser_runner; #[test] fn browser_gate() {}\n")
         self.write("bridge/facade/src/actor_host/m1_browser_runner.rs", "pub fn run() {}\n")
         self.write("bridge/facade/src/actor_host/test_campaign.rs", "pub struct TestCampaign;\n")
+        self.write("bridge/facade/src/host_dynamic_tools.rs", "#[cfg(test)] mod tui_resource_tests;\n")
+        self.write("bridge/facade/src/host_dynamic_tools/tui_resource_tests.rs", 'const OMITTED: &str = include_str!("../../../../.exomonad/workspace/skills/exomonad-command/SKILL.md");\n')
         self.write("bridge/facade/src/actor_host/documentation_tests.rs", 'const OMITTED: &str = include_str!("../../../../.exomonad/workspace/checks/not-in-profile.hs");\n')
         self.write("bridge/facade/src/actor_host/agent_spec_tests.rs", 'const OMITTED: &str = include_str!("../../../../exomonad/examples/workspace/.exomonad/AgentSpec.hs");\n')
         self.write("bridge/facade/src/exomonad.rs", '''

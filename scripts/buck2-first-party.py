@@ -386,6 +386,13 @@ def source_inputs(package, target, features=()):
     if source_root.is_relative_to(directory / "src"):
         sources.update((directory / "src").rglob("*.rs"))
         facade_unit_test = package["name"] == "tidepool" and target["name"].endswith("_unit_tests")
+        if package["name"] == "tidepool" and "codex-compat" not in features:
+            codex_root = directory / "src/host_dynamic_tools.rs"
+            codex_modules = directory / "src/host_dynamic_tools"
+            sources = {
+                source for source in sources
+                if source != codex_root and not source.is_relative_to(codex_modules)
+            }
         if package["name"] == "tidepool" and not facade_unit_test:
             sources = {
                 source for source in sources
