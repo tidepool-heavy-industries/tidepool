@@ -46,6 +46,140 @@ fn assert_indexes(table: &BindingTable) {
 }
 
 #[test]
+fn persistent_membership_roots_share_append_and_unchanged_capture_custody() {
+    let mut tree = ScopeTree::new();
+    let owner = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let mut first_slot = std::ptr::null_mut();
+    let mut second_slot = std::ptr::null_mut();
+    let first = table
+        .bind_in(owner, entry("first", 1, &mut first_slot))
+        .unwrap();
+    let old = tree.mint_isolated();
+    table.seed_detached_scope(&tree, owner, old);
+    assert!(table.tips[&old]
+        .retained
+        .ptr_eq(&table.capturable_membership[&owner].retained));
+    assert_eq!(table.lease_count(first), 1);
+    let second = table
+        .bind_in(owner, entry("second", 2, &mut second_slot))
+        .unwrap();
+    let latest = tree.mint_isolated();
+    table.seed_detached_scope(&tree, owner, latest);
+    assert_eq!(table.scope_reachable_binding_ids(&tree, old), vec![first]);
+    assert_eq!(
+        table.scope_reachable_binding_ids(&tree, latest),
+        vec![first, second]
+    );
+    assert_eq!(
+        table.lease_count(first),
+        1,
+        "append reuses exact existing physical custody"
+    );
+    assert_eq!(table.lease_count(second), 1);
+    let unchanged = tree.mint_isolated();
+    table.seed_detached_scope(&tree, owner, unchanged);
+    assert!(table.tips[&unchanged]
+        .retained
+        .ptr_eq(&table.tips[&latest].retained));
+    assert!(table.tips[&unchanged]
+        .source_instances
+        .ptr_eq(&table.tips[&latest].source_instances));
+    assert!(Arc::ptr_eq(
+        &table.tips[&unchanged].leases,
+        &table.tips[&latest].leases
+    ));
+    let grandchild = tree.mint_isolated();
+    table.seed_detached_scope(&tree, old, grandchild);
+    assert!(table.tips[&grandchild]
+        .retained
+        .ptr_eq(&table.tips[&old].retained));
+    assert_eq!(
+        table.scope_reachable_binding_ids(&tree, grandchild),
+        vec![first]
+    );
+    tree.retire(owner);
+    assert!(table.drain_scope(owner).is_empty());
+    for scope in [old, grandchild, latest] {
+        tree.retire(scope);
+        assert!(table.drain_scope(scope).is_empty());
+    }
+    tree.retire(unchanged);
+    assert_eq!(table.drain_scope(unchanged).len(), 2);
+    assert!(table.capturable_membership.is_empty());
+    assert_indexes(&table);
+}
+
+#[test]
+fn persistent_membership_observation_fallback_handles_cycles_resave_and_cross_owner_edits() {
+    let mut tree = ScopeTree::new();
+    let a = tree.mint_isolated();
+    let b = tree.mint_isolated();
+    let c = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let mut slots = [std::ptr::null_mut(); 3];
+    let aid = table.bind_in(a, entry("a", 1, &mut slots[0])).unwrap();
+    let bid = table.bind_in(b, entry("b", 2, &mut slots[1])).unwrap();
+    let cid = table.bind_in(c, entry("c", 3, &mut slots[2])).unwrap();
+    assert!(table.save_observation(cid, &[], 10).is_empty());
+    assert!(table.save_observation(bid, &[], 10).is_empty());
+    assert!(table.save_observation(aid, &[bid.var()], 10).is_empty());
+    let old = tree.mint_isolated();
+    table.seed_detached_scope(&tree, a, old);
+    assert_eq!(
+        table.scope_reachable_binding_ids(&tree, old),
+        vec![aid, bid]
+    );
+    let witness = table.scope_witness(&tree, a);
+    assert!(table.save_observation(bid, &[cid.var()], 10).is_empty());
+    assert_ne!(table.scope_witness(&tree, a), witness);
+    let expanded = tree.mint_isolated();
+    table.seed_detached_scope(&tree, a, expanded);
+    assert_eq!(
+        table.scope_reachable_binding_ids(&tree, expanded),
+        vec![aid, bid, cid]
+    );
+    let grandchild = tree.mint_isolated();
+    table.seed_detached_scope(&tree, old, grandchild);
+    assert_eq!(
+        table.scope_reachable_binding_ids(&tree, grandchild),
+        vec![aid, bid]
+    );
+    assert!(table.save_observation(cid, &[aid.var()], 10).is_empty());
+    let cyclic = tree.mint_isolated();
+    table.seed_detached_scope(&tree, a, cyclic);
+    assert_eq!(
+        table.scope_reachable_binding_ids(&tree, cyclic),
+        vec![aid, bid, cid]
+    );
+    assert!(table.save_observation(aid, &[], 10).is_empty());
+    let retracted = tree.mint_isolated();
+    table.seed_detached_scope(&tree, a, retracted);
+    assert_eq!(
+        table.scope_reachable_binding_ids(&tree, retracted),
+        vec![aid]
+    );
+    for scope in [old, grandchild, expanded, cyclic] {
+        tree.retire(scope);
+        assert!(table.drain_scope(scope).is_empty());
+    }
+    assert_eq!(table.lease_count(bid), 0);
+    assert_eq!(
+        table.lease_count(cid),
+        0,
+        "new capture cannot prolong retracted foreign dependencies"
+    );
+    assert_eq!(table.lease_count(aid), 1);
+    for scope in [a, b, c, retracted] {
+        tree.retire(scope);
+        table.drain_scope(scope);
+    }
+    assert!(table.capturable_membership.is_empty());
+    assert!(table.is_empty());
+    assert_indexes(&table);
+}
+
+#[test]
 fn immutable_identity_reinsertion_is_idempotent_and_conflicts_are_atomic() {
     let mut tree = ScopeTree::new();
     let scope = tree.mint_isolated();

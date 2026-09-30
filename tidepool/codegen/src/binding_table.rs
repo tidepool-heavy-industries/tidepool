@@ -50,7 +50,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Weak};
 
-use rpds::HashTrieMapSync;
+use rpds::{HashTrieMapSync, HashTrieSetSync};
 use tidepool_repr::{BindingName, SessionModule, SessionVarId, VarId};
 
 use crate::old_space::RootSlot;
@@ -133,8 +133,8 @@ struct BindingTip {
     /// Frozen exact ancestor values, including shadowed generations needed by
     /// inherited declaration code. Leasing them keeps observations alive if
     /// their original owner later stops naming them.
-    retained: Arc<HashSet<SessionVarId>>,
-    source_instances: Arc<HashSet<SourceLeaseKey>>,
+    retained: HashTrieSetSync<SessionVarId>,
+    source_instances: HashTrieSetSync<SourceLeaseKey>,
     leases: Arc<BindingLeaseChunk>,
 }
 
@@ -147,8 +147,43 @@ struct BindingLeaseChunk {
 
 struct CaptureLeaseHistory {
     chunk: Weak<BindingLeaseChunk>,
-    retained: Arc<HashSet<SessionVarId>>,
-    source_instances: Arc<HashSet<SourceLeaseKey>>,
+    retained: HashTrieSetSync<SessionVarId>,
+    source_instances: HashTrieSetSync<SourceLeaseKey>,
+    append_epoch: Option<u64>,
+}
+
+/// Mutation-owned exact capture projection. Immutable inherited/promoted
+/// memberships are closed; only own mutable observations require refresh.
+struct CapturableMembership {
+    retained: HashTrieSetSync<SessionVarId>,
+    source_instances: HashTrieSetSync<SourceLeaseKey>,
+    dependency_revision: u64,
+    dependencies_dirty: bool,
+    // Nonzero epochs prove that every mutation since the latest capture only
+    // added exact membership. A removal or dependency refresh breaks the proof.
+    append_epoch: u64,
+    added_bindings: HashSet<SessionVarId>,
+    added_sources: HashSet<SourceLeaseKey>,
+}
+
+struct CaptureMembership {
+    retained: HashTrieSetSync<SessionVarId>,
+    source_instances: HashTrieSetSync<SourceLeaseKey>,
+    append_epoch: Option<u64>,
+    added_bindings: HashSet<SessionVarId>,
+    added_sources: HashSet<SourceLeaseKey>,
+}
+
+impl CapturableMembership {
+    fn break_append_proof(&mut self) {
+        self.append_epoch = if self.append_epoch == 0 {
+            0
+        } else {
+            self.append_epoch.checked_add(1).unwrap_or(0)
+        };
+        self.added_bindings.clear();
+        self.added_sources.clear();
+    }
 }
 
 /// A value retained by a prepared-STG `PreparedMachine`: tenured as-is (never
@@ -212,6 +247,7 @@ pub struct BindingTable {
     /// frames start at their inherited root; mutation changes only trie paths.
     /// Own aliases stay in `current` but suppress the captured name.
     capturable_names: HashMap<ScopeId, HashTrieMapSync<BindingName, SessionVarId>>,
+    capturable_membership: HashMap<ScopeId, CapturableMembership>,
     /// Append-only-by-id store of every live binding (old gens retained),
     /// flat and globally keyed across every scope.
     live: HashMap<SessionVarId, BindingEntry>,
@@ -448,6 +484,7 @@ impl Default for BindingTable {
         Self {
             current: HashMap::new(),
             capturable_names: HashMap::new(),
+            capturable_membership: HashMap::new(),
             live: HashMap::new(),
             owned: HashMap::new(),
             modules: HashMap::new(),
@@ -550,6 +587,154 @@ impl BindingTable {
         }
     }
 
+    fn membership_mut(&mut self, scope: ScopeId) -> &mut CapturableMembership {
+        self.capturable_membership.entry(scope).or_insert_with(|| {
+            let tip = self.tips.get(&scope);
+            CapturableMembership {
+                retained: tip.map(|tip| tip.retained.clone()).unwrap_or_default(),
+                source_instances: tip
+                    .map(|tip| tip.source_instances.clone())
+                    .unwrap_or_default(),
+                dependency_revision: self.dependency_revision,
+                dependencies_dirty: false,
+                append_epoch: 1,
+                added_bindings: HashSet::new(),
+                added_sources: HashSet::new(),
+            }
+        })
+    }
+
+    fn add_capturable_bindings(
+        &mut self,
+        scope: ScopeId,
+        ids: impl IntoIterator<Item = SessionVarId>,
+    ) {
+        let projected = self.membership_mut(scope);
+        for id in ids {
+            if !projected.retained.contains(&id) {
+                projected.retained.insert_mut(id);
+                projected.added_bindings.insert(id);
+            }
+        }
+    }
+
+    fn add_capturable_sources(
+        &mut self,
+        scope: ScopeId,
+        keys: impl IntoIterator<Item = SourceLeaseKey>,
+    ) {
+        let projected = self.membership_mut(scope);
+        for key in keys {
+            if !projected.source_instances.contains(&key) {
+                projected.source_instances.insert_mut(key.clone());
+                projected.added_sources.insert(key);
+            }
+        }
+    }
+
+    fn remove_capturable_binding(&mut self, scope: ScopeId, id: SessionVarId) {
+        let frozen = self
+            .tips
+            .get(&scope)
+            .is_some_and(|tip| tip.retained.contains(&id))
+            || self
+                .promoted
+                .get(&scope)
+                .is_some_and(|ids| ids.contains(&id));
+        let observations = self.observation_owners.contains_key(&scope);
+        if let Some(projected) = self.capturable_membership.get_mut(&scope) {
+            projected.break_append_proof();
+            if observations {
+                projected.dependencies_dirty = true;
+            } else if !frozen {
+                projected.retained.remove_mut(&id);
+            }
+        }
+    }
+
+    fn remove_capturable_source(&mut self, scope: ScopeId, key: &SourceLeaseKey) {
+        let frozen = self
+            .tips
+            .get(&scope)
+            .is_some_and(|tip| tip.source_instances.contains(key))
+            || self
+                .promoted_source_instances
+                .get(&scope)
+                .is_some_and(|keys| keys.contains(key));
+        if let Some(projected) = self.capturable_membership.get_mut(&scope) {
+            if !frozen && projected.source_instances.remove_mut(key) {
+                projected.break_append_proof();
+            }
+        }
+    }
+
+    fn membership_dependencies_current(
+        &self,
+        scope: ScopeId,
+        projected: &CapturableMembership,
+    ) -> bool {
+        !projected.dependencies_dirty
+            && (!self.observation_owners.contains_key(&scope)
+                || (self.dependency_revision != 0
+                    && projected.dependency_revision == self.dependency_revision))
+    }
+
+    fn capture_membership(&mut self, tree: &ScopeTree, scope: ScopeId) -> CaptureMembership {
+        if !tree.is_live(scope) {
+            return CaptureMembership {
+                retained: HashTrieSetSync::new_sync(),
+                source_instances: HashTrieSetSync::new_sync(),
+                append_epoch: None,
+                added_bindings: HashSet::new(),
+                added_sources: HashSet::new(),
+            };
+        }
+        if !self.tips.contains_key(&scope) && tree.parent_of(scope).is_some() {
+            // Unseeded legacy scopes observe mutable ancestors. Their full
+            // current closure remains the existing conservative fallback.
+            return CaptureMembership {
+                retained: self
+                    .scope_dependency_ids_slow(tree, scope)
+                    .into_iter()
+                    .collect(),
+                source_instances: self
+                    .source_instance_keys_in_slow(tree, scope)
+                    .into_iter()
+                    .collect(),
+                append_epoch: None,
+                added_bindings: HashSet::new(),
+                added_sources: HashSet::new(),
+            };
+        }
+        self.membership_mut(scope);
+        if !self.membership_dependencies_current(scope, &self.capturable_membership[&scope]) {
+            let retained = self
+                .scope_dependency_ids_slow(tree, scope)
+                .into_iter()
+                .collect();
+            let revision = self.dependency_revision;
+            let projected = self
+                .capturable_membership
+                .get_mut(&scope)
+                .expect("membership exists");
+            projected.retained = retained;
+            projected.dependency_revision = revision;
+            projected.dependencies_dirty = false;
+            projected.break_append_proof();
+        }
+        let projected = self
+            .capturable_membership
+            .get_mut(&scope)
+            .expect("membership exists");
+        CaptureMembership {
+            retained: projected.retained.clone(),
+            source_instances: projected.source_instances.clone(),
+            append_epoch: (projected.append_epoch != 0).then_some(projected.append_epoch),
+            added_bindings: std::mem::take(&mut projected.added_bindings),
+            added_sources: std::mem::take(&mut projected.added_sources),
+        }
+    }
+
     /// Project one mutated local name over its immutable inherited winner.
     /// A current alias masks that inherited winner even though children do
     /// not inherit the alias itself. Explicit hiding masks both namespaces.
@@ -599,6 +784,7 @@ impl BindingTable {
                 self.owned.remove(&entry.scope);
             }
         }
+        self.remove_capturable_binding(entry.scope, id);
         let count = self
             .modules
             .get_mut(&entry.module)
@@ -614,6 +800,7 @@ impl BindingTable {
 
     fn remove_source(&mut self, key: &SourceLeaseKey) -> Option<ScopedSourceLease> {
         let lease = self.source_instances.remove(key)?;
+        self.remove_capturable_source(lease.owner, key);
         if let Some(owned) = self.source_owned.get_mut(&lease.owner) {
             owned.remove(key);
             if owned.is_empty() {
@@ -652,12 +839,16 @@ impl BindingTable {
         let scope = observation.owner;
         *self.observation_owners.entry(scope).or_default() += 1;
         self.observations.insert(id, observation);
+        self.membership_mut(scope).dependencies_dirty = true;
         self.changed(scope);
         self.dependency_revision = self.revision;
     }
 
     fn remove_observation(&mut self, id: SessionVarId) -> Option<ObservationBinding> {
         let observation = self.observations.remove(&id)?;
+        if let Some(projected) = self.capturable_membership.get_mut(&observation.owner) {
+            projected.dependencies_dirty = true;
+        }
         let count = self
             .observation_owners
             .get_mut(&observation.owner)
@@ -847,6 +1038,7 @@ impl BindingTable {
             .entry(scope)
             .or_default()
             .insert(key.clone());
+        self.add_capturable_sources(scope, [key.clone()]);
         self.changed(scope);
         Ok(key)
     }
@@ -903,6 +1095,7 @@ impl BindingTable {
                 .expect("source owner batch was prevalidated");
             lease.owner_retired = true;
             let unshared = lease.shares == 0;
+            self.remove_capturable_source(scope, key);
             self.changed(scope);
             if unshared {
                 released.push(
@@ -949,13 +1142,28 @@ impl BindingTable {
         tree: &ScopeTree,
         scope: ScopeId,
     ) -> HashSet<SourceLeaseKey> {
+        if tree.is_live(scope)
+            && (self.tips.contains_key(&scope) || tree.parent_of(scope).is_none())
+        {
+            if let Some(projected) = self.capturable_membership.get(&scope) {
+                return projected.source_instances.iter().cloned().collect();
+            }
+        }
+        self.source_instance_keys_in_slow(tree, scope)
+    }
+
+    fn source_instance_keys_in_slow(
+        &self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+    ) -> HashSet<SourceLeaseKey> {
         if !tree.is_live(scope) {
             return HashSet::new();
         }
         let mut keys = self
             .tips
             .get(&scope)
-            .map(|tip| tip.source_instances.as_ref().clone())
+            .map(|tip| tip.source_instances.iter().cloned().collect::<HashSet<_>>())
             .unwrap_or_default();
         let owners = if self.tips.contains_key(&scope) {
             vec![scope]
@@ -1081,6 +1289,7 @@ impl BindingTable {
                 .insert(entry.name.clone(), id);
         }
         self.owned.entry(scope).or_default().insert(id);
+        self.add_capturable_bindings(scope, [id]);
         *self.modules.entry(entry.module).or_default() += 1;
         self.live.insert(id, entry);
         self.refresh_capturable_name(scope, &name);
@@ -1182,6 +1391,7 @@ impl BindingTable {
         let existing = self.promoted.entry(target).or_default();
         let added: HashSet<_> = retained.difference(existing).copied().collect();
         existing.extend(added.iter().copied());
+        self.add_capturable_bindings(target, added.iter().copied());
         self.lease_exact_ids(&added);
         let existing_source = self.promoted_source_instances.entry(target).or_default();
         let added_source: HashSet<_> = source_instances
@@ -1189,6 +1399,7 @@ impl BindingTable {
             .cloned()
             .collect();
         existing_source.extend(added_source.iter().cloned());
+        self.add_capturable_sources(target, added_source.iter().cloned());
         self.acquire_source_shares(&added_source);
         for (name, id) in writes {
             if let Some(hidden) = self.hidden.get_mut(&target) {
@@ -1360,6 +1571,7 @@ impl BindingTable {
     /// The session owner releases returned machine handles under checkout.
     pub fn drain_scope_with_sources(&mut self, scope: ScopeId) -> ScopeDrain {
         self.capture_history.remove(&scope);
+        self.capturable_membership.remove(&scope);
         let (mut released, mut source_instances) = self.release_tip(scope);
         if let Some(promoted) = self.promoted.remove(&scope) {
             released.extend(self.release_leases(promoted));
@@ -1455,10 +1667,13 @@ impl BindingTable {
         };
         // Inherited custody is already closed at its capture. Only the
         // parent's own mutable owner dependencies may grow this new capture.
-        let retained = self.scope_dependency_ids(tree, parent);
-        let retained = Arc::new(retained);
-        let source_instances = Arc::new(self.source_instance_keys_in(tree, parent));
-        let leases = self.capture_leases(parent, &retained, &source_instances);
+        let membership = self.capture_membership(tree, parent);
+        let leases = self.capture_leases(parent, &membership);
+        let CaptureMembership {
+            retained,
+            source_instances,
+            ..
+        } = membership;
         self.next_tip = next_tip;
         self.capturable_names.insert(child, visible.clone());
         self.tips.insert(
@@ -1471,6 +1686,28 @@ impl BindingTable {
                 leases,
             },
         );
+        // Normally a fresh scope has no own entries. Preserve the supported
+        // pre-seed owner case without widening its new frozen inheritance.
+        let mut child_membership = CapturableMembership {
+            retained: self.tips[&child].retained.clone(),
+            source_instances: self.tips[&child].source_instances.clone(),
+            dependency_revision: self.dependency_revision,
+            dependencies_dirty: self.observation_owners.contains_key(&child),
+            append_epoch: 1,
+            added_bindings: HashSet::new(),
+            added_sources: HashSet::new(),
+        };
+        if let Some(previous) = self.capturable_membership.remove(&child) {
+            child_membership.dependencies_dirty |= previous.dependencies_dirty;
+            for id in previous.retained.iter() {
+                child_membership.retained.insert_mut(*id);
+            }
+            for key in previous.source_instances.iter() {
+                child_membership.source_instances.insert_mut(key.clone());
+            }
+        }
+        self.capturable_membership.insert(child, child_membership);
+        self.capture_history.remove(&child);
         let local_names = self
             .current
             .get(&child)
@@ -1513,7 +1750,8 @@ impl BindingTable {
         let already = &self.tips[&target].retained;
         let retained: HashSet<_> = self
             .scope_dependency_ids(tree, source)
-            .difference(already)
+            .iter()
+            .filter(|id| !already.contains(id))
             .copied()
             .collect();
         let source_keys = self.source_instance_keys_in(tree, source);
@@ -1523,9 +1761,15 @@ impl BindingTable {
         if !retained.is_empty() || !additional_source.is_empty() {
             self.lease_exact_ids(&retained);
             self.acquire_source_shares(&additional_source);
+            self.add_capturable_bindings(target, retained.iter().copied());
+            self.add_capturable_sources(target, additional_source.iter().cloned());
             let tip = self.tips.get_mut(&target).expect("target was checked");
-            Arc::make_mut(&mut tip.retained).extend(retained.iter().copied());
-            Arc::make_mut(&mut tip.source_instances).extend(additional_source.iter().cloned());
+            for id in &retained {
+                tip.retained.insert_mut(*id);
+            }
+            for key in &additional_source {
+                tip.source_instances.insert_mut(key.clone());
+            }
             tip.leases = Arc::new(BindingLeaseChunk {
                 parents: vec![Arc::clone(&tip.leases)],
                 bindings: retained,
@@ -1554,37 +1798,62 @@ impl BindingTable {
     fn capture_leases(
         &mut self,
         parent: ScopeId,
-        retained: &Arc<HashSet<SessionVarId>>,
-        source_instances: &Arc<HashSet<SourceLeaseKey>>,
+        membership: &CaptureMembership,
     ) -> Arc<BindingLeaseChunk> {
+        let retained = &membership.retained;
+        let source_instances = &membership.source_instances;
         let previous = self.capture_history.remove(&parent).and_then(|history| {
-            history
-                .chunk
-                .upgrade()
-                .map(|chunk| (chunk, history.retained, history.source_instances))
+            history.chunk.upgrade().map(|chunk| {
+                (
+                    chunk,
+                    history.retained,
+                    history.source_instances,
+                    history.append_epoch,
+                )
+            })
         });
         let inherited = self.tips.get(&parent).map(|tip| {
             (
                 Arc::clone(&tip.leases),
-                Arc::clone(&tip.retained),
-                Arc::clone(&tip.source_instances),
+                tip.retained.clone(),
+                tip.source_instances.clone(),
+                None,
             )
         });
         let mut selected = None;
         // Test coverage while selecting the current deltas, without walking
         // the historical chunk chain. A retraction cannot retain obsolete
         // native custody through a previous capture's physical parent.
-        for (chunk, covered, covered_source) in previous.into_iter().chain(inherited) {
-            let bindings = retained
-                .difference(&covered)
-                .copied()
-                .collect::<HashSet<_>>();
-            let sources = source_instances
-                .difference(&covered_source)
-                .cloned()
-                .collect::<HashSet<_>>();
-            if retained.len() - bindings.len() == covered.len()
-                && source_instances.len() - sources.len() == covered_source.len()
+        for (chunk, covered, covered_source, epoch) in previous.into_iter().chain(inherited) {
+            // Equal nonzero epochs are issued only by the owning append-only
+            // mutation paths. Weak upgrade supplies physical custody, never
+            // membership authority. The exact accumulated additions suffice.
+            let append_only = epoch.is_some() && epoch == membership.append_epoch;
+            let bindings = if append_only {
+                membership.added_bindings.clone()
+            } else if retained.ptr_eq(&covered) {
+                HashSet::new()
+            } else {
+                retained
+                    .iter()
+                    .filter(|id| !covered.contains(id))
+                    .copied()
+                    .collect()
+            };
+            let sources = if append_only {
+                membership.added_sources.clone()
+            } else if source_instances.ptr_eq(&covered_source) {
+                HashSet::new()
+            } else {
+                source_instances
+                    .iter()
+                    .filter(|key| !covered_source.contains(key))
+                    .cloned()
+                    .collect()
+            };
+            if append_only
+                || (retained.size() - bindings.len() == covered.size()
+                    && source_instances.size() - sources.len() == covered_source.size())
             {
                 selected = Some((chunk, bindings, sources));
                 break;
@@ -1603,8 +1872,9 @@ impl BindingTable {
                     parent,
                     CaptureLeaseHistory {
                         chunk: Arc::downgrade(&chunk),
-                        retained: Arc::clone(retained),
-                        source_instances: Arc::clone(source_instances),
+                        retained: retained.clone(),
+                        source_instances: source_instances.clone(),
+                        append_epoch: membership.append_epoch,
                     },
                 );
                 return chunk;
@@ -1612,8 +1882,8 @@ impl BindingTable {
             Some((parent, bindings, sources)) => (vec![parent], bindings, sources),
             None => (
                 Vec::new(),
-                retained.as_ref().clone(),
-                source_instances.as_ref().clone(),
+                retained.iter().copied().collect(),
+                source_instances.iter().cloned().collect(),
             ),
         };
         self.lease_exact_ids(&bindings);
@@ -1627,8 +1897,9 @@ impl BindingTable {
             parent,
             CaptureLeaseHistory {
                 chunk: Arc::downgrade(&chunk),
-                retained: Arc::clone(retained),
-                source_instances: Arc::clone(source_instances),
+                retained: retained.clone(),
+                source_instances: source_instances.clone(),
+                append_epoch: membership.append_epoch,
             },
         );
         chunk
@@ -1976,6 +2247,19 @@ impl BindingTable {
     }
 
     fn scope_dependency_ids(&self, tree: &ScopeTree, scope: ScopeId) -> HashSet<SessionVarId> {
+        if tree.is_live(scope)
+            && (self.tips.contains_key(&scope) || tree.parent_of(scope).is_none())
+        {
+            if let Some(projected) = self.capturable_membership.get(&scope) {
+                if self.membership_dependencies_current(scope, projected) {
+                    return projected.retained.iter().copied().collect();
+                }
+            }
+        }
+        self.scope_dependency_ids_slow(tree, scope)
+    }
+
+    fn scope_dependency_ids_slow(&self, tree: &ScopeTree, scope: ScopeId) -> HashSet<SessionVarId> {
         if !tree.is_live(scope) {
             return HashSet::new();
         }
