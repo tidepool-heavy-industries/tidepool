@@ -2498,7 +2498,9 @@ certifyModuleCandidates manifest graph targetPath = do
               | otherwise -> do
                   let selectedBoots = [summary | (name,summary) <- Map.toList bootSummaries,
                         Map.member name admitted]
-                  hydratedResult <- hydrateCandidateHomeProducts env interfaces
+                  let canonicalLoadGraph = mapMG (\summary -> summary
+                        { ms_hspp_opts = canonicalizeRepresentationFlags (ms_hspp_opts summary) }) graph
+                  hydratedResult <- hydrateCandidateHomeProducts env canonicalLoadGraph interfaces
                     [summary | (_,summary,_) <- Map.elems admitted] selectedBoots
                   case hydratedResult of
                     Left _ -> pure Map.empty
