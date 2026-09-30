@@ -321,8 +321,8 @@ runInspectionMode compiler args _path = do
             case compiled of
               Left exception
                 | requestInspectionStrict args -> throwIO exception
-                | otherwise -> case fromException exception of
-                    Just (_ :: SourceError) -> runSingletons scope queries
+                | otherwise -> case sourceFailureDiagnostics exception of
+                    Just _ -> runSingletons scope queries
                     Nothing -> throwIO exception
               Right successful -> inspect successful queries
         | otherwise -> fail "inspection type batch requires at least two type queries and no other query kinds"
@@ -353,9 +353,9 @@ runInspectionMode compiler args _path = do
           result <- case compiled of
             Left exception
               | requestInspectionStrict args -> throwIO exception
-              | otherwise -> case fromException exception of
-                  Just (sourceError :: SourceError) ->
-                    pure [InspectionRejected (renderInspectionDiagnostics sourceError)]
+              | otherwise -> case sourceFailureDiagnostics exception of
+                  Just diagnostics ->
+                    pure [InspectionRejected (renderInspectionDiagnostics diagnostics)]
                   Nothing -> throwIO exception
             Right successful -> inspect successful [query]
           pure (Map.insert key compiled environments, answers ++ result)
@@ -365,8 +365,18 @@ isInspectionTypeQuery query = case query of
   InspectTypeOf _ -> True
   _ -> False
 
-renderInspectionDiagnostics :: SourceError -> String
-renderInspectionDiagnostics = intercalate "\n" . map render . diagsFromSourceError
+-- Both direct checking and GHC dependency loading retain real source
+-- diagnostics. Only this structural distinction permits a source alternative;
+-- input, protocol and worker failures never choose another template.
+sourceFailureDiagnostics :: SomeException -> Maybe [Diag]
+sourceFailureDiagnostics exception = case fromException exception of
+  Just (sourceError :: SourceError) -> Just (diagsFromSourceError sourceError)
+  Nothing -> case fromException exception of
+    Just (DependencySourceFailure diagnostics) -> Just diagnostics
+    _ -> Nothing
+
+renderInspectionDiagnostics :: [Diag] -> String
+renderInspectionDiagnostics = intercalate "\n" . map render
   where
     render diagnostic = location diagnostic ++ dMessage diagnostic
     location diagnostic = case dFile diagnostic of
@@ -1020,8 +1030,8 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
           case attempted of
             Right prepared ->
               return (index, spliced, modulePath, prepared)
-            Left err@(_ :: SomeException) -> case (fromException err :: Maybe SourceError, rest) of
-              (Just _, _ : _) | not (isJust admitted) -> compileVariants (index + 1) rest
+            Left err@(_ :: SomeException) -> case (sourceFailureDiagnostics err, rest) of
+              (Just _, _ : _) | not (isJust admitted || isJust display) -> compileVariants (index + 1) rest
               _               -> throwIO err
     if requestActivationPreview args
         && (selector /= SBind || length (sbBinders sb) /= 1 || length matching /= 1)

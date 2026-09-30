@@ -8179,6 +8179,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn run_turn_retries_opaque_template_after_render_source_rejection() {
+        tidepool_testing::eval_harness::require_extract();
+        let session_root = TempDir::new().unwrap();
+        let templates = [
+            TurnTemplate {
+                kind: TemplateSelector::Expr,
+                source: "module Expr where\n__result = show ({{TURN}})\n".into(),
+            },
+            TurnTemplate {
+                kind: TemplateSelector::Expr,
+                source: "module Expr where\n__result = let _value = {{TURN}} in (\"<opaque>\" :: String)\n".into(),
+            },
+        ];
+        let result = run_turn(TurnRequest {
+            exact_context: None,
+            session_id: None,
+            turn_text: "((+ 1) :: Int -> Int)",
+            templates: &templates,
+            include: &[],
+            session_root: session_root.path(),
+            inject_modules: &[],
+            gen: 0,
+            verdict: Some(TurnClassification {
+                kind: TurnKind::Expr,
+                binders: Vec::new(),
+                items: Vec::new(),
+            }),
+            target: None,
+            retained_imports: &[],
+        })
+        .unwrap();
+        let TurnResult::Expr {
+            variant,
+            wrapped_source,
+            ..
+        } = result
+        else {
+            panic!("ordinary opaque alternative must remain an expression");
+        };
+        assert_eq!(variant, 1);
+        assert_eq!(
+            wrapped_source,
+            templates[1]
+                .source
+                .replace("{{TURN}}", "((+ 1) :: Int -> Int)")
+        );
+    }
+
     /// Ordered templates are a typechecking fallback, not a blanket recovery
     /// loop. A missing external preprocessor raises an infrastructure
     /// exception rather than a GHC `SourceError`; the worker must surface it
