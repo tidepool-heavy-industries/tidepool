@@ -620,6 +620,10 @@ impl PersistentSession {
         let view = self
             .compile_view_in(scope)
             .ok_or(SessionError::DeadScope(scope))?;
+        // The lazy machine has one reserved lifetime identity before any
+        // compiler offer captures it. Bootstrap adopts this identity rather
+        // than invalidating another independently admitted private cell.
+        self.ensure_machine_incarnation();
         let visibility = self
             .public_visibility_snapshot_in(scope)
             .ok_or(SessionError::DeadScope(scope))?;
@@ -754,6 +758,52 @@ impl PersistentSession {
 mod tests {
     use super::*;
     use crate::session::{ModuleEnv, SessionId, SessionLib};
+
+    #[test]
+    fn cell_admission_reserves_the_lazy_machine_identity_once() {
+        let root = tempfile::tempdir().unwrap();
+        let lib =
+            SessionLib::open(SessionId(986), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let first = Arc::new(session.begin_private_execution(public).unwrap());
+        let second = Arc::new(session.begin_private_execution(public).unwrap());
+        assert_eq!(first.admitted_public().machine_incarnation, None);
+        let first_cell = session
+            .admit_cell_for_execution(first.clone(), 0, Arc::new(()), [7; 32], [8; 32])
+            .unwrap();
+        let second_cell = session
+            .admit_cell_for_execution(second.clone(), 0, Arc::new(()), [7; 32], [8; 32])
+            .unwrap();
+        let incarnation = first_cell.visibility().machine_incarnation;
+        assert!(incarnation.is_some());
+        assert_eq!(second_cell.visibility().machine_incarnation, incarnation);
+        assert!(session.prepared_mut().is_none());
+        let _value = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "bootstrapRoot",
+            704,
+        );
+        assert_eq!(
+            session
+                .public_visibility_snapshot_in(first.private_scope())
+                .unwrap(),
+            *first_cell.visibility()
+        );
+        assert_eq!(
+            session
+                .public_visibility_snapshot_in(second.private_scope())
+                .unwrap(),
+            *second_cell.visibility()
+        );
+        drop(first);
+        let scope = first_cell.private_execution().unwrap().private_scope();
+        session.reap_admission_leases();
+        assert!(session.scope_tree().is_live(scope));
+        drop(first_cell);
+        session.reap_admission_leases();
+        assert!(!session.scope_tree().is_live(scope));
+    }
 
     #[test]
     fn lexical_scope_lease_survives_owner_retirement_and_releases_after_child() {

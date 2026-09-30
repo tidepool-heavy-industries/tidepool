@@ -567,7 +567,7 @@ impl PersistentSession {
                 let target = engine.commit_certified_turn(staged);
                 if let Some(engine) = bootstrap {
                     self.machine = Some(engine);
-                    self.machine_incarnation = Some(super::registry::fresh_session_id());
+                    self.ensure_machine_incarnation();
                 }
                 Ok((target, keys))
             }
@@ -905,11 +905,16 @@ impl PersistentSession {
                     self.image_registry.clone(),
                 )?;
                 self.machine = Some(engine);
-                self.machine_incarnation = Some(super::registry::fresh_session_id());
+                self.ensure_machine_incarnation();
                 Ok(program)
             }
             Some(engine) => engine.install(prepared, &self.bindings, &self.binding_index),
         }
+    }
+
+    pub(crate) fn ensure_machine_incarnation(&mut self) {
+        self.machine_incarnation
+            .get_or_insert_with(super::registry::fresh_session_id);
     }
 
     /// Step (a) of the off-checkout split install (see
