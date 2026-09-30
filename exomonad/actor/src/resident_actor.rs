@@ -90,8 +90,7 @@ pub struct LocalResidentInstallation {
     pub creator: Option<crate::ActorRef>,
     pub fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
     pub checkpoint: Option<crate::CheckpointLease>,
-    /// Captured at child admission, before checkpoint release can revoke new
-    /// users. The installed host consumes only its own opaque attachment.
+    /// Captured when the child is admitted, before release can revoke new users.
     pub checkpoint_attachment: Option<HostedCheckpointAttachment>,
     pub supervisor_parent: Option<crate::ActorRef>,
     pub context_parent: Option<crate::ActorRef>,
@@ -995,12 +994,12 @@ pub struct ResidentKernelBehavior<H, O> {
     replacement_transfer: Option<replacement::ReplacementTransfer>,
     retained_replacements: Vec<replacement::RetainedHandler>,
     descriptor: ActorDescriptor,
-    admitted_checkpoint: Option<(crate::CheckpointLease, Option<HostedCheckpointAttachment>)>,
     environment: ResidentEnvironment<H, O>,
     boot: Option<ResidentBoot>,
     standing: ResidentStanding,
     shutdown_hook: Option<RootCustody>,
     checkpoint: Option<StateCheckpoint>,
+    admitted_checkpoint: Option<(crate::CheckpointLease, Option<HostedCheckpointAttachment>)>,
     pending_checkpoint: Option<StateCheckpoint>,
     active_input: Option<RetainedActorInput>,
     input_origin: ActorInputOrigin,
@@ -1019,10 +1018,6 @@ pub struct ResidentKernelBehavior<H, O> {
     /// Every after-tool invocation this actor has made, and what became of it.
     /// An abstention's reason lives here and nowhere else.
     after_tool: crate::after_tool::AfterToolLog,
-    /// Set while the after-tool slot is running. A slot's own effects and tool
-    /// use never trigger a slot, so a broken slot can never block its own
-    /// repair.
-    after_tool_active: bool,
     forest_control: bool,
     pending_program: Option<ResidentOutcome>,
     pending_reply: Option<crate::RequestId>,
@@ -1044,7 +1039,6 @@ pub struct ResidentKernelBehavior<H, O> {
     workbench_executions: Arc<Mutex<WorkbenchExecutions>>,
     active_route: Option<(crate::WatchId, Vec<crate::ForkGroupId>)>,
     fork_publication: ForkPublication,
-    active_workbench_execution: Option<ActiveWorkbenchExecution>,
     active_route_reservation_owner: Option<RequestReservationOwner>,
     settled_fork_boundaries: Vec<tidepool_runtime::session::WorkbenchForkBoundary>,
     pending_fork_publications: Vec<PendingForkPublication>,
@@ -1056,16 +1050,124 @@ pub struct ResidentKernelBehavior<H, O> {
     assignment_base: Option<String>,
 }
 
-/// State admitted for one workbench call. The actor still drives one call at
-/// a time; keeping its source context, cancellation control and reservation
-/// authority together gives each subsequent effect the same exact owner.
-struct ActiveWorkbenchExecution {
-    id: WorkbenchExecutionId,
+/// One admitted call owns its authority and cursor until final settlement.
+/// Dispatch remains sequential; this record is never cloned into another call.
+struct WorkbenchExecutionState {
+    effects: WorkbenchEffectState,
+    request: WorkbenchRequest,
+    replay_request: Option<WorkbenchRequest>,
+    invocation: Option<crate::resident_tools::WorkbenchCallKey>,
+    cursor: WorkbenchCursor,
+}
+
+struct WorkbenchEffectState {
     context: ActorSessionContext,
     public_visibility: Option<tidepool_runtime::session::PublicVisibilitySnapshot>,
     control: Option<Arc<crate::resident_tools::WorkbenchExecutionControl>>,
     installed_tools: Option<crate::InstalledToolLease>,
     admitted_source: crate::CheckpointSourceLayer,
+    reservation_owner: RequestReservationOwner,
+    publication: ForkPublication,
+    /// The nested slot borrows this execution and cannot recursively invoke itself.
+    after_tool_active: bool,
+}
+
+struct WorkbenchCursor {
+    prepared_cell: Option<Vec<Option<crate::resident_workbench::PreparedCellItem>>>,
+    dependencies: Option<tidepool_runtime::session::resident::BindingLease>,
+    cell_check: Option<tidepool_runtime::session::CellCheck>,
+    receipts: Vec<WorkbenchItemReceipt>,
+    cell_display_remaining: usize,
+    index: usize,
+    running: Option<WorkbenchFragmentExecution>,
+    unit: WorkbenchUnitState,
+    tool_dispatch: Option<Arc<RootCustody>>,
+}
+
+struct WorkbenchFragmentExecution {
+    fragment: Option<ResidentWorkbenchFragment>,
+    outcome: Option<ResidentOutcome>,
+    effect_ordinal: usize,
+}
+
+impl WorkbenchFragmentExecution {
+    fn new(fragment: ResidentWorkbenchFragment, outcome: ResidentOutcome) -> Self {
+        Self {
+            fragment: Some(fragment),
+            outcome: Some(outcome),
+            effect_ordinal: 0,
+        }
+    }
+}
+
+#[derive(Default)]
+struct WorkbenchUnitState {
+    operations: Vec<WorkbenchOperationReceipt>,
+    command_output: Vec<String>,
+    display_remaining: usize,
+}
+
+impl Default for WorkbenchCursor {
+    fn default() -> Self {
+        Self {
+            prepared_cell: None,
+            dependencies: None,
+            cell_check: None,
+            receipts: Vec::new(),
+            cell_display_remaining: 8192,
+            index: 0,
+            running: None,
+            unit: WorkbenchUnitState::default(),
+            tool_dispatch: None,
+        }
+    }
+}
+
+/// Structured actor turns retain actor publication authority. Workbench effects
+/// borrow the exact admitted call instead of consulting an actor singleton.
+#[derive(Clone)]
+enum CurrentEffectOwner<'a> {
+    Workbench(&'a WorkbenchEffectState),
+    Actor {
+        publication: ForkPublication,
+        reservation_owner: Option<RequestReservationOwner>,
+    },
+}
+
+impl CurrentEffectOwner<'_> {
+    fn publication(&self) -> &ForkPublication {
+        match self {
+            Self::Workbench(execution) => &execution.publication,
+            Self::Actor { publication, .. } => publication,
+        }
+    }
+
+    fn control(&self) -> Option<Arc<crate::WorkbenchExecutionControl>> {
+        match self {
+            Self::Workbench(execution) => execution.control.clone(),
+            Self::Actor { .. } => None,
+        }
+    }
+
+    fn admitted_source(&self) -> Option<&crate::CheckpointSourceLayer> {
+        match self {
+            Self::Workbench(execution) => Some(&execution.admitted_source),
+            Self::Actor { .. } => None,
+        }
+    }
+
+    fn reservation_owner(&self) -> Option<RequestReservationOwner> {
+        match self {
+            Self::Workbench(execution) => Some(execution.reservation_owner.clone()),
+            Self::Actor {
+                reservation_owner, ..
+            } => reservation_owner.clone(),
+        }
+    }
+
+    fn after_tool_active(&self) -> bool {
+        matches!(self, Self::Workbench(execution) if execution.after_tool_active)
+    }
 }
 
 struct WorkbenchAdmission {
@@ -1086,6 +1188,7 @@ enum WorkbenchPreflight {
 
 // Even a raw operator notebook with no provider boundary publishes at the
 // end of its input. A resident handler has no later notebook completion.
+#[derive(Clone)]
 enum ForkPublication {
     Resident,
     Workbench {
@@ -1163,8 +1266,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         )
     }
 
-    fn pending_in_tool_block(&self, target: ActorRef) -> bool {
-        self.fork_publication.boundary().is_some()
+    fn pending_in_tool_block(
+        &self,
+        effect_owner: &CurrentEffectOwner<'_>,
+        target: ActorRef,
+    ) -> bool {
+        effect_owner.publication().boundary().is_some()
             && self.environment.fork_groups.is_pending_child(target)
     }
 
@@ -1230,12 +1337,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             replacement_transfer: None,
             retained_replacements: Vec::new(),
             descriptor,
-            admitted_checkpoint: None,
             environment,
             boot: Some(boot),
             standing: ResidentStanding::Boot,
             shutdown_hook: None,
             checkpoint: None,
+            admitted_checkpoint: None,
             pending_checkpoint: None,
             active_input: None,
             input_origin: ActorInputOrigin::ActorStartup,
@@ -1249,7 +1356,6 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             installed_tools: Arc::default(),
             spec_installs: 0,
             after_tool: crate::after_tool::AfterToolLog::default(),
-            after_tool_active: false,
             forest_control: false,
             pending_program: None,
             pending_reply: None,
@@ -1264,7 +1370,6 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             workbench_executions: Arc::default(),
             active_route: None,
             fork_publication: ForkPublication::Resident,
-            active_workbench_execution: None,
             active_route_reservation_owner: None,
             settled_fork_boundaries: Vec::new(),
             pending_fork_publications: Vec::new(),
@@ -1367,11 +1472,11 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         }))
     }
 
-    fn active_reservation_owner(&self) -> Option<RequestReservationOwner> {
-        self.active_workbench_execution
-            .as_ref()
-            .map(|execution| RequestReservationOwner::Workbench(execution.id.clone()))
-            .or_else(|| self.active_route_reservation_owner.clone())
+    fn actor_effect_owner(&self) -> CurrentEffectOwner<'static> {
+        CurrentEffectOwner::Actor {
+            publication: self.fork_publication.clone(),
+            reservation_owner: self.active_route_reservation_owner.clone(),
+        }
     }
 
     fn failure(error: impl std::fmt::Display) -> KernelBehaviorError {
@@ -2309,11 +2414,12 @@ where
         &self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
+        effect_owner: CurrentEffectOwner<'_>,
         ancestry: &crate::CallAncestry,
         target: ActorRef,
         request: MailboxValue,
     ) -> Result<MailboxValue, ResidentCallError> {
-        if self.pending_in_tool_block(target) {
+        if self.pending_in_tool_block(&effect_owner, target) {
             return Err(ResidentCallError::Call(KernelCallFailure::Handler {
                 actor: target,
                 detail: "child starts after this tool block completes; register a watch or call it in a later tool invocation".into(),
@@ -2348,12 +2454,11 @@ where
             .map_err(ResidentCallError::Call)
     }
 
-    // Child startup is polled inside the parent's workbench. Heap-own its
-    // async state so nested admission does not accumulate large stack frames.
     fn start_child<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
         context: &'a ActorSessionContext,
+        effect_owner: CurrentEffectOwner<'a>,
         start: crate::ResidentActorStart,
     ) -> futures_util::future::BoxFuture<'a, Result<ResidentOutcome, ResidentActorWorkbenchError>>
     {
@@ -2371,7 +2476,9 @@ where
             // whether or not provisioning ever actually happened.
             let launch_session = child.descriptor.placement().session;
             let launch_scope = child.descriptor.placement().lexical_scope;
-            let started = self.try_start_child(kernel, context, child).await;
+            let started = self
+                .try_start_child(kernel, context, effect_owner, child)
+                .await;
             if started.is_err() && launch_session != context.placement.session {
                 self.environment
                     .runner
@@ -2470,6 +2577,7 @@ where
         &'a mut self,
         kernel: &'a KernelContext,
         context: &'a ActorSessionContext,
+        effect_owner: CurrentEffectOwner<'a>,
         child: crate::start::CapturedChildLaunch,
     ) -> futures_util::future::BoxFuture<
         'a,
@@ -2548,9 +2656,12 @@ where
             if descriptor.fork_group().is_some() {
                 if checkpoint_lease.is_none()
                     && self.policy_installed
-                    && self.fork_publication.boundary().is_none_or(|boundary| {
-                        boundary.thread_id.is_empty() || boundary.call_id.is_empty()
-                    })
+                    && effect_owner
+                        .publication()
+                        .boundary()
+                        .is_none_or(|boundary| {
+                            boundary.thread_id.is_empty() || boundary.call_id.is_empty()
+                        })
                 {
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
                     "context fork requires recorded invocation provenance from the hosted transport; use a Codex build that supplies contextCallId".into(),
@@ -2560,7 +2671,7 @@ where
                     checkpoint_lease
                         .as_ref()
                         .map(|lease| lease.boundary.clone())
-                        .or_else(|| self.fork_publication.boundary().cloned()),
+                        .or_else(|| effect_owner.publication().boundary().cloned()),
                 );
                 if let Some(lease) = &checkpoint_lease {
                     descriptor = descriptor.with_context_parent(lease.issuer);
@@ -2827,6 +2938,7 @@ where
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
+        effect_owner: CurrentEffectOwner<'_>,
         ancestry: &crate::CallAncestry,
         outbound: ResidentOutbound,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
@@ -2862,7 +2974,14 @@ where
                 request,
             } => {
                 let reply = self
-                    .perform_call(kernel, context, ancestry, target, request)
+                    .perform_call(
+                        kernel,
+                        context,
+                        effect_owner.clone(),
+                        ancestry,
+                        target,
+                        request,
+                    )
                     .await
                     .map_err(|error| match error {
                         ResidentCallError::Call(error) => {
@@ -2881,7 +3000,14 @@ where
                 request,
             } => {
                 let failure = match self
-                    .perform_call(kernel, context, ancestry, target, request)
+                    .perform_call(
+                        kernel,
+                        context,
+                        effect_owner.clone(),
+                        ancestry,
+                        target,
+                        request,
+                    )
                     .await
                 {
                     Ok(reply) => {
@@ -3103,6 +3229,7 @@ where
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
+        effect_owner: CurrentEffectOwner<'_>,
         ancestry: &crate::CallAncestry,
         boundary: ResidentActorBoundary,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
@@ -3189,10 +3316,8 @@ where
                 // Mailbox handlers and direct local workbenches have no hosted
                 // evaluation to cancel, but still share the actor-owned timer
                 // and retirement path.
-                let control = self
-                    .active_workbench_execution
-                    .as_ref()
-                    .and_then(|execution| execution.control.clone())
+                let control = effect_owner
+                    .control()
                     .unwrap_or_else(crate::resident_tools::WorkbenchExecutionControl::untracked);
                 control.arm_sleep();
                 let timer = tokio::time::sleep(duration);
@@ -3848,8 +3973,8 @@ where
                 name,
             }) => Box::pin(async move {
                 let result: Result<String, crate::CheckpointRefusal> = async {
-                    let boundary = self
-                        .fork_publication
+                    let boundary = effect_owner
+                        .publication()
                         .hosted_boundary()
                         .filter(|boundary| {
                             !boundary.thread_id.is_empty()
@@ -3869,10 +3994,7 @@ where
                     // Workbench admission already froze the revision paths.
                     // The run source owner retains immutable revisions for the
                     // run; a later reload cannot change this capture's source.
-                    let admitted_source = self
-                        .active_workbench_execution
-                        .as_ref()
-                        .map(|execution| execution.admitted_source.clone());
+                    let admitted_source = effect_owner.admitted_source().cloned();
                     let before = admitted_source.clone().map_or_else(
                         || freeze_source().map_err(|_| crate::CheckpointRefusal::CaptureFailed),
                         Ok,
@@ -3896,7 +4018,7 @@ where
                             .map_err(|_| crate::CheckpointRefusal::CaptureFailed)?;
                         return Err(crate::CheckpointRefusal::CaptureFailed);
                     }
-                    let attachment = match self.fork_publication.capture() {
+                    let attachment = match effect_owner.publication().capture() {
                         Some(capture) => match capture.capture(&name, &boundary) {
                             Ok(attachment) => Some(attachment),
                             Err(_) => {
@@ -4084,7 +4206,7 @@ where
                     let group_path = group.to_string();
                     let maximum = budget.maximum_active_children.map(usize::from);
                     let (group_id, reservations) =
-                        match self.fork_publication.boundary().cloned() {
+                        match effect_owner.publication().boundary().cloned() {
                             Some(boundary) => self.environment.fork_groups.begin_at_boundary(
                                 context.actor,
                                 group,
@@ -4206,7 +4328,7 @@ where
                 // publish their children. Publish this admission before resuming
                 // the handler, which may immediately await a child's reply.
                 // Notebook groups remain fenced by their completion boundary.
-                if matches!(self.fork_publication, ForkPublication::Resident) {
+                if matches!(effect_owner.publication(), ForkPublication::Resident) {
                     self.environment
                         .fork_groups
                         .publish_groups(&[group], context.actor)
@@ -4269,10 +4391,10 @@ where
                     .await
             }),
             ResidentActorBoundary::Start(start) => {
-                Box::pin(self.start_child(kernel, context, start))
+                Box::pin(self.start_child(kernel, context, effect_owner, start))
             }
             ResidentActorBoundary::Outbound(outbound) => Box::pin(async move {
-                self.resolve_outbound(kernel, context, ancestry, outbound)
+                self.resolve_outbound(kernel, context, effect_owner, ancestry, outbound)
                     .await
             }),
             ResidentActorBoundary::Replace { target, candidate } => Box::pin(async move {
@@ -4358,7 +4480,7 @@ where
                     .await
             }),
             ResidentActorBoundary::Wait(wait) => Box::pin(async move {
-                if self.pending_in_tool_block(wait.target) {
+                if self.pending_in_tool_block(&effect_owner, wait.target) {
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
                         "child starts after this tool block completes; register a watch or wait in a later tool invocation".into(),
                     ));
@@ -4419,7 +4541,7 @@ where
                 tracing::info!(
                     actor = %context.actor,
                     target = %target,
-                    from_slot = self.after_tool_active,
+                    from_slot = effect_owner.after_tool_active(),
                     reason = %crate::workbench_display::bounded_output(&message, 1024),
                     "actor notification sent"
                 );
@@ -4524,7 +4646,7 @@ where
                     reservation.target,
                     reservation.label,
                     reservation.notify_owner,
-                    self.active_reservation_owner(),
+                    effect_owner.reservation_owner(),
                 );
                 self.environment
                     .runner
@@ -4868,10 +4990,8 @@ where
                     .await
             }),
             ResidentActorBoundary::WatchAwait(poll) => Box::pin(async move {
-                let control = self
-                    .active_workbench_execution
-                    .as_ref()
-                    .and_then(|execution| execution.control.clone())
+                let control = effect_owner
+                    .control()
                     .unwrap_or_else(crate::resident_tools::WorkbenchExecutionControl::untracked);
                 control.arm_sleep();
                 let waiting = self
@@ -5135,7 +5255,13 @@ where
                 }
                 boundary => {
                     outcome = self
-                        .resolve_effect(kernel, context, ancestry, boundary)
+                        .resolve_effect(
+                            kernel,
+                            context,
+                            self.actor_effect_owner(),
+                            ancestry,
+                            boundary,
+                        )
                         .await?;
                 }
             }
@@ -5565,278 +5691,268 @@ where
         Ok(())
     }
 
-    fn initialize<'a>(
-        &'a mut self,
-        kernel: &'a KernelContext,
-        context: &'a ActorSessionContext,
+    async fn initialize(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
         boot: ResidentBoot,
-    ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, ResidentActorWorkbenchError>>
-    {
-        Box::pin(async move {
-            let boot = match boot {
-                ResidentBoot::Replacement(prepared) => {
-                    self.boot = Some(ResidentBoot::Replacement(prepared));
-                    return Ok(KernelStep::Continue(()));
-                }
-                boot => boot,
-            };
-            if let Some(terminal) = kernel.requested_shutdown() {
-                return Ok(KernelStep::Stop {
-                    output: (),
-                    terminal,
-                });
+    ) -> Result<KernelStep<()>, ResidentActorWorkbenchError> {
+        let boot = match boot {
+            ResidentBoot::Replacement(prepared) => {
+                self.boot = Some(ResidentBoot::Replacement(prepared));
+                return Ok(KernelStep::Continue(()));
             }
-            if self.worktree_custody.is_none() {
-                if let Some(prepared) = self.prepared_workspace.take() {
+            boot => boot,
+        };
+        if let Some(terminal) = kernel.requested_shutdown() {
+            return Ok(KernelStep::Stop {
+                output: (),
+                terminal,
+            });
+        }
+        if self.worktree_custody.is_none() {
+            if let Some(prepared) = self.prepared_workspace.take() {
+                let actor = context.actor;
+                self.worktree_custody = Some(
+                    tidepool_runtime::spawn_blocking_in_span(move || prepared.install(actor))
+                        .await
+                        .map_err(ResidentActorWorkbenchError::Join)?
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                        })?,
+                );
+            }
+        }
+        if self.worktree_custody.is_none() {
+            match self.launch_worktrees.as_slice() {
+                [] => {}
+                [worktree] => {
+                    let admission = self.environment.fork_workspaces.as_ref().ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "pre-bootstrap worktree custody is unavailable".into(),
+                        )
+                    })?;
+                    let admission = admission.clone();
                     let actor = context.actor;
+                    let worktree = worktree.clone();
+                    let role = self.descriptor.effective_role().role();
                     self.worktree_custody = Some(
-                        tidepool_runtime::spawn_blocking_in_span(move || prepared.install(actor))
-                            .await
-                            .map_err(ResidentActorWorkbenchError::Join)?
-                            .map_err(|error| {
-                                ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                            })?,
+                        tidepool_runtime::spawn_blocking_in_span(move || {
+                            admission.install_custody(actor, &worktree, role)
+                        })
+                        .await
+                        .map_err(ResidentActorWorkbenchError::Join)?
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                        })?,
                     );
                 }
-            }
-            if self.worktree_custody.is_none() {
-                match self.launch_worktrees.as_slice() {
-                    [] => {}
-                    [worktree] => {
-                        let admission =
-                            self.environment.fork_workspaces.as_ref().ok_or_else(|| {
-                                ResidentActorWorkbenchError::ActorProtocol(
-                                    "pre-bootstrap worktree custody is unavailable".into(),
-                                )
-                            })?;
-                        let admission = admission.clone();
-                        let actor = context.actor;
-                        let worktree = worktree.clone();
-                        let role = self.descriptor.effective_role().role();
-                        self.worktree_custody = Some(
-                            tidepool_runtime::spawn_blocking_in_span(move || {
-                                admission.install_custody(actor, &worktree, role)
-                            })
-                            .await
-                            .map_err(ResidentActorWorkbenchError::Join)?
-                            .map_err(|error| {
-                                ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                            })?,
-                        );
-                    }
-                    _ => {
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(
-                            "actor bootstrap requires at most one worktree".into(),
-                        ));
-                    }
+                _ => {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "actor bootstrap requires at most one worktree".into(),
+                    ));
                 }
             }
-            if let Some(terminal) = kernel.requested_shutdown() {
-                return Ok(KernelStep::Stop {
-                    output: (),
-                    terminal,
-                });
+        }
+        if let Some(terminal) = kernel.requested_shutdown() {
+            return Ok(KernelStep::Stop {
+                output: (),
+                terminal,
+            });
+        }
+        let outcome = match boot {
+            ResidentBoot::Replacement(_) => {
+                unreachable!("replacement bootstrap parks before initialization")
             }
-            let outcome = match boot {
-                ResidentBoot::Replacement(_) => {
-                    unreachable!("replacement bootstrap parks before initialization")
-                }
-                ResidentBoot::Workbench => {
-                    self.set_standing(context.actor, ResidentStanding::Workbench);
-                    self.policy_installed = true;
-                    return Ok(KernelStep::Continue(()));
-                }
-                ResidentBoot::Prepared(outcome) => *outcome,
-                ResidentBoot::Entry(entry) => {
-                    let mut outcome = self
+            ResidentBoot::Workbench => {
+                self.set_standing(context.actor, ResidentStanding::Workbench);
+                self.policy_installed = true;
+                return Ok(KernelStep::Continue(()));
+            }
+            ResidentBoot::Prepared(outcome) => *outcome,
+            ResidentBoot::Entry(entry) => {
+                let mut outcome = self
+                    .environment
+                    .runner
+                    .run_rooted_entry(context.clone(), entry, context.placement.resource_scope)
+                    .await?;
+                loop {
+                    let startup_step = self
                         .environment
                         .runner
-                        .run_rooted_entry(context.clone(), entry, context.placement.resource_scope)
+                        .capture_startup_step(
+                            context.clone(),
+                            outcome,
+                            context.placement.resource_scope,
+                        )
                         .await?;
-                    loop {
-                        let startup_step = self
-                            .environment
-                            .runner
-                            .capture_startup_step(
-                                context.clone(),
-                                outcome,
-                                context.placement.resource_scope,
+                    if let Some(terminal) = kernel.requested_shutdown() {
+                        return Ok(KernelStep::Stop {
+                            output: (),
+                            terminal,
+                        });
+                    }
+                    match startup_step {
+                        ResidentActorStartupStep::InstallSource {
+                            continuation,
+                            source,
+                        } => {
+                            self.sources.push(source);
+                            outcome = self
+                                .environment
+                                .runner
+                                .resume_unit(context.clone(), continuation)
+                                .await?;
+                        }
+                        ResidentActorStartupStep::InstallShutdown(shutdown) => {
+                            if self.shutdown_hook.is_some() {
+                                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                    "actor installed its shutdown hook more than once".into(),
+                                ));
+                            }
+                            let (continuation, hook) = shutdown.into_parts();
+                            self.shutdown_hook = Some(hook);
+                            outcome = self
+                                .environment
+                                .runner
+                                .resume_unit(context.clone(), continuation)
+                                .await?;
+                        }
+                        ResidentActorStartupStep::Attach(attachment) => {
+                            if self.policy_installed {
+                                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                    "actor installed its Codex application more than once".into(),
+                                ));
+                            }
+                            self.install_interactive_policy(
+                                kernel,
+                                context,
+                                attachment.initial_user_message,
                             )
                             .await?;
-                        if let Some(terminal) = kernel.requested_shutdown() {
-                            return Ok(KernelStep::Stop {
-                                output: (),
-                                terminal,
-                            });
-                        }
-                        match startup_step {
-                            ResidentActorStartupStep::InstallSource {
-                                continuation,
-                                source,
-                            } => {
-                                self.sources.push(source);
-                                outcome = self
-                                    .environment
-                                    .runner
-                                    .resume_unit(context.clone(), continuation)
-                                    .await?;
-                            }
-                            ResidentActorStartupStep::InstallShutdown(shutdown) => {
-                                if self.shutdown_hook.is_some() {
-                                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                                        "actor installed its shutdown hook more than once".into(),
-                                    ));
-                                }
-                                let (continuation, hook) = shutdown.into_parts();
-                                self.shutdown_hook = Some(hook);
-                                outcome = self
-                                    .environment
-                                    .runner
-                                    .resume_unit(context.clone(), continuation)
-                                    .await?;
-                            }
-                            ResidentActorStartupStep::Attach(attachment) => {
-                                if self.policy_installed {
-                                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                                        "actor installed its Codex application more than once"
-                                            .into(),
-                                    ));
-                                }
-                                self.install_interactive_policy(
-                                    kernel,
-                                    context,
-                                    attachment.initial_user_message,
-                                )
+                            outcome = self
+                                .environment
+                                .runner
+                                .resume_unit(context.clone(), attachment.continuation)
                                 .await?;
-                                outcome = self
-                                    .environment
-                                    .runner
-                                    .resume_unit(context.clone(), attachment.continuation)
-                                    .await?;
-                            }
-                            ResidentActorStartupStep::Ready(readiness) => {
-                                self.static_source_count = self.sources.len();
-                                if !self.sources.is_empty() {
-                                    let owner = self.descriptor.creator().ok_or_else(|| {
-                                        ResidentActorWorkbenchError::ActorProtocol(
-                                            "source actor has no creator".into(),
-                                        )
-                                    })?;
-                                    let recipient =
-                                        kernel.resolve(context.actor).ok_or_else(|| {
+                        }
+                        ResidentActorStartupStep::Ready(readiness) => {
+                            self.static_source_count = self.sources.len();
+                            if !self.sources.is_empty() {
+                                let owner = self.descriptor.creator().ok_or_else(|| {
+                                    ResidentActorWorkbenchError::ActorProtocol(
+                                        "source actor has no creator".into(),
+                                    )
+                                })?;
+                                let recipient = kernel.resolve(context.actor).ok_or_else(|| {
+                                    ResidentActorWorkbenchError::ActorProtocol(
+                                        "source actor is absent from its directory".into(),
+                                    )
+                                })?;
+                                let sources = self
+                                    .sources
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(slot, source)| match source.target {
+                                        crate::request::sources::SourceTarget::Request(
+                                            request,
+                                            kind,
+                                        ) => Some((slot, request, kind)),
+                                        crate::request::sources::SourceTarget::Lifecycle(_)
+                                        | crate::request::sources::SourceTarget::Command(_) => None,
+                                    })
+                                    .collect::<Vec<_>>();
+                                let mut lifecycle = Vec::new();
+                                for (slot, source) in self.sources.iter().enumerate() {
+                                    if let crate::request::sources::SourceTarget::Lifecycle(
+                                        target,
+                                    ) = source.target
+                                    {
+                                        if !actor_can_observe(
+                                            owner,
+                                            target,
+                                            &self.environment.actors.lock(),
+                                        ) {
+                                            return Err(
+                                                ResidentActorWorkbenchError::ActorProtocol(
+                                                    "lifecycle source is not authorized".into(),
+                                                ),
+                                            );
+                                        }
+                                        let actor = kernel.resolve(target).ok_or_else(|| {
                                             ResidentActorWorkbenchError::ActorProtocol(
-                                                "source actor is absent from its directory".into(),
+                                                "lifecycle source target is unavailable".into(),
                                             )
                                         })?;
-                                    let sources = self
-                                        .sources
-                                        .iter()
-                                        .enumerate()
-                                        .filter_map(|(slot, source)| match source.target {
-                                            crate::request::sources::SourceTarget::Request(
-                                                request,
-                                                kind,
-                                            ) => Some((slot, request, kind)),
-                                            crate::request::sources::SourceTarget::Lifecycle(_)
-                                            | crate::request::sources::SourceTarget::Command(_) => {
-                                                None
-                                            }
-                                        })
-                                        .collect::<Vec<_>>();
-                                    let mut lifecycle = Vec::new();
-                                    for (slot, source) in self.sources.iter().enumerate() {
-                                        if let crate::request::sources::SourceTarget::Lifecycle(
-                                            target,
-                                        ) = source.target
-                                        {
-                                            if !actor_can_observe(
-                                                owner,
-                                                target,
-                                                &self.environment.actors.lock(),
-                                            ) {
-                                                return Err(
-                                                    ResidentActorWorkbenchError::ActorProtocol(
-                                                        "lifecycle source is not authorized".into(),
-                                                    ),
-                                                );
-                                            }
-                                            let actor =
-                                                kernel.resolve(target).ok_or_else(|| {
-                                                    ResidentActorWorkbenchError::ActorProtocol(
-                                                        "lifecycle source target is unavailable"
-                                                            .into(),
-                                                    )
-                                                })?;
-                                            lifecycle.push((slot, actor));
-                                        }
+                                        lifecycle.push((slot, actor));
                                     }
-                                    self.source_connections = Some(
-                                        self.environment
-                                            .requests
-                                            .attach_sources(owner, recipient, &sources)
-                                            .map_err(|error| {
-                                                ResidentActorWorkbenchError::ActorProtocol(format!(
-                                                    "source attachment rejected: {error:?}"
-                                                ))
-                                            })?,
-                                    );
-                                    for (slot, source) in self.sources.iter().enumerate() {
-                                        if let crate::request::sources::SourceTarget::Command(key) =
-                                            source.target
-                                        {
-                                            #[allow(
-                                                clippy::expect_used,
-                                                reason = "self.source_connections was set to \
-                                                      Some(..) immediately above, with no \
-                                                      intervening code that clears it"
-                                            )]
-                                            self.source_connections
-                                                .as_mut()
-                                                .expect("attached sources")
-                                                .attach_command(
-                                                    slot,
-                                                    key,
-                                                    owner,
-                                                    &self.environment.commands,
-                                                )
-                                                .map_err(|error| {
-                                                    ResidentActorWorkbenchError::ActorProtocol(
-                                                        format!("command source: {error:?}"),
-                                                    )
-                                                })?;
-                                        }
-                                    }
-                                    for (slot, actor) in lifecycle {
+                                }
+                                self.source_connections = Some(
+                                    self.environment
+                                        .requests
+                                        .attach_sources(owner, recipient, &sources)
+                                        .map_err(|error| {
+                                            ResidentActorWorkbenchError::ActorProtocol(format!(
+                                                "source attachment rejected: {error:?}"
+                                            ))
+                                        })?,
+                                );
+                                for (slot, source) in self.sources.iter().enumerate() {
+                                    if let crate::request::sources::SourceTarget::Command(key) =
+                                        source.target
+                                    {
                                         #[allow(
                                             clippy::expect_used,
                                             reason = "self.source_connections was set to \
-                                                  Some(..) immediately above, with no \
-                                                  intervening code that clears it"
+                                                      Some(..) immediately above, with no \
+                                                      intervening code that clears it"
                                         )]
                                         self.source_connections
                                             .as_mut()
-                                            .expect("attached source set")
-                                            .attach_lifecycle(slot, &actor);
+                                            .expect("attached sources")
+                                            .attach_command(
+                                                slot,
+                                                key,
+                                                owner,
+                                                &self.environment.commands,
+                                            )
+                                            .map_err(|error| {
+                                                ResidentActorWorkbenchError::ActorProtocol(format!(
+                                                    "command source: {error:?}"
+                                                ))
+                                            })?;
                                     }
                                 }
-                                break self
-                                    .environment
-                                    .runner
-                                    .resume_readiness(context.clone(), readiness)
-                                    .await?;
+                                for (slot, actor) in lifecycle {
+                                    #[allow(
+                                        clippy::expect_used,
+                                        reason = "self.source_connections was set to \
+                                                  Some(..) immediately above, with no \
+                                                  intervening code that clears it"
+                                    )]
+                                    self.source_connections
+                                        .as_mut()
+                                        .expect("attached source set")
+                                        .attach_lifecycle(slot, &actor);
+                                }
                             }
+                            break self
+                                .environment
+                                .runner
+                                .resume_readiness(context.clone(), readiness)
+                                .await?;
                         }
                     }
                 }
-            };
-            self.stabilize_program(
-                kernel,
-                context,
-                &crate::CallAncestry::begin(context.actor),
-                outcome,
-            )
-            .await
-        })
+            }
+        };
+        self.stabilize_program(
+            kernel,
+            context,
+            &crate::CallAncestry::begin(context.actor),
+            outcome,
+        )
+        .await
     }
 
     async fn run_receiver(
@@ -5897,7 +6013,13 @@ where
                     .capture_boundary(context.clone(), outcome, handler_realm)
                     .await?;
                 outcome = self
-                    .resolve_effect(kernel, context, ancestry, boundary)
+                    .resolve_effect(
+                        kernel,
+                        context,
+                        self.actor_effect_owner(),
+                        ancestry,
+                        boundary,
+                    )
                     .await?;
             }
         }
@@ -6120,7 +6242,13 @@ where
                 }
                 boundary => {
                     outcome = self
-                        .resolve_effect(kernel, context, ancestry, boundary)
+                        .resolve_effect(
+                            kernel,
+                            context,
+                            self.actor_effect_owner(),
+                            ancestry,
+                            boundary,
+                        )
                         .await?;
                 }
             }
@@ -6131,12 +6259,11 @@ where
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
+        execution_state: &mut WorkbenchEffectState,
         workbench: &crate::ResidentActorWorkbench<H, O>,
-        mut fragment: ResidentWorkbenchFragment,
-        mut outcome: ResidentOutcome,
+        current: &mut WorkbenchFragmentExecution,
         unit: WorkbenchUnitExecution<'_>,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
-        let mut effect_ordinal = 0;
         loop {
             self.runtime_observation.publish_workbench_posture(
                 crate::ActorWorkbenchPosture::RunningUnit {
@@ -6145,13 +6272,28 @@ where
                 },
             );
             match workbench
-                .settle_item(context.clone(), fragment, outcome)
+                .settle_item(
+                    context.clone(),
+                    current
+                        .fragment
+                        .take()
+                        .expect("running unit owns its fragment"),
+                    current
+                        .outcome
+                        .take()
+                        .expect("running unit owns its outcome"),
+                )
                 .await?
             {
                 ResidentWorkbenchStep::Running {
-                    fragment: mut next_fragment,
+                    fragment: next_fragment,
                     outcome: next,
                 } => {
+                    current.fragment = Some(*next_fragment);
+                    let next_fragment = current
+                        .fragment
+                        .as_mut()
+                        .expect("captured effect retains its fragment");
                     let boundary = self
                         .environment
                         .runner
@@ -6165,8 +6307,8 @@ where
                             effect: effect.clone(),
                         },
                     );
-                    let ordinal = effect_ordinal;
-                    effect_ordinal += 1;
+                    let ordinal = current.effect_ordinal;
+                    current.effect_ordinal += 1;
                     // Timed from here, not from `capture_boundary` above:
                     // this brackets the boundary's own service work, which
                     // is what `record_workbench_operation` reports as
@@ -6216,16 +6358,16 @@ where
                                     WorkbenchOperationDisposition::Rejected,
                                 );
                                 drop(attempt.result);
-                                outcome = self
-                                    .environment
-                                    .runner
-                                    .resume_reply_rejection(
-                                        context.clone(),
-                                        attempt.continuation,
-                                        error,
-                                    )
-                                    .await?;
-                                fragment = *next_fragment;
+                                current.outcome = Some(
+                                    self.environment
+                                        .runner
+                                        .resume_reply_rejection(
+                                            context.clone(),
+                                            attempt.continuation,
+                                            error,
+                                        )
+                                        .await?,
+                                );
                                 continue;
                             }
                             Err(error) => {
@@ -6277,16 +6419,16 @@ where
                                         effect_started.elapsed(),
                                         WorkbenchOperationDisposition::Rejected,
                                     );
-                                    outcome = self
-                                        .environment
-                                        .runner
-                                        .resume_reply_rejection(
-                                            context.clone(),
-                                            acknowledgement.continuation,
-                                            error,
-                                        )
-                                        .await?;
-                                    fragment = *next_fragment;
+                                    current.outcome = Some(
+                                        self.environment
+                                            .runner
+                                            .resume_reply_rejection(
+                                                context.clone(),
+                                                acknowledgement.continuation,
+                                                error,
+                                            )
+                                            .await?,
+                                    );
                                     continue;
                                 }
                                 Err(error) => {
@@ -6502,6 +6644,7 @@ where
                                     self.resolve_effect(
                                         kernel,
                                         context,
+                                        CurrentEffectOwner::Workbench(execution_state),
                                         &crate::CallAncestry::begin(context.actor),
                                         boundary,
                                     )
@@ -6509,7 +6652,7 @@ where
                                     None,
                                 ),
                             };
-                            outcome = match resolved {
+                            current.outcome = Some(match resolved {
                                 Ok(outcome) => {
                                     record_workbench_operation(
                                         unit.operations,
@@ -6555,10 +6698,9 @@ where
                                     );
                                     return Err(error);
                                 }
-                            };
+                            });
                         }
                     }
-                    fragment = *next_fragment;
                 }
                 settled => return Ok(settled),
             }
@@ -6581,6 +6723,7 @@ where
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
+        execution_state: &mut WorkbenchEffectState,
         workbench: &crate::ResidentActorWorkbench<H, O>,
         tools: &crate::resident_workbench::ResidentWorkbenchTools,
         dispatch: Arc<RootCustody>,
@@ -6597,7 +6740,7 @@ where
             return output;
         }
         // A slot's own effects and tool use never trigger a slot.
-        if self.after_tool_active {
+        if execution_state.after_tool_active {
             return output;
         }
         let provenance = tools.provenance();
@@ -6633,7 +6776,7 @@ where
             let started = std::time::Instant::now();
             let wait = crate::after_tool::wait();
             let observation = self.runtime_observation.clone();
-            self.after_tool_active = true;
+            execution_state.after_tool_active = true;
             let answer = {
                 let slot = workbench.with_exact_continuation_cleanup(
                     context.clone(),
@@ -6641,6 +6784,7 @@ where
                     self.run_after_tool(
                         kernel,
                         context,
+                        execution_state,
                         workbench,
                         dispatch,
                         call.name.clone(),
@@ -6672,7 +6816,7 @@ where
                     }
                 }
             };
-            self.after_tool_active = false;
+            execution_state.after_tool_active = false;
             let elapsed = started.elapsed();
             tracing::Span::current().record("elapsed_ms", elapsed.as_millis() as u64);
             // `outcome_detail` is the one bounded line of reason text a compact
@@ -6792,6 +6936,7 @@ where
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
+        execution_state: &mut WorkbenchEffectState,
         workbench: &crate::ResidentActorWorkbench<H, O>,
         dispatch: Arc<RootCustody>,
         tool: String,
@@ -6805,12 +6950,13 @@ where
             .await?;
         let step = match step {
             ResidentWorkbenchStep::Running { fragment, outcome } => {
+                let mut current = WorkbenchFragmentExecution::new(*fragment, *outcome);
                 self.settle_fragment_effects(
                     kernel,
                     context,
+                    execution_state,
                     workbench,
-                    *fragment,
-                    *outcome,
+                    &mut current,
                     WorkbenchUnitExecution {
                         execution: None,
                         input_unit_index: 0,
@@ -6842,29 +6988,34 @@ where
     /// The cell level of the run's span tree. `execution` is the tool call's
     /// own identity carried into the actor task, and is how a reconstructed
     /// cell joins back to the provider call that asked for it.
-    // Keep the cell state on the heap before generic timing and task-local
-    // wrappers poll it; those wrappers must not copy a whole cell future.
     #[tracing::instrument(
         name = "cell",
         skip_all,
         fields(
-            actor = %context.actor,
-            execution = request.execution_id().map_or("", |id| id.as_str()),
-            tool = request.tool_call().map_or("", |call| call.name.as_str()),
-            items = request.items.len(),
+            actor = %execution_state.effects.context.actor,
+            execution = execution_state.request.execution_id().map_or("", |id| id.as_str()),
+            tool = execution_state.request.tool_call().map_or("", |call| call.name.as_str()),
+            items = execution_state.request.items.len(),
         )
     )]
     fn execute_workbench<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
-        context: &'a ActorSessionContext,
-        mut request: WorkbenchRequest,
-        installed_tools: Option<crate::InstalledToolLease>,
+        execution_state: &'a mut WorkbenchExecutionState,
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     > {
         Box::pin(async move {
+            let WorkbenchExecutionState {
+                effects,
+                request,
+                cursor,
+                ..
+            } = execution_state;
+            let context = effects.context.clone();
+            let context = &context;
+            let installed_tools = effects.installed_tools.clone();
             let execution = request.execution_id().cloned();
             let status_call = request
                 .tool_call()
@@ -6878,7 +7029,7 @@ where
                 .tool_call()
                 .filter(|call| call.name == crate::reload_helpers_tool::RELOAD_HELPERS_TOOL)
                 .cloned();
-            let tool_dispatch = if let Some(call) = request.tool_call().filter(|call| {
+            cursor.tool_dispatch = if let Some(call) = request.tool_call().filter(|call| {
                 call.name != crate::status_tool::STATUS_TOOL
                     && call.name != crate::reload_spec_tool::RELOAD_SPEC_TOOL
                     && call.name != crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
@@ -7080,9 +7231,7 @@ where
                     None,
                 )));
             }
-            let mut prepared_cell = None;
-            let mut _cell_dependencies = None;
-            let cell_check = if let Some(cell_source) = request.cell_source() {
+            cursor.cell_check = if let Some(cell_source) = request.cell_source() {
                 let (checked, prepared) = match workbench
                     .prepare_cell(context.clone(), cell_source.to_owned())
                     .await
@@ -7108,13 +7257,17 @@ where
                         items,
                         dependencies,
                     } => {
-                        _cell_dependencies = Some(dependencies);
-                        prepared_cell = Some(items.into_iter().map(Some).collect::<Vec<_>>());
+                        cursor.dependencies = Some(dependencies);
+                        cursor.prepared_cell =
+                            Some(items.into_iter().map(Some).collect::<Vec<_>>());
                     }
-                    PreparedCell::Rejected { index, diagnostic } => {
-                        let items = (0..=index)
+                    PreparedCell::Rejected {
+                        index: rejected_index,
+                        diagnostic,
+                    } => {
+                        let items = (0..=rejected_index)
                             .map(|prior| WorkbenchItemReceipt {
-                                diagnostics: if prior == index {
+                                diagnostics: if prior == rejected_index {
                                     diagnostic.diagnostics.clone()
                                 } else {
                                     Vec::new()
@@ -7123,12 +7276,12 @@ where
                                 kind: None,
                                 span: None,
                                 source_items: Vec::new(),
-                                status: if prior == index {
+                                status: if prior == rejected_index {
                                     WorkbenchItemStatus::Rejected
                                 } else {
                                     WorkbenchItemStatus::NotRun
                                 },
-                                output: if prior == index {
+                                output: if prior == rejected_index {
                                     diagnostic.output.clone()
                                 } else {
                                     String::new()
@@ -7137,7 +7290,7 @@ where
                                 installed_bindings: Vec::new(),
                                 operations: Vec::new(),
                                 terminal_transfer: None,
-                                failure_layer: if prior == index {
+                                failure_layer: if prior == rejected_index {
                                     Some(WorkbenchFailureLayer::Compile)
                                 } else {
                                     None
@@ -7147,7 +7300,7 @@ where
                         return Ok(KernelStep::Continue(workbench_response(
                             WorkbenchRunStatus::Rejected,
                             items,
-                            index,
+                            rejected_index,
                             request.items.len(),
                             Some(&checked.items),
                         )));
@@ -7157,30 +7310,30 @@ where
             } else {
                 None
             };
-            let mut receipts: Vec<WorkbenchItemReceipt> = Vec::new();
-            let mut cell_display_remaining = 8192usize;
-            let mut index = 0;
-            while index < request.items.len() {
-                let source = request.items[index].clone();
-                let mut unit_operations = Vec::new();
-                let mut command_output = Vec::new();
+            while cursor.index < request.items.len() {
+                let source = request.items[cursor.index].clone();
+                cursor.unit = WorkbenchUnitState::default();
                 // Leave room for a later stop/error receipt without hiding offered command output.
                 let display_budget = if request.tool_call().is_some() {
                     28usize * 1024
                 } else {
                     60usize * 1024
                 };
-                let mut display_remaining = display_budget.saturating_sub(
-                    receipts
+                cursor.unit.display_remaining = display_budget.saturating_sub(
+                    cursor
+                        .receipts
                         .iter()
                         .map(|item| item.output.len() + 1)
                         .sum::<usize>(),
                 );
                 if request.tool_call().is_none() {
-                    display_remaining = display_remaining.min(cell_display_remaining);
+                    cursor.unit.display_remaining = cursor
+                        .unit
+                        .display_remaining
+                        .min(cursor.cell_display_remaining);
                 }
                 let block = ParsedBlock {
-                    ordinal: index + 1,
+                    ordinal: cursor.index + 1,
                     total: request.items.len(),
                     source,
                 };
@@ -7189,7 +7342,7 @@ where
                 // themselves, never by a guard.
                 let unit_span = tracing::info_span!(
                     "unit",
-                    index,
+                    index = cursor.index,
                     total = request.items.len(),
                     kind = if request.tool_call().is_some() {
                         "tool"
@@ -7200,18 +7353,18 @@ where
                 tracing::info!(
                     target: "exomonad::content",
                     parent: &unit_span,
-                    index,
+                    index = cursor.index,
                     source = %block.source,
                     "input unit source"
                 );
                 self.runtime_observation.publish_workbench_posture(
                     crate::ActorWorkbenchPosture::RunningUnit {
-                        input_unit_index: index,
+                        input_unit_index: cursor.index,
                         total: request.items.len(),
                     },
                 );
                 let started = if let (Some(call), Some(dispatch)) =
-                    (request.tool_call(), &tool_dispatch)
+                    (request.tool_call(), &cursor.tool_dispatch)
                 {
                     workbench
                         .begin_tool(
@@ -7223,12 +7376,12 @@ where
                         .instrument(unit_span.clone())
                         .await
                 } else {
-                    match prepared_cell.as_mut() {
+                    match cursor.prepared_cell.as_mut() {
                         Some(items) => {
-                            let prepared = items[index].take().ok_or_else(|| {
+                            let prepared = items[cursor.index].take().ok_or_else(|| {
                                 workbench_failure(
-                                    &receipts,
-                                    index,
+                                    &cursor.receipts,
+                                    cursor.index,
                                     request.items.len(),
                                     ResidentActorWorkbenchError::CompileInfrastructure(
                                         "prepared cell item was already consumed".into(),
@@ -7240,7 +7393,7 @@ where
                                     context.clone(),
                                     block,
                                     prepared,
-                                    cell_display_remaining,
+                                    cursor.cell_display_remaining,
                                 )
                                 .instrument(unit_span.clone())
                                 .await
@@ -7260,29 +7413,33 @@ where
                         )
                         .await;
                         return Err(workbench_failure(
-                            &receipts,
-                            index,
+                            &cursor.receipts,
+                            cursor.index,
                             request.items.len(),
                             source,
                         ));
                     }
                 };
                 if let ResidentWorkbenchStep::Running { fragment, outcome } = step {
+                    cursor.running = Some(WorkbenchFragmentExecution::new(*fragment, *outcome));
                     step = match self
                         .settle_fragment_effects(
                             kernel,
                             context,
+                            effects,
                             &workbench,
-                            *fragment,
-                            *outcome,
+                            cursor
+                                .running
+                                .as_mut()
+                                .expect("cell retained its running unit"),
                             WorkbenchUnitExecution {
                                 execution: execution.as_ref(),
-                                input_unit_index: index,
+                                input_unit_index: cursor.index,
                                 total: request.items.len(),
                                 named_tool: request.tool_call().is_some(),
-                                operations: &mut unit_operations,
-                                display_remaining: &mut display_remaining,
-                                command_output: &mut command_output,
+                                operations: &mut cursor.unit.operations,
+                                display_remaining: &mut cursor.unit.display_remaining,
+                                command_output: &mut cursor.unit.command_output,
                             },
                         )
                         .instrument(unit_span.clone())
@@ -7297,25 +7454,28 @@ where
                             )
                             .await;
                             let mut failure = workbench_failure_after_operations(
-                                &receipts,
-                                index,
+                                &cursor.receipts,
+                                cursor.index,
                                 request.items.len(),
                                 source,
-                                unit_operations,
+                                std::mem::take(&mut cursor.unit.operations),
                             );
                             if let Some(receipt) = failure
                                 .receipts
                                 .last_mut()
-                                .filter(|receipt| receipt.index == index)
+                                .filter(|receipt| receipt.index == cursor.index)
                             {
-                                receipt.output =
-                                    format!("{}\n{}", command_output.join("\n"), receipt.output);
+                                receipt.output = format!(
+                                    "{}\n{}",
+                                    cursor.unit.command_output.join("\n"),
+                                    receipt.output
+                                );
                             }
                             return Err(failure);
                         }
                     };
                 }
-                let command_prefix = command_output.join("\n");
+                let command_prefix = cursor.unit.command_output.join("\n");
                 match step {
                     ResidentWorkbenchStep::Committed {
                         output,
@@ -7323,9 +7483,10 @@ where
                         installed_bindings,
                     } => {
                         let mut warnings = warnings;
-                        let (checked_warnings, diagnostics) = cell_check
+                        let (checked_warnings, diagnostics) = cursor
+                            .cell_check
                             .as_ref()
-                            .map(|checked| committed_declaration_warnings(checked, index))
+                            .map(|checked| committed_declaration_warnings(checked, cursor.index))
                             .unwrap_or_default();
                         warnings.extend(checked_warnings);
                         let output = crate::workbench_display::resolve_job_binding_placeholder(
@@ -7333,7 +7494,7 @@ where
                             &installed_bindings,
                         );
                         let output = if request.tool_call().is_some() {
-                            crate::bound_workbench_display(&output, display_remaining)
+                            crate::bound_workbench_display(&output, cursor.unit.display_remaining)
                         } else {
                             output
                         };
@@ -7350,8 +7511,11 @@ where
                         // `reload_agent_spec` and `reload_helpers` are the only committed outcomes
                         // that never acquire one, so a broken slot can never
                         // block its own repair.
-                        let hosted_call = request.tool_call().cloned().zip(tool_dispatch.clone());
-                        let cell_call = if hosted_call.is_none() && cell_check.is_some() {
+                        let hosted_call = request
+                            .tool_call()
+                            .cloned()
+                            .zip(cursor.tool_dispatch.clone());
+                        let cell_call = if hosted_call.is_none() && cursor.cell_check.is_some() {
                             installed_tools
                                 .as_ref()
                                 .and_then(crate::InstalledToolLease::tools)
@@ -7360,7 +7524,7 @@ where
                                         tidepool_runtime::session::workbench::WorkbenchToolCall {
                                             name: crate::HASKELL_TOOL.to_string(),
                                             arguments: serde_json::Value::String(
-                                                request.items[index].clone(),
+                                                request.items[cursor.index].clone(),
                                             ),
                                         },
                                         Arc::clone(&tools.dispatch),
@@ -7377,8 +7541,8 @@ where
                                 {
                                     Some(tools) => {
                                         self.annotate_tool_result(
-                                            kernel, context, &workbench, tools, dispatch, &call,
-                                            output,
+                                            kernel, context, effects, &workbench, tools, dispatch,
+                                            &call, output,
                                         )
                                         .await
                                     }
@@ -7387,37 +7551,38 @@ where
                             }
                             None => output,
                         };
-                        if let Some(checked) = &cell_check {
-                            let spent = if checked.items[index].verdict.kind
+                        if let Some(checked) = &cursor.cell_check {
+                            let spent = if checked.items[cursor.index].verdict.kind
                                 == tidepool_runtime::session::TurnKind::Expr
                             {
                                 output.chars().count()
                             } else {
                                 command_prefix.chars().count()
                             };
-                            cell_display_remaining = cell_display_remaining.saturating_sub(spent);
+                            cursor.cell_display_remaining =
+                                cursor.cell_display_remaining.saturating_sub(spent);
                         }
                         if self.environment.fork_groups.has_ready(context.actor) {
-                            let publication = if self.fork_publication.boundary().is_none() {
+                            let publication = if effects.publication.boundary().is_none() {
                                 self.environment.fork_groups.publish_ready(context.actor)
                             } else {
                                 Ok(Vec::new())
                             };
                             if let Err(source) = publication {
                                 settle_prepared_operations(
-                                    &mut unit_operations,
+                                    &mut cursor.unit.operations,
                                     WorkbenchOperationDisposition::Unknown,
                                 );
                                 return Err(workbench_failure_after_operations(
-                                    &receipts,
-                                    index,
+                                    &cursor.receipts,
+                                    cursor.index,
                                     request.items.len(),
                                     ResidentActorWorkbenchError::ActorProtocol(source.to_string()),
-                                    unit_operations,
+                                    std::mem::take(&mut cursor.unit.operations),
                                 ));
                             }
                             settle_prepared_operations(
-                                &mut unit_operations,
+                                &mut cursor.unit.operations,
                                 WorkbenchOperationDisposition::Committed,
                             );
                         } else if self.environment.fork_groups.has_incomplete(context.actor) {
@@ -7428,12 +7593,12 @@ where
                             )
                             .await;
                             settle_prepared_operations(
-                                &mut unit_operations,
+                                &mut cursor.unit.operations,
                                 WorkbenchOperationDisposition::Rejected,
                             );
-                            receipts.push(WorkbenchItemReceipt {
+                            cursor.receipts.push(WorkbenchItemReceipt {
                                 diagnostics: Vec::new(),
-                                index,
+                                index: cursor.index,
                                 kind: None,
                                 span: None,
                                 source_items: Vec::new(),
@@ -7443,21 +7608,24 @@ where
                                         .into(),
                                 warnings: Vec::new(),
                                 installed_bindings: Vec::new(),
-                                operations: unit_operations,
+                                operations: std::mem::take(&mut cursor.unit.operations),
                                 terminal_transfer: None,
                                 failure_layer: Some(WorkbenchFailureLayer::Effect),
                             });
                             return Ok(KernelStep::Continue(workbench_response(
                                 WorkbenchRunStatus::Rejected,
-                                receipts,
-                                index,
+                                std::mem::take(&mut cursor.receipts),
+                                cursor.index,
                                 request.items.len(),
-                                cell_check.as_ref().map(|checked| checked.items.as_slice()),
+                                cursor
+                                    .cell_check
+                                    .as_ref()
+                                    .map(|checked| checked.items.as_slice()),
                             )));
                         }
-                        receipts.push(WorkbenchItemReceipt {
+                        cursor.receipts.push(WorkbenchItemReceipt {
                             diagnostics,
-                            index,
+                            index: cursor.index,
                             kind: None,
                             span: None,
                             source_items: Vec::new(),
@@ -7465,7 +7633,7 @@ where
                             output,
                             warnings,
                             installed_bindings,
-                            operations: unit_operations,
+                            operations: std::mem::take(&mut cursor.unit.operations),
                             terminal_transfer: None,
                             failure_layer: None,
                         });
@@ -7476,7 +7644,7 @@ where
                             diagnostics,
                         } = rejection;
                         let output = if request.tool_call().is_some() {
-                            crate::bound_workbench_display(&output, display_remaining)
+                            crate::bound_workbench_display(&output, cursor.unit.display_remaining)
                         } else {
                             output
                         };
@@ -7486,7 +7654,7 @@ where
                             format!("{command_prefix}\n{output}")
                         };
                         settle_prepared_operations(
-                            &mut unit_operations,
+                            &mut cursor.unit.operations,
                             WorkbenchOperationDisposition::Rejected,
                         );
                         self.abort_incomplete_groups(
@@ -7495,9 +7663,9 @@ where
                             "Haskell input rejected during unfold admission",
                         )
                         .await;
-                        receipts.push(WorkbenchItemReceipt {
+                        cursor.receipts.push(WorkbenchItemReceipt {
                             diagnostics,
-                            index,
+                            index: cursor.index,
                             kind: None,
                             span: None,
                             source_items: Vec::new(),
@@ -7505,16 +7673,19 @@ where
                             output,
                             warnings: Vec::new(),
                             installed_bindings: Vec::new(),
-                            operations: unit_operations,
+                            operations: std::mem::take(&mut cursor.unit.operations),
                             terminal_transfer: None,
                             failure_layer: Some(WorkbenchFailureLayer::Compile),
                         });
                         return Ok(KernelStep::Continue(workbench_response(
                             WorkbenchRunStatus::Rejected,
-                            receipts,
-                            index,
+                            std::mem::take(&mut cursor.receipts),
+                            cursor.index,
                             request.items.len(),
-                            cell_check.as_ref().map(|checked| checked.items.as_slice()),
+                            cursor
+                                .cell_check
+                                .as_ref()
+                                .map(|checked| checked.items.as_slice()),
                         )));
                     }
                     ResidentWorkbenchStep::CommandBackgrounded {
@@ -7545,7 +7716,7 @@ where
                             Ok(pages) => {
                                 let rendered = crate::workbench_display::bounded_output(
                                     &crate::workbench_display::command_pages(&pages),
-                                    display_remaining.saturating_sub(output.len()),
+                                    cursor.unit.display_remaining.saturating_sub(output.len()),
                                 );
                                 if !rendered.is_empty() {
                                     output.push_str(&rendered);
@@ -7566,9 +7737,9 @@ where
                                 "\nOutput unavailable: {error:?}; the same job remains retained."
                             )),
                         }
-                        receipts.push(WorkbenchItemReceipt {
+                        cursor.receipts.push(WorkbenchItemReceipt {
                             diagnostics: Vec::new(),
-                            index,
+                            index: cursor.index,
                             kind: None,
                             span: None,
                             source_items: Vec::new(),
@@ -7576,16 +7747,19 @@ where
                             output,
                             warnings: Vec::new(),
                             installed_bindings: vec![binding],
-                            operations: unit_operations,
+                            operations: std::mem::take(&mut cursor.unit.operations),
                             terminal_transfer: Some(WorkbenchTerminalTransfer::CommandBackgrounded),
                             failure_layer: None,
                         });
                         return Ok(KernelStep::Continue(workbench_response(
                             WorkbenchRunStatus::Backgrounded,
-                            receipts,
-                            index,
+                            std::mem::take(&mut cursor.receipts),
+                            cursor.index,
                             request.items.len(),
-                            cell_check.as_ref().map(|checked| checked.items.as_slice()),
+                            cursor
+                                .cell_check
+                                .as_ref()
+                                .map(|checked| checked.items.as_slice()),
                         )));
                     }
                     ResidentWorkbenchStep::Replied {
@@ -7597,16 +7771,16 @@ where
                             .await
                             .map_err(|error| {
                                 workbench_failure_after_operations(
-                                    &receipts,
-                                    index,
+                                    &cursor.receipts,
+                                    cursor.index,
                                     request.items.len(),
                                     error,
-                                    unit_operations.clone(),
+                                    cursor.unit.operations.clone(),
                                 )
                             })?;
-                        receipts.push(WorkbenchItemReceipt {
+                        cursor.receipts.push(WorkbenchItemReceipt {
                             diagnostics: Vec::new(),
-                            index,
+                            index: cursor.index,
                             kind: None,
                             span: None,
                             source_items: Vec::new(),
@@ -7614,16 +7788,19 @@ where
                             output: "Reply submitted.".to_owned(),
                             warnings: Vec::new(),
                             installed_bindings: Vec::new(),
-                            operations: unit_operations,
+                            operations: std::mem::take(&mut cursor.unit.operations),
                             terminal_transfer: Some(WorkbenchTerminalTransfer::ReplyAccepted),
                             failure_layer: None,
                         });
                         return Ok(KernelStep::ContinueLater(workbench_response(
                             WorkbenchRunStatus::Replied,
-                            receipts,
-                            index + 1,
+                            std::mem::take(&mut cursor.receipts),
+                            cursor.index + 1,
                             request.items.len(),
-                            cell_check.as_ref().map(|checked| checked.items.as_slice()),
+                            cursor
+                                .cell_check
+                                .as_ref()
+                                .map(|checked| checked.items.as_slice()),
                         )));
                     }
                     ResidentWorkbenchStep::CancellationAcknowledged {
@@ -7640,14 +7817,14 @@ where
                                 .requests
                                 .rollback_cancellation_acknowledgement(request_id);
                             return Err(workbench_failure_after_operations(
-                            &receipts,
-                            index,
+                            &cursor.receipts,
+                            cursor.index,
                             request.items.len(),
                             ResidentActorWorkbenchError::ActorProtocol(
                                 "an actor cannot acknowledge cancellation while an unfold group is unpublished"
                                     .into(),
                             ),
-                            unit_operations,
+                            std::mem::take(&mut cursor.unit.operations),
                         ));
                         }
                         if self.pending_program.is_some()
@@ -7658,14 +7835,14 @@ where
                                 .requests
                                 .rollback_cancellation_acknowledgement(request_id);
                             return Err(workbench_failure_after_operations(
-                                &receipts,
-                                index,
+                                &cursor.receipts,
+                                cursor.index,
                                 request.items.len(),
                                 ResidentActorWorkbenchError::ActorProtocol(
                                     "actor settled a second request before resuming the first"
                                         .into(),
                                 ),
-                                unit_operations,
+                                std::mem::take(&mut cursor.unit.operations),
                             ));
                         }
                         let awaiting =
@@ -7688,13 +7865,13 @@ where
                                         .requests
                                         .rollback_cancellation_acknowledgement(request_id);
                                     return Err(workbench_failure_after_operations(
-                                        &receipts,
-                                        index,
+                                        &cursor.receipts,
+                                        cursor.index,
                                         request.items.len(),
                                         ResidentActorWorkbenchError::ActorProtocol(
                                             "cancellation did not match the active request".into(),
                                         ),
-                                        unit_operations,
+                                        std::mem::take(&mut cursor.unit.operations),
                                     ));
                                 }
                                 standing => {
@@ -7703,13 +7880,13 @@ where
                                         .requests
                                         .rollback_cancellation_acknowledgement(request_id);
                                     return Err(workbench_failure_after_operations(
-                                        &receipts,
-                                        index,
+                                        &cursor.receipts,
+                                        cursor.index,
                                         request.items.len(),
                                         ResidentActorWorkbenchError::ActorProtocol(
                                             "cancellation lost its active request".into(),
                                         ),
-                                        unit_operations,
+                                        std::mem::take(&mut cursor.unit.operations),
                                     ));
                                 }
                             };
@@ -7719,13 +7896,13 @@ where
                                 .requests
                                 .rollback_cancellation_acknowledgement(request_id);
                             return Err(workbench_failure_after_operations(
-                                &receipts,
-                                index,
+                                &cursor.receipts,
+                                cursor.index,
                                 request.items.len(),
                                 ResidentActorWorkbenchError::ActorProtocol(
                                     "cancellation lost its mailbox continuation".into(),
                                 ),
-                                unit_operations,
+                                std::mem::take(&mut cursor.unit.operations),
                             ));
                         };
                         let outcome = match self
@@ -7746,11 +7923,11 @@ where
                                     .requests
                                     .rollback_cancellation_acknowledgement(request_id);
                                 return Err(workbench_failure_after_operations(
-                                    &receipts,
-                                    index,
+                                    &cursor.receipts,
+                                    cursor.index,
                                     request.items.len(),
                                     error,
-                                    unit_operations,
+                                    std::mem::take(&mut cursor.unit.operations),
                                 ));
                             }
                         };
@@ -7760,9 +7937,9 @@ where
                         self.outstanding_interactive = None;
                         self.pending_program = Some(outcome);
                         self.pending_cancellation = Some(request_id);
-                        receipts.push(WorkbenchItemReceipt {
+                        cursor.receipts.push(WorkbenchItemReceipt {
                             diagnostics: Vec::new(),
-                            index,
+                            index: cursor.index,
                             kind: None,
                             span: None,
                             source_items: Vec::new(),
@@ -7770,7 +7947,7 @@ where
                             output: String::new(),
                             warnings: Vec::new(),
                             installed_bindings: Vec::new(),
-                            operations: unit_operations,
+                            operations: std::mem::take(&mut cursor.unit.operations),
                             terminal_transfer: Some(
                                 WorkbenchTerminalTransfer::CancellationAcknowledged,
                             ),
@@ -7778,24 +7955,30 @@ where
                         });
                         return Ok(KernelStep::ContinueLater(workbench_response(
                             WorkbenchRunStatus::RequestCancelled,
-                            receipts,
-                            index + 1,
+                            std::mem::take(&mut cursor.receipts),
+                            cursor.index + 1,
                             request.items.len(),
-                            cell_check.as_ref().map(|checked| checked.items.as_slice()),
+                            cursor
+                                .cell_check
+                                .as_ref()
+                                .map(|checked| checked.items.as_slice()),
                         )));
                     }
                     ResidentWorkbenchStep::Running { .. } => {
                         unreachable!("running workbench steps are settled above")
                     }
                 }
-                index += 1;
+                cursor.index += 1;
             }
             Ok(KernelStep::Continue(workbench_response(
                 WorkbenchRunStatus::Committed,
-                receipts,
+                std::mem::take(&mut cursor.receipts),
                 request.items.len(),
                 request.items.len(),
-                cell_check.as_ref().map(|checked| checked.items.as_slice()),
+                cursor
+                    .cell_check
+                    .as_ref()
+                    .map(|checked| checked.items.as_slice()),
             )))
         })
     }
@@ -8545,6 +8728,7 @@ where
                             .resolve_effect(
                                 kernel,
                                 &context,
+                                self.actor_effect_owner(),
                                 &crate::CallAncestry::begin(context.actor),
                                 boundary,
                             )
@@ -8610,26 +8794,32 @@ where
                 WorkbenchExecutionId::from_digest(*uuid::Uuid::new_v4().as_bytes())
             });
             let reservation_owner = RequestReservationOwner::Workbench(local_execution_id.clone());
-            let previous_workbench =
-                self.active_workbench_execution
-                    .replace(ActiveWorkbenchExecution {
-                        id: local_execution_id,
-                        context: context.clone(),
-                        public_visibility,
-                        control: control.clone(),
-                        installed_tools,
-                        admitted_source,
-                    });
-            self.fork_publication = ForkPublication::Workbench {
-                boundary: request.fork_boundary().cloned(),
-                capture,
+            let mut execution_state = WorkbenchExecutionState {
+                effects: WorkbenchEffectState {
+                    context: context.clone(),
+                    public_visibility,
+                    control,
+                    installed_tools,
+                    admitted_source,
+                    reservation_owner,
+                    publication: ForkPublication::Workbench {
+                        boundary: request.fork_boundary().cloned(),
+                        capture,
+                    },
+                    after_tool_active: false,
+                },
+                request,
+                replay_request: retained_request,
+                invocation,
+                cursor: WorkbenchCursor::default(),
             };
             // One INFO line per hosted tool call or cell, breaking down
             // where its wall time went (checkout wait/hold, compile, Jev,
             // exec) — see `crate::call_timing`. The scope wraps the whole
             // call so every nested site it awaits (workbench compiles,
             // resolved effects) can add to it as a task-local.
-            let call_kind = request
+            let call_kind = execution_state
+                .request
                 .tool_call()
                 .map(|call| call.name.clone())
                 .unwrap_or_else(|| "cell".to_string());
@@ -8639,13 +8829,7 @@ where
                 call_actor as u64,
                 call_incarnation as u64,
             );
-            let admitted = self
-                .active_workbench_execution
-                .as_ref()
-                .expect("workbench admission retained its execution");
-            let admitted_context = admitted.context.clone();
-            let admitted_tools = admitted.installed_tools.clone();
-            if let Some(public) = &admitted.public_visibility {
+            if let Some(public) = &execution_state.effects.public_visibility {
                 tracing::debug!(
                     actor = ?context.actor,
                     scope = ?public.scope,
@@ -8656,9 +8840,8 @@ where
                 );
             }
             let result = call_scope
-                .run(self.execute_workbench(kernel, &admitted_context, request, admitted_tools))
+                .run(self.execute_workbench(kernel, &mut execution_state))
                 .await;
-            self.active_workbench_execution = previous_workbench;
             let call_outcome = match &result {
                 Ok(
                     KernelStep::Continue(response)
@@ -8756,7 +8939,7 @@ where
                 let (aborted, notifications) = self
                     .environment
                     .requests
-                    .abort_unsubmitted(context.actor, &reservation_owner);
+                    .abort_unsubmitted(context.actor, &execution_state.effects.reservation_owner);
                 self.publish_watch_notifications(notifications).await;
                 if !aborted.is_empty() {
                     tracing::debug!(actor = ?context.actor, requests = ?aborted, "aborted unpublished request reservations after rejected workbench input");
@@ -8793,7 +8976,9 @@ where
                     detail: failure.source.to_string(),
                 })
             });
-            if let (Some(execution), Some(request)) = (execution, retained_request) {
+            if let (Some(execution), Some(request)) =
+                (execution, execution_state.replay_request.take())
+            {
                 let reply = match &result {
                     Ok(
                         KernelStep::Continue(response)
@@ -8804,7 +8989,7 @@ where
                     ) => Ok(response.clone()),
                     Err(error) => Err(error.clone()),
                 };
-                let cancellation = control.as_ref().map_or_else(
+                let cancellation = execution_state.effects.control.as_ref().map_or_else(
                     || crate::WorkbenchCancellationOutcome::NotSleeping {
                         execution: execution.clone(),
                     },
@@ -8815,7 +9000,7 @@ where
                     request,
                     reply,
                     cancellation,
-                    invocation.as_ref(),
+                    execution_state.invocation.as_ref(),
                 );
             }
             result
@@ -8921,6 +9106,7 @@ where
                         .resolve_effect(
                             kernel,
                             &context,
+                            self.actor_effect_owner(),
                             &crate::CallAncestry::begin(context.actor),
                             boundary,
                         )
