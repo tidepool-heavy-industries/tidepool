@@ -88,7 +88,7 @@ impl RunningBrowserHost {
             ));
         }
         format!(
-            "call={call_id}, computing={}, claims={}, settlements={settlements:?}, actor_terminal={:?}",
+            "call={call_id}, legacy_codex_computing={}, claims={}, settlements={settlements:?}, actor_terminal={:?}",
             self.campaign.actor.hosted_cell_computing(),
             claims.len(),
             self.campaign
@@ -103,6 +103,10 @@ impl RunningBrowserHost {
         settings: &crate::exomonad::EmbeddedLaunchConfig,
         transport: &Arc<dyn harness::engine::ResponsesTransport>,
     ) -> Result<Self, String> {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("exomonad_actor::workbench_phase=info")
+            .with_test_writer()
+            .try_init();
         let mut campaign = test_campaign::TestCampaign::start_with_config(
             exomonad_actor::ResearchPolicy::default(),
             |admission| admission,

@@ -7,7 +7,7 @@ use harness::{
     model::AgentPath,
     transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError, Usage},
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -15,7 +15,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 #[path = "m1_host_fixture.rs"]
 mod host_fixture;
-use host_fixture::{RunningBrowserHost, cell_output_matches};
+use host_fixture::{cell_output_matches, RunningBrowserHost};
 
 #[path = "m1_browser_process.rs"]
 mod browser_process;
@@ -302,7 +302,9 @@ async fn production_host_retains_http_haskell_commands_and_reconnects_without_re
         .parse::<i64>()
         .unwrap();
 
-    let request_after_cell = tokio::time::timeout(Duration::from_secs(120), async {
+    // Whole-cell checking, item compilation, and display compilation are distinct
+    // worker requests; this budget covers all three on a cold compiler.
+    let request_after_cell = tokio::time::timeout(Duration::from_secs(300), async {
         while let Some(request) = second_rx.recv().await {
             if request.input.iter().any(|item| {
                 item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == "host-real-cell"

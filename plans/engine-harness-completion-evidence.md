@@ -7,6 +7,24 @@ supersedes the earlier completion-wave sequencing.
 
 ## Final delivery wave: joined checkpoint
 
+The dedicated raw-host phase trace on `28ac77a024` plus the fixture subscriber
+showed successful whole-cell checking (14.49 seconds) and item compilation
+(97.68 seconds), followed by display compilation still running when the fixture's
+120-second completion deadline expired. This identifies a premature fixture
+deadline rather than proving a lost reply. The raw-host completion allowance is
+now 300 seconds; readiness and cancellation deadlines are unchanged. The strict
+result check is being rerun in
+`target/completion-evidence/final-delivery/budgeted-raw-host.log`.
+The diagnostic's computing flag is explicitly labeled legacy Codex state:
+it does not describe embedded workbench activity.
+
+Error classification now follows owning stages: prepared failures distinguish
+installation from execution, and checked-fold outcomes distinguish not requested,
+ineligible, attempted failure, and successful compilation. Rendered causes remain
+diagnostics rather than control flow. Publication's reserved-module identity
+validation and the actor retirement/terminal-wait race remain under repair;
+neither boundary is accepted yet.
+
 On `83c46c44a2` plus strict result checks, the TPCERT3 matched native gate
 executed five cases: the expanded checked-cell original/publication case,
 root Ready/authentication failure and running-cell cancellation passed;

@@ -8,10 +8,10 @@ use harness::{
 };
 use serde_json::json;
 use std::sync::{
-    Mutex as StdMutex,
     atomic::{AtomicUsize, Ordering},
+    Mutex as StdMutex,
 };
-use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 
 const CELL_CALL_ID: &str = "m1-late-output-cell";
 const FIRST_INPUT: &str = "Start the resident Haskell operation.";
@@ -281,12 +281,10 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
             .await
             .expect("provider did not receive the pending-call turn")
             .expect("provider dropped the pending-call turn");
-    assert!(
-        pending_request
-            .input
-            .iter()
-            .any(|item| item.0["call_id"] == CELL_CALL_ID)
-    );
+    assert!(pending_request
+        .input
+        .iter()
+        .any(|item| item.0["call_id"] == CELL_CALL_ID));
     assert_eq!(output_for_call(&pending_request).count(), 0);
     wait_for_cell_state(&host, true, Duration::from_secs(180)).await;
     pending_reply
@@ -310,12 +308,10 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
             .await
             .expect("provider did not receive the post-compaction request")
             .expect("provider dropped post-compaction request");
-    assert!(
-        successor_request
-            .input
-            .iter()
-            .any(|item| item.0["call_id"] == CELL_CALL_ID)
-    );
+    assert!(successor_request
+        .input
+        .iter()
+        .any(|item| item.0["call_id"] == CELL_CALL_ID));
     assert_eq!(output_for_call(&successor_request).count(), 0);
     wait_for_cell_state(&host, true, Duration::from_secs(30)).await;
     successor_reply
