@@ -28,10 +28,18 @@ nix_rust_toolchain = rule(
 )
 
 def _nix_haskell_toolchain_impl(ctx):
+    compiler = ctx.attrs.ghc
+    if ctx.attrs.extra_compile_inputs:
+        # Prelude's compile action wraps this value in cmd_args, so hidden
+        # artifacts become declared inputs without becoming GHC arguments.
+        compiler = cmd_args(
+            compiler,
+            hidden = ctx.attrs.extra_compile_inputs,
+        )
     return [
         DefaultInfo(),
         HaskellToolchainInfo(
-            compiler = ctx.attrs.ghc,
+            compiler = compiler,
             linker = ctx.attrs.ghc,
             packager = ctx.attrs.ghc_pkg,
             haddock = ctx.attrs.haddock,
@@ -47,6 +55,7 @@ nix_haskell_toolchain = rule(
         "ghc": attrs.string(),
         "ghc_pkg": attrs.string(),
         "haddock": attrs.string(),
+        "extra_compile_inputs": attrs.list(attrs.source(), default = []),
     },
     is_toolchain_rule = True,
 )

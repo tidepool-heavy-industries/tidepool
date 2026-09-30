@@ -1,4 +1,97 @@
-load("@prelude//:rules.bzl", "export_file")
+load("@prelude//:rules.bzl", "export_file", "haskell_binary", "haskell_library", "sh_test")
+load(
+    "//build/haskell:defs.bzl",
+    "assignment_component_flags",
+    "encoder_test_flags", "extractor_library_link_flags", "extractor_binary_link_flags", "encoder_test_link_flags",
+    "extractor_binary_flags",
+    "extractor_library_flags",
+)
+
+# Native Haskell components. The extractor library deliberately stays one
+# component so GHC builds its 40-module home unit once for the worker and tests.
+haskell_library(
+    name = "tidepool_extract_internal",
+    srcs = {
+        "Tidepool/Binders.hs": "src/Tidepool/Binders.hs",
+        "Tidepool/CborEncode.hs": "src/Tidepool/CborEncode.hs",
+        "Tidepool/DependencyEvidence.hs": "src/Tidepool/DependencyEvidence.hs",
+        "Tidepool/DeclarationJoin.hs": "src/Tidepool/DeclarationJoin.hs",
+        "Tidepool/WorkerServer.hs": "src/Tidepool/WorkerServer.hs",
+        "Tidepool/DiagJson.hs": "src/Tidepool/DiagJson.hs",
+        "Tidepool/EffectSchema.hs": "src/Tidepool/EffectSchema.hs",
+        "Tidepool/ExtractUtil.hs": "src/Tidepool/ExtractUtil.hs",
+        "Tidepool/ExtractRequest.hs": "src/Tidepool/ExtractRequest.hs",
+        "Tidepool/FatIface.hs": "src/Tidepool/FatIface.hs",
+        "Tidepool/GhcPipeline.hs": "src/Tidepool/GhcPipeline.hs",
+        "Tidepool/ExactHydration.hs": "src/Tidepool/ExactHydration.hs",
+        "Tidepool/HostBindingAuthority.hs": "src/Tidepool/HostBindingAuthority.hs",
+        "Tidepool/Identity.hs": "src/Tidepool/Identity.hs",
+        "Tidepool/Introspection.hs": "src/Tidepool/Introspection.hs",
+        "Tidepool/Metadata.hs": "src/Tidepool/Metadata.hs",
+        "Tidepool/ModuleCandidates.hs": "src/Tidepool/ModuleCandidates.hs",
+        "Tidepool/CertifiedProducts.hs": "src/Tidepool/CertifiedProducts.hs",
+        "Tidepool/PrimOps.hs": "src/Tidepool/PrimOps.hs",
+        "Tidepool/PreparedStg.hs": "src/Tidepool/PreparedStg.hs",
+        "Tidepool/PreparedRecovery.hs": "src/Tidepool/PreparedRecovery.hs",
+        "Tidepool/PreparedBuiltins.hs": "src/Tidepool/PreparedBuiltins.hs",
+        "Tidepool/PreparedFacts.hs": "src/Tidepool/PreparedFacts.hs",
+        "Tidepool/PreparedFormatting.hs": "src/Tidepool/PreparedFormatting.hs",
+        "Tidepool/PreparedTime.hs": "src/Tidepool/PreparedTime.hs",
+        "Tidepool/PreparedJson.hs": "src/Tidepool/PreparedJson.hs",
+        "Tidepool/SiteClassifier.hs": "src/Tidepool/SiteClassifier.hs",
+        "Tidepool/PreparedSites.hs": "src/Tidepool/PreparedSites.hs",
+        "Tidepool/RetainedUnfoldings.hs": "src/Tidepool/RetainedUnfoldings.hs",
+        "Tidepool/ExecutionIR.hs": "src/Tidepool/ExecutionIR.hs",
+        "Tidepool/ExecutionSchema.hs": "src/Tidepool/ExecutionSchema.hs",
+        "Tidepool/ExecutionProjection.hs": "src/Tidepool/ExecutionProjection.hs",
+        "Tidepool/ExecutionEncode.hs": "src/Tidepool/ExecutionEncode.hs",
+        "Tidepool/Json.hs": "src/Tidepool/Json.hs",
+        "Tidepool/Resolve.hs": "src/Tidepool/Resolve.hs",
+        "Tidepool/Session.hs": "src/Tidepool/Session.hs",
+        "Tidepool/SessionArtifacts.hs": "src/Tidepool/SessionArtifacts.hs",
+        "Tidepool/Timing.hs": "src/Tidepool/Timing.hs",
+        "Tidepool/TypePolicy.hs": "src/Tidepool/TypePolicy.hs",
+        "Tidepool/TurnSource.hs": "src/Tidepool/TurnSource.hs",
+    },
+    _haskell_toolchain = "toolchains//:haskell_with_extractor_source_inputs",
+    compiler_flags = extractor_library_flags("-XOverloadedStrings"),
+    linker_flags = extractor_library_link_flags(),
+    visibility = ["PUBLIC"],
+)
+
+haskell_library(
+    name = "assignment_internal",
+    srcs = {"Tidepool/Agent/Assignment/Internal.hs": "lib/Tidepool/Agent/Assignment/Internal.hs"},
+    compiler_flags = assignment_component_flags("-XOverloadedStrings"),
+    visibility = ["PUBLIC"],
+)
+
+haskell_binary(
+    name = "tidepool_extract_bin",
+    srcs = {"Main.hs": "app/Main.hs"},
+    deps = [":tidepool_extract_internal"],
+    compiler_flags = extractor_binary_flags("-XOverloadedStrings"),
+    linker_flags = extractor_binary_link_flags() + ["-with-rtsopts=-T"],
+    visibility = ["PUBLIC"],
+)
+
+# This focused native executable compiles the same encoder test source that
+# Cabal exposes as execution-schema-encode. Building it checks the component;
+# running it remains a separate test action.
+haskell_binary(
+    name = "execution_schema_encode_test",
+    srcs = {"Main.hs": "test-execution-schema-encode/Main.hs"},
+    deps = [":tidepool_extract_internal"],
+    compiler_flags = encoder_test_flags("-XOverloadedStrings"),
+    linker_flags = encoder_test_link_flags(),
+    visibility = ["PUBLIC"],
+)
+
+sh_test(
+    name = "execution_schema_encode",
+    test = ":execution_schema_encode_test",
+    visibility = ["PUBLIC"],
+)
 
 # Exact compile-time resources consumed by the native repr targets.
 export_file(
@@ -23,5 +116,70 @@ export_file(
 export_file(
     name = "freer_retention_fixture",
     src = "test-prepared-stg/fixtures/freer-retention.cbor",
+    visibility = ["PUBLIC"],
+)
+
+# Source and fixture artifacts exposed to native actions that model these
+# dependencies explicitly.
+export_file(
+    name = "haskell_prepared_json_value_source",
+    src = "lib/Tidepool/Aeson/Value.hs",
+    mode = "reference",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_prepared_json_scientific_source",
+    src = "lib/Tidepool/Aeson/Scientific.hs",
+    mode = "reference",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_prepared_formatting_double_source",
+    src = "lib/Tidepool/Double.hs",
+    mode = "reference",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "extract_request_source",
+    src = "src/Tidepool/ExtractRequest.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "timing_source",
+    src = "src/Tidepool/Timing.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "ghc_pipeline_source",
+    src = "src/Tidepool/GhcPipeline.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "declaration_join_v2_cbor_fixture",
+    src = "test-cell-splitter/fixtures/declaration-join/join-v2.cbor",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "declaration_join_v2_json_fixture",
+    src = "test-cell-splitter/fixtures/declaration-join/join-v2.json",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "declaration_inventory_v2_cbor_fixture",
+    src = "test-cell-splitter/fixtures/declaration-join/inventory-v2.cbor",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "declaration_inventory_v2_json_fixture",
+    src = "test-cell-splitter/fixtures/declaration-join/inventory-v2.json",
     visibility = ["PUBLIC"],
 )

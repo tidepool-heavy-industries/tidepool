@@ -22,6 +22,19 @@ nix_haskell_toolchain(
     visibility = ["PUBLIC"],
 )
 
+nix_haskell_toolchain(
+    name = "haskell_with_extractor_source_inputs",
+    ghc = read_root_config("nix", "ghc"),
+    ghc_pkg = read_root_config("nix", "ghc_pkg"),
+    haddock = read_root_config("nix", "haddock"),
+    extra_compile_inputs = [
+        "root//bridge/haskell:haskell_prepared_json_value_source",
+        "root//bridge/haskell:haskell_prepared_json_scientific_source",
+        "root//bridge/haskell:haskell_prepared_formatting_double_source",
+    ],
+    visibility = ["PUBLIC"],
+)
+
 system_cxx_toolchain(
     name = "cxx",
     compiler = read_root_config("nix", "cc"),
