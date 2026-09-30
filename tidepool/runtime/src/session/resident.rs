@@ -2145,6 +2145,14 @@ where
         self.state.lib_mut().confirm_recovery_durability()
     }
 
+    pub fn confirm_durable_public_scope(
+        &mut self,
+        owner: &super::RecoveryPublicOwner,
+        scope: ScopeId,
+    ) -> Result<(), SessionError> {
+        self.state.confirm_durable_public_scope(owner, scope)
+    }
+
     pub fn admit_cell_in(
         &mut self,
         scope: ScopeId,

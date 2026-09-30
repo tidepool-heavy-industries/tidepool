@@ -809,7 +809,21 @@ fn durable_child_visible_uncertainty_confirms_without_reinitializing_or_reexecut
     assert!(session
         .initialize_durable_public_scope(child_owner.clone(), child)
         .is_err());
-    session.lib_mut().confirm_recovery_durability().unwrap();
+    assert!(session
+        .confirm_durable_public_scope(&owner(99), child)
+        .is_err());
+    assert!(session
+        .confirm_durable_public_scope(&child_owner, parent)
+        .is_err());
+    assert!(session
+        .begin_durable_private_execution(&child_owner, child)
+        .is_err());
+    session
+        .confirm_durable_public_scope(&child_owner, child)
+        .unwrap();
+    session
+        .confirm_durable_public_scope(&child_owner, child)
+        .unwrap();
     assert_eq!(
         session
             .initialize_durable_public_scope(child_owner.clone(), child)

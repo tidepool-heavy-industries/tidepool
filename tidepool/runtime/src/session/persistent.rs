@@ -2012,6 +2012,42 @@ impl PersistentSession {
         Ok(committed)
     }
 
+    /// Confirm the already visible initialization or transfer for this exact
+    /// owner and local scope. This never stages or publishes another surface.
+    pub fn confirm_durable_public_scope(
+        &mut self,
+        owner: &RecoveryPublicOwner,
+        target: ScopeId,
+    ) -> Result<(), SessionError> {
+        let snapshot = self
+            .public_visibility_snapshot_in(target)
+            .ok_or(SessionError::DeadScope(target))?;
+        let lib = self.lib();
+        let state = lib
+            .durable_graph
+            .as_ref()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        state
+            .owner
+            .as_ref()
+            .ok_or(SessionError::WrongPublicManifestTicket)?
+            .validate_owner()?;
+        let surface = state
+            .graph
+            .public_surfaces
+            .iter()
+            .find(|surface| &surface.owner == owner)
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        if lib.durable_public_scopes.get(owner) != Some(&target)
+            || surface.declaration_root
+                != (snapshot.declaration_tip != Generation(0)).then_some(snapshot.declaration_tip)
+            || surface.epoch != snapshot.epoch
+        {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        self.lib_mut().confirm_recovery_durability()
+    }
+
     /// Capture a binding-only publication against one exact private and public
     /// lexical view. Caller stages its bytes after releasing this checkout.
     pub fn snapshot_binding_publication(

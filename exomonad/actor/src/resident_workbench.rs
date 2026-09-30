@@ -7049,6 +7049,24 @@ where
             .await
     }
 
+    /// Complete only the directory durability confirmation for an already
+    /// visible initialized owner; the Pending actor keeps its placement alive.
+    pub(crate) async fn confirm_durable_public_owner(
+        &self,
+        context: crate::ActorSessionContext,
+        owner: tidepool_runtime::session::RecoveryPublicOwner,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, context, _| {
+                session
+                    .confirm_durable_public_scope(&owner, context.placement.lexical_scope)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })
+            })
+            .await
+    }
+
     /// Publish a fixed native execution. Every retry captures only the latest
     /// public merge baseline; accepted and rejected compiler graphs both
     /// revalidate under the owning checkout before becoming a terminal result.
