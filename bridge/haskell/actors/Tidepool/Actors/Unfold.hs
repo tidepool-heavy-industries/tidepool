@@ -88,7 +88,9 @@ module Tidepool.Actors.Unfold
   , UnfoldError (..)
   , renderUnfoldError
   , attemptUnfold
+  , attemptUnfoldCaptured
   , unfold
+  , unfoldCaptured
   , spawnWatched
   , errand
   ) where
@@ -352,7 +354,9 @@ withModel model (Branch role seed effects options assigned) =
 newtype ContextCheckpoint = ContextCheckpoint Text
 
 -- | Capture the current Haskell environment and exact hosted provider call.
--- A returned token becomes usable only after this hosted call succeeds.
+-- The delivered capture becomes usable before the enclosing call finishes.
+-- 'unfold' still defers publication; 'unfoldCaptured' publishes its own group
+-- from the provider prefix before this call and the captured Haskell scope.
 checkpoint :: Member Forks es => Text -> Eff es (Either CheckpointRefusal ContextCheckpoint)
 checkpoint name = fmap ContextCheckpoint <$> send (ForksCheckpointWith name)
 
@@ -373,7 +377,7 @@ fromCheckpoint :: ContextCheckpoint -> WorkerContext input
 fromCheckpoint = FromCheckpoint
 
 -- | Selected contexts receive the typed input and authored guidance in an
--- isolated Haskell scope and fresh TUI conversation. Imported project modules
+-- isolated Haskell scope and fresh model conversation. Imported project modules
 -- remain available from the swarm's fixed source selection.
 withContext :: WorkerContext input -> Branch child input result -> Branch child input result
 withContext context (Branch role seed effects options assigned) = case context of
@@ -591,6 +595,7 @@ childWithProgressSited site branch =
 data UnfoldError
   = UnfoldBeginRejected Text
   | UnfoldCheckpointRefused CheckpointRefusal
+  | UnfoldUncapturedContext Text
   | UnfoldBranchRejected Text Text
   | UnfoldShapeMismatch Text
   | UnfoldCommitRejected Text
@@ -606,11 +611,45 @@ attemptUnfold
   => ForkGroupPath
   -> Unfold parent result
   -> Eff parent (Either UnfoldError result)
-attemptUnfold path plan = do
+attemptUnfold = attemptUnfoldUsing ForksCommitWith
+
+-- | Publish an independent group before the enclosing call returns. Every
+-- branch must use 'fromCheckpoint' or 'selected'. Checkpoint branches retain
+-- the captured Haskell environment and the provider prefix before its call;
+-- selected branches start with a fresh context. Earlier pending provider
+-- calls in a checkpoint prefix remain dependencies of that context.
+attemptUnfoldCaptured
+  :: forall parent result
+   . (Member Forks parent, Member Replies parent, Member AgentInspection parent)
+  => ForkGroupPath
+  -> Unfold parent result
+  -> Eff parent (Either UnfoldError result)
+attemptUnfoldCaptured path plan = case uncapturedBranches plan of
+  label : _ -> pure (Left (UnfoldUncapturedContext label))
+  [] -> attemptUnfoldUsing ForksCommitCapturedWith path plan
+
+uncapturedBranches :: Unfold parent result -> [Text]
+uncapturedBranches (PureU _) = []
+uncapturedBranches (BranchU _ (Branch _ _ _ options assigned)) =
+  case (branchCheckpoint options, branchContext options) of
+    (Just _, _) -> []
+    (_, SelectedContext) -> []
+    _ -> [labelText (assignmentLabel assigned)]
+uncapturedBranches (ApU functions arguments) =
+  uncapturedBranches functions ++ uncapturedBranches arguments
+
+attemptUnfoldUsing
+  :: forall parent result
+   . (Member Forks parent, Member Replies parent, Member AgentInspection parent)
+  => (Int -> Forks (Either Text ()))
+  -> ForkGroupPath
+  -> Unfold parent result
+  -> Eff parent (Either UnfoldError result)
+attemptUnfoldUsing commit path plan = do
   checked <- traverse (send . ForksCheckCheckpointWith) (checkpointTokens plan)
   case [refusal | Left refusal <- checked] of
     refusal : _ -> pure (Left (UnfoldCheckpointRefused refusal))
-    [] -> attemptUnfoldUnchecked path plan
+    [] -> attemptUnfoldUnchecked commit path plan
 
 checkpointTokens :: Unfold parent result -> [Text]
 checkpointTokens (PureU _) = []
@@ -624,10 +663,11 @@ checkpointTokens (ApU functions arguments) =
 attemptUnfoldUnchecked
   :: forall parent result
    . (Member Forks parent, Member Replies parent, Member AgentInspection parent)
-  => ForkGroupPath
+  => (Int -> Forks (Either Text ()))
+  -> ForkGroupPath
   -> Unfold parent result
   -> Eff parent (Either UnfoldError result)
-attemptUnfoldUnchecked (ForkGroupPath relative groupName) plan = do
+attemptUnfoldUnchecked commit (ForkGroupPath relative groupName) plan = do
   let names = branchNames plan
   -- Validated literals can otherwise remain thunks across the effect bridge.
   -- Force the whole launch shape before admission so an invalid later branch
@@ -644,7 +684,7 @@ attemptUnfoldUnchecked (ForkGroupPath relative groupName) plan = do
           pure (Left failure)
         Right (tree, []) -> do
           result <- activate (siblingRoster tree) tree
-          committed <- send (ForksCommitWith groupId)
+          committed <- send (commit groupId)
           pure $ case committed of
             Left failure -> Left (UnfoldCommitRejected failure)
             Right () -> Right result
@@ -723,6 +763,18 @@ unfold path plan = do
     Left failure -> error (Text.unpack (renderUnfoldError failure))
     Right result -> pure result
 
+unfoldCaptured
+  :: forall parent result
+   . (Member Forks parent, Member Replies parent, Member AgentInspection parent)
+  => ForkGroupPath
+  -> Unfold parent result
+  -> Eff parent result
+unfoldCaptured path plan = do
+  attempted <- attemptUnfoldCaptured path plan
+  case attempted of
+    Left failure -> error (Text.unpack (renderUnfoldError failure))
+    Right result -> pure result
+
 -- | What an admission refusal says, in the words the host used.
 --
 -- The host already composes one clean sentence for each of these — which
@@ -735,6 +787,7 @@ renderUnfoldError :: UnfoldError -> Text
 renderUnfoldError failure = case failure of
   UnfoldBeginRejected detail -> detail
   UnfoldCheckpointRefused refusal -> Text.pack (show refusal)
+  UnfoldUncapturedContext label -> label <> ": captured unfold requires a checkpoint or selected context"
   UnfoldBranchRejected label detail -> label <> ": " <> detail
   UnfoldShapeMismatch detail -> detail
   UnfoldCommitRejected detail -> detail

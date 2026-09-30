@@ -1639,6 +1639,10 @@ pub(crate) enum ForkGroupBoundary {
         continuation: ResidentHole,
         group: crate::ForkGroupId,
     },
+    CommitCaptured {
+        continuation: ResidentHole,
+        group: crate::ForkGroupId,
+    },
     Abort {
         continuation: ResidentHole,
         group: crate::ForkGroupId,
@@ -1688,6 +1692,9 @@ impl ResidentActorBoundary {
             }
             Self::ForkGroup(ForkGroupBoundary::Begin { .. }) => "begin context-fork group",
             Self::ForkGroup(ForkGroupBoundary::Commit { .. }) => "commit context-fork group",
+            Self::ForkGroup(ForkGroupBoundary::CommitCaptured { .. }) => {
+                "commit captured context-fork group"
+            }
             Self::ForkGroup(ForkGroupBoundary::Abort { .. }) => "abort context-fork group",
             Self::ForkGroup(ForkGroupBoundary::Cleanup { .. }) => "cleanup context-fork group",
             Self::Start(_) => "startActor",
@@ -1984,6 +1991,9 @@ impl ResidentRequest {
             }
             Self::Forks(crate::generated::forks::ForksReq::ForksCommitWith(..)) => {
                 "commit context-fork group"
+            }
+            Self::Forks(crate::generated::forks::ForksReq::ForksCommitCapturedWith(..)) => {
+                "commit captured context-fork group"
             }
             Self::Forks(crate::generated::forks::ForksReq::ForksAbortWith(..)) => {
                 "abort context-fork group"
@@ -6720,6 +6730,14 @@ where
                                 ResidentActorWorkbenchError::ActorProtocol(format!(
                                     "invalid fork group id {group}"
                                 ))
+                            })?),
+                        },
+                    )),
+                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksCommitCapturedWith(group)) => Ok(ResidentActorBoundary::ForkGroup(
+                        ForkGroupBoundary::CommitCaptured {
+                            continuation: hole,
+                            group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
+                                ResidentActorWorkbenchError::ActorProtocol(format!("invalid fork group id {group}"))
                             })?),
                         },
                     )),

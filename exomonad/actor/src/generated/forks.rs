@@ -55,6 +55,7 @@ pub enum ForksReq {
         crate::WorkerLifetime,
     ),
     ForksCommitWith(i64),
+    ForksCommitCapturedWith(i64),
     ForksAbortWith(i64),
     ForksCleanupWith(i64),
 }

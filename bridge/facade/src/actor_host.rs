@@ -20,11 +20,14 @@ mod custody_tests;
 #[cfg(all(test, feature = "codex-compat"))]
 mod documentation_tests;
 #[cfg(test)]
+mod embedded_captured_unfold_tests;
+#[cfg(test)]
 mod embedded_checkpoint_children_survive_later_failure_tests;
 #[cfg(test)]
 mod embedded_checkpoint_children_tests;
 #[cfg(test)]
 mod embedded_command_tests;
+mod embedded_context;
 mod embedded_harness;
 #[cfg(test)]
 mod embedded_notification_tests;
@@ -4659,7 +4662,7 @@ async fn run_interactive_applications(
                                 ) {
                                     break Some(error);
                                 }
-                            } else if installation.checkpoint.is_none() {
+                            } else if installation.checkpoint.is_none() && installation.context_parent.is_some() {
                                 break Some(format!(
                                     "embedded child actor {actor:?} requires a hosted checkpoint"
                                 ));
@@ -4667,6 +4670,27 @@ async fn run_interactive_applications(
                             let initial_input = installation.initial_user_message.clone();
                             let has_initial_input = initial_input.is_some();
                             if !is_root {
+                                let selected_parent = if installation.checkpoint.is_none() {
+                                    let identities = embedded_conversations.iter().map(|(actor, conversation)| (*actor, conversation.identity().clone())).collect();
+                                    match embedded_context::selected_provider_parent(
+                                        &embedded_run, installation.creator.or(installation.supervisor_parent), &(host_graph)(), &identities,
+                                    ) {
+                                        Ok(parent) => Some(parent),
+                                        Err(error) => {
+                                            if let Some(gate) = installation.fork_gate.as_ref() {
+                                                gate.mark_failed().ok();
+                                            }
+                                            tracing::warn!(?actor, %error, "selected provider ancestry refused");
+                                            if let Err(failure) = apply_application_failure(local_actor.clone(), ExternalApplicationFailure {
+                                                class: ExternalApplicationFailureClass::ToolHostStartup,
+                                                detail: error,
+                                            }).await {
+                                                tracing::warn!(?actor, %failure, "selected child startup failure was not delivered");
+                                            }
+                                            continue;
+                                        },
+                                    }
+                                } else { None };
                                 let queue_admission = match local_actor.admit_transaction() {
                                     Ok(admission) => admission,
                                     Err(error) => {
@@ -4674,7 +4698,6 @@ async fn run_interactive_applications(
                                         continue;
                                     }
                                 };
-                                let checkpoint = installation.checkpoint.as_ref().expect("checked checkpoint").clone();
                                 let fork_gate = installation.fork_gate.clone();
                                 let committed_gate = fork_gate.clone();
                                 let runtime = Arc::clone(&service.runtime);
@@ -4697,21 +4720,19 @@ async fn run_interactive_applications(
                                                 _ = cancellation_rx.changed() => return Ok(()),
                                             }
                                         }
-                                        tokio::select! {
-                                            published = checkpoint.wait_published() => {
-                                                published.map_err(|refusal| format!("checkpoint publication refused: {refusal:?}"))?;
-                                            }
-                                            _ = cancellation_rx.changed() => return Ok(()),
-                                        }
                                         if *cancellation_rx.borrow() || local_actor.terminal().get().is_some() {
                                             return Ok(());
                                         }
-                                        let mut embedded = embedded_service::attach_checkpoint_actor(
-                                            runtime.as_ref(),
-                                            &run_root,
-                                            *installation,
-                                            initial_input,
-                                        ).await?;
+                                        let attachment = async {
+                                            match selected_parent {
+                                                Some(parent) => embedded_service::attach_selected_actor(runtime.as_ref(), &run_root, parent, *installation, initial_input).await,
+                                                None => embedded_service::attach_checkpoint_actor(runtime.as_ref(), &run_root, *installation, initial_input).await,
+                                            }
+                                        };
+                                        let mut embedded = tokio::select! {
+                                            attached = attachment => attached?,
+                                            _ = cancellation_rx.changed() => return Ok(()),
+                                        };
                                         if *cancellation_rx.borrow() || local_actor.terminal().get().is_some() {
                                             return Ok(());
                                         }

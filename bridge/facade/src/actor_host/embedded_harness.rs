@@ -102,6 +102,7 @@ impl EmbeddedHarnessRuntime {
         actor: LocalActorRef,
         installation: Arc<EmbeddedPolicyInstallation>,
         lease: &CheckpointLease,
+        gate: &exomonad_actor::ForkGroupGate,
         captured: Arc<EmbeddedHostedCheckpoint>,
     ) -> Result<EmbeddedConversation, EmbeddedError> {
         if identity.run != self.run {
@@ -114,7 +115,14 @@ impl EmbeddedHarnessRuntime {
                 "embedded checkpoint issuer mismatch".into(),
             ));
         }
-        let parent = captured.checkpoint.origin().clone();
+        let checkpoint = match gate
+            .publication()
+            .map_err(|error| EmbeddedError::Binding(error.to_string()))?
+        {
+            exomonad_actor::ForkGroupPublication::Deferred => captured.cuts.deferred(),
+            exomonad_actor::ForkGroupPublication::Captured => captured.cuts.before_call(),
+        };
+        let parent = checkpoint.origin().clone();
         let (wakes, incoming) = mpsc::unbounded_channel();
         let round_control = Arc::new(EmbeddedRoundControl::default());
         let host = Arc::new(EmbeddedHostActor::new(
@@ -131,7 +139,7 @@ impl EmbeddedHarnessRuntime {
             self.store.clone(),
             host,
             &parent,
-            &captured.checkpoint,
+            checkpoint,
             &json!({}),
             &json!({}),
         )?);
@@ -465,7 +473,18 @@ struct EmbeddedDispatcher {
 /// new children; an admitted child keeps its captured attachment for install.
 pub(super) struct EmbeddedHostedCheckpoint {
     issuer: ActorRef,
-    pub(super) checkpoint: harness::checkpoint::Checkpoint<()>,
+    pub(super) cuts: harness::checkpoint::CheckpointCuts<()>,
+}
+
+impl EmbeddedHostedCheckpoint {
+    pub(super) fn child_path(&self, actor: ActorRef) -> AgentPath {
+        AgentPath(format!(
+            "{}/a{}_i{}",
+            self.cuts.deferred().origin().0,
+            actor.id.0,
+            actor.incarnation.0
+        ))
+    }
 }
 
 impl EmbeddedHostedCheckpoint {
@@ -515,20 +534,14 @@ impl HostedCheckpointCapture for EmbeddedCheckpointCapture {
             "name": name,
             "operation": self.operation,
         });
-        let checkpoint = self
+        let cuts = self
             .store
-            .capture_checkpoint(
-                self.operation.origin.actor(),
-                &self.operation.request,
-                &self.operation.call,
-                &metadata,
-                Arc::new(()),
-            )
+            .capture_checkpoint_cuts(&self.operation, &metadata, Arc::new(()))
             .map_err(|_| HostedCheckpointCaptureError::CaptureFailed)?;
-        Ok(HostedCheckpointAttachment::new(Arc::new(
+        Ok(HostedCheckpointAttachment::captured(Arc::new(
             EmbeddedHostedCheckpoint {
                 issuer: self.issuer,
-                checkpoint,
+                cuts,
             },
         )))
     }

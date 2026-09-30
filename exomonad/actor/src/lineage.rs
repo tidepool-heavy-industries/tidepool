@@ -182,6 +182,8 @@ pub enum ForkGroupError {
     NotCommitted(u64),
     #[error("fork group {0} is not ready for publication")]
     NotReady(u64),
+    #[error("fork group {group} checkpoint admission does not match child {child:?}")]
+    CheckpointAdmissionMismatch { group: u64, child: ActorRef },
     #[error("fork group {0} has members outside the inspected cleanup scope")]
     CleanupScopeChanged(u64),
     #[error("actor {0:?} is being cleaned up")]
@@ -212,7 +214,10 @@ struct ForkGroup {
     checkpoint_sponsors: Vec<Option<Vec<ActorRef>>>,
     claimed: usize,
     children: Vec<ActorRef>,
+    checkpoint_admissions: HashMap<ActorRef, AdmittedForkCheckpoint>,
+    selected_admissions: HashMap<ActorRef, (SessionId, ScopeId, ActorPath)>,
     commit_requested: bool,
+    publication: Option<ForkGroupPublication>,
     ready: HashSet<ActorRef>,
     phase: tokio::sync::watch::Sender<ForkGroupPhase>,
 }
@@ -223,6 +228,54 @@ pub enum ForkGroupPhase {
     Ready,
     Committed,
     Aborted,
+}
+
+/// Immutable facts recorded from the admitted lease after actual child scope
+/// allocation. Release can revoke new uses without revoking this admission.
+#[derive(Clone)]
+pub(crate) struct AdmittedForkCheckpoint {
+    token: String,
+    issuer: ActorRef,
+    checkpoint: (SessionId, ScopeId),
+    child: (SessionId, ScopeId),
+    path: ActorPath,
+    pub(crate) context: crate::HostedCheckpointContext,
+}
+
+impl AdmittedForkCheckpoint {
+    pub(crate) fn matches(&self, descriptor: &crate::ActorDescriptor) -> bool {
+        descriptor.checkpoint_token() == Some(self.token.as_str())
+            && descriptor.context_parent() == Some(self.issuer)
+            && descriptor.actor_path() == Some(&self.path)
+            && (
+                descriptor.placement().session,
+                descriptor.placement().lexical_scope,
+            ) == self.child
+            && self.checkpoint.0 == self.child.0
+    }
+}
+
+/// Context selected by the owning group publication transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkGroupPublication {
+    Deferred,
+    Captured,
+}
+
+/// Retained authority for release repair after the registry commits a group.
+/// Only the registry constructs it; a failed release cannot request rollback.
+pub(crate) struct CommittedForkGroups {
+    owner: ActorRef,
+    groups: Vec<ForkGroupId>,
+}
+
+impl CommittedForkGroups {
+    pub(crate) fn owner(&self) -> ActorRef {
+        self.owner
+    }
+    pub(crate) fn groups(&self) -> &[ForkGroupId] {
+        &self.groups
+    }
 }
 
 #[derive(Clone)]
@@ -248,6 +301,10 @@ impl ForkGroupGate {
 
     pub fn mark_failed(&self) -> Result<(), ForkGroupError> {
         self.registry.mark_failed(self.id, self.child)
+    }
+
+    pub fn publication(&self) -> Result<ForkGroupPublication, ForkGroupError> {
+        self.registry.committed_publication(self.id, self.child)
     }
 }
 
@@ -886,7 +943,10 @@ impl ForkGroupRegistry {
                 checkpoint_sponsors: vec![None; reservations.len()],
                 claimed: 0,
                 children: Vec::with_capacity(reservations.len()),
+                checkpoint_admissions: HashMap::new(),
+                selected_admissions: HashMap::new(),
                 commit_requested: false,
+                publication: None,
                 ready: HashSet::new(),
                 phase: tokio::sync::watch::channel(ForkGroupPhase::Staging).0,
             },
@@ -1017,6 +1077,146 @@ impl ForkGroupRegistry {
         })
     }
 
+    pub(crate) fn retain_checkpoint_admission(
+        &self,
+        id: ForkGroupId,
+        owner: ActorRef,
+        child: ActorRef,
+        descriptor: &crate::ActorDescriptor,
+        lease: &CheckpointLease,
+        attachment: Option<&HostedCheckpointAttachment>,
+    ) -> Result<(), ForkGroupError> {
+        let mut state = self.state.lock();
+        let group = state
+            .groups
+            .get_mut(&id)
+            .ok_or(ForkGroupError::Unknown(id.0))?;
+        if group.owner != owner {
+            return Err(ForkGroupError::WrongOwner {
+                group: id.0,
+                actual: owner,
+            });
+        }
+        let path = descriptor
+            .actor_path()
+            .ok_or(ForkGroupError::CheckpointAdmissionMismatch { group: id.0, child })?;
+        let token = descriptor
+            .checkpoint_token()
+            .ok_or(ForkGroupError::CheckpointAdmissionMismatch { group: id.0, child })?;
+        if group.commit_requested
+            || !group.children.contains(&child)
+            || group.checkpoint_admissions.contains_key(&child)
+            || group.selected_admissions.contains_key(&child)
+            || descriptor.fork_group() != Some(id)
+            || descriptor.context_parent() != Some(lease.issuer)
+            || descriptor.placement().session != lease.session
+            || !group.reservations[..group.claimed]
+                .iter()
+                .any(|reservation| &reservation.allocated == path)
+        {
+            return Err(ForkGroupError::CheckpointAdmissionMismatch { group: id.0, child });
+        }
+        group.checkpoint_admissions.insert(
+            child,
+            AdmittedForkCheckpoint {
+                token: token.to_owned(),
+                issuer: lease.issuer,
+                checkpoint: (lease.session, lease.scope),
+                child: (
+                    descriptor.placement().session,
+                    descriptor.placement().lexical_scope,
+                ),
+                path: path.clone(),
+                context: attachment.map_or(
+                    crate::HostedCheckpointContext::DeferredOnly,
+                    HostedCheckpointAttachment::context,
+                ),
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn checkpoint_admission(
+        &self,
+        id: ForkGroupId,
+        owner: ActorRef,
+        child: ActorRef,
+    ) -> Result<Option<AdmittedForkCheckpoint>, ForkGroupError> {
+        let state = self.state.lock();
+        let group = state.groups.get(&id).ok_or(ForkGroupError::Unknown(id.0))?;
+        if group.owner != owner {
+            return Err(ForkGroupError::WrongOwner {
+                group: id.0,
+                actual: owner,
+            });
+        }
+        if !group.children.contains(&child) {
+            return Err(ForkGroupError::Unknown(id.0));
+        }
+        Ok(group.checkpoint_admissions.get(&child).cloned())
+    }
+
+    pub(crate) fn retain_selected_admission(
+        &self,
+        id: ForkGroupId,
+        owner: ActorRef,
+        child: ActorRef,
+        descriptor: &crate::ActorDescriptor,
+    ) -> Result<(), ForkGroupError> {
+        let mut state = self.state.lock();
+        let group = state
+            .groups
+            .get_mut(&id)
+            .ok_or(ForkGroupError::Unknown(id.0))?;
+        if group.owner != owner {
+            return Err(ForkGroupError::WrongOwner {
+                group: id.0,
+                actual: owner,
+            });
+        }
+        let path = descriptor
+            .actor_path()
+            .ok_or(ForkGroupError::CheckpointAdmissionMismatch { group: id.0, child })?;
+        if group.commit_requested
+            || !group.children.contains(&child)
+            || group.checkpoint_admissions.contains_key(&child)
+            || group.selected_admissions.contains_key(&child)
+            || descriptor.fork_group() != Some(id)
+            || descriptor.context_parent().is_some()
+            || descriptor.checkpoint_token().is_some()
+            || !group.reservations[..group.claimed]
+                .iter()
+                .any(|reservation| &reservation.allocated == path)
+        {
+            return Err(ForkGroupError::CheckpointAdmissionMismatch { group: id.0, child });
+        }
+        group.selected_admissions.insert(
+            child,
+            (
+                descriptor.placement().session,
+                descriptor.placement().lexical_scope,
+                path.clone(),
+            ),
+        );
+        Ok(())
+    }
+
+    pub(crate) fn completion_boundary(
+        &self,
+        id: ForkGroupId,
+        owner: ActorRef,
+    ) -> Result<Option<WorkbenchForkBoundary>, ForkGroupError> {
+        let state = self.state.lock();
+        let group = state.groups.get(&id).ok_or(ForkGroupError::Unknown(id.0))?;
+        if group.owner != owner {
+            return Err(ForkGroupError::WrongOwner {
+                group: id.0,
+                actual: owner,
+            });
+        }
+        Ok(group.completion_boundary.clone())
+    }
+
     pub fn request_commit(
         &self,
         id: ForkGroupId,
@@ -1099,6 +1299,38 @@ impl ForkGroupRegistry {
                 .await
                 .map_err(|_| ForkGroupError::Unknown(id.0))?;
         }
+    }
+
+    fn committed_publication(
+        &self,
+        id: ForkGroupId,
+        child: ActorRef,
+    ) -> Result<ForkGroupPublication, ForkGroupError> {
+        let state = self.state.lock();
+        let group = state.groups.get(&id).ok_or(ForkGroupError::Unknown(id.0))?;
+        if !group.children.contains(&child) {
+            return Err(ForkGroupError::Unknown(id.0));
+        }
+        if *group.phase.borrow() != ForkGroupPhase::Committed {
+            return Err(ForkGroupError::NotCommitted(id.0));
+        }
+        group.publication.ok_or(ForkGroupError::NotCommitted(id.0))
+    }
+
+    pub(crate) fn children_for_owner(
+        &self,
+        id: ForkGroupId,
+        owner: ActorRef,
+    ) -> Result<Vec<ActorRef>, ForkGroupError> {
+        let state = self.state.lock();
+        let group = state.groups.get(&id).ok_or(ForkGroupError::Unknown(id.0))?;
+        if group.owner != owner {
+            return Err(ForkGroupError::WrongOwner {
+                group: id.0,
+                actual: owner,
+            });
+        }
+        Ok(group.children.clone())
     }
 
     pub fn abort(&self, id: ForkGroupId, owner: ActorRef) -> Result<Vec<ActorRef>, ForkGroupError> {
@@ -1192,8 +1424,82 @@ impl ForkGroupRegistry {
         &self,
         ids: &[ForkGroupId],
         owner: ActorRef,
-    ) -> Result<(), ForkGroupError> {
-        let state = self.state.lock();
+    ) -> Result<CommittedForkGroups, ForkGroupError> {
+        self.publish_group_context(ids, owner, ForkGroupPublication::Deferred)
+    }
+
+    pub(crate) fn publish_captured_group(
+        &self,
+        id: ForkGroupId,
+        owner: ActorRef,
+        boundary: Option<&WorkbenchForkBoundary>,
+        descriptors: &[(ActorRef, crate::ActorDescriptor)],
+    ) -> Result<CommittedForkGroups, ForkGroupError> {
+        let mut state = self.state.lock();
+        let group = state
+            .groups
+            .get_mut(&id)
+            .ok_or(ForkGroupError::Unknown(id.0))?;
+        if group.owner != owner {
+            return Err(ForkGroupError::WrongOwner {
+                group: id.0,
+                actual: owner,
+            });
+        }
+        if group.completion_boundary.as_ref() != boundary
+            || *group.phase.borrow() != ForkGroupPhase::Ready
+        {
+            return Err(ForkGroupError::NotReady(id.0));
+        }
+        for child in &group.children {
+            let descriptor = descriptors
+                .iter()
+                .find(|(actor, _)| actor == child)
+                .map(|(_, descriptor)| descriptor);
+            let valid = descriptor.is_some_and(|descriptor| {
+                descriptor.fork_group() == Some(id)
+                    && (group
+                        .checkpoint_admissions
+                        .get(child)
+                        .is_some_and(|admission| {
+                            admission.context == crate::HostedCheckpointContext::Captured
+                                && admission.matches(descriptor)
+                        })
+                        || group.selected_admissions.get(child).is_some_and(
+                            |(session, scope, path)| {
+                                descriptor.checkpoint_token().is_none()
+                                    && descriptor.context_parent().is_none()
+                                    && descriptor.actor_path() == Some(path)
+                                    && descriptor.placement().session == *session
+                                    && descriptor.placement().lexical_scope == *scope
+                            },
+                        ))
+            });
+            if !valid {
+                return Err(ForkGroupError::CheckpointAdmissionMismatch {
+                    group: id.0,
+                    child: *child,
+                });
+            }
+        }
+        if descriptors.len() != group.children.len() {
+            return Err(ForkGroupError::TooManyChildren(id.0));
+        }
+        group.publication = Some(ForkGroupPublication::Captured);
+        group.phase.send_replace(ForkGroupPhase::Committed);
+        Ok(CommittedForkGroups {
+            owner,
+            groups: vec![id],
+        })
+    }
+
+    fn publish_group_context(
+        &self,
+        ids: &[ForkGroupId],
+        owner: ActorRef,
+        publication: ForkGroupPublication,
+    ) -> Result<CommittedForkGroups, ForkGroupError> {
+        let mut state = self.state.lock();
         for id in ids {
             let group = state.groups.get(id).ok_or(ForkGroupError::Unknown(id.0))?;
             if group.owner != owner {
@@ -1207,12 +1513,15 @@ impl ForkGroupRegistry {
             }
         }
         for id in ids {
-            state.groups[id]
-                .phase
-                .send_replace(ForkGroupPhase::Committed);
+            let group = state.groups.get_mut(id).expect("validated group");
+            group.publication = Some(publication);
+            group.phase.send_replace(ForkGroupPhase::Committed);
             tracing::info!(group = id.0, actor = ?owner, "fork group published");
         }
-        Ok(())
+        Ok(CommittedForkGroups {
+            owner,
+            groups: ids.to_vec(),
+        })
     }
 
     pub fn publish_ready(&self, owner: ActorRef) -> Result<Vec<ForkGroupId>, ForkGroupError> {
@@ -1220,6 +1529,7 @@ impl ForkGroupRegistry {
         let mut published = Vec::new();
         for (id, group) in &mut state.groups {
             if group.owner == owner && *group.phase.borrow() == ForkGroupPhase::Ready {
+                group.publication = Some(ForkGroupPublication::Deferred);
                 group.phase.send_replace(ForkGroupPhase::Committed);
                 published.push(*id);
             }
@@ -1630,6 +1940,10 @@ fn lowest_available(
     }
     unreachable!("unbounded numeric suffix space")
 }
+
+#[cfg(test)]
+#[path = "lineage/captured_tests.rs"]
+mod captured_tests;
 
 #[cfg(test)]
 mod tests {

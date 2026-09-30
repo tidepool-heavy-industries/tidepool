@@ -358,17 +358,44 @@ pub type ResidentToolFuture =
 /// this share with its checkpoint lease; only the host that created the value
 /// can interpret it.
 #[derive(Clone)]
-pub struct HostedCheckpointAttachment(Arc<dyn Any + Send + Sync>);
+pub struct HostedCheckpointAttachment {
+    value: Arc<dyn Any + Send + Sync>,
+    context: HostedCheckpointContext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostedCheckpointContext {
+    DeferredOnly,
+    Captured,
+}
 
 impl HostedCheckpointAttachment {
     #[must_use]
     pub fn new<T: Any + Send + Sync>(value: Arc<T>) -> Self {
-        Self(value)
+        Self {
+            value,
+            context: HostedCheckpointContext::DeferredOnly,
+        }
+    }
+
+    /// Issued by a trusted host capture owner only after it retains both
+    /// the deferred and independently usable immutable context cuts.
+    #[must_use]
+    pub fn captured<T: Any + Send + Sync>(value: Arc<T>) -> Self {
+        Self {
+            value,
+            context: HostedCheckpointContext::Captured,
+        }
+    }
+
+    #[must_use]
+    pub fn context(&self) -> HostedCheckpointContext {
+        self.context
     }
 
     #[must_use]
     pub fn downcast<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
-        Arc::downcast(Arc::clone(&self.0)).ok()
+        Arc::downcast(Arc::clone(&self.value)).ok()
     }
 }
 

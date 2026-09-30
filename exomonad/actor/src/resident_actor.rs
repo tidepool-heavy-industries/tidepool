@@ -1226,11 +1226,19 @@ impl ForkPublication {
 }
 
 struct PendingForkPublication {
-    boundary: tidepool_runtime::session::WorkbenchForkBoundary,
-    groups: Vec<crate::ForkGroupId>,
-    releases: Vec<(ActorRef, tidepool_codegen::scope::ScopeId)>,
-    unused_scopes: Vec<tidepool_codegen::scope::ScopeId>,
-    published: bool,
+    boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
+    phase: PendingForkPublicationPhase,
+    releases: Vec<(
+        ActorRef,
+        tidepool_repr::SessionId,
+        tidepool_codegen::scope::ScopeId,
+    )>,
+    unused_scopes: Vec<(tidepool_repr::SessionId, tidepool_codegen::scope::ScopeId)>,
+}
+
+enum PendingForkPublicationPhase {
+    Prepared(Vec<crate::ForkGroupId>),
+    Committed(crate::lineage::CommittedForkGroups),
 }
 
 impl<H, O> ResidentKernelBehavior<H, O> {
@@ -2883,6 +2891,10 @@ where
                 .map(|prepared| prepared.handle().clone());
             let bound_worktrees = launch_worktrees.clone();
             let descriptor_scope = descriptor.placement().lexical_scope;
+            let checkpoint_descriptor = fork_group.map(|_| descriptor.clone());
+            let checkpoint_attachment = checkpoint_admission
+                .as_ref()
+                .and_then(|(_, attachment)| attachment.clone());
             let mut behavior = Self::child(
                 descriptor,
                 self.environment.clone(),
@@ -2912,6 +2924,41 @@ where
                     ));
                 }
             };
+            if let (Some(group), Some(lease), Some(descriptor)) = (
+                fork_group,
+                checkpoint_lease.as_ref(),
+                checkpoint_descriptor.as_ref(),
+            ) {
+                self.environment
+                    .fork_groups
+                    .retain_checkpoint_admission(
+                        group,
+                        context.actor,
+                        child.identity(),
+                        descriptor,
+                        lease,
+                        checkpoint_attachment.as_ref(),
+                    )
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                    })?;
+            } else if let (Some(group), Some(descriptor)) =
+                (fork_group, checkpoint_descriptor.as_ref())
+            {
+                if descriptor.context_parent().is_none() {
+                    self.environment
+                        .fork_groups
+                        .retain_selected_admission(
+                            group,
+                            context.actor,
+                            child.identity(),
+                            descriptor,
+                        )
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                        })?;
+                }
+            }
             // The child now has a principal, so the layer its descriptor carries
             // can be named as its own. This happens before the child runs, so its
             // first cell already reaches its own layer and no other.
@@ -4250,6 +4297,20 @@ where
                             .await
                     }
                 }
+            }),
+            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::CommitCaptured {
+                continuation,
+                group,
+            }) => Box::pin(async move {
+                self.commit_captured_group(
+                    kernel,
+                    context,
+                    effect_owner.publication(),
+                    effect_owner.control(),
+                    continuation,
+                    group,
+                )
+                .await
             }),
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Commit {
                 continuation,
@@ -8006,34 +8067,289 @@ where
             }
         }
     }
+    fn captured_group_descriptors(
+        &self,
+        owner: ActorRef,
+        group: crate::ForkGroupId,
+    ) -> Result<Vec<(ActorRef, ActorDescriptor)>, String> {
+        let children = self
+            .environment
+            .fork_groups
+            .children_for_owner(group, owner)
+            .map_err(|error| error.to_string())?;
+        let descriptors = {
+            let actors = self.environment.actors.lock();
+            children
+                .into_iter()
+                .map(|child| {
+                    actors
+                        .get(&child)
+                        .map(|record| (child, record.descriptor.clone()))
+                        .ok_or_else(|| {
+                            format!("captured fork child {child:?} has no admitted descriptor")
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        descriptors.into_iter().map(|(child, descriptor)| {
+            if descriptor.fork_group() != Some(group) {
+                return Err(format!("captured fork child {child:?} belongs to a different group"));
+            }
+            if descriptor.checkpoint_token().is_some() {
+                let admission = self.environment.fork_groups.checkpoint_admission(group, owner, child)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("captured fork child {child:?} has no admitted checkpoint"))?;
+                if !admission.matches(&descriptor)
+                    || admission.context != crate::HostedCheckpointContext::Captured
+                {
+                    return Err(format!("captured fork child {child:?} has no independently usable captured context"));
+                }
+            } else if descriptor.context_parent().is_some() {
+                return Err(format!("captured fork child {child:?} requires a checkpoint or selected context"));
+            }
+            Ok((child, descriptor))
+        }).collect()
+    }
+
+    async fn reject_captured_group(
+        &self,
+        kernel: &KernelContext,
+        owner: ActorRef,
+        group: crate::ForkGroupId,
+    ) {
+        // Normal Abort refuses a requested commit. This owning rejection path
+        // also revokes Ready admission, but cannot remove a committed group.
+        for child in self
+            .environment
+            .fork_groups
+            .abort_selected_unpublished(owner, &[group])
+        {
+            if let Some(child) = kernel.resolve(child) {
+                if let Err(error) = child
+                    .shutdown(ActorTerminal {
+                        kind: ActorExitKind::Cancelled,
+                        summary: "captured fork group admission rejected".into(),
+                    })
+                    .await
+                {
+                    tracing::warn!(child = ?child.identity(), %error, "captured fork child did not shut down");
+                }
+            }
+        }
+    }
+
+    async fn commit_captured_group(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        publication: &ForkPublication,
+        control: Option<Arc<crate::WorkbenchExecutionControl>>,
+        continuation: ResidentHole,
+        group: crate::ForkGroupId,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        let owned_boundary = self
+            .environment
+            .fork_groups
+            .completion_boundary(group, context.actor)
+            .map_err(|error| error.to_string());
+        if !matches!(&owned_boundary, Ok(boundary) if boundary.as_ref() == publication.boundary()) {
+            let detail = owned_boundary.err().unwrap_or_else(|| {
+                "captured fork group belongs to another execution boundary".into()
+            });
+            return self
+                .environment
+                .runner
+                .resume_fork_failure(context.clone(), continuation, detail)
+                .await;
+        }
+        let control = control.unwrap_or_else(crate::WorkbenchExecutionControl::untracked);
+        control.arm_sleep();
+        let ready = {
+            let waiting = async {
+                self.captured_group_descriptors(context.actor, group)?;
+                let mut phase = self
+                    .environment
+                    .fork_groups
+                    .request_commit(group, context.actor)
+                    .map_err(|error| error.to_string())?;
+                loop {
+                    let current = *phase.borrow();
+                    match current {
+                        crate::ForkGroupPhase::Ready => {
+                            return self.captured_group_descriptors(context.actor, group)
+                        }
+                        crate::ForkGroupPhase::Committed => {
+                            return Err("captured fork group was already published".into())
+                        }
+                        crate::ForkGroupPhase::Aborted => {
+                            return Err(
+                                "captured fork group was aborted while awaiting readiness".into()
+                            )
+                        }
+                        crate::ForkGroupPhase::Staging => {}
+                    }
+                    phase
+                        .changed()
+                        .await
+                        .map_err(|_| "captured fork group readiness channel closed".to_string())?;
+                }
+            };
+            tokio::pin!(waiting);
+            tokio::select! {
+                ready = &mut waiting => {
+                    if control.claim_expiry() {
+                        control.finish_sleep();
+                        Some(ready)
+                    } else { None }
+                }
+                () = control.wait_for_cancellation() => None,
+                _ = kernel.wait_requested_shutdown() => {
+                    control.request_cancellation();
+                    None
+                }
+            }
+        };
+        let Some(ready) = ready else {
+            self.reject_captured_group(kernel, context.actor, group)
+                .await;
+            let (outcome, consumed) = self
+                .environment
+                .runner
+                .abort_live(
+                    context.clone(),
+                    continuation,
+                    "captured fork admission interrupted".into(),
+                )
+                .await;
+            if consumed {
+                control.acknowledge_cancellation();
+            }
+            return outcome;
+        };
+        let descriptors = match ready {
+            Ok(descriptors) => descriptors,
+            Err(detail) => {
+                self.reject_captured_group(kernel, context.actor, group)
+                    .await;
+                return self
+                    .environment
+                    .runner
+                    .resume_fork_failure(context.clone(), continuation, detail)
+                    .await;
+            }
+        };
+        let authority = match self.environment.fork_groups.publish_captured_group(
+            group,
+            context.actor,
+            publication.boundary(),
+            &descriptors,
+        ) {
+            Ok(authority) => authority,
+            Err(error) => {
+                self.reject_captured_group(kernel, context.actor, group)
+                    .await;
+                return self
+                    .environment
+                    .runner
+                    .resume_fork_failure(context.clone(), continuation, error.to_string())
+                    .await;
+            }
+        };
+        let releases = descriptors
+            .into_iter()
+            .map(|(child, descriptor)| {
+                (
+                    child,
+                    descriptor.placement().session,
+                    descriptor.placement().lexical_scope,
+                )
+            })
+            .collect();
+        let index = self.pending_fork_publications.len();
+        self.pending_fork_publications.push(PendingForkPublication {
+            boundary: publication.boundary().cloned(),
+            phase: PendingForkPublicationPhase::Committed(authority),
+            releases,
+            unused_scopes: Vec::new(),
+        });
+        // Publication is irreversible. Retain its authority on a cleanup
+        // failure; never report a post-commit failure as an admission rollback.
+        self.finish_pending_fork_publication_index(kernel, context, index)
+            .await
+            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.detail))?;
+        self.environment
+            .runner
+            .resume_fork_unit(context.clone(), continuation)
+            .await
+    }
+
     async fn finish_pending_fork_publication(
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
         boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
-    ) -> Result<bool, KernelBehaviorError> {
-        let Some(index) = self
+    ) -> Result<(), KernelBehaviorError> {
+        while let Some(index) = self
             .pending_fork_publications
             .iter()
-            .position(|pending| &pending.boundary == boundary)
-        else {
-            return Ok(false);
-        };
+            .position(|pending| pending.boundary.as_ref() == Some(boundary))
+        {
+            self.finish_pending_fork_publication_index(kernel, context, index)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn finish_pending_fork_publication_index(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        index: usize,
+    ) -> Result<(), KernelBehaviorError> {
         let mut pending = self.pending_fork_publications.remove(index);
-        if !pending.published {
-            if let Err(error) = self
+        if let PendingForkPublicationPhase::Prepared(groups) = &pending.phase {
+            match self
                 .environment
                 .fork_groups
-                .publish_groups(&pending.groups, context.actor)
+                .publish_groups(groups, context.actor)
             {
-                self.pending_fork_publications.push(pending);
-                return Err(KernelBehaviorError {
-                    detail: error.to_string(),
-                });
+                Ok(authority) => pending.phase = PendingForkPublicationPhase::Committed(authority),
+                Err(error) => {
+                    self.pending_fork_publications.push(pending);
+                    return Err(KernelBehaviorError {
+                        detail: error.to_string(),
+                    });
+                }
             }
-            pending.published = true;
         }
-        for (child, scope) in pending.releases.drain(..) {
+        let PendingForkPublicationPhase::Committed(authority) = &pending.phase else {
+            unreachable!("publication minted committed authority");
+        };
+        if authority.owner() != context.actor {
+            self.pending_fork_publications.push(pending);
+            return Err(KernelBehaviorError {
+                detail: "fork publication authority belongs to another actor".into(),
+            });
+        }
+        let valid = {
+            let actors = self.environment.actors.lock();
+            pending.releases.iter().all(|(child, session, _)| {
+                actors.get(child).is_none_or(|record| {
+                    record.descriptor.placement().session == *session
+                        && record
+                            .descriptor
+                            .fork_group()
+                            .is_some_and(|group| authority.groups().contains(&group))
+                })
+            })
+        };
+        if !valid {
+            self.pending_fork_publications.push(pending);
+            return Err(KernelBehaviorError {
+                detail: "fork release differs from committed admission".into(),
+            });
+        }
+        for (child, session, scope) in pending.releases.drain(..) {
             let sent = kernel.resolve(child).is_some_and(|child| {
                 child.terminal().get().is_none()
                     && child
@@ -8042,21 +8358,27 @@ where
                         .is_ok()
             });
             if !sent {
-                pending.unused_scopes.push(scope);
+                pending.unused_scopes.push((session, scope));
             }
         }
-        if !pending.unused_scopes.is_empty() {
+        while let Some((session, _)) = pending.unused_scopes.first().copied() {
+            let scopes = pending
+                .unused_scopes
+                .iter()
+                .filter_map(|(owner, scope)| (*owner == session).then_some(*scope))
+                .collect();
             if let Err(error) = self
                 .environment
                 .runner
-                .retire_fork_scopes(context.clone(), pending.unused_scopes.clone())
+                .retire_checkpoint_scopes(session, scopes)
                 .await
             {
                 self.pending_fork_publications.push(pending);
                 return Err(Self::failure(error));
             }
+            pending.unused_scopes.retain(|(owner, _)| *owner != session);
         }
-        Ok(true)
+        Ok(())
     }
 
     async fn abort_incomplete_groups(
@@ -8426,15 +8748,8 @@ where
             self.environment
                 .fork_groups
                 .settle_checkpoints(context.actor, &boundary, true);
-            if self
-                .finish_pending_fork_publication(kernel, &context, &boundary)
-                .await?
-            {
-                if !self.settled_fork_boundaries.contains(&boundary) {
-                    self.settled_fork_boundaries.push(boundary);
-                }
-                return Ok(());
-            }
+            self.finish_pending_fork_publication(kernel, &context, &boundary)
+                .await?;
             for child in self
                 .environment
                 .fork_groups
@@ -8518,12 +8833,23 @@ where
                 .finalize_fork_scopes(context.clone(), previous)
                 .await
                 .map_err(Self::failure)?;
+            let releases = {
+                let actors = self.environment.actors.lock();
+                children
+                    .into_iter()
+                    .zip(scopes)
+                    .map(|(child, scope)| {
+                        (child, actors[&child].descriptor.placement().session, scope)
+                    })
+                    .collect()
+            };
             self.pending_fork_publications.push(PendingForkPublication {
-                boundary: boundary.clone(),
-                groups: groups.into_iter().map(|(group, _)| group).collect(),
-                releases: children.into_iter().zip(scopes).collect(),
+                boundary: Some(boundary.clone()),
+                phase: PendingForkPublicationPhase::Prepared(
+                    groups.into_iter().map(|(group, _)| group).collect(),
+                ),
+                releases,
                 unused_scopes: Vec::new(),
-                published: false,
             });
             self.finish_pending_fork_publication(kernel, &context, &boundary)
                 .await?;
@@ -9305,6 +9631,7 @@ where
         Box::pin(async move {
             use crate::CleanupComponentOutcome::{Confirmed, Unconfirmed};
             let staged_replacement = self.replacement_staged();
+            let staged_fork = self.boot.is_some() && self.descriptor.fork_group().is_some();
             self.source_connections.take();
             self.sources.clear();
             let context = self.context(kernel.identity());
@@ -9368,25 +9695,27 @@ where
             }
             // Realm retirement obtains its own exclusive checkout. A failed hook
             // does not skip this safe cleanup; it also never becomes success.
-            let realm_result =
-                if staged_replacement || self.descriptor.supervisor_parent().is_none() {
-                    self.environment
-                        .runner
-                        .retire_root_placement_wait(
-                            self.descriptor.placement(),
-                            deadline.saturating_duration_since(tokio::time::Instant::now()),
-                        )
-                        .await
-                } else {
-                    self.environment
-                        .runner
-                        .close_realm_wait(
-                            context,
-                            self.descriptor.placement().resource_scope,
-                            deadline.saturating_duration_since(tokio::time::Instant::now()),
-                        )
-                        .await
-                };
+            let realm_result = if staged_replacement
+                || staged_fork
+                || self.descriptor.supervisor_parent().is_none()
+            {
+                self.environment
+                    .runner
+                    .retire_root_placement_wait(
+                        self.descriptor.placement(),
+                        deadline.saturating_duration_since(tokio::time::Instant::now()),
+                    )
+                    .await
+            } else {
+                self.environment
+                    .runner
+                    .close_realm_wait(
+                        context,
+                        self.descriptor.placement().resource_scope,
+                        deadline.saturating_duration_since(tokio::time::Instant::now()),
+                    )
+                    .await
+            };
             if let Err(error) = realm_result {
                 retained_errors.push(error.to_string());
             }
