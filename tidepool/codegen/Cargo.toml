@@ -29,6 +29,7 @@ env_logger = "0.11"
 # cranelift-jit's own unconditional CLIF-dump `info!`s.
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 recursion.workspace = true
+rpds = "=1.2.1"
 stacker = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 serde.workspace = true
