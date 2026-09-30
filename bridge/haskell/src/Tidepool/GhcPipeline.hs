@@ -68,7 +68,7 @@ import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable
   ( renderWithContext, defaultSDocContext, ppr, SDocContext(..)
   , mkUserStyle, NamePprCtx(..), QualifyName(..), Depth(..), PromotionTickContext(..) )
-import GHC.Types.Id (idName)
+import GHC.Types.Id (idName, setIdExported)
 import GHC.Core.Type
   ( mkInvisForAllTys
   , mkInvisFunTys
@@ -100,7 +100,8 @@ import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUn
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.TypeEnv (typeEnvIds, typeEnvTyCons)
 import GHC.LanguageExtensions.Type qualified as LangExt
-import GHC.Tc.Types (TcGblEnv, tcg_dependent_files, tcg_binds, tcg_rdr_env, tcg_type_env, tcg_insts, tcg_imports)
+import GHC.Tc.Types (TcGblEnv, tcg_dependent_files, tcg_binds, tcg_rdr_env, tcg_type_env, tcg_insts, tcg_imports, tcg_keep)
+import GHC.Types.Name.Set (extendNameSetList)
 import GHC.Types.Name.Reader (GlobalRdrEnv)
 import GHC.Types.Name.Ppr (mkNamePprCtx)
 import GHC.Types.Name (nameOccName, nameUnique, mkExternalName, mkInternalName, nameModule_maybe)
@@ -672,13 +673,14 @@ data PipelineVariant = PipelineVariant
   , pvTransformParsed :: HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
   }
 
-data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile
+data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile | OriginalDeclarationCompile
   | CheckedItemCompile [(String,CheckedSignature)]
   | PlannedDeclarationCheck PlannedDeclarationInventory ExactScope
   deriving (Eq, Show)
 
 transformFor :: CompilePurpose -> ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
 transformFor GeneralCompile _ _ _ = pure
+transformFor OriginalDeclarationCompile _ _ _ = pure
 transformFor CertifyHomeProductsCompile _ _ _ = pure
 transformFor LookupTypeCompile target _ summary
   | ms_mod_name summary == target = pure . normalizeLookupWildcards
@@ -702,6 +704,7 @@ data CompilePlan = CompilePlan
   , cpSummaries :: Ghc [ModSummary]
     -- ^ The modules to compile, in compile ORDER, BEFORE the hs-boot filter
     -- (which is the skeleton's, at one site).
+  , cpKeepPrivateResult :: Bool
   , cpResultBinders :: [String]
     -- ^ OccNames to try, in order, for 'prResultType' — the @result@ vs
     -- @__result@ convention, which differs by wrapper.
@@ -1567,7 +1570,17 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 when (timing && not (null dependentFiles)) $ liftIO $ hPutStrLn stderr $
                   "tidepool-dependent-files module=" ++ moduleNameString (ms_mod_name modSum)
                     ++ " files=" ++ show dependentFiles
-                (desugared, dsMs) <- timeSection $ liftIO (hscDesugar hscEnv modSum tcGblEnv)
+                let resultRoots = [idName identifier | cpKeepPrivateResult plan, ms_mod_name modSum == targetModName'
+                      , identifier <- typeEnvIds (tcg_type_env tcGblEnv)
+                      , occNameString (nameOccName (idName identifier)) `elem` cpResultBinders plan
+                      , nameModule_maybe (idName identifier) == Just (ms_mod modSum)]
+                liftIO $ modifyIORef' (tcg_keep tcGblEnv) (`extendNameSetList` resultRoots)
+                (desugared0, dsMs) <- timeSection $ liftIO (hscDesugar hscEnv modSum tcGblEnv)
+                let retainResult identifier = if idName identifier `elem` resultRoots
+                      then setIdExported identifier else identifier
+                    retainBinding (NonRec identifier rhs) = NonRec (retainResult identifier) rhs
+                    retainBinding (Rec bindings) = Rec [(retainResult identifier,rhs) | (identifier,rhs) <- bindings]
+                    desugared = desugared0 {mg_binds = map retainBinding (mg_binds desugared0)}
                 liftIO (modifyIORef' loweringMsRef (+ dsMs))
                 liftIO (modifyIORef' dsMsRef (+ dsMs))
                 liftIO (modifyIORef' moduleMsRef
@@ -3040,6 +3053,7 @@ normalVariant purpose path = do
         -- @result@; a resident turn without prior bindings can also land on
         -- this variant while its template names @__result@. Try both, in that
         -- order.
+      , cpKeepPrivateResult = purpose == OriginalDeclarationCompile
       , cpResultBinders = [scaffoldOutputBase, scaffoldTargetName]
       , cpBeforeModule = \_ -> pure ()
       , cpTier = if purpose == CertifyHomeProductsCompile
@@ -3207,6 +3221,7 @@ sessionVariant purpose scope path = do
           -- ('isSessionScopeActive'); every such turn's wrapper compiles a
           -- target literally named @__result@ (scaffold-reserved, never
           -- @result@).
+        , cpKeepPrivateResult = purpose == OriginalDeclarationCompile
         , cpResultBinders = [scaffoldTargetName, scaffoldOutputBase]
         , cpBeforeModule = \modSum ->
             when (ms_mod_name modSum `Set.member` deferredMods) $ do

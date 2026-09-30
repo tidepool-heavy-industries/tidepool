@@ -481,7 +481,7 @@ impl ModuleCandidateOffer {
             || module.module_name() != module_name
             || string(&fields[7])? != "planned-declaration"
             || extract_module_name(source).as_deref() != Some(module_name)
-            || std::fs::read(&source_path)? != source.as_bytes()
+            || crate::checked_cell::read(&source_path, 32 * 1024 * 1024)? != source.as_bytes()
         {
             return Err(fail());
         }
@@ -674,10 +674,16 @@ pub fn seal_turn_outputs(
             "turn source changed after worker compile".into(),
         ));
     }
-    let product_bytes = std::fs::read(output_dir.join("module-products.cbor"))?;
-    let package_bundle_bytes = std::fs::read(output_dir.join("module-package-imports.cbor"))?;
-    let evidence_bytes = std::fs::read(output_dir.join("dependencies.json"))?;
-    let receipt_bytes = std::fs::read(output_dir.join("certified-products.cbor"))?;
+    let read_sidecar = |name: &str| {
+        let path = output_dir.join(name);
+        std::fs::read(&path).map_err(|error| {
+            CompileError::ExtractFailed(format!("turn sidecar {}: {error}", path.display()))
+        })
+    };
+    let product_bytes = read_sidecar("module-products.cbor")?;
+    let package_bundle_bytes = read_sidecar("module-package-imports.cbor")?;
+    let evidence_bytes = read_sidecar("dependencies.json")?;
+    let receipt_bytes = read_sidecar("certified-products.cbor")?;
     let fresh_products = tidepool_repr::execution_schema::parse_module_products(
         &product_bytes,
         &crate::prepared_artifact::production_requirements()?,
@@ -1132,7 +1138,7 @@ fn compile_invocation_inner(
                 temp_dir.path(),
                 &compiler_stderr,
                 error,
-            ))
+            ));
         }
     };
 
@@ -1418,6 +1424,17 @@ fn retain_failed_compiler_artifacts(directory: &Path) -> std::io::Result<PathBuf
         let entry = entry?;
         if entry.file_type()?.is_file() {
             std::fs::copy(entry.path(), retained.path().join(entry.file_name()))?;
+        }
+    }
+    let planned = directory.join("planned-declaration");
+    if planned.is_dir() {
+        let destination = retained.path().join("planned-declaration");
+        std::fs::create_dir(&destination)?;
+        for entry in std::fs::read_dir(&planned)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                std::fs::copy(entry.path(), destination.join(entry.file_name()))?;
+            }
         }
     }
     if let Ok(bytes) = std::fs::read(directory.join("dependencies.json")) {

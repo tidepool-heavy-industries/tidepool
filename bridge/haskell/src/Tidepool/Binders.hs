@@ -730,8 +730,15 @@ renderDeclarationForTemplate template source = do
           imports = concatMap ((++ "\n") . locatedImportSource)
             (prologueImports (declarationPrologue source))
           withPragmas = unlines beforeModule ++ pragmas ++ unlines afterModule
-       in Right (spliceTemplate withPragmas
-            (imports ++ declarationBody source) "")
+       in if "{{CELL_IMPORTS}}" `isInfixOf` withPragmas
+            then case T.breakOn "{{CELL_IMPORTS}}" (T.pack withPragmas) of
+              (before, remaining) ->
+                let after = T.drop (length ("{{CELL_IMPORTS}}" :: String)) remaining
+                in if "{{CELL_IMPORTS}}" `T.isInfixOf` after
+                  then Left "declaration template has duplicate import placeholders"
+                  else Right (spliceTemplate (T.unpack before ++ imports ++ T.unpack after)
+                    (declarationBody source) "")
+            else Right (spliceTemplate withPragmas (imports ++ declarationBody source) "")
   where
     moduleHeader line = "module " `isPrefixOf` dropWhile isSpace line
 

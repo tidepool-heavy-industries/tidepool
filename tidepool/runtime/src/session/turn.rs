@@ -2758,7 +2758,13 @@ fn check_cell_impl(
     }
     checked.warnings = report.diagnostics;
     if let Some(admission) = admission {
-        checked.authority = Some(offer.admit_checked_cell(temp.path())?);
+        checked.authority = Some(offer.admit_checked_cell(temp.path()).map_err(|error| {
+            tidepool_toolchain::artifacts::retain_compiler_failure(
+                temp.path(),
+                &output.stderr,
+                error,
+            )
+        })?);
         checked.admission = Some(admission);
     }
     // The worker writes `turn.cbor` only when it attempted AND succeeded at
@@ -3493,7 +3499,9 @@ fn read_compiled_turn(
             checked_display_admission: None,
         }),
     };
-    if let Some(certification) = &compiled.certification { certification.validate_checked_table(&compiled.table)?; }
+    if let Some(certification) = &compiled.certification {
+        certification.validate_checked_table(&compiled.table)?;
+    }
     Ok(compiled)
 }
 

@@ -1187,10 +1187,11 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
       writeOriginal plan = do
         original <- planned plan
         writeFile sourcePath (plannedSource original)
+        writeFile (outDir </> "turn-attempt.hs") (plannedSource original)
         pure original
       checkOriginal plan = do
         _ <- writeOriginal plan
-        compiler CheckedEnvironment Set.empty GeneralCompile scope sourcePath
+        compiler CheckedEnvironment Set.empty OriginalDeclarationCompile scope sourcePath
           (requestIncludes args) (requestBuildProductsDir args)
   createDirectoryIfMissing True directory
   (analyzed, provisional) <- checkCellInstances checkOriginal initial
@@ -1202,7 +1203,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
     pure (installCellDisplayDeclarations fields analyzed)
   original <- writeOriginal finalized
   prepared <- compiler (PreparedProducts Nothing) (Map.keysSet (requestRetainedGenerations args))
-    GeneralCompile scope sourcePath (requestIncludes args) (requestBuildProductsDir args)
+    OriginalDeclarationCompile scope sourcePath (requestIncludes args) (requestBuildProductsDir args)
   let result = pprPipelineResult prepared
       environment = prHscEnv result
       binds = prBinds result
@@ -1246,8 +1247,8 @@ originalDeclarationWrapper template = do
   let marker = "\n__tidepoolInEffectRow ::"
       (prefix, remaining) = T.breakOn (T.pack marker) (T.pack template)
   when (T.null remaining) (fail "original declaration requires canonical whole-cell recipe")
-  let stripped = T.replace "{{CELL_PRAGMAS}}" "" (T.replace "{{CELL_IMPORTS}}" "" prefix)
-  when ("{{" `T.isInfixOf` stripped) (fail "original declaration wrapper has an unknown placeholder")
+  let stripped = T.replace "{{CELL_PRAGMAS}}" "" prefix
+  when ("{{" `T.isInfixOf` T.replace "{{CELL_IMPORTS}}" "" stripped) (fail "original declaration wrapper has an unknown placeholder")
   pure (T.unpack stripped ++ "\n{{TURN}}\n__result :: Int\n__result = (0 :: Int)\n")
 
 validateCheckedCellAdmission :: WorkerRequest -> CheckedCellAdmission -> String -> String -> IO ()

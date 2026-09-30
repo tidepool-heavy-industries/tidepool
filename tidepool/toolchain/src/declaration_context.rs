@@ -133,7 +133,13 @@ impl ExactCompilationRequest {
             return Err(failure("scope request changed during compilation"));
         }
         let directory = root.join(".exact-compilations");
-        let mut receipts = std::fs::read_dir(&directory)?
+        let mut receipts = std::fs::read_dir(&directory)
+            .map_err(|error| {
+                failure(format!(
+                    "exact compile receipts {}: {error}",
+                    directory.display()
+                ))
+            })?
             .map(|entry| entry.map(|entry| entry.path()))
             .collect::<Result<Vec<_>, _>>()?;
         receipts.sort();
@@ -279,7 +285,8 @@ impl ExactCompilationRequest {
 fn bounded_read(path: &Path, limit: u64) -> Result<Vec<u8>, CompileError> {
     use std::io::Read;
     let mut bytes = Vec::new();
-    std::fs::File::open(path)?
+    std::fs::File::open(path)
+        .map_err(|error| failure(format!("exact artifact {}: {error}", path.display())))?
         .take(limit + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > limit {
