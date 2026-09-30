@@ -4,6 +4,11 @@ use super::*;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+const ROOT_POLICY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const FAILED_START_FOREST_SHUTDOWN_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(35);
+const FAILED_START_HOSTED_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub(super) struct ModelFreeSession {
     pub session_root: Arc<tempfile::TempDir>,
     pub worktrees: WorktreeManager,
@@ -103,14 +108,68 @@ impl ModelFreeSession {
         if let Some(layers) = &source_layers {
             layers.bind_run(actor.identity().into());
         }
-        let Some(LocalResidentDeployment::PolicyInstalled(root_installation)) =
-            deployments.recv().await
-        else {
-            forest.shutdown().await;
-            hosted.await?;
-            return Err(runtime_error(
-                "root retired before installing its application",
-            ));
+        let root_installation = match tokio::time::timeout(
+            ROOT_POLICY_INSTALL_TIMEOUT,
+            deployments.recv(),
+        )
+        .await
+        {
+            Ok(Some(LocalResidentDeployment::PolicyInstalled(installation)))
+                if installation.actor.identity() == actor.identity() =>
+            {
+                *installation
+            }
+            Ok(Some(LocalResidentDeployment::PolicyInstalled(installation))) => {
+                return Err(failed_root_start_cleanup(
+                    forest,
+                    hosted,
+                    format!(
+                        "received root policy installation for unexpected actor {:?}, expected {:?}",
+                        installation.actor.identity(),
+                        actor.identity()
+                    ),
+                )
+                .await);
+            }
+            Ok(Some(LocalResidentDeployment::Retired { actor, terminal })) => {
+                return Err(failed_root_start_cleanup(
+                    forest,
+                    hosted,
+                    format!(
+                        "root {actor:?} retired before installing its application: {terminal:?}"
+                    ),
+                )
+                .await);
+            }
+            Ok(Some(deployment)) => {
+                return Err(failed_root_start_cleanup(
+                    forest,
+                    hosted,
+                    format!(
+                        "received {} before root policy installation",
+                        deployment.kind()
+                    ),
+                )
+                .await);
+            }
+            Ok(None) => {
+                return Err(failed_root_start_cleanup(
+                    forest,
+                    hosted,
+                    "deployment channel closed before root policy installation".into(),
+                )
+                .await);
+            }
+            Err(_) => {
+                return Err(failed_root_start_cleanup(
+                    forest,
+                    hosted,
+                    format!(
+                        "timed out after {ROOT_POLICY_INSTALL_TIMEOUT:?} waiting for root policy installation"
+                    ),
+                )
+                .await);
+            }
         };
         Ok(Self {
             session_root,
@@ -123,7 +182,35 @@ impl ModelFreeSession {
             _child_session_factory: returned_child_session_factory,
             hosted,
             deployments,
-            root_installation: *root_installation,
+            root_installation,
         })
     }
+}
+
+async fn failed_root_start_cleanup(
+    forest: Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
+    mut hosted: tokio::task::JoinHandle<()>,
+    cause: String,
+) -> Box<dyn std::error::Error> {
+    let mut details = vec![cause];
+    if tokio::time::timeout(FAILED_START_FOREST_SHUTDOWN_TIMEOUT, forest.shutdown())
+        .await
+        .is_err()
+    {
+        details.push(format!(
+            "forest shutdown exceeded {FAILED_START_FOREST_SHUTDOWN_TIMEOUT:?}; completion is unconfirmed"
+        ));
+    }
+
+    hosted.abort();
+    match tokio::time::timeout(FAILED_START_HOSTED_JOIN_TIMEOUT, &mut hosted).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) if error.is_cancelled() => {}
+        Ok(Err(error)) => details.push(format!("joining hosted root after abort: {error}")),
+        Err(_) => details.push(format!(
+            "hosted root abort join exceeded {FAILED_START_HOSTED_JOIN_TIMEOUT:?}; completion is unconfirmed"
+        )),
+    }
+
+    runtime_error(details.join("; "))
 }

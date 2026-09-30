@@ -13,6 +13,43 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
+#[path = "m1_host_fixture.rs"]
+mod host_fixture;
+use host_fixture::RunningBrowserHost;
+
+#[path = "m1_browser_process.rs"]
+mod browser_process;
+
+#[path = "m1_browser_runner.rs"]
+mod browser_runner;
+
+#[tokio::test]
+#[ignore = "requires declared matched web, Node, Playwright and resident compiler inputs"]
+async fn production_browser_executes_resident_haskell_retries_and_controls_root() {
+    browser_runner::production_browser_journey().await;
+}
+
+fn browser_target(campaign: &test_campaign::TestCampaign) -> harness::embedding::HostIdentity {
+    harness::embedding::HostIdentity {
+        run: runtime_namespace(&campaign.config.run_root),
+        actor: AgentPath("/root".into()),
+        incarnation: campaign.actor.identity().incarnation.0.to_string(),
+    }
+}
+
+fn browser_input(
+    target: &harness::embedding::HostIdentity,
+    text: &str,
+) -> harness::server::ClientCommand {
+    harness::server::ClientCommand::Host {
+        operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
+        command: harness::server::HostCommand::Input {
+            target: target.clone(),
+            text: text.to_owned(),
+        },
+    }
+}
+
 #[derive(Clone)]
 struct HostCellTransport {
     requests: Arc<Mutex<Vec<ResponsesRequest>>>,
@@ -185,7 +222,7 @@ async fn browser_snapshot_until(
 }
 
 #[tokio::test]
-async fn production_host_runs_browser_haskell_reconnects_without_replay_and_retires_root() {
+async fn production_host_retains_http_haskell_commands_and_reconnects_without_replay() {
     let files = tempfile::tempdir().unwrap();
     let assets = files.path().join("assets");
     std::fs::create_dir_all(&assets).unwrap();
@@ -204,103 +241,20 @@ async fn production_host_runs_browser_haskell_reconnects_without_replay_and_reti
         context_capacity_tokens: 2_000_000,
         concurrent_jobs: 1,
     };
-    let mut campaign = test_campaign::TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
-        |admission| admission,
-        |config| {
-            config.backend = crate::exomonad::HostBackendOptions::Embedded;
-            config.embedded = Some(settings.clone());
-        },
-    )
-    .await;
-    std::fs::create_dir_all(&campaign.config.run_root).unwrap();
-    let root_installation = campaign.root_installation.clone();
     let (second_tx, mut second_rx) = mpsc::unbounded_channel();
     let transport = Arc::new(HostCellTransport {
         requests: Arc::new(Mutex::new(Vec::new())),
         second_request: second_tx,
         calls: Arc::new(AtomicUsize::new(0)),
     });
-    let mut service =
-        embedded_service::EmbeddedService::prepare(&campaign.config.run_root, &settings)
-            .await
-            .unwrap();
-    service.set_test_transport(transport.clone());
-    let embedded_runtime = Arc::clone(&service.runtime);
-
-    let (lifecycle_tx, lifecycle_rx) = mpsc::channel(32);
-    lifecycle_tx
-        .send(LocalResidentDeployment::PolicyInstalled(Box::new(
-            root_installation.clone(),
-        )))
+    let host_transport: Arc<dyn ResponsesTransport> = transport.clone();
+    let fixture = RunningBrowserHost::start(&settings, &host_transport)
         .await
         .unwrap();
-    let deployments = campaign.take_deployments();
-    let forward = tokio::spawn(async move {
-        let mut deployments = deployments;
-        while let Some(deployment) = deployments.recv().await {
-            if lifecycle_tx.send(deployment).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    let (readiness_tx, mut readiness_rx) = mpsc::unbounded_channel();
-    let (shutdown_tx, shutdown_rx) = watch::channel(None);
-    let (_config_tx, config_rx) = watch::channel(campaign.config.clone());
-    let host_graph_forest = Arc::clone(&campaign.forest);
-    let fleet = InteractiveFleet {
-        root: campaign.actor.clone(),
-        config: campaign.config.clone(),
-        run_root: campaign.config.run_root.clone(),
-        #[cfg(feature = "codex-compat")]
-        tmux: TmuxSession::new(&campaign.config.tmux_session).unwrap(),
-        #[cfg(feature = "codex-compat")]
-        backend: HostRuntimeMode::Embedded,
-        worktrees: campaign.worktrees.clone(),
-        #[cfg(feature = "codex-compat")]
-        bindings: campaign.bindings.clone(),
-        readiness: readiness_tx,
-        worktree_authority: campaign.authority.clone(),
-        #[cfg(feature = "codex-compat")]
-        watch_retention: Arc::new(|_, _| false),
-        #[cfg(feature = "codex-compat")]
-        watch_observation: Arc::new(|_, _, _| false),
-        #[cfg(feature = "codex-compat")]
-        open_request: Arc::new(|_| None),
-        #[cfg(feature = "codex-compat")]
-        source_layers: None,
-        #[cfg(feature = "codex-compat")]
-        actor_recovery: exomonad_actor::ActorRecoveryJournal::open(
-            campaign.config.run_root.join("actor-lifecycle.v2.jsonl"),
-        )
-        .unwrap(),
-        #[cfg(feature = "codex-compat")]
-        recovered_threads: Arc::new(BTreeMap::new()),
-        #[cfg(feature = "codex-compat")]
-        recovered_root_predecessor: None,
-        host_graph: Arc::new(move || host_graph_forest.inspect_host_graph()),
-    };
-    let host = tokio::spawn(run_interactive_applications(
-        lifecycle_rx,
-        Arc::new(Mutex::new(HashMap::new())),
-        fleet,
-        shutdown_rx,
-        config_rx,
-        Some(service),
-    ));
-
-    let address = match tokio::time::timeout(Duration::from_secs(30), readiness_rx.recv())
-        .await
-        .expect("production host did not become ready")
-        .unwrap()
-    {
-        ActorHostReadiness::EmbeddedReady { root, address } => {
-            assert_eq!(root, campaign.actor.identity());
-            address
-        }
-        other => panic!("unexpected readiness: {other:?}"),
-    };
+    let campaign = &fixture.campaign;
+    let target = browser_target(campaign);
+    let embedded_runtime = Arc::clone(&fixture.runtime);
+    let address = fixture.address;
     let origin = format!("https://{address}");
     let api = format!("http://{address}/api");
     let client = reqwest::Client::new();
@@ -326,23 +280,25 @@ async fn production_host_runs_browser_haskell_reconnects_without_replay_and_reti
     );
 
     let command = "run one Haskell cell and retain its result";
+    let submission = browser_input(&target, command);
     let accepted = client
         .post(format!("{api}/commands"))
         .header("Origin", &origin)
         .header(reqwest::header::COOKIE, &cookie)
-        .json(&harness::server::ClientCommand::Submit {
-            command: command.into(),
-        })
+        .json(&submission)
         .send()
         .await
         .unwrap();
     assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
     let accepted: Value = accepted.json().await.unwrap();
     let command_id = accepted["command_id"].as_str().unwrap().to_owned();
-    let admitted = next_browser_event(&mut socket, "command.admitted").await;
+    let admitted = next_browser_event(&mut socket, "command.receipt").await;
     assert_eq!(admitted["event"]["event"]["value"]["commandId"], command_id);
+    assert_eq!(admitted["event"]["event"]["value"]["outcome"], "admitted");
     let envelope_id = admitted["event"]["event"]["value"]["envelopeId"]
-        .as_i64()
+        .as_str()
+        .unwrap()
+        .parse::<i64>()
         .unwrap();
 
     let request_after_cell = tokio::time::timeout(Duration::from_secs(120), second_rx.recv())
@@ -372,28 +328,25 @@ async fn production_host_runs_browser_haskell_reconnects_without_replay_and_reti
         request_after_cell.input
     );
 
-    let run = runtime_namespace(&campaign.config.run_root);
-    let identity = harness::embedding::HostIdentity {
-        run,
-        actor: AgentPath("/root".into()),
-        incarnation: campaign.actor.identity().incarnation.0.to_string(),
-    };
-    let replay = embedded_runtime
-        .attach(
-            identity,
-            campaign.actor.clone(),
-            Arc::new(
-                embedded_policy::EmbeddedPolicyInstallation::from_installation(&root_installation),
-            ),
-            None,
-        )
-        .unwrap();
-    let duplicate = replay
-        .conversation
-        .input(&command_id, "browser", command)
+    let duplicate = client
+        .post(format!("{api}/commands"))
+        .header("Origin", &origin)
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&submission)
+        .send()
         .await
         .unwrap();
-    assert_eq!(duplicate.envelope_id, envelope_id);
+    assert_eq!(duplicate.status(), reqwest::StatusCode::ACCEPTED);
+    let observation: Value = client
+        .get(format!("{api}/commands/{command_id}"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(observation["envelopeId"], envelope_id);
 
     socket.close(None).await.unwrap();
     let (mut reconnected, idle_snapshot) =
@@ -403,11 +356,9 @@ async fn production_host_runs_browser_haskell_reconnects_without_replay_and_reti
         "idle"
     );
 
-    let head = replay.conversation.identity();
-    assert_eq!(head.actor, AgentPath("/root".into()));
     let store = embedded_runtime.store();
     let mut request = store
-        .agent(&head.actor)
+        .agent(&target.actor)
         .unwrap()
         .unwrap()
         .head_request
@@ -465,14 +416,20 @@ async fn production_host_runs_browser_haskell_reconnects_without_replay_and_reti
     );
     reconnected.close(None).await.unwrap();
 
-    campaign
-        .actor
-        .shutdown(ActorTerminal {
-            kind: ActorExitKind::Cancelled,
-            summary: "M1 host reconnect acceptance complete".into(),
+    let retire = client
+        .post(format!("{api}/commands"))
+        .header("Origin", &origin)
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&harness::server::ClientCommand::Host {
+            operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
+            command: harness::server::HostCommand::Retire {
+                target: target.clone(),
+            },
         })
+        .send()
         .await
         .unwrap();
+    assert_eq!(retire.status(), reqwest::StatusCode::ACCEPTED);
     let (mut retired_socket, retired_snapshot) =
         browser_snapshot_until(address, &cookie, "retired").await;
     assert_eq!(
@@ -481,36 +438,22 @@ async fn production_host_runs_browser_haskell_reconnects_without_replay_and_reti
     );
     assert_eq!(
         retired_snapshot["snapshot"]["conversations"][0]["state"],
-        "retired"
+        "cancelled"
     );
     let rejected = client
         .post(format!("{api}/commands"))
         .header("Origin", &origin)
         .header(reqwest::header::COOKIE, &cookie)
-        .json(&harness::server::ClientCommand::Submit {
-            command: "must not reach a retired actor".into(),
-        })
+        .json(&browser_input(&target, "must not reach a retired actor"))
         .send()
         .await
         .unwrap();
     assert_eq!(rejected.status(), reqwest::StatusCode::ACCEPTED);
-    let rejection = next_browser_event(&mut retired_socket, "command.rejected").await;
-    assert_eq!(
-        rejection["event"]["event"]["value"]["error"],
-        "embedded root is unavailable"
-    );
+    let rejection = next_browser_event(&mut retired_socket, "command.receipt").await;
+    assert_eq!(rejection["event"]["event"]["value"]["outcome"], "refused");
     retired_socket.close(None).await.unwrap();
 
-    shutdown_tx.send_replace(Some(NativeRetirement::Terminate));
-    let result = tokio::time::timeout(Duration::from_secs(30), host)
-        .await
-        .expect("production host did not terminate")
-        .expect("production host task panicked");
-    assert!(result.is_ok(), "production host cleanup failed: {result:?}");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-    forward.abort();
-    assert!(forward.await.unwrap_err().is_cancelled());
+    fixture.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -768,15 +711,16 @@ async fn production_host_marks_embedded_root_ready_and_retires_invalid_auth_fail
     assert_eq!(snapshot["snapshot"]["actors"][0]["lifecycle"], "lost");
     assert_eq!(
         snapshot["snapshot"]["conversations"][0]["state"],
-        "unavailable"
+        "cancelled"
     );
     let response = client
         .post(format!("{api}/commands"))
         .header("Origin", &origin)
         .header(reqwest::header::COOKIE, &cookie)
-        .json(&harness::server::ClientCommand::Submit {
-            command: "must not wake a retired root".into(),
-        })
+        .json(&browser_input(
+            &browser_target(&campaign),
+            "must not wake a retired root",
+        ))
         .send()
         .await
         .unwrap();
@@ -785,17 +729,14 @@ async fn production_host_marks_embedded_root_ready_and_retires_invalid_auth_fail
         loop {
             let frame = socket.next().await.unwrap().unwrap();
             let event: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
-            if event["event"]["event"]["kind"] == "command.rejected" {
+            if event["event"]["event"]["kind"] == "command.receipt" {
                 break event;
             }
         }
     })
     .await
     .expect("host did not reject browser input after root retirement");
-    assert_eq!(
-        rejection["event"]["event"]["value"]["error"],
-        "embedded root is unavailable"
-    );
+    assert_eq!(rejection["event"]["event"]["value"]["outcome"], "refused");
     socket.close(None).await.unwrap();
 
     shutdown_tx.send_replace(Some(NativeRetirement::Terminate));
