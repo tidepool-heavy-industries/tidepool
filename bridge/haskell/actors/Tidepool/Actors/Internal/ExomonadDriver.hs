@@ -25,7 +25,7 @@ data RootProtocol result
 
 type RootEffects = AgentSession ': ActorLocal RootProtocol ': ActorEffects
 
-rootDriver :: Eff RootEffects a
+rootDriver :: Eff RootEffects ()
 rootDriver = do
   attachAgent Nothing
   serve @() @RootProtocol () (\() request -> case request of {})
