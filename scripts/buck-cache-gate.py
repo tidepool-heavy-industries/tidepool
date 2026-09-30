@@ -9,12 +9,12 @@ import math
 import os
 from pathlib import Path
 import re
+import selectors
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 
 
@@ -25,6 +25,7 @@ SUMMARY_FIELDS = {
     "Other actions": "other",
 }
 MAX_LOG_BYTES = 8 * 1024 * 1024
+INTERRUPTED_BY = None
 
 
 class ProbeError(RuntimeError):
@@ -37,7 +38,14 @@ class ProbeInterrupted(Exception):
 
 
 def _interrupt_probe(signum, _frame):
-    raise ProbeInterrupted(signum)
+    global INTERRUPTED_BY
+    if INTERRUPTED_BY is None:
+        INTERRUPTED_BY = signum
+
+
+def check_interrupted():
+    if INTERRUPTED_BY is not None:
+        raise ProbeInterrupted(INTERRUPTED_BY)
 
 
 @dataclass(frozen=True)
@@ -215,73 +223,97 @@ def validate_checkout(root, evidence, probe_relative, buck2):
     return executable
 
 
-def _read_bounded(stream, result):
-    chunks = []
-    size = 0
-    truncated = False
-    while True:
-        chunk = stream.read(64 * 1024)
-        if not chunk:
-            break
-        keep = max(0, min(len(chunk), MAX_LOG_BYTES - size))
-        if keep:
-            chunks.append(chunk[:keep])
-            size += keep
-        if keep != len(chunk):
-            truncated = True
-    result.append(b"".join(chunks).decode("utf-8", errors="replace") + (
-        "\n[output truncated by buck-cache-gate]\n" if truncated else ""
-    ))
-
-
 def run_command(command, cwd, timeout):
     process = subprocess.Popen(
         command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         start_new_session=True,
     )
-    captured = []
-    reader = threading.Thread(target=_read_bounded, args=(process.stdout, captured), daemon=True)
-    reader.start()
-    try:
-        process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
+    selector = selectors.DefaultSelector()
+    os.set_blocking(process.stdout.fileno(), False)
+    selector.register(process.stdout, selectors.EVENT_READ)
+    chunks = []
+    output_size = 0
+    output_truncated = False
+    started = time.monotonic()
+    timed_out = False
+
+    def capture(chunk):
+        nonlocal output_size, output_truncated
+        keep = max(0, min(len(chunk), MAX_LOG_BYTES - output_size))
+        if keep:
+            chunks.append(chunk[:keep])
+            output_size += keep
+        if keep != len(chunk):
+            output_truncated = True
+
+    def drain_ready():
+        drain_until = time.monotonic() + 0.5
+        while time.monotonic() < drain_until:
+            events = selector.select(0)
+            if not events:
+                return
+            for key, _ in events:
+                try:
+                    chunk = os.read(key.fileobj.fileno(), 64 * 1024)
+                except BlockingIOError:
+                    continue
+                if chunk:
+                    capture(chunk)
+                else:
+                    selector.unregister(key.fileobj)
+
+    def kill_group():
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+    def reap():
         try:
             process.wait(timeout=10)
         except subprocess.TimeoutExpired as error:
-            process.stdout.close()
-            raise ProbeError(f"command cleanup remained unconfirmed after timeout: {command!r}") from error
-        timed_out = True
+            raise ProbeError(f"command cleanup remained unconfirmed: {command!r}") from error
+
+    try:
+        while process.poll() is None:
+            check_interrupted()
+            remaining = timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                timed_out = True
+                break
+            for key, _ in selector.select(min(0.2, remaining)):
+                try:
+                    chunk = os.read(key.fileobj.fileno(), 64 * 1024)
+                except BlockingIOError:
+                    continue
+                if chunk:
+                    capture(chunk)
+                else:
+                    selector.unregister(key.fileobj)
+        if timed_out:
+            kill_group()
+            reap()
+        else:
+            # Do not leave descendants behind when a successful client exits.
+            kill_group()
+            reap()
+        drain_ready()
     except BaseException:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.stdout.close()
-        reader.join(timeout=5)
+        kill_group()
+        reap()
         raise
-    else:
-        timed_out = False
-        # Kill same-group children that outlive a successful Buck client.
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    reader.join(timeout=5)
-    if reader.is_alive():
+    finally:
+        selector.close()
+        # This descriptor is nonblocking and has no competing buffered reader.
         process.stdout.close()
-        raise ProbeError(f"command output reader remained active after cleanup: {command!r}")
-    output = captured[0] if captured else ""
+    output = b"".join(chunks).decode("utf-8", errors="replace")
+    if output_truncated:
+        output += "\n[output truncated by buck-cache-gate]\n"
     return process.returncode, output, timed_out
 
 
 def run_build_phase(options, root, evidence, executable, phase):
+    check_interrupted()
     event_log = evidence / f"{phase}.events.jsonl"
     build_id_file = evidence / f"{phase}.build-id"
     command = [
@@ -338,6 +370,23 @@ def input_status(root, relative_probe):
     return result.stdout.strip()
 
 
+def git_snapshot(root, relative_probe):
+    head = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    full_status = subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"],
+        text=True, capture_output=True, check=True,
+    ).stdout
+    probe_status = input_status(root, relative_probe)
+    return {
+        "head": head,
+        "full_status_porcelain": full_status,
+        "probe_status_porcelain": probe_status,
+    }
+
+
 def restore_input(path, baseline, mutated_hash, original_mode, original_mtime_ns):
     current = path.read_bytes()
     current_hash = sha256(current)
@@ -384,16 +433,16 @@ def run_probe(options):
         raise ProbeError(f"evidence directory became nonempty during validation: {evidence}")
     baseline = probe.read_bytes()
     original_stat = probe.stat()
+    baseline_snapshot = git_snapshot(root, probe_relative)
     backup = evidence / "probe-input.baseline"
     backup.write_bytes(baseline)
     baseline_hash = sha256(baseline)
     mutation_hash = sha256(baseline + options.mutation_bytes)
     metadata = {
         "root": str(root),
-        "head": subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "HEAD"],
-            text=True, capture_output=True, check=True,
-        ).stdout.strip(),
+        "head": baseline_snapshot["head"],
+        "baseline_full_status_porcelain": baseline_snapshot["full_status_porcelain"],
+        "baseline_probe_status_porcelain": baseline_snapshot["probe_status_porcelain"],
         "branch": subprocess.run(
             ["git", "-C", str(root), "branch", "--show-current"],
             text=True, capture_output=True, check=True,
@@ -413,8 +462,18 @@ def run_probe(options):
     try:
         reports.append(run_build_phase(options, root, evidence, executable, "baseline"))
         reports.append(run_build_phase(options, root, evidence, executable, "warm"))
-        if input_status(root, probe_relative):
+        check_interrupted()
+        before_mutation = git_snapshot(root, probe_relative)
+        metadata["pre_mutation_full_status_porcelain"] = before_mutation["full_status_porcelain"]
+        metadata["pre_mutation_probe_status_porcelain"] = before_mutation["probe_status_porcelain"]
+        (evidence / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
+        if before_mutation["head"] != baseline_snapshot["head"]:
+            raise ProbeError("checkout HEAD changed after baseline capture; refusing to mutate input")
+        if before_mutation["probe_status_porcelain"]:
             raise ProbeError("probe input became dirty before mutation; refusing to overwrite it")
+        if probe.read_bytes() != baseline:
+            raise ProbeError("probe input bytes changed after baseline capture; refusing to overwrite it")
+        check_interrupted()
         mutated = True
         descriptor, temporary = tempfile.mkstemp(prefix=f".{probe.name}.probe-", dir=probe.parent)
         try:
@@ -423,6 +482,14 @@ def run_probe(options):
                 handle.flush()
                 os.fsync(handle.fileno())
             os.chmod(temporary, original_stat.st_mode & 0o777)
+            if probe.read_bytes() != baseline:
+                raise ProbeError("probe input bytes changed before atomic mutation; refusing to overwrite it")
+            current_head = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "HEAD"],
+                text=True, capture_output=True, check=True,
+            ).stdout.strip()
+            if current_head != baseline_snapshot["head"] or input_status(root, probe_relative):
+                raise ProbeError("checkout or probe input changed before atomic mutation; refusing to overwrite it")
             os.replace(temporary, probe)
         finally:
             if os.path.exists(temporary):
@@ -451,13 +518,17 @@ def run_probe(options):
                 (evidence / "restoration.txt").write_text(
                     f"restored sha256={baseline_hash} from {backup}\n"
                 )
-                if isinstance(sys.exc_info()[1], ProbeInterrupted):
+                if INTERRUPTED_BY is not None or isinstance(sys.exc_info()[1], ProbeInterrupted):
                     restored_build_skipped = True
                 else:
                     try:
                         reports.append(run_build_phase(options, root, evidence, executable, "restored"))
+                    except ProbeInterrupted:
+                        restored_build_skipped = True
                     except BaseException as error:
                         restore_error = f"input restored, but restored build failed: {error}"
+                metadata["post_restoration_snapshot"] = git_snapshot(root, probe_relative)
+                (evidence / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
             else:
                 if restore_error is None:
                     restore_error = (
@@ -474,10 +545,13 @@ def run_probe(options):
         }, indent=2) + "\n")
     if restore_error:
         raise ProbeError(restore_error)
+    check_interrupted()
     return evidence
 
 
 def main(argv=None):
+    global INTERRUPTED_BY
+    INTERRUPTED_BY = None
     options = parse_args(sys.argv[1:] if argv is None else argv)
     old_handlers = {}
     for signum in (signal.SIGINT, signal.SIGTERM):

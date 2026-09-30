@@ -2,7 +2,12 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import signal
+import subprocess
+import sys
 import tempfile
+import threading
+import time
 import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'buck-cache-gate.py'
@@ -163,6 +168,55 @@ class BuckCacheGateParserTests(unittest.TestCase):
 
             self.assertFalse(restored)
             self.assertEqual(path.read_bytes(), concurrent)
+
+    def test_run_command_does_not_wait_on_pipe_held_by_escaped_descendant(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = Path(directory) / 'descendant.pid'
+            child = (
+                'import os,time; '
+                f'open({str(pid_path)!r}, "w").write(str(os.getpid())); '
+                'time.sleep(30)'
+            )
+            leader = f'''import os,subprocess,sys,time
+subprocess.Popen([sys.executable, "-c", {child!r}], start_new_session=True)
+deadline=time.monotonic()+2
+while not os.path.exists({str(pid_path)!r}) and time.monotonic()<deadline:
+    time.sleep(.01)
+assert os.path.exists({str(pid_path)!r})
+print("leader finished")
+'''
+
+            started = time.monotonic()
+            status, output, timed_out = gate.run_command(
+                [sys.executable, '-c', leader], Path(directory), 3,
+            )
+
+            self.assertEqual(status, 0, output)
+            self.assertFalse(timed_out)
+            self.assertIn('leader finished', output)
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertTrue(pid_path.exists())
+            os.kill(int(pid_path.read_text()), signal.SIGKILL)
+
+    def test_run_command_signal_cleanup_is_idempotent_and_reaps_child(self):
+        old_handler = signal.signal(signal.SIGTERM, gate._interrupt_probe)
+        previous_interrupt = gate.INTERRUPTED_BY
+        gate.INTERRUPTED_BY = None
+        timer = threading.Timer(0.1, lambda: os.kill(os.getpid(), signal.SIGTERM))
+        timer.start()
+        try:
+            with self.assertRaises(gate.ProbeInterrupted) as raised:
+                gate.run_command(
+                    [sys.executable, '-c', 'import time; time.sleep(30)'],
+                    Path.cwd(), 5,
+                )
+            self.assertEqual(raised.exception.signum, signal.SIGTERM)
+            gate._interrupt_probe(signal.SIGINT, None)
+            self.assertEqual(gate.INTERRUPTED_BY, signal.SIGTERM)
+        finally:
+            timer.join(timeout=2)
+            gate.INTERRUPTED_BY = previous_interrupt
+            signal.signal(signal.SIGTERM, old_handler)
 
 
 if __name__ == '__main__':
