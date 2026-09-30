@@ -102,8 +102,40 @@ pub struct DeclarationWrite {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct InstanceInventory {
-    pub classes: Vec<ExportIdentity>,
+    pub classes: Vec<ClassInstanceEvidence>,
     pub families: Vec<ExportIdentity>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct ClassInstanceEvidence {
+    pub dfun: ExportIdentity,
+    pub class: ExportIdentity,
+    pub selected_axioms: Vec<ExportIdentity>,
+}
+
+fn validate_instance_inventory(inventory: &InstanceInventory) -> Result<(), CompileError> {
+    use std::collections::BTreeSet;
+    let families = inventory.families.iter().collect::<BTreeSet<_>>();
+    if families.len() != inventory.families.len() {
+        return Err(contract("duplicate family axiom in declaration inventory"));
+    }
+    let mut dfuns = BTreeSet::new();
+    for record in &inventory.classes {
+        if record.dfun.namespace != ExportNamespace::Value
+            || record.class.namespace != ExportNamespace::Type
+            || !dfuns.insert(&record.dfun)
+            || record.selected_axioms.iter().collect::<BTreeSet<_>>().len()
+                != record.selected_axioms.len()
+            || record
+                .selected_axioms
+                .iter()
+                .any(|axiom| !families.contains(axiom))
+        {
+            return Err(contract("invalid typed class-instance inventory"));
+        }
+    }
+    Ok(())
 }
 
 /// The original declaration module from the same exact-source validation
@@ -372,10 +404,11 @@ pub fn validate_declaration_join(
 /// Canonical definite-length CBOR arrays shared with the worker. Keeping the
 /// ordered writes in this digest fences instance-only changes and retractions.
 pub fn encode_declaration_join(input: &DeclarationJoinInput) -> Result<Vec<u8>, CompileError> {
+    validate_instance_inventory(&input.expected_instances)?;
     let mut writer = JoinEncoder(Vec::new());
     writer.array(12);
     writer.text("TPDJOIN");
-    writer.text("2");
+    writer.text("3");
     writer.text(&input.expected_public_version);
     writer.optional(input.public_module.as_ref())?;
     writer.optional(input.private_base.as_ref())?;
@@ -393,15 +426,7 @@ pub fn encode_declaration_join(input: &DeclarationJoinInput) -> Result<Vec<u8>, 
     }
     writer.reserved(&input.reserved)?;
     writer.exports(&input.expected_exports);
-    writer.array(2);
-    writer.array(input.expected_instances.classes.len());
-    for identity in &input.expected_instances.classes {
-        writer.identity(identity);
-    }
-    writer.array(input.expected_instances.families.len());
-    for identity in &input.expected_instances.families {
-        writer.identity(identity);
-    }
+    writer.inventory(&input.expected_instances);
     writer.artifacts(&input.artifacts)?;
     writer.identities(&input.family_closure);
     if writer.0.len() > 4 * 1024 * 1024 {
@@ -424,7 +449,7 @@ pub fn decode_declaration_join_outcome(
     instances.inventory(&input.expected_instances);
     let mut families = JoinEncoder(Vec::new());
     families.identities(&input.family_closure);
-    if outcome.version != 2
+    if outcome.version != 3
         || outcome.expected_public_version != input.expected_public_version
         || outcome.request_sha256 != sha256(&encode_declaration_join(input)?)
         || outcome.reserved != input.reserved
@@ -576,7 +601,13 @@ impl JoinEncoder {
     }
     fn inventory(&mut self, inventory: &InstanceInventory) {
         self.array(2);
-        self.identities(&inventory.classes);
+        self.array(inventory.classes.len());
+        for record in &inventory.classes {
+            self.array(3);
+            self.identity(&record.dfun);
+            self.identity(&record.class);
+            self.identities(&record.selected_axioms);
+        }
         self.identities(&inventory.families);
     }
     fn identity(&mut self, identity: &ExportIdentity) {
@@ -636,7 +667,7 @@ mod tests {
         let mut families = JoinEncoder(Vec::new());
         families.identities(&input.family_closure);
         DeclarationJoinOutcome {
-            version: 2,
+            version: 3,
             expected_public_version: input.expected_public_version.clone(),
             request_sha256: sha256(&encode_declaration_join(input).unwrap()),
             reserved: input.reserved.clone(),
@@ -663,20 +694,51 @@ mod tests {
         assert_eq!(
             encode_declaration_join(&input).unwrap(),
             include_bytes!(
-                "../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v2.cbor"
+                "../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v3.cbor"
             )
         );
         let receipt = include_bytes!(
-            "../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v2.json"
+            "../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v3.json"
         );
         let accepted = decode_declaration_join_outcome(&input, receipt).unwrap();
         assert_eq!(accepted.decision, JoinDecision::Accepted);
         assert_eq!(accepted.artifact.unwrap().path, input.reserved.path);
         assert_eq!(encode_declaration_inventory(&[]).unwrap(),
-            include_bytes!("../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v2.cbor"));
+            include_bytes!("../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.cbor"));
         let inventory = decode_declaration_inventory_outcome(&[], include_bytes!(
-            "../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v2.json")).unwrap();
+            "../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.json")).unwrap();
         assert_eq!(inventory.decision, JoinDecision::Accepted);
+    }
+
+    #[test]
+    fn matches_haskell_typed_class_family_and_consistency_subset_manifest() {
+        let identity = |namespace, occurrence: &str| ExportIdentity {
+            unit: "main".into(),
+            module: "Original".into(),
+            namespace,
+            occurrence: occurrence.into(),
+            record_parent: None,
+        };
+        let selected = identity(ExportNamespace::Type, "AssociatedAxiom");
+        let standalone = identity(ExportNamespace::Type, "StandaloneAxiom");
+        let hidden = identity(ExportNamespace::Type, "HiddenAxiom");
+        let mut input = input();
+        input.expected_instances = InstanceInventory {
+            classes: vec![ClassInstanceEvidence {
+                dfun: identity(ExportNamespace::Value, "$fClassInt"),
+                class: identity(ExportNamespace::Type, "Class"),
+                selected_axioms: vec![selected.clone()],
+            }],
+            families: vec![selected.clone(), standalone.clone()],
+        };
+        input.family_closure = vec![selected, standalone, hidden];
+        assert_eq!(encode_declaration_join(&input).unwrap(), include_bytes!(
+            "../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-typed-v3.cbor"
+        ));
+        let outcome = decode_declaration_join_outcome(&input, include_bytes!(
+            "../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-typed-v3.json"
+        )).unwrap();
+        assert_eq!(outcome.decision, JoinDecision::Accepted);
     }
 
     #[test]
@@ -685,7 +747,7 @@ mod tests {
         let mut encoder = JoinEncoder(Vec::new());
         encoder.artifacts(&artifacts).unwrap();
         let outcome = DeclarationInventoryOutcome {
-            version: 2,
+            version: 3,
             request_sha256: sha256(&encode_declaration_inventory(&artifacts).unwrap()),
             implementation_sha256: sha256(&encoder.0),
             inventories: Some(Vec::new()),
@@ -708,6 +770,51 @@ mod tests {
             product: None,
         }];
         assert!(decode_declaration_inventory_outcome(&changed, &bytes).is_err());
+    }
+
+    #[test]
+    fn refuses_previous_untyped_inventory_schema() {
+        assert!(decode_declaration_join_outcome(
+            &input(),
+            include_bytes!(
+                "../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v2.json"
+            )
+        )
+        .is_err());
+        assert!(decode_declaration_inventory_outcome(
+            &[],
+            include_bytes!(
+            "../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v2.json"
+        )
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn typed_class_records_require_selected_unique_family_axioms() {
+        let identity = |namespace, occurrence: &str| ExportIdentity {
+            unit: "main".into(),
+            module: "Original".into(),
+            namespace,
+            occurrence: occurrence.into(),
+            record_parent: None,
+        };
+        let axiom = identity(ExportNamespace::Type, "Axiom");
+        let record = ClassInstanceEvidence {
+            dfun: identity(ExportNamespace::Value, "$fClassInt"),
+            class: identity(ExportNamespace::Type, "Class"),
+            selected_axioms: vec![axiom.clone()],
+        };
+        let mut inventory = InstanceInventory {
+            classes: vec![record.clone()],
+            families: vec![axiom],
+        };
+        validate_instance_inventory(&inventory).unwrap();
+        inventory.classes.push(record);
+        assert!(validate_instance_inventory(&inventory).is_err());
+        inventory.classes.pop();
+        inventory.families.clear();
+        assert!(validate_instance_inventory(&inventory).is_err());
     }
 
     #[test]
@@ -825,7 +932,7 @@ pub fn encode_declaration_inventory(
     let mut encoder = JoinEncoder(Vec::new());
     encoder.array(3);
     encoder.text("TPDINVENTORY");
-    encoder.text("2");
+    encoder.text("3");
     encoder.artifacts(artifacts)?;
     if encoder.0.len() > 4 * 1024 * 1024 {
         return Err(contract("declaration inventory exceeds four MiB"));
@@ -853,7 +960,7 @@ pub fn decode_declaration_inventory_outcome(
         .map_err(|error| contract(format!("invalid declaration inventory receipt: {error}")))?;
     let mut implementation = JoinEncoder(Vec::new());
     implementation.artifacts(artifacts)?;
-    if outcome.version != 2
+    if outcome.version != 3
         || outcome.request_sha256 != sha256(&encode_declaration_inventory(artifacts)?)
         || outcome.implementation_sha256 != sha256(&implementation.0)
     {
@@ -867,6 +974,9 @@ pub fn decode_declaration_inventory_outcome(
         &outcome.family_closure,
     ) {
         (JoinDecision::Accepted, Some(inventories), Some(families)) => {
+            for inventory in inventories {
+                validate_instance_inventory(&inventory.instances)?;
+            }
             if inventories
                 .iter()
                 .map(|inventory| &inventory.artifact)
