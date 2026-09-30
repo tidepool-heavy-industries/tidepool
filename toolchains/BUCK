@@ -67,6 +67,7 @@ nix_tool(name = "python", executable = read_root_config("nix", "python"), visibi
 nix_tool(name = "bash", executable = read_root_config("nix", "bash"), visibility = ["PUBLIC"])
 nix_tool(name = "ghc", executable = read_root_config("nix", "ghc"), visibility = ["PUBLIC"])
 nix_tool(name = "coreutils", executable = read_root_config("nix", "coreutils"), visibility = ["PUBLIC"])
+nix_tool(name = "sleep", executable = read_root_config("nix", "sleep"), visibility = ["PUBLIC"])
 
 nix_directory(
     name = "npm_cache",

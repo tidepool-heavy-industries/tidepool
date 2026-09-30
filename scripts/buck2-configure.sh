@@ -70,6 +70,7 @@ browser_test_closure = $browser_test_closure
 git = $git_path/bin/git
 bash = $bash_path/bin/bash
 coreutils = $coreutils/bin
+sleep = $coreutils/bin/sleep
 tar = $tar_path/bin/tar
 gzip = $gzip/bin/gzip
 python = $python/bin/python3
