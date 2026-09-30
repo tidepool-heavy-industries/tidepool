@@ -1841,7 +1841,7 @@ impl TurnCertification {
     }
 }
 
-fn encode_bound_binder_authority(binder: &BoundBinder) -> CborValue {
+pub(super) fn encode_bound_binder_authority(binder: &BoundBinder) -> CborValue {
     let text = |value: &str| CborValue::Text(value.into());
     CborValue::Array(vec![
         text(&binder.name),
