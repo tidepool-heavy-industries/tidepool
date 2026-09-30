@@ -33,6 +33,7 @@ import GHC.Unit.Module (moduleName, moduleNameString)
 import GHC.Utils.Outputable (ppr, renderWithContext, defaultSDocContext)
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact, freshExactState, hydrateExactScope )
+import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.RetainedUnfoldings (scopeRetainedHscEnv, scopeRetainedModuleGraph)
 
 -- Every ordinary summary and every boot summary is from the current
@@ -80,11 +81,16 @@ hydrateCandidateHomeProducts initial loadGraph interfaces summaries boots = reif
           && length boots == Map.size bootNames
           && Map.keysSet bootNames == Map.keysSet graphBootNames) $
         liftIO (ioError (userError "cached home owner/graph inventory differs"))
-      forM_ (summaries ++ boots) $ \summary ->
-        unless (not (gopt Opt_Pp (ms_hspp_opts summary)) && not (any
-            (`xopt` ms_hspp_opts summary)
+      forM_ (summaries ++ boots) $ \summary -> do
+        let flags = ms_hspp_opts summary
+        unless (not (gopt Opt_Pp flags) && not (any
+            (`xopt` flags)
             [LangExt.Cpp, LangExt.TemplateHaskell, LangExt.QuasiQuotes])) $
           liftIO (ioError (userError "cached home input has untracked compile-time inputs"))
+        case pluginInputIssues flags of
+          [] -> pure ()
+          issues -> liftIO (ioError (userError
+            ("cached home input has untracked compiler plugin inputs: " ++ show issues)))
       validationBase <- if null boots then pure initial else do
         -- In a boot SCC, an early extraction pass can consume a load-produced
         -- ordinary interface before that owner gets its prepared interface.

@@ -30,6 +30,7 @@ library tidepool-extract-internal
     Tidepool.Binders
     Tidepool.CborEncode
     Tidepool.CheckedCell
+    Tidepool.CompileInputPolicy
     Tidepool.DependencyEvidence
     Tidepool.DeclarationJoin
     Tidepool.WorkerServer
@@ -319,6 +320,18 @@ test-suite prepared-stg-pipeline-test
     filepath
   default-language: GHC2024
   default-extensions: OverloadedStrings
+
+test-suite compile-input-policy-test
+  type:             exitcode-stdio-1.0
+  main-is:          Main.hs
+  hs-source-dirs:   test-compile-input-policy
+  build-depends:
+    base >= 4.20 && < 5,
+    ghc >= 9.12 && < 9.13,
+    tidepool-extract-internal
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
+  ghc-options: -Wall
 
 -- Property coverage for "Tidepool.Swarm"'s 'Cycles' budget currency
 -- (operator's type-level review, 2026-08-17): the conservation law
