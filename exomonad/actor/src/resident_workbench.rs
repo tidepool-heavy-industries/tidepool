@@ -8370,6 +8370,25 @@ where
             .await
     }
 
+    /// Admit the original child entry only while its retained lexical grant
+    /// still belongs to this runtime epoch and exact installed scope.
+    pub(crate) async fn run_fork_child_rooted_entry(
+        &self,
+        context: crate::ActorSessionContext,
+        entry: RootCustody,
+        realm: RealmId,
+        lease: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, context, _| {
+                session.validate_lexical_scope_lease(context.placement.lexical_scope, &lease)?;
+                session
+                    .run_rooted_entry("actor_program", entry, 0, realm, None)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
     pub(crate) async fn capture_startup_step(
         &self,
         context: crate::ActorSessionContext,

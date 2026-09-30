@@ -6128,11 +6128,29 @@ where
             }
             ResidentBoot::Prepared(outcome) => *outcome,
             ResidentBoot::Entry(entry) => {
-                let mut outcome = self
-                    .environment
-                    .runner
-                    .run_rooted_entry(context.clone(), entry, context.placement.resource_scope)
-                    .await?;
+                let mut outcome = match self.child_scope_lease.as_ref() {
+                    Some(lease) => {
+                        self.environment
+                            .runner
+                            .run_fork_child_rooted_entry(
+                                context.clone(),
+                                entry,
+                                context.placement.resource_scope,
+                                Arc::clone(lease),
+                            )
+                            .await?
+                    }
+                    None => {
+                        self.environment
+                            .runner
+                            .run_rooted_entry(
+                                context.clone(),
+                                entry,
+                                context.placement.resource_scope,
+                            )
+                            .await?
+                    }
+                };
                 loop {
                     let startup_step = self
                         .environment
