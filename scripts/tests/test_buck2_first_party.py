@@ -114,8 +114,19 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                 ("tidepool_runtime", "lib", "src/lib.rs")]),
             self.package("tidepool-toolchain", "tidepool/toolchain", [
                 ("tidepool_toolchain", "lib", "src/lib.rs")]),
-            self.package("tidepool", "bridge/facade", [])]
+            self.package("tidepool", "bridge/facade", [
+                ("tidepool_build_script", "custom-build", "build.rs"),
+                ("tidepool", "lib", "src/lib.rs"),
+                ("tidepool", "bin", "src/main.rs"),
+                ("exomonad", "bin", "src/exomonad.rs"),
+                ("exomonad-view-helper", "bin", "src/view_helper.rs"),
+                ("tidepool-compile-report", "bin", "src/compile_report_main.rs"),
+            ])]
         self.packages[-1]["features"] = {"default": ["codex-compat"], "codex-compat": []}
+        self.write("bridge/facade/build.rs", "fn main() {}\n")
+        for source in ("src/lib.rs", "src/main.rs", "src/exomonad.rs", "src/view_helper.rs",
+                       "src/compile_report_main.rs"):
+            self.write(f"bridge/facade/{source}", "fn main() {}\n")
         self.metadata = self.base / "metadata.json"
         self.metadata.write_text(json.dumps({"packages": self.packages,
             "workspace_members": [package["id"] for package in self.packages],
@@ -175,6 +186,68 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             groups["tidepool-extract_sources"]["src/main.rs"],
             "tidepool/extract-cmd/src/main.rs",
         )
+
+    def test_facade_buildscript_declares_embedded_sources_and_out_dir(self):
+        result = self.generate("--package", "tidepool", "--no-default-features", "tidepool")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        buck, groups = self.groups("bridge/facade")
+        self.assertIn('name = "tidepool_build_script"', buck)
+        self.assertIn('name = "tidepool_build_script_run"', buck)
+        self.assertIn('"TIDEPOOL_EMBED_HASKELL": "1"', buck)
+        self.assertIn('"TIDEPOOL_BUILD_SOURCE_ROOT": "."', buck)
+        self.assertIn('haskell_sources = "//bridge/haskell:facade_embedded_sources"', buck)
+        self.assertIn('workspace_sources = "//exomonad/examples/workspace:facade_scaffold_sources"', buck)
+        self.assertEqual(buck.count('"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"'), 5)
+        self.assertNotIn("codex-shoal-protocol", buck)
+        self.assertIn("src/lib.rs", groups["tidepool_sources"])
+
+    def test_transitive_reindeer_target_uses_unique_locked_source_identity(self):
+        metadata = json.loads(self.metadata.read_text())
+        runtime = next(p for p in metadata["packages"] if p["name"] == "tidepool-runtime")
+        resolved_id = (
+            "registry+https://github.com/rust-lang/crates.io-index"
+            "#tokio-tungstenite@0.29.0"
+        )
+        runtime["dependencies"].append({
+            "name": "tokio-tungstenite", "rename": None, "kind": None,
+            "target": None, "optional": False, "uses_default_features": True,
+            "features": [], "req": "=0.29.0",
+        })
+        metadata["packages"].append({
+            "id": resolved_id, "name": "tokio-tungstenite", "version": "0.29.0",
+            "source": "registry+https://github.com/rust-lang/crates.io-index",
+        })
+        node = next(n for n in metadata["resolve"]["nodes"] if n["id"] == runtime["id"])
+        node["deps"].append({
+            "name": "tokio_tungstenite", "pkg": resolved_id,
+            "dep_kinds": [{"kind": None, "target": None}],
+        })
+        self.metadata.write_text(json.dumps(metadata))
+        self.write("Cargo.lock", """version = 4
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+""")
+        self.write("third-party/rust/BUCK", 'cargo.rust_library(\n    name = "tokio-tungstenite-0.29",\n)\n')
+
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        runtime_buck, _ = self.groups("tidepool/runtime")
+        self.assertIn("//third-party/rust:tokio-tungstenite-0.29", runtime_buck)
+
+        lock = self.root / "Cargo.lock"
+        lock.write_text(lock.read_text() + """
+[[package]]
+name = "tokio-tungstenite"
+version = "0.29.0"
+source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+""")
+        result = self.generate()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("source-ambiguous Reindeer target", result.stderr)
 
     def test_runtime_and_proc_macro_support_leaf_generate_as_native_library_targets(self):
         result = self.generate()

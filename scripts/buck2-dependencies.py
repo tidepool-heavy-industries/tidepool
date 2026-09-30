@@ -7,8 +7,11 @@ import subprocess
 import tomllib
 
 from buck2_cargo_features import (
+    CRATES_IO_SOURCE,
     FeatureSelectionError,
+    dependency_aliases,
     metadata_feature_args,
+    parse_locked_git_source,
     resolve as resolve_cargo_features,
 )
 
@@ -32,6 +35,8 @@ LIBRARY_ROOTS = {
     "tidepool-extract-report", "tidepool-bridge-derive", "tidepool-runtime",
     "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
     "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-agent",
+    "tidepool-mcp", "tidepool-handlers",
+    "tidepool",
 }
 ROOTS = TEST_ROOTS | LIBRARY_ROOTS
 LINUX_TARGETS = {None, "cfg(unix)"}
@@ -92,7 +97,12 @@ for package in selected:
                 raise SystemExit(f"Unmodeled codegen build dependency: {dependency['name']}")
             continue
         if kind == "build":
-            raise SystemExit(f"Model build dependency for {package['name']}: {dependency['name']}")
+            if not (
+                package["name"] == "tidepool"
+                and dependency["name"] == "tidepool-toolchain"
+                and dependency.get("target") is None
+            ):
+                raise SystemExit(f"Model build dependency for {package['name']}: {dependency['name']}")
         dependency_key = dependency["rename"] or dependency["name"]
         if dependency["optional"] and dependency_key not in active_dependencies:
             continue
@@ -120,10 +130,17 @@ for package in selected:
             if target["name"] not in ROOTS:
                 raise SystemExit(f"Unmigrated local dependency: {target['name']}")
             continue
-        if target["source"] != "registry+https://github.com/rust-lang/crates.io-index":
-            raise SystemExit(f"Declare non-registry source explicitly: {target['source']}")
-        key = (target["name"], target["version"])
-        spec = dependencies.setdefault(key, {"features": set(), "default": False})
+        source = target["source"]
+        git = None
+        if source != CRATES_IO_SOURCE:
+            try:
+                git = parse_locked_git_source(source)
+            except ValueError as error:
+                raise SystemExit(str(error)) from error
+        key = (target["name"], target["version"], source)
+        spec = dependencies.setdefault(key, {"features": set(), "default": False, "git": git})
+        if spec["git"] != git:
+            raise SystemExit(f"inconsistent Cargo source for {target['name']} {target['version']}")
         spec["features"].update(dependency["features"])
         spec["features"].update(dependency_features.get(dependency_key, set()))
         spec["default"] |= dependency["uses_default_features"]
@@ -133,11 +150,16 @@ lines = [
     'edition = "2021"', 'publish = false', '[workspace]', '[lib]', 'path = "empty.rs"',
     '[dependencies]',
 ]
-for (name, version), spec in sorted(dependencies.items()):
-    alias = name if sum(n == name for n, _ in dependencies) == 1 else name + "-" + version.replace(".", "_")
+aliases = dependency_aliases(dependencies)
+for identity, spec in sorted(dependencies.items()):
+    name, version, source = identity
+    alias = aliases[identity]
     fields = [f'package = {json.dumps(name)}', f'version = {json.dumps("=" + version)}',
               'default-features = ' + str(spec["default"]).lower(),
               'features = ' + json.dumps(sorted(spec["features"]))]
+    if spec["git"] is not None:
+        repository, revision = spec["git"]
+        fields.extend([f'git = {json.dumps(repository)}', f'rev = {json.dumps(revision)}'])
     lines.append(json.dumps(alias) + ' = { ' + ', '.join(fields) + ' }')
 (DEST / 'Cargo.toml').write_text('\n'.join(lines) + '\n')
 (DEST / 'Cargo.lock').write_bytes((ROOT / 'Cargo.lock').read_bytes())

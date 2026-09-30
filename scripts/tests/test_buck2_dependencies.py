@@ -19,6 +19,12 @@ ROOT_NAMES = (
     "tidepool-bridge-derive", "tidepool-runtime",
     "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
     "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-agent",
+    "tidepool-mcp", "tidepool-handlers", "tidepool",
+)
+HARNESS_GIT_SOURCE = (
+    "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git"
+    "?rev=763d38d57691da31d2bf3c3c7493ca9910067540"
+    "#763d38d57691da31d2bf3c3c7493ca9910067540"
 )
 
 
@@ -38,11 +44,13 @@ class DependencyManifest(unittest.TestCase):
         metadata, lock_packages = self.fixture_metadata()
         self.metadata_path.write_text(json.dumps(metadata))
         lock = ["# generated fixture lock", "version = 4", ""]
-        for name, version in sorted(lock_packages):
-            lock.extend([
-                "[[package]]", f'name = "{name}"', f'version = "{version}"',
-                f'source = "{REGISTRY}"', 'checksum = "' + ("a" * 64) + '"', "",
-            ])
+        for name, version, source in sorted(lock_packages):
+            lock.extend(["[[package]]", f'name = "{name}"', f'version = "{version}"'])
+            if source.startswith("git+"):
+                lock.append(f'source = "{source}"')
+            else:
+                lock.extend([f'source = "{source}"', 'checksum = "' + ("a" * 64) + '"'])
+            lock.append("")
         self.cargo_lock.write_text("\n".join(lock))
         fake_cargo = self.root / "bin/cargo"
         fake_cargo.write_text(
@@ -80,9 +88,9 @@ print(open(os.environ['FAKE_METADATA']).read())
             "proc-macro2": "1.0.0",
             "parking_lot": "0.12.5", "cranelift-codegen": "0.129.1",
             "bridge-dev-only": "1.0.0", "effect-dev-only": "1.0.0",
-            "cc": "1.0.0", "windows-only": "1.0.0",
+            "cc": "1.0.0", "windows-only": "1.0.0", "harness": "0.1.0",
         }
-        lock_packages = set(registry_versions.items())
+        lock_packages = {(name, version, REGISTRY) for name, version in registry_versions.items()}
         for name, version in registry_versions.items():
             package_id = f"registry+fixture#{name}@{version}"
             packages.append({
@@ -170,24 +178,48 @@ print(open(os.environ['FAKE_METADATA']).read())
             "exomonad-worktree": [],
             "exomonad-actor": [],
             "exomonad-agent": [],
+            "tidepool-mcp": [],
+            "tidepool-handlers": [],
+            "tidepool": [
+                ("tidepool-toolchain", "build", None, True, []),
+                ("harness", None, None, True, [], "harness_git", "git"),
+                ("harness", None, None, True, [], "harness_registry", "registry"),
+            ],
         }
         edges_by_root = {}
         for root_name, deps in declarations.items():
             root_id = local_ids[root_name]
             package_deps = []
             edges = []
-            for dep_name, kind, target, use_default, features in deps:
+            for declaration in deps:
+                dep_name, kind, target, use_default, features, *extra = declaration
+                rename = extra[0] if extra else None
+                source_mode = extra[1] if len(extra) > 1 else None
                 local_name = dep_name if dep_name in local_ids else None
-                package_id = local_ids[local_name] if local_name else f"registry+fixture#{dep_name}@{registry_versions[dep_name]}"
-                package_deps.append({
-                    "name": dep_name, "rename": None, "kind": kind, "target": target,
+                if local_name:
+                    package_id = local_ids[local_name]
+                elif dep_name == "harness" and source_mode == "git":
+                    package_id = f"{HARNESS_GIT_SOURCE}#harness@0.1.0"
+                else:
+                    package_id = f"registry+fixture#{dep_name}@{registry_versions[dep_name]}"
+                dep_entry = {
+                    "name": dep_name, "rename": rename, "kind": kind, "target": target,
                     "optional": False, "uses_default_features": use_default,
                     "features": features,
-                })
+                }
+                if source_mode == "git":
+                    dep_entry["source"] = HARNESS_GIT_SOURCE.rsplit("#", 1)[0]
+                package_deps.append(dep_entry)
                 edges.append({
-                    "name": dep_name.replace("-", "_"), "pkg": package_id,
+                    "name": (rename or dep_name).replace("-", "_"), "pkg": package_id,
                     "dep_kinds": [{"kind": kind, "target": target}],
                 })
+                if dep_name == "harness" and not any(p["id"] == package_id for p in packages):
+                    source = HARNESS_GIT_SOURCE if source_mode == "git" else REGISTRY
+                    packages.append({
+                        "id": package_id, "name": "harness", "version": "0.1.0",
+                        "source": source, "features": {}, "dependencies": [], "targets": [],
+                    })
             packages.append({
                 "id": root_id, "name": root_name, "version": "0.1.0", "source": None,
                 "manifest_path": f"/fixture/{root_name}/Cargo.toml", "features": {},
@@ -327,6 +359,35 @@ print(open(os.environ['FAKE_METADATA']).read())
         self.assertEqual(result.returncode, 0, result.stderr)
         manifest = tomllib.loads((self.output / "Cargo.toml").read_text())
         self.assertNotIn("codex-shoal-protocol", manifest["dependencies"])
+
+    def test_locked_https_git_source_and_same_version_registry_identity_are_preserved(self):
+        result = self.run_generator()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = tomllib.loads((self.output / "Cargo.toml").read_text())
+        aliases = [
+            (alias, spec) for alias, spec in manifest["dependencies"].items()
+            if spec.get("package") == "harness"
+        ]
+        self.assertEqual(len(aliases), 2)
+        self.assertEqual(len({alias for alias, _ in aliases}), 2)
+        git_specs = [(alias, spec) for alias, spec in aliases if "git" in spec]
+        registry_specs = [(alias, spec) for alias, spec in aliases if "git" not in spec]
+        self.assertEqual(len(git_specs), 1)
+        self.assertEqual(len(registry_specs), 1)
+        self.assertEqual(git_specs[0][1]["git"], "https://github.com/tidepool-heavy-industries/exomonad-harness.git")
+        self.assertEqual(git_specs[0][1]["rev"], "763d38d57691da31d2bf3c3c7493ca9910067540")
+        self.assertEqual(git_specs[0][1]["version"], registry_specs[0][1]["version"])
+
+    def test_unlocked_git_sources_fail_closed(self):
+        metadata, _ = self.fixture_metadata()
+        package = next(p for p in metadata["packages"] if p["name"] == "tidepool")
+        dependency = next(d for d in package["dependencies"] if d["rename"] == "harness_git")
+        dependency["source"] = "git+ssh://github.com/tidepool-heavy-industries/exomonad-harness.git#deadbeef"
+        harness = next(p for p in metadata["packages"] if p["name"] == "harness" and p["source"].startswith("git+"))
+        harness["source"] = dependency["source"]
+        result = self.run_generator(metadata)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported Cargo dependency source", result.stderr)
 
 
 if __name__ == "__main__":

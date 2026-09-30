@@ -20,18 +20,22 @@ fn main() {
     println!("cargo:rerun-if-env-changed=TIDEPOOL_EMBED_HASKELL");
     let embed =
         std::env::var_os("TIDEPOOL_EMBED_HASKELL").as_deref() == Some(std::ffi::OsStr::new("1"));
+    println!("cargo:rerun-if-env-changed=TIDEPOOL_BUILD_SOURCE_ROOT");
+    let workspace = std::env::var_os("TIDEPOOL_BUILD_SOURCE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(&manifest).join("../.."));
 
     #[allow(clippy::expect_used, reason = "haskell/lib must exist at build time")]
-    let stdlib_root = Path::new(&manifest)
-        .join("../haskell/lib")
+    let stdlib_root = workspace
+        .join("bridge/haskell/lib")
         .canonicalize()
         .expect("haskell/lib must exist relative to the tidepool crate");
     #[allow(
         clippy::expect_used,
         reason = "haskell/actors must exist at build time"
     )]
-    let actor_root = Path::new(&manifest)
-        .join("../haskell/actors")
+    let actor_root = workspace
+        .join("bridge/haskell/actors")
         .canonicalize()
         .expect("haskell/actors must exist relative to the tidepool crate");
 
@@ -74,7 +78,7 @@ fn main() {
         emit_dev_source_identity(Some(&identity));
     }
 
-    emit_scaffold_package(Path::new(&manifest).join("../.."));
+    emit_scaffold_package(workspace);
 }
 
 fn emit_dev_source_identity(identity: Option<&str>) {

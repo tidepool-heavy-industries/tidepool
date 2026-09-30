@@ -1,4 +1,4 @@
-load("@prelude//:rules.bzl", "export_file", "haskell_binary", "haskell_library", "sh_test")
+load("@prelude//:rules.bzl", "export_file", "filegroup", "haskell_binary", "haskell_library", "sh_test")
 load(
     "//build/haskell:defs.bzl",
     "assignment_component_flags",
@@ -225,5 +225,14 @@ export_file(
     name = "actor_role_source",
     src = "actors/Tidepool/Actors/Role.hs",
     mode = "reference",
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
+    name = "facade_embedded_sources",
+    srcs = {source: source for source in glob(
+        ["lib/**/*.hs", "actors/**/*.hs"],
+        exclude = ["lib/**/Prelude_cbor/**", "lib/**/DataTextProbe.hs"],
+    )},
     visibility = ["PUBLIC"],
 )

@@ -10,8 +10,10 @@ import sys
 import tomllib
 
 from buck2_cargo_features import (
+    CRATES_IO_SOURCE,
     FeatureSelectionError,
     metadata_feature_args,
+    parse_locked_git_source,
     resolve as resolve_cargo_features,
 )
 
@@ -37,7 +39,7 @@ SUPPORTED_PACKAGES = {
     "tidepool-atomic-write", "tidepool-repr", "tidepool-heap", "tidepool-bignum",
     "tidepool-bridge", "tidepool-effect", "tidepool-codegen", "tidepool-extract-cmd",
     "tidepool-extract-report", "tidepool-toolchain", "tidepool-bridge-derive",
-    "tidepool-runtime",
+    "tidepool-runtime", "tidepool-mcp", "tidepool-handlers", "tidepool",
     "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
     "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-agent",
 }
@@ -46,6 +48,7 @@ NORMAL_DEPENDENCY_ONLY_PACKAGES = {
     "tidepool-extract-report", "tidepool-bridge-derive", "tidepool-runtime",
     "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
     "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-agent",
+    "tidepool-mcp", "tidepool-handlers", "tidepool",
 }
 UNIT_TEST_PACKAGES = {
     "tidepool-atomic-write", "tidepool-repr", "tidepool-heap", "tidepool-codegen",
@@ -142,23 +145,70 @@ def dependency_label(dependency, resolved_package):
         target = target_name(local[name], "lib")
         directory = package_dir(local[name])
         return (":" if directory == CURRENT_DIR else "//" + directory + ":") + target
-    if resolved_package["source"] != "registry+https://github.com/rust-lang/crates.io-index":
-        raise SystemExit(f"Declare non-registry source explicitly: {resolved_package['source']}")
+    source = resolved_package["source"]
+    if source != CRATES_IO_SOURCE:
+        try:
+            parse_locked_git_source(source)
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
     manifest_path = ROOT / "third-party/rust/Cargo.toml"
     if not manifest_path.is_file():
         raise SystemExit("missing generated third-party/rust/Cargo.toml; regenerate Reindeer inputs")
     manifest = tomllib.loads(manifest_path.read_text())
-    identity = (resolved_package["name"], "=" + resolved_package["version"])
-    aliases = [
-        alias for alias, spec in manifest.get("dependencies", {}).items()
-        if (spec.get("package", alias), spec.get("version")) == identity
-    ]
-    if len(aliases) != 1:
+    identity = (resolved_package["name"], "=" + resolved_package["version"], source)
+    aliases = []
+    for alias, spec in manifest.get("dependencies", {}).items():
+        package_name = spec.get("package", alias)
+        dependency_source = CRATES_IO_SOURCE
+        if "git" in spec:
+            revision = spec.get("rev", "")
+            try:
+                repository, revision = parse_locked_git_source(
+                    f"git+{spec['git']}?rev={revision}#{revision}"
+                )
+            except ValueError as error:
+                raise SystemExit(str(error)) from error
+            dependency_source = f"git+{repository}?rev={revision}#{revision}"
+        if (package_name, spec.get("version"), dependency_source) == identity:
+            aliases.append(alias)
+    if len(aliases) == 1:
+        return "//third-party/rust:" + aliases[0]
+    if len(aliases) > 1:
         raise SystemExit(
-            f"missing or ambiguous Reindeer public dependency alias for "
+            f"ambiguous Reindeer public dependency alias for "
             f"{resolved_package['name']} {resolved_package['version']}"
         )
-    return "//third-party/rust:" + aliases[0]
+
+    # Transitive dependencies have no direct manifest alias. Reindeer names
+    # their package rule by the semver compatibility line; use that rule only
+    # when the lock contains one exact source identity for this name/version.
+    lock = tomllib.loads((ROOT / "Cargo.lock").read_text())
+    locked = [
+        package for package in lock["package"]
+        if package["name"] == resolved_package["name"]
+        and package["version"] == resolved_package["version"]
+        and package.get("source") == source
+    ]
+    same_version = [
+        package for package in lock["package"]
+        if package["name"] == resolved_package["name"]
+        and package["version"] == resolved_package["version"]
+    ]
+    if len(locked) != 1 or len(same_version) != 1:
+        raise SystemExit(
+            f"missing or source-ambiguous Reindeer target for "
+            f"{resolved_package['name']} {resolved_package['version']}"
+        )
+    major, minor, *_ = resolved_package["version"].split(".")
+    version_line = major if major != "0" else major + "." + minor
+    target = resolved_package["name"] + "-" + version_line
+    buck = (ROOT / "third-party/rust/BUCK").read_text()
+    if not re.search(r'^\s*name = "' + re.escape(target) + r'",\s*$', buck, re.MULTILINE):
+        raise SystemExit(
+            f"missing Reindeer target {target} for {resolved_package['name']} "
+            f"{resolved_package['version']}"
+        )
+    return "//third-party/rust:" + target
 
 
 def linux_dependency(package, dependency):
@@ -188,7 +238,19 @@ def dependency_sets(package, enabled_dependencies, forwarded_features, include_d
     named = {}
     for dependency in package["dependencies"]:
         if dependency["kind"] == "build":
-            if package["name"] != "tidepool-codegen" or dependency["name"] != "cc" or dependency["rename"] is not None or dependency["target"] is not None:
+            codegen_native = (
+                package["name"] == "tidepool-codegen"
+                and dependency["name"] == "cc"
+                and dependency["rename"] is None
+                and dependency["target"] is None
+            )
+            facade_native = (
+                package["name"] == "tidepool"
+                and dependency["name"] == "tidepool-toolchain"
+                and dependency["rename"] is None
+                and dependency["target"] is None
+            )
+            if not (codegen_native or facade_native):
                 raise SystemExit(f"Unmodeled build dependency in {package['name']}: {dependency['name']}")
             continue
         if dependency["kind"] == "dev" and not include_dev:
@@ -196,19 +258,6 @@ def dependency_sets(package, enabled_dependencies, forwarded_features, include_d
         dependency_key = cargo_dependency_key(dependency)
         if dependency.get("optional", False) and dependency_key not in enabled_dependencies:
             continue
-        child_features = local.get(dependency["name"], {}).get("features", {})
-        if dependency["name"] in local and (
-            (not dependency["uses_default_features"] and child_features.get("default", []))
-            or any(feature != "default" for feature in child_features)
-        ) and (
-            dependency["features"]
-            or forwarded_features.get(dependency_key)
-            or not dependency["uses_default_features"]
-        ):
-            raise SystemExit(
-                f"local dependency feature selection for {package['name']} -> {dependency['name']} "
-                "requires a matching Buck feature variant"
-            )
         resolved_package = linux_dependency(package, dependency)
         label = dependency_label(dependency, resolved_package)
         if dependency["rename"]:
@@ -288,6 +337,13 @@ def source_inputs(package, target):
     external = {}
     if source_root.is_relative_to(directory / "src"):
         sources.update((directory / "src").rglob("*.rs"))
+        if package["name"] == "tidepool":
+            sources = {
+                source for source in sources
+                if source.name != "tests.rs"
+                and not source.stem.endswith("_tests")
+                and source.stem != "test_campaign"
+            }
         if "lib" in target["kind"] or "proc-macro" in target["kind"]:
             binary_roots = {
                 pathlib.Path(candidate["src_path"]).resolve()
@@ -337,6 +393,14 @@ def source_inputs(package, target):
         "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.cbor": "//bridge/haskell:declaration_inventory_v3_cbor_fixture",
         "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.json": "//bridge/haskell:declaration_inventory_v3_json_fixture",
         "bridge/haskell/actors/Tidepool/Actors/Role.hs": "//bridge/haskell:actor_role_source",
+        "exomonad/prompts/base.md": "//exomonad/prompts:base_prompt",
+        "exomonad/prompts/api-guide.md": "//exomonad/prompts:api_guide_prompt",
+        "exomonad/prompts/root.md": "//exomonad/prompts:root_prompt",
+        "exomonad/prompts/recreated-root.md": "//exomonad/prompts:recreated_root_prompt",
+        "exomonad/prompts/worktree-agent.md": "//exomonad/prompts:worktree_agent_prompt",
+        "exomonad/prompts/readonly-agent.md": "//exomonad/prompts:readonly_agent_prompt",
+        "exomonad/prompts/scaffolding-agent.md": "//exomonad/prompts:scaffolding_agent_prompt",
+        "exomonad/prompts/integration-agent.md": "//exomonad/prompts:integration_agent_prompt",
         "exomonad/prompts/haskell-tool-description.md": "//exomonad/prompts:haskell_tool_description",
         "exomonad/prompts/haskell-tool-instructions.md": "//exomonad/prompts:haskell_tool_instructions",
         "exomonad/prompts/docs/actors.md": "//exomonad/prompts:doc_actors",
@@ -357,6 +421,18 @@ def source_inputs(package, target):
         source = pending.pop()
         for relative in includes.findall(source.read_text()):
             included = (source.parent / relative).resolve()
+            if (
+                package["name"] == "tidepool"
+                and included.is_relative_to(ROOT)
+                and included.relative_to(ROOT).as_posix().startswith((
+                    ".exomonad/workspace/",
+                    "exomonad/examples/workspace/.exomonad/",
+                ))
+            ):
+                # These include_str! references occur only in tests omitted by
+                # this library/binary target slice; the user workspace is not a
+                # source input to the shipped facade.
+                continue
             if not included.is_file():
                 raise SystemExit(f"missing compile-time input {included} from {source}")
             if included.is_relative_to(directory):
@@ -433,13 +509,18 @@ for package_name, package in local.items():
         continue
     CURRENT_DIR = package_dir(package)
     package_features, enabled_dependencies, forwarded_features = feature_plan(package)
-    if any("custom-build" in target["kind"] for target in package["targets"]) and package_name != "tidepool-codegen":
+    has_custom_build = any("custom-build" in target["kind"] for target in package["targets"])
+    if has_custom_build and package_name not in {"tidepool-codegen", "tidepool"}:
         raise SystemExit(f"{package_name} has a build.rs target; add a native Buck action before selecting it")
     rules = [header]
     if package_name == "tidepool-codegen":
         rules.append('load("//build/rust:codegen-md5.bzl", "tidepool_codegen_md5")\n')
     if package_name in ISOLATED_UNIT_TEST_PACKAGES:
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_isolated_test")\n')
+    if package_name == "tidepool":
+        rules.append('''load("//build/rust:buildscript.bzl", "tidepool_buildscript_run")
+load("//build/rust:facade_build_inputs.bzl", "tidepool_facade_build_inputs")
+''')
     normal_deps, normal_named = dependency_sets(package, enabled_dependencies, forwarded_features)
     if package_name == "tidepool-codegen":
         normal_named["prepared_md5_native"] = ":prepared_md5_native"
@@ -452,6 +533,40 @@ for package_name, package in local.items():
             raise SystemExit("Model codegen dev dependencies before extending its native unit target")
         unit_deps, unit_named = normal_deps, normal_named
     targets = package["targets"]
+    if package_name == "tidepool":
+        build_targets = [target for target in targets if "custom-build" in target["kind"]]
+        if len(build_targets) != 1:
+            raise SystemExit("facade requires exactly one Cargo build.rs target")
+        build_package = dict(package)
+        build_package["dependencies"] = [
+            dependency for dependency in package["dependencies"] if dependency["kind"] == "build"
+        ]
+        build_deps, build_named = dependency_sets(
+            build_package, enabled_dependencies, forwarded_features
+        )
+        rules.append(render_rule(
+            "tidepool_rust_binary", "tidepool_build_script", build_targets[0],
+            package, build_deps, build_named,
+        ))
+        rules.append('''tidepool_facade_build_inputs(
+    name = "tidepool_build_source_tree",
+    cargo_manifest = "Cargo.toml",
+    haskell_sources = "//bridge/haskell:facade_embedded_sources",
+    workspace_sources = "//exomonad/examples/workspace:facade_scaffold_sources",
+)
+
+tidepool_buildscript_run(
+    name = "tidepool_build_script_run",
+    package_name = "tidepool",
+    version = "''' + package["version"] + '''",
+    buildscript_rule = ":tidepool_build_script",
+    manifest_dir = ":tidepool_build_source_tree",
+    env = {
+        "TIDEPOOL_BUILD_SOURCE_ROOT": ".",
+        "TIDEPOOL_EMBED_HASKELL": "1",
+    },
+)
+''')
     libraries = [target for target in targets if "lib" in target["kind"] or "proc-macro" in target["kind"]]
     binaries = [target for target in targets if "bin" in target["kind"]]
     if package_name in LIBRARY_TARGET_ONLY_PACKAGES:
@@ -459,6 +574,8 @@ for package_name, package in local.items():
     tests = [target for target in targets if "test" in target["kind"]]
     for target in libraries:
         extra = "    proc_macro = True," if "proc-macro" in target["kind"] else ""
+        if package_name == "tidepool":
+            extra = '    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},'
         rule = render_rule("tidepool_rust_library", target["name"], target, package, normal_deps, normal_named, extra, features=package_features)
         rules.append(rule)
     if package_name == "tidepool-codegen":
@@ -466,7 +583,10 @@ for package_name, package in local.items():
     for target in binaries:
         deps = normal_deps + ([":" + libraries[0]["name"]] if libraries else [])
         binary_name = target["name"] + "_bin" if libraries and target["name"] == libraries[0]["name"] else target["name"]
-        rules.append(render_rule("tidepool_rust_binary", binary_name, target, package, deps, normal_named, features=package_features))
+        extra = ""
+        if package_name == "tidepool":
+            extra = '    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},'
+        rules.append(render_rule("tidepool_rust_binary", binary_name, target, package, deps, normal_named, extra, features=package_features))
     if libraries and package_name in UNIT_TEST_PACKAGES:
         library = libraries[0]
         unit_target = dict(library)

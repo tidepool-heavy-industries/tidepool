@@ -1,5 +1,60 @@
 """Resolve Cargo feature syntax for the native Buck generator slices."""
 
+import hashlib
+import re
+
+
+CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
+
+
+def parse_locked_git_source(source):
+    """Accept only HTTPS git sources pinned by a full Cargo.lock object id."""
+    if not isinstance(source, str) or not source.startswith("git+https://"):
+        raise ValueError(f"unsupported Cargo dependency source {source!r}")
+    value = source[4:]
+    before_fragment, marker, fragment = value.partition("#")
+    repository, separator, query = before_fragment.partition("?")
+    if not repository.startswith("https://"):
+        raise ValueError(f"unsupported Cargo git repository URL {repository!r}")
+    revision = None
+    if separator:
+        if not query.startswith("rev=") or "&" in query:
+            raise ValueError(f"Cargo git source must use only a locked rev: {source!r}")
+        revision = query.removeprefix("rev=")
+    if marker:
+        if revision is not None and revision != fragment:
+            raise ValueError(f"Cargo git rev differs from locked source commit: {source!r}")
+        revision = fragment
+    if revision is None or re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", revision) is None:
+        raise ValueError(f"Cargo git source lacks a full locked object id: {source!r}")
+    return repository, revision.lower()
+
+
+def dependency_aliases(identities):
+    """Choose stable manifest aliases without merging distinct source identities."""
+    by_name = {}
+    for name, version, source in identities:
+        by_name.setdefault(name, []).append((name, version, source))
+    aliases = {}
+    for name, items in by_name.items():
+        unique = sorted(set(items))
+        if len(unique) == 1:
+            aliases[unique[0]] = name
+            continue
+        same_versions = {}
+        for identity in unique:
+            same_versions.setdefault(identity[1], []).append(identity)
+        for identity in unique:
+            _, version, source = identity
+            alias = name + "-" + version.replace(".", "_")
+            if len(same_versions[version]) > 1:
+                suffix = hashlib.sha256((source or "local").encode()).hexdigest()[:10]
+                alias += "-" + suffix
+            if alias in aliases.values():
+                raise ValueError(f"ambiguous generated Cargo dependency alias {alias!r}")
+            aliases[identity] = alias
+    return aliases
+
 
 class FeatureSelectionError(ValueError):
     pass

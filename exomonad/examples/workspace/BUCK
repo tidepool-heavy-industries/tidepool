@@ -1,0 +1,12 @@
+load("@prelude//:rules.bzl", "filegroup")
+
+filegroup(
+    name = "facade_scaffold_sources",
+    srcs = {source: source for source in glob([
+        "flake.nix",
+        ".exomonad/AgentSpec.hs",
+        ".exomonad/prompts/**/*.md",
+        ".exomonad/plans/**/*",
+    ])},
+    visibility = ["PUBLIC"],
+)

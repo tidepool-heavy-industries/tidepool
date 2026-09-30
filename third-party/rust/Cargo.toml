@@ -8,10 +8,13 @@ publish = false
 [lib]
 path = "empty.rs"
 [dependencies]
+"async-trait" = { package = "async-trait", version = "=0.1.92", default-features = true, features = [] }
+"axum" = { package = "axum", version = "=0.8.9", default-features = true, features = [] }
 "blake3" = { package = "blake3", version = "=1.8.6", default-features = true, features = [] }
 "camino" = { package = "camino", version = "=1.2.5", default-features = true, features = [] }
 "chrono" = { package = "chrono", version = "=0.4.45", default-features = false, features = ["alloc"] }
 "ciborium" = { package = "ciborium", version = "=0.2.2", default-features = true, features = [] }
+"clap" = { package = "clap", version = "=4.6.6", default-features = true, features = ["derive", "env"] }
 "cranelift-codegen" = { package = "cranelift-codegen", version = "=0.129.1", default-features = true, features = [] }
 "cranelift-frontend" = { package = "cranelift-frontend", version = "=0.129.1", default-features = true, features = [] }
 "cranelift-jit" = { package = "cranelift-jit", version = "=0.129.1", default-features = true, features = [] }
@@ -20,6 +23,10 @@ path = "empty.rs"
 "env_logger" = { package = "env_logger", version = "=0.11.11", default-features = true, features = [] }
 "frunk" = { package = "frunk", version = "=0.5.0", default-features = true, features = [] }
 "futures-util" = { package = "futures-util", version = "=0.3.34", default-features = true, features = [] }
+"genai" = { package = "genai", version = "=0.6.5", default-features = true, features = [] }
+"glob" = { package = "glob", version = "=0.3.4", default-features = true, features = [] }
+"harness" = { package = "harness", version = "=0.1.0", default-features = true, features = [], git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "763d38d57691da31d2bf3c3c7493ca9910067540" }
+"ignore" = { package = "ignore", version = "=0.4.33", default-features = true, features = [] }
 "inventory" = { package = "inventory", version = "=0.3.24", default-features = true, features = [] }
 "libc" = { package = "libc", version = "=0.2.189", default-features = true, features = [] }
 "log" = { package = "log", version = "=0.4.33", default-features = true, features = [] }
@@ -30,6 +37,9 @@ path = "empty.rs"
 "quote" = { package = "quote", version = "=1.0.47", default-features = true, features = [] }
 "ractor" = { package = "ractor", version = "=0.16.5", default-features = false, features = ["tokio_runtime"] }
 "recursion" = { package = "recursion", version = "=0.5.4", default-features = true, features = [] }
+"regex" = { package = "regex", version = "=1.13.1", default-features = true, features = [] }
+"reqwest" = { package = "reqwest", version = "=0.13.4", default-features = true, features = ["json", "stream"] }
+"rusqlite" = { package = "rusqlite", version = "=0.32.1", default-features = true, features = ["bundled"] }
 "rustix" = { package = "rustix", version = "=1.1.4", default-features = true, features = ["event", "fs", "mount", "pipe", "process", "runtime", "stdio", "termios", "thread"] }
 "schemars" = { package = "schemars", version = "=1.2.2", default-features = true, features = [] }
 "serde" = { package = "serde", version = "=1.0.229", default-features = true, features = ["derive"] }
@@ -42,9 +52,12 @@ path = "empty.rs"
 "syn" = { package = "syn", version = "=3.0.3", default-features = true, features = ["extra-traits", "full"] }
 "tempfile" = { package = "tempfile", version = "=3.27.0", default-features = true, features = [] }
 "thiserror" = { package = "thiserror", version = "=2.0.20", default-features = true, features = [] }
-"tokio" = { package = "tokio", version = "=1.53.1", default-features = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "sync", "time"] }
+"tokio" = { package = "tokio", version = "=1.53.1", default-features = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+"toml" = { package = "toml", version = "=1.1.4+spec-1.1.0", default-features = true, features = [] }
 "tracing" = { package = "tracing", version = "=0.1.44", default-features = true, features = [] }
 "tracing-appender" = { package = "tracing-appender", version = "=0.2.5", default-features = true, features = [] }
 "tracing-subscriber" = { package = "tracing-subscriber", version = "=0.3.23", default-features = true, features = ["env-filter", "json"] }
+"ureq" = { package = "ureq", version = "=2.12.1", default-features = true, features = ["json"] }
+"url" = { package = "url", version = "=2.5.8", default-features = true, features = [] }
 "uuid" = { package = "uuid", version = "=1.24.1", default-features = true, features = ["v4"] }
 "which" = { package = "which", version = "=8.0.5", default-features = true, features = [] }
