@@ -12,7 +12,10 @@ use tidepool_repr::execution_schema::{
 /// contains a pointer to a mutable top must move with it; static code referring
 /// to a top through VMContext is not a heap edge. The remaining graph is closed
 /// and immutable, so the collector may continue skipping its fields.
-pub(super) fn heap_top_partition(tops: &BTreeMap<ValueId, &HeapBinding>) -> BTreeSet<ValueId> {
+pub(super) fn heap_top_partition(
+    tops: &BTreeMap<ValueId, &HeapBinding>,
+    is_literal: impl Fn(tidepool_repr::execution_schema::GlobalId) -> bool,
+) -> BTreeSet<ValueId> {
     let mut reverse = BTreeMap::<ValueId, Vec<ValueId>>::new();
     let mut heap = BTreeSet::new();
     let mut pending = Vec::new();
@@ -28,7 +31,7 @@ pub(super) fn heap_top_partition(tops: &BTreeMap<ValueId, &HeapBinding>) -> BTre
                     reverse.entry(*target).or_default().push(owner);
                 }
             }
-            ValueRef::Global(_) => has_global = true,
+            ValueRef::Global(id) => has_global |= !is_literal(*id),
         };
         match &binding.rhs {
             HeapRhs::Function { captures, .. } | HeapRhs::Thunk { captures, .. } => {
@@ -396,6 +399,15 @@ fn resolve_address(
     value: &ValueRef,
 ) -> Result<usize, CompileError> {
     let ValueRef::Local(id) = value else {
+        if let ValueRef::Global(id) = value {
+            if let Some(literal) = plan
+                .import_slots
+                .get(id.0 as usize)
+                .and_then(|slot| slot.literal.as_ref())
+            {
+                return Ok(literal.as_ptr() as usize);
+            }
+        }
         return Err(CompileError::Unsupported(super::unsupported_global(
             &plan.program,
             match value {
@@ -538,7 +550,7 @@ mod partition_tests {
             .map(|binding| (binding.id, binding))
             .collect();
         assert_eq!(
-            heap_top_partition(&tops),
+            heap_top_partition(&tops, |_| false),
             BTreeSet::from([caf.id, container.id, closure.id])
         );
     }

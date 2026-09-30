@@ -57,6 +57,9 @@ pub(crate) struct ImportSlot {
     pub rep: RuntimeRep,
     pub entry_signature: Option<Signature>,
     pub required_evaluated: bool,
+    /// Native-local immutable bytes, authenticated before specialization.
+    /// This word is initialized internally and is never a managed GC root.
+    pub literal: Option<Arc<[u8]>>,
 }
 
 /// What a `Call` site can know about its callee at compile time. Computed
@@ -203,6 +206,7 @@ impl<'a> ProgramPlan<'a> {
         program: DefinitionsView<'a>,
         interner: &mut super::DescriptorInterner,
         existing_bytes: &Arc<PinnedBytes>,
+        literals: &super::package_literals::GroupPackageLiterals,
     ) -> Result<Self, CompileError> {
         // wave4:LAYOUT_PLAN — collect top/local RHS types, function and join
         // parameter reps, case binder/alternative reps from checked signatures
@@ -222,6 +226,15 @@ impl<'a> ProgramPlan<'a> {
                 top_slots.insert(top.binding.id, slot);
                 binding_rep(&program, &top.binding, &mut values);
                 collect_binding_literals(&top.binding, &mut bytes, existing_bytes);
+            }
+        }
+
+        for (_, literal) in literals.iter() {
+            let logical = literal.logical_bytes();
+            if existing_bytes.get(logical).is_none() {
+                bytes
+                    .entry(logical.to_vec())
+                    .or_insert_with(|| Arc::clone(literal.storage()));
             }
         }
 
@@ -420,11 +433,22 @@ impl<'a> ProgramPlan<'a> {
                     .entry_signature
                     .map(|signature| program.signatures()[signature.0 as usize].clone()),
                 required_evaluated: declaration.required_evaluated,
+                literal: literals
+                    .get(tidepool_repr::execution_schema::GlobalId(index as u32))
+                    .map(|literal| {
+                        Arc::clone(
+                            existing_bytes
+                                .get(literal.logical_bytes())
+                                .or_else(|| bytes.get(literal.logical_bytes()))
+                                .expect("selected literal is pinned by this plan"),
+                        )
+                    }),
             })
             .collect::<Vec<_>>();
         let root_words = top_slots.len() + import_slots.len();
 
-        let heap_tops = super::image::heap_top_partition(&top_bindings);
+        let heap_tops =
+            super::image::heap_top_partition(&top_bindings, |id| literals.get(id).is_some());
         let mut pap_layouts = super::apply::layouts(
             target,
             functions

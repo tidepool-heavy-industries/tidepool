@@ -93,11 +93,23 @@ pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
 }
 
 pub(super) fn admit_definitions(program: &DefinitionsView<'_>) -> Result<(), Unsupported> {
+    admit_definitions_with_literals(
+        program,
+        &super::package_literals::GroupPackageLiterals::default(),
+    )
+}
+
+pub(super) fn admit_definitions_with_literals(
+    program: &DefinitionsView<'_>,
+    literals: &super::package_literals::GroupPackageLiterals,
+) -> Result<(), Unsupported> {
     for (index, declaration) in program.globals().iter().enumerate() {
         if !matches!(
             declaration.rep,
             RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef
-        ) {
+        ) && !(declaration.rep == RuntimeRep::Address
+            && literals.get(GlobalId(index as u32)).is_some())
+        {
             return Err(super::unsupported_global(
                 program,
                 GlobalId(index as u32),

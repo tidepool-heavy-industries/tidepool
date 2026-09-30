@@ -320,6 +320,20 @@ impl DemandedImage {
         Ok(Self { group, image })
     }
 
+    /// Specialize only immutable package literals supplied by the runtime's
+    /// exact target. The original product and every global ID stay unchanged.
+    pub fn compile_with_package_literals(
+        group: CertifiedGroup,
+        registry: &ImageRegistry,
+        supplied: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
+    ) -> Result<Self, DemandError> {
+        let literals = super::package_literals::GroupPackageLiterals::select(&group, supplied)?;
+        let image = registry.get_or_compile_literal_group(&group, &literals, || {
+            CompiledProgram::compile_certified_group_with_literals(&group, &literals).map(Arc::new)
+        })?;
+        Ok(Self { group, image })
+    }
+
     pub fn group(&self) -> &CertifiedGroup {
         &self.group
     }

@@ -34,6 +34,8 @@ pub(crate) mod compile_phases;
 mod emit;
 mod image;
 mod image_registry;
+mod package_literals;
+pub use package_literals::PackageLiteral;
 mod instance;
 #[cfg(test)]
 mod invocation;
@@ -216,6 +218,8 @@ pub enum CompileError {
     Descriptor(#[from] tidepool_heap::execution_descriptor::DescriptorConstructionError),
     #[error("checked program lacks representation for {0:?}")]
     MissingRepresentation(ValueId),
+    #[error("immutable package literal differs from the certified global {0:?}")]
+    PackageLiteralContract(Box<tidepool_repr::execution_schema::SymbolIdentity>),
     #[error("JSON operation was admitted without a program JSON layout")]
     MissingJsonLayout,
     #[error("JSON layout names constructor {0:?}, which this program does not declare")]
@@ -567,10 +571,21 @@ impl CompiledProgram {
     /// owner and import provenance were sealed before native compilation;
     /// machine-local import handles are supplied only when the image installs.
     pub fn compile_certified_group(group: &CertifiedGroup) -> Result<Self, CompileError> {
-        let mut image = Self::compile_definitions(
+        Self::compile_certified_group_with_literals(
+            group,
+            &package_literals::GroupPackageLiterals::default(),
+        )
+    }
+
+    fn compile_certified_group_with_literals(
+        group: &CertifiedGroup,
+        literals: &package_literals::GroupPackageLiterals,
+    ) -> Result<Self, CompileError> {
+        let mut image = Self::compile_definitions_with_literals(
             group.definitions(),
             &mut DescriptorInterner::default(),
             &Arc::new(static_bytes::PinnedBytes::empty()),
+            literals,
         )
         .map_err(|mut error| {
             if let CompileError::Unsupported(Unsupported::Global(refusal)) = &mut error {
@@ -618,6 +633,20 @@ impl CompiledProgram {
         interner: &mut DescriptorInterner,
         existing_bytes: &Arc<static_bytes::PinnedBytes>,
     ) -> Result<Self, CompileError> {
+        Self::compile_definitions_with_literals(
+            definitions,
+            interner,
+            existing_bytes,
+            &package_literals::GroupPackageLiterals::default(),
+        )
+    }
+
+    fn compile_definitions_with_literals(
+        definitions: DefinitionsView<'_>,
+        interner: &mut DescriptorInterner,
+        existing_bytes: &Arc<static_bytes::PinnedBytes>,
+        literals: &package_literals::GroupPackageLiterals,
+    ) -> Result<Self, CompileError> {
         let target = &definitions.envelope().target;
         let host_matches = cfg!(all(target_os = "linux", target_arch = "x86_64"))
             && target.architecture == Architecture::X86_64;
@@ -632,13 +661,13 @@ impl CompiledProgram {
         let mut clock = compile_phases::PhaseClock::start();
         let mut phases = compile_phases::CompilePhases::default();
         let mut native_metrics = compile_phases::NativeMetrics::new(&definitions);
-        admission::admit_definitions(&definitions)?;
+        admission::admit_definitions_with_literals(&definitions, literals)?;
         phases.admit = clock.lap();
         use crate::entry_abi::{EnvironmentMode, NativeAbiProfile};
         use cranelift_codegen::isa::CallConv;
         use cranelift_module::Linkage;
         use tidepool_repr::execution_schema::{HeapRhs, RuntimeRep};
-        let plan = plan::ProgramPlan::new(definitions, interner, existing_bytes)?;
+        let plan = plan::ProgramPlan::new(definitions, interner, existing_bytes, literals)?;
         let profile = NativeAbiProfile::new(plan.program.envelope().target.clone(), 0)?;
         phases.plan = clock.lap();
         let statics = image::build_static_image(&plan)?;

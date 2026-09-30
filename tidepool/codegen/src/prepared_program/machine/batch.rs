@@ -264,11 +264,25 @@ impl PreparedMachine<'_> {
                                 found: ImportShapeFact::Evaluated(false),
                             });
                         }
+                        if let Some(literal) = &slot.literal {
+                            if target.image.byte_tops.get(binding).map(Arc::as_ref)
+                                != Some(literal.as_ref())
+                            {
+                                return Err(ExecutionError::BatchSourceContract(Box::new(
+                                    slot.identity.clone(),
+                                )));
+                            }
+                        }
                     }
                     BatchImport::Existing {
                         handle,
                         entry_signature,
                     } => {
+                        if slot.literal.is_some() {
+                            return Err(ExecutionError::BatchSourceContract(Box::new(
+                                slot.identity.clone(),
+                            )));
+                        }
                         if slot
                             .entry_signature
                             .as_ref()
@@ -604,6 +618,10 @@ impl PreparedMachine<'_> {
         for candidate in candidates {
             for (slot, origin) in candidate.image.import_slots.iter().zip(&candidate.imports) {
                 if let BatchImport::Source { group, binding } = origin {
+                    if let Some(literal) = &slot.literal {
+                        candidate.roots.write(slot.slot, literal.as_ptr() as u64)?;
+                        continue;
+                    }
                     let target = &candidates[*group];
                     let top = target.image.top_slots[binding];
                     candidate.roots.write(

@@ -55,6 +55,10 @@ struct Entries {
 enum ImageKey {
     Program(PreparedProgram),
     Group(CertifiedGroupCode),
+    LiteralGroup(
+        CertifiedGroupCode,
+        super::package_literals::GroupPackageLiterals,
+    ),
 }
 
 enum Entry {
@@ -238,6 +242,21 @@ impl ImageRegistry {
         compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
     ) -> Result<Arc<CompiledProgram>, E> {
         self.get_or_compile_key(ImageKey::Group(group.code_identity()), compile)
+    }
+
+    pub(super) fn get_or_compile_literal_group<E>(
+        &self,
+        group: &CertifiedGroup,
+        literals: &super::package_literals::GroupPackageLiterals,
+        compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
+    ) -> Result<Arc<CompiledProgram>, E> {
+        if literals.iter().next().is_none() {
+            return self.get_or_compile_group(group, compile);
+        }
+        self.get_or_compile_key(
+            ImageKey::LiteralGroup(group.code_identity(), literals.clone()),
+            compile,
+        )
     }
 
     fn get_or_compile_key<E>(

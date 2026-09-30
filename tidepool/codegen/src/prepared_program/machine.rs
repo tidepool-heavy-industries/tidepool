@@ -1006,6 +1006,9 @@ impl<'code> PreparedMachine<'code> {
         let compiled = installed.program.get();
         let mut imports = Vec::with_capacity(compiled.import_slots.len());
         for slot in &compiled.import_slots {
+            if slot.literal.is_some() {
+                continue;
+            }
             let word = installed.roots.read(slot.slot).ok()?;
             imports.push((slot.identity.clone(), word as usize));
         }
@@ -1176,6 +1179,10 @@ impl<'code> PreparedMachine<'code> {
         // what is a caller error).
         let mut evaluated_checks: Vec<(usize, &super::plan::ImportSlot)> = Vec::new();
         for slot in &compiled.import_slots {
+            if let Some(literal) = &slot.literal {
+                block.write(slot.slot, literal.as_ptr() as u64)?;
+                continue;
+            }
             let handle = imports
                 .get(&slot.identity)
                 .copied()
