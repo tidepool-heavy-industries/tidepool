@@ -5,6 +5,7 @@ pub mod host_command;
 mod inbox;
 #[cfg(target_os = "linux")]
 mod mount_namespace;
+pub mod network;
 mod process_boundary;
 mod process_supervisor;
 pub mod systemd_slice;

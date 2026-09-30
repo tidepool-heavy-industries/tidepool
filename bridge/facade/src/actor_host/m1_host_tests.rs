@@ -197,6 +197,7 @@ async fn production_host_runs_browser_haskell_reconnects_without_replay_and_reti
     std::fs::write(&auth_file, "{}").unwrap();
     let settings = EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
+        public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
         asset_root: assets,
         session_secret_file: secret_file,
         codex_auth_file: auth_file,
@@ -518,6 +519,7 @@ async fn host_cancellation_stops_a_real_running_haskell_cell() {
     std::fs::write(&auth_file, "{}").unwrap();
     let settings = EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
+        public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
         asset_root: assets,
         session_secret_file: secret_file,
         codex_auth_file: auth_file,
@@ -613,6 +615,7 @@ async fn production_host_marks_embedded_root_ready_and_retires_invalid_auth_fail
     std::fs::write(&auth_file, "{}").unwrap();
     let settings = EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
+        public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
         asset_root: assets,
         session_secret_file: secret_file,
         codex_auth_file: auth_file,

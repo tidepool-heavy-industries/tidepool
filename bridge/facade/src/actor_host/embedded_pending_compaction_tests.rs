@@ -303,6 +303,7 @@ async fn production_engine_carries_raw_and_typed_pending_calls_through_compactio
     std::fs::write(&codex_auth_file, "{}").unwrap();
     let settings = crate::exomonad::EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
+        public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
         asset_root: assets,
         session_secret_file,
         codex_auth_file,
@@ -527,6 +528,7 @@ async fn production_engine_compaction_failure_continues_once_then_cleans_pending
     std::fs::write(&codex_auth_file, "{}").unwrap();
     let settings = crate::exomonad::EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
+        public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
         asset_root: assets,
         session_secret_file,
         codex_auth_file,
@@ -642,6 +644,7 @@ async fn browser_interrupt_cancels_one_engine_round_and_driver_accepts_later_inp
     std::fs::write(&auth, "{}").unwrap();
     let settings = crate::exomonad::EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
+        public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
         asset_root: assets,
         session_secret_file: secret,
         codex_auth_file: auth,

@@ -93,6 +93,7 @@ fn embedded_settings() -> (tempfile::TempDir, crate::exomonad::EmbeddedLaunchCon
         files,
         crate::exomonad::EmbeddedLaunchConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
+            public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
             asset_root: assets,
             session_secret_file,
             codex_auth_file,

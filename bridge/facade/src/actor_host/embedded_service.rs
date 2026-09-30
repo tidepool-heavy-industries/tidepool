@@ -71,7 +71,7 @@ impl EmbeddedService {
             .with_history_store(runtime.store())
             .with_browser_session(secret, std::time::Duration::from_secs(8 * 60 * 60))
             .map_err(str::to_owned)?
-            .with_public_origin_scheme("https")
+            .with_public_origin_scheme(settings.public_origin_scheme.as_str())
             .map_err(str::to_owned)?;
         let listener = TcpListener::bind(settings.listen)
             .await
@@ -415,12 +415,12 @@ where
             .send(first)
             .map_err(|_| "embedded Engine wake receiver closed")?;
         let recovering_this_round = recovering;
-        lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Running);
         let mut lifetime_stopped = false;
         let result = {
             let round = round_control
                 .begin()
                 .map_err(|error| format!("could not begin embedded Engine round: {error}"))?;
+            lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Running);
             let run = async {
                 if recovering_this_round {
                     engine

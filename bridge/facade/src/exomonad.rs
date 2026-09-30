@@ -323,6 +323,8 @@ pub(crate) struct LaunchConfig {
 #[serde(deny_unknown_fields)]
 pub struct EmbeddedLaunchConfig {
     pub(crate) listen: std::net::SocketAddr,
+    #[serde(default)]
+    pub(crate) public_origin_scheme: EmbeddedPublicOriginScheme,
     #[serde(default = "default_embedded_asset_root")]
     pub(crate) asset_root: PathBuf,
     pub(crate) session_secret_file: PathBuf,
@@ -330,6 +332,23 @@ pub struct EmbeddedLaunchConfig {
     pub(crate) context_capacity_tokens: u64,
     #[serde(default = "default_embedded_concurrent_jobs")]
     pub(crate) concurrent_jobs: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum EmbeddedPublicOriginScheme {
+    Http,
+    #[default]
+    Https,
+}
+
+impl EmbeddedPublicOriginScheme {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
 }
 
 fn default_embedded_asset_root() -> PathBuf {
@@ -344,8 +363,12 @@ fn default_embedded_concurrent_jobs() -> usize {
 
 impl EmbeddedLaunchConfig {
     pub(crate) fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
-        if !self.listen.ip().is_loopback() {
-            return Err(runtime_error("embedded browser listener must use loopback"));
+        if !self.listen.ip().is_loopback()
+            && !exomonad_node::network::tailnet_address_is_local(self.listen.ip())?
+        {
+            return Err(runtime_error(
+                "embedded browser listener must use loopback or an address assigned to tailscale0",
+            ));
         }
         if self.context_capacity_tokens == 0 || self.concurrent_jobs == 0 {
             return Err(runtime_error(
@@ -2581,6 +2604,38 @@ mod tests {
         }
         assert_eq!(omitted.unwrap().asset_root, PathBuf::from(packaged));
         assert_eq!(explicit.unwrap().asset_root, PathBuf::from("/tmp/override"));
+    }
+
+    #[test]
+    fn embedded_origin_scheme_preserves_https_and_accepts_explicit_http() {
+        let config = "listen = '127.0.0.1:0'\nasset_root = '/tmp/assets'\nsession_secret_file = '/tmp/secret'\ncodex_auth_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n";
+        let existing: EmbeddedLaunchConfig = toml::from_str(config).unwrap();
+        assert_eq!(
+            existing.public_origin_scheme,
+            EmbeddedPublicOriginScheme::Https
+        );
+        let direct: EmbeddedLaunchConfig =
+            toml::from_str(&format!("{config}public_origin_scheme = 'http'\n")).unwrap();
+        assert_eq!(direct.public_origin_scheme.as_str(), "http");
+        assert!(toml::from_str::<EmbeddedLaunchConfig>(&format!(
+            "{config}public_origin_scheme = 'ftp'\n"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn embedded_listener_rejects_wildcard_and_unassigned_addresses() {
+        for listen in ["0.0.0.0:8080", "[::]:8080", "192.0.2.1:8080"] {
+            let config: EmbeddedLaunchConfig = toml::from_str(&format!(
+                "listen = '{listen}'\nasset_root = '/tmp/assets'\nsession_secret_file = '/tmp/secret'\ncodex_auth_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n"
+            ))
+            .unwrap();
+            assert!(config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("tailscale0"));
+        }
     }
 
     fn test_agent_defaults() -> ExomonadAgentDefaults {
