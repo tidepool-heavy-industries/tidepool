@@ -72,6 +72,12 @@ class FirstPartySources(unittest.TestCase):
         self.write("tidepool/runtime/src/lib.rs",
                    'const SESSION: &str = include_str!("../../../bridge/haskell/src/Tidepool/Session.hs");\n')
         self.write("bridge/haskell/src/Tidepool/Session.hs", "module Tidepool.Session where\n")
+        self.write("third-party/rust/Cargo.toml", """
+[dependencies]
+codex-shoal-protocol = { package = "codex-shoal-protocol", version = "=0.1.0" }
+sha2-0_10_9 = { package = "sha2", version = "=0.10.9" }
+sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
+""")
         fixtures = (
             "join-v2.cbor", "join-v2.json", "inventory-v2.cbor", "inventory-v2.json",
             "join-v3.cbor", "join-v3.json", "join-typed-v3.cbor", "join-typed-v3.json",
@@ -350,6 +356,36 @@ class FirstPartySources(unittest.TestCase):
         buck = (self.root / "tidepool/repr/BUCK").read_text()
         self.assertIn("//third-party/rust:codex-shoal-protocol", buck)
         self.assertIn('"codex-compat"', buck)
+
+    def test_registry_dependency_labels_follow_resolved_package_versions(self):
+        metadata = json.loads(self.metadata.read_text())
+        package = next(p for p in metadata["packages"] if p["name"] == "tidepool-repr")
+        versions = [("0.10.9", "sha2-old"), ("0.11.0", "sha2-new")]
+        edges = []
+        for index, (version, package_id) in enumerate(versions):
+            metadata["packages"].append({
+                "id": package_id, "name": "sha2", "version": version,
+                "source": "registry+https://github.com/rust-lang/crates.io-index",
+            })
+            alias = None if index == 0 else "sha2_new"
+            package["dependencies"].append({
+                "name": "sha2", "rename": alias, "kind": None, "target": None,
+                "optional": False, "uses_default_features": True, "features": [],
+            })
+            edges.append({
+                "name": (alias or "sha2"), "pkg": package_id,
+                "dep_kinds": [{"kind": None, "target": None}],
+            })
+        node = next(n for n in metadata["resolve"]["nodes"] if n["id"] == package["id"])
+        node["deps"].extend(edges)
+        self.metadata.write_text(json.dumps(metadata))
+
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        buck, _ = self.groups("tidepool/repr")
+        self.assertIn("//third-party/rust:sha2-0_10_9", buck)
+        self.assertIn("//third-party/rust:sha2-0_11_0", buck)
+        self.assertNotIn('"//third-party/rust:sha2"', buck)
 
     def test_workspace_default_can_be_suppressed_without_emitting_that_package(self):
         result = self.generate("--no-default-features", "tidepool")

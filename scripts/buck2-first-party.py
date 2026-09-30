@@ -7,6 +7,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import tomllib
 
 from buck2_cargo_features import (
     FeatureSelectionError,
@@ -133,17 +134,31 @@ def target_name(package, kind):
     )
 
 
-def dependency_label(dependency):
+def dependency_label(dependency, resolved_package):
     name = dependency["name"]
-    if name in local:
+    if resolved_package["source"] is None:
+        if name not in local or local[name]["id"] != resolved_package["id"]:
+            raise SystemExit(f"resolved local dependency mismatch for {name}")
         target = target_name(local[name], "lib")
         directory = package_dir(local[name])
         return (":" if directory == CURRENT_DIR else "//" + directory + ":") + target
-    if name == "sha2":
-        # Reindeer exposes the common workspace version through a public alias;
-        # the versioned implementation target is intentionally private.
-        return "//third-party/rust:sha2"
-    return "//third-party/rust:" + name
+    if resolved_package["source"] != "registry+https://github.com/rust-lang/crates.io-index":
+        raise SystemExit(f"Declare non-registry source explicitly: {resolved_package['source']}")
+    manifest_path = ROOT / "third-party/rust/Cargo.toml"
+    if not manifest_path.is_file():
+        raise SystemExit("missing generated third-party/rust/Cargo.toml; regenerate Reindeer inputs")
+    manifest = tomllib.loads(manifest_path.read_text())
+    identity = (resolved_package["name"], "=" + resolved_package["version"])
+    aliases = [
+        alias for alias, spec in manifest.get("dependencies", {}).items()
+        if (spec.get("package", alias), spec.get("version")) == identity
+    ]
+    if len(aliases) != 1:
+        raise SystemExit(
+            f"missing or ambiguous Reindeer public dependency alias for "
+            f"{resolved_package['name']} {resolved_package['version']}"
+        )
+    return "//third-party/rust:" + aliases[0]
 
 
 def linux_dependency(package, dependency):
@@ -165,7 +180,7 @@ def linux_dependency(package, dependency):
     resolved_package = next(p for p in metadata["packages"] if p["id"] == matches[0]["pkg"])
     if resolved_package["name"] != dependency["name"]:
         raise SystemExit(f"resolved dependency mismatch for {cargo_name} in {package['name']}")
-    return True
+    return resolved_package
 
 
 def dependency_sets(package, enabled_dependencies, forwarded_features, include_dev=False):
@@ -194,8 +209,8 @@ def dependency_sets(package, enabled_dependencies, forwarded_features, include_d
                 f"local dependency feature selection for {package['name']} -> {dependency['name']} "
                 "requires a matching Buck feature variant"
             )
-        linux_dependency(package, dependency)
-        label = dependency_label(dependency)
+        resolved_package = linux_dependency(package, dependency)
+        label = dependency_label(dependency, resolved_package)
         if dependency["rename"]:
             named[dependency["rename"].replace("-", "_")] = label
         elif label not in deps:
