@@ -699,9 +699,12 @@ impl ExactDeclarationContext {
         &self,
         root: &Path,
     ) -> Result<MaterializedExactDeclarationContext, CompileError> {
-        let references =
+        let references = if self.products.is_empty() {
+            Vec::new()
+        } else {
             recovery_artifacts::materialize_certified_products(root, self.producer, &self.products)
-                .map_err(failure)?;
+                .map_err(failure)?
+        };
         let joined = self
             .joins
             .iter()
@@ -760,6 +763,9 @@ impl ExactDeclarationContext {
         &self,
         root: &Path,
     ) -> Result<Vec<PendingCertifiedGroup>, CompileError> {
+        if self.products.is_empty() {
+            return Ok(Vec::new());
+        }
         let references =
             recovery_artifacts::materialize_certified_products(root, self.producer, &self.products)
                 .map_err(failure)?;
