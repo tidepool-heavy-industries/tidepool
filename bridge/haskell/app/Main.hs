@@ -998,8 +998,8 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
         -- and the prepared modules.
         compileTurn modulePath = do
           let purpose = case (display, admitted) of
-                (Just authority, Nothing) -> CheckedItemCompile [] (displayPlannedDeclaration authority)
-                (Nothing, Just authority) -> CheckedItemCompile (checkedRecipeAnnotations authority) (itemPlannedDeclaration authority)
+                (Just authority, Nothing) -> CheckedItemCompile [] (displayPlannedDeclaration authority) (displayCompletedValues authority)
+                (Nothing, Just authority) -> CheckedItemCompile (checkedRecipeAnnotations authority) (itemPlannedDeclaration authority) (itemCompletedValues authority)
                 _ -> GeneralCompile
           compiler (PreparedProducts (requestModuleCandidates args))
             (Map.keysSet (requestRetainedGenerations args)) purpose
@@ -1459,7 +1459,7 @@ attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled admitt
             let admission = CheckedItemAdmission (checkedAdmissionDigest cellAdmission) (shaHex receipt) 0
                   (shaHex (TE.encodeUtf8 (T.pack turnSrc))) "bind" (sbBinders sb)
                   (checkedTurnTemplates cellAdmission) (checkedInjectedModules cellAdmission)
-                  signatures Nothing Nothing generation (checkedAdmissionDigest cellAdmission) [] Nothing Nothing
+                  signatures Nothing Nothing generation (checkedAdmissionDigest cellAdmission) [] Nothing Nothing [] (checkedValueInterfaces cellAdmission)
             validateCheckedItemAdmission args admission turnSrc sb
             pure (Just admission)
         let typeImports = if isJust admitted then [] else nub (concatMap checkedPinImports [pin | Just pin <- pins])

@@ -2680,6 +2680,11 @@ fn check_cell_impl(
             temp.path(),
             context,
             specification,
+            admission
+                .interfaces()
+                .iter()
+                .map(|interface| (interface.module(), interface.bytes_owned().clone()))
+                .collect(),
         )?
     } else {
         select_module_candidate_offer(
@@ -4865,6 +4870,127 @@ mod ambiguity_advice_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn empty_checked_context_reuses_immutable_support_and_invalidates_changed_source() {
+        use crate::session::{
+            resident_cell_check_template, resident_workbench_templates, ModuleEnv,
+            PersistentSession, SessionLib,
+        };
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_repr::SessionId;
+        use tidepool_testing::effect_surface::TestEffectSurface;
+        use tidepool_toolchain::certified_products::ProductOrigin;
+        tidepool_testing::eval_harness::require_extract();
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let cache = tempfile::tempdir().unwrap();
+        let _cache = TestEnvGuard::set("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
+        let root = tempfile::tempdir().unwrap();
+        let support = root.path().join("CheckedTiny.hs");
+        let support_source = include_str!("fixtures/checked-tiny-support.hs");
+        std::fs::write(&support, support_source).unwrap();
+        let effects = TestEffectSurface::minimal(&[]).unwrap();
+        let lib = SessionLib::open(SessionId(997), root.path(), ModuleEnv::standalone_default())
+            .unwrap()
+            .with_validation_include(effects.include_paths().to_vec());
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        for (index, expected) in [
+            ProductOrigin::Fresh,
+            ProductOrigin::Cached,
+            ProductOrigin::Fresh,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if index == 2 {
+                std::fs::write(&support, support_source.replace("41", "42")).unwrap();
+            }
+            let execution = Arc::new(session.begin_private_execution(public).unwrap());
+            let view = execution.view();
+            let imports = view.turn_imports(&crate::session::SourceImports::new());
+            let template =
+                resident_cell_check_template(effects.preamble(), effects.row(), &imports);
+            let templates =
+                resident_workbench_templates(effects.preamble(), effects.row(), &imports);
+            let source = "import qualified CheckedTiny\nlet tiny = CheckedTiny.tinyValue";
+            let specification = CheckedCellSpecification {
+                admission_digest: [0; 32],
+                cell_source: source.into(),
+                template_source: template.clone(),
+                turn_templates: templates
+                    .iter()
+                    .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                    .collect(),
+                injected_modules: view.injected_module_names(),
+                reserved_declaration_modules: Vec::new(),
+            };
+            let admission = session
+                .admit_cell_for_execution(
+                    execution,
+                    0,
+                    Arc::new(specification.clone()),
+                    specification.specification_digest(),
+                    [1; 32],
+                )
+                .unwrap();
+            let view = admission.view();
+            let mut roots = effects.include_paths().to_vec();
+            roots.insert(0, root.path().to_owned());
+            let include = view.include_paths(&roots);
+            let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+            let injected = view.injected_module_names();
+            let started = std::time::Instant::now();
+            let (_, folded) = check_cell_admitted(
+                CellCheckRequest {
+                    exact_context: view.exact_declaration_context().cloned(),
+                    session_id: Some(view.session()),
+                    cell_text: source,
+                    template: &template,
+                    include: &include,
+                    session_root: view.session_root(),
+                    inject_modules: &injected,
+                    compile_generation: admission.initial_value_generation().0,
+                    compile_view_evidence: "",
+                },
+                admission.clone(),
+                &templates,
+                Some(CellFoldTurn {
+                    templates: &templates,
+                    gen: admission.initial_value_generation().0,
+                    retained_imports: &[],
+                }),
+            )
+            .unwrap();
+            let Some(TurnResult::Bind { compiled, .. }) = folded else {
+                panic!("the eligible tiny bind must compile in its same-check fold")
+            };
+            let groups = &compiled.certification.unwrap().groups;
+            let support_groups = groups
+                .iter()
+                .filter(|group| group.owner().module == "CheckedTiny")
+                .collect::<Vec<_>>();
+            assert!(
+                !support_groups.is_empty(),
+                "support group was not certified"
+            );
+            assert!(support_groups
+                .iter()
+                .all(|group| group.origin() == expected));
+            eprintln!(
+                "checked-tiny index={index} elapsed_ms={} fresh_groups={} cached_groups={}",
+                started.elapsed().as_millis(),
+                groups
+                    .iter()
+                    .filter(|group| group.origin() == ProductOrigin::Fresh)
+                    .count(),
+                groups
+                    .iter()
+                    .filter(|group| group.origin() == ProductOrigin::Cached)
+                    .count()
+            );
+        }
+    }
+
     #[test]
     fn admitted_cell_certifies_original_local_declaration_before_its_bind_and_expression() {
         use crate::session::{

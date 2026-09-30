@@ -3,7 +3,7 @@
 module Tidepool.ExactScope
   ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..)
   , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..)
-  , readExactScope, revalidateExactScope
+  , readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation
   ) where
 
@@ -26,6 +26,8 @@ import System.Directory (getFileSize, createDirectory, createDirectoryIfMissing,
 import System.FilePath (isAbsolute, takeDirectory, (</>))
 import System.IO.Error (isAlreadyExistsError)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
+import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
+import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell (CheckedSignature(..), CheckedSignatureName(..))
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.PackageWitness
@@ -61,6 +63,8 @@ data CheckedDisplayAdmission = CheckedDisplayAdmission
   , displayValueImports :: [(String,[String])]
   , displayPresentation :: String
   , displayPlannedDeclaration :: Maybe ((String,String),String)
+  , displayCompletedValues :: [CompletedValueImport]
+  , displayValueInterfaces :: [ExactIfaceArtifact]
   } deriving (Eq, Show)
 
 data CheckedCellAdmission = CheckedCellAdmission
@@ -70,6 +74,7 @@ data CheckedCellAdmission = CheckedCellAdmission
   , checkedTurnTemplates :: [(String, String)]
   , checkedInjectedModules :: [String]
   , checkedReservedModules :: [String]
+  , checkedValueInterfaces :: [ExactIfaceArtifact]
   } deriving (Eq, Show)
 
 data CheckedItemAdmission = CheckedItemAdmission
@@ -89,6 +94,8 @@ data CheckedItemAdmission = CheckedItemAdmission
   , itemValueImports :: [(String,[String])]
   , itemObservationName :: Maybe String
   , itemPlannedDeclaration :: Maybe ((String,String),String)
+  , itemCompletedValues :: [CompletedValueImport]
+  , itemValueInterfaces :: [ExactIfaceArtifact]
   } deriving (Eq, Show)
 
 data ExactProduct = ExactProduct
@@ -109,6 +116,12 @@ data ExactCompilation = ExactCompilation
   , compilationSource :: FilePath
   , compilationImports :: [((String, String, Bool), [(String, String, Bool, String)])]
   } deriving (Eq, Show)
+
+scopeValueInterfaces :: ExactScope -> [ExactIfaceArtifact]
+scopeValueInterfaces scope =
+  maybe [] checkedValueInterfaces (scopeCheckedCell scope)
+    ++ maybe [] itemValueInterfaces (scopeCheckedItem scope)
+    ++ maybe [] displayValueInterfaces (scopeCheckedDisplay scope)
 
 readExactScope :: FilePath -> IO (Either String ExactScope)
 readExactScope path = do
@@ -135,7 +148,8 @@ revalidateExactScope env scope = do
     bytes <- BS.readFile (scopeManifestPath scope)
     unless (digest bytes == scopeRequestSha256 scope) (fail "exact scope request changed")
     mapM_ checkInterface (scopeInterfaces scope)
-    mapM_ checkProduct (scopeProducts scope))
+    mapM_ checkProduct (scopeProducts scope)
+    mapM_ checkValue (scopeValueInterfaces scope))
     :: IO (Either IOException ())
   pure $ either (Left . show) Right result
   where
@@ -143,6 +157,9 @@ revalidateExactScope env scope = do
       roots <- readPackageImports packages packagesSha iface
       selected <- either fail pure roots
       mapM_ (\root -> validatePackageImportRoot env root >>= either fail pure) selected
+    checkValue value = do
+      bytes <- BS.readFile (exactPath value)
+      unless (digest bytes == exactSha256 value) (fail "checked value interface changed")
     checkProduct originalProduct = do
       bytes <- BS.readFile (originalProductPath originalProduct)
       unless (digest bytes == originalProductSha256 originalProduct)
@@ -261,15 +278,16 @@ decodeScope = do
     purpose <- string
     case purpose of
       "cell-check" -> do
-        unless (authCount == 7) (fail "invalid cell-check admission")
+        unless (authCount == 8) (fail "invalid cell-check admission")
         admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
           <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
-          <*> bounded 4096 nonempty <*> bounded 4096 nonempty
+          <*> bounded 4096 nonempty <*> bounded 4096 nonempty <*> valueInterfaces
+        validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
         unique "checked injected modules" (checkedInjectedModules admission)
         unique "checked reserved modules" (checkedReservedModules admission)
         pure (Just admission,Nothing,Nothing)
       "checked-item" -> do
-        unless (authCount == 16) (fail "invalid checked-item admission")
+        unless (authCount == 18) (fail "invalid checked-item admission")
         admissionDigest <- digestField
         receiptDigest <- digestField
         index <- decodeWord64
@@ -306,10 +324,14 @@ decodeScope = do
         unless ((kind == "expr") == maybe False (const True) observation)
           (fail "checked observation identity differs from item kind")
         planned <- plannedDeclaration
+        values <- completedValues
+        interfaces <- valueInterfaces
+        validateInterfaces injected interfaces
+        validateValues valueImports values
         pure (Nothing, Just (CheckedItemAdmission admissionDigest receiptDigest index sourceDigest kind binders
-          templates injected signatures liftPlan presentation generation prefix valueImports observation planned), Nothing)
+          templates injected signatures liftPlan presentation generation prefix valueImports observation planned values interfaces), Nothing)
       "checked-display" -> do
-        unless (authCount == 15) (fail "invalid checked-display admission")
+        unless (authCount == 17) (fail "invalid checked-display admission")
         admission <- CheckedDisplayAdmission <$> digestField <*> digestField <*> decodeWord64
           <*> nonempty <*> decodeWord64 <*> decodeWord64 <*> digestField <*> decodeWord64
           <*> bounded 65536 string <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
@@ -317,6 +339,9 @@ decodeScope = do
           <*> bounded 4096 (array 2 >> ((,) <$> nonempty <*> bounded 65536 nonempty))
           <*> nonempty
           <*> plannedDeclaration
+          <*> completedValues <*> valueInterfaces
+        validateInterfaces (displayInjectedModules admission) (displayValueInterfaces admission)
+        validateValues (displayValueImports admission) (displayCompletedValues admission)
         unique "display injected modules" (displayInjectedModules admission)
         unique "display value import owners" (map fst (displayValueImports admission))
         unique "display value import names" (concatMap snd (displayValueImports admission))
@@ -327,6 +352,25 @@ decodeScope = do
       _ -> fail "unsupported exact compile purpose"
   pure (ExactScope "" "" semantic interfaces lexical products checked checkedItem checkedDisplay)
   where
+    valueInterfaces = bounded 4096 $ do
+      array 4
+      ExactIfaceArtifact <$> nonempty <*> nonempty <*> absolute <*> digestField <*> pure []
+    validateInterfaces injected values = do
+      unique "checked value interface owners" (map exactModule values)
+      let canonicalValue value = case parseSessionModule (exactModule value) of
+            Just owner -> smKind owner == ValMod && sessionModuleString owner == exactModule value
+            Nothing -> False
+      unless (all ((== "main") . exactUnit) values && all canonicalValue values
+          && length values == length injected && all (`elem` injected) (map exactModule values))
+        (fail "checked value bytes differ from injected owner inventory")
+    completedValues = bounded 4096 $ do
+      array 5
+      CompletedValueImport <$> nonempty <*> nonempty <*> absolute <*> digestField
+        <*> bounded 65536 (array 2 >> (,) <$> nonempty <*> decodeWord64)
+    validateValues imports values = unless
+      (map (\value -> (completedValueModule value,map fst (completedValueBinders value))) values == imports
+        && all ((== "main") . completedValueUnit) values)
+      (fail "completed value identities differ from exact prefix imports")
     plannedDeclaration = do
       token <- peekTokenType
       if token == TypeNull then decodeNull >> pure Nothing else do

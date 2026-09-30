@@ -7,7 +7,8 @@
 //! All cacheable requests use one recipe and one named artifact bundle.
 //! Compiler dependency evidence is validated on publication and on every hit.
 
-use std::collections::{BTreeMap, HashMap};
+use ciborium::value::Value;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -262,6 +263,7 @@ pub struct ModuleCandidateOffer {
     include: Vec<PathBuf>,
     exact: Option<crate::declaration_context::ExactCompilationRequest>,
     checked_cell: Option<crate::checked_cell::CheckedCellSpecification>,
+    checked_values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
     checked_item: Option<crate::checked_cell::CheckedItemOffer>,
     checked_display: Option<crate::checked_cell::CheckedDisplayOffer>,
 }
@@ -303,6 +305,7 @@ impl ModuleCandidateOffer {
             include: include.to_vec(),
             exact: None,
             checked_cell: None,
+            checked_values: Vec::new(),
             checked_item: None,
             checked_display: None,
         }
@@ -320,6 +323,7 @@ impl ModuleCandidateOffer {
             include: include.to_vec(),
             exact: Some(context.prepare_compilation(&scratch.join("exact-scope"), producer)?),
             checked_cell: None,
+            checked_values: Vec::new(),
             checked_item: None,
             checked_display: None,
         })
@@ -331,8 +335,42 @@ impl ModuleCandidateOffer {
         scratch: &Path,
         context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
         specification: crate::checked_cell::CheckedCellSpecification,
+        checked_values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
     ) -> Result<Self, CompileError> {
-        let authorization = specification.manifest_value()?;
+        let expected = specification
+            .injected_modules
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let actual = checked_values
+            .iter()
+            .map(|(module, _)| module.module_name())
+            .collect::<BTreeSet<_>>();
+        if actual.len() != checked_values.len() || actual != expected {
+            return Err(CompileError::ExtractFailed(
+                "checked initial interface inventory differs from injected owners".into(),
+            ));
+        }
+        let mut authorization = specification.manifest_value()?;
+        let Value::Array(fields) = &mut authorization else {
+            unreachable!("closed cell authorization")
+        };
+        fields.push(Value::Array(
+            checked_values
+                .iter()
+                .map(|(module, bytes)| {
+                    let path = scratch
+                        .join("admitted-values")
+                        .join(module.relative_hi_path());
+                    Value::Array(vec![
+                        Value::Text("main".into()),
+                        Value::Text(module.module_name()),
+                        Value::Text(path.to_string_lossy().into_owned()),
+                        Value::Text(crate::checked_cell::hash(bytes)),
+                    ])
+                })
+                .collect(),
+        ));
         let context = checked_offer_context(context)?;
         Ok(Self {
             selected: immutable_candidates_in_context(&context, producer, include, scratch),
@@ -344,6 +382,7 @@ impl ModuleCandidateOffer {
                 Some(authorization),
             )?),
             checked_cell: Some(specification),
+            checked_values,
             checked_item: None,
             checked_display: None,
         })
@@ -371,7 +410,11 @@ impl ModuleCandidateOffer {
         };
         checked_item.validate_templates(templates)?;
         checked_item.validate_include(include)?;
-        let authorization = checked_item.authorization(producer, context.semantic_sha256())?;
+        let authorization = checked_item.authorization(
+            producer,
+            context.semantic_sha256(),
+            &scratch.join("admitted-values"),
+        )?;
         Ok(Self {
             selected: immutable_candidates_in_context(&context, producer, include, scratch),
             producer: producer.to_vec(),
@@ -382,6 +425,7 @@ impl ModuleCandidateOffer {
                 Some(authorization),
             )?),
             checked_cell: None,
+            checked_values: Vec::new(),
             checked_item: Some(checked_item),
             checked_display: None,
         })
@@ -413,7 +457,11 @@ impl ModuleCandidateOffer {
             budget,
             presented,
         };
-        let authorization = display.authorization(producer, context.semantic_sha256())?;
+        let authorization = display.authorization(
+            producer,
+            context.semantic_sha256(),
+            &scratch.join("admitted-values"),
+        )?;
         Ok(Self {
             selected: immutable_candidates_in_context(&context, producer, include, scratch),
             producer: producer.to_vec(),
@@ -424,6 +472,7 @@ impl ModuleCandidateOffer {
                 Some(authorization),
             )?),
             checked_cell: None,
+            checked_values: Vec::new(),
             checked_item: None,
             checked_display: Some(display),
         })
@@ -458,6 +507,7 @@ impl ModuleCandidateOffer {
             exact.validate_outputs_with_planned(root, owner.as_ref())?,
             &self.include,
             planned,
+            self.checked_values.clone(),
         )
     }
 

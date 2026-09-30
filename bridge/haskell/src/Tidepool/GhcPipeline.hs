@@ -134,14 +134,16 @@ import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteC
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts)
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.PlannedDeclaration
-  ( PlannedDeclarationInventory, transformPlannedDeclarationImports, hydratePlannedDeclarationInventory )
+  ( PlannedDeclarationInventory, transformPlannedDeclarationImports, transformPlannedDeclarationImportsWithCompleted, hydratePlannedDeclarationInventory )
+import Tidepool.CheckedPrefixImports
+  ( CompletedValueImport, CompletedValueImports, hydrateCompletedValueImports, transformCompletedValueImports )
 import Tidepool.FamilyConsistency (validateCompilationFamilies)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
 import Tidepool.Introspection (normalizeLookupWildcards)
 import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), SessionScope(..)
-  , isSessionScopeActive, injectSessionScope, renderSessionModule
+  , isSessionScopeActive, injectSessionScope, registerSessionInterfaceLocation, renderSessionModule
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule )
 import Tidepool.Timing
   ( readTimingEnabled, timeSection, timePhase, emitPhase, emitDetailPhase, emitCount
@@ -168,7 +170,7 @@ import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope
   , installExactLexicalGraph )
 import Tidepool.ExactScope
-  ( ExactScope(..), ExactCompilation(..), readExactScope, revalidateExactScope
+  ( ExactScope(..), ExactCompilation(..), readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation )
 import Tidepool.PackageWitness
   ( PackageImportRoot(..), packageImportRoot, readPackageImports
@@ -676,7 +678,7 @@ data PipelineVariant = PipelineVariant
   }
 
 data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile | OriginalDeclarationCompile
-  | CheckedItemCompile [(String,CheckedSignature)] (Maybe ((String,String),String))
+  | CheckedItemCompile [(String,CheckedSignature)] (Maybe ((String,String),String)) [CompletedValueImport]
   | PlannedDeclarationCheck PlannedDeclarationInventory ExactScope
   deriving (Eq, Show)
 
@@ -687,7 +689,7 @@ transformFor CertifyHomeProductsCompile _ _ _ = pure
 transformFor LookupTypeCompile target _ summary
   | ms_mod_name summary == target = pure . normalizeLookupWildcards
   | otherwise = pure
-transformFor (CheckedItemCompile annotations original) target env summary
+transformFor (CheckedItemCompile annotations original _) target env summary
   | ms_mod_name summary == target = \parsed -> do
       annotated <- rewriteCheckedAnnotations env annotations parsed
       case original of
@@ -699,6 +701,20 @@ transformFor (CheckedItemCompile annotations original) target env summary
 transformFor (PlannedDeclarationCheck inventory _) target env summary
   | ms_mod_name summary == target = transformPlannedDeclarationImports inventory env
   | otherwise = pure
+
+transformWithCompletedValues :: Maybe CompletedValueImports -> CompilePurpose -> ModuleName
+  -> HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
+transformWithCompletedValues captured purpose target env summary = case purpose of
+  CheckedItemCompile annotations original requested
+    | ms_mod_name summary == target && not (null requested) -> \parsed -> do
+        values <- maybe (fail "completed value interfaces were not installed in this request") pure captured
+        annotated <- rewriteCheckedAnnotations env annotations parsed
+        case original of
+          Nothing -> transformCompletedValueImports values env annotated
+          Just (owner, fingerprint) -> do
+            inventory <- hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure
+            transformPlannedDeclarationImportsWithCompleted inventory values env annotated
+  _ -> transformFor purpose target env summary
 
 -- | The seam values for one run, derived from the downsweep graph.
 data CompilePlan = CompilePlan
@@ -3129,6 +3145,10 @@ normalVariant purpose path = do
 sessionVariant :: CompilePurpose -> SessionScope -> FilePath -> IO PipelineVariant
 sessionVariant purpose scope path = do
   targetModName' <- targetModuleNameFor path
+  completedValuesRef <- newIORef Nothing
+  let completedValues = case purpose of
+        CheckedItemCompile _ _ values -> values
+        _ -> []
   capturedExact <- traverse (\manifest -> readExactScope manifest >>= either (ioError . userError) pure)
     (ssExactScope scope)
   let exact = case purpose of
@@ -3149,7 +3169,9 @@ sessionVariant purpose scope path = do
    { pvLabel = "runSessionPipeline"
    , pvExactScope = exact
    , pvDownsweepExcludes = excludedOwners
-   , pvTransformParsed = transformFor purpose targetModName'
+   , pvTransformParsed = \env summary parsed -> do
+       captured <- readIORef completedValuesRef
+       transformWithCompletedValues captured purpose targetModName' env summary parsed
    , pvPlan = \timing modGraphRaw -> do
       let directSummaries = [ ms | ModuleNode _ ms <- mgModSummaries' modGraphRaw ]
           importsOf ms = [ unLoc lmn | (_, lmn) <- ms_textual_imps ms ]
@@ -3265,12 +3287,34 @@ sessionVariant purpose scope path = do
                 -- false cycle and makes GHC reject the still-unloaded Lib.
                 (hscInjected, injectMs) <- timeSection $ do
                   hsc0 <- getSession
-                  injectSessionScope (scope { ssValIfaces = needed }) hsc0
+                  case exact of
+                    Just admitted | isJust (scopeCheckedCell admitted) || isJust (scopeCheckedItem admitted)
+                        || isJust (scopeCheckedDisplay admitted) -> do
+                      let wanted = map (moduleNameString . renderSessionModule) needed
+                          artifacts = [value | value <- scopeValueInterfaces admitted, exactModule value `elem` wanted]
+                      when (length artifacts /= length needed) $ liftIO $ ioError $ userError
+                        "checked value injection lacks exact captured input bytes"
+                      readback <- liftIO (readExactIfaceArtifacts hsc0 artifacts)
+                      captured <- either (liftIO . ioError . userError) pure readback
+                      hydrated <- liftIO (hydrateExactScope hsc0 captured)
+                      liftIO $ forM_ needed $ \owner -> case
+                          [artifact | artifact <- artifacts,
+                            exactModule artifact == moduleNameString (renderSessionModule owner)] of
+                        [artifact] -> registerSessionInterfaceLocation (exactPath artifact) owner hydrated
+                        _ -> fail "checked finder owner differs from captured interface"
+                      pure hydrated
+                    _ -> injectSessionScope (scope { ssValIfaces = needed }) hsc0
                 setSession hscInjected
                 liftIO $ do
                   modifyIORef' injectedRef
                     (`Set.union` Set.fromList (map renderSessionModule needed))
                   modifyIORef' injectMsRef (+ injectMs)
+              when (ms_mod_name modSum == targetModName' && not (null completedValues)) $ do
+                current <- getSession
+                readback <- liftIO (hydrateCompletedValueImports completedValues current)
+                (hydrated, captured) <- either (liftIO . ioError . userError) pure readback
+                setSession hydrated
+                liftIO (writeIORef completedValuesRef (Just captured))
         , cpTier = OptimizeEveryModule
           -- The load barrier already fired in 'cpAfterLoad' (see there).
         , cpBeforeMerge = \_ _ ->

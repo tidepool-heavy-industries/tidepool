@@ -63,7 +63,7 @@ module Tidepool.Session
   , mkThinSessionIface
   , writeSessionIface
   , injectSessionIface
-  , injectSessionScope
+  , injectSessionScope, registerSessionInterfaceLocation
     -- * Persistent binder identity
   , sessionBinderName
     -- * Reserved scaffold binders
@@ -295,11 +295,10 @@ writeSessionIface hsc root sm iface = do
 -- importing modules through the HPT — see the module header on instance replay.
 injectSessionIface :: MonadIO m => FilePath -> SessionModule -> HscEnv -> m HscEnv
 injectSessionIface root sm hsc0 = liftIO $ do
-  let fc     = hsc_FC hsc0
-      homeU  = hsc_home_unit hsc0
-      modNm  = renderSessionModule sm
+  let homeU = hsc_home_unit hsc0
+      modNm = renderSessionModule sm
       theMod = mkModule (homeUnitAsUnit homeU) modNm
-      path   = sessionHiPath root sm
+      path = sessionHiPath root sm
   readRes <- readIface (hsc_dflags hsc0) (hsc_NC hsc0) theMod path
   case readRes of
     MErr.Failed _ ->
@@ -307,16 +306,24 @@ injectSessionIface root sm hsc0 = liftIO $ do
                           ++ sessionModuleString sm ++ " at " ++ path))
     MErr.Succeeded iface -> do
       details <- injectDetails hsc0 modNm iface
-      let hmi    = HomeModInfo iface details emptyHomeModInfoLinkable
-          hsc1   = hscUpdateHPT (addHomeModInfoToHpt hmi) hsc0
-          modLoc = sourcelessModLocation path
-          mnwib  = GWIB modNm NotBoot :: ModuleNameWithIsBoot
-      _ <- addHomeModuleToFinder fc homeU mnwib modLoc
+      let hmi = HomeModInfo iface details emptyHomeModInfoLinkable
+          hsc1 = hscUpdateHPT (addHomeModInfoToHpt hmi) hsc0
+      registerSessionInterfaceLocation path sm hsc1
       pure hsc1
   where
     injectDetails :: HscEnv -> ModuleName -> ModIface -> IO ModDetails
     injectDetails hsc _ iface =
       initIfaceCheck (text "tidepool session inject") hsc (typecheckIface iface)
+
+-- Register a source-less owner after its exact interface has been installed.
+-- This changes only the finder location; it never reads or grants interface
+-- contents. Both ordinary injection and captured-byte hydration use it.
+registerSessionInterfaceLocation :: FilePath -> SessionModule -> HscEnv -> IO ()
+registerSessionInterfaceLocation path owner env = do
+  _ <- addHomeModuleToFinder (hsc_FC env) (hsc_home_unit env)
+    (GWIB (renderSessionModule owner) NotBoot :: ModuleNameWithIsBoot)
+    (sourcelessModLocation path)
+  pure ()
 
 -- | A source-less 'ModLocation' anchored at the session @.hi@ — the load-bearing
 -- @ml_hs_file = Nothing@ is what lets the finder accept a module with no source.

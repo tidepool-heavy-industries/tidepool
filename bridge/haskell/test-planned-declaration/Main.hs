@@ -2,7 +2,10 @@ module Main (main) where
 
 import Control.Exception (bracket, IOException, try)
 import Control.Monad (forM_, unless)
-import Data.List (isInfixOf, isPrefixOf)
+import Data.List (isInfixOf, isPrefixOf, nub)
+import Data.ByteString qualified as BS
+import Crypto.Hash.SHA256 qualified as SHA256
+import Numeric (showHex)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import System.Directory
@@ -15,6 +18,13 @@ import GHC
   , ms_mod_name, parseModule, typecheckModule, getSession, tm_internals_, ParsedModule )
 import GHC.Tc.Types (tcg_rdr_env)
 import GHC.Driver.Env (HscEnv)
+import GHC.Builtin.Types (intTy)
+import GHC.Types.Name (nameModule_maybe)
+import GHC.Types.Name.Occurrence (mkVarOcc)
+import GHC.Types.Name.Reader (RdrName(..), mkRdrUnqual, globalRdrEnvElts, greName, greRdrNames)
+import GHC.Unit.Module (moduleName, mkModuleName)
+import GHC.Unit.Module.ModIface (mi_iface_hash, mi_final_exts)
+import GHC.Utils.Fingerprint (Fingerprint(..))
 import GHC.Types.SourceError (SourceError)
 import GHC.Unit.Module (moduleNameString)
 import Control.Monad.IO.Class (liftIO)
@@ -27,9 +37,13 @@ import Tidepool.GhcPipeline
   ( CompilePurpose(..), PipelineSelection(..), PreparedPipelineResult(..)
   , PipelineResult(..), CheckedEnvironmentResult(..), runPipelineSessionSelected
   , cellCheckedBinderSignatures )
+import Tidepool.CheckedPrefixImports
+import Tidepool.Identity (stableVarId)
 import Tidepool.PlannedDeclaration
 import Tidepool.ExtractUtil (getLibdir)
-import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), sessionModuleString)
+import Tidepool.Session
+  ( Generation(..), SessionModule(..), SessionModuleKind(..), sessionModuleString
+  , mkThinSessionIface, writeSessionIface, injectSessionIface, sessionHiPath, sessionBinderName, registerSessionInterfaceLocation )
 
 main :: IO ()
 main = withScratch $ \work -> do
@@ -140,6 +154,7 @@ main = withScratch $ \work -> do
       :: IO (Either SourceError [CheckedSignature])
     unless (case refusedQualification of Left _ -> True; Right _ -> False) $
       fail "qualified clone widened the original import selection"
+  checkCompletedValueRefinement work importedEnv importedInventory
   duplicateFields <- readFile "test-planned-declaration/fixtures/DuplicateFields.hs"
   writeFile (work </> "DuplicateFields.hs") duplicateFields
   fieldCell <- readFile "test-planned-declaration/fixtures/field-cell.hs"
@@ -155,6 +170,80 @@ main = withScratch $ \work -> do
   writeFile checkFile fieldCheck
   _ <- checkImports checkFile fieldEnv fieldInventory Nothing
   putStrLn "planned original declarations: source identity, inventories, import shadowing and declaration/bind/expression check passed"
+
+checkCompletedValueRefinement :: FilePath -> HscEnv -> PlannedDeclarationInventory -> IO ()
+checkCompletedValueRefinement work baseEnv original = do
+  let owner = SessionModule ValMod (Generation 9)
+      ownerName = sessionModuleString owner
+      occurrence = mkVarOcc "id"
+      binderIdentity = stableVarId (sessionBinderName baseEnv owner occurrence)
+  thin <- mkThinSessionIface baseEnv owner [(occurrence, intTy), (mkVarOcc "other", intTy)]
+  unless (mi_iface_hash (mi_final_exts thin) == Fingerprint 0 0) $
+    fail "thin value fixture does not exercise the zero fingerprint case"
+  writeSessionIface baseEnv work owner thin
+  previousEnv <- injectSessionIface work owner baseEnv
+  bytes <- BS.readFile (sessionHiPath work owner)
+  let digest = concatMap (\byte -> let digits = showHex byte ""
+        in replicate (2 - length digits) '0' ++ digits) (BS.unpack (SHA256.hash bytes))
+      requested = CompletedValueImport (fst (plannedOriginalOwner original)) ownerName
+        (sessionHiPath work owner) digest [("id", binderIdentity)]
+      target = work </> "PrefixCheck.hs"
+  (hydrated, completed) <- hydrateCompletedValueImports [requested] previousEnv >>= either fail pure
+  source <- readFile "test-planned-declaration/fixtures/prefix-check.hs"
+  writeFile target source
+  checkCompletedImports target hydrated original completed
+  forM_ [requested {completedValueIfaceSha256 = replicate 64 '0'}
+    ,requested {completedValueBinders = [("id", 0)]}
+    ,requested {completedValueModule = "Tidepool.Session.Val.G10"}
+    ,requested {completedValueBinders = [("absent", binderIdentity)]}] $ \invalid -> do
+      refused <- hydrateCompletedValueImports [invalid] previousEnv
+      unless (case refused of Left _ -> True; Right _ -> False) $
+        fail "changed bytes, owner or native binder admitted completed value imports"
+  duplicated <- hydrateCompletedValueImports [requested, requested] previousEnv
+  unless (case duplicated of Left _ -> True; Right _ -> False) $
+    fail "duplicate completed value winners were admitted"
+  -- Identical owner, bytes and fingerprint0 still do not authorize the HPT
+  -- allocation from an earlier injection or a separately reconstructed read.
+  (recreated, _) <- hydrateCompletedValueImports [requested] hydrated >>= either fail pure
+  forM_ [previousEnv, recreated] $ \stale -> do
+    refused <- try (checkCompletedImports target stale original completed) :: IO (Either IOException ())
+    unless (case refused of Left _ -> True; Right _ -> False) $
+      fail "stale zero-fingerprint HPT accepted an unrelated readback allocation"
+  writeFile target (unlines [if line == "import Tidepool.Session.Val.G9 (id)"
+    then "import Tidepool.Session.Val.G9 (id, other)" else line | line <- lines source])
+  widened <- try (checkCompletedImports target hydrated original completed) :: IO (Either IOException ())
+  unless (case widened of Left _ -> True; Right _ -> False) $
+    fail "completed value import widened beyond its certified prefix winners"
+
+checkCompletedImports
+  :: FilePath -> HscEnv -> PlannedDeclarationInventory -> CompletedValueImports -> IO ()
+checkCompletedImports file env original completed = do
+  libdir <- getLibdir
+  runGhc (Just libdir) $ do
+    setSession env
+    target <- guessTarget file Nothing Nothing
+    setTargets [target]
+    graph <- depanal [mkModuleName "Tidepool.Session.Val.G9"] False
+    summary <- case [item | item <- mgModSummaries graph, moduleNameString (ms_mod_name item) == "PrefixCheck"] of
+      [item] -> pure item
+      _ -> fail "completed-prefix checking module absent"
+    parsed <- parseModule summary
+    current <- getSession
+    -- Downsweep can replace finder state; register the retained source-less
+    -- location in the consuming request, as the session pipeline does.
+    liftIO (registerSessionInterfaceLocation (sessionHiPath (takeDirectory file)
+      (SessionModule ValMod (Generation 9))) (SessionModule ValMod (Generation 9)) current)
+    transformed <- liftIO (transformPlannedDeclarationImportsWithCompleted original completed current parsed)
+    typed <- typecheckModule transformed
+    let (tcg, _) = tm_internals_ typed
+        owners spelling = nub [moduleNameString (moduleName owner)
+          | entry <- globalRdrEnvElts (tcg_rdr_env tcg)
+          , spelling `elem` greRdrNames entry
+          , Just owner <- [nameModule_maybe (greName entry)]]
+    unless (owners (mkRdrUnqual (mkVarOcc "id")) == ["Tidepool.Session.Val.G9"]
+        && owners (Qual (mkModuleName "Tidepool.Session.Lib.G7") (mkVarOcc "id")) == ["Tidepool.Session.Lib.G7"]
+        && owners (Qual (mkModuleName "Foreign") (mkVarOcc "hidden")) == ["Foreign"]) $
+      fail "completed value refinement lost native replacement or preserved qualification"
 
 replaceForeignImport :: String -> String -> String
 replaceForeignImport replacement = unlines . map replace . lines

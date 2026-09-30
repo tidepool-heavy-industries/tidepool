@@ -26,7 +26,7 @@ import GHC.Types.Name.Reader (mkRdrUnqual, rdrNameOcc)
 import GHC.Types.PkgQual (RawPkgQual(..))
 import GHC.Types.SrcLoc (GenLocated(..), unLoc)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), lookupHpt)
-import GHC.Unit.Module (Module, moduleName, mkModuleName)
+import GHC.Unit.Module (Module, moduleName)
 import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_iface_hash, mi_final_exts, mi_exports)
 import GHC.Unit.Finder (FindResult(..), findImportedModule)
 import GHC.Utils.Fingerprint (Fingerprint)
@@ -36,7 +36,7 @@ import Tidepool.DeclarationJoin (ExportIdentity(..), ExportNamespace(..), export
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), readExactIfaceArtifacts, hydrateExactScope)
 import Tidepool.Identity (stableVarId)
 import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule,
-  sessionModuleString, scaffoldTargetName)
+  sessionModuleString, scaffoldTargetName, registerSessionInterfaceLocation)
 
 -- These fields come from the closed completed-prefix authorization. They are
 -- advisory until the exact captured bytes and exported native Names validate.
@@ -78,6 +78,9 @@ hydrateCompletedValueImports requested env
             Left diagnostic -> pure (Left diagnostic)
             Right selections -> do
               hydrated <- hydrateExactScope env interfaces
+              forM_ requested $ \value -> case parseSessionModule (completedValueModule value) of
+                Just owner -> registerSessionInterfaceLocation (completedValueIfacePath value) owner hydrated
+                Nothing -> fail "completed value owner ceased to be canonical"
               owners <- forM (zip interfaces selections) $ \((_, iface), names) -> do
                 forced <- evaluate iface
                 stable <- makeStableName forced
