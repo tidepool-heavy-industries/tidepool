@@ -162,12 +162,10 @@ instance {-# OVERLAPPABLE #-} (JsonSchema a) => JsonSchema [a] where
 instance {-# OVERLAPPING #-} JsonSchema [Char] where
   jsonSchema _ = object [("type", String "string")]
 
--- | 'Maybe' OUTSIDE field position is just its payload: the encoder writes
--- @null@ for 'Nothing' and the decoder reads @null@ back. In FIELD position
--- the optionality is additionally expressed by absence from @required@ — see
--- 'GSchemaRecord'.
+-- | 'Nothing' encodes as @null@, including inside arrays and nested values.
+-- In field position absence is also accepted by 'GSchemaRecord'.
 instance (JsonSchema a) => JsonSchema (Maybe a) where
-  jsonSchema _ = jsonSchema (Proxy :: Proxy a)
+  jsonSchema _ = object [("anyOf", Array [jsonSchema (Proxy :: Proxy a), object [("type", String "null")]])]
 
 -- ---------------------------------------------------------------------------
 -- Object assembly
