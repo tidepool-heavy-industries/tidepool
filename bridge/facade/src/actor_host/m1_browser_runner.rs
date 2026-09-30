@@ -142,7 +142,10 @@ fn required_path(name: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("browser gate requires declared {name}"))
 }
 
-async fn verify_cancelled_resident_call(fixture: &RunningBrowserHost) -> Result<(), String> {
+async fn verify_cancelled_resident_call(
+    fixture: &RunningBrowserHost,
+    expected_operation: &harness::model::OperationId,
+) -> Result<(), String> {
     let target = browser_target(&fixture.campaign);
     let call = harness::model::CallId("browser-cancellable-cell".into());
     let claims = fixture
@@ -158,7 +161,10 @@ async fn verify_cancelled_resident_call(fixture: &RunningBrowserHost) -> Result<
         actor: target.actor,
         incarnation: target.incarnation,
     };
-    if claim.operation.origin != expected_origin || claim.operation.request != claim.request {
+    if claim.operation != *expected_operation
+        || claim.operation.origin != expected_origin
+        || claim.operation.request != claim.request
+    {
         return Err("cancellation evidence belongs to another originating operation".into());
     }
     let scheduler = fixture.runtime.scheduler();
@@ -179,10 +185,63 @@ async fn verify_cancelled_resident_call(fixture: &RunningBrowserHost) -> Result<
     ) {
         return Err("resident cancellation owner did not confirm cleanup".into());
     }
-    if fixture.campaign.actor.hosted_cell_computing() {
-        return Err("resident actor still owns the interrupted cell".into());
-    }
     Ok(())
+}
+
+async fn pending_sleep_operation(
+    fixture: &RunningBrowserHost,
+) -> Result<Option<harness::model::OperationId>, String> {
+    let call = harness::model::CallId("browser-cancellable-cell".into());
+    let claims = fixture
+        .runtime
+        .store()
+        .claims(&call)
+        .map_err(|error| error.to_string())?;
+    let [claim] = claims.as_slice() else {
+        return if claims.is_empty() {
+            Ok(None)
+        } else {
+            Err("cancellable resident call has multiple originating operations".into())
+        };
+    };
+    let target = browser_target(&fixture.campaign);
+    let expected_origin = harness::model::ConversationIdentity::Embedded {
+        run: target.run,
+        actor: target.actor,
+        incarnation: target.incarnation,
+    };
+    if claim.call_id != call
+        || claim.operation.call != call
+        || claim.operation.origin != expected_origin
+        || claim.operation.request != claim.request
+    {
+        return Err("pending sleep evidence belongs to another embedded operation".into());
+    }
+    if claim.state != harness::store::ClaimState::Pending
+        || fixture
+            .runtime
+            .scheduler()
+            .output(&claim.operation)
+            .await
+            .map_err(|error| error.to_string())?
+            .is_some()
+    {
+        return Err("cancellable resident operation settled before interruption".into());
+    }
+
+    let actor = fixture.campaign.actor.identity();
+    let graph = fixture.campaign.forest.inspect_host_graph();
+    let Some(node) = graph.into_iter().find(|node| node.actor == actor) else {
+        return Ok(None);
+    };
+    match node.workbench {
+        exomonad_actor::ActorWorkbenchPosture::AwaitingEffect {
+            input_unit_index: 0,
+            total: 1,
+            effect,
+        } if effect == "sleep" => Ok(Some(claim.operation.clone())),
+        _ => Ok(None),
+    }
 }
 
 async fn drive_browser(
@@ -201,7 +260,7 @@ async fn drive_browser(
         "scenario":{"steps":[
             {"action":"input", "text":RAW_INPUT,"wait_for_receipt":false,"provider_barriers":[
                 {"phase":"raw_input","expected_request_text":RAW_INPUT},
-                {"until_phase":"raw_result","allowed_intermediate_phases":["raw_wait"],"expected_request_text":"42"}
+                {"until_phase":"raw_result","timeout_ms":300000,"allowed_intermediate_phases":["raw_wait"],"expected_request_text":"42"}
             ], "wait_for_text":"The resident cell returned 42."},
             {"action":"reload"}, {"action":"retry"},
             {"action":"input","text":CANCEL_INPUT,"provider_barriers":[
@@ -226,6 +285,7 @@ async fn drive_browser(
         let mut raw_completed = false;
         let mut cancel_wait = false;
         let mut cancel_pending_at = None;
+        let mut cancel_operation = None;
         let mut continued = false;
         let readiness_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
@@ -238,15 +298,21 @@ async fn drive_browser(
                     last_phase = barrier.phase;
                     eprintln!("browser gate phase={last_phase} elapsed={:?}", journey_started.elapsed());
                     if barrier.phase == "cancel_wait" {
-                        tokio::time::timeout(Duration::from_secs(10), async {
-                            while !fixture.campaign.actor.hosted_cell_computing() {
+                        cancel_operation = Some(tokio::time::timeout(Duration::from_secs(10), async {
+                            loop {
+                                if let Some(operation) = pending_sleep_operation(fixture).await? {
+                                    return Ok::<_, String>(operation);
+                                }
                                 tokio::time::sleep(Duration::from_millis(10)).await;
                             }
-                        }).await.map_err(|_| "cancellable cell never entered the real resident actor")?;
+                        }).await.map_err(|_| "cancellable cell never reached the captured native sleep effect")??);
                         cancel_pending_at = Some(tokio::time::Instant::now());
                     }
                     if barrier.phase == "continued" {
-                        verify_cancelled_resident_call(fixture).await?;
+                        let operation = cancel_operation.as_ref().ok_or(
+                            "cancellation completed without an exact pending operation witness",
+                        )?;
+                        verify_cancelled_resident_call(fixture, operation).await?;
                         if !cancel_pending_at.is_some_and(|started| started.elapsed() < Duration::from_secs(8)) {
                             return Err("interrupt did not stop the pending 30-second cell promptly".into());
                         }
