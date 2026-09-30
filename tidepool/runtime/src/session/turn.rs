@@ -5325,7 +5325,7 @@ mod tests {
         assert!(!receipts.is_empty());
         let selected = alternate_root.join("RootChoice.hs");
         assert!(receipts.iter().any(|receipt| {
-            let value: Value = ciborium::de::from_reader(std::fs::read(receipt).unwrap().as_slice()).unwrap();
+            let value: ciborium::value::Value = ciborium::de::from_reader(std::fs::read(receipt).unwrap().as_slice()).unwrap();
             let evidence = value.as_array().unwrap()[7].as_text().unwrap();
             evidence.contains(selected.to_str().unwrap())
         }));
