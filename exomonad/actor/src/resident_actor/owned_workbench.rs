@@ -120,6 +120,18 @@ impl ExecutionResourceOwners {
         })
     }
 
+    pub(crate) fn authorizes_cleanup_context(&self, context: &ActorSessionContext) -> bool {
+        let original = self.public.placement;
+        context.actor == self.public.actor
+            && context.placement.session == original.session
+            && context.placement.resource_scope == original.resource_scope
+            && (context.placement.lexical_scope == original.lexical_scope
+                || self.private.get().is_some_and(|private| {
+                    private.view().session() == context.placement.session
+                        && private.private_scope() == context.placement.lexical_scope
+                }))
+    }
+
     pub(super) fn retain_private(
         &self,
         admission: Arc<tidepool_runtime::session::PrivateExecutionAdmission>,
