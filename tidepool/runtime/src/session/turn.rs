@@ -5987,7 +5987,7 @@ mod tests {
                 compile_generation: admission.initial_value_generation().0,
                 compile_view_evidence: "",
             },
-            admission,
+            admission.clone(),
             &[],
             None,
         )
