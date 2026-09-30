@@ -59,6 +59,43 @@ local_harness_source = sys.argv[2] == '1'
 dependency_args = sys.argv[3:]
 HARNESS_REPO = 'https://github.com/tidepool-heavy-industries/exomonad-harness.git'
 
+def current_harness_source_output():
+    # Mirror scripts/dev-shell.sh's reduced committed source so this check is
+    # independent of an inherited TIDEPOOL_DEV_SHELL and never captures the
+    # Codex submodule or mounted build outputs.
+    nix_inputs = ['flake.nix', 'flake.lock', 'rust-toolchain.toml', 'nix']
+    if subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--', *nix_inputs], cwd=root).returncode:
+        raise SystemExit('Cannot verify matched harness source: commit Nix inputs before Reindeer generation')
+    listing = subprocess.run(
+        ['git', 'ls-tree', 'HEAD', '--', *nix_inputs], cwd=root,
+        check=True, capture_output=True,
+    ).stdout
+    tree = subprocess.run(['git', 'mktree'], cwd=root, input=listing, check=True, capture_output=True).stdout.decode().strip()
+    commit_env = os.environ | {
+        'GIT_AUTHOR_DATE': '@0 +0000',
+        'GIT_COMMITTER_DATE': '@0 +0000',
+        'GIT_AUTHOR_NAME': 'dev-shell',
+        'GIT_AUTHOR_EMAIL': 'dev-shell@invalid',
+        'GIT_COMMITTER_NAME': 'dev-shell',
+        'GIT_COMMITTER_EMAIL': 'dev-shell@invalid',
+    }
+    revision = subprocess.run(
+        ['git', 'commit-tree', tree, '-m', 'dev-shell toolchain-input pin'],
+        cwd=root, env=commit_env, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    ref = f'refs/tidepool/dev-shell/{revision}'
+    if subprocess.run(['git', 'rev-parse', '-q', '--verify', ref], cwd=root, capture_output=True).returncode:
+        raise SystemExit('Cannot verify matched harness source: enter the pinned Tidepool dev shell first')
+    flake = f'git+file://{root}?rev={revision}'
+    system = subprocess.run(
+        ['nix', 'eval', '--raw', '--impure', '--expr', 'builtins.currentSystem'],
+        cwd=root, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    return subprocess.run(
+        ['nix', 'eval', '--raw', f'{flake}#packages.{system}.buck-matched-harness-source.outPath'],
+        cwd=root, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
 def parse_harness_lock():
     try:
         cargo = tomllib.loads((root / 'Cargo.lock').read_text())
@@ -85,6 +122,7 @@ def parse_harness_lock():
 
 def use_local_harness_source(buck):
     rev = parse_harness_lock()
+    expected_source_path = current_harness_source_output()
     config = configparser.ConfigParser()
     try:
         with (root / '.buckconfig.local').open() as stream:
@@ -92,8 +130,10 @@ def use_local_harness_source(buck):
         source_path = config['nix']['matched_harness_source'].strip()
     except (OSError, KeyError, configparser.Error) as error:
         raise SystemExit(f'Cannot select matched harness source: missing configured Nix source: {error}')
-    if not re.fullmatch(r'/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-tidepool-matched-harness-source', source_path):
-        raise SystemExit('Cannot select matched harness source: configured source is not the declared pinned Nix output')
+    if source_path != expected_source_path:
+        raise SystemExit('Cannot select matched harness source: configured source is stale or differs from the current pinned Nix output')
+    if not re.fullmatch(r'/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-tidepool-matched-harness-source', expected_source_path):
+        raise SystemExit('Cannot select matched harness source: current flake output is not the declared immutable Nix source')
 
     stanzas = re.findall(r'git_fetch\(\n(.*?)\n\)', buck, re.DOTALL)
     matches = [stanza for stanza in stanzas if f'repo = "{HARNESS_REPO}"' in stanza]
