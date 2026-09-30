@@ -630,6 +630,8 @@ where
             request,
         } => {
             let exec_started = std::time::Instant::now();
+            let wait_control = (commands_permitted && commands::waits_for_completion(&request))
+                .then_some(control.as_ref());
             let result = commands::resolve_command(
                 &environment,
                 &kernel,
@@ -637,6 +639,7 @@ where
                 continuation,
                 request,
                 commands_permitted,
+                wait_control,
             )
             .await;
             crate::call_timing::add_exec_ms(exec_started.elapsed().as_millis());

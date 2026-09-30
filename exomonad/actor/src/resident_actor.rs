@@ -6609,7 +6609,10 @@ where
                                 if matches!(
                                     &wait,
                                     OwnedWorkbenchWait::Watch(_) | OwnedWorkbenchWait::Sleep { .. }
-                                ) {
+                                ) || matches!(&wait, OwnedWorkbenchWait::Command { request, .. }
+                                    if commands::waits_for_completion(request)
+                                        && self.descriptor.effective_role().effect_keys().contains(&crate::ActorEffectKey::Commands))
+                                {
                                     execution_state
                                         .control
                                         .get_or_insert_with(

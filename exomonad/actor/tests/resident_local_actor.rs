@@ -57,6 +57,7 @@ struct DelayedCommandBackend {
     started: tokio::sync::Notify,
     completed: tokio::sync::Notify,
     completion_count: std::sync::atomic::AtomicUsize,
+    cancellation_count: std::sync::atomic::AtomicUsize,
     output: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }
 
@@ -126,7 +127,7 @@ impl exomonad_actor::command_jobs::CommandBackend for DelayedCommandBackend {
     fn control<'a>(
         &'a self,
         _id: &'a str,
-        _operation: exomonad_actor::command_jobs::CommandControl,
+        operation: exomonad_actor::command_jobs::CommandControl,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Result<(), tidepool_bridge_effects::CommandError>>
@@ -134,7 +135,16 @@ impl exomonad_actor::command_jobs::CommandBackend for DelayedCommandBackend {
                 + 'a,
         >,
     > {
-        Box::pin(async { Ok(()) })
+        Box::pin(async move {
+            if matches!(
+                operation,
+                exomonad_actor::command_jobs::CommandControl::Cancel
+            ) {
+                self.cancellation_count
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            }
+            Ok(())
+        })
     }
 
     fn output<'a>(
@@ -279,19 +289,48 @@ async fn resident_primary_sleep_parks_and_cancels_the_same_owned_step() {
     resident_await_watch_case(WatchCase::PrimarySleepCancellation).await;
 }
 
+#[tokio::test]
+async fn resident_primary_unbounded_command_observation_cancels_without_cancelling_job() {
+    resident_await_watch_case(WatchCase::PrimaryCommandAwaitCancellation).await;
+}
+
+#[tokio::test]
+async fn resident_primary_foreground_command_observation_cancels_without_cancelling_job() {
+    resident_await_watch_case(WatchCase::PrimaryCommandForegroundCancellation).await;
+}
+
+#[tokio::test]
+async fn resident_primary_command_notice_wait_cancels_before_notice_handoff() {
+    resident_await_watch_case(WatchCase::PrimaryCommandNotifyCancellation).await;
+}
+
 enum WatchCase {
     PrimaryRoundTrip,
     StructuredRoundTrip,
     PrimaryCancellation,
     PrimarySleepCancellation,
+    PrimaryCommandAwaitCancellation,
+    PrimaryCommandForegroundCancellation,
+    PrimaryCommandNotifyCancellation,
 }
 
 async fn resident_await_watch_case(case: WatchCase) {
     let primary = !matches!(case, WatchCase::StructuredRoundTrip);
-    let cancel_first = matches!(
-        case,
-        WatchCase::PrimaryCancellation | WatchCase::PrimarySleepCancellation
-    );
+    let command_observation = match case {
+        WatchCase::PrimaryCommandAwaitCancellation => {
+            Some("Cmd.observe (Cmd.Observation (-1) 0) job")
+        }
+        WatchCase::PrimaryCommandForegroundCancellation => Some("Cmd.await job"),
+        WatchCase::PrimaryCommandNotifyCancellation => {
+            Some("Cmd.observeCompletion (Cmd.Observation (-1) 0) job")
+        }
+        _ => None,
+    };
+    let cancel_first = command_observation.is_some()
+        || matches!(
+            case,
+            WatchCase::PrimaryCancellation | WatchCase::PrimarySleepCancellation
+        );
     let cancel_sleep = matches!(case, WatchCase::PrimarySleepCancellation);
     if std::env::var_os("TIDEPOOL_ACTOR_TEST_TRACE").is_some() {
         tracing_subscriber::fmt()
@@ -302,7 +341,9 @@ async fn resident_await_watch_case(case: WatchCase) {
     }
     eval_harness::require_extract();
 
-    let session = support::process_unique_session(if cancel_sleep {
+    let session = support::process_unique_session(if command_observation.is_some() {
+        184
+    } else if cancel_sleep {
         183
     } else if cancel_first {
         182
@@ -546,6 +587,9 @@ async fn resident_await_watch_case(case: WatchCase) {
                     name: exomonad_actor::HASKELL_TOOL.into(),
                     arguments: ToolArguments::Raw(if cancel_sleep {
                         include_str!("resident_local_actor/await_sleep_cell.hs").into()
+                    } else if let Some(observation) = command_observation {
+                        include_str!("resident_local_actor/await_command_cell.hs")
+                            .replace("OBSERVATION", observation)
                     } else {
                         include_str!("resident_local_actor/await_watch_cell.hs")
                             .replace("DELAY", "3")
@@ -627,7 +671,25 @@ async fn resident_await_watch_case(case: WatchCase) {
         other => panic!("cancellation and original terminal reply differ: {other:?}"),
     }
     if !cancel_sleep {
+        if command_observation.is_some() {
+            assert_eq!(
+                command_backend
+                    .completion_count
+                    .load(std::sync::atomic::Ordering::Acquire),
+                0,
+                "the observation cancels before the independent job finishes"
+            );
+        }
         wait_for_command_completions(&command_backend, if cancel_first { 1 } else { 2 }).await;
+        if command_observation.is_some() {
+            assert_eq!(
+                command_backend
+                    .cancellation_count
+                    .load(std::sync::atomic::Ordering::Acquire),
+                0,
+                "cancelling the cell's observation does not cancel the command job"
+            );
+        }
     }
 
     forest.shutdown().await;

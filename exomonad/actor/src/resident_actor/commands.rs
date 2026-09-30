@@ -52,6 +52,7 @@ where
             continuation,
             request,
             permitted,
+            None,
         )
         .await
     }
@@ -64,6 +65,7 @@ pub(super) async fn resolve_command<H, O>(
     continuation: ResidentHole,
     request: CommandsReq,
     permitted: bool,
+    control: Option<&crate::WorkbenchExecutionControl>,
 ) -> CommandResolution
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -73,6 +75,31 @@ where
     let owner = context.actor;
     let mut settled = WorkbenchOperationDisposition::Unknown;
     let mut started_job = None;
+    // The job remains owned by CommandJobs. Cancelling this read-only wait
+    // abandons only the cell's observation, before its native input is used.
+    macro_rules! observe {
+        ($waiting:expr) => {{
+            match wait_for_observation(kernel, control, $waiting).await {
+                Ok(observation) => observation,
+                Err(reason) => {
+                    let (outcome, consumed) = environment
+                        .runner
+                        .abort_live(context.clone(), continuation, reason)
+                        .await;
+                    if consumed {
+                        if let Some(control) = control {
+                            control.acknowledge_cancellation();
+                        }
+                    }
+                    settled = match &outcome {
+                        Ok(_) => WorkbenchOperationDisposition::Committed,
+                        Err(error) => disposition_for_non_command_failure(error),
+                    };
+                    return outcome;
+                }
+            }
+        }};
+    }
     macro_rules! answer {
         ($action:expr) => {{
             let result = if permitted {
@@ -117,16 +144,28 @@ where
             }),
             CommandsReq::CommandStatusWith(id) => answer!(jobs.status(owner, &id).await),
             CommandsReq::CommandAwaitWith(id, milliseconds) => {
-                answer!(jobs.wait(owner, &id, milliseconds).await)
+                answer!(observe!(jobs.wait(owner, &id, milliseconds)))
             }
             CommandsReq::CommandAwaitAndNotifyWith(id, milliseconds) => answer!({
-                super::command_settlement::CommandSettlements::new(&environment)
-                    .await_and_notify(owner, &id, milliseconds)
-                    .await
+                let settlements = super::command_settlement::CommandSettlements::new(environment);
+                match jobs.owner(&id) {
+                    Ok(job_owner) if job_owner == owner => {
+                        match observe!(jobs.wait(owner, &id, milliseconds)) {
+                            Ok(observed) => {
+                                settlements
+                                    .notify_after_observation(owner, &id, observed)
+                                    .await
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Ok(_) => Err(CommandError::CommandUnauthorized),
+                    Err(error) => Err(error),
+                }
             }),
             CommandsReq::CommandForegroundWith(id) => {
                 let observed = if permitted {
-                    jobs.wait(owner, &id, 30_000).await
+                    observe!(jobs.wait(owner, &id, 30_000))
                 } else {
                     Err(CommandError::CommandUnauthorized)
                 };
@@ -245,9 +284,48 @@ where
         }
     }
     .await;
+    if let Some(control) = control {
+        control.finish_sleep();
+    }
     CommandResolution {
         disposition: settled,
         outcome,
         started_job,
+    }
+}
+
+pub(super) fn waits_for_completion(request: &CommandsReq) -> bool {
+    matches!(
+        request,
+        CommandsReq::CommandAwaitWith(..)
+            | CommandsReq::CommandAwaitAndNotifyWith(..)
+            | CommandsReq::CommandForegroundWith(..)
+    )
+}
+
+async fn wait_for_observation<F: std::future::Future>(
+    kernel: &KernelContext,
+    control: Option<&crate::WorkbenchExecutionControl>,
+    waiting: F,
+) -> Result<F::Output, String> {
+    let Some(control) = control else {
+        return Ok(waiting.await);
+    };
+    tokio::pin!(waiting);
+    tokio::select! {
+        observation = &mut waiting => {
+            if control.claim_expiry() {
+                Ok(observation)
+            } else {
+                Err("command observation interrupted by delivered input".into())
+            }
+        }
+        () = control.wait_for_cancellation() => {
+            Err("command observation interrupted by delivered input".into())
+        }
+        terminal = kernel.wait_requested_shutdown() => {
+            control.request_cancellation();
+            Err(format!("command observation interrupted by actor retirement: {}", terminal.summary))
+        }
     }
 }

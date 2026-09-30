@@ -149,21 +149,18 @@ impl CommandSettlements {
         Ok(job)
     }
 
-    /// Give a foreground command a bounded chance to finish. If it is still
-    /// live at the observation boundary, its existing settlement becomes the
-    /// single owner notice. A finish racing this handoff settles that same
-    /// record; the returned observation remains the live snapshot so the
-    /// completion is delivered only through the notice.
-    pub(super) async fn await_and_notify(
+    /// The caller has claimed this observation before the notice mutation.
+    /// A still-live job keeps its existing settlement as the single owner
+    /// notice; a racing finish is delivered through that same record.
+    pub(super) async fn notify_after_observation(
         &self,
         owner: crate::ActorRef,
         job: &str,
-        milliseconds: i64,
+        observed: tidepool_bridge_effects::CommandStatus,
     ) -> Result<tidepool_bridge_effects::CommandStatus, CommandError> {
         if self.jobs.owner(job)? != owner {
             return Err(CommandError::CommandUnauthorized);
         }
-        let observed = self.jobs.wait(owner, job, milliseconds).await?;
         if matches!(
             observed,
             tidepool_bridge_effects::CommandStatus::CommandFinished(_)
