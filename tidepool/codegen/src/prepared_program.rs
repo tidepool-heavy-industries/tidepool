@@ -396,7 +396,7 @@ pub struct CompiledProgram {
     /// `GlobalId`, occupying the block range right after `top_slots`.
     pub(crate) import_slots: Vec<plan::ImportSlot>,
     /// Block length (one word per top and import slot). Each installation
-    /// allocates its own block, registered and rewritten by the collector.
+    /// allocates its own block; only reference slots are collector roots.
     pub(crate) root_words: usize,
     /// This program's constructor declarations with the descriptors they
     /// compiled against, so an installing machine can absorb them into its
@@ -491,6 +491,25 @@ unsafe impl Sync for CompiledProgram {}
 static_assertions::assert_impl_all!(CompiledProgram: Send, Sync);
 
 impl CompiledProgram {
+    /// Collector roots in an installation's block, classified by the admitted
+    /// runtime representation. Byte tops and Address imports contain literal
+    /// pool addresses, whose lifetime belongs to the machine's permanent pool.
+    fn reference_slots(&self) -> impl Iterator<Item = usize> + '_ {
+        self.top_slots
+            .iter()
+            .filter_map(|(id, slot)| {
+                matches!(
+                    self.top_exports[id].rep,
+                    RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef
+                )
+                .then_some(*slot)
+            })
+            .chain(self.import_slots.iter().filter_map(|slot| {
+                matches!(slot.rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef)
+                    .then_some(slot.slot)
+            }))
+    }
+
     /// Compile with a fresh descriptor interner: a standalone program, or the
     /// first program of a machine (whose descriptors the machine absorbs at
     /// install). Later programs on a machine compile through

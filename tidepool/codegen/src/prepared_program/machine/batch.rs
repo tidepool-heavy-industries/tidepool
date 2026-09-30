@@ -638,13 +638,7 @@ impl PreparedMachine<'_> {
         }
 
         for candidate in candidates {
-            for slot in candidate
-                .image
-                .top_slots
-                .values()
-                .copied()
-                .chain(candidate.image.import_slots.iter().map(|slot| slot.slot))
-            {
+            for slot in candidate.image.reference_slots() {
                 let root = candidate
                     .roots
                     .slot_address(slot)
@@ -676,8 +670,8 @@ mod tests {
     use crate::prepared_program::{GroupInventory, ImageRegistry};
     use tidepool_repr::execution_schema::{
         testing, Atom, CachedHomeOwner, CertifiedGroup, CheckedLayout, ConstructorDecl,
-        ConstructorId, ExprFrame, FieldLayout, GlobalDecl, GlobalId, HeapRhs, ImportOwner,
-        ModuleVersion, Signature, SignatureId, UpdatePolicy, ValueRef,
+        ConstructorId, ExprFrame, FieldLayout, GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs,
+        ImportOwner, ModuleVersion, Signature, SignatureId, TopBinding, UpdatePolicy, ValueRef,
     };
 
     fn group(name: &str, ordinal: u32, other: &str) -> Arc<CompiledProgram> {
@@ -858,6 +852,117 @@ mod tests {
             vec![],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn batch_literal_tops_survive_promotion_and_retirement() {
+        const LITERAL: &[u8] = b"batch literal\0";
+        let mut producer = testing::wire_program();
+        producer.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        producer.constructors.push(ConstructorDecl {
+            identity: testing::identity("Literal", "Value"),
+            family: testing::identity("Literal", "Value"),
+            host_id: tidepool_repr::DataConId(90_004),
+            result_rep: RuntimeRep::LiftedRef,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+            tag: 1,
+            family_size: 1,
+        });
+        producer.expressions.nodes[0] = ExprFrame::Construct {
+            constructor: ConstructorId(0),
+            fields: vec![],
+        };
+        producer.bindings.push(Group::NonRecursive(TopBinding {
+            identity: testing::identity("Fixture", "literal"),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Bytes(LITERAL.to_vec()),
+            },
+        }));
+        producer.signatures.push(Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::Address]),
+        });
+        producer
+            .expressions
+            .nodes
+            .push(ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(
+                ValueId(1),
+            ))]));
+        producer.bindings.push(Group::NonRecursive(TopBinding {
+            identity: testing::identity("Fixture", "readLiteral"),
+            binding: HeapBinding {
+                id: ValueId(2),
+                rhs: HeapRhs::Function {
+                    signature: SignatureId(1),
+                    parameters: vec![],
+                    captures: vec![],
+                    body: 1,
+                },
+            },
+        }));
+        let producer = Arc::new(
+            CompiledProgram::compile_prepared_definitions(&testing::prepare(producer).unwrap())
+                .unwrap(),
+        );
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        let ids = machine
+            .install_shared_batch(vec![BatchProgram {
+                image: producer,
+                imports: vec![],
+            }])
+            .unwrap();
+        machine.pin(ids[0]).unwrap();
+        let call = PreparedCallOptions {
+            observation_budget: 0,
+            collect_before_observation: false,
+        };
+        // The result starts in the nursery. Retention promotes it and fixes
+        // sibling roots while the byte top is live.
+        let result = machine
+            .run_entry_retained(ids[0], ValueId(0), &[], call, RealmId::ROOT)
+            .unwrap();
+        let [PreparedResult::Managed(value)] = result.values.as_slice() else {
+            panic!("producer must return a managed constructor");
+        };
+        assert!(matches!(
+            machine.inspect_outer(*value, RealmId::ROOT).unwrap(),
+            PreparedOuter::Constructor { .. }
+        ));
+        assert!(machine.release(*value));
+        let literal_before = machine
+            .run_entry_retained(ids[0], ValueId(2), &[], call, RealmId::ROOT)
+            .unwrap();
+        let [PreparedResult::Scalar(address)] = literal_before.values.as_slice() else {
+            panic!("accessor must return the raw literal address");
+        };
+        let address = *address;
+        let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert!(retired.programs.is_empty());
+        let literal_after = machine
+            .run_entry_retained(ids[0], ValueId(2), &[], call, RealmId::ROOT)
+            .unwrap();
+        assert_eq!(literal_after.values, vec![PreparedResult::Scalar(address)]);
+        assert!(machine.unpin(ids[0]));
+        let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(retired.programs, vec![ids[0]]);
+        // SAFETY: this address came from the admitted Bytes top; the machine's
+        // permanent literal pool retains its allocation after producer retirement.
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(address as *const u8, LITERAL.len()) },
+            LITERAL
+        );
+        assert_eq!(machine.residency().programs, 0);
     }
 
     #[test]
