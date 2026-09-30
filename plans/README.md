@@ -11,6 +11,10 @@ unconsumed proposals are removed; Git retains their history.
   implementation wave through M1/M2, recovery, structural performance and native
   Buck release readiness; live trials and publication remain separate.
 
+- [Release preparation handoff](release-preparation-handoff.md): package
+  producer, immutable staging/selection, run retention, and state compatibility
+  contracts required before deployment can move to staged releases.
+
 - [Engine and harness implementation](engine-harness-integration.md): approved
   parallel foundation closure, compiler/native and Git/process redesign, shared
   private notebook execution and embedded harness; stop at verified readiness.
