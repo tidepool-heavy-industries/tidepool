@@ -1466,6 +1466,20 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 detail: format!("cannot admit exact source layer: {error}"),
             })?;
         if !current_builtin {
+            if let Some(layers) = &self.environment.source_layers {
+                layers
+                    .validate_source_authority(&admitted_source)
+                    .map_err(|error| KernelInvocationFailure::Rejected {
+                        actor: context.actor,
+                        detail: format!("cannot admit source authority: {error}"),
+                    })?;
+            }
+            if !admitted_source.is_owned() && !context.source_layer.is_empty() {
+                return Err(KernelInvocationFailure::Rejected {
+                    actor: context.actor,
+                    detail: "selected helper source roots have no retained source owner".into(),
+                });
+            }
             context = context.with_issued_source(&admitted_source);
         }
         Ok(WorkbenchPreflight::Admitted(WorkbenchAdmission {
@@ -2964,11 +2978,13 @@ where
             // first cell already reaches its own layer and no other.
             if let Some(layers) = &source_layers {
                 if let Some(lease) = &checkpoint_lease {
-                    layers.bind_checkpoint_for(
-                        child.identity().into(),
-                        helper_branch.as_deref().unwrap_or_default(),
-                        &lease.issuer_source_layer,
-                    );
+                    layers
+                        .bind_checkpoint_for(
+                            child.identity().into(),
+                            helper_branch.as_deref().unwrap_or_default(),
+                            &lease.issuer_source_layer,
+                        )
+                        .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
                 } else {
                     layers.bind_for(
                         child.identity().into(),
@@ -4057,7 +4073,7 @@ where
                     } else {
                         freeze_source()
                     };
-                    if !matches!(after, Ok(ref layer) if layer.identities == before.identities) {
+                    if !matches!(after, Ok(ref layer) if layer.same_revision(&before)) {
                         self.environment
                             .runner
                             .retire_fork_scopes(context.clone(), vec![scope])
