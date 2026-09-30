@@ -1630,6 +1630,9 @@ impl PersistentSession {
             .lib
             .as_ref()
             .ok_or(SessionError::MissingDeclarationLibrary)?;
+        if !lib.validate_recovered_public_owner(owner)? {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
         let state = lib
             .durable_graph
             .as_ref()
@@ -1637,35 +1640,6 @@ impl PersistentSession {
                 path: lib.root.clone(),
                 detail: "exact recovery graph is not attached".into(),
             })?;
-        let manifest_owner =
-            state
-                .owner
-                .as_ref()
-                .ok_or_else(|| SessionError::RecoveryManifest {
-                    path: state.path.clone(),
-                    detail: "public recovery requires its configured manifest owner".into(),
-                })?;
-        manifest_owner.validate_owner()?;
-        let bytes = std::fs::read(&state.path).map_err(|error| SessionError::RecoveryManifest {
-            path: state.path.clone(),
-            detail: error.to_string(),
-        })?;
-        let current = super::recovery::read_v2_bytes(
-            &state.path,
-            state.path.parent().expect("attached manifest parent"),
-            &bytes,
-        )
-        .map_err(|error| SessionError::RecoveryManifest {
-            path: state.path.clone(),
-            detail: error.to_string(),
-        })?;
-        if state.unconfirmed.is_some()
-            || current.is_none_or(|read| {
-                !read.artifact_losses.is_empty() || read.graph.checksum != state.graph.checksum
-            })
-        {
-            return Err(SessionError::WrongPublicManifestTicket);
-        }
         if lib.durable_public_scopes.contains_key(owner) {
             return Err(SessionError::RecoveryManifest {
                 path: state.path.clone(),
@@ -1698,6 +1672,16 @@ impl PersistentSession {
         }
         self.public_visibility_epochs.insert(scope, epoch);
         Ok(scope)
+    }
+
+    pub fn validate_recovered_public_owner(
+        &self,
+        owner: &RecoveryPublicOwner,
+    ) -> Result<bool, SessionError> {
+        self.lib
+            .as_ref()
+            .ok_or(SessionError::MissingDeclarationLibrary)?
+            .validate_recovered_public_owner(owner)
     }
 
     /// Durably initialize one actor's exact captured public surface before

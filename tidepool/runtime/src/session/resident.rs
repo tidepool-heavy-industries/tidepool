@@ -2136,6 +2136,13 @@ where
         self.state.initialize_durable_public_scope(owner, scope)
     }
 
+    pub fn validate_recovered_public_owner(
+        &self,
+        owner: &super::RecoveryPublicOwner,
+    ) -> Result<bool, SessionError> {
+        self.state.validate_recovered_public_owner(owner)
+    }
+
     pub fn transfer_recovered_public_owner(
         &mut self,
         predecessor: &super::RecoveryPublicOwner,

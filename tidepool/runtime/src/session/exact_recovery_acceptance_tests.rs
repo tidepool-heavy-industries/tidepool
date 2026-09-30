@@ -77,6 +77,83 @@ fn library(id: u64, source: &Path, manifest: &Path, include: &[PathBuf]) -> Sess
 }
 
 #[test]
+fn recovered_owner_validation_checks_the_current_owned_manifest_without_minting_scopes() {
+    let durable = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let manifest = durable.path().join("declarations.json");
+    let mut session =
+        PersistentSession::new(Some(library(4410, source.path(), &manifest, &[])), 1024);
+    let public = session.mint_isolated_scope();
+    session
+        .initialize_durable_public_scope(owner(1), public)
+        .unwrap();
+    let before_scope_count = session.scope_tree().len();
+    let before_visibility = session.public_visibility_snapshot_in(public);
+    let before_bytes = std::fs::read(&manifest).unwrap();
+    assert!(session
+        .lib()
+        .validate_recovered_public_owner(&owner(1))
+        .unwrap());
+    assert!(!session.validate_recovered_public_owner(&owner(2)).unwrap());
+    assert_eq!(session.scope_tree().len(), before_scope_count);
+    assert_eq!(
+        session.public_visibility_snapshot_in(public),
+        before_visibility
+    );
+    assert_eq!(std::fs::read(&manifest).unwrap(), before_bytes);
+
+    let mut newer = session.lib().durable_graph.as_ref().unwrap().graph.clone();
+    newer.high_water.0 += 1;
+    newer.seal().unwrap();
+    std::fs::write(&manifest, serde_json::to_vec(&newer).unwrap()).unwrap();
+    assert!(session.validate_recovered_public_owner(&owner(1)).is_err());
+    assert_eq!(session.scope_tree().len(), before_scope_count);
+    std::fs::write(&manifest, b"corrupt manifest").unwrap();
+    assert!(session.validate_recovered_public_owner(&owner(1)).is_err());
+    std::fs::write(&manifest, before_bytes).unwrap();
+    assert!(session.validate_recovered_public_owner(&owner(1)).unwrap());
+}
+
+#[test]
+fn recovered_owner_validation_retains_and_revalidates_the_actual_run_authority() {
+    struct RevocableRun {
+        retained: Arc<TestRunOwner>,
+        admitted: std::sync::atomic::AtomicBool,
+    }
+    impl RecoveryRunAuthority for RevocableRun {
+        fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
+            Ok(self.admitted.load(std::sync::atomic::Ordering::Acquire)
+                && self.retained.owns_run(root)?)
+        }
+    }
+    let durable = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let manifest = durable.path().join("declarations.json");
+    let retained = Arc::new(RevocableRun {
+        retained: run_owner(durable.path()),
+        admitted: std::sync::atomic::AtomicBool::new(true),
+    });
+    let mut lib = SessionLib::open(
+        SessionId(4411),
+        source.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap();
+    lib.attach_owned_recovery_graph_v3(&manifest, retained.clone())
+        .unwrap();
+    let mut session = PersistentSession::new(Some(lib), 1024);
+    let public = session.mint_isolated_scope();
+    session
+        .initialize_durable_public_scope(owner(1), public)
+        .unwrap();
+    assert!(session.validate_recovered_public_owner(&owner(1)).unwrap());
+    retained
+        .admitted
+        .store(false, std::sync::atomic::Ordering::Release);
+    assert!(session.validate_recovered_public_owner(&owner(1)).is_err());
+}
+
+#[test]
 fn recovered_public_owner_rejects_foreign_admission_and_incarnation_without_effects() {
     let durable = tempfile::tempdir().unwrap();
     let first_root = tempfile::tempdir().unwrap();
@@ -818,12 +895,18 @@ fn durable_child_visible_uncertainty_confirms_without_reinitializing_or_reexecut
     assert!(session
         .begin_durable_private_execution(&child_owner, child)
         .is_err());
+    assert!(session
+        .validate_recovered_public_owner(&child_owner)
+        .is_err());
     session
         .confirm_durable_public_scope(&child_owner, child)
         .unwrap();
     session
         .confirm_durable_public_scope(&child_owner, child)
         .unwrap();
+    assert!(session
+        .validate_recovered_public_owner(&child_owner)
+        .unwrap());
     assert_eq!(
         session
             .initialize_durable_public_scope(child_owner.clone(), child)

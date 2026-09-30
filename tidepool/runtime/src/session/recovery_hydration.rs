@@ -98,6 +98,54 @@ impl OwnedRecoveryManifest {
 }
 
 impl SessionLib {
+    /// Check an already attached run-owned manifest before reconciling an
+    /// external conversation binding. This observes the exact persisted owner
+    /// without minting a scope or transferring its incarnation.
+    pub fn validate_recovered_public_owner(
+        &self,
+        expected: &RecoveryPublicOwner,
+    ) -> Result<bool, SessionError> {
+        let state = self
+            .durable_graph
+            .as_ref()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        let retained = state
+            .owner
+            .as_ref()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        retained.validate_owner()?;
+        if state.unconfirmed.is_some() {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        let invalid = |detail: String| SessionError::RecoveryManifest {
+            path: state.path.clone(),
+            detail,
+        };
+        let bytes = std::fs::read(&state.path).map_err(|error| invalid(error.to_string()))?;
+        let read = recovery::read_v2_bytes(
+            &state.path,
+            state
+                .path
+                .parent()
+                .expect("attached canonical manifest parent"),
+            &bytes,
+        )
+        .map_err(|error| invalid(error.to_string()))?
+        .ok_or(SessionError::WrongPublicManifestTicket)?;
+        if !read.artifact_losses.is_empty()
+            || read.graph.checksum != state.graph.checksum
+            || read.graph.high_water != state.graph.high_water
+        {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        retained.validate_owner()?;
+        Ok(read
+            .graph
+            .public_surfaces
+            .iter()
+            .any(|surface| &surface.owner == expected))
+    }
+
     /// A path alone can initialize an empty graph, but cannot admit a retained
     /// public surface. Production recovery uses the configured run owner.
     pub fn attach_recovery_graph_v2(
