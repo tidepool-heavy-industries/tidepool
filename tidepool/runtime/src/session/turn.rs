@@ -5441,6 +5441,40 @@ mod tests {
             else {
                 panic!("ordered checked item must compile its binding recipe")
             };
+            let proof = compiled
+                .certification
+                .as_ref()
+                .unwrap()
+                .checked_execution()
+                .unwrap();
+            proof
+                .validate_runtime_admission(reservation.digest(), protected.admission().digest())
+                .unwrap();
+            assert!(proof
+                .validate_runtime_admission([0; 32], protected.admission().digest())
+                .is_err());
+            proof
+                .validate_settled_native_bindings(snapshot.settled_native_bindings())
+                .unwrap();
+            let mut edited_rows = snapshot
+                .settled_native_bindings()
+                .map(|(name, identity, generation, id)| {
+                    (name.to_owned(), identity.clone(), generation, id)
+                })
+                .collect::<Vec<_>>();
+            if let Some(row) = edited_rows.first_mut() {
+                row.3 ^= 1;
+                assert!(proof
+                    .validate_settled_native_bindings(edited_rows.iter().map(
+                        |(name, identity, generation, id)| (
+                            name.as_str(),
+                            identity,
+                            *generation,
+                            *id
+                        )
+                    ))
+                    .is_err());
+            }
             if item.kind() == tidepool_toolchain::checked_cell::CheckedItemKind::Bind {
                 resident
                     .run_bind_with_sites(
@@ -5918,7 +5952,7 @@ mod tests {
         assert!(expression_fold.is_none());
         assert_eq!(
             expression_check.fold_outcome(),
-            &CellFoldOutcome::Ineligible(CellFoldIneligibility::Expression)
+            &CellFoldOutcome::NotRequested
         );
         let expression_item = expression_check.checked_item(0).unwrap();
         assert!(expression_item.signatures()[0]

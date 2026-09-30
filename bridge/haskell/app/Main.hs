@@ -1164,12 +1164,9 @@ runCellMode compiler caches args cellPath = do
             <> foldMap encodeCheckedSignature signatures
             <> maybe encodeNull (text . shaHex) plannedReceipt
       BS.writeFile (outDir </> "checked-cell.cbor") (toStrictByteString receipt)
-    -- Best-effort, and entirely inside this SAME 'try': a fold failure (an
-    -- ineligible cell shape, a missing template, a real compile rejection)
-    -- must never turn a SUCCESSFUL whole-cell check into a reported failure.
-    -- 'attemptCellFoldTurn' catches its own exceptions and simply leaves
-    -- '--turn-out' unwritten, which is the caller's documented signal to
-    -- fall back to its own separate '--turn' request.
+    -- Fold preparation is optional and cannot change a successful check.
+    -- Its typed outcome distinguishes ineligibility from a real attempt;
+    -- any partial artifacts of a failed attempt remain diagnostic only.
     foldOutcome <- if requestCellFoldTurn args
       then attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled admittedScope
       else pure CellFoldNotRequested
