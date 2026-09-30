@@ -54,17 +54,21 @@ fn measured<T>(
 ) -> T {
     let before = counters(resident, images);
     let started = Instant::now();
-    let result = action(resident);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(resident)));
     let elapsed_ns = started.elapsed().as_nanos();
     eprintln!(
         "protected-scale {}",
         serde_json::json!({
             "schema": 1, "prefix": scenario.0, "baseline": scenario.1,
             "phase": phase, "item": item, "elapsed_ns": elapsed_ns,
+            "completed": result.is_ok(),
             "before": before, "after": counters(resident, images),
         })
     );
-    result
+    match result {
+        Ok(value) => value,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
 }
 
 fn execute_cell(
