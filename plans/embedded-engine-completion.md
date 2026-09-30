@@ -689,3 +689,30 @@ review but its abort regression still needs descriptor-lifetime reconciliation.
 Do not infer M1, M2 or compiler completion from the focused successes above.
 WIP is retained at `target/completion-evidence/active-wip/20260930T035527Z`.
 No push, live provider trial or backend-default change occurred.
+
+### 2026-09-30 export-owner and packaged-compilation follow-up
+
+Product `47bee6df3` now passes both exact native-export ownership regressions
+(`/tmp/retained-code-owner-gate.log`). Optional export staging `88dee24ae1`
+passes both tests in its isolated target, including repeated abort with exact
+residency accounting (`/tmp/export-staging-gate5.log`); joined as `2d6812597`.
+The descriptor baseline explicitly includes the three permanent external heap
+layouts initialized by the first successful install. No growing roots or
+instance metadata are ignored. Do not share Cargo target directories across
+divergent worktrees: the attempted gate4 reused incompatible repr evidence;
+the isolated gate5 is the accepted result.
+
+Main `2bedda6fa` passes two native Buck tests: bundle startup and actual Haskell
+fixture compilation through its packaged frontend and worker, producing a
+prepared artifact (`/tmp/native-package-compile-gate2.log`). The package still
+uses the earlier main engine revision; final joined-engine package acceptance
+remains pending. The current exact local harness source is 2f6edc79; observer
+abfbf3b is pinned on product but not yet regenerated into the main Buck graph.
+
+Real notification gate7 clears the missing native-export owner and now fails
+at `UnsettledEntry` before notification assertions. The constructor evidence
+failure also occurs in the actor watch test. Diagnostics are opt-in and retained
+separately; no scheduling repair is justified yet. Runtime's exact-context
+consumer compiles and executes but refuses a generated wrapper's unselected
+standard home import. The repair must preserve admitted lexical imports
+separately from retained implementation dependencies.
