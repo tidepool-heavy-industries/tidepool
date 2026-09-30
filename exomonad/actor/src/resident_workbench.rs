@@ -2768,6 +2768,8 @@ pub enum CommandObservationStop {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResidentActorWorkbenchError {
+    #[error("actor retired before machine admission: {0:?}")]
+    RetiredBeforeAdmission(crate::ActorTerminal),
     #[error("command {job} retained: {reason}")]
     CommandObservationStopped {
         job: String,
@@ -2872,6 +2874,17 @@ fn classify_resumption(error: ResidentResumeError) -> ResidentActorWorkbenchErro
     }
 }
 
+enum MachineCheckoutAdmission {
+    Wait(Option<Duration>),
+    UntilRetirement(crate::RetainedActorExit),
+}
+
+impl From<Option<Duration>> for MachineCheckoutAdmission {
+    fn from(wait: Option<Duration>) -> Self {
+        Self::Wait(wait)
+    }
+}
+
 impl<H, O> ResidentMachineAccess<H, O>
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -2920,7 +2933,7 @@ where
     async fn with_machine_wait<ResultValue>(
         &self,
         context: crate::ActorSessionContext,
-        max_wait: Option<Duration>,
+        admission: impl Into<MachineCheckoutAdmission>,
         operation: impl FnOnce(
                 &mut ResidentSession<H, O>,
                 &crate::ActorSessionContext,
@@ -2955,7 +2968,7 @@ where
         self.with_host_machine(
             context.actor.to_string(),
             context.placement.session,
-            max_wait,
+            admission,
             move |session, source| {
                 session
                     .set_actor_execution(
@@ -2991,7 +3004,7 @@ where
         &self,
         actor: impl Into<String>,
         session_id: tidepool_repr::SessionId,
-        max_wait: Option<Duration>,
+        admission: impl Into<MachineCheckoutAdmission>,
         operation: impl FnOnce(
                 &mut ResidentSession<H, O>,
                 &ActorWorkbenchSource,
@@ -3002,13 +3015,26 @@ where
         let actor = actor.into();
         let request = tidepool_runtime::session::registry::CheckoutRequest::Run;
         let admission_started = std::time::Instant::now();
-        let checkout = match max_wait {
-            Some(limit) => {
+        let retirement = match admission.into() {
+            MachineCheckoutAdmission::Wait(wait) => (wait, None),
+            MachineCheckoutAdmission::UntilRetirement(retirement) => (None, Some(retirement)),
+        };
+        let checkout = match &retirement {
+            (_, Some(retirement)) => {
+                tokio::select! {
+                    biased;
+                    terminal = retirement.wait_requested_shutdown() => {
+                        return Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(terminal));
+                    }
+                    checkout = self.machines.checkout_queued(session_id, request) => checkout,
+                }
+            }
+            (Some(limit), None) => {
                 self.machines
-                    .checkout_wait(session_id, request, limit)
+                    .checkout_wait(session_id, request, *limit)
                     .await
             }
-            None => self.machines.checkout_queued(session_id, request).await,
+            (None, None) => self.machines.checkout_queued(session_id, request).await,
         }
         .map_err(ResidentActorWorkbenchError::Checkout)?;
         // Every cell holds the run's resident machine exclusively, so the
@@ -3038,6 +3064,11 @@ where
             // cancelled while this closure is running; settlement must not
             // depend on that caller continuing to poll the JoinHandle.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let Some(retirement) = &retirement.1 {
+                    retirement
+                        .claim_before_shutdown(|| true)
+                        .map_err(ResidentActorWorkbenchError::RetiredBeforeAdmission)?;
+                }
                 operation(&mut session, &source)
             }));
             match outcome {
@@ -7112,17 +7143,22 @@ where
         context: crate::ActorSessionContext,
         owner: tidepool_runtime::session::RecoveryPublicOwner,
         lease: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+        retirement: crate::RetainedActorExit,
     ) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, context, _| {
-                let scope = context.placement.lexical_scope;
-                session.validate_lexical_scope_lease(scope, &lease)?;
-                session
-                    .initialize_durable_public_scope(owner, scope)
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })
-            })
+            .with_machine_wait(
+                context,
+                MachineCheckoutAdmission::UntilRetirement(retirement),
+                move |session, context, _| {
+                    let scope = context.placement.lexical_scope;
+                    session.validate_lexical_scope_lease(scope, &lease)?;
+                    session
+                        .initialize_durable_public_scope(owner, scope)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })
+                },
+            )
             .await
     }
 
@@ -9892,10 +9928,14 @@ where
         max_wait: impl Into<Option<Duration>>,
     ) -> Result<(), ResidentActorWorkbenchError> {
         self.access
-            .with_machine_wait(context, max_wait.into(), move |session, _, _| {
-                let _ = session.close_realm(realm);
-                Ok(())
-            })
+            .with_machine_wait(
+                context,
+                MachineCheckoutAdmission::Wait(max_wait.into()),
+                move |session, _, _| {
+                    let _ = session.close_realm(realm);
+                    Ok(())
+                },
+            )
             .await
     }
 
@@ -14341,6 +14381,130 @@ mod request_tests {
             ),
             session_root,
         )
+    }
+
+    fn child_admission_fixture() -> (
+        Arc<ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>>,
+        ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        crate::ActorSessionContext,
+        tempfile::TempDir,
+    ) {
+        let id = tidepool_repr::SessionId(79);
+        let (mut session, root) = bare_session_at(id);
+        let scope = session.mint_isolated_scope();
+        let context = crate::ActorDescriptor::new(
+            "child-admission",
+            crate::ActorPlacement {
+                session: id,
+                resource_scope: RealmId::ROOT,
+                lexical_scope: scope,
+            },
+        )
+        .session_context(crate::ActorRef::first(crate::ActorId(79)));
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(id, Box::new(session));
+        let runner = ResidentActorRunner::new(
+            Arc::clone(&machines),
+            ActorWorkbenchSource::new("", Vec::new()),
+        );
+        (machines, runner, context, root)
+    }
+
+    fn child_retirement() -> crate::ActorTerminal {
+        crate::ActorTerminal {
+            kind: crate::ActorExitKind::Cancelled,
+            summary: "child preparation retired".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn fork_child_admission_prior_retirement_refuses_ready_checkout() {
+        let (machines, runner, context, _root) = child_admission_fixture();
+        let retirement = crate::RetainedActorExit::new();
+        let terminal = retirement.request_shutdown(child_retirement());
+        let result = runner
+            .access
+            .with_machine_wait(
+                context.clone(),
+                MachineCheckoutAdmission::UntilRetirement(retirement),
+                |_, _, _| -> Result<(), ResidentActorWorkbenchError> {
+                    panic!("retired child must not enter the native owner")
+                },
+            )
+            .await;
+        assert!(
+            matches!(result, Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(actual)) if actual == terminal)
+        );
+        assert_eq!(
+            machines.kind(context.placement.session),
+            Some(tidepool_runtime::session::registry::SlotKind::Idle)
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_child_admission_retirement_removes_queued_checkout() {
+        let (machines, runner, context, _root) = child_admission_fixture();
+        let id = context.placement.session;
+        let (session, receipt) = machines.checkout_run(id).unwrap().into_parts();
+        let retirement = crate::RetainedActorExit::new();
+        let task = runner.access.with_machine_wait(
+            context,
+            MachineCheckoutAdmission::UntilRetirement(retirement.clone()),
+            |_, _, _| -> Result<(), ResidentActorWorkbenchError> {
+                panic!("queued retired child must not enter the native owner")
+            },
+        );
+        tokio::pin!(task);
+        assert!(matches!(
+            futures_util::poll!(task.as_mut()),
+            std::task::Poll::Pending
+        ));
+        let terminal = retirement.request_shutdown(child_retirement());
+        let result = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(actual)) if actual == terminal)
+        );
+        machines.settle_suspended(receipt, session, Vec::new());
+        // Cancellation removed its queue position and did not consume custody.
+        let checkout = machines.checkout_run(id).unwrap();
+        drop(checkout);
+    }
+
+    #[tokio::test]
+    async fn fork_child_admission_claimed_operation_keeps_result_during_retirement() {
+        let (machines, runner, context, _root) = child_admission_fixture();
+        let id = context.placement.session;
+        let retirement = crate::RetainedActorExit::new();
+        let (entered, observe) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let task = tokio::spawn(async move {
+            runner
+                .access
+                .with_machine_wait(
+                    context,
+                    MachineCheckoutAdmission::UntilRetirement(retirement.clone()),
+                    move |_, _, _| {
+                        entered.send(retirement).unwrap();
+                        wait.recv_timeout(Duration::from_secs(1)).unwrap();
+                        Ok(37)
+                    },
+                )
+                .await
+        });
+        let retirement = observe.await.unwrap();
+        retirement.request_shutdown(child_retirement());
+        assert!(
+            !task.is_finished(),
+            "an admitted operation must keep its real visibility result"
+        );
+        release.send(()).unwrap();
+        assert_eq!(task.await.unwrap().unwrap(), 37);
+        assert_eq!(
+            machines.kind(id),
+            Some(tidepool_runtime::session::registry::SlotKind::Idle)
+        );
     }
 
     #[test]
