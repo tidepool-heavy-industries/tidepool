@@ -33,6 +33,7 @@ genrule(
         "//bridge/facade:exomonad",
         "//tidepool/extract-cmd:tidepool-extract",
         "//bridge/haskell:tidepool_extract_bin",
+        "//bridge/haskell:tidepool_extract_internal[shared]",
         "//web:dist",
         ":embedded_web_provenance",
     ],
@@ -40,12 +41,15 @@ genrule(
     bash = """set -euo pipefail
 OUTPUT="$PWD/$OUT"
 mkdir -p "$OUTPUT/bin" "$OUTPUT/share/exomonad/web" "$OUTPUT/share/exomonad"
+# The worker's Haskell binary RPATH points here for its shared component.
+mkdir -p "$OUTPUT/bin/__tidepool_extract_bin__shared_libs_symlink_tree"
 GHC="$(exe toolchains//:ghc)"
 "$GHC" --print-libdir > "$OUTPUT/share/exomonad/ghc-libdir.txt"
 "$GHC" --numeric-version > "$OUTPUT/share/exomonad/ghc-version.txt"
 cp -a "$PWD/$(location //bridge/facade:exomonad)" "$OUTPUT/bin/exomonad"
 cp -a "$PWD/$(location //tidepool/extract-cmd:tidepool-extract)" "$OUTPUT/bin/tidepool-extract"
 cp -a "$PWD/$(location //bridge/haskell:tidepool_extract_bin)" "$OUTPUT/bin/tidepool-extract-bin"
+cp -a "$PWD/$(location //bridge/haskell:tidepool_extract_internal[shared])" "$OUTPUT/bin/__tidepool_extract_bin__shared_libs_symlink_tree/"
 WEB="$PWD/$(location //web:dist)"
 cp -a "$WEB/web/." "$OUTPUT/share/exomonad/web/"
 cp -a "$PWD/$(location :embedded_web_provenance)" "$OUTPUT/share/exomonad/harness-source-revision.txt"
