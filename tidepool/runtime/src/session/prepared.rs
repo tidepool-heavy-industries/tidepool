@@ -1740,9 +1740,13 @@ struct CodeExport {
     handle: PreparedHandle,
     entry: Option<Signature>,
     /// The exact GHC-loaded package interface selected for this exported
-    /// binder. First certified use attaches it only after the atomic native
-    /// install commits; later selections must match this same digest.
+    /// binder. Ordinary legacy roots may have no digest, but protected package
+    /// owners require a complete match before native resolution.
     interface_digest: Option<[u8; 32]>,
+}
+
+fn matches_protected_package_interface(export: &CodeExport, requested: &[u8; 32]) -> bool {
+    requested != &[0; 32] && export.interface_digest.as_ref() == Some(requested)
 }
 
 /// The generation every code export is offered at. Package code is fixed for
@@ -2567,7 +2571,9 @@ impl PreparedEngine {
                 // Not a session value binding: it may be a package top an
                 // earlier turn already installed and this turn was told to
                 // import (see `code_exports`). Absent from both: left out,
-                // and `link_program` reports the typed `MissingImport`.
+                // and `link_program` reports the typed `MissingImport`. This
+                // is the legacy ordinary resolver; protected package imports
+                // use exact `ImportOwner::Package` provenance below.
                 if let Some(export) = self.code_exports.get(identity).cloned() {
                     let evaluated = self
                         .machine
@@ -2693,6 +2699,9 @@ impl PreparedEngine {
                         binder,
                         interface_digest,
                     } => {
+                        if *interface_digest == [0; 32] {
+                            return Err(PreparedRuntimeError::MissingCertifiedOwner(owner.clone()));
+                        }
                         let handle = exact_external.get(owner).copied().ok_or_else(|| {
                             PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
                         })?;
@@ -2704,9 +2713,7 @@ impl PreparedEngine {
                                     && declaration.identity == *binder
                                     && binder.unit == *unit
                                     && binder.module == *module
-                                    && export
-                                        .interface_digest
-                                        .is_none_or(|known| known == *interface_digest)
+                                    && matches_protected_package_interface(export, interface_digest)
                             })
                             .ok_or_else(|| {
                                 PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
@@ -2788,6 +2795,9 @@ impl PreparedEngine {
             else {
                 continue;
             };
+            if *interface_digest == [0; 32] {
+                return Err(PreparedRuntimeError::MissingCertifiedOwner(owner.clone()));
+            }
             if self.code_exports.contains_key(binder) {
                 continue;
             }
@@ -3089,7 +3099,8 @@ impl PreparedEngine {
                             binder,
                             interface_digest,
                         } => {
-                            if declaration.identity != *binder
+                            if *interface_digest == [0; 32]
+                                || declaration.identity != *binder
                                 || binder.unit != *unit
                                 || binder.module != *module
                             {
@@ -3098,10 +3109,7 @@ impl PreparedEngine {
                                 ));
                             }
                             let import = if let Some(export) = self.code_exports.get(binder) {
-                                if export
-                                    .interface_digest
-                                    .is_some_and(|known| known != *interface_digest)
-                                {
+                                if !matches_protected_package_interface(export, interface_digest) {
                                     return Err(PreparedRuntimeError::MissingCertifiedOwner(
                                         owner.clone(),
                                     ));
@@ -5998,6 +6006,16 @@ pub(super) mod tests {
             result.values.as_slice(),
             [PreparedResult::Scalar(42)]
         ));
+        let stale = group(false, [8; 32]);
+        assert!(matches!(
+            install(&mut engine, &stale),
+            Err(PreparedRuntimeError::MissingCertifiedOwner(owner))
+                if owner == package_owner([8; 32])
+        ));
+        assert_eq!(
+            engine.code_exports[&package].interface_digest,
+            Some([9; 32])
+        );
         for token in tokens {
             assert!(engine.release(token.handle()));
         }
@@ -6059,7 +6077,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn package_interface_provenance_commits_only_after_native_install() {
+    fn protected_package_import_rejects_unproven_legacy_export() {
         use tidepool_codegen::prepared_program::GroupInventory;
         use tidepool_repr::execution_schema::{
             CachedHomeOwner, CertifiedGroup, ImportOwner, ModuleVersion,
@@ -6071,7 +6089,7 @@ pub(super) mod tests {
             binder: package.clone(),
             interface_digest: [9; 32],
         };
-        let group = |mismatched_signature: bool| {
+        let group = |mismatched_signature: bool, digest| {
             let mut wire = testing::wire_program();
             if let Group::NonRecursive(top) = &mut wire.bindings[0] {
                 top.identity = testing::identity("Fixture", "cached");
@@ -6098,7 +6116,12 @@ pub(super) mod tests {
                     product_sha256: [3; 32],
                 },
                 testing::projected_group(wire, 2).unwrap(),
-                vec![owner.clone()],
+                vec![ImportOwner::Package {
+                    unit: package.unit.clone(),
+                    module: package.module.clone(),
+                    binder: package.clone(),
+                    interface_digest: digest,
+                }],
             )
             .unwrap()
         };
@@ -6117,20 +6140,39 @@ pub(super) mod tests {
                 .compile(&ImageRegistry::new())
                 .unwrap()
         }
-        let bad = [group(true)];
+        let bad = [group(true, [9; 32])];
         assert!(engine
             .install_certified_demand(selected(&bad), &exact, &BindingTable::new())
-            .is_err());
+            .is_err_and(|error| matches!(
+                error,
+                PreparedRuntimeError::MissingCertifiedOwner(missing) if missing == owner
+            )));
         assert_eq!(engine.code_exports[&package].interface_digest, None);
-        let good = [group(false)];
-        let installed = engine
+        let good = [group(false, [9; 32])];
+        let error = engine
             .install_certified_demand(selected(&good), &exact, &BindingTable::new())
-            .unwrap();
-        assert_eq!(installed.len(), 1);
-        assert_eq!(
-            engine.code_exports[&package].interface_digest,
-            Some([9; 32])
-        );
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            PreparedRuntimeError::MissingCertifiedOwner(missing) if missing == owner
+        ));
+        assert_eq!(engine.code_exports[&package].interface_digest, None);
+        let zero_owner = ImportOwner::Package {
+            unit: package.unit.clone(),
+            module: package.module.clone(),
+            binder: package.clone(),
+            interface_digest: [0; 32],
+        };
+        let zero = [group(false, [0; 32])];
+        assert!(matches!(
+            engine.install_certified_demand(
+                selected(&zero),
+                &HashMap::from([(zero_owner.clone(), handle)]),
+                &BindingTable::new(),
+            ),
+            Err(PreparedRuntimeError::MissingCertifiedOwner(missing)) if missing == zero_owner
+        ));
+        assert_eq!(engine.code_exports[&package].interface_digest, None);
         let wrong = ImportOwner::Package {
             unit: package.unit.clone(),
             module: package.module.clone(),
@@ -6162,6 +6204,7 @@ pub(super) mod tests {
             engine.install_certified_demand(selected(&wrong_groups), &wrong_exact, &BindingTable::new()),
             Err(PreparedRuntimeError::MissingCertifiedOwner(rejected)) if rejected == wrong
         ));
+        assert_eq!(engine.code_exports[&package].interface_digest, None);
     }
 
     #[test]
