@@ -219,10 +219,14 @@ pub enum WorkbenchOperationDisposition {
 /// Which layer produced an item's failure, kept as data instead of leaving a
 /// reader to infer it from `output`'s prose.
 ///
-/// `Compile` never reached an effect at all: the cell or declaration was
-/// rejected before anything ran. `Effect` covers an effect that itself
-/// failed, or a unit that ended before every effect it started crossed its
-/// commit point (an incomplete fork-group admission, a handler failure).
+/// `Compile` is a GHC cell/declaration rejection before the program runs.
+/// `Effect` covers an effect that itself failed, or a unit that ended before
+/// every effect it started crossed its commit point (an incomplete fork-group
+/// admission, a handler failure).
+/// `Install` means this prepared program was rejected while being parsed,
+/// linked, natively compiled, admitted, or installed, before that program
+/// ran. Earlier input units may already have committed effects; their
+/// receipts remain authoritative.
 /// `Observation` is narrower and more reassuring than either: every effect
 /// this unit ran already committed, and only materializing the result
 /// afterward failed — a bound name, if any, is sound and the failure is
@@ -237,6 +241,7 @@ pub enum WorkbenchOperationDisposition {
 pub enum WorkbenchFailureLayer {
     Compile,
     Effect,
+    Install,
     Observation,
 }
 
@@ -1407,6 +1412,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn install_failure_layer_has_an_additive_wire_tag() {
+        assert_eq!(
+            serde_json::to_string(&WorkbenchFailureLayer::Install).unwrap(),
+            "\"install\""
+        );
+    }
+
+    #[test]
     fn cell_template_preserves_worker_placeholders() {
         let template = resident_cell_check_template("module CellCheck where\n", "ActorEffects", "");
         assert_eq!(template.matches("{{CELL_DECLS}}").count(), 1);
@@ -1679,6 +1692,7 @@ mod tests {
         assert!(text.contains("diagnostics"), "{schema:#}");
         assert!(text.contains("authored"), "{schema:#}");
         assert!(text.contains("unlocated"), "{schema:#}");
+        assert!(text.contains("install"), "{schema:#}");
     }
 
     #[tokio::test]

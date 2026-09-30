@@ -882,12 +882,14 @@ impl ResidentResumeError {
 }
 
 impl ResidentError {
-    /// Which of the two post-compile failure layers this error belongs to —
-    /// see [`crate::session::workbench::WorkbenchFailureLayer`]. `None` covers an
-    /// ordinary program-language fault (a pattern match failure, a case
-    /// trap, a bootstrap or table-merge failure) that never reached either
-    /// an effect boundary or the observation step, and any error this
-    /// classification does not yet cover.
+    /// Which workbench failure layer this error belongs to — see
+    /// [`crate::session::workbench::WorkbenchFailureLayer`]. Install errors
+    /// are refused before this prepared program runs; earlier input units may
+    /// already have committed effects. `None` covers an ordinary
+    /// program-language fault (a pattern match failure, a case trap, a
+    /// bootstrap or table-merge failure) that never reached an effect
+    /// boundary or the observation step, and any error this classification
+    /// does not yet cover.
     ///
     /// The prepared engine distinguishes handler failures from observation
     /// failures. The tolerated
@@ -898,14 +900,69 @@ impl ResidentError {
         use crate::session::workbench::WorkbenchFailureLayer;
         match self {
             Self::Run(RuntimeError::Jit(_)) => Some(WorkbenchFailureLayer::Effect),
-            Self::Prepared(PreparedRuntimeError::Run(
-                tidepool_codegen::prepared_program::ExecutionError::Observation(_),
-            )) => Some(WorkbenchFailureLayer::Observation),
-            Self::Prepared(PreparedRuntimeError::Handler { .. }) => {
-                Some(WorkbenchFailureLayer::Effect)
-            }
+            Self::Prepared(prepared) => match prepared.stage() {
+                super::prepared::PreparedFailureStage::Install => {
+                    Some(WorkbenchFailureLayer::Install)
+                }
+                super::prepared::PreparedFailureStage::Run => match prepared {
+                    PreparedRuntimeError::Run(
+                        tidepool_codegen::prepared_program::ExecutionError::Observation(_),
+                    ) => Some(WorkbenchFailureLayer::Observation),
+                    PreparedRuntimeError::Handler { .. } => Some(WorkbenchFailureLayer::Effect),
+                    _ => None,
+                },
+            },
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod failure_layer_tests {
+    use super::*;
+    use crate::session::prepared::PreparedFailureStage;
+    use crate::session::workbench::WorkbenchFailureLayer;
+    use tidepool_codegen::prepared_program::{ExecutionError, ObservationFailure};
+
+    #[test]
+    fn prepared_install_refusals_have_the_install_layer() {
+        let install =
+            ResidentError::Prepared(PreparedRuntimeError::Install(ExecutionError::NotQuiescent));
+        let compile = ResidentError::Prepared(PreparedRuntimeError::Compile(
+            tidepool_codegen::prepared_program::CompileError::RootBlock,
+        ));
+
+        assert_eq!(
+            install.failure_layer(),
+            Some(WorkbenchFailureLayer::Install)
+        );
+        assert_eq!(
+            compile.failure_layer(),
+            Some(WorkbenchFailureLayer::Install)
+        );
+        assert_eq!(
+            PreparedRuntimeError::Install(ExecutionError::NotQuiescent).stage(),
+            PreparedFailureStage::Install
+        );
+    }
+
+    #[test]
+    fn prepared_run_observation_and_language_layers_keep_their_meaning() {
+        let observation = ResidentError::Prepared(PreparedRuntimeError::Run(
+            ExecutionError::Observation(ObservationFailure::AllocationFailed),
+        ));
+        let language =
+            ResidentError::Prepared(PreparedRuntimeError::Run(ExecutionError::NotQuiescent));
+
+        assert_eq!(
+            observation.failure_layer(),
+            Some(WorkbenchFailureLayer::Observation)
+        );
+        assert_eq!(language.failure_layer(), None);
+        assert_eq!(
+            PreparedRuntimeError::Run(ExecutionError::NotQuiescent).stage(),
+            PreparedFailureStage::Run
+        );
     }
 }
 
