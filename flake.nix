@@ -138,12 +138,15 @@
             src = ./nix/browser-test;
             hash = "sha256-OHK/Hwr1gq5XxODSXX+zmRM8v0WQqJkkJQ82zzvoJAM=";
           };
-          matchedHarnessSource = pkgs.runCommand "tidepool-matched-harness-source" {
-            nativeBuildInputs = [ pkgs.coreutils ];
-          } ''
-            mkdir -p "$out"
-            cp -a "${harnessWeb}/." "$out/"
-          '';
+          matchedHarnessSource =
+            pkgs.runCommand "tidepool-matched-harness-source"
+              {
+                nativeBuildInputs = [ pkgs.coreutils ];
+              }
+              ''
+                mkdir -p "$out"
+                cp -a "${harnessWeb}/." "$out/"
+              '';
           playwrightChromium = harnessPkgs.playwright-driver.browsers.override {
             withFirefox = false;
             withWebkit = false;
@@ -513,6 +516,13 @@
               pkgs.pkg-config
               pkgs.openssl
               pkgs.git
+            ];
+          };
+          packages.buck-test-tools-closure = pkgs.closureInfo {
+            rootPaths = [
+              pkgs.git
+              pkgs.bash
+              pkgs.coreutils
             ];
           };
           packages.buck-browser-test-closure = pkgs.closureInfo {

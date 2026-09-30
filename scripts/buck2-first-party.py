@@ -703,9 +703,7 @@ tidepool_buildscript_run(
     resources = [
         "//build/testing/browser:driver_bundle",
         "//web:dist",
-        "toolchains//:git",
-        "toolchains//:bash",
-        "toolchains//:sleep",
+        "toolchains//:test_tools_closure",
         "toolchains//:browser_test_closure",
         "toolchains//:playwright_browsers",
     ],

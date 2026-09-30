@@ -96,3 +96,10 @@ nix_directory(
     store_path = read_root_config("nix", "browser_test_closure"),
     visibility = ["PUBLIC"],
 )
+
+nix_directory(
+    name = "test_tools_closure",
+    cp = read_root_config("nix", "coreutils") + "/cp",
+    store_path = read_root_config("nix", "test_tools_closure"),
+    visibility = ["PUBLIC"],
+)
