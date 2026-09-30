@@ -1,8 +1,63 @@
 # Engine and embedded harness completion evidence
 
 Status as of 2026-09-30. This is a checkpoint ledger, not an acceptance claim.
-The approved scope and final gates remain in
-[`engine-harness-completion-wave.md`](engine-harness-completion-wave.md).
+The approved scope and final gates are in
+[`engine-harness-final-delivery.md`](engine-harness-final-delivery.md), which
+supersedes the earlier completion-wave sequencing.
+
+## Final delivery wave: joined checkpoint
+
+Main `d6955f602` joins the original/native compiler candidate through `595b2f72f`,
+protected display consumption, runtime nonempty child initialization and
+confirmation-only publication, actor command ownership/resource retention,
+Ephemeral publication, and embedded provider attachment. These joins do not
+enable concurrent actor admission or establish M1/M2 acceptance.
+
+The native facade graph now shares one linked test binary across separately
+declared process, host, late-output and browser actions. On `ec986da3e2` plus the
+graph subsequently committed as `d6955f602`, `//bridge/facade:facade_process_tests`
+executed **6 tests, 6 passed, 0 failed**, exit 0. The Buck action took 4.5 seconds;
+the admitted service took 38.737 seconds. Generator tests passed 18/18. Logs:
+[`native-process-six.log`](../target/completion-evidence/final-delivery/native-process-six.log)
+and [`focused-generator-tests.log`](../target/completion-evidence/final-delivery/focused-generator-tests.log).
+This exercises process framing/cleanup, not a real browser or resident Haskell
+journey. Independent review subsequently found cancellation/discovery/descendant
+cleanup gaps in the **Buck runner itself**; repairs and regressions are pending.
+Nine actions executed locally with zero action-cache hits. Incremental reuse is
+not evidence of an action-cache hit. The service's 57.5 MiB peak excludes the
+pre-existing Buck daemon.
+
+The original declaration → binding → expression → display native gate passed
+on compiler candidate `595b2f72f`: one passed, 307 skipped, 171.833 seconds,
+`/tmp/tidepool-next-compiler-original-bi.log`. Protected hidden display passed
+on `05901db219`: one passed, 307 skipped, 289.363 seconds,
+`/tmp/tidepool-next-compiler-display-bf.log`. Final Ephemeral declaration
+publication and private actor activation are separate pending gates.
+
+The actual two-delayed-child capture gate passed on combined candidate
+`82e7f2d3e69ea3762f7a1565c88c86b881a1e44b`: one passed, 421 skipped,
+404.185 seconds. Its source, command and compiler hashes are retained in
+`/srv/build/buck-out/cargo-completion-next/qapp-provenance/actor-qapp-evidence.md`.
+This supersedes that fixture's earlier qApp failure below; the workspace-barrier
+fixture and the joined concurrent M2 worker tree remain unaccepted.
+
+Runtime exact-publication recovery passed through a distinct Rust process and
+fresh compiler processes on the candidate finalized as `4909c5818`: one passed,
+313 skipped, 91.334 seconds, with four additional extractor-free tests and one
+journal test passing. See the
+[`recovery packet`](../target/completion-evidence/next-wave/recovery-final-packet.txt)
+for exact tested WIP/source attribution and commands. Compiler-pair provenance
+was corroborated retrospectively, and the test used an explicit cross-worktree
+timestamp override; it is not a doctor-clean packaged gate. Production embedded
+startup, typed journal/Store successor transfer and execution of a recovered
+nonempty child remain separate work.
+
+All eight retained worker threads are assigned implementation or independent
+review. New worker creation hit the thread limit, so reviews in this wave reuse
+an independent review thread; they must not be described as fresh-context
+reviews. Compiler authority/value replacement, private/keyed actor execution,
+durable recovery, structural scaling, cache invalidation and final packaging
+are still in progress. No live provider or backend cutover has been run.
 
 ## Joined source and bounded passing checks
 
@@ -33,7 +88,7 @@ and output in [`browser-process.log`](../target/completion-evidence/next-wave/br
 These test process framing/cancellation behavior; they did not start Node,
 Chromium, the resident compiler, or a real browser journey.
 
-## Current integration checkpoint and open gates
+## Earlier checkpoint and retained gate history
 
 The compiler/runtime/actor/capture dependency join is `cbc8bdad26`. Its pinned
 no-default library check for `tidepool`, `exomonad-actor`, and `tidepool-runtime`
