@@ -84,9 +84,7 @@ impl KernelBehavior for Owner {
         Box::pin(async {})
     }
 
-    fn child_exited(&mut self, _: ChildExitNotice) -> BoxFuture<'_, ()> {
-        Box::pin(async {})
-    }
+    fn child_exited(&mut self, _: ChildExitNotice) {}
 }
 
 #[derive(Default)]

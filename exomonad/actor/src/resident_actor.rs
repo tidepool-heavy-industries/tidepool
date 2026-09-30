@@ -10160,34 +10160,32 @@ where
         })
     }
 
-    fn child_exited(&mut self, notice: ChildExitNotice) -> futures_util::future::BoxFuture<'_, ()> {
-        Box::pin(async move {
-            let child = notice.child.identity();
-            self.publish_retired(child, notice.terminal.clone());
-            if self.child_exit_observations.process(child)
-                || notice.terminal.kind == ActorExitKind::Completed
-            {
-                return;
-            }
-            if matches!(self.standing, ResidentStanding::Boot) {
-                self.deferred_child_failures.push(notice);
-            } else if !self.policy_installed {
-                self.notify_supervisor(
-                    child,
-                    self.descriptor.supervisor_parent(),
-                    format!(
-                        "{child:?} exited {:?}: {}",
-                        notice.terminal.kind, notice.terminal.summary
-                    ),
-                );
-            } else {
-                // best-effort: deployment observer channel may have no listener.
-                self.environment
-                    .deployments
-                    .try_send(LocalResidentDeployment::ChildExited { notice })
-                    .ok();
-            }
-        })
+    fn child_exited(&mut self, notice: ChildExitNotice) {
+        let child = notice.child.identity();
+        self.publish_retired(child, notice.terminal.clone());
+        if self.child_exit_observations.process(child)
+            || notice.terminal.kind == ActorExitKind::Completed
+        {
+            return;
+        }
+        if matches!(self.standing, ResidentStanding::Boot) {
+            self.deferred_child_failures.push(notice);
+        } else if !self.policy_installed {
+            self.notify_supervisor(
+                child,
+                self.descriptor.supervisor_parent(),
+                format!(
+                    "{child:?} exited {:?}: {}",
+                    notice.terminal.kind, notice.terminal.summary
+                ),
+            );
+        } else {
+            // best-effort: deployment observer channel may have no listener.
+            self.environment
+                .deployments
+                .try_send(LocalResidentDeployment::ChildExited { notice })
+                .ok();
+        }
     }
 }
 

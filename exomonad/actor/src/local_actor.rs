@@ -801,7 +801,9 @@ pub trait KernelBehavior: Send + 'static {
         terminal: &'a ActorTerminal,
     ) -> BoxFuture<'a, ()>;
 
-    fn child_exited(&mut self, notice: ChildExitNotice) -> BoxFuture<'_, ()>;
+    /// Apply an immutable child exit on the actor queue; external cleanup belongs
+    /// to the child and its retained lifecycle owner.
+    fn child_exited(&mut self, notice: ChildExitNotice);
 }
 
 pub struct LocalActor<B>(PhantomData<fn() -> B>);
@@ -1629,7 +1631,7 @@ where
         if state.pending_workbench.is_some() {
             state.pending_child_exits.push(notice);
         } else {
-            state.behavior.child_exited(notice).await;
+            state.behavior.child_exited(notice);
         }
         Ok(())
     }
@@ -1905,7 +1907,7 @@ async fn complete_workbench<B: KernelBehavior>(
     }
     if state.terminal.get().is_none() {
         for notice in std::mem::take(&mut state.pending_child_exits) {
-            state.behavior.child_exited(notice).await;
+            state.behavior.child_exited(notice);
         }
     }
     maybe_drain(myself, state).await;
@@ -2873,8 +2875,8 @@ mod tests {
             Box::pin(async {})
         }
 
-        fn child_exited(&mut self, notice: ChildExitNotice) -> BoxFuture<'_, ()> {
-            Box::pin(async move { self.child_exits.lock().push(notice.terminal) })
+        fn child_exited(&mut self, notice: ChildExitNotice) {
+            self.child_exits.lock().push(notice.terminal);
         }
     }
 
@@ -2963,9 +2965,7 @@ mod tests {
             Box::pin(async {})
         }
 
-        fn child_exited(&mut self, _notice: ChildExitNotice) -> BoxFuture<'_, ()> {
-            Box::pin(async {})
-        }
+        fn child_exited(&mut self, _notice: ChildExitNotice) {}
     }
 
     struct ProbeFixture {
@@ -5068,9 +5068,7 @@ mod tests {
             Box::pin(async {})
         }
 
-        fn child_exited(&mut self, _notice: ChildExitNotice) -> BoxFuture<'_, ()> {
-            Box::pin(async {})
-        }
+        fn child_exited(&mut self, _notice: ChildExitNotice) {}
     }
 
     /// Q1-B: a handler failure while a drain was already requested ends the
