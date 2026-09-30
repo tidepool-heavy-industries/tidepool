@@ -320,9 +320,65 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         expected.declaration_tip
     );
     drop(child_admission);
+    let uncertain_owner = RecoveryPublicOwner::new(
+        &ActorPath::parse("root/exact-recovery/confirmed-child").unwrap(),
+        4,
+    )
+    .unwrap();
+    let uncertain_child = producer.mint_detached_scope(public).unwrap();
+    producer.lib_mut().fail_recovery_durability_once = true;
+    assert!(matches!(
+        producer
+            .initialize_durable_public_scope(uncertain_owner.clone(), uncertain_child)
+            .unwrap(),
+        PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+    ));
+    let visible = std::fs::read(&manifest).unwrap();
+    assert!(producer
+        .begin_durable_private_execution(&uncertain_owner, uncertain_child)
+        .is_err());
+    assert!(producer
+        .initialize_durable_public_scope(uncertain_owner.clone(), uncertain_child)
+        .is_err());
+    assert!(producer
+        .confirm_durable_public_scope(&child_owner, uncertain_child)
+        .is_err());
+    assert!(producer
+        .confirm_durable_public_scope(&uncertain_owner, child)
+        .is_err());
+    assert!(producer
+        .validate_recovered_public_owner(&uncertain_owner)
+        .is_err());
+    producer
+        .confirm_durable_public_scope(&uncertain_owner, uncertain_child)
+        .unwrap();
+    producer
+        .confirm_durable_public_scope(&uncertain_owner, uncertain_child)
+        .unwrap();
+    assert_eq!(std::fs::read(&manifest).unwrap(), visible);
+    assert_eq!(
+        producer
+            .initialize_durable_public_scope(uncertain_owner.clone(), uncertain_child)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    );
+    assert_eq!(std::fs::read(&manifest).unwrap(), visible);
+    assert_eq!(
+        producer
+            .begin_durable_private_execution(&uncertain_owner, uncertain_child)
+            .unwrap()
+            .admitted_public()
+            .declaration_tip,
+        expected.declaration_tip
+    );
     drop(admission);
     drop(producer);
+    let removed_source = producer_root.path().to_owned();
     drop(producer_root);
+    assert!(
+        !removed_source.exists(),
+        "producer source must be absent before recovery"
+    );
     // No runtime owner, heap, source tree, or admission handle crosses the
     // OS-process boundary. These fixture expectations confer no authority;
     // the child reads and certifies the actual run-owned manifest itself.
@@ -503,6 +559,31 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
     assert_eq!(snapshot.declaration_tip, Generation(spec.declaration_tip));
     assert_eq!(snapshot.epoch, spec.epoch + 1);
     assert!(snapshot.bindings.is_empty());
+    let mut recovered_scopes = vec![(public, "root/recovered")];
+    for (path, incarnation) in [
+        ("root/exact-recovery/child", 3),
+        ("root/exact-recovery/confirmed-child", 4),
+    ] {
+        let child_owner =
+            RecoveryPublicOwner::new(&ActorPath::parse(path).unwrap(), incarnation).unwrap();
+        let child_scope = consumer.recover_public_scope(&child_owner).unwrap();
+        let child_snapshot = consumer.public_visibility_snapshot_in(child_scope).unwrap();
+        assert_eq!(
+            child_snapshot.declaration_tip,
+            Generation(spec.declaration_tip)
+        );
+        assert_eq!(child_snapshot.epoch, 1);
+        assert!(child_snapshot.bindings.is_empty());
+        assert_eq!(
+            consumer
+                .begin_durable_private_execution(&child_owner, child_scope)
+                .unwrap()
+                .admitted_public(),
+            &child_snapshot
+        );
+        recovered_scopes.push((child_scope, path));
+    }
+    assert_eq!(std::fs::read(&manifest).unwrap(), before);
     let view = consumer.compile_view_in(public).unwrap();
     let context = view.exact_declaration_context().unwrap().clone();
     for generation in [original, dependent] {
@@ -581,23 +662,41 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
     );
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, EmptyOutput, consumer);
-    resident
-        .set_actor_execution(
-            SessionRunContext {
-                lexical_scope: public,
-                ..SessionRunContext::ROOT
-            },
-            EffectRunPolicy::HandleOrSuspend,
-            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-        )
-        .unwrap();
-    let ResidentOutcome::Completed { result, .. } = resident
-        .run_with_sites("recovered_original_dependency", compiled.into_code())
-        .unwrap()
-    else {
-        panic!("real recovered original dependency must execute");
-    };
-    assert_eq!(result.to_json(), serde_json::json!([42, "42"]));
+    for (scope, path) in recovered_scopes {
+        let selected = resident.compile_view_in(scope).unwrap();
+        assert_eq!(selected.turn_imports(&SourceImports::new()), imports);
+        assert_eq!(
+            selected
+                .exact_declaration_context()
+                .unwrap()
+                .semantic_sha256(),
+            view.exact_declaration_context().unwrap().semantic_sha256()
+        );
+        resident
+            .set_actor_execution(
+                SessionRunContext {
+                    lexical_scope: scope,
+                    ..SessionRunContext::ROOT
+                },
+                EffectRunPolicy::HandleOrSuspend,
+                LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            )
+            .unwrap();
+        // All three scopes select the same exact immutable declaration root.
+        // Reuse its compiled pure probe; mutable resident execution stays fresh.
+        let ResidentOutcome::Completed { result, .. } = resident
+            .run_with_sites("recovered_original_dependency", compiled.code())
+            .unwrap()
+        else {
+            panic!("real recovered original dependency must execute in each selected scope");
+        };
+        assert_eq!(result.to_json(), serde_json::json!([42, "42"]));
+        assert_eq!(std::fs::read(&manifest).unwrap(), before);
+        println!(
+            "fresh recovery native execution: pid={} owner={path} scope={scope:?} result=42",
+            std::process::id()
+        );
+    }
     assert_eq!(std::fs::read(&manifest).unwrap(), before);
     std::fs::write(
         &spec.result_file,
