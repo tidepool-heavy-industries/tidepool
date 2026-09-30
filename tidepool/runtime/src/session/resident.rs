@@ -184,6 +184,7 @@ pub struct HostCarrier {
     prepared: PreparedProgram,
     shape: HostCarrierShape,
     host_type: HostBindingType,
+    checked: bool,
 }
 
 impl HostCarrier {
@@ -198,6 +199,7 @@ impl HostCarrier {
         code: TurnCode<'_>,
         host_type: HostBindingType,
     ) -> Self {
+        let checked = is_checked_turn(&code);
         HostCarrier {
             table: code.table.into_owned(),
             prepared: code.prepared.into_owned(),
@@ -208,6 +210,7 @@ impl HostCarrier {
                 host_authority: binder.host_authority,
             },
             host_type,
+            checked,
         }
     }
 
@@ -796,6 +799,10 @@ impl ResidentDisplayBundle {
 /// Why a resident-session operation was refused or failed.
 #[derive(thiserror::Error, Debug)]
 pub enum ResidentError {
+    /// Checked items must enter a route that validates their sealed recipe
+    /// and owns successful prefix settlement.
+    #[error("checked turn requires its authenticated execution route")]
+    UnsupportedCheckedTurn,
     #[error(transparent)]
     BindingAlias(#[from] BindingAliasError),
     /// A rooted value minted by another resident session was presented to
@@ -1032,6 +1039,24 @@ fn checked_turn_plan(
         prefix: prefix.clone(),
         execution: execution.clone(),
     }))
+}
+
+fn is_checked_turn(code: &TurnCode<'_>) -> bool {
+    code.certification
+        .as_ref()
+        .as_ref()
+        .is_some_and(|certification| {
+            certification.checked_item().is_some()
+                || certification.checked_execution().is_some()
+                || certification.checked_prefix().is_some()
+        })
+}
+
+fn refuse_checked_turn(code: &TurnCode<'_>) -> Result<(), ResidentError> {
+    if is_checked_turn(code) {
+        return Err(ResidentError::UnsupportedCheckedTurn);
+    }
+    Ok(())
 }
 
 impl PreparedCheckedTurn {
@@ -3002,6 +3027,7 @@ where
         code: TurnCode<'_>,
         value: &serde_json::Value,
     ) -> Result<(), ResidentError> {
+        refuse_checked_turn(&code)?;
         self.settle_dropped_custody();
         self.validate_compiled_mount_target(
             scope,
@@ -3028,6 +3054,7 @@ where
         code: TurnCode<'_>,
         text: &str,
     ) -> Result<(), ResidentError> {
+        refuse_checked_turn(&code)?;
         self.settle_dropped_custody();
         self.validate_compiled_mount_target(scope, binder, gen, &code, HostBindingType::TEXT)?;
         self.validate_text_runtime_constructor(&code)?;
@@ -3051,6 +3078,7 @@ where
     where
         T: tidepool_bridge::ToHaskell,
     {
+        refuse_checked_turn(&code)?;
         self.settle_dropped_custody();
         self.validate_compiled_mount_target(scope, binder, gen, &code, expected)?;
         self.mount_host_value_in(scope, binder, gen, code, |engine, realm, table| {
@@ -3082,6 +3110,9 @@ where
         carrier: &HostCarrier,
         payload: HostPayload<'_>,
     ) -> Result<BoundBinder, ResidentError> {
+        if carrier.checked {
+            return Err(ResidentError::UnsupportedCheckedTurn);
+        }
         self.settle_dropped_custody();
         // Reap any stub sources a prior eviction (in this or an earlier
         // call) left pending -- opportunistic, since this call already has
@@ -3467,6 +3498,7 @@ where
             &DataConTable,
         ) -> Result<PreparedHandle, PreparedRuntimeError>,
     ) -> Result<(), ResidentError> {
+        refuse_checked_turn(&code)?;
         let table = code
             .table
             .with_json_layout(json_runtime_layout_optional(&code.prepared));
@@ -4545,6 +4577,7 @@ where
         alias: &BoundBinder,
         generation: Generation,
     ) -> Result<ResidentDisplayBundle, ResidentError> {
+        refuse_checked_turn(&code)?;
         check_display_bundle_binders(page, metadata, alias)?;
         let prepared = code.prepared.into_owned();
         let provenance = self.provenance_for(&code.sites)?;
@@ -4608,6 +4641,7 @@ where
         alias: &BoundBinder,
         generation: Generation,
     ) -> Result<PendingDisplayInstall, ResidentError> {
+        refuse_checked_turn(&code)?;
         check_display_bundle_binders(page, metadata, alias)?;
         let prepared = code.prepared.into_owned();
         let provenance = self.provenance_for(&code.sites)?;
@@ -5730,6 +5764,225 @@ mod authored_publication_tests {
     }
 
     type TestSession = ResidentSession<frunk::HNil, EmptyOutput>;
+
+    #[test]
+    fn unsupported_checked_routes_refuse_before_native_install_and_prefix_settlement() {
+        use crate::session::turn::{check_cell_admitted, run_checked_item, TemplateSelector};
+        use crate::session::{
+            resident_cell_check_template, resident_workbench_templates, CellCheckRequest,
+            TurnRequest, TurnResult,
+        };
+        use tidepool_testing::effect_surface::TestEffectSurface;
+        use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let effects = TestEffectSurface::minimal(&[]).unwrap();
+        let mut lib =
+            SessionLib::open(SessionId(993), root.path(), ModuleEnv::standalone_default())
+                .unwrap()
+                .with_validation_include(effects.include_paths().to_vec());
+        lib.attach_recovery_graph_v2(root.path().join("declarations.json"))
+            .unwrap();
+        let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(lib));
+        session
+            .define_scoped_with_imports_in(
+                ScopeId::ROOT,
+                &["seed :: Int\nseed = 1"],
+                &super::super::SourceImports::new(),
+            )
+            .unwrap();
+        let private = session.begin_private_execution(ScopeId::ROOT).unwrap();
+        let scope = private.private_scope();
+        session.run_context.lexical_scope = scope;
+        let view = session.state.compile_view_in(scope).unwrap();
+        let imports = view.turn_imports(&super::super::SourceImports::new());
+        let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
+        let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
+        let source = "let page = (42 :: Int)";
+        let injected = view.injected_module_names();
+        let specification = CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: source.into(),
+            template_source: template.clone(),
+            turn_templates: templates
+                .iter()
+                .map(|template| {
+                    let kind = match template.kind {
+                        TemplateSelector::Decl => "decl",
+                        TemplateSelector::Bind => "bind",
+                        TemplateSelector::BindDiscard => "binddiscard",
+                        TemplateSelector::Expr => "expr",
+                    };
+                    (kind.into(), template.source.clone())
+                })
+                .collect(),
+            injected_modules: injected.clone(),
+            reserved_declaration_modules: Vec::new(),
+        };
+        let admission = session
+            .admit_cell_in(
+                scope,
+                0,
+                Arc::new(specification.clone()),
+                specification.specification_digest(),
+                [0; 32],
+            )
+            .unwrap();
+        let includes = view.include_paths(effects.include_paths());
+        let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        let (checked, _) = check_cell_admitted(
+            CellCheckRequest {
+                exact_context: view.exact_declaration_context().cloned(),
+                session_id: Some(view.session()),
+                cell_text: source,
+                template: &template,
+                include: &includes,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                compile_generation: view.next_value_generation().0,
+                compile_view_evidence: "",
+            },
+            admission.clone(),
+            &templates,
+            None,
+        )
+        .unwrap();
+        let item = checked.checked_item(0).unwrap();
+        let prefix = session
+            .begin_checked_prefix(admission, item.clone())
+            .unwrap();
+        let item_admission = session.admit_checked_item(prefix.clone(), item).unwrap();
+        let generation = item_admission.generation();
+        let TurnResult::Bind {
+            bound, compiled, ..
+        } = run_checked_item(
+            TurnRequest {
+                exact_context: view.exact_declaration_context().cloned(),
+                session_id: Some(view.session()),
+                turn_text: &checked.items[0].source,
+                templates: &templates,
+                include: &includes,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                gen: generation.0,
+                verdict: Some(checked.items[0].verdict.clone()),
+                target: None,
+                retained_imports: &[],
+            },
+            item_admission,
+        )
+        .unwrap()
+        else {
+            panic!("expected compiler-owned binders");
+        };
+        let page = bound.iter().find(|binder| binder.name == "page").unwrap();
+        let mut metadata = page.clone();
+        metadata.name = "metadata".into();
+        let mut alias = page.clone();
+        alias.name = "cellDisplay".into();
+        let code = compiled.into_code();
+        assert!(code
+            .certification
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .checked_execution()
+            .is_some());
+        let before = session.state.public_visibility_snapshot_in(scope).unwrap();
+        let before_view = session
+            .state
+            .compile_view_in(scope)
+            .unwrap()
+            .admission_digest();
+        let before_table = session.state.session_table().clone();
+        let before_prefix = prefix.snapshot();
+
+        assert!(matches!(
+            session.run_display_bundle_with_sites(
+                code.clone(),
+                page,
+                &metadata,
+                &alias,
+                generation
+            ),
+            Err(ResidentError::UnsupportedCheckedTurn)
+        ));
+        assert!(matches!(
+            session.snapshot_display_bundle(code.clone(), page, &metadata, &alias, generation),
+            Err(ResidentError::UnsupportedCheckedTurn)
+        ));
+        assert!(matches!(
+            session.mount_json_binding_in(
+                scope,
+                page,
+                generation,
+                code.clone(),
+                &serde_json::Value::Null
+            ),
+            Err(ResidentError::UnsupportedCheckedTurn)
+        ));
+        assert!(matches!(
+            session.mount_text_binding_in(scope, page, generation, code.clone(), "host value"),
+            Err(ResidentError::UnsupportedCheckedTurn)
+        ));
+        assert!(matches!(
+            session.mount_typed_binding_in(
+                scope,
+                page,
+                generation,
+                code.clone(),
+                HostBindingType::TEXT,
+                &()
+            ),
+            Err(ResidentError::UnsupportedCheckedTurn)
+        ));
+        assert!(matches!(
+            session.mount_host_value_in(scope, page, generation, code.clone(), |_, _, _| panic!(
+                "unsupported checked recipe must not build a host value"
+            )),
+            Err(ResidentError::UnsupportedCheckedTurn)
+        ));
+        let carrier = HostCarrier::from_compiled(page, code.clone(), HostBindingType::TEXT);
+        assert!(matches!(
+            session.mount_carrier_in(
+                root.path(),
+                scope,
+                "freshCarrier",
+                generation,
+                &carrier,
+                HostPayload::Text("host value")
+            ),
+            Err(ResidentError::UnsupportedCheckedTurn)
+        ));
+        assert!(
+            !session.prepared_machine_ready(),
+            "refusal must precede native installation"
+        );
+        assert_eq!(session.state.session_table(), &before_table);
+        assert_eq!(
+            session.state.public_visibility_snapshot_in(scope).unwrap(),
+            before
+        );
+        assert_eq!(
+            session
+                .state
+                .compile_view_in(scope)
+                .unwrap()
+                .admission_digest(),
+            before_view
+        );
+        assert!(Arc::ptr_eq(&prefix.snapshot(), &before_prefix));
+        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
+
+        // Refused routes cannot consume the item reservation. Its authenticated
+        // bind route still executes and alone advances the sealed prefix.
+        assert!(matches!(
+            session.run_bind_with_sites("checked bind", code, page, generation),
+            Ok(ResidentOutcome::Completed { .. })
+        ));
+        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 1);
+    }
 
     fn authored_lib(root: &Path) -> SessionLib {
         tidepool_testing::eval_harness::require_extract();
