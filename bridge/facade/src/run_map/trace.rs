@@ -1023,8 +1023,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("trace.jsonl");
         let records = [
-            serde_json::json!({"timestamp":"2026-09-23T10:00:00Z","target":"host","fields":{"message":"call timing","actor":2,"incarnation":1,"tool":"haskell","total_ms":40,"outcome":"ok"}}),
-            serde_json::json!({"timestamp":"2026-09-23T10:00:01Z","target":"host","fields":{"message":"jev call answered","elapsed_ms":12},"spans":[{"name":"cell","execution":"exec-1"}]}),
+            serde_json::json!({"timestamp":"2026-09-23T10:00:00Z","target":"exomonad_actor::call_timing","fields":{"message":"call timing","actor":2,"incarnation":1,"tool":"haskell","total_ms":40,"outcome":"ok"}}),
+            serde_json::json!({"timestamp":"2026-09-23T10:00:01Z","target":"exomonad_actor::resident_actor","fields":{"message":"jev call answered","elapsed_ms":12},"spans":[{"name":"cell","execution":"exec-1"}]}),
         ];
         fs::write(
             &path,
@@ -1076,6 +1076,6 @@ mod tests {
         assert!(summary.timeline.iter().any(|event| event.call_id.is_none()));
         let export = serde_json::to_value(&summary.timeline).unwrap();
         assert!(!export.to_string().contains("flow"));
-        assert!(export.to_string().contains("review-trace.jsonl:"));
+        assert!(export.to_string().contains("trace.jsonl:"));
     }
 }
