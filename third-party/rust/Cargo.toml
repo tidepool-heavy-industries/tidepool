@@ -25,7 +25,7 @@ path = "empty.rs"
 "futures-util" = { package = "futures-util", version = "=0.3.34", default-features = true, features = [] }
 "genai" = { package = "genai", version = "=0.6.5", default-features = true, features = [] }
 "glob" = { package = "glob", version = "=0.3.4", default-features = true, features = [] }
-"harness" = { package = "harness", version = "=0.1.0", default-features = true, features = [], git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "2f6edc79ac2be758de809610cc807122cab1562d" }
+"harness" = { package = "harness", version = "=0.1.0", default-features = true, features = [], git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "31ae2e52ca091235c670dbe28aaf730ae148cd4c" }
 "ignore" = { package = "ignore", version = "=0.4.33", default-features = true, features = [] }
 "inventory" = { package = "inventory", version = "=0.3.24", default-features = true, features = [] }
 "libc" = { package = "libc", version = "=0.2.189", default-features = true, features = [] }
@@ -43,7 +43,7 @@ path = "empty.rs"
 "rustix" = { package = "rustix", version = "=1.1.4", default-features = true, features = ["event", "fs", "mount", "pipe", "process", "runtime", "stdio", "termios", "thread"] }
 "schemars" = { package = "schemars", version = "=1.2.2", default-features = true, features = [] }
 "serde" = { package = "serde", version = "=1.0.229", default-features = true, features = ["derive"] }
-"serde_json" = { package = "serde_json", version = "=1.0.151", default-features = true, features = ["arbitrary_precision"] }
+"serde_json" = { package = "serde_json", version = "=1.0.151", default-features = true, features = ["arbitrary_precision", "float_roundtrip"] }
 "serial_test" = { package = "serial_test", version = "=3.5.0", default-features = true, features = [] }
 "sha2-0_10_9" = { package = "sha2", version = "=0.10.9", default-features = true, features = [] }
 "sha2-0_11_0" = { package = "sha2", version = "=0.11.0", default-features = true, features = [] }
@@ -53,6 +53,7 @@ path = "empty.rs"
 "tempfile" = { package = "tempfile", version = "=3.27.0", default-features = true, features = [] }
 "thiserror" = { package = "thiserror", version = "=2.0.20", default-features = true, features = [] }
 "tokio" = { package = "tokio", version = "=1.53.1", default-features = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+"tokio-tungstenite" = { package = "tokio-tungstenite", version = "=0.29.0", default-features = true, features = [] }
 "toml" = { package = "toml", version = "=1.1.4+spec-1.1.0", default-features = true, features = [] }
 "tracing" = { package = "tracing", version = "=0.1.44", default-features = true, features = [] }
 "tracing-appender" = { package = "tracing-appender", version = "=0.2.5", default-features = true, features = [] }

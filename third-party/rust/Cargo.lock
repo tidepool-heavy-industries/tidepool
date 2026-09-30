@@ -1421,7 +1421,7 @@ dependencies = [
 [[package]]
 name = "harness"
 version = "0.1.0"
-source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=2f6edc79ac2be758de809610cc807122cab1562d#2f6edc79ac2be758de809610cc807122cab1562d"
+source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=31ae2e52ca091235c670dbe28aaf730ae148cd4c#31ae2e52ca091235c670dbe28aaf730ae148cd4c"
 dependencies = [
  "async-trait",
  "axum",
@@ -3343,6 +3343,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-tungstenite",
  "toml",
  "tracing",
  "tracing-appender",

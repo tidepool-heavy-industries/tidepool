@@ -3,11 +3,12 @@
 load("//build/rust:buildscript.bzl", "tidepool_buildscript_run")
 load("@prelude//rust:cargo_package.bzl", "cargo")
 load("@prelude//:rules.bzl", "filegroup")
+load("@toolchains//:tidepool.bzl", "nix_directory")
 
-git_fetch(
-    name = "exomonad-harness-5fdd156badd86236.git",
-    repo = "https://github.com/tidepool-heavy-industries/exomonad-harness.git",
-    rev = "2f6edc79ac2be758de809610cc807122cab1562d",
+nix_directory(
+    name = "exomonad-harness-5fdd156badd86236",
+    cp = read_root_config("nix", "coreutils") + "/cp",
+    store_path = read_root_config("nix", "matched_harness_source"),
     visibility = [],
 )
 
@@ -5702,7 +5703,7 @@ alias(
 
 cargo.rust_library(
     name = "harness-0.1",
-    srcs = [":exomonad-harness-5fdd156badd86236.git"],
+    srcs = [":exomonad-harness-5fdd156badd86236"],
     crate = "harness",
     crate_root = "exomonad-harness-5fdd156badd86236/crates/harness/src/lib.rs",
     edition = "2024",
@@ -11015,6 +11016,7 @@ cargo.rust_library(
         "alloc",
         "arbitrary_precision",
         "default",
+        "float_roundtrip",
         "raw_value",
         "std",
     ],
@@ -11055,6 +11057,7 @@ cargo.rust_binary(
         "alloc",
         "arbitrary_precision",
         "default",
+        "float_roundtrip",
         "raw_value",
         "std",
     ],
@@ -11081,6 +11084,7 @@ tidepool_buildscript_run(
         "alloc",
         "arbitrary_precision",
         "default",
+        "float_roundtrip",
         "raw_value",
         "std",
     ],
@@ -12912,6 +12916,12 @@ cargo.rust_library(
         ":pin-project-lite-0.2",
         ":tokio-1",
     ],
+)
+
+alias(
+    name = "tokio-tungstenite",
+    actual = ":tokio-tungstenite-0.29",
+    visibility = ["PUBLIC"],
 )
 
 http_archive(
@@ -15195,6 +15205,6 @@ cargo.rust_library(
 
 filegroup(
     name = "matched_harness_source",
-    srcs = [":exomonad-harness-5fdd156badd86236.git"],
+    srcs = [":exomonad-harness-5fdd156badd86236"],
     visibility = ["PUBLIC"],
 )

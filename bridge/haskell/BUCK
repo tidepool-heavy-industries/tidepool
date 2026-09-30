@@ -35,6 +35,7 @@ haskell_library(
         "Tidepool/HomeProducts.hs": "src/Tidepool/HomeProducts.hs",
         "Tidepool/CertifiedProducts.hs": "src/Tidepool/CertifiedProducts.hs",
         "Tidepool/CheckedCell.hs": "src/Tidepool/CheckedCell.hs",
+        "Tidepool/CheckedPrefixImports.hs": "src/Tidepool/CheckedPrefixImports.hs",
         "Tidepool/CompileInputPolicy.hs": "src/Tidepool/CompileInputPolicy.hs",
         "Tidepool/PackageWitness.hs": "src/Tidepool/PackageWitness.hs",
         "Tidepool/PlannedDeclaration.hs": "src/Tidepool/PlannedDeclaration.hs",

@@ -24,6 +24,7 @@ rust_filegroup(
         "src/mount_namespace/overlay/observation.rs": "exomonad/node/src/mount_namespace/overlay/observation.rs",
         "src/mount_namespace/overlay/recovery_tests.rs": "exomonad/node/src/mount_namespace/overlay/recovery_tests.rs",
         "src/mount_namespace/overlay/root_metadata.rs": "exomonad/node/src/mount_namespace/overlay/root_metadata.rs",
+        "src/network.rs": "exomonad/node/src/network.rs",
         "src/process_boundary.rs": "exomonad/node/src/process_boundary.rs",
         "src/process_boundary/view.rs": "exomonad/node/src/process_boundary/view.rs",
         "src/process_scope.rs": "exomonad/node/src/process_scope.rs",
