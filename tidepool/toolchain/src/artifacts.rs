@@ -263,7 +263,7 @@ pub struct ModuleCandidateOffer {
     include: Vec<PathBuf>,
     exact: Option<crate::declaration_context::ExactCompilationRequest>,
     checked_cell: Option<crate::checked_cell::CheckedCellSpecification>,
-    checked_values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
+    checked_values: Option<Arc<crate::checked_cell::CheckedValueInputs>>,
     checked_item: Option<crate::checked_cell::CheckedItemOffer>,
     checked_display: Option<crate::checked_cell::CheckedDisplayOffer>,
 }
@@ -305,7 +305,7 @@ impl ModuleCandidateOffer {
             include: include.to_vec(),
             exact: None,
             checked_cell: None,
-            checked_values: Vec::new(),
+            checked_values: None,
             checked_item: None,
             checked_display: None,
         }
@@ -323,7 +323,7 @@ impl ModuleCandidateOffer {
             include: include.to_vec(),
             exact: Some(context.prepare_compilation(&scratch.join("exact-scope"), producer)?),
             checked_cell: None,
-            checked_values: Vec::new(),
+            checked_values: None,
             checked_item: None,
             checked_display: None,
         })
@@ -355,22 +355,8 @@ impl ModuleCandidateOffer {
         let Value::Array(fields) = &mut authorization else {
             unreachable!("closed cell authorization")
         };
-        fields.push(Value::Array(
-            checked_values
-                .iter()
-                .map(|(module, bytes)| {
-                    let path = scratch
-                        .join("admitted-values")
-                        .join(module.relative_hi_path());
-                    Value::Array(vec![
-                        Value::Text("main".into()),
-                        Value::Text(module.module_name()),
-                        Value::Text(path.to_string_lossy().into_owned()),
-                        Value::Text(crate::checked_cell::hash(bytes)),
-                    ])
-                })
-                .collect(),
-        ));
+        let checked_values = crate::checked_cell::CheckedValueInputs::capture(checked_values)?;
+        fields.push(checked_values.baseline_authorization());
         let context = checked_offer_context(context)?;
         Ok(Self {
             selected: immutable_candidates_in_context(&context, producer, include, scratch),
@@ -382,7 +368,7 @@ impl ModuleCandidateOffer {
                 Some(authorization),
             )?),
             checked_cell: Some(specification),
-            checked_values,
+            checked_values: Some(checked_values),
             checked_item: None,
             checked_display: None,
         })
@@ -410,11 +396,7 @@ impl ModuleCandidateOffer {
         };
         checked_item.validate_templates(templates)?;
         checked_item.validate_include(include)?;
-        let authorization = checked_item.authorization(
-            producer,
-            context.semantic_sha256(),
-            &scratch.join("admitted-values"),
-        )?;
+        let authorization = checked_item.authorization(producer, context.semantic_sha256())?;
         Ok(Self {
             selected: immutable_candidates_in_context(&context, producer, include, scratch),
             producer: producer.to_vec(),
@@ -425,7 +407,7 @@ impl ModuleCandidateOffer {
                 Some(authorization),
             )?),
             checked_cell: None,
-            checked_values: Vec::new(),
+            checked_values: None,
             checked_item: Some(checked_item),
             checked_display: None,
         })
@@ -457,11 +439,7 @@ impl ModuleCandidateOffer {
             budget,
             presented,
         };
-        let authorization = display.authorization(
-            producer,
-            context.semantic_sha256(),
-            &scratch.join("admitted-values"),
-        )?;
+        let authorization = display.authorization(producer, context.semantic_sha256())?;
         Ok(Self {
             selected: immutable_candidates_in_context(&context, producer, include, scratch),
             producer: producer.to_vec(),
@@ -472,10 +450,28 @@ impl ModuleCandidateOffer {
                 Some(authorization),
             )?),
             checked_cell: None,
-            checked_values: Vec::new(),
+            checked_values: None,
             checked_item: None,
             checked_display: Some(display),
         })
+    }
+
+    /// Retained checked-cell artifact root. Only the sealed request manifest
+    /// authorizes inputs from this directory; new directory members do not.
+    pub fn checked_value_root(&self) -> Option<&Path> {
+        self.checked_values
+            .as_ref()
+            .map(|inputs| inputs.root())
+            .or_else(|| {
+                self.checked_item
+                    .as_ref()
+                    .map(|offer| offer.item.value_input_root())
+            })
+            .or_else(|| {
+                self.checked_display
+                    .as_ref()
+                    .map(|offer| offer.capture.item().value_input_root())
+            })
     }
 
     pub fn admit_checked_cell(
@@ -507,7 +503,9 @@ impl ModuleCandidateOffer {
             exact.validate_outputs_with_planned(root, owner.as_ref())?,
             &self.include,
             planned,
-            self.checked_values.clone(),
+            self.checked_values.clone().ok_or_else(|| {
+                CompileError::ExtractFailed("checked values owner is absent".into())
+            })?,
         )
     }
 

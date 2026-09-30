@@ -145,7 +145,89 @@ pub struct ExactCheckedCell {
     items: Vec<CheckedItem>,
     include: Vec<std::path::PathBuf>,
     planned_declaration: Option<PlannedCheckedDeclaration>,
-    baseline_values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
+    value_inputs: Arc<CheckedValueInputs>,
+}
+
+/// The existing checked-cell artifact owner retains one directory for exact
+/// input bytes. Directory membership is never authority: every request lists
+/// only the original inventory and its sealed completed deltas.
+#[derive(Debug)]
+pub(crate) struct CheckedValueInputs {
+    directory: tempfile::TempDir,
+    baseline: Vec<Arc<CheckedValueArtifact>>,
+}
+
+#[derive(Debug)]
+struct CheckedValueArtifact {
+    owner: tidepool_repr::SessionModule,
+    module: String,
+    bytes: Arc<[u8]>,
+    path: std::path::PathBuf,
+    digest: String,
+}
+
+impl CheckedValueInputs {
+    pub(crate) fn capture(
+        values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
+    ) -> Result<Arc<Self>, CompileError> {
+        let directory = tempfile::Builder::new()
+            .prefix("tidepool-checked-values-")
+            .tempdir()?;
+        let mut baseline = Vec::with_capacity(values.len());
+        for (owner, bytes) in values {
+            let path = directory.path().join(owner.relative_hi_path());
+            std::fs::create_dir_all(path.parent().expect("generated interface parent"))?;
+            std::fs::write(&path, &bytes)?;
+            baseline.push(Arc::new(CheckedValueArtifact {
+                owner,
+                module: owner.module_name(),
+                digest: hash(&bytes),
+                bytes,
+                path,
+            }));
+        }
+        Ok(Arc::new(Self {
+            directory,
+            baseline,
+        }))
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        self.directory.path()
+    }
+
+    pub(crate) fn baseline_authorization(&self) -> Value {
+        Value::Array(
+            self.baseline
+                .iter()
+                .map(|artifact| artifact.authorization())
+                .collect(),
+        )
+    }
+
+    fn capture_output(&self, generation: u64) -> Result<Arc<CheckedValueArtifact>, CompileError> {
+        let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation));
+        let path = self.root().join(owner.relative_hi_path());
+        let bytes: Arc<[u8]> = read(&path, 32 * 1024 * 1024)?.into();
+        Ok(Arc::new(CheckedValueArtifact {
+            owner,
+            module: owner.module_name(),
+            digest: hash(&bytes),
+            bytes,
+            path,
+        }))
+    }
+}
+
+impl CheckedValueArtifact {
+    fn authorization(&self) -> Value {
+        array([
+            text("main"),
+            text(&self.module),
+            text(self.path.to_string_lossy()),
+            text(&self.digest),
+        ])
+    }
 }
 
 #[derive(Debug)]
@@ -242,7 +324,7 @@ pub struct ExactCompiledItem {
     item: ExactCheckedItem,
     target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
     table: tidepool_repr::DataConTable,
-    value_interface: Option<(String, Arc<[u8]>)>,
+    value_interface: Option<Arc<CheckedValueArtifact>>,
     generation: u64,
     bound_binders: Vec<Value>,
     observation_name: Option<String>,
@@ -256,7 +338,7 @@ pub struct ExactCompiledDisplay {
     generation: u64,
     admission_digest: [u8; 32],
     bound_binders: Vec<Value>,
-    value_interface: (String, Arc<[u8]>),
+    value_interface: Arc<CheckedValueArtifact>,
 }
 
 impl ExactCompiledDisplay {
@@ -267,7 +349,7 @@ impl ExactCompiledDisplay {
         Ok(())
     }
     pub fn value_interface_owned(&self) -> (&str, &Arc<[u8]>) {
-        (&self.value_interface.0, &self.value_interface.1)
+        (&self.value_interface.module, &self.value_interface.bytes)
     }
     pub fn capture(&self) -> &Arc<ExactCompiledItem> {
         &self.capture
@@ -306,7 +388,6 @@ impl CheckedDisplayOffer {
         &self,
         producer: &[u8],
         context: [u8; 32],
-        value_root: &Path,
     ) -> Result<Value, CompileError> {
         self.prefix.revalidate_context(producer, &context)?;
         if self.admission_digest == [0; 32]
@@ -362,8 +443,8 @@ impl CheckedDisplayOffer {
                 CheckedExpressionPresentation::Opaque => "opaque",
             }),
             self.prefix.planned_authorization(),
-            self.prefix.completed_value_authorization(value_root)?,
-            self.prefix.value_interface_authorization(value_root)?,
+            self.prefix.completed_value_authorization()?,
+            self.prefix.value_interface_authorization()?,
         ]))
     }
     pub(crate) fn seal(
@@ -416,13 +497,12 @@ impl CheckedDisplayOffer {
                 return Err(failure("display binder has another reserved native owner"));
             }
         }
-        let bytes = read(
-            root.join("admitted-values").join(
-                tidepool_repr::SessionModule::val(tidepool_repr::Generation(self.generation))
-                    .relative_hi_path(),
-            ),
-            32 * 1024 * 1024,
-        )?;
+        let interface = self
+            .capture
+            .item
+            .cell
+            .value_inputs
+            .capture_output(self.generation)?;
         Ok(Arc::new(ExactCompiledDisplay {
             capture: self.capture.clone(),
             target: target.clone(),
@@ -430,7 +510,7 @@ impl CheckedDisplayOffer {
             generation: self.generation,
             admission_digest: self.admission_digest,
             bound_binders: bound,
-            value_interface: (module, bytes.into()),
+            value_interface: interface,
         }))
     }
 }
@@ -483,12 +563,12 @@ impl ExactCompiledItem {
     pub fn value_interface(&self) -> Option<(&str, &[u8])> {
         self.value_interface
             .as_ref()
-            .map(|(module, bytes)| (module.as_str(), bytes.as_ref()))
+            .map(|artifact| (artifact.module.as_str(), artifact.bytes.as_ref()))
     }
     pub fn value_interface_owned(&self) -> Option<(&str, &Arc<[u8]>)> {
         self.value_interface
             .as_ref()
-            .map(|(module, bytes)| (module.as_str(), bytes))
+            .map(|artifact| (artifact.module.as_str(), &artifact.bytes))
     }
 }
 
@@ -671,13 +751,13 @@ impl ExactCompiledPrefix {
                         completed
                             .value_interface
                             .as_ref()
-                            .map(|(module, _)| module.clone())
+                            .map(|artifact| artifact.module.clone())
                     }),
             )
             .chain(
                 self.displays
                     .iter()
-                    .map(|display| display.value_interface.0.clone()),
+                    .map(|display| display.value_interface.module.clone()),
             )
             .collect()
     }
@@ -688,8 +768,8 @@ impl ExactCompiledPrefix {
             .filter_map(|completed| completed.value_interface())
             .chain(self.displays.iter().map(|display| {
                 (
-                    display.value_interface.0.as_str(),
-                    display.value_interface.1.as_ref(),
+                    display.value_interface.module.as_str(),
+                    display.value_interface.bytes.as_ref(),
                 )
             }))
     }
@@ -726,59 +806,39 @@ impl ExactCompiledPrefix {
         }
         retained.into_iter().collect()
     }
-    fn value_interface_authorization(&self, root: &Path) -> Result<Value, CompileError> {
+    fn value_interface_authorization(&self) -> Result<Value, CompileError> {
         let mut inputs = self
             .cell
-            .baseline_values
+            .value_inputs
+            .baseline
             .iter()
-            .map(|(module, bytes)| {
-                (
-                    module.module_name(),
-                    (module.relative_hi_path(), bytes.as_ref()),
-                )
-            })
+            .map(|artifact| (artifact.module.as_str(), artifact.as_ref()))
             .collect::<BTreeMap<_, _>>();
         for item in self
             .completed
             .iter()
             .filter_map(CompletedCheckedItem::native)
         {
-            if let Some((module, bytes)) = item.value_interface() {
-                let path =
-                    tidepool_repr::SessionModule::val(tidepool_repr::Generation(item.generation))
-                        .relative_hi_path();
-                if inputs.insert(module.into(), (path, bytes)).is_some() {
+            if let Some(artifact) = &item.value_interface {
+                if inputs.insert(&artifact.module, artifact).is_some() {
                     return Err(failure("duplicate checked value interface"));
                 }
             }
         }
         for display in &self.displays {
-            let (module, bytes) = display.value_interface_owned();
-            let path =
-                tidepool_repr::SessionModule::val(tidepool_repr::Generation(display.generation))
-                    .relative_hi_path();
-            if inputs
-                .insert(module.into(), (path, bytes.as_ref()))
-                .is_some()
-            {
+            let artifact = &display.value_interface;
+            if inputs.insert(&artifact.module, artifact).is_some() {
                 return Err(failure("duplicate checked display interface"));
             }
         }
         Ok(Value::Array(
             inputs
-                .into_iter()
-                .map(|(module, (path, bytes))| {
-                    array([
-                        text("main"),
-                        text(module),
-                        text(root.join(path).to_string_lossy()),
-                        text(hash(bytes)),
-                    ])
-                })
+                .into_values()
+                .map(CheckedValueArtifact::authorization)
                 .collect(),
         ))
     }
-    fn completed_value_authorization(&self, root: &Path) -> Result<Value, CompileError> {
+    fn completed_value_authorization(&self) -> Result<Value, CompileError> {
         let values = self
             .value_imports()
             .into_iter()
@@ -792,15 +852,10 @@ impl ExactCompiledPrefix {
                             .is_some_and(|(owner, _)| owner == module)
                     })
                     .ok_or_else(|| failure("completed value has no exact native proof"))?;
-                let (_, bytes) = execution
-                    .value_interface()
+                let artifact = execution
+                    .value_interface
+                    .as_ref()
                     .ok_or_else(|| failure("completed value interface missing"))?;
-                let path = root.join(
-                    tidepool_repr::SessionModule::val(tidepool_repr::Generation(
-                        execution.generation,
-                    ))
-                    .relative_hi_path(),
-                );
                 let binders = names
                     .iter()
                     .map(|name| {
@@ -822,8 +877,8 @@ impl ExactCompiledPrefix {
                 Ok(array([
                     text("main"),
                     text(module),
-                    text(path.to_string_lossy()),
-                    text(hash(bytes)),
+                    text(artifact.path.to_string_lossy()),
+                    text(&artifact.digest),
                     Value::Array(binders),
                 ]))
             })
@@ -865,13 +920,17 @@ impl PartialEq for ExactCheckedItem {
 impl Eq for ExactCheckedItem {}
 
 impl ExactCheckedItem {
+    pub(crate) fn value_input_root(&self) -> &Path {
+        self.cell.value_inputs.root()
+    }
     pub fn baseline_value_interfaces(
         &self,
     ) -> impl Iterator<Item = (&tidepool_repr::SessionModule, &Arc<[u8]>)> {
         self.cell
-            .baseline_values
+            .value_inputs
+            .baseline
             .iter()
-            .map(|(module, bytes)| (module, bytes))
+            .map(|artifact| (&artifact.owner, &artifact.bytes))
     }
     pub fn cell_observations(&self) -> &[u8] {
         &self.cell.observations
@@ -1017,7 +1076,6 @@ impl CheckedItemOffer {
         &self,
         producer: &[u8],
         context: [u8; 32],
-        value_root: &Path,
     ) -> Result<Value, CompileError> {
         self.prefix.revalidate_context(producer, &context)?;
         if self.item.index != self.prefix.next_item()
@@ -1086,8 +1144,8 @@ impl CheckedItemOffer {
             ),
             self.observation_name.as_ref().map_or(Value::Null, text),
             self.prefix.planned_authorization(),
-            self.prefix.completed_value_authorization(value_root)?,
-            self.prefix.value_interface_authorization(value_root)?,
+            self.prefix.completed_value_authorization()?,
+            self.prefix.value_interface_authorization()?,
         ]))
     }
     pub(crate) fn validate_templates(
@@ -1170,13 +1228,12 @@ impl CheckedItemOffer {
             _ => return Err(failure("compiled turn kind differs from checked item")),
         };
         let value_interface = if !expected_binders.is_empty() {
-            let module =
-                tidepool_repr::SessionModule::val(tidepool_repr::Generation(self.generation));
-            let bytes = read(
-                root.join("admitted-values").join(module.relative_hi_path()),
-                32 * 1024 * 1024,
-            )?;
-            Some((module.module_name(), bytes.into()))
+            Some(
+                self.item
+                    .cell
+                    .value_inputs
+                    .capture_output(self.generation)?,
+            )
         } else {
             None
         };
@@ -1230,7 +1287,7 @@ pub(crate) fn admit_checked_cell(
     admissions: Vec<ExactSourceAdmission>,
     include: &[std::path::PathBuf],
     planned_declaration: Option<PlannedCheckedDeclaration>,
-    baseline_values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
+    value_inputs: Arc<CheckedValueInputs>,
 ) -> Result<Arc<ExactCheckedCell>, CompileError> {
     let receipt = read(root.join("checked-cell.cbor"), 8 * 1024 * 1024)?;
     let value = decode(&receipt)?;
@@ -1391,7 +1448,7 @@ pub(crate) fn admit_checked_cell(
         items,
         include: include.to_vec(),
         planned_declaration,
-        baseline_values,
+        value_inputs,
     }))
 }
 

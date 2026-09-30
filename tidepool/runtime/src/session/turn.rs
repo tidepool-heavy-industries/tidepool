@@ -2601,21 +2601,6 @@ fn check_cell_impl(
     std::fs::write(&cell_path, req.cell_text)?;
     std::fs::write(&template_path, req.template)?;
 
-    let admitted_root = temp.path().join("admitted-values");
-    let input_root = if let Some(admission) = &admission {
-        std::fs::create_dir_all(&admitted_root)?;
-        for interface in admission.interfaces() {
-            let path = admitted_root.join(interface.module().relative_hi_path());
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(path, interface.bytes())?;
-        }
-        admitted_root.as_path()
-    } else {
-        req.session_root
-    };
-
     let mut cmd = extract_cmd()?;
     cmd.input(&cell_path)
         .cell()
@@ -2623,7 +2608,7 @@ fn check_cell_impl(
         .cell_out(&out_path)
         .output_dir(temp.path())
         .includes(req.include)
-        .session_root(input_root)
+        .session_root(req.session_root)
         .inject_vals(req.inject_modules);
     if let Some(session_id) = req.session_id {
         cmd.session_incarnation(session_id.0.to_string());
@@ -2699,6 +2684,9 @@ fn check_cell_impl(
             req.exact_context.clone(),
         )?
     };
+    if let Some(root) = offer.checked_value_root() {
+        cmd.session_root(root);
+    }
     if let Some(manifest) = offer.exact_scope_path() {
         cmd.session_artifacts(manifest);
     }
@@ -2833,7 +2821,12 @@ fn check_cell_impl(
         if let Some(fold) = &fold {
             let relative = tidepool_repr::SessionModule::val(tidepool_repr::Generation(fold.gen))
                 .relative_hi_path();
-            let bytes = std::fs::read(input_root.join(&relative))?;
+            let bytes = std::fs::read(
+                offer
+                    .checked_value_root()
+                    .unwrap_or(req.session_root)
+                    .join(&relative),
+            )?;
             let output = req.session_root.join(relative);
             if let Some(parent) = output.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -3144,20 +3137,6 @@ fn run_turn_with_pin(
         .as_ref()
         .map(|admission| admission.snapshot())
         .or_else(|| display.as_ref().map(|admission| admission.snapshot()));
-    let admitted_root = temp.path().join("admitted-values");
-    let input_root = if let Some(snapshot) = &snapshot {
-        std::fs::create_dir_all(&admitted_root)?;
-        for interface in snapshot.interfaces() {
-            let path = admitted_root.join(interface.module().relative_hi_path());
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(path, interface.bytes())?;
-        }
-        admitted_root.as_path()
-    } else {
-        req.session_root
-    };
     let turn_path = temp.path().join("turn.txt");
     std::fs::write(&turn_path, req.turn_text)?;
     let turn_out_path = temp.path().join("turn.cbor");
@@ -3177,7 +3156,7 @@ fn run_turn_with_pin(
     cmd.turn_out(&turn_out_path)
         .output_dir(temp.path())
         .includes(req.include)
-        .session_root(input_root)
+        .session_root(req.session_root)
         .inject_vals(req.inject_modules)
         .bind_gen(req.gen);
     if let Some(session_id) = req.session_id {
@@ -3243,6 +3222,9 @@ fn run_turn_with_pin(
             req.exact_context.clone(),
         )?
     };
+    if let Some(root) = offer.checked_value_root() {
+        cmd.session_root(root);
+    }
     if let Some(manifest) = offer.exact_scope_path() {
         cmd.session_artifacts(manifest);
     }
