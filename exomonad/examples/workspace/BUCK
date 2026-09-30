@@ -1,4 +1,16 @@
-load("@prelude//:rules.bzl", "filegroup")
+load("@prelude//:rules.bzl", "export_file", "filegroup")
+
+export_file(
+    name = "facade_agent_spec",
+    src = ".exomonad/AgentSpec.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "facade_review_prompt",
+    src = ".exomonad/prompts/review.md",
+    visibility = ["PUBLIC"],
+)
 
 filegroup(
     name = "facade_scaffold_sources",

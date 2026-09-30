@@ -375,7 +375,11 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
             groups["tidepool_unit_tests_sources"],
         )
         self.assertIn(
-            "//exomonad/examples/workspace:facade_scaffold_sources",
+            "//exomonad/examples/workspace:facade_agent_spec",
+            groups["tidepool_unit_tests_sources"],
+        )
+        self.assertIn(
+            "//exomonad/examples/workspace:facade_review_prompt",
             groups["tidepool_unit_tests_sources"],
         )
 

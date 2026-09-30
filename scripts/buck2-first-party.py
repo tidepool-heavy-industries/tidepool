@@ -484,8 +484,8 @@ def source_inputs(package, target, features=()):
         "exomonad/prompts/docs/unfold.md": "//exomonad/prompts:doc_unfold",
         "exomonad/prompts/docs/watch.md": "//exomonad/prompts:doc_watch",
         "exomonad/prompts/docs/workbench.md": "//exomonad/prompts:doc_workbench",
-        "exomonad/examples/workspace/.exomonad/AgentSpec.hs": "//exomonad/examples/workspace:facade_scaffold_sources",
-        "exomonad/examples/workspace/.exomonad/prompts/review.md": "//exomonad/examples/workspace:facade_scaffold_sources",
+        "exomonad/examples/workspace/.exomonad/AgentSpec.hs": "//exomonad/examples/workspace:facade_agent_spec",
+        "exomonad/examples/workspace/.exomonad/prompts/review.md": "//exomonad/examples/workspace:facade_review_prompt",
         ".exomonad/workspace/Jev/Operators.hs": "//:facade_test_jev_operators",
     }
     while pending:
