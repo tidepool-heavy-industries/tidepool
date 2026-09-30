@@ -638,6 +638,7 @@ mod tests {
         }
         let first = inventory.seal([source("first")]).unwrap();
         let reused = first.compile(&registry).unwrap();
+        let retained_image = Arc::downgrade(reused[0].image());
         assert_eq!(registry.misses(), 2);
         assert_eq!(registry.hits(), 1);
         assert_eq!(reused[0].group().original_ordinal(), 4);
@@ -649,6 +650,9 @@ mod tests {
         let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
         assert_eq!(retired.programs.len(), 2);
         assert_eq!(machine.residency().programs, 0);
+        assert!(retained_image.upgrade().is_some());
+        drop(reused);
+        assert!(retained_image.upgrade().is_none());
     }
 
     #[test]
