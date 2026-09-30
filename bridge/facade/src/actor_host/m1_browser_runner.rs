@@ -430,6 +430,12 @@ pub(super) async fn production_browser_journey() {
                 .cell_settlement_diagnostic("browser-real-cell")
                 .await
         );
+        eprintln!(
+            "browser gate {}",
+            fixture
+                .cell_settlement_diagnostic("browser-cancellable-cell")
+                .await
+        );
     }
     let terminal = fixture.campaign.actor.terminal().get();
     let retirement_cleanup = fixture.campaign.actor.terminal().cleanup();

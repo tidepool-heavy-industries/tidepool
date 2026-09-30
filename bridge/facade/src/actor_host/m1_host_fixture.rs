@@ -78,8 +78,60 @@ impl RunningBrowserHost {
                 Ok(Some(harness::turn::JobOutput::CancellationUnconfirmed(_))) => "unconfirmed",
                 Err(_) => "lookup_failed",
             };
+            let failure = match &scheduler {
+                Ok(Some(harness::turn::JobOutput::Completed(Err(error))))
+                | Ok(Some(harness::turn::JobOutput::CancellationUnconfirmed(error))) => {
+                    Some(error.chars().take(2048).collect::<String>())
+                }
+                Ok(Some(harness::turn::JobOutput::Completed(Ok(value)))) => {
+                    let items = value["items"].as_array();
+                    let failures = items
+                        .into_iter()
+                        .flatten()
+                        .filter(|item| {
+                            use tidepool_runtime::session::WorkbenchItemStatus;
+                            [
+                                WorkbenchItemStatus::Stopped,
+                                WorkbenchItemStatus::Diagnostic,
+                                WorkbenchItemStatus::Rejected,
+                            ]
+                            .into_iter()
+                            .any(|status| item["status"] == serde_json::to_value(status).unwrap())
+                        })
+                        .take(4)
+                        .map(|item| {
+                            let diagnostics = item["diagnostics"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .take(4)
+                                .filter_map(|diagnostic| diagnostic["message"].as_str())
+                                .map(|message| message.chars().take(512).collect::<String>())
+                                .collect::<Vec<_>>();
+                            json!({
+                                "status": item["status"].as_str(),
+                                "failureLayer": item["failureLayer"].as_str(),
+                                "diagnostics": diagnostics,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    (!failures.is_empty()).then(|| {
+                        serde_json::to_string(&json!({
+                            "items": failures,
+                            "summary": value["summary"]
+                                .as_str()
+                                .map(|summary| summary.chars().take(2048).collect::<String>()),
+                        }))
+                        .unwrap()
+                        .chars()
+                        .take(2048)
+                        .collect::<String>()
+                    })
+                }
+                _ => None,
+            };
             settlements.push(format!(
-                "request={}, claim={:?}, scheduler={stage}, persisted_output={:?}",
+                "request={}, claim={:?}, scheduler={stage}, failure={failure:?}, persisted_output={:?}",
                 claim.request.0,
                 claim.state,
                 store
@@ -88,7 +140,7 @@ impl RunningBrowserHost {
             ));
         }
         format!(
-            "call={call_id}, legacy_codex_computing={}, claims={}, settlements={settlements:?}, actor_terminal={:?}",
+            "call={call_id}, legacy_codex_computing={}, claims={}, settlements={settlements:?}, actor_terminal={:?}, actor_failure={:?}",
             self.campaign.actor.hosted_cell_computing(),
             claims.len(),
             self.campaign
@@ -96,6 +148,10 @@ impl RunningBrowserHost {
                 .terminal()
                 .get()
                 .map(|terminal| terminal.kind),
+            self.campaign.actor.terminal().get().and_then(|terminal| {
+                (terminal.kind == exomonad_actor::ActorExitKind::Failed)
+                    .then(|| terminal.summary.chars().take(2048).collect::<String>())
+            }),
         )
     }
 
