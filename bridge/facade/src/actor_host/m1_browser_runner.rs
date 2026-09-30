@@ -387,6 +387,7 @@ async fn drive_browser(
 }
 
 pub(super) async fn production_browser_journey() {
+    let test_started = tokio::time::Instant::now();
     let assets = required_path("EXOMONAD_EMBEDDED_ASSET_ROOT").unwrap();
     assert!(
         assets.join("index.html").is_file(),
@@ -413,9 +414,14 @@ pub(super) async fn production_browser_journey() {
         state: Mutex::new(ScriptState::default()),
     });
     let host_transport: Arc<dyn ResponsesTransport> = transport.clone();
+    let host_started = tokio::time::Instant::now();
     let fixture = RunningBrowserHost::start(&settings, &host_transport)
         .await
         .unwrap();
+    eprintln!(
+        "browser gate host_startup elapsed={:?}",
+        host_started.elapsed()
+    );
     let outcome = drive_browser(&fixture, secret, barrier_rx).await;
     if outcome.is_err() {
         eprintln!(
@@ -427,7 +433,13 @@ pub(super) async fn production_browser_journey() {
     }
     let terminal = fixture.campaign.actor.terminal().get();
     let retirement_cleanup = fixture.campaign.actor.terminal().cleanup();
+    let cleanup_started = tokio::time::Instant::now();
     let cleanup = fixture.stop().await;
+    eprintln!(
+        "browser gate cleanup elapsed={:?} test_total={:?}",
+        cleanup_started.elapsed(),
+        test_started.elapsed()
+    );
     assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
     assert!(cleanup.is_ok(), "{}", cleanup.unwrap_err());
     assert!(
