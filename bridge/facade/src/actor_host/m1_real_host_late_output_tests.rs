@@ -90,7 +90,7 @@ impl ResponsesTransport for PendingCellTransport {
                         "type":"custom_tool_call",
                         "call_id":CELL_CALL_ID,
                         "name":"haskell",
-                        "input":"do { sleep (seconds 30); pure (40 + 2 :: Int) }"
+                        "input":"answer <- do { sleep (seconds 30); pure (40 + 2 :: Int) }"
                     }))],
                     usage: Usage::default(),
                 })
