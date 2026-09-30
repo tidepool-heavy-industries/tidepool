@@ -749,6 +749,11 @@ impl PersistentSession {
     }
 
     /// The prepared engine, once the first prepared turn has installed it.
+    pub(crate) fn prepared(&self) -> Option<&PreparedEngine> {
+        self.machine.as_ref()
+    }
+
+    /// The prepared engine, once the first prepared turn has installed it.
     pub fn prepared_mut(&mut self) -> Option<&mut PreparedEngine> {
         self.machine.as_mut()
     }

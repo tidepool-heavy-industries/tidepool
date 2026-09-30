@@ -6,6 +6,7 @@ use std::sync::{Arc, OnceLock};
 
 use tidepool_codegen::binding_table::{BindingTipId, SourceLeaseKey};
 use tidepool_codegen::scope::ScopeId;
+use tidepool_repr::execution_schema::{ImportOwner, SymbolIdentity};
 use tidepool_repr::Generation;
 
 use super::{PersistentSession, PublicVisibilitySnapshot, SessionCompileView, SessionError};
@@ -58,6 +59,7 @@ pub struct RuntimeCellAdmission {
     reserved_generations: Vec<Generation>,
     initial_value_generation: Generation,
     native_shares: Vec<SourceLeaseKey>,
+    native_imports: Arc<AdmittedNativeImports>,
     interfaces: Vec<AdmittedValueInterface>,
     specification: Arc<dyn Any + Send + Sync>,
     specification_digest: [u8; 32],
@@ -117,6 +119,36 @@ impl Drop for RuntimeLexicalScopeLease {
 pub struct AdmittedValueInterface {
     module: tidepool_repr::SessionModule,
     bytes: Arc<[u8]>,
+}
+
+/// The original native import ledger remains fixed for the whole cell.
+/// Completed items add only their sealed compiler-owned native identities.
+#[derive(Debug)]
+struct AdmittedNativeImports {
+    entries: Vec<(SymbolIdentity, u64)>,
+    commitment: [u8; 32],
+}
+
+fn frame_native_identity(hash: &mut blake3::Hasher, identity: &SymbolIdentity) {
+    for part in [
+        identity.unit.as_bytes(),
+        identity.module.as_bytes(),
+        identity.namespace.as_bytes(),
+        identity.occurrence.as_bytes(),
+    ] {
+        hash.update(&(part.len() as u64).to_le_bytes());
+        hash.update(part);
+    }
+    match &identity.record_parent {
+        None => {
+            hash.update(&[0]);
+        }
+        Some(parent) => {
+            hash.update(&[1]);
+            hash.update(&(parent.len() as u64).to_le_bytes());
+            hash.update(parent.as_bytes());
+        }
+    }
 }
 
 /// Interfaces retain compiler-owned byte Arcs. Each successful item appends
@@ -309,6 +341,7 @@ pub struct RuntimeCheckedPrefixSnapshot {
     interfaces: CheckedInterfaces,
     _retained_scope: Arc<RuntimeLexicalScopeLease>,
     native_shares: Vec<SourceLeaseKey>,
+    native_imports: Arc<AdmittedNativeImports>,
     compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
     last_display_settlement: Option<CheckedDisplaySettlement>,
     digest: [u8; 32],
@@ -323,6 +356,11 @@ impl RuntimeCheckedPrefixSnapshot {
     }
     pub fn native_shares(&self) -> &[SourceLeaseKey] {
         &self.native_shares
+    }
+    /// Baseline imports only. Completed native additions are carried by the
+    /// opaque compiler prefix rather than inferred from the latest machine.
+    pub fn admitted_retained_imports(&self) -> &[(SymbolIdentity, u64)] {
+        &self.native_imports.entries
     }
     pub fn compiler_prefix(&self) -> &tidepool_toolchain::checked_cell::ExactCompiledPrefix {
         &self.compiler_prefix
@@ -610,6 +648,7 @@ fn settle_checked_snapshot(
         admission,
         retained,
         display_settlement,
+        state.snapshot.native_imports.clone(),
     ));
     state.snapshot = snapshot;
     Ok(())
@@ -635,6 +674,7 @@ fn checked_snapshot(
     admission: [u8; 32],
     retained_scope: Arc<RuntimeLexicalScopeLease>,
     last_display_settlement: Option<CheckedDisplaySettlement>,
+    native_imports: Arc<AdmittedNativeImports>,
 ) -> RuntimeCheckedPrefixSnapshot {
     let native_shares = visibility.source_instances.clone();
     let mut digest = blake3::Hasher::new();
@@ -689,6 +729,7 @@ fn checked_snapshot(
         interfaces,
         _retained_scope: retained_scope,
         native_shares,
+        native_imports,
         compiler_prefix,
         last_display_settlement,
         digest: *digest.finalize().as_bytes(),
@@ -705,6 +746,26 @@ impl AdmittedValueInterface {
     pub fn bytes_owned(&self) -> &Arc<[u8]> {
         &self.bytes
     }
+}
+
+fn initial_interfaces_match<'a>(
+    admitted: &[AdmittedValueInterface],
+    consumed: impl IntoIterator<Item = (&'a tidepool_repr::SessionModule, &'a Arc<[u8]>)>,
+) -> bool {
+    let mut inventory = consumed.into_iter();
+    let mut seen = std::collections::BTreeSet::new();
+    for interface in admitted {
+        let Some((module, bytes)) = inventory.next() else {
+            return false;
+        };
+        if !seen.insert(interface.module.module_name())
+            || interface.module != *module
+            || (!Arc::ptr_eq(&interface.bytes, bytes) && interface.bytes.as_ref() != bytes.as_ref())
+        {
+            return false;
+        }
+    }
+    inventory.next().is_none()
 }
 
 impl std::fmt::Debug for RuntimeCellAdmission {
@@ -737,6 +798,9 @@ impl RuntimeCellAdmission {
     }
     pub fn native_shares(&self) -> &[SourceLeaseKey] {
         &self.native_shares
+    }
+    pub fn admitted_retained_imports(&self) -> &[(SymbolIdentity, u64)] {
+        &self.native_imports.entries
     }
     pub fn interfaces(&self) -> &[AdmittedValueInterface] {
         &self.interfaces
@@ -1112,6 +1176,10 @@ impl PersistentSession {
     ) -> Result<Arc<RuntimeCheckedPrefix>, SessionError> {
         if !admission.belongs_to(self)
             || first_item.admission_digest() != admission.digest()
+            || !initial_interfaces_match(
+                &admission.interfaces,
+                first_item.baseline_value_interfaces(),
+            )
             || self
                 .public_visibility_snapshot_in(admission.visibility.scope)
                 .as_ref()
@@ -1131,6 +1199,7 @@ impl PersistentSession {
             admission.digest(),
             admission._retained_scope.clone(),
             None,
+            admission.native_imports.clone(),
         ));
         admission
             .prefix_started
@@ -1299,6 +1368,7 @@ impl PersistentSession {
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
+        let native_imports = Arc::new(self.capture_admitted_native_imports(scope)?);
         let interfaces = view
             .reachable_values()
             .iter()
@@ -1344,6 +1414,7 @@ impl PersistentSession {
         }
         frame(&view.next_value_generation().0.to_le_bytes());
         frame(&view.admission_digest());
+        frame(&native_imports.commitment);
         if let Some(context) = view.exact_declaration_context() {
             frame(&context.semantic_sha256());
         }
@@ -1382,12 +1453,71 @@ impl PersistentSession {
             reserved_generations,
             initial_value_generation,
             native_shares,
+            native_imports,
             interfaces,
             specification,
             specification_digest,
             authority_digest,
             digest,
         }))
+    }
+
+    fn capture_admitted_native_imports(
+        &self,
+        scope: ScopeId,
+    ) -> Result<AdmittedNativeImports, SessionError> {
+        if !self.scope_tree().is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
+        let mut entries = std::collections::BTreeSet::new();
+        let mut bound = std::collections::BTreeSet::new();
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"TidepoolAdmittedNativeImports1");
+        for id in self
+            .bindings()
+            .scope_reachable_binding_ids(self.scope_tree(), scope)
+        {
+            let entry = self
+                .bindings()
+                .get(id)
+                .ok_or(SessionError::StaleStagedDeclaration)?;
+            let handle = entry.value.handle;
+            if self
+                .prepared()
+                .and_then(|engine| engine.prepared_handle_of(handle.raw()))
+                != Some(handle)
+            {
+                return Err(SessionError::StaleStagedDeclaration);
+            }
+            hash.update(b"binding");
+            hash.update(&id.raw().to_le_bytes());
+            hash.update(&entry.module.gen.0.to_le_bytes());
+            hash.update(&handle.raw().0.to_le_bytes());
+            frame_native_identity(&mut hash, &entry.value.identity);
+            entries.insert((entry.value.identity.clone(), entry.module.gen.0));
+            bound.insert(entry.value.identity.clone());
+        }
+        if let Some(engine) = self.prepared() {
+            for (identity, generation) in engine.code_export_retentions() {
+                if bound.contains(&identity) {
+                    continue;
+                }
+                let Some(ImportOwner::CodeExport { root_id, .. }) =
+                    engine.retained_code_export_owner(&identity, generation)
+                else {
+                    return Err(SessionError::StaleStagedDeclaration);
+                };
+                hash.update(b"code-export");
+                hash.update(&generation.to_le_bytes());
+                hash.update(&root_id.to_le_bytes());
+                frame_native_identity(&mut hash, &identity);
+                entries.insert((identity, generation));
+            }
+        }
+        Ok(AdmittedNativeImports {
+            entries: entries.into_iter().collect(),
+            commitment: *hash.finalize().as_bytes(),
+        })
     }
 
     /// Issue executable cell authority inside the exact private execution
@@ -1426,6 +1556,187 @@ impl PersistentSession {
 mod tests {
     use super::*;
     use crate::session::{ModuleEnv, SessionId, SessionLib};
+
+    #[test]
+    fn initial_interface_inventory_refuses_missing_extra_duplicate_and_changed_bytes() {
+        let first = AdmittedValueInterface {
+            module: tidepool_repr::SessionModule::val(Generation(1)),
+            bytes: Arc::from([1, 2, 3]),
+        };
+        let second = AdmittedValueInterface {
+            module: tidepool_repr::SessionModule::val(Generation(2)),
+            bytes: Arc::from([4, 5, 6]),
+        };
+        let admitted = [first.clone(), second.clone()];
+        assert!(!initial_interfaces_match(
+            &admitted,
+            [
+                (&second.module, &second.bytes),
+                (&first.module, &first.bytes)
+            ],
+        ));
+        assert!(initial_interfaces_match(
+            &admitted,
+            [
+                (&first.module, &first.bytes),
+                (&second.module, &second.bytes)
+            ],
+        ));
+        let equal_bytes: Arc<[u8]> = Arc::from([1, 2, 3]);
+        assert!(!Arc::ptr_eq(&first.bytes, &equal_bytes));
+        assert!(initial_interfaces_match(
+            &admitted,
+            [
+                (&first.module, &equal_bytes),
+                (&second.module, &second.bytes)
+            ],
+        ));
+        assert!(!initial_interfaces_match(
+            &admitted,
+            [(&first.module, &first.bytes)],
+        ));
+        let extra = tidepool_repr::SessionModule::val(Generation(3));
+        assert!(!initial_interfaces_match(
+            &admitted,
+            [
+                (&first.module, &first.bytes),
+                (&second.module, &second.bytes),
+                (&extra, &first.bytes),
+            ],
+        ));
+        assert!(!initial_interfaces_match(
+            &admitted,
+            [(&first.module, &first.bytes), (&first.module, &first.bytes)],
+        ));
+        let changed: Arc<[u8]> = Arc::from([1, 2, 4]);
+        assert!(!initial_interfaces_match(
+            &admitted,
+            [(&first.module, &changed), (&second.module, &second.bytes)],
+        ));
+        assert!(!initial_interfaces_match(
+            &[first.clone(), first],
+            [(&second.module, &second.bytes)],
+        ));
+        assert!(initial_interfaces_match(&[], []));
+        assert!(!initial_interfaces_match(
+            &[],
+            [(&second.module, &second.bytes)],
+        ));
+    }
+
+    #[test]
+    fn native_admission_uses_exact_scoped_roots_and_keeps_its_original_ledger() {
+        use tidepool_repr::{SessionModule, SessionVarId};
+
+        let root = tempfile::tempdir().unwrap();
+        let lib =
+            SessionLib::open(SessionId(990), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let sibling = session.mint_scope(ScopeId::ROOT).unwrap();
+        let mut original =
+            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "x", 910);
+        original.value.identity.module = original.module.module_name();
+        let original_identity = original.value.identity.clone();
+        let original_id = original.id;
+        session.bind_in(public, original).unwrap();
+        let mut historical =
+            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "x", 911);
+        historical.value.identity.module = historical.module.module_name();
+        let historical_identity = historical.value.identity.clone();
+        session.bind_in(public, historical).unwrap();
+
+        // A sibling sharing a module is still a different exact binding owner.
+        let mut foreign = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "foreign",
+            912,
+        );
+        foreign.module = SessionModule::val(Generation(910));
+        foreign.value.identity.module = foreign.module.module_name();
+        foreign.value.identity.occurrence = "foreign".into();
+        let foreign_identity = foreign.value.identity.clone();
+        session.bind_in(sibling, foreign).unwrap();
+        let private = Arc::new(session.begin_private_execution(public).unwrap());
+
+        // These sentinel bytes exercise runtime retention, not compiler interface
+        // authority. The compiler must independently certify their input receipt.
+        for module in private.view().reachable_values() {
+            let path = root.path().join(module.relative_hi_path());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, [1, 2, 3]).unwrap();
+        }
+        let admitted = session
+            .admit_cell_for_execution(private.clone(), 0, Arc::new(()), [7; 32], [8; 32])
+            .unwrap();
+        let ledger = admitted.native_imports.clone();
+        assert!(admitted
+            .admitted_retained_imports()
+            .contains(&(original_identity, 910)));
+        assert!(admitted
+            .admitted_retained_imports()
+            .contains(&(historical_identity, 911)));
+        assert!(!admitted
+            .admitted_retained_imports()
+            .iter()
+            .any(|(identity, _)| identity == &foreign_identity));
+
+        let mut replacement =
+            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "x", 913);
+        replacement.value.identity.module = replacement.module.module_name();
+        let replacement_identity = replacement.value.identity.clone();
+        session.bind_in(public, replacement).unwrap();
+        assert!(session
+            .capture_admitted_native_imports(public)
+            .unwrap()
+            .entries
+            .contains(&(replacement_identity.clone(), 913)));
+        assert!(!admitted
+            .admitted_retained_imports()
+            .contains(&(replacement_identity, 913)));
+        assert!(Arc::ptr_eq(&ledger, &admitted.native_imports));
+        session.retire_scope(public);
+        assert!(session.bindings().get(original_id).is_some());
+        drop(admitted);
+        drop(ledger);
+        drop(private);
+        session.reap_admission_leases();
+        assert!(session.bindings().get(original_id).is_none());
+        assert!(session
+            .bindings()
+            .get(SessionVarId::from_extract(912))
+            .is_some());
+    }
+
+    #[test]
+    fn native_admission_commits_the_live_machine_export_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let lib =
+            SessionLib::open(SessionId(991), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let unbound = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "nativeExport",
+            914,
+        );
+        let identity = unbound.value.identity;
+        let scope = session.mint_scope(ScopeId::ROOT).unwrap();
+        let admitted = session.capture_admitted_native_imports(scope).unwrap();
+        assert!(admitted.entries.contains(&(identity.clone(), 0)));
+        let Some(ImportOwner::CodeExport { root_id, .. }) = session
+            .prepared()
+            .unwrap()
+            .retained_code_export_owner(&identity, 0)
+        else {
+            panic!("real installed export must have its native owner")
+        };
+        assert_ne!(root_id, 0);
+        let empty = PersistentSession::new(None, 1024 * 1024)
+            .capture_admitted_native_imports(ScopeId::ROOT)
+            .unwrap();
+        assert!(empty.entries.is_empty());
+        assert_ne!(admitted.commitment, empty.commitment);
+    }
 
     #[test]
     fn cell_admission_reserves_the_lazy_machine_identity_once() {
