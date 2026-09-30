@@ -261,15 +261,28 @@ async fn authored_failed_shutdown_hook_remains_unconfirmed_in_parent_cleanup() {
 
 #[tokio::test]
 async fn resident_local_actor_await_watch_parks_resumes_and_cancels() {
-    resident_await_watch_case(true).await;
+    resident_await_watch_case(WatchCase::PrimaryRoundTrip).await;
 }
 
 #[tokio::test]
 async fn resident_structured_tool_await_watch_resumes() {
-    resident_await_watch_case(false).await;
+    resident_await_watch_case(WatchCase::StructuredRoundTrip).await;
 }
 
-async fn resident_await_watch_case(primary: bool) {
+#[tokio::test]
+async fn resident_primary_await_watch_cancels_an_unpublished_cell() {
+    resident_await_watch_case(WatchCase::PrimaryCancellation).await;
+}
+
+enum WatchCase {
+    PrimaryRoundTrip,
+    StructuredRoundTrip,
+    PrimaryCancellation,
+}
+
+async fn resident_await_watch_case(case: WatchCase) {
+    let primary = !matches!(case, WatchCase::StructuredRoundTrip);
+    let cancel_first = matches!(case, WatchCase::PrimaryCancellation);
     if std::env::var_os("TIDEPOOL_ACTOR_TEST_TRACE").is_some() {
         tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -279,7 +292,13 @@ async fn resident_await_watch_case(primary: bool) {
     }
     eval_harness::require_extract();
 
-    let session = support::process_unique_session(if primary { 180 } else { 181 });
+    let session = support::process_unique_session(if cancel_first {
+        182
+    } else if primary {
+        180
+    } else {
+        181
+    });
     let declarations = [
         tidepool_mcp::agent_tools_decl(),
         tidepool_mcp::actor_decl(),
@@ -396,102 +415,107 @@ async fn resident_await_watch_case(primary: bool) {
         (actor, Some(task), installation.policy)
     };
     let command_backend = std::sync::Arc::new(DelayedCommandBackend::default());
-    let settled_context = ToolInvocationContext {
-        context_call_id: Some("await-watch-settled".into()),
-        thread_id: "await-watch-test".into(),
-        turn_id: "turn-settled".into(),
-        call_id: "call-settled".into(),
-        namespace: None,
-    };
-    let mut settled_call = {
-        let policy = policy.clone();
-        let context = settled_context.clone();
-        tokio::spawn(async move {
-            policy
-                .dispatch_boxed(ToolInvocation {
-                    context: Some(context),
-                    name: if primary {
-                        exomonad_actor::HASKELL_TOOL
-                    } else {
-                        "wait_for_command"
-                    }
-                    .into(),
-                    arguments: if primary {
-                        ToolArguments::Raw(
-                            include_str!("resident_local_actor/await_watch_cell.hs")
-                                .replace("DELAY", "1"),
-                        )
-                    } else {
-                        ToolArguments::Structured(serde_json::json!({"delay": 1}))
-                    },
-                })
-                .await
-        })
-    };
-    tokio::time::timeout(std::time::Duration::from_secs(180), async {
+    let settled = if cancel_first {
+        None
+    } else {
+        let settled_context = ToolInvocationContext {
+            context_call_id: Some("await-watch-settled".into()),
+            thread_id: "await-watch-test".into(),
+            turn_id: "turn-settled".into(),
+            call_id: "call-settled".into(),
+            namespace: None,
+        };
+        let mut settled_call = {
+            let policy = policy.clone();
+            let context = settled_context.clone();
+            tokio::spawn(async move {
+                policy
+                    .dispatch_boxed(ToolInvocation {
+                        context: Some(context),
+                        name: if primary {
+                            exomonad_actor::HASKELL_TOOL
+                        } else {
+                            "wait_for_command"
+                        }
+                        .into(),
+                        arguments: if primary {
+                            ToolArguments::Raw(
+                                include_str!("resident_local_actor/await_watch_cell.hs")
+                                    .replace("DELAY", "1"),
+                            )
+                        } else {
+                            ToolArguments::Structured(serde_json::json!({"delay": 1}))
+                        },
+                    })
+                    .await
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(180), async {
         tokio::select! {
             () = supply_command_until_started(&mut deployments, command_backend.clone(), actor.identity()) => {},
             reply = &mut settled_call => panic!("watch cell settled before starting its command: {reply:?}"),
         }
     }).await.expect("command start is bounded");
-    if primary {
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while actor.hosted_cell_computing() {
-                assert!(
-                    !settled_call.is_finished(),
-                    "the cell must reach its captured watch"
-                );
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the owned watch parks promptly after command admission");
-    }
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(100), &mut settled_call)
+        if primary {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while actor.hosted_cell_computing() {
+                    assert!(
+                        !settled_call.is_finished(),
+                        "the cell must reach its captured watch"
+                    );
+                    tokio::task::yield_now().await;
+                }
+            })
             .await
-            .is_err(),
-        "awaitWatch must keep the hosted workbench parked while its exact command is live"
-    );
-    if primary {
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while !actor.hosted_cell_computing() && !settled_call.is_finished() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("ready watch resumes promptly into the same cell");
-    }
-    // A primary cell renders its deferred observation through GHC after the
-    // watch resumes; the structured tool already owns its JSON result.
-    let settled = tokio::time::timeout(
-        std::time::Duration::from_secs(if primary { 600 } else { 5 }),
-        settled_call,
-    )
-    .await
-    .expect("watch settles")
-    .expect("watch call task")
-    .expect("watch tool call");
-    if primary {
-        assert_eq!(settled["status"], "committed", "{settled:?}");
-        let operations = settled["items"][0]["operations"]
-            .as_array()
-            .expect("operation receipts");
-        assert_eq!(operations.len(), 4, "{settled:?}");
-        for (ordinal, operation) in operations.iter().enumerate() {
-            assert_eq!(operation["id"]["effectOrdinal"], ordinal, "{settled:?}");
-            assert_eq!(operation["id"]["inputUnitIndex"], 0, "{settled:?}");
-            assert_eq!(operation["disposition"], "committed", "{settled:?}");
+            .expect("the owned watch parks promptly after command admission");
         }
-        assert_eq!(operations[2]["effect"], "awaitWatch", "{settled:?}");
-    } else {
-        assert_eq!(settled, serde_json::json!({"settled": true}));
-        forest.shutdown().await;
-        task.expect("structured actor task")
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut settled_call)
+                .await
+                .is_err(),
+            "awaitWatch must keep the hosted workbench parked while its exact command is live"
+        );
+        if primary {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while !actor.hosted_cell_computing() && !settled_call.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
             .await
-            .expect("actor task");
-        return;
-    }
+            .expect("ready watch resumes promptly into the same cell");
+        }
+        // A primary cell renders its deferred observation through GHC after the
+        // watch resumes; the structured tool already owns its JSON result.
+        let settled = tokio::time::timeout(
+            std::time::Duration::from_secs(if primary { 600 } else { 5 }),
+            settled_call,
+        )
+        .await
+        .expect("watch settles")
+        .expect("watch call task")
+        .expect("watch tool call");
+        if primary {
+            assert_eq!(settled["status"], "committed", "{settled:?}");
+            let operations = settled["items"][0]["operations"]
+                .as_array()
+                .expect("operation receipts");
+            assert_eq!(operations.len(), 4, "{settled:?}");
+            for (ordinal, operation) in operations.iter().enumerate() {
+                assert_eq!(operation["id"]["effectOrdinal"], ordinal, "{settled:?}");
+                assert_eq!(operation["id"]["inputUnitIndex"], 0, "{settled:?}");
+                assert_eq!(operation["disposition"], "committed", "{settled:?}");
+            }
+            assert_eq!(operations[2]["effect"], "awaitWatch", "{settled:?}");
+        } else {
+            assert_eq!(settled, serde_json::json!({"settled": true}));
+            forest.shutdown().await;
+            task.expect("structured actor task")
+                .await
+                .expect("actor task");
+            return;
+        }
+        Some(settled)
+    };
 
     let cancelled_context = ToolInvocationContext {
         context_call_id: Some("await-watch-cancelled".into()),
@@ -546,7 +570,7 @@ async fn resident_await_watch_case(primary: bool) {
         .await
         .expect("cancelled workbench settles")
         .expect("cancelled workbench task");
-    wait_for_command_completions(&command_backend, 2).await;
+    wait_for_command_completions(&command_backend, if cancel_first { 1 } else { 2 }).await;
 
     forest.shutdown().await;
     assert_eq!(
@@ -573,7 +597,9 @@ async fn resident_await_watch_case(primary: bool) {
             other => panic!("unexpected final deployment: {}", other.kind()),
         }
     }
-    assert_eq!(settled["items"][0]["output"], "True", "{settled:?}");
+    if let Some(settled) = settled {
+        assert_eq!(settled["items"][0]["output"], "True", "{settled:?}");
+    }
 }
 
 async fn resident_cleanup_case(fail_hook: bool) {
