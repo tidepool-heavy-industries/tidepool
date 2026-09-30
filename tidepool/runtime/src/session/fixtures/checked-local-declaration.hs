@@ -7,8 +7,10 @@ class LocalClass a where
   localValue :: a -> Int
 instance LocalClass LocalBox where
   localValue = localNumber
-type family LocalPayload (flag :: Bool) where
-  LocalPayload 'True = LocalBox
+type family LocalClosed (flag :: Bool) where
+  LocalClosed 'True = LocalBox
+type family LocalPayload (flag :: Bool)
+type instance LocalPayload 'True = LocalClosed 'True
 makeLocal :: Int -> LocalPayload 'True
 makeLocal = LocalBox
 historical :: Int
