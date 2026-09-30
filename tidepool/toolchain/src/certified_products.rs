@@ -774,7 +774,25 @@ type SourceGroupKey = (String, String, u32, SymbolIdentity);
 #[derive(Default)]
 struct SourceGroupMap {
     groups: BTreeMap<SourceGroupKey, (CachedHomeOwner, ProductOrigin)>,
-    modules: BTreeMap<String, BTreeSet<String>>,
+    modules: SourceModuleIndex,
+}
+
+#[derive(Default)]
+struct SourceModuleIndex(BTreeMap<String, BTreeSet<String>>);
+
+impl SourceModuleIndex {
+    fn insert(&mut self, unit: &str, module: &str) {
+        self.0
+            .entry(unit.to_owned())
+            .or_default()
+            .insert(module.to_owned());
+    }
+
+    fn contains(&self, unit: &str, module: &str) -> bool {
+        self.0
+            .get(unit)
+            .is_some_and(|modules| modules.contains(module))
+    }
 }
 
 impl SourceGroupMap {
@@ -787,10 +805,7 @@ impl SourceGroupMap {
         key: SourceGroupKey,
         owner: (CachedHomeOwner, ProductOrigin),
     ) -> Option<(CachedHomeOwner, ProductOrigin)> {
-        self.modules
-            .entry(key.0.clone())
-            .or_default()
-            .insert(key.1.clone());
+        self.modules.insert(&key.0, &key.1);
         self.groups.insert(key, owner)
     }
 
@@ -799,9 +814,7 @@ impl SourceGroupMap {
     }
 
     fn contains_module(&self, unit: &str, module: &str) -> bool {
-        self.modules
-            .get(unit)
-            .is_some_and(|modules| modules.contains(module))
+        self.modules.contains(unit, module)
     }
 }
 
@@ -2197,6 +2210,98 @@ mod tests {
                     "qualification": "actual original package-owner validation only; decode and other owner checks excluded"
                 })
             );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires an exact retained original declaration packet"]
+    fn retained_original_source_module_lookup_cost() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let root = PathBuf::from(std::env::var_os("TIDEPOOL_PACKAGE_VALIDATION_PACKET").unwrap());
+        let receipt_bytes = std::fs::read(root.join("certified-products.cbor")).unwrap();
+        let product_bytes = std::fs::read(root.join("module-products.cbor")).unwrap();
+        let receipt = decode_receipt(&receipt_bytes).unwrap();
+        let products = parse_module_products(
+            &product_bytes,
+            &crate::prepared_artifact::production_requirements().unwrap(),
+            crate::module_candidates::product_decode_limits(),
+        )
+        .unwrap();
+        // Only exact source-key membership is measured; no source-owner capability
+        // is constructed from this worker receipt or used to install a program.
+        let mut keys = BTreeMap::<SourceGroupKey, ()>::new();
+        for accepted in &receipt.modules {
+            let product = matching_product(&products, &accepted.unit, &accepted.module).unwrap();
+            for group in &product.groups {
+                for binder in group.binders() {
+                    assert!(keys
+                        .insert(
+                            (
+                                accepted.unit.clone(),
+                                accepted.module.clone(),
+                                group.original_ordinal(),
+                                binder.clone()
+                            ),
+                            ()
+                        )
+                        .is_none());
+                }
+            }
+        }
+        let setup_started = Instant::now();
+        let mut index = SourceModuleIndex::default();
+        for (unit, module, _, _) in keys.keys() {
+            index.insert(unit, module);
+        }
+        let setup = setup_started.elapsed();
+        let queries: Vec<_> = receipt
+            .modules
+            .iter()
+            .flat_map(|module| &module.groups)
+            .flat_map(|group| &group.globals)
+            .filter_map(|global| match &global.owner {
+                ReceiptImportOwner::Package { unit, module, .. } => Some((unit, module)),
+                _ => None,
+            })
+            .collect();
+        assert!(queries.len() >= 100);
+        for count in [1, 10, 100, queries.len()] {
+            for algorithm in ["flat_source_keys", "indexed_source_modules"] {
+                let started = Instant::now();
+                for (unit, module) in &queries[..count] {
+                    let (unit, module) = black_box((*unit, *module));
+                    let exists = if algorithm == "flat_source_keys" {
+                        keys.keys().any(|(home_unit, home_module, _, _)| {
+                            home_unit == unit && home_module == module
+                        })
+                    } else {
+                        index.contains(unit, module)
+                    };
+                    assert!(!black_box(exists));
+                }
+                let elapsed = started.elapsed();
+                println!(
+                    "SOURCE_MODULE_LOOKUP_COST {}",
+                    serde_json::json!({
+                        "packet_receipt_sha256": hex(&sha(&receipt_bytes)),
+                        "packet_product_sha256": hex(&sha(&product_bytes)),
+                        "algorithm": algorithm, "source_keys": keys.len(), "queries": count,
+                        "indexed_units": index.0.len(), "indexed_modules": index.0.values().map(BTreeSet::len).sum::<usize>(),
+                        "index_setup_nanoseconds": setup.as_nanos(), "nanoseconds": elapsed.as_nanos(),
+                        "qualification": "exact captured source-key predicate only; flat map omits unused owner values; not full validation or prefix latency"
+                    })
+                );
+            }
+        }
+        for (unit, modules) in &index.0 {
+            for module in modules {
+                assert!(keys.keys().any(
+                    |(home_unit, home_module, _, _)| home_unit == unit && home_module == module
+                ));
+                assert!(index.contains(unit, module));
+            }
         }
     }
 
