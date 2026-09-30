@@ -131,6 +131,7 @@ import Data.Word (Word64)
 import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellDisplayTarget(..), CellGenericDeclaration(..), CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), omitCellGenericDeclarations, omitCellDisplayDeclarations)
 import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts)
+import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.FamilyConsistency (validateCompilationFamilies)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
@@ -942,6 +943,7 @@ hasUntrackedCompileTimeExecution flags =
 -- of these, in which case the trace names the first.
 untrackedExtensionName :: DynFlags -> Maybe String
 untrackedExtensionName flags
+  | issue : _ <- pluginInputIssues flags = Just issue
   | gopt Opt_Pp flags = Just "external-preprocessor"
   | otherwise = case filter (`xopt` flags)
       [LangExt.Cpp, LangExt.TemplateHaskell, LangExt.QuasiQuotes] of
@@ -955,7 +957,8 @@ untrackedExtensionName flags
 -- 'QuasiQuotes' is handled separately: see 'pureQuasiQuoters' below.
 hasUnconditionallyUntrackedCompileTimeExecution :: DynFlags -> Bool
 hasUnconditionallyUntrackedCompileTimeExecution flags =
-  gopt Opt_Pp flags || any (`xopt` flags) [LangExt.Cpp, LangExt.TemplateHaskell]
+  not (null (pluginInputIssues flags))
+    || gopt Opt_Pp flags || any (`xopt` flags) [LangExt.Cpp, LangExt.TemplateHaskell]
 
 -- | Quasiquoters proven pure by inspection, named by their fully-qualified
 -- defining module and identifier ("Module.Path.name"). THE PURITY
