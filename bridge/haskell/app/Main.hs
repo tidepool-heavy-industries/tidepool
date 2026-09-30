@@ -1319,9 +1319,9 @@ checkedDisplayRecipe admission template = do
         Just row | not (T.null row) -> pure (T.unpack row)
         _ -> fail "display requires the canonical bind effect-row pin"
     _ -> fail "display requires one exact bind effect-row pin"
-  withImports <- if null (displayValueImports admission) then pure template else
-    replaceRecipeMarker "default (Int, Double, Text)\n"
-      (concatMap (\(name, binders) -> "import " ++ name ++ " (" ++ intercalate ", " binders ++ ")\n")
+  withImports <- replaceRecipeMarker "default (Int, Double, Text)\n"
+    ("import qualified Tidepool.Inspection as TidepoolInspection\n"
+      ++ concatMap (\(name, binders) -> "import " ++ name ++ " (" ++ intercalate ", " binders ++ ")\n")
         (displayValueImports admission) ++ "default (Int, Double, Text)\n") template
   unless ("__result = do {\n{{TURN_STMT}}" `isInfixOf` withImports)
     (fail "display requires canonical bind recipe version one")
