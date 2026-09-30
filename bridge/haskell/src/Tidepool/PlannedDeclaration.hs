@@ -7,7 +7,7 @@ module Tidepool.PlannedDeclaration
   , PlannedDeclarationInventory, plannedExports, plannedInstances
   , plannedOriginalOwner, plannedInterfaceFingerprint, plannedFamilyClosure
   , renderPlannedDeclarationInventory
-  , certifyPlannedDeclaration
+  , certifyPlannedDeclaration, hydratePlannedDeclarationInventory
   , transformPlannedDeclarationImports
   ) where
 
@@ -169,39 +169,76 @@ certifyPlannedDeclaration planned env = case
   Just original -> do
     let iface = hm_iface original
         owner = mi_module iface
-        unit = unitString (moduleUnit owner)
-        owns identity = exportUnit identity == unit
-          && exportModule identity == plannedModule planned
         sourceHash = fingerprintByteString (TE.encodeUtf8 (T.pack (plannedSource planned)))
     if moduleNameString (moduleName owner) /= plannedModule planned
         || moduleUnit owner /= homeUnitAsUnit (hsc_home_unit env)
         || mi_src_hash iface /= sourceHash
       then pure (Left "planned original declaration owner or source differs")
       else do
-        exports <- interfaceExports env iface
-        instances <- interfaceInventory env iface
-        eps <- hscEPS env
-        let families = concat
-              [md_fam_insts (hm_details hmi)
-              | hpt <- unitEnv_hpts (hsc_HUG env), hmi <- eltsHpt hpt]
-            heads = nub [(exportKind item, exportOccurrence (exportHead item)) | item <- exports]
-            exactExports = all (\item -> owns (exportHead item)
-                && all owns (exportChildren item)) exports
-            familyCheck = validateRetainedFamilyInstances (eps_fam_inst_env eps) families
+        result <- readPlannedDeclarationInventory env original
         pure $ do
+          inventory <- result
+          let heads = nub [(exportKind item, exportOccurrence (exportHead item))
+                | item <- plannedExports inventory]
           unless (length heads == length (authoredHeads planned)
-              && all (`elem` authoredHeads planned) heads && exactExports)
+              && all (`elem` authoredHeads planned) heads)
             (Left "planned original declaration exports differ from parser-owned heads")
-          inventory <- instances
-          unless (all (owns . instanceDfun) (inventoryClasses inventory)
-              && all owns (inventoryFamilies inventory)
-              && all (all owns . instanceSelectedAxioms) (inventoryClasses inventory))
-            (Left "planned original instance inventory has a foreign owner")
-          case familyCheck of
-            JoinAccepted -> Right (PlannedDeclarationInventory exports inventory owner
-              (mi_iface_hash (mi_final_exts iface))
-              (sort (nub (map (exportIdentity . coAxiomName . fi_axiom) families))))
-            JoinRejected _ diagnostic -> Left diagnostic
+          Right inventory
+
+-- A later target recipe receives the original owner and final interface
+-- fingerprint from its closed declaration authorization. Read the same
+-- already hydrated original; neither source replay nor rendered names can
+-- stand in for its exact interface identity.
+hydratePlannedDeclarationInventory
+  :: (String, String) -> String -> HscEnv
+  -> IO (Either String PlannedDeclarationInventory)
+hydratePlannedDeclarationInventory expectedOwner expectedFingerprint env =
+  case parseSessionModule (snd expectedOwner) of
+    Just owner | smKind owner == LibMod && sessionModuleString owner == snd expectedOwner ->
+      case lookupHpt (hsc_HPT env) (mkModuleName (snd expectedOwner)) of
+        Nothing -> pure (Left "planned original declaration interface is absent")
+        Just original -> do
+          let iface = hm_iface original
+              ownerModule = mi_module iface
+              actualOwner = (unitString (moduleUnit ownerModule)
+                ,moduleNameString (moduleName ownerModule))
+          if actualOwner /= expectedOwner
+              || moduleUnit ownerModule /= homeUnitAsUnit (hsc_home_unit env)
+              || show (mi_iface_hash (mi_final_exts iface)) /= expectedFingerprint
+            then pure (Left "planned original declaration owner or interface differs")
+            else readPlannedDeclarationInventory env original
+    _ -> pure (Left "planned declaration requires a canonical original Lib owner")
+
+readPlannedDeclarationInventory
+  :: HscEnv -> HomeModInfo -> IO (Either String PlannedDeclarationInventory)
+readPlannedDeclarationInventory env original = do
+  let iface = hm_iface original
+      owner = mi_module iface
+      unit = unitString (moduleUnit owner)
+      ownerName = moduleNameString (moduleName owner)
+      owns identity = exportUnit identity == unit && exportModule identity == ownerName
+  exports <- interfaceExports env iface
+  instances <- interfaceInventory env iface
+  eps <- hscEPS env
+  let families = concat
+        [md_fam_insts (hm_details hmi)
+        | hpt <- unitEnv_hpts (hsc_HUG env), hmi <- eltsHpt hpt]
+      exactExports = all (\item -> owns (exportHead item)
+        && exportOccurrence (exportHead item) /= scaffoldTargetName
+        && all owns (exportChildren item)) exports
+      familyCheck = validateRetainedFamilyInstances (eps_fam_inst_env eps) families
+  pure $ do
+    unless exactExports (Left "planned original declaration exports have a foreign or compiler owner")
+    inventory <- instances
+    unless (all (owns . instanceDfun) (inventoryClasses inventory)
+        && all owns (inventoryFamilies inventory)
+        && all (all owns . instanceSelectedAxioms) (inventoryClasses inventory))
+      (Left "planned original instance inventory has a foreign owner")
+    case familyCheck of
+      JoinAccepted -> Right (PlannedDeclarationInventory exports inventory owner
+        (mi_iface_hash (mi_final_exts iface))
+        (sort (nub (map (exportIdentity . coAxiomName . fi_axiom) families))))
+      JoinRejected _ diagnostic -> Left diagnostic
 
 -- The checking recipe retains historical imports alongside the new original
 -- owner. Give its certified authored names the declaration wrapper's lexical

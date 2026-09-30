@@ -49,6 +49,19 @@ main = withScratch $ \work -> do
     CertifyHomeProductsCompile Nothing originalFile [work] Nothing
   certified <- certifyPlannedDeclaration planned (prHscEnv (pprPipelineResult original))
     >>= either fail pure
+  hydrated <- hydratePlannedDeclarationInventory (plannedOriginalOwner certified)
+    (plannedInterfaceFingerprint certified) (prHscEnv (pprPipelineResult original))
+    >>= either fail pure
+  unless (hydrated == certified) $
+    fail "exact hydrated original changed its declaration inventory"
+  forM_ [(plannedOriginalOwner certified, "stale-interface")
+    ,((fst (plannedOriginalOwner certified), "Tidepool.Session.Lib.G8")
+      ,plannedInterfaceFingerprint certified)
+    ,(("foreign-unit", originalName), plannedInterfaceFingerprint certified)] $ \(owner, fingerprint) -> do
+      refusedHydration <- hydratePlannedDeclarationInventory owner fingerprint
+        (prHscEnv (pprPipelineResult original))
+      unless (case refusedHydration of Left _ -> True; Right _ -> False) $
+        fail "stale or absent original interface admitted hydrated declaration inventory"
   unless (snd (plannedOriginalOwner certified) == originalName
       && not (null (plannedInterfaceFingerprint certified))
       && all (`elem` plannedFamilyClosure certified) (inventoryFamilies (plannedInstances certified))
