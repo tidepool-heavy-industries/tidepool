@@ -136,7 +136,7 @@
           };
           browserTestNpmCache = harnessPkgs.fetchNpmDeps {
             src = ./nix/browser-test;
-            hash = pkgs.lib.fakeHash;
+            hash = "sha256-OHK/Hwr1gq5XxODSXX+zmRM8v0WQqJkkJQ82zzvoJAM=";
           };
           playwrightChromium = harnessPkgs.playwright-driver.browsers.override {
             withFirefox = false;
