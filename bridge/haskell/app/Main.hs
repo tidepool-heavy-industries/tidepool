@@ -55,21 +55,23 @@ import Tidepool.GhcPipeline
   , cellExpressionPlans
   , satisfiesCapturedConstraint, stripMonadHead )
 import Tidepool.ExecutionEncode (encodeWireProgram, encodeModuleProducts)
-import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelected, projectPreparedModuleGroups, resolveTextPackageUnit)
+import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelected, projectPreparedModuleGroups, preparedRootIdentity, resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedJson (resolveJsonAuthority)
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..)
   , WireProgram(..), ProjectedGroup(..), SiteRow(..) )
+import qualified Tidepool.ExecutionSchema as Execution
 import qualified Tidepool.EffectSchema
 import Tidepool.PreparedStg
   ( PreparedModule(..), PreparedBodyCache, newPreparedBodyCache
   , evictPreparedBodyMatching )
 import Tidepool.PreparedRecovery
-  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithCached )
+  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots )
 import Tidepool.ModuleCandidates (ModuleCandidate(..))
-import Tidepool.CertifiedProducts (encodeCertifiedProducts)
+import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
+import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobals)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.PackageWitness (PackageImportRoot, encodePackageImports)
 import qualified Crypto.Hash.SHA256 as SHA256
@@ -463,11 +465,8 @@ processFile compiler caches timing args path = do
     let preparedTargets = case requestTargets args of
           targets@(_ : _) -> targets
           [] -> maybe [] pure mTarget
-    let certifiedHomes = Set.fromList
-          [(candidateUnit candidate, candidateModule candidate)
-          | candidate <- pprAcceptedCandidates prepared]
     (preparedArtifacts, productContext) <- prepareArtifacts caches path hscEnv (pprModules prepared) preparedTargets
-      (standardAuxiliaryRoots binds) (requestRetainedGenerations args) certifiedHomes
+      (standardAuxiliaryRoots binds) (requestRetainedGenerations args) (pprAcceptedCandidates prepared)
     if null preparedArtifacts
       then ioError (userError "prepared extraction requires --target or --targets")
       else timePhase timing "prepared_sidecars" $ writePreparedSidecars SeparateYieldSites outDir binds tycons mCapturedTy warnTexts preparedArtifacts
@@ -529,10 +528,10 @@ data PreparedArtifact = PreparedArtifact
 -- Project before writing artifacts so the shared constructor
 -- table includes exactly the GHC constructors admitted by prepared execution.
 prepareArtifacts :: RecoveryCaches -> FilePath -> HscEnv -> [PreparedModule] -> [String] -> [String]
-  -> Map.Map SymbolIdentity Word64 -> Set.Set (String, String)
+  -> Map.Map SymbolIdentity Word64 -> [ModuleCandidate]
   -> IO ([PreparedArtifact], Maybe ProjectionContext)
 prepareArtifacts _ _ _ _ [] _ _ _ = pure ([], Nothing)
-prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliaryRoots retainedGenerations certifiedHomes = do
+prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliaryRoots retainedGenerations candidates = do
   timing <- readTimingEnabled
   formattingAuthority <- timePhase timing "formatting_authority" $ resolveFormattingAuthority hscEnv
   timeAuthority <- timePhase timing "time_authority" $ resolveTimeAuthority hscEnv
@@ -568,23 +567,54 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
           , projectionJsonAuthority = jsonAuthority
           , projectionTextUnit = textAuthority
           }
-  recover <- newPreparedRecoveryWithCached hscEnv (rcFatIface caches) (rcOwnerIface caches)
-    (rcPreparedBodies caches) certifiedHomes (contextFor firstTarget) modules
+  let certifiedHomes = Set.fromList
+        [(candidateUnit candidate, candidateModule candidate) | candidate <- candidates]
+      originalProducts =
+        [(unitString (moduleUnit (pmModule prepared)), moduleNameString (moduleName (pmModule prepared)),
+          either (Left . show) Right (projectPreparedModuleGroups (contextFor firstTarget) prepared))
+        | prepared <- modules]
+      recovery roots = newPreparedRecoveryWithPackageRoots hscEnv (rcFatIface caches) (rcOwnerIface caches)
+        (rcPreparedBodies caches) certifiedHomes (contextFor firstTarget) modules roots
+  recover <- recovery []
   artifacts <- forM targets $ \target -> do
     let context = contextFor target
-    -- Three flat phases, one row each per target (see Tidepool.Timing).
-    -- Selection forces its complete identity/binding inventory. Lowering is
-    -- lazy, so encoding owns and forces lowering plus wire serialization.
-    recovered <- timePhase timing "prepared_recover"
+    -- Package roots grow only from the finite exact original-group inventory.
+    -- Recovered package code may expose another original group; rescan each
+    -- projected target before admitting the final executable closure.
+    initial <- timePhase timing "prepared_recover"
       (recover (projectionEntry context))
+    let closePackages roots recovered = do
+          let finalContext = context
+                { projectionAuxiliaryRoots = projectionAuxiliaryRoots context ++ roots }
+          selected <- timePhase timing "prepared_project" $
+            requireProjection (prepareProjectionWithReachability finalContext
+              (closureModules recovered) (closureReachability recovered))
+          (program, constructors) <- requireProjection (projectSelected selected)
+          required <- either (ioError . userError) pure
+            (requiredOriginalPackageGlobals originalProducts candidates (programGlobals program))
+          let nextRoots = Set.toAscList (Set.fromList (roots ++ required))
+          if nextRoots == roots
+            then pure (recovered, program, constructors, roots)
+            else do
+              packageRoots <- forM nextRoots $ \identity -> do
+                (identifier, _) <- resolvePackageGlobal hscEnv identity >>= either (ioError . userError) pure
+                when (preparedRootIdentity identifier /= identity) $
+                  ioError (userError "package recovery root differs from canonical original global")
+                pure identifier
+              withPackages <- recovery packageRoots
+              next <- timePhase timing "prepared_recover_original_packages"
+                (withPackages (projectionEntry context))
+              closePackages nextRoots next
+    (recovered, program, constructors, roots) <- closePackages [] initial
     reportRecoveryResiduals target (closureFailures recovered)
-    selected <- timePhase timing "prepared_project" $
-      requireProjection (prepareProjectionWithReachability context
-        (closureModules recovered) (closureReachability recovered))
-    (program, constructors, bytes) <- timePhase timing "prepared_encode" $ do
-      (program, constructors) <- requireProjection (projectSelected selected)
-      bytes <- evaluate (encodeWireProgram program)
-      pure (program, constructors, bytes)
+    let defined = Set.fromList
+          [identity | group <- programBindings program
+          , Execution.TopBinding identity _ <- case group of
+              Execution.NonRecursive binding -> [binding]
+              Execution.Recursive bindings -> bindings]
+    when (any (`Set.notMember` defined) roots) $
+      ioError (userError "required original-group package root has no executable definition")
+    bytes <- timePhase timing "prepared_encode" $ evaluate (encodeWireProgram program)
     let admitted = Set.fromList (map siteId (programSites program))
         yieldSites =
           [ site
@@ -904,12 +934,9 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
         warnTexts   = map T.pack (prWarnings result)
     -- Projection remains outside compileVariants. Its entry is the settled
     -- scaffold, and its constructors join the shared metadata before write.
-    let certifiedHomes = Set.fromList
-          [(candidateUnit candidate, candidateModule candidate)
-          | candidate <- pprAcceptedCandidates prepared]
     (preparedArtifacts, productContext) <- prepareArtifacts caches compiledPath hscEnv preparedModules
       [preparedScaffoldTargetName] (standardAuxiliaryRoots binds)
-      (requestRetainedGenerations args) certifiedHomes
+      (requestRetainedGenerations args) (pprAcceptedCandidates prepared)
     let asksSites = concatMap paYieldSites preparedArtifacts
     timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts

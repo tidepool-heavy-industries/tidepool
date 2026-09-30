@@ -3,7 +3,7 @@
 -- from an interface left by an earlier edit.
 module Tidepool.PreparedRecovery
   ( RecoveryFailure(..), RecoveredClosure(..), recoverPreparedClosure
-  , newPreparedRecovery, newPreparedRecoveryWithCached
+  , newPreparedRecovery, newPreparedRecoveryWithCached, newPreparedRecoveryWithPackageRoots
   , insertGroup
   ) where
 
@@ -14,7 +14,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Maybe (isJust)
 import Data.Word (Word64)
-import GHC.Types.Unique.Set (elementOfUniqSet, nonDetEltsUniqSet, sizeUniqSet)
+import GHC.Types.Unique.Set (elementOfUniqSet, nonDetEltsUniqSet, sizeUniqSet, addListToUniqSet)
 import GHC.Types.Unique (getKey)
 import System.Environment (lookupEnv)
 import GHC.Core (CoreBind, Bind(..))
@@ -31,7 +31,7 @@ import Tidepool.ExecutionProjection
   ( PreparedReachability(..), ProjectionContext(..), admitReachFacts
   , combinePreparedTargetReferences, emptyPreparedReachability
   , preparedModuleReachFacts, preparedModuleReferenceFacts, preparedSeedUniques
-  , preparedTargetReferences, topBinders )
+  , preparedTargetReferences, preparedRootIdentity, topBinders )
 import Tidepool.ExecutionSchema (SymbolIdentity)
 import Tidepool.FatIface (FatIfaceCache, FatIfaceMissing, OwnerInterfaceCache)
 import Tidepool.PreparedStg
@@ -133,7 +133,17 @@ newPreparedRecovery env cache ownerCache bodyCache baseContext home =
 newPreparedRecoveryWithCached :: HscEnv -> FatIfaceCache -> OwnerInterfaceCache
   -> PreparedBodyCache -> Set.Set (String, String) -> ProjectionContext
   -> [PreparedModule] -> IO (SymbolIdentity -> IO RecoveredClosure)
-newPreparedRecoveryWithCached env cache ownerCache bodyCache certifiedHomes baseContext home = do
+newPreparedRecoveryWithCached env cache ownerCache bodyCache certifiedHomes baseContext home =
+  newPreparedRecoveryWithPackageRoots env cache ownerCache bodyCache certifiedHomes baseContext home []
+
+-- Only demanded original-group package globals enter these additional roots.
+-- They seed exact recovery even when target optimization removed every use.
+newPreparedRecoveryWithPackageRoots :: HscEnv -> FatIfaceCache -> OwnerInterfaceCache
+  -> PreparedBodyCache -> Set.Set (String, String) -> ProjectionContext
+  -> [PreparedModule] -> [Id] -> IO (SymbolIdentity -> IO RecoveredClosure)
+newPreparedRecoveryWithPackageRoots env cache ownerCache bodyCache certifiedHomes initialContext home roots = do
+  let baseContext = initialContext { projectionAuxiliaryRoots =
+        projectionAuxiliaryRoots initialContext ++ map preparedRootIdentity roots }
   timing <- readTimingEnabled
   checking <- isJust <$> lookupEnv "TIDEPOOL_RECOVERY_CHECK"
   let factsOf prepared =
@@ -147,7 +157,8 @@ newPreparedRecoveryWithCached env cache ownerCache bodyCache certifiedHomes base
   factsMemo <- newIORef Map.empty
   pure $ \entry -> do
     let context = baseContext { projectionEntry = entry }
-        seedList = nonDetEltsUniqSet (preparedSeedUniques context home)
+        seedList = nonDetEltsUniqSet (addListToUniqSet (preparedSeedUniques context home)
+          (map varUnique roots))
     factHits <- newIORef (0 :: Int)
     let factsFor prepared = do
           memo <- readIORef factsMemo
@@ -165,6 +176,10 @@ newPreparedRecoveryWithCached env cache ownerCache bodyCache certifiedHomes base
                [(prepared, references) | (prepared, (references, _)) <- entries]
     spent <- newIORef (Spent 0 0 0 0 0 0 0)
     let homeOwners = Set.fromList (map pmModule home)
+        includeRoots reach references = Map.elems (Map.fromList
+          [(varName binder, binder)
+          | binder <- references ++ roots
+          , not (elementOfUniqSet (varUnique binder) (admittedTops reach))])
         charge f = modifyIORef' spent f
         go attempted groups prepared failures admitted previousReach = do
           let modules = home ++ Map.elems prepared
@@ -193,11 +208,11 @@ newPreparedRecoveryWithCached env cache ownerCache bodyCache certifiedHomes base
             _ <- evaluate (sizeUniqSet (admittedTops extended))
             pure extended
           (references, refsMs) <- timeSection $ do
-            refs <- evaluate (roundReferences reach entries)
+            refs <- evaluate (includeRoots reach (roundReferences reach entries))
             _ <- evaluate (length refs)
             when checking $ do
-              let expected = preparedTargetReferences context modules
-              unless (map varUnique refs == map varUnique expected) $
+              let expected = includeRoots reach (preparedTargetReferences context modules)
+              unless (Set.fromList (map (getKey . varUnique) refs) == Set.fromList (map (getKey . varUnique) expected)) $
                 throwIO (userError ("recovery reachability diverged from identity selection: "
                   ++ show (length refs) ++ " vs " ++ show (length expected) ++ " references"))
             pure refs
