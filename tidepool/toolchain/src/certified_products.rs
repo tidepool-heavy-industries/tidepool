@@ -782,10 +782,14 @@ struct SourceModuleIndex(BTreeMap<String, BTreeSet<String>>);
 
 impl SourceModuleIndex {
     fn insert(&mut self, unit: &str, module: &str) {
-        self.0
-            .entry(unit.to_owned())
-            .or_default()
-            .insert(module.to_owned());
+        if let Some(modules) = self.0.get_mut(unit) {
+            if !modules.contains(module) {
+                modules.insert(module.to_owned());
+            }
+        } else {
+            self.0
+                .insert(unit.to_owned(), BTreeSet::from([module.to_owned()]));
+        }
     }
 
     fn contains(&self, unit: &str, module: &str) -> bool {
