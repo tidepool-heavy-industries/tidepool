@@ -680,6 +680,39 @@ impl ExactCompiledPrefix {
                 )
             }))
     }
+    /// Exact native identities retained by actual completed items and display
+    /// bundles. Historical definitions remain reachable by already compiled
+    /// references even when a later item replaces their lexical spelling.
+    pub fn retained_imports(
+        &self,
+    ) -> Vec<(tidepool_repr::execution_schema::SymbolIdentity, u64)> {
+        let mut retained = std::collections::BTreeMap::new();
+        let rows = self
+            .completed
+            .iter()
+            .filter_map(CompletedCheckedItem::native)
+            .map(|item| (item.generation, item.bound_binders.as_slice()))
+            .chain(self.displays.iter().map(|display| {
+                (display.generation, display.bound_binders.as_slice())
+            }));
+        for (generation, rows) in rows {
+            for value in rows {
+                // Issuance validated these immutable seven-field rows.
+                let fields = row(value, 7).expect("sealed native binder row");
+                retained.insert(
+                    tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "main".into(),
+                        module: string(&fields[2]).expect("sealed binder owner").into(),
+                        namespace: "value".into(),
+                        occurrence: string(&fields[0]).expect("sealed binder name").into(),
+                        record_parent: None,
+                    },
+                    generation,
+                );
+            }
+        }
+        retained.into_iter().collect()
+    }
     fn value_imports(&self) -> Vec<(String, Vec<String>)> {
         let mut winners = std::collections::BTreeMap::new();
         for completed in self

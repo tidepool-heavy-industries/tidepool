@@ -3185,6 +3185,11 @@ fn run_turn_with_pin(
     for (identity, generation) in req.retained_imports {
         cmd.retained_generation(extract_identity(identity), *generation);
     }
+    if let Some(snapshot) = &snapshot {
+        for (identity, generation) in snapshot.compiler_prefix().retained_imports() {
+            cmd.retained_generation(extract_identity(&identity), generation);
+        }
+    }
 
     let endpoint = cmd.bind().map_err(map_notfound)?;
     let include: Vec<_> = req.include.iter().map(|path| path.to_path_buf()).collect();
