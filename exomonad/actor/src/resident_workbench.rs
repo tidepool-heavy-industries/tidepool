@@ -959,29 +959,6 @@ struct ParkedHoleAbortState {
     state: Mutex<ParkedHoleState>,
     reason: String,
     retained_authority: Option<Arc<dyn std::any::Any + Send + Sync>>,
-    // An abandoned hole keeps its original resource owners until a checkout
-    // acknowledges retirement. An error or panic leaves this claim retained.
-    unconfirmed_owner: Mutex<Option<Arc<ParkedHoleAbortState>>>,
-}
-
-impl ParkedHoleAbortState {
-    fn retain_abandoned_claim(shared: &Arc<Self>) {
-        let state = shared.state.lock();
-        if shared.retained_authority.is_some()
-            && matches!(&*state, ParkedHoleState::Abandoned(holes) if !holes.is_empty())
-        {
-            *shared.unconfirmed_owner.lock() = Some(shared.clone());
-        }
-    }
-
-    fn release_acknowledged_claim(&self) {
-        let state = self.state.lock();
-        if matches!(&*state, ParkedHoleState::Settled)
-            || matches!(&*state, ParkedHoleState::Owned(holes) | ParkedHoleState::Abandoned(holes) if holes.is_empty())
-        {
-            self.unconfirmed_owner.lock().take();
-        }
-    }
 }
 
 enum ParkedHoleState {
@@ -1042,30 +1019,26 @@ impl ParkedHoleAbortGuard {
                 let reason = cleanup_reason.clone();
                 let cleanup_id = cont_id.clone();
                 let owner = weak.upgrade();
-                if let Some(owner) = &owner {
-                    ParkedHoleAbortState::retain_abandoned_claim(owner);
-                }
                 runtime.spawn(async move {
-                let access = ResidentMachineAccess::new(machines, source);
-                let result = access
-                    .with_machine(context, move |session, _, _| {
-                        abort_owned_hole(session, cont_id.clone(), reason)
-                    })
-                    .await;
-                if let Err(error) = result {
-                    tracing::warn!(cont_id = %cleanup_id, %error, "failed to abort an abandoned continuation");
-                } else if let Some(owner) = owner {
-                    ParkedHoleAbortRegistration(owner)
-                        .observe(ResidentContinuationEvent::Retired(cleanup_id));
-                }
-            });
+                    let access = ResidentMachineAccess::new(machines, source);
+                    let result = access
+                        .with_machine(context, move |session, _, _| {
+                            abort_owned_hole(session, cont_id.clone(), reason)
+                        })
+                        .await;
+                    if let Err(error) = result {
+                        tracing::warn!(cont_id = %cleanup_id, %error, "failed to abort an abandoned continuation");
+                    } else if let Some(owner) = owner {
+                        ParkedHoleAbortRegistration(owner)
+                            .observe(ResidentContinuationEvent::Retired(cleanup_id));
+                    }
+                });
             });
             ParkedHoleAbortState {
                 abort,
                 state: Mutex::new(ParkedHoleState::Owned(latest.into_iter().collect())),
                 reason,
                 retained_authority,
-                unconfirmed_owner: Mutex::new(None),
             }
         });
         Self { shared }
@@ -1081,7 +1054,6 @@ impl ParkedHoleAbortGuard {
         let mut state = self.shared.state.lock();
         *state = ParkedHoleState::Settled;
         drop(state);
-        self.shared.release_acknowledged_claim();
     }
 }
 
@@ -1101,7 +1073,6 @@ impl Drop for ParkedHoleAbortGuard {
                 ParkedHoleState::Settled => std::collections::BTreeSet::new(),
             }
         };
-        ParkedHoleAbortState::retain_abandoned_claim(&self.shared);
         for cont_id in abandoned {
             (self.shared.abort)(cont_id);
         }
@@ -1150,7 +1121,6 @@ impl ParkedHoleAbortRegistration {
                 }
             }
         };
-        self.0.release_acknowledged_claim();
         if let Some(cont_id) = abort {
             (self.0.abort)(cont_id);
         }
@@ -1198,7 +1168,6 @@ impl ParkedHoleAbortRegistration {
                 }
             }
         }
-        self.0.release_acknowledged_claim();
     }
 }
 
@@ -2882,11 +2851,19 @@ where
                     )
                     .map_err(ResidentActorWorkbenchError::Resident)?;
                 if let Some(owner) = slot_owner {
+                    let authority = owner.0.retained_authority.clone();
                     let observer: Arc<dyn Fn(ResidentContinuationEvent) + Send + Sync> =
                         Arc::new(move |event| owner.observe(event));
-                    session.with_continuation_observer(observer, |session| {
-                        operation(session, &context, source)
-                    })
+                    let observed = |session: &mut ResidentSession<H, O>| {
+                        session.with_continuation_observer(observer, |session| {
+                            operation(session, &context, source)
+                        })
+                    };
+                    if let Some(authority) = authority {
+                        session.with_continuation_resource_owner(authority, observed)
+                    } else {
+                        observed(session)
+                    }
                 } else {
                     operation(session, &context, source)
                 }
@@ -16176,43 +16153,107 @@ mod request_tests {
         }
     }
 
-    #[test]
-    fn abandoned_cleanup_retains_authority_until_exact_retirement_acknowledgement() {
+    #[tokio::test]
+    async fn failed_abort_retains_frame_authority_until_owning_realm_retirement() {
+        failed_abort_frame_owner(false).await;
+    }
+
+    #[tokio::test]
+    async fn failed_abort_releases_frame_authority_after_confirmed_native_machine_loss() {
+        failed_abort_frame_owner(true).await;
+    }
+
+    async fn failed_abort_frame_owner(lose_machine: bool) {
+        let (machines, mut context, source, _root) = actor_registry_fixture();
+        context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
+        let workbench =
+            ResidentActorWorkbench::new(machines.clone(), source.clone(), None, None, vec![]);
         let authority = Arc::new(());
         let authority_weak = Arc::downgrade(&authority);
-        let aborted = Arc::new(Mutex::new(Vec::<String>::new()));
-        let guard = ParkedHoleAbortGuard {
-            shared: Arc::new(ParkedHoleAbortState {
-                abort: {
-                    let aborted = aborted.clone();
-                    Arc::new(move |id| aborted.lock().push(id))
-                },
-                state: Mutex::new(ParkedHoleState::Owned(Default::default())),
-                reason: "test unknown cleanup".into(),
-                retained_authority: Some(authority),
-                unconfirmed_owner: Mutex::new(None),
-            }),
-        };
-        let owner_weak = Arc::downgrade(&guard.shared);
+        let mut failed_cleanup_context = context.clone();
+        failed_cleanup_context.placement.lexical_scope = ScopeId(u64::MAX);
+        let guard = ParkedHoleAbortGuard::with_retained_latest(
+            &workbench.access,
+            failed_cleanup_context,
+            None,
+            "test failed cleanup admission".into(),
+            Some(authority),
+        );
+        let cleanup_weak = Arc::downgrade(&guard.shared);
         let registration = guard.registration();
-        registration.observe(ResidentContinuationEvent::Parked("exact-hole".into()));
+        let (block, verdict) = suspending_fragment();
+        let step = registration
+            .scope(workbench.begin_fragment_split(
+                context.clone(),
+                source,
+                vec![],
+                block,
+                Some(verdict),
+            ))
+            .await
+            .expect("real native frame parks with its authority");
+        let ResidentWorkbenchStep::Running { outcome, .. } = step else {
+            panic!("expected a native suspension")
+        };
+        let owned_id = outcome_continuation_id(&outcome).expect("owned hole");
+        drop(outcome);
         drop(guard);
         drop(registration);
-        assert_eq!(&*aborted.lock(), &["exact-hole"]);
+
+        // The failed checkout has returned and no abort claim is kept alive
+        // by an artificial cycle. Its lease belongs to the native frame.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while cleanup_weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("failed background cleanup releases its task owner");
         assert!(
             authority_weak.upgrade().is_some(),
-            "unknown cleanup retains source/tool owners"
+            "failed abort keeps exact frame resources"
         );
-        let acknowledgement = ParkedHoleAbortRegistration(owner_weak.upgrade().unwrap());
-        acknowledgement.observe(ResidentContinuationEvent::Retired("unrelated-hole".into()));
+        let inspect_id = owned_id.clone();
+        workbench
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                assert!(session.parked_holes().contains(&inspect_id.as_str()));
+                session.close_realm(RealmId(u64::MAX));
+                assert!(session.parked_holes().contains(&inspect_id.as_str()));
+                Ok(())
+            })
+            .await
+            .expect("unrelated realm closure leaves the exact frame intact");
         assert!(
             authority_weak.upgrade().is_some(),
-            "unrelated retirement cannot release authority"
+            "unrelated cleanup does not release resources"
         );
-        acknowledgement.observe(ResidentContinuationEvent::Retired("exact-hole".into()));
-        drop(acknowledgement);
-        assert!(owner_weak.upgrade().is_none());
-        assert!(authority_weak.upgrade().is_none());
+
+        if lose_machine {
+            let result: Result<(), ResidentActorWorkbenchError> = workbench
+                .access
+                .with_machine(context.clone(), |_, _, _| {
+                    panic!("test native machine loss")
+                })
+                .await;
+            assert!(matches!(result, Err(ResidentActorWorkbenchError::Join(_))));
+            assert!(machines.kind(context.placement.session).is_none());
+        } else {
+            let owned_realm = context.placement.resource_scope;
+            workbench
+                .access
+                .with_machine(context, move |session, _, _| {
+                    assert_eq!(session.close_realm(owned_realm).0, 1);
+                    assert!(!session.parked_holes().contains(&owned_id.as_str()));
+                    Ok(())
+                })
+                .await
+                .expect("existing realm owner confirms native retirement");
+        }
+        assert!(
+            authority_weak.upgrade().is_none(),
+            "confirmed native retirement releases resources"
+        );
     }
 
     #[test]
@@ -16226,7 +16267,6 @@ mod request_tests {
                     state: Mutex::new(ParkedHoleState::Owned(Default::default())),
                     reason: "test".into(),
                     retained_authority: None,
-                    unconfirmed_owner: Mutex::new(None),
                 }),
             }
         };

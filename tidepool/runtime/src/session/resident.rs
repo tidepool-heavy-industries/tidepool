@@ -1905,6 +1905,15 @@ fn is_observation_budget_exhausted(error: &PreparedRuntimeError) -> bool {
     matches!(error, PreparedRuntimeError::Run(inner) if inner.is_observation_budget_exhausted())
 }
 
+type ContinuationResourceOwner = Arc<dyn std::any::Any + Send + Sync>;
+
+struct ParkedContinuation {
+    name: String,
+    id: ContinuationId,
+    // The native frame owns this lease until exact retirement or machine loss.
+    resource_owners: Vec<ContinuationResourceOwner>,
+}
+
 /// A resident JIT session: one long-lived [`PreparedEngine`] whose heap and
 /// effect state persist across turns.
 ///
@@ -1926,11 +1935,12 @@ pub struct ResidentSession<H, O> {
     /// Monotonic continuation-id counter (prefix `scont` for the resident
     /// surface).
     cont_id_issuer: MonotonicIdIssuer,
-    /// The parked holes, insertion-ordered: `(hole string, machine
-    /// ContinuationId)` per live parked frame. The machine's continuation
+    /// The parked holes and their resource leases, insertion-ordered. The
+    /// machine's continuation
     /// registry is the ground truth; these are the string identities callers
     /// resume/abort against (atomic validate-before-consume). Top = last.
-    parked: Vec<(String, ContinuationId)>,
+    parked: Vec<ParkedContinuation>,
+    continuation_resource_owner: Option<ContinuationResourceOwner>,
     continuation_observer: Option<Arc<dyn Fn(ResidentContinuationEvent) + Send + Sync>>,
     parked_provenance: HashMap<ContinuationId, Arc<ProgramProvenance>>,
     binding_provenance: HashMap<u64, Arc<ProgramProvenance>>,
@@ -1981,6 +1991,7 @@ where
             captured,
             cont_id_issuer: MonotonicIdIssuer::new("scont"),
             parked: Vec::new(),
+            continuation_resource_owner: None,
             continuation_observer: None,
             parked_provenance: HashMap::new(),
             binding_provenance: HashMap::new(),
@@ -2218,6 +2229,24 @@ where
         let previous = self.continuation_observer.replace(observer);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(self)));
         self.continuation_observer = previous;
+        match result {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// Retain the supplied host lease on each native frame parked by this
+    /// operation. Exact frame retirement, realm closure, or native session
+    /// destruction releases it. The lease must not own this session or its
+    /// registry. Restore the prior selection even when the operation panics.
+    pub fn with_continuation_resource_owner<T>(
+        &mut self,
+        owner: ContinuationResourceOwner,
+        operation: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous = self.continuation_resource_owner.replace(owner);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(self)));
+        self.continuation_resource_owner = previous;
         match result {
             Ok(value) => value,
             Err(panic) => std::panic::resume_unwind(panic),
@@ -2556,12 +2585,15 @@ where
     ///
     /// Use [`Self::parked_holes`] when the caller needs the complete registry.
     pub fn pending_continuation(&self) -> Option<&str> {
-        self.parked.last().map(|(h, _)| h.as_str())
+        self.parked.last().map(|entry| entry.name.as_str())
     }
 
     /// Every parked hole, insertion-ordered (oldest first).
     pub fn parked_holes(&self) -> Vec<&str> {
-        self.parked.iter().map(|(h, _)| h.as_str()).collect()
+        self.parked
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect()
     }
 
     /// Runtime resource scope owning one parked continuation. Lifecycle
@@ -2569,20 +2601,20 @@ where
     /// disposable workbench fragments without trusting request payload data.
     #[must_use]
     pub fn parked_realm(&self, hole: &ResidentHole) -> Option<RealmId> {
-        let &(_, id) = self
+        let entry = self
             .parked
             .iter()
-            .find(|(name, _)| name == hole.cont_id())?;
-        self.state.parked_realm(id)
+            .find(|entry| entry.name == hole.cont_id())?;
+        self.state.parked_realm(entry.id)
     }
 
     #[must_use]
     pub fn parked_program_provenance(&self, hole: &ResidentHole) -> Option<Arc<ProgramProvenance>> {
-        let (_, id) = self
+        let entry = self
             .parked
             .iter()
-            .find(|(name, _)| name == hole.cont_id())?;
-        self.parked_provenance.get(id).cloned()
+            .find(|entry| entry.name == hole.cont_id())?;
+        self.parked_provenance.get(&entry.id).cloned()
     }
 
     /// Whether the session has no parked frames (ready and quiescent).
@@ -2660,7 +2692,7 @@ where
         self.settle_dropped_custody();
         let counts = self.state.close_realm(realm);
         let survivors = self.state.parked_ids();
-        self.parked.retain(|(_, id)| survivors.contains(id));
+        self.parked.retain(|entry| survivors.contains(&entry.id));
         self.parked_provenance
             .retain(|id, _| survivors.contains(id));
         counts
@@ -2706,9 +2738,10 @@ where
         hole: &str,
     ) -> Result<Option<RootCustody>, ResidentError> {
         self.settle_dropped_custody();
-        let Some(&(_, id)) = self.parked.iter().find(|(h, _)| h == hole) else {
+        let Some(entry) = self.parked.iter().find(|entry| entry.name == hole) else {
             return Ok(None);
         };
+        let id = entry.id;
         let provenance = self.parked_provenance.get(&id).cloned().unwrap_or_default();
         let handle = match self.state.prepared_mut() {
             Some(engine) => engine.live_payload_handle(id)?,
@@ -2733,9 +2766,10 @@ where
         realm: RealmId,
     ) -> Result<Option<RootCustody>, ResidentError> {
         self.settle_dropped_custody();
-        let Some(&(_, id)) = self.parked.iter().find(|(h, _)| h == hole) else {
+        let Some(entry) = self.parked.iter().find(|entry| entry.name == hole) else {
             return Ok(None);
         };
+        let id = entry.id;
         let provenance = self.parked_provenance.get(&id).cloned().unwrap_or_default();
         let handle = match self.state.prepared_mut() {
             Some(engine) => match engine.live_payload_handle_owned_by(id, realm)? {
@@ -5356,14 +5390,15 @@ where
         // Validate BEFORE consuming: `cont_id` must be a MEMBER of the parked
         // set (any-order resume — the machine imposes no order and neither do
         // we). A mismatch leaves every parked frame intact.
-        let Some(&(_, frame_id)) = self.parked.iter().find(|(h, _)| h == cont_id) else {
+        let Some(entry) = self.parked.iter().find(|entry| entry.name == cont_id) else {
             return Err(ResidentResumeError::Rejected(
                 ResidentError::WrongContinuation {
                     attempted: cont_id.to_string(),
-                    pending: self.parked.iter().map(|(h, _)| h.clone()).collect(),
+                    pending: self.parked.iter().map(|entry| entry.name.clone()).collect(),
                 },
             ));
         };
+        let frame_id = entry.id;
         let mut provenance = self
             .parked_provenance
             .get(&frame_id)
@@ -5548,6 +5583,18 @@ where
         seed: HoleSeed,
         provenance: Arc<ProgramProvenance>,
     ) -> ResidentOutcome {
+        let mut resource_owners = resumed
+            .and_then(|name| self.parked.iter().find(|entry| entry.name == name))
+            .map(|entry| entry.resource_owners.clone())
+            .unwrap_or_default();
+        if let Some(owner) = &self.continuation_resource_owner {
+            if !resource_owners
+                .iter()
+                .any(|retained| Arc::ptr_eq(retained, owner))
+            {
+                resource_owners.push(owner.clone());
+            }
+        }
         match outcome {
             ParkedRun::CompletedValue(value) => {
                 self.retire_resumed(resumed);
@@ -5569,7 +5616,11 @@ where
                 // ids are never reused) and the new one replaces it.
                 self.retire_resumed(resumed);
                 let cont_id = self.next_cont_id();
-                self.parked.push((cont_id.clone(), id));
+                self.parked.push(ParkedContinuation {
+                    name: cont_id.clone(),
+                    id,
+                    resource_owners,
+                });
                 self.parked_provenance.insert(id, provenance);
                 if let Some(observer) = &self.continuation_observer {
                     observer(ResidentContinuationEvent::Parked(cont_id.clone()));
@@ -5584,7 +5635,11 @@ where
             ParkedRun::Deferred { id, request, work } => {
                 self.retire_resumed(resumed);
                 let cont_id = self.next_cont_id();
-                self.parked.push((cont_id.clone(), id));
+                self.parked.push(ParkedContinuation {
+                    name: cont_id.clone(),
+                    id,
+                    resource_owners,
+                });
                 self.parked_provenance.insert(id, provenance);
                 if let Some(observer) = &self.continuation_observer {
                     observer(ResidentContinuationEvent::Parked(cont_id.clone()));
@@ -5610,7 +5665,7 @@ where
         let still_parked = self.state.parked_ids().contains(&frame_id);
         if !still_parked {
             self.parked_provenance.remove(&frame_id);
-            self.parked.retain(|(h, _)| h != cont_id);
+            self.parked.retain(|entry| entry.name != cont_id);
             if let Some(observer) = &self.continuation_observer {
                 observer(ResidentContinuationEvent::Retired(cont_id.to_owned()));
             }
@@ -5796,10 +5851,10 @@ where
         let Some(hole) = resumed else {
             return;
         };
-        if let Some((_, id)) = self.parked.iter().find(|(name, _)| name == hole) {
-            self.parked_provenance.remove(id);
+        if let Some(entry) = self.parked.iter().find(|entry| entry.name == hole) {
+            self.parked_provenance.remove(&entry.id);
         }
-        self.parked.retain(|(name, _)| name != hole);
+        self.parked.retain(|entry| entry.name != hole);
         if let Some(observer) = &self.continuation_observer {
             observer(ResidentContinuationEvent::Retired(hole.to_owned()));
         }
