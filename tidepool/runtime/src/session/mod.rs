@@ -535,6 +535,26 @@ fn authored_identity(
     })
 }
 
+fn certified_recovery_export(
+    export: &tidepool_toolchain::declaration_join::DeclarationExport,
+) -> Option<recovery::RecoveryExport> {
+    use tidepool_toolchain::declaration_join::DeclarationKind;
+
+    Some(recovery::RecoveryExport {
+        identity: authored_identity(&export.head)?,
+        kind: match export.kind {
+            DeclarationKind::Value => recovery::RecoveryExportKind::Value,
+            DeclarationKind::Type => recovery::RecoveryExportKind::Type,
+            DeclarationKind::Class => recovery::RecoveryExportKind::Class,
+        },
+        children: export
+            .children
+            .iter()
+            .map(authored_identity)
+            .collect::<Option<_>>()?,
+    })
+}
+
 /// A resident session's declaration library. Owns the ordered decl log, the
 /// monotonic generation, and the on-disk include tree.
 pub struct SessionLib {
@@ -1958,29 +1978,8 @@ impl SessionLib {
             .introduced_exports()
             .iter()
             .map(|export| {
-                Ok(recovery::RecoveryExport {
-                    identity: authored_identity(&export.head)
-                        .ok_or_else(|| invalid("unsupported authored export identity"))?,
-                    kind: match export.kind {
-                        tidepool_toolchain::declaration_join::DeclarationKind::Value => {
-                            recovery::RecoveryExportKind::Value
-                        }
-                        tidepool_toolchain::declaration_join::DeclarationKind::Type => {
-                            recovery::RecoveryExportKind::Type
-                        }
-                        tidepool_toolchain::declaration_join::DeclarationKind::Class => {
-                            recovery::RecoveryExportKind::Class
-                        }
-                    },
-                    children: export
-                        .children
-                        .iter()
-                        .map(|child| {
-                            authored_identity(child)
-                                .ok_or_else(|| invalid("unsupported authored child identity"))
-                        })
-                        .collect::<Result<_, _>>()?,
-                })
+                certified_recovery_export(export)
+                    .ok_or_else(|| invalid("unsupported authored export identity"))
             })
             .collect::<Result<Vec<_>, SessionError>>()?;
         let artifacts = refs

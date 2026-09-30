@@ -13,7 +13,7 @@ use tidepool_toolchain::declaration_join::{
 };
 
 use super::persistent::PersistentSession;
-use super::render::{DeclTurn, JoinedDeclaration};
+use super::render::{extend_exports_by_head, DeclTurn, JoinedDeclaration};
 use super::{
     recovery, DeclarationSource, PublicManifestBase, PublicVisibilitySnapshot, RecoveryPublicOwner,
     SessionError, SessionLib, StagedPublicManifest,
@@ -26,6 +26,7 @@ pub struct DeclarationPublicationBase {
     reserved: Generation,
     original: Generation,
     authored: Arc<CertifiedAuthoredDeclaration>,
+    current_public: Option<JoinedDeclaration>,
     turn: DeclTurn,
     includes: Vec<PathBuf>,
     session_root: PathBuf,
@@ -110,8 +111,8 @@ fn paired_version(base: &PublicManifestBase) -> String {
 impl PersistentSession {
     /// Snapshot a first authored declaration and exact value/source writes for
     /// one publication. The admitted snapshot identifies the execution's base;
-    /// each retry captures the current public binding winners without replaying
-    /// execution. Rich declaration suffixes require the exact-context authored
+    /// each retry captures the current public declaration and binding winners
+    /// without replaying execution. Rich declaration suffixes require the exact-context authored
     /// producer and remain refused at this boundary.
     pub fn snapshot_declaration_publication(
         &mut self,
@@ -128,17 +129,54 @@ impl PersistentSession {
             write_ids.clone(),
             source_keys.clone(),
         )?;
-        if private_scope == admitted.scope
-            || admitted.declaration_tip != Generation(0)
-            || public.expected_public.declaration_tip != Generation(0)
-        {
+        if private_scope == admitted.scope || admitted.declaration_tip != Generation(0) {
             return Err(invalid(
                 &public,
-                "declaration publication requires an empty admitted and current public declaration view",
+                "declaration publication requires an empty admitted declaration view and a distinct private scope",
             ));
         }
         let original = public.expected_private.declaration_tip;
         let lib = self.lib();
+        let current_public = if public.expected_public.declaration_tip == Generation(0) {
+            None
+        } else {
+            let tip = public.expected_public.declaration_tip;
+            let joined = lib.log.joined_at(tip).ok_or_else(|| {
+                invalid(
+                    &public,
+                    "current public declaration lacks a protected Join receipt",
+                )
+            })?;
+            let node = public
+                .graph
+                .nodes
+                .iter()
+                .find(|node| node.id == tip)
+                .ok_or_else(|| {
+                    invalid(
+                        &public,
+                        "current public Join is absent from the durable graph",
+                    )
+                })?;
+            if node.kind != recovery::RecoveryNodeKind::Join
+                || node.parent.is_some()
+                || !node.retracts.is_empty()
+                || node.state != recovery::RecoveryNodeState::ExactArtifactClosure
+                || !node.live_dependencies.is_empty()
+                || joined.turn.parent.is_some()
+                || !joined.turn.retracts.is_empty()
+                || !joined.turn.workbench_imports.specs().is_empty()
+                || !joined.evidence.instances().classes.is_empty()
+                || !joined.evidence.instances().families.is_empty()
+                || !joined.evidence.family_closure().is_empty()
+            {
+                return Err(invalid(
+                    &public,
+                    "current public Join requires unsupported rich evidence",
+                ));
+            }
+            Some(joined.clone())
+        };
         let authored = lib.log.certified_authored_arc_at(original).ok_or_else(|| {
             invalid(
                 &public,
@@ -166,6 +204,7 @@ impl PersistentSession {
             || !turn.workbench_imports.specs().is_empty()
             || node.kind != recovery::RecoveryNodeKind::Authored
             || node.parent.is_some()
+            || !node.retracts.is_empty()
             || !node.live_dependencies.is_empty()
             || node.state != recovery::RecoveryNodeState::ExactArtifactClosure
             || !authored.instances().classes.is_empty()
@@ -206,6 +245,7 @@ impl PersistentSession {
             reserved,
             original,
             authored,
+            current_public,
             turn,
             includes: self.lib().extra_include.clone(),
             session_root: self.lib().root.clone(),
@@ -263,17 +303,28 @@ impl DeclarationPublicationBase {
     /// their exact input, producer identity, and session baseline.
     pub fn certify(self) -> Result<CertifiedDeclarationPublication, SessionError> {
         let owner = self.authored.product().owner();
-        let context = ExactDeclarationContext::new(
-            &[self.authored.clone()],
-            &[],
-            vec![ExactLexicalNode {
+        let joins = self
+            .current_public
+            .as_ref()
+            .map(|joined| vec![joined.evidence.clone()])
+            .unwrap_or_default();
+        let mut lexical = vec![ExactLexicalNode {
+            owner: ExactModuleIdentity {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+            },
+            imports: Vec::new(),
+        }];
+        if let Some(joined) = &self.current_public {
+            lexical.push(ExactLexicalNode {
                 owner: ExactModuleIdentity {
-                    unit: owner.unit.clone(),
-                    module: owner.module.clone(),
+                    unit: joined.evidence.reserved().unit.clone(),
+                    module: joined.evidence.reserved().module.clone(),
                 },
                 imports: Vec::new(),
-            }],
-        )?;
+            });
+        }
+        let context = ExactDeclarationContext::new(&[self.authored.clone()], &joins, lexical)?;
         let scratch = tempfile::tempdir()?;
         let materialized = context.materialize(scratch.path())?;
         let artifact = materialized
@@ -293,9 +344,44 @@ impl DeclarationPublicationBase {
             path: artifact.interface.path.clone(),
             sha256: artifact.interface.sha256.clone(),
         };
+        let public_module = self
+            .current_public
+            .as_ref()
+            .map(|joined| {
+                let reserved = joined.evidence.reserved();
+                let artifact = materialized
+                    .artifacts
+                    .iter()
+                    .find(|artifact| {
+                        artifact.interface.unit == reserved.unit
+                            && artifact.interface.module == reserved.module
+                    })
+                    .ok_or_else(|| {
+                        invalid(
+                            &self.public,
+                            "owned context lacks the current public Join interface",
+                        )
+                    })?;
+                Ok::<_, SessionError>(ModuleSnapshot {
+                    module: reserved.module.clone(),
+                    path: artifact.interface.path.clone(),
+                    sha256: artifact.interface.sha256.clone(),
+                })
+            })
+            .transpose()?;
+        let mut expected_exports = self
+            .current_public
+            .as_ref()
+            .map(|joined| joined.evidence.exports().to_vec())
+            .unwrap_or_default();
+        extend_exports_by_head(
+            &mut expected_exports,
+            self.authored.introduced_exports(),
+            |export| export.head.occurrence.as_str(),
+        );
         let input = DeclarationJoinInput {
             expected_public_version: self.expected_public_version.clone(),
-            public_module: None,
+            public_module,
             private_base: None,
             private_tip: Some(anchor.clone()),
             writes: vec![DeclarationWrite {
@@ -311,7 +397,7 @@ impl DeclarationPublicationBase {
             },
             artifacts: materialized.artifacts,
             family_closure: self.authored.family_closure().to_vec(),
-            expected_exports: self.authored.lexical_exports().to_vec(),
+            expected_exports,
             expected_instances: self.authored.instances().clone(),
         };
         match tidepool_toolchain::declaration_join::certify_declaration_join(
@@ -363,14 +449,18 @@ impl AcceptedDeclarationPublication {
         let materialized = receipt
             .materialize(root)
             .map_err(|error| invalid(&base.public, error.to_string()))?;
-        let original_node = base
-            .public
-            .graph
-            .nodes
+        let exports = receipt
+            .exports()
             .iter()
-            .find(|node| node.id == base.original)
-            .ok_or_else(|| invalid(&base.public, "original authored graph node disappeared"))?;
-        let exports = original_node.exports.clone();
+            .map(|export| {
+                super::certified_recovery_export(export)
+                    .ok_or_else(|| invalid(&base.public, "unsupported joined export identity"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut implementation_refs = vec![base.original];
+        if base.current_public.is_some() {
+            implementation_refs.push(base.public.expected_public.declaration_tip);
+        }
         let artifacts = materialized
             .products
             .into_iter()
@@ -393,7 +483,7 @@ impl AcceptedDeclarationPublication {
             id: base.reserved,
             parent: None,
             kind: recovery::RecoveryNodeKind::Join,
-            implementation_refs: vec![base.original],
+            implementation_refs,
             artifact_refs,
             exports,
             retracts: Vec::new(),
@@ -437,6 +527,33 @@ impl AcceptedDeclarationPublication {
             .graph
             .seal()
             .map_err(|error| invalid(&base.public, error.to_string()))?;
+        let declared_names = base
+            .turn
+            .items
+            .iter()
+            .flat_map(super::ExportItem::all_names)
+            .map(str::to_owned)
+            .collect();
+        if let Some(joined) = &base.current_public {
+            let mut items = joined.turn.items.clone();
+            extend_exports_by_head(&mut items, &base.turn.items, super::ExportItem::head_name);
+            let mut value_types = joined.turn.value_types.clone();
+            value_types.retain(|name, _| {
+                !base
+                    .turn
+                    .items
+                    .iter()
+                    .any(|item| item.all_names().any(|introduced| introduced == name))
+            });
+            value_types.extend(base.turn.value_types);
+            value_types.retain(|name, _| {
+                items.iter().any(
+                    |item| matches!(item, super::ExportItem::Value { name: head } if head == name),
+                )
+            });
+            base.turn.items = items;
+            base.turn.value_types = value_types;
+        }
         base.turn.parent = None;
         base.turn.sources.clear();
         base.turn.normalized = DeclarationSource {
@@ -445,13 +562,7 @@ impl AcceptedDeclarationPublication {
         };
         let declaration = PreparedDeclarationPublication {
             generation: base.reserved,
-            declared_names: base
-                .turn
-                .items
-                .iter()
-                .flat_map(super::ExportItem::all_names)
-                .map(str::to_owned)
-                .collect(),
+            declared_names,
             joined: JoinedDeclaration {
                 turn: base.turn,
                 evidence: receipt,
@@ -474,7 +585,7 @@ impl SessionLib {
         ticket.declaration.as_ref().is_none_or(|declaration| {
             self.log.is_reserved(declaration.generation)
                 && declaration.joined.turn.parent == None
-                && self.scope_tip(ticket.public_scope) == Generation(0)
+                && self.scope_tip(ticket.public_scope) == ticket.expected_public.declaration_tip
                 && self.tips.contains_key(&ticket.public_scope)
                 && declaration.joined.evidence.reserved().module
                     == SessionModule::lib(declaration.generation).module_name()
@@ -510,6 +621,253 @@ mod tests {
                 panic!("unexpected rejection: {:?}", rejected.receipt.outcome())
             }
         }
+    }
+
+    #[test]
+    fn paired_independent_authored_rebase_preserves_originals_and_current_winners() {
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("declarations.json");
+        let mut lib =
+            SessionLib::open(SessionId(994), root.path(), ModuleEnv::standalone_default())
+                .unwrap()
+                .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
+        lib.attach_recovery_graph_v2(&path).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let private_a = session.mint_detached_scope(public).unwrap();
+        let private_b = session.mint_detached_scope(public).unwrap();
+        let owner =
+            RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse("root/rebase").unwrap(), 1)
+                .unwrap();
+        session
+            .bind_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        let admitted = session.public_visibility_snapshot_in(public).unwrap();
+        for (scope, source) in [
+            (private_a, include_str!("fixtures/paired-rebase-A.hs")),
+            (private_b, include_str!("fixtures/paired-rebase-B.hs")),
+        ] {
+            let receipt = session
+                .lib()
+                .declaration_receipt(&[source])
+                .unwrap()
+                .unwrap();
+            let (candidate, values) = session
+                .render_declaration_candidate_in(scope, &receipt, &SourceImports::new())
+                .unwrap();
+            let staged = crate::session::validate_declaration_candidate(
+                candidate,
+                session.lib().include_dir(),
+            )
+            .unwrap()
+            .with_visible_values(values);
+            session.adopt_staged_declaration_in(staged).unwrap();
+        }
+        let original_a = session.lib().scope_tip(private_a);
+        let original_b = session.lib().scope_tip(private_b);
+        let authored_b = session
+            .lib()
+            .log
+            .certified_authored_arc_at(original_b)
+            .unwrap();
+        let value_a =
+            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "fromA", 73);
+        let value_a_id = value_a.id;
+        session.bind_in(private_a, value_a).unwrap();
+        let value_b =
+            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "fromB", 74);
+        let value_b_id = value_b.id;
+        session.bind_in(private_b, value_b).unwrap();
+
+        let old_b = accepted(
+            session
+                .snapshot_declaration_publication(
+                    owner.clone(),
+                    &admitted,
+                    private_b,
+                    vec![value_b_id],
+                    vec![],
+                )
+                .unwrap(),
+        )
+        .stage()
+        .unwrap();
+        let first = accepted(
+            session
+                .snapshot_declaration_publication(
+                    owner.clone(),
+                    &admitted,
+                    private_a,
+                    vec![value_a_id],
+                    vec![],
+                )
+                .unwrap(),
+        );
+        let first_generation = first.base.reserved;
+        assert_eq!(session.publish_staged_public_manifest(
+            first.stage().unwrap(), &PublicationDecision::new(),
+        ).unwrap(), PublicManifestCommit::Durable);
+        let first_public = session.public_visibility_snapshot_in(public).unwrap();
+        let decision = PublicationDecision::new();
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(old_b, &decision)
+                .unwrap(),
+            PublicManifestCommit::Stale
+        );
+        assert_eq!(decision.phase(), PublicationPhase::Running);
+        assert_eq!(
+            session.public_visibility_snapshot_in(public).unwrap(),
+            first_public
+        );
+
+        let cancelled = accepted(
+            session
+                .snapshot_declaration_publication(
+                    owner.clone(),
+                    &admitted,
+                    private_b,
+                    vec![value_b_id],
+                    vec![],
+                )
+                .unwrap(),
+        );
+        assert_eq!(
+            cancelled
+                .receipt
+                .input()
+                .public_module
+                .as_ref()
+                .unwrap()
+                .module,
+            SessionModule::lib(first_generation).module_name()
+        );
+        let cancellation = PublicationDecision::new();
+        cancellation.request_cancellation();
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(cancelled.stage().unwrap(), &cancellation,)
+                .unwrap(),
+            PublicManifestCommit::Cancelled
+        );
+        assert_eq!(
+            session.public_visibility_snapshot_in(public).unwrap(),
+            first_public
+        );
+
+        let retry = accepted(
+            session
+                .snapshot_declaration_publication(
+                    owner,
+                    &admitted,
+                    private_b,
+                    vec![value_b_id],
+                    vec![],
+                )
+                .unwrap(),
+        );
+        assert!(Arc::ptr_eq(&retry.base.authored, &authored_b));
+        let generation = retry.base.reserved;
+        let proof = retry.receipt.clone();
+        for (name, original) in [
+            ("keepA", original_a),
+            ("keepB", original_b),
+            ("answer", original_b),
+            ("PublicShape", original_b),
+        ] {
+            let export = proof
+                .exports()
+                .iter()
+                .find(|export| export.head.occurrence == name)
+                .unwrap();
+            assert_eq!(
+                export.head.module,
+                SessionModule::lib(original).module_name()
+            );
+        }
+        let shape = proof
+            .exports()
+            .iter()
+            .find(|export| export.head.occurrence == "PublicShape")
+            .unwrap();
+        assert_eq!(
+            shape
+                .children
+                .iter()
+                .map(|child| child.occurrence.as_str())
+                .collect::<Vec<_>>(),
+            vec!["NewShape"]
+        );
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(retry.stage().unwrap(), &decision,)
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+        assert_eq!(decision.phase(), PublicationPhase::Published);
+        let published = session.public_visibility_snapshot_in(public).unwrap();
+        assert_eq!(published.declaration_tip, generation);
+        assert_eq!(published.epoch, first_public.epoch + 1);
+        assert!(published.bindings.contains(&("fromA".into(), value_a_id)));
+        assert!(published.bindings.contains(&("fromB".into(), value_b_id)));
+        let turn = session.lib().log.turn(generation).unwrap();
+        assert_eq!(turn.items.len(), 4);
+        assert!(turn.sources.is_empty());
+        assert_eq!(
+            turn.value_types.get("answer"),
+            session
+                .lib()
+                .log
+                .turn(original_b)
+                .unwrap()
+                .value_types
+                .get("answer")
+        );
+        let graph = recovery::read_v2(&path, root.path())
+            .unwrap()
+            .unwrap()
+            .graph;
+        let joined = graph
+            .nodes
+            .iter()
+            .find(|node| node.id == generation)
+            .unwrap();
+        let mut expected_refs = vec![original_b, first_generation];
+        expected_refs.sort();
+        assert_eq!(joined.implementation_refs, expected_refs);
+        assert_eq!(joined.exports.len(), proof.exports().len());
+        assert!(joined.exports.iter().all(|export| export
+            .children
+            .iter()
+            .all(|child| child.occurrence != "OldShape")));
+        assert_eq!(graph.public_surfaces[0].declaration_root, Some(generation));
+        session.retire_scope(private_a);
+        session.retire_scope(private_b);
+        assert!(session.bindings().get(value_a_id).is_some());
+        assert!(session.bindings().get(value_b_id).is_some());
+        let view = session.compile_view_in(public).unwrap();
+        let context = view.exact_declaration_context().unwrap();
+        assert_eq!(context.lexical_graph().len(), 1);
+        assert_eq!(
+            context.lexical_graph()[0].owner.module,
+            SessionModule::lib(generation).module_name()
+        );
+        for original in [original_a, original_b] {
+            assert!(context.recovery_products().iter().any(|product| {
+                product.owner().module == SessionModule::lib(original).module_name()
+            }));
+        }
+        let materialized = proof.materialize(root.path()).unwrap();
+        assert!(materialized
+            .anchors
+            .iter()
+            .any(|anchor| anchor.module == SessionModule::lib(first_generation).module_name()));
+        tidepool_toolchain::recovery_artifacts::verify_materialized_join(
+            root.path(),
+            &materialized.join,
+        )
+        .unwrap();
     }
 
     #[test]

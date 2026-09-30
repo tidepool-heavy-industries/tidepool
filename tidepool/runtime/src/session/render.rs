@@ -126,6 +126,19 @@ impl ExportItem {
     }
 }
 
+/// Replace complete export groups by head name. Constructor or method
+/// collisions between different heads remain for GHC to diagnose.
+pub(super) fn extend_exports_by_head<T: Clone>(
+    exports: &mut Vec<T>,
+    introduced: &[T],
+    head: impl Fn(&T) -> &str,
+) {
+    for item in introduced {
+        exports.retain(|prior| head(prior) != head(item));
+        exports.push(item.clone());
+    }
+}
+
 /// One declaration turn: the raw source text(s) appended this turn and the
 /// export items GHC says they introduce.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -323,6 +336,13 @@ impl DeclLog {
         }
     }
 
+    pub(crate) fn joined_at(&self, generation: Generation) -> Option<&JoinedDeclaration> {
+        match self.turns.get(&generation)? {
+            DeclarationSlot::Joined(joined) => Some(joined),
+            _ => None,
+        }
+    }
+
     fn next_generation(&mut self) -> Generation {
         self.high_water = Generation(
             self.high_water
@@ -510,10 +530,7 @@ impl DeclLog {
             for retracted in &turn.retracts {
                 exports.retain(|item: &ExportItem| item.head_name() != retracted);
             }
-            for item in &turn.items {
-                exports.retain(|prior| prior.head_name() != item.head_name());
-                exports.push(item.clone());
-            }
+            extend_exports_by_head(&mut exports, &turn.items, ExportItem::head_name);
         }
         exports
     }
@@ -788,14 +805,10 @@ fn cumulative_exports_before(log: &DeclLog, gen_one_based: usize) -> Vec<ExportI
         let turn = log
             .turn(g)
             .expect("scope chain contains only committed nodes");
-        let new_heads: Vec<&str> = turn.items.iter().map(ExportItem::head_name).collect();
         // A turn removes prior exports it either redefines OR retracts; then
         // re-adds its own. (A retraction adds nothing.)
-        acc.retain(|prior| {
-            !new_heads.contains(&prior.head_name())
-                && !turn.retracts.iter().any(|r| r == prior.head_name())
-        });
-        acc.extend(turn.items.iter().cloned());
+        acc.retain(|prior| !turn.retracts.iter().any(|r| r == prior.head_name()));
+        extend_exports_by_head(&mut acc, &turn.items, ExportItem::head_name);
     }
     acc
 }
