@@ -1,0 +1,1 @@
+let SCALE_BINDING = scaleStep SCALE_PREVIOUS
