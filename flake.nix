@@ -33,7 +33,7 @@
     };
     # Browser assets must come from the exact harness source used by Cargo.
     harnessWeb = {
-      url = "github:tidepool-heavy-industries/exomonad-harness/2f6edc79ac2be758de809610cc807122cab1562d";
+      url = "github:tidepool-heavy-industries/exomonad-harness/abfbf3b3edfc0199bd03352865b5cd9acfa53a81";
       flake = false;
     };
     # Match the harness web verification shell's pinned Node 24 package.
@@ -220,7 +220,7 @@
           interactiveCodex = codex.packages.${system}.default;
           embeddedWebAssets = harnessPkgs.buildNpmPackage {
             pname = "exomonad-harness-web";
-            version = "2f6edc79ac2be758de809610cc807122cab1562d";
+            version = "abfbf3b3edfc0199bd03352865b5cd9acfa53a81";
             src = "${harnessWeb}/web";
             nodejs = harnessPkgs.nodejs_24;
             npmDepsHash = "sha256-yJrPGaSazF06w91mddpNlOyoB6d1cYKXumyaoeWCfeU=";
@@ -230,7 +230,7 @@
               cp -R dist/. "$out/share/exomonad/web/"
               runHook postInstall
             '';
-            passthru.sourceRevision = "2f6edc79ac2be758de809610cc807122cab1562d";
+            passthru.sourceRevision = "abfbf3b3edfc0199bd03352865b5cd9acfa53a81";
           };
           # Tidepool consumes only the standalone private wire crate from the
           # matched Codex checkout. Keep the rest of Codex in its independent
@@ -356,7 +356,7 @@
                 version = "0.1.0";
                 src = exomonadSource;
                 cargoLock.lockFile = ./Cargo.lock;
-                cargoLock.outputHashes."harness-0.1.0" = "sha256-3vb3rC8Is6bNOHuMjcWpXMChBXofMurAjEZHtJnwAmE=";
+                cargoLock.outputHashes."harness-0.1.0" = "sha256-+ifradrlSEhX7Koj7kQeiHutocIyR5a5n4LAbzj/UUk=";
                 cargoBuildFlags = [
                   "-p"
                   "tidepool-extract-cmd"
@@ -392,7 +392,7 @@
             version = "0.1.0";
             src = exomonadSource;
             cargoLock.lockFile = ./Cargo.lock;
-            cargoLock.outputHashes."harness-0.1.0" = "sha256-3vb3rC8Is6bNOHuMjcWpXMChBXofMurAjEZHtJnwAmE=";
+            cargoLock.outputHashes."harness-0.1.0" = "sha256-+ifradrlSEhX7Koj7kQeiHutocIyR5a5n4LAbzj/UUk=";
             cargoBuildFlags = [
               "-p"
               "tidepool"
@@ -575,7 +575,7 @@
             tidepool-extract = self.packages.${system}.tidepool-extract;
 
             embedded-web-provenance = pkgs.runCommand "embedded-web-provenance" { } ''
-              revision=2f6edc79ac2be758de809610cc807122cab1562d
+              revision=abfbf3b3edfc0199bd03352865b5cd9acfa53a81
               grep -Fq "$revision" ${./Cargo.lock}
               grep -Fq "$revision" ${./flake.nix}
               test -s ${embeddedWebAssets}/share/exomonad/web/index.html
