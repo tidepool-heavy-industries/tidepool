@@ -280,6 +280,11 @@ async fn resident_structured_tool_await_watch_resumes() {
 }
 
 #[tokio::test]
+async fn resident_structured_tool_command_presentation_retains_job_and_resumes() {
+    resident_await_watch_case(WatchCase::StructuredCommandPresentation).await;
+}
+
+#[tokio::test]
 async fn resident_primary_await_watch_cancels_an_unpublished_cell() {
     resident_await_watch_case(WatchCase::PrimaryCancellation).await;
 }
@@ -307,6 +312,7 @@ async fn resident_primary_command_notice_wait_cancels_before_notice_handoff() {
 enum WatchCase {
     PrimaryRoundTrip,
     StructuredRoundTrip,
+    StructuredCommandPresentation,
     PrimaryCancellation,
     PrimarySleepCancellation,
     PrimaryCommandAwaitCancellation,
@@ -315,7 +321,11 @@ enum WatchCase {
 }
 
 async fn resident_await_watch_case(case: WatchCase) {
-    let primary = !matches!(case, WatchCase::StructuredRoundTrip);
+    let structured_command = matches!(case, WatchCase::StructuredCommandPresentation);
+    let primary = !matches!(
+        case,
+        WatchCase::StructuredRoundTrip | WatchCase::StructuredCommandPresentation
+    );
     let command_observation = match case {
         WatchCase::PrimaryCommandAwaitCancellation => {
             Some("Cmd.observe (Cmd.Observation (-1) 0) job")
@@ -395,7 +405,11 @@ async fn resident_await_watch_case(case: WatchCase) {
         let compiled = match run_turn(HaskellTurnRequest {
             exact_context: None,
             session_id: None,
-            turn_text: include_str!("resident_local_actor/await_watch_policy.hs"),
+            turn_text: if structured_command {
+                include_str!("resident_local_actor/await_command_policy.hs")
+            } else {
+                include_str!("resident_local_actor/await_watch_policy.hs")
+            },
             templates: &templates,
             include: &include_refs,
             session_root: session_root.path(),

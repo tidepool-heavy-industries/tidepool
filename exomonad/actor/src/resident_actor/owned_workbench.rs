@@ -430,6 +430,107 @@ where
             .parked_effect
             .take()
             .expect("one captured effect wait");
+        if let OwnedWorkbenchWait::Command {
+            request: crate::generated::commands::CommandsReq::CommandPresentWith(job, presentation),
+            ..
+        } = &pending.wait
+        {
+            let named_tool = owned.state.request.tool_call().is_some();
+            let request = command_presentation::CommandPresentationRequest {
+                job: job.clone(),
+                presentation: presentation.clone(),
+                summarize: !named_tool
+                    && owned
+                        .state
+                        .cursor
+                        .running
+                        .as_ref()
+                        .expect("same presentation fragment")
+                        .fragment
+                        .as_ref()
+                        .expect("presentation retains its fragment")
+                        .summarizes_bound_commands(),
+                named_tool,
+                display_remaining: owned.state.cursor.unit.display_remaining,
+            };
+            let environment = self.environment.clone();
+            let permitted = self
+                .descriptor
+                .effective_role()
+                .effect_keys()
+                .contains(&crate::ActorEffectKey::Commands);
+            return OwnedWorkbenchTask::new(Box::pin(async move {
+                let (timing, cleanup) = owned.scopes();
+                let prepared = timing
+                    .scope(cleanup.scope(command_presentation::prepare(
+                        &environment.commands,
+                        &owned.state.effects.context,
+                        &owned.workbench,
+                        request,
+                        permitted,
+                    )))
+                    .await;
+                OwnedWorkbenchCompletion::advance(move |behavior: &mut Self, _kernel| {
+                    let (timing, cleanup) = owned.scopes();
+                    timing.sync_scope(|| {
+                        cleanup.sync_scope(|| {
+                            let result = prepared.and_then(|prepared| {
+                                prepared.apply(
+                                    &environment.commands,
+                                    owned.state.effects.context.actor,
+                                    owned
+                                        .state
+                                        .cursor
+                                        .running
+                                        .as_mut()
+                                        .expect("same presentation fragment")
+                                        .fragment
+                                        .as_mut()
+                                        .expect("presentation retains its fragment"),
+                                    &mut owned.state.cursor.unit.display_remaining,
+                                    &mut owned.state.cursor.unit.command_output,
+                                )
+                            });
+                            if let Err(error) = result {
+                                record_workbench_operation(
+                                    &mut owned.state.cursor.unit.operations,
+                                    owned.state.request.execution_id(),
+                                    owned.state.cursor.index,
+                                    pending.ordinal,
+                                    &pending.effect,
+                                    pending.started.elapsed(),
+                                    WorkbenchOperationDisposition::Unknown,
+                                );
+                                owned
+                                    .state
+                                    .cursor
+                                    .running
+                                    .as_mut()
+                                    .expect("same presentation fragment")
+                                    .resume_failure = Some(error);
+                                return Ok(WorkbenchAdvance::Park(Self::continue_owned_task(
+                                    owned,
+                                )));
+                            }
+                            // Rendering, display budget and page receipt advance together
+                            // before the native continuation receives this acknowledgement.
+                            Ok(WorkbenchAdvance::Park(
+                                behavior.resume_owned_effect_task(owned, kernel, pending),
+                            ))
+                        })
+                    })
+                })
+            }));
+        }
+        self.resume_owned_effect_task(owned, kernel, pending)
+    }
+
+    fn resume_owned_effect_task(
+        &self,
+        mut owned: OwnedExecution<H, O>,
+        kernel: KernelContext,
+        pending: ParkedWorkbenchEffect,
+    ) -> OwnedWorkbenchTask<Self> {
         let environment = self.environment.clone();
         let commands_permitted = self
             .descriptor

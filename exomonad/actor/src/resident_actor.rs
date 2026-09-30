@@ -12,6 +12,7 @@ mod capture_workspace_tests;
 #[cfg(test)]
 mod provider_owner_tests;
 
+mod command_presentation;
 mod command_settlement;
 mod commands;
 mod owned_workbench;
@@ -1390,16 +1391,10 @@ impl OwnedWorkbenchWait {
             ResidentActorBoundary::Command {
                 continuation,
                 request,
-            } if !matches!(
+            } => Ok(Self::Command {
+                continuation,
                 request,
-                crate::generated::commands::CommandsReq::CommandPresentWith(..)
-            ) =>
-            {
-                Ok(Self::Command {
-                    continuation,
-                    request,
-                })
-            }
+            }),
             other => Err(other),
         }
     }
@@ -6792,146 +6787,32 @@ where
                                 } => Some((job.clone(), presentation.clone())),
                                 _ => None,
                             };
-                            if let Some((job, mut presentation)) = presentation {
-                                if !unit.named_tool
-                                    && next_fragment.summarizes_bound_commands()
-                                    && matches!(
+                            if let Some((job, presentation)) = presentation {
+                                let prepared = command_presentation::prepare(
+                                    &self.environment.commands,
+                                    context,
+                                    workbench,
+                                    command_presentation::CommandPresentationRequest {
+                                        job,
                                         presentation,
-                                        CommandPresentation::CommandVisible(_, _)
-                                    )
-                                {
-                                    let status =
-                                        self.environment.commands.status(context.actor, &job).await;
-                                    let output = self
-                                        .environment
-                                        .commands
-                                        .output(context.actor, &job, 0)
-                                        .await;
-                                    let exit = match status {
-                                        Ok(tidepool_bridge_effects::CommandStatus::CommandFinished(result)) => match result.outcome {
-                                            tidepool_bridge_effects::CommandOutcome::CommandExited(code) => format!("exit {code}"),
-                                            other => format!("{:?}", other),
-                                        },
-                                        Ok(tidepool_bridge_effects::CommandStatus::CommandQueued) => "queued".into(),
-                                        Ok(tidepool_bridge_effects::CommandStatus::CommandStarting) => "starting".into(),
-                                        Ok(tidepool_bridge_effects::CommandStatus::CommandRunning) => "running".into(),
-                                        Ok(tidepool_bridge_effects::CommandStatus::CommandStopping) => "stopping".into(),
-                                        Err(error) => format!("status unavailable: {error:?}"),
-                                    };
-                                    let counts = match output {
-                                        Ok(output) => format!(
-                                            "stdout {} bytes · stderr {} bytes",
-                                            output.stdout.available_end,
-                                            output.stderr.available_end
-                                        ),
-                                        Err(error) => {
-                                            format!(
-                                                "stdout/stderr byte counts unavailable: {error:?}"
-                                            )
-                                        }
-                                    };
-                                    presentation = CommandPresentation::CommandVisible(
-                                        format!("command {job}: {exit} · {counts}"),
-                                        512,
-                                    );
-                                }
-                                let limit = match &presentation {
-                                    CommandPresentation::CommandVisible(_, bytes) => {
-                                        usize::try_from(*bytes)
-                                            .unwrap_or(0)
-                                            .min(65536)
-                                            .min(*unit.display_remaining)
-                                    }
-                                    CommandPresentation::CommandQuiet => 0,
-                                };
-                                let mut shortened = false;
-                                let pages = if matches!(
-                                    presentation,
-                                    CommandPresentation::CommandVisible(_, _)
-                                ) && limit >= 1024
-                                {
-                                    Some(
-                                        self.environment
-                                            .commands
-                                            .observation(context.actor, &job)
-                                            .await,
-                                    )
-                                } else {
-                                    None
-                                };
-                                if let CommandPresentation::CommandVisible(text, _) =
-                                    &mut presentation
-                                {
-                                    *text = crate::workbench_display::bounded_output(text, 512);
-                                    match &pages {
-                                                Some(Ok(pages)) => text.push_str(&crate::workbench_display::command_pages(pages)),
-                                                Some(Err(tidepool_bridge_effects::CommandError::CommandOutputPending)) => text.push_str("\nNo output yet; streams are starting."),
-                                                Some(Err(error)) => text.push_str(&format!("\nOutput observation unavailable: {error:?}. Inspect the same job; do not rerun for output.")),
-                                                None => {}
-                                            }
-                                }
-                                if unit.named_tool {
-                                    if let CommandPresentation::CommandVisible(text, _) =
-                                        &mut presentation
-                                    {
-                                        let incomplete =
-                                            pages.as_ref().is_some_and(|pages| match pages {
-                                                Ok(pages) => pages.iter().any(|(_, page)| {
-                                                    page.lost_bytes > 0
-                                                        || page.end < page.available_end
-                                                }),
-                                                Err(tidepool_bridge_effects::CommandError::CommandOutputPending) => false,
-                                                Err(_) => true,
-                                            });
-                                        // Every direct command tool call retains a Haskell binding,
-                                        // not only ones whose output would otherwise be truncated —
-                                        // the cheap path must cross into a program for free.
-                                        let oversized = text.len() > limit || incomplete;
-                                        shortened = oversized;
-                                        let binding = workbench
-                                            .bind_command_job(context.clone(), job.clone())
-                                            .await?;
-                                        if oversized {
-                                            shortened |= text.len()
-                                                > (8 * 1024).min(limit).saturating_sub(512);
-                                            *text = crate::workbench_display::bounded_output(
-                                                text,
-                                                (8 * 1024).min(limit).saturating_sub(512),
-                                            );
-                                            *text = format!(
-                                                "retained as {binding} :: Cmd.Job\nnext: read_output session_id={job}, stream=Stdout (or Stderr), offset=0. Do not rerun.\n{text}"
-                                            );
-                                        } else {
-                                            *text =
-                                                format!("retained as {binding} :: Cmd.Job\n{text}");
-                                        }
-                                        next_fragment.retain_job_binding(binding);
-                                    }
-                                }
-                                if let CommandPresentation::CommandVisible(text, _) =
-                                    &mut presentation
-                                {
-                                    shortened |= text.len() > limit;
-                                    *text = crate::workbench_display::bounded_output(text, limit);
-                                }
-                                let rendered = next_fragment.present_command(
-                                    job.clone(),
-                                    presentation,
+                                        summarize: !unit.named_tool
+                                            && next_fragment.summarizes_bound_commands(),
+                                        named_tool: unit.named_tool,
+                                        display_remaining: *unit.display_remaining,
+                                    },
+                                    self.descriptor
+                                        .effective_role()
+                                        .effect_keys()
+                                        .contains(&crate::ActorEffectKey::Commands),
+                                )
+                                .await?;
+                                prepared.apply(
+                                    &self.environment.commands,
+                                    context.actor,
+                                    next_fragment,
                                     unit.display_remaining,
-                                );
-                                if !rendered.is_empty() {
-                                    unit.command_output.push(rendered);
-                                }
-                                if let Some(Ok(pages)) = pages.filter(|_| !shortened) {
-                                    self.environment
-                                        .commands
-                                        .mark_displayed(context.actor, &job, &pages)
-                                        .map_err(|error| {
-                                            ResidentActorWorkbenchError::ActorProtocol(format!(
-                                                "command observation receipt: {error:?}"
-                                            ))
-                                        })?;
-                                }
+                                    unit.command_output,
+                                )?;
                             }
                             let (resolved, command_disposition) = match boundary {
                                 ResidentActorBoundary::Command {
