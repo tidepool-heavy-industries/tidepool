@@ -2057,6 +2057,24 @@ where
         self.state.begin_checked_prefix(admission, first_item)
     }
 
+    pub fn admit_cell_for_execution(
+        &mut self,
+        execution: Arc<super::PrivateExecutionAdmission>,
+        declarations: usize,
+        specification: Arc<dyn std::any::Any + Send + Sync>,
+        specification_digest: [u8; 32],
+        authority_digest: [u8; 32],
+    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
+        self.settle_dropped_custody();
+        self.state.admit_cell_for_execution(
+            execution,
+            declarations,
+            specification,
+            specification_digest,
+            authority_digest,
+        )
+    }
+
     pub fn admit_checked_item(
         &mut self,
         prefix: Arc<super::RuntimeCheckedPrefix>,
@@ -2075,6 +2093,33 @@ where
         self.settle_dropped_custody();
         self.state
             .freeze_execution_intent(admission, writes, sources)
+    }
+
+    /// Finalize the current writes selected by this resident owner. Private
+    /// host input carriers retain native dependencies but never become public
+    /// value heads.
+    pub fn freeze_private_execution(
+        &mut self,
+        admission: &super::PrivateExecutionAdmission,
+    ) -> Result<Arc<super::FinalExecutionIntent>, SessionError> {
+        self.settle_dropped_custody();
+        let scope = admission.private_scope();
+        let snapshot = self
+            .state
+            .public_visibility_snapshot_in(scope)
+            .ok_or(SessionError::DeadScope(scope))?;
+        let writes = snapshot
+            .bindings
+            .iter()
+            .filter_map(|(_, id)| {
+                self.state.bindings().get(*id).and_then(|entry| {
+                    (entry.scope == scope && !self.hidden_host_bindings.contains_key(id))
+                        .then_some(*id)
+                })
+            })
+            .collect();
+        self.state
+            .freeze_execution_intent(admission, writes, snapshot.source_instances)
     }
 
     pub fn restage_execution_publication(

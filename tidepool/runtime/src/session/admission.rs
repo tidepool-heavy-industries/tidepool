@@ -15,6 +15,7 @@ use super::{PersistentSession, PublicVisibilitySnapshot, SessionCompileView, Ses
 /// binding-store owner; completion must retire that scope once.
 pub struct PrivateExecutionAdmission {
     pub(super) owner: Arc<RuntimeAdmissionOwner>,
+    pub(super) scope_lease: Arc<RuntimeLexicalScopeLease>,
     admitted: PublicVisibilitySnapshot,
     private_scope: ScopeId,
     view: SessionCompileView,
@@ -43,6 +44,7 @@ impl PrivateExecutionAdmission {
 /// Original declaration identities are burned before checking any source.
 pub struct RuntimeCellAdmission {
     owner: Arc<RuntimeAdmissionOwner>,
+    private_execution: Option<Arc<PrivateExecutionAdmission>>,
     _retained_scope: Arc<RuntimeLexicalScopeLease>,
     prefix_started: std::sync::atomic::AtomicBool,
     view: SessionCompileView,
@@ -136,6 +138,7 @@ pub struct RuntimeCheckedItemAdmission {
     snapshot: Arc<RuntimeCheckedPrefixSnapshot>,
     item: tidepool_toolchain::checked_cell::ExactCheckedItem,
     generation: Generation,
+    observation_name: Option<String>,
     digest: [u8; 32],
 }
 impl RuntimeCheckedItemAdmission {
@@ -150,6 +153,9 @@ impl RuntimeCheckedItemAdmission {
     }
     pub fn generation(&self) -> Generation {
         self.generation
+    }
+    pub fn observation_name(&self) -> Option<&str> {
+        self.observation_name.as_deref()
     }
     pub fn digest(&self) -> [u8; 32] {
         self.digest
@@ -384,6 +390,9 @@ impl std::fmt::Debug for RuntimeCellAdmission {
 }
 
 impl RuntimeCellAdmission {
+    pub fn private_execution(&self) -> Option<&Arc<PrivateExecutionAdmission>> {
+        self.private_execution.as_ref()
+    }
     pub fn view(&self) -> &SessionCompileView {
         &self.view
     }
@@ -451,6 +460,16 @@ impl PersistentSession {
             generation
         };
         let snapshot = state.snapshot.clone();
+        let observation_name = (item.kind()
+            == tidepool_toolchain::checked_cell::CheckedItemKind::Expression)
+            .then(|| {
+                let mut name = format!("observation{}", generation.0);
+                let visible = self.bindings().iter_current_in(self.scope_tree(), scope);
+                while visible.iter().any(|(existing, _)| existing.0 == name) {
+                    name.push('_');
+                }
+                name
+            });
         state.reservation = Some(CheckedItemReservation {
             item: item.clone(),
             generation,
@@ -460,6 +479,16 @@ impl PersistentSession {
         digest.update(&snapshot.digest());
         digest.update(&(item.index() as u64).to_le_bytes());
         digest.update(&generation.0.to_le_bytes());
+        match &observation_name {
+            Some(name) => {
+                digest.update(b"observation");
+                digest.update(&(name.len() as u64).to_le_bytes());
+                digest.update(name.as_bytes());
+            }
+            None => {
+                digest.update(b"no-observation");
+            }
+        }
         let digest = *digest.finalize().as_bytes();
         drop(state);
         Ok(Arc::new(RuntimeCheckedItemAdmission {
@@ -467,6 +496,7 @@ impl PersistentSession {
             snapshot,
             item,
             generation,
+            observation_name,
             digest,
         }))
     }
@@ -566,6 +596,10 @@ impl PersistentSession {
             .expect("detached scope captures a binding tip");
         Ok(PrivateExecutionAdmission {
             owner: self.admission_owner().clone(),
+            scope_lease: Arc::new(RuntimeLexicalScopeLease {
+                owner: self.admission_owner().clone(),
+                scope: private_scope,
+            }),
             admitted,
             private_scope,
             view,
@@ -669,6 +703,7 @@ impl PersistentSession {
         let retained_scope = self.retain_lexical_scope(scope)?;
         Ok(Arc::new(RuntimeCellAdmission {
             owner: self.admission_owner().clone(),
+            private_execution: None,
             _retained_scope: retained_scope,
             prefix_started: std::sync::atomic::AtomicBool::new(false),
             view,
@@ -682,6 +717,36 @@ impl PersistentSession {
             authority_digest,
             digest,
         }))
+    }
+
+    /// Issue executable cell authority inside the exact private execution
+    /// whose token this runtime minted. The token retains its lexical owner
+    /// through off-checkout compilation and parked native execution.
+    pub fn admit_cell_for_execution(
+        &mut self,
+        execution: Arc<PrivateExecutionAdmission>,
+        declaration_count: usize,
+        specification: Arc<dyn Any + Send + Sync>,
+        specification_digest: [u8; 32],
+        authority_digest: [u8; 32],
+    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        if !Arc::ptr_eq(&execution.owner, self.admission_owner())
+            || execution.view().session() != self.lib().session_id()
+            || self.binding_tip_id(execution.private_scope()) != Some(execution.binding_tip())
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let mut admission = self.admit_cell_in(
+            execution.private_scope(),
+            declaration_count,
+            specification,
+            specification_digest,
+            authority_digest,
+        )?;
+        Arc::get_mut(&mut admission)
+            .expect("fresh runtime admission has one owner")
+            .private_execution = Some(execution);
+        Ok(admission)
     }
 }
 

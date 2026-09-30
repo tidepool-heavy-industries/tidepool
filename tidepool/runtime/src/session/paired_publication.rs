@@ -48,6 +48,7 @@ struct AuthoredWrite {
 /// The private scope keeps live roots owned until publication or abandonment.
 pub struct FinalExecutionIntent {
     owner: Arc<super::admission::RuntimeAdmissionOwner>,
+    _private_scope_lease: Option<Arc<super::RuntimeLexicalScopeLease>>,
     admitted: PublicVisibilitySnapshot,
     private: PublicVisibilitySnapshot,
     private_base: Option<DeclarationTip>,
@@ -533,6 +534,7 @@ impl PersistentSession {
             admission.private_scope(),
             write_ids,
             source_keys,
+            Some(admission.scope_lease.clone()),
         )?;
         assert!(
             admission.final_intent.set(intent.clone()).is_ok(),
@@ -547,6 +549,7 @@ impl PersistentSession {
         private_scope: ScopeId,
         write_ids: Vec<SessionVarId>,
         source_keys: Vec<SourceLeaseKey>,
+        private_scope_lease: Option<Arc<super::RuntimeLexicalScopeLease>>,
     ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
         if private_scope == admitted.scope || !self.scope_tree().is_live(private_scope) {
             return Err(SessionError::DeadScope(private_scope));
@@ -665,6 +668,7 @@ impl PersistentSession {
         let reserved = self.lib_mut().reserve_join_generation_durable()?;
         Ok(Arc::new(FinalExecutionIntent {
             owner: self.admission_owner().clone(),
+            _private_scope_lease: private_scope_lease,
             admitted: admitted.clone(),
             private,
             private_base,
@@ -753,6 +757,7 @@ impl PersistentSession {
             private_scope,
             write_ids,
             source_keys,
+            None,
         )?;
         self.restage_declaration_publication(owner, intent)
     }
