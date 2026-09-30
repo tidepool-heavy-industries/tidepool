@@ -4,8 +4,11 @@ import Codec.CBOR.Encoding (encodeBool, encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (SomeException, bracket, finally, try)
 import Control.Monad (forM, unless)
+import GHC.Clock (getMonotonicTimeNSec)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as BSC
+import Data.List (isPrefixOf)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -21,14 +24,14 @@ import Numeric (showHex)
 import System.Directory
   ( copyFile, createDirectory, getTemporaryDirectory, removeDirectoryRecursive
   , removeFile )
-import System.Environment (getArgs, getExecutablePath)
+import System.Environment (getArgs, getExecutablePath, setEnv)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
-import System.IO (hClose, openTempFile)
+import System.IO (hClose, hPutStrLn, openTempFile, stderr)
 import System.Process (readProcessWithExitCode)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencyModule(..), DependencyImport(..)
-  , dependencySourceSha256, sourceEvidence )
+  , DependencyResolution(..), dependencySourceSha256, sourceEvidence )
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), freshExactState)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts)
@@ -42,6 +45,11 @@ import Tidepool.PreparedStg (PreparedModule(..))
 main :: IO ()
 main = getArgs >>= \case
   ["--fresh", work] -> reuseFresh work >>= requireReused "fresh worker"
+  ["--mixed-fresh", work, count] -> reuseFresh work >>= requireMixed (read count)
+  ["--mixed"] -> do
+    setEnv "TIDEPOOL_TIMING" "1"
+    forM_ [1, 10, 100] (mixedGraph False)
+    mixedGraph True 10
   [] -> withScratch $ \work -> do
     forM_ ["CacheEven.hs", "CacheEven.hs-boot", "CacheOdd.hs", "CacheEntry.hs"] $ \file ->
       copyFile ("test-source-boot/fixtures" </> file) (work </> file)
@@ -72,10 +80,139 @@ main = getArgs >>= \case
     unless (exit == ExitSuccess) $ fail ("fresh worker reuse failed: " ++ errors)
     _ <- reuseFresh work >>= requireReused "reuse after refusal"
     putStrLn "SOURCE boot cache: cold, resident, warm, fresh-worker, ABI and CPP refusal passed"
+    setEnv "TIDEPOOL_TIMING" "1"
+    mixedGraph False 1
+    mixedGraph True 10
   _ -> fail "unexpected SOURCE boot test arguments"
 
+-- The fixed two-module SOURCE SCC is surrounded by ordinary candidate
+-- products. A separate case makes Independent1 a real ordinary+boot input;
+-- it must stay in GHC's fresh-load closure while the other members stay out.
+mixedGraph :: Bool -> Int -> IO ()
+mixedGraph required count = withScratch $ \work -> do
+  forM_ ["CacheEven.hs", "CacheEven.hs-boot", "CacheOdd.hs", "CacheEntry.hs"] $ \file ->
+    copyFile ("test-source-boot/fixtures" </> file) (work </> file)
+  let independent = ["Independent" ++ show index | index <- [1 .. count]]
+      expected = ["CacheEven", "CacheOdd"] ++ independent
+  forM_ independent $ \name -> writeFile (work </> name ++ ".hs") (unlines
+    ["module " ++ name ++ " where", "data Token = Token", "value :: Int", "value = 1"])
+  entry <- BSC.unpack <$> BS.readFile (work </> "CacheEntry.hs")
+  writeFile (work </> "CacheEntry.hs") (unlines
+    (take 4 (lines entry) ++ ["import qualified " ++ name | name <- independent]
+      ++ drop 4 (lines entry)) ++ "\nindependentTotal :: Int\nindependentTotal = "
+      ++ foldr1 (\left right -> left ++ " + " ++ right) [name ++ ".value" | name <- independent] ++ "\n")
+  if required
+    then forM_ ["CacheEven.hs", "CacheEven.hs-boot"] $ \file -> do
+      content <- BSC.unpack <$> BS.readFile (work </> file)
+      let body = unlines (take 3 (lines content) ++ ["import qualified Independent1"] ++ drop 3 (lines content))
+          anchor = "\nanchor :: Independent1.Token\n"
+            ++ if file == "CacheEven.hs" then "anchor = Independent1.Token\n" else ""
+      writeFile (work </> file) (body ++ anchor)
+    else pure ()
+  cold <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
+    (work </> "CacheEntry.hs") [work] (Just (work </> "build-products"))
+  unless (Set.fromList (preparedNames cold) == Set.fromList ("CacheEntry" : expected)) $
+    fail "mixed SOURCE producer omitted an original module"
+  writeManifestFor expected work cold
+  withResidentPipelineSelected [work] $ \compile ->
+    forM_ [1 .. 3 :: Int] $ \sample -> do
+      hPutStrLn stderr ("mixed-source-start independent=" ++ show count
+        ++ " required=" ++ show required ++ " sample=" ++ show sample)
+      start <- getMonotonicTimeNSec
+      result <- compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
+        Nothing (work </> "CacheEntry.hs") [] Nothing
+      end <- getMonotonicTimeNSec
+      requireMixed count result
+      let evidence = pprDependencies result
+          negative = length [resolution | resolution <- dependencyResolutions evidence
+            , dependencyResolutionSelected resolution == Nothing
+            , not (null (dependencyResolutionCandidates resolution))]
+      unless (negative > 0) (fail "mixed reuse omitted negative home lookup witnesses")
+      hPutStrLn stderr ("mixed-source-result independent=" ++ show count
+        ++ " required=" ++ show required ++ " sample=" ++ show sample
+        ++ " elapsed_ns=" ++ show (end - start)
+        ++ " accepted=" ++ show (length (pprAcceptedCandidates result))
+        ++ " extracted=" ++ show (length (pprModules result))
+        ++ " negative_lookups=" ++ show negative)
+    -- Refusals run on the smallest mixed graph and are outside measurement.
+  if count == 1 then do
+    exerciseRefusalsWith (\_ -> requireMixed count) work (reuseFresh work)
+    exerciseFamilyRefusal work
+    exerciseIndependentDrift work
+    exerciseNegativeHomeSelection work
+    else pure ()
+  executable <- getExecutablePath
+  (exit, _, errors) <- readProcessWithExitCode executable ["--mixed-fresh", work, show count] ""
+  unless (exit == ExitSuccess) $ fail ("fresh mixed worker failed: " ++ errors)
+  let expectedLoad = if required then 3 else 2 :: Int
+      loadCounts = [line | line <- lines errors
+        , "tidepool-count name=home_products_source_load_owners " `isPrefixOf` line]
+      expectedLine = "tidepool-count name=home_products_source_load_owners count=" ++ show expectedLoad
+  unless (loadCounts == [expectedLine]) $
+    fail ("fresh mixed worker loaded unrelated owners: " ++ show loadCounts)
+  putStrLn ("mixed SOURCE: PASS independent=" ++ show count ++ " required=" ++ show required)
+
+requireMixed :: Int -> PreparedPipelineResult -> IO ()
+requireMixed count result = unless
+  (Set.fromList (map candidateModule (pprAcceptedCandidates result)) == Set.fromList
+      (["CacheEven", "CacheOdd"] ++ ["Independent" ++ show index | index <- [1 .. count]])
+    && preparedNames result == ["CacheEntry"]
+    && dependencyCacheSafe (pprDependencies result)
+    && dependencySelectionComplete (pprDependencies result)) $
+  fail ("mixed SOURCE reuse changed closure: accepted="
+    ++ show (map candidateModule (pprAcceptedCandidates result))
+    ++ " prepared=" ++ show (preparedNames result))
+
+exerciseFamilyRefusal :: FilePath -> IO ()
+exerciseFamilyRefusal work = do
+  let boot = work </> "CacheEven.hs-boot"
+  original <- BS.readFile boot
+  -- The same nominal family has a different kind in the current boot input.
+  (do writeFile boot (unlines [if line == "type family Payload a"
+        then "type family Payload a b" else line | line <- lines (BSC.unpack original)])
+      changed <- try (reuseFresh work) :: IO (Either SomeException PreparedPipelineResult)
+      case changed of
+        Left _ -> pure ()
+        Right result -> requireRefused "changed boot family arity" result)
+    `finally` BS.writeFile boot original
+  reuseFresh work >>= requireMixed 1
+
+exerciseIndependentDrift :: FilePath -> IO ()
+exerciseIndependentDrift work = do
+  let source = work </> "Independent1.hs"
+  original <- BS.readFile source
+  (do writeFile source (unlines [if line == "value = 1"
+        then "value = 2" else line | line <- lines (BSC.unpack original)])
+      result <- reuseFresh work
+      unless (Set.fromList (map candidateModule (pprAcceptedCandidates result))
+          == Set.fromList ["CacheEven", "CacheOdd"]
+        && Set.fromList (preparedNames result) == Set.fromList ["Independent1", "CacheEntry"]
+        && dependencyCacheSafe (pprDependencies result)
+        && dependencySelectionComplete (pprDependencies result)) $
+        fail "unrelated source drift skipped a changed product or lost the SOURCE SCC")
+    `finally` BS.writeFile source original
+  reuseFresh work >>= requireMixed 1
+
+exerciseNegativeHomeSelection :: FilePath -> IO ()
+exerciseNegativeHomeSelection work = do
+  let source = work </> "Prelude.hs"
+  -- This was an absent home path in every producer's package-import witness.
+  -- Its current presence changes GHC's selection even though it reexports
+  -- the same package Names. No original candidate can skip that new owner.
+  (do writeFile source (unlines ["{-# LANGUAGE PackageImports #-}"
+        , "module Prelude (module PackagePrelude) where"
+        , "import \"base\" Prelude as PackagePrelude"])
+      result <- reuseFresh work
+      requireRefused "new home Prelude selection" result)
+    `finally` removeFile source
+  reuseFresh work >>= requireMixed 1
+
 exerciseRefusals :: FilePath -> IO PreparedPipelineResult -> IO ()
-exerciseRefusals work reuse = do
+exerciseRefusals = exerciseRefusalsWith requireReused
+
+exerciseRefusalsWith
+  :: (String -> PreparedPipelineResult -> IO ()) -> FilePath -> IO PreparedPipelineResult -> IO ()
+exerciseRefusalsWith requireAccepted work reuse = do
   -- The type ABI changes while the ordinary source bytes and interfaces
   -- remain unchanged. Fresh boot validation must refuse the old SCC.
   let boot = work </> "CacheEven.hs-boot"
@@ -86,13 +223,13 @@ exerciseRefusals work reuse = do
         Left _ -> pure ()
         Right result -> requireRefused "changed boot ABI" result)
     `finally` BS.writeFile boot original
-  reuse >>= requireReused "resident reuse after ABI refusal"
+  reuse >>= requireAccepted "resident reuse after ABI refusal"
   -- CPP has readable inputs outside the bounded source graph. Refuse the
   -- entire SCC even when this particular source happens to typecheck.
   (BS.writeFile boot ("{-# LANGUAGE CPP #-}\n" <> original) >>
     reuse >>= requireRefused "untracked boot CPP")
     `finally` BS.writeFile boot original
-  reuse >>= requireReused "resident reuse after refusal"
+  reuse >>= requireAccepted "resident reuse after refusal"
 
 forM_ :: [a] -> (a -> IO b) -> IO ()
 forM_ values action = mapM_ action values
@@ -149,8 +286,11 @@ verifyHydration work cold = do
       Right _ -> pure ()
 
 writeManifest :: FilePath -> PreparedPipelineResult -> IO ()
-writeManifest work cold = do
-  candidates <- forM ["CacheEven", "CacheOdd"] $ \name -> do
+writeManifest = writeManifestFor ["CacheEven", "CacheOdd"]
+
+writeManifestFor :: [String] -> FilePath -> PreparedPipelineResult -> IO ()
+writeManifestFor names work cold = do
+  candidates <- forM names $ \name -> do
     let key = mkModuleName name
         nodes = [node | node <- dependencyModules (pprDependencies cold)
           , dependencyModuleName node == name, not (dependencyModuleBoot node)]
@@ -183,7 +323,7 @@ writeManifest work cold = do
       <> encodeListLen 0 <> text packagePath <> text (digest packages)
   BS.writeFile (manifest work) (toStrictByteString
     (encodeListLen 3 <> encodeString "TPMCAN" <> encodeString "5"
-      <> encodeListLen 2 <> mconcat candidates))
+      <> encodeListLen (fromIntegral (length candidates)) <> mconcat candidates))
 
 digest :: BS.ByteString -> String
 digest = concatMap (\byte -> let text = showHex byte ""

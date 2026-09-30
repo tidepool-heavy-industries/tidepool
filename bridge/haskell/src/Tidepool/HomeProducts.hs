@@ -9,6 +9,7 @@ import Control.Exception
 import Control.Monad (forM_, unless)
 import Control.Monad.IO.Class (liftIO)
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.IORef (readIORef)
 import GHC
   ( Ghc, ModSummary(..), getSession, parseModule, setSession, typecheckModule
@@ -22,9 +23,10 @@ import GHC.Driver.Session (GeneralFlag(Opt_Pp), gopt, xopt)
 import GHC.LanguageExtensions.Type qualified as LangExt
 import GHC.Tc.Types (tcg_dependent_files)
 import GHC.Types.SourceFile (HscSource(..))
-import GHC.Unit.Home.ModInfo (addToHpt, lookupHpt)
+import GHC.Unit.Home.ModInfo (addToHpt, eltsHpt, lookupHpt)
 import GHC.Unit.Module.Graph
-  ( ModuleGraph, ModuleGraphNode(..), mgModSummaries', mkModuleGraph )
+  ( ModuleGraph, ModuleGraphNode(..), NodeKey(..), mgModSummaries', mkModuleGraph
+  , mgTransDeps, mkNodeKey, nodeDependencies )
 import GHC.Driver.Make (load')
 import GHC.Types.Error (mkUnknownDiagnostic)
 import GHC.Data.Graph.Directed (flattenSCCs)
@@ -35,6 +37,7 @@ import Tidepool.ExactHydration
   ( ExactIfaceArtifact, freshExactState, hydrateExactScope )
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.RetainedUnfoldings (scopeRetainedHscEnv, scopeRetainedModuleGraph)
+import Tidepool.Timing (emitCount, readTimingEnabled, timeDetailPhase)
 
 -- Every ordinary summary and every boot summary is from the current
 -- downsweep. The caller has already checked source/package witnesses and
@@ -59,6 +62,7 @@ hydrateCandidateHomeProducts initial loadGraph interfaces summaries boots = reif
     Right environment -> pure (Right environment)
   where
     hydrate = do
+      timing <- liftIO readTimingEnabled
       let selected = Map.fromList [(ms_mod_name summary, ()) | summary <- summaries]
           selectedGraph = mkModuleGraph
             [node | node@(ModuleNode _ summary) <- mgModSummaries' loadGraph
@@ -94,15 +98,22 @@ hydrateCandidateHomeProducts initial loadGraph interfaces summaries boots = reif
       validationBase <- if null boots then pure initial else do
         -- In a boot SCC, an early extraction pass can consume a load-produced
         -- ordinary interface before that owner gets its prepared interface.
-        -- Recreate that compiler state rather than guessing provenance from
-        -- SOURCE syntax. The immutable prepared bodies still avoid extraction
-        -- and lowering; this conservative path does not avoid GHC's load pass.
-        setSession initial {hsc_mod_graph = selectedGraph}
-        flag <- load' Nothing LoadAllTargets mkUnknownDiagnostic Nothing
-          (scopeRetainedModuleGraph selectedGraph)
+        -- Recreate that context for every boot owner and its GHC-selected
+        -- dependencies. Other accepted products retain the ordinary hydration
+        -- path; their interfaces are checked in the original dependency order.
+        sourceGraph <- either (liftIO . ioError . userError) pure
+          (sourceValidationGraph selectedGraph boots)
+        setSession initial {hsc_mod_graph = sourceGraph}
+        flag <- timeDetailPhase timing "ghc_setup" "home_products_source_load" $
+          load' Nothing LoadAllTargets mkUnknownDiagnostic Nothing
+            (scopeRetainedModuleGraph sourceGraph)
         unless (case flag of Succeeded -> True; Failed -> False) $
           liftIO (ioError (userError "cached home SOURCE graph failed fresh load"))
-        current <- getSession
+        loaded <- getSession
+        let current = loaded {hsc_mod_graph = selectedGraph}
+        setSession current
+        liftIO $ emitCount timing "home_products_source_load_owners"
+          (toInteger (length (eltsHpt (hsc_HPT current))))
         forM_ boots $ \summary -> do
           unless (ms_hsc_src summary == HsBootFile) $
             liftIO (ioError (userError "cached home boot input is not a boot summary"))
@@ -136,3 +147,26 @@ hydrateCandidateHomeProducts initial loadGraph interfaces summaries boots = reif
       let restored = final {hsc_mod_graph = hsc_mod_graph initial}
       setSession restored
       pure restored
+
+-- GHC's cached reachability retains boot nodes and their real downsweep
+-- edges. Root both forms of every boot owner, keep the original node order,
+-- and refuse a dangling home edge before allowing any candidate to skip.
+sourceValidationGraph :: ModuleGraph -> [ModSummary] -> Either String ModuleGraph
+sourceValidationGraph graph boots = do
+  let nodes = mgModSummaries' graph
+      bootNames = Set.fromList (map ms_mod_name boots)
+      roots = [mkNodeKey node | node@(ModuleNode _ summary) <- nodes
+        , ms_mod_name summary `Set.member` bootNames]
+      ordinaryRoots = Set.fromList [ms_mod_name summary
+        | ModuleNode _ summary <- nodes, ms_hsc_src summary == HsSrcFile
+        , ms_mod_name summary `Set.member` bootNames]
+  unless (ordinaryRoots == bootNames) (Left "cached SOURCE ordinary owner is absent")
+  closures <- mapM (\root -> maybe (Left "cached SOURCE reachability is absent")
+    (Right . Set.insert root) (Map.lookup root (mgTransDeps graph))) roots
+  let required = Set.unions closures
+      selected = [node | node <- nodes, mkNodeKey node `Set.member` required]
+      homeDependencies = [dependency | node <- selected, dependency <- nodeDependencies False node
+        , NodeKey_Module _ <- [dependency]]
+  unless (all (`Set.member` required) homeDependencies)
+    (Left "cached SOURCE fresh-load closure is incomplete")
+  pure (mkModuleGraph selected)
