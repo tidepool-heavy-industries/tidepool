@@ -45,6 +45,7 @@ impl ModelFreeSession {
         conversation: Option<exomonad_actor::ConversationReader>,
     ) -> Result<Self> {
         let session_root = Arc::new(tempfile::tempdir()?);
+        let host_incarnation = Arc::new(HostIncarnationLease::claim(session_root.path())?);
         let (worktrees, bindings) = actor_worktree_resources_at(
             &config.run_root.join("check-worktrees"),
             &config.workspace,
@@ -66,7 +67,7 @@ impl ModelFreeSession {
             worktrees.clone(),
             authority.clone(),
             source_layers.as_ref(),
-            exomonad_actor::Incarnation::FIRST,
+            host_incarnation,
             super::JournalOpenMode::Create,
         )?;
         let (descriptor, machine, outcome) = root.into_parts();
@@ -104,6 +105,20 @@ impl ModelFreeSession {
         }
         let forest = Arc::new(forest);
         let (actor, hosted) = forest.admit_root(descriptor, outcome).await?;
+        match forest
+            .bind_durable_root_public_owner(actor.identity())
+            .await
+        {
+            Ok(tidepool_runtime::session::PublicManifestCommit::Durable) => {}
+            outcome => {
+                return Err(failed_root_start_cleanup(
+                    forest,
+                    hosted,
+                    format!("model-free root declaration ownership is unavailable: {outcome:?}"),
+                )
+                .await);
+            }
+        }
         authority.install_grant(actor.identity().into(), ActorWorktreeGrant::Repository);
         if let Some(layers) = &source_layers {
             layers.bind_run(actor.identity().into());

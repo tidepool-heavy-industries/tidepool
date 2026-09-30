@@ -73,6 +73,7 @@ pub(crate) mod recipe_checks;
 mod research_policy_tests;
 #[cfg(all(test, feature = "codex-compat"))]
 mod resource_tests;
+mod root_declaration_recovery;
 mod scoped_custody;
 #[cfg(feature = "codex-compat")]
 mod socket_directory;
@@ -2580,7 +2581,7 @@ pub(crate) async fn run(
         worktrees.clone(),
         worktree_authority.clone(),
         source_layers.as_ref(),
-        host_incarnation.incarnation(),
+        Arc::clone(&host_incarnation),
         run_journal_mode,
     )?;
     let accepted_source = active_source_identity(&run_root, config.workspace_inputs.is_some())?;
@@ -2713,6 +2714,78 @@ pub(crate) async fn run(
         }
         None => forest.admit_root(descriptor, outcome).await?,
     };
+    if let Err(error) = actor_recovery.prepare_application(
+        root_actor.identity(),
+        config.root_binding_path.clone(),
+        accepted_source.clone(),
+    ) {
+        forest.shutdown().await;
+        return Err(runtime_error(format!(
+            "root application ownership could not be journalled before declaration recovery: {error}"
+        )));
+    }
+    let declaration_recovery = async {
+        match recovered_root {
+            Some((predecessor, _)) => {
+                let placement = forest
+                    .root_recovery_placement(root_actor.identity())
+                    .map_err(|error| runtime_error(error.to_string()))?;
+                let admission = actor_recovery.certify_root_successor(
+                    predecessor,
+                    placement,
+                    accepted_source.as_deref(),
+                    &config.root_binding_path,
+                )?;
+                let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
+                    &root_declaration_recovery::root_path(),
+                    predecessor.incarnation.0,
+                )
+                .ok_or_else(|| runtime_error("durable root predecessor has no incarnation"))?;
+                let authority = root_declaration_recovery::successor_authority(
+                    Arc::clone(&host_incarnation),
+                    admission,
+                );
+                match forest
+                    .transfer_recovered_root_public_owner(root_actor.identity(), &owner, authority)
+                    .await
+                    .map_err(|error| runtime_error(error.to_string()))?
+                {
+                    tidepool_runtime::session::PublicManifestCommit::Durable => Ok(()),
+                    outcome => Err(runtime_error(format!(
+                        "root declaration successor transfer did not become durable: {outcome:?}"
+                    ))),
+                }
+            }
+            None => match forest
+                .bind_durable_root_public_owner(root_actor.identity())
+                .await
+                .map_err(|error| runtime_error(error.to_string()))?
+            {
+                tidepool_runtime::session::PublicManifestCommit::Durable => Ok(()),
+                outcome => Err(runtime_error(format!(
+                    "initial root declaration ownership did not become durable: {outcome:?}"
+                ))),
+            },
+        }
+    }
+    .await;
+    if let Err(error) = declaration_recovery {
+        let summary = format!("root declaration recovery remains unavailable: {error}");
+        let cleanup = tokio::time::timeout(
+            APPLICATION_SHUTDOWN_TIMEOUT,
+            root_actor.shutdown(ActorTerminal {
+                kind: ActorExitKind::Failed,
+                summary: summary.clone(),
+            }),
+        )
+        .await;
+        if !matches!(cleanup, Ok(Ok(_))) {
+            tracing::warn!(actor = %root_actor.identity(), ?cleanup,
+                "root declaration recovery cleanup remains unconfirmed");
+        }
+        forest.shutdown().await;
+        return Err(runtime_error(summary));
+    }
     #[cfg(feature = "codex-compat")]
     let recovered_threads = Arc::new(match &runtime_backend {
         HostRuntimeMode::Codex(_) => {
@@ -3773,7 +3846,7 @@ fn compile_root(
     worktrees: WorktreeManager,
     worktree_authority: ActorWorktreeAuthority,
     source: Option<&Arc<crate::exomonad::source::ExomonadSourceReload>>,
-    host_incarnation: exomonad_actor::Incarnation,
+    host_incarnation: Arc<HostIncarnationLease>,
     run_journal_mode: JournalOpenMode,
 ) -> Result<CompiledRoot, Box<dyn std::error::Error>> {
     let CompiledExomonadDriver {
@@ -3800,15 +3873,7 @@ fn compile_root(
     }
     let mut library = SessionLib::open(session, &session_root, module_env)?
         .with_validation_include(include.clone());
-    let recovery_report =
-        library.attach_recovery_manifest(config.run_root.join("root-declarations.json"))?;
-    tracing::info!(
-        source_session = ?recovery_report.source_session,
-        successor_session = recovery_report.successor_session,
-        replayed = recovery_report.replayed.len(),
-        lost = recovery_report.lost.len(),
-        "attached Exomonad root declaration recovery manifest"
-    );
+    root_declaration_recovery::attach(&mut library, run_root, Arc::clone(&host_incarnation))?;
     let event_registry = WorktreeRegistry::open(
         actor_worktree_storage_root(&config.workspace, run_root)?.join("registry"),
     )?;
@@ -3836,7 +3901,7 @@ fn compile_root(
     } else {
         tidepool_handlers::JournalHandler::resuming(
             tidepool_handlers::SegmentPath::open_existing(journal_path)?,
-            host_incarnation.0,
+            host_incarnation.incarnation().0,
         )?
     };
     // The composition root's `ChildSessionFactory`: builds a fresh, idle
@@ -3959,6 +4024,7 @@ fn compile_root(
             lexical_scope,
         },
     )
+    .with_actor_path(root_declaration_recovery::root_path())
     // Profiles classify resident Haskell rows, not the native Codex sandbox.
     // The root allocates worktrees and may attenuate children to ReadOnly.
     .with_profile(ActorEffectProfile::ReadWrite)
