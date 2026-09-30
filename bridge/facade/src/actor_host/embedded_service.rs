@@ -7,7 +7,7 @@ use harness::{
     engine::EngineConfig,
     model::{AgentPath, Effort},
     server::{QueuedCommand, ServerConfig, ServerControl, SessionSecret},
-    transport::{auth::CodexFileAuth, ResponsesClient},
+    transport::{ResponsesClient, auth::CodexFileAuth},
 };
 use tokio::{
     net::TcpListener,
@@ -45,6 +45,25 @@ impl harness::engine::ResponsesTransport for TestResponsesTransport {
         request: harness::transport::ResponsesRequest,
     ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
         self.0.create(request).await
+    }
+
+    async fn create_streaming(
+        &self,
+        request: harness::transport::ResponsesRequest,
+        sink: mpsc::Sender<harness::transport::sse::StreamEvent>,
+    ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
+        self.0.create_streaming(request, sink).await
+    }
+
+    async fn create_streaming_for_request(
+        &self,
+        request_id: &harness::model::RequestId,
+        request: harness::transport::ResponsesRequest,
+        sink: mpsc::Sender<harness::transport::sse::StreamEvent>,
+    ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
+        self.0
+            .create_streaming_for_request(request_id, request, sink)
+            .await
     }
 }
 

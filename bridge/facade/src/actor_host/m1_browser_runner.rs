@@ -11,6 +11,7 @@ const CONTINUE_INPUT: &str = "Continue after the interrupted cell.";
 struct Barrier {
     id: String,
     phase: &'static str,
+    request_id: Option<harness::model::RequestId>,
     request: ResponsesRequest,
     release: oneshot::Sender<()>,
 }
@@ -40,9 +41,12 @@ fn real_cell_returned_42(item: &harness::item::Item) -> bool {
     cell_output_matches(item, "browser-real-cell", "42")
 }
 
-#[async_trait]
-impl ResponsesTransport for BrowserTransport {
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+impl BrowserTransport {
+    async fn create_for_request(
+        &self,
+        request: ResponsesRequest,
+        request_id: Option<&harness::model::RequestId>,
+    ) -> Result<ResponsesTurn, TransportError> {
         for item in request.input.iter().filter(|item| {
             item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == "browser-real-cell"
         }) {
@@ -119,6 +123,7 @@ impl ResponsesTransport for BrowserTransport {
             .send(Barrier {
                 id: id.clone(),
                 phase,
+                request_id: request_id.cloned(),
                 request,
                 release,
             })
@@ -133,6 +138,28 @@ impl ResponsesTransport for BrowserTransport {
             items: vec![item],
             usage: Usage::default(),
         })
+    }
+}
+
+#[async_trait]
+impl ResponsesTransport for BrowserTransport {
+    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        self.create_for_request(request, None).await
+    }
+
+    async fn create_streaming_for_request(
+        &self,
+        request_id: &harness::model::RequestId,
+        request: ResponsesRequest,
+        sink: mpsc::Sender<harness::transport::sse::StreamEvent>,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let turn = self.create_for_request(request, Some(request_id)).await?;
+        for item in &turn.items {
+            let _ = sink
+                .send(harness::transport::sse::StreamEvent::ItemDone(item.clone()))
+                .await;
+        }
+        Ok(turn)
     }
 }
 
@@ -321,7 +348,7 @@ async fn drive_browser(
                     cancel_wait |= barrier.phase == "cancel_wait";
                     continued |= barrier.phase == "continued";
                     process.send_frame(&json!({"type":"provider_barrier", "id":barrier.id,
-                        "phase":barrier.phase, "request_summary":{"input":barrier.request.input}})).await?;
+                        "phase":barrier.phase, "request_id":barrier.request_id, "request_summary":{"input":barrier.request.input}})).await?;
                     waiting = Some(barrier);
                 }
                 frame = process.next_frame() => {

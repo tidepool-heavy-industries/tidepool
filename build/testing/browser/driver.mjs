@@ -100,7 +100,7 @@ async function releaseBarrier(spec, defaultExpectedInput) {
     if (barrier.phase === finalPhase) {
       assertRequestIncludes(barrier.request_summary, spec.expected_request_text ?? defaultExpectedInput, finalPhase);
       send({ type: 'provider_release', id: barrier.id });
-      return;
+      return barrier.request_id;
     }
     if (!intermediate.includes(barrier.phase)) {
       throw new Error(`unexpected provider barrier ${String(barrier.phase)}; expected ${finalPhase}`);
@@ -157,7 +157,6 @@ async function runJourney(ready) {
     const hostOperations = [];
     const hostOperationWaiters = [];
     const requestWaiters = [];
-    const requestOrder = new Map();
     const commandReceipts = [];
     const receiptWaiters = new Map();
     let latestSnapshot;
@@ -165,27 +164,25 @@ async function runJourney(ready) {
     let droppedFirstAck = 0;
     let droppedFirstReceipt = 0;
     let filteredSnapshotReceipt = 0;
-    let nextRequestOrder = 0;
     const requestsForConversation = (conversationId) => (latestSnapshot?.requests ?? [])
       .filter((request) => request.conversationId === conversationId);
-    const newestCompletedRequest = (conversationId, baselineIds) => requestsForConversation(conversationId)
-      .filter((request) => request.state === 'completed' && !baselineIds.has(request.id))
-      .sort((left, right) => (requestOrder.get(right.id) ?? 0) - (requestOrder.get(left.id) ?? 0))[0];
+    const completedRequest = (conversationId, requestId) => requestsForConversation(conversationId)
+      .find((request) => request.state === 'completed' && request.id === requestId);
     const notifyRequestWaiters = () => {
       for (let index = requestWaiters.length - 1; index >= 0; index -= 1) {
         const waiter = requestWaiters[index];
-        const request = newestCompletedRequest(waiter.conversationId, waiter.baselineIds);
+        const request = completedRequest(waiter.conversationId, waiter.requestId);
         if (!request) continue;
         requestWaiters.splice(index, 1);
         clearTimeout(waiter.timer);
         waiter.resolve(request);
       }
     };
-    const waitForCompletedRequest = (conversationId, baselineIds, timeoutMs = 120_000) => {
-      const existing = newestCompletedRequest(conversationId, baselineIds);
+    const waitForCompletedRequest = (conversationId, requestId, timeoutMs = 120_000) => {
+      const existing = completedRequest(conversationId, requestId);
       if (existing) return Promise.resolve(existing);
       return new Promise((resolve, reject) => {
-        const waiter = { conversationId, baselineIds, resolve, reject, timer: undefined };
+        const waiter = { conversationId, requestId, resolve, reject, timer: undefined };
         waiter.timer = setTimeout(() => {
           const index = requestWaiters.indexOf(waiter);
           if (index >= 0) requestWaiters.splice(index, 1);
@@ -225,9 +222,6 @@ async function runJourney(ready) {
         }
         if (frame?.type === 'snapshot') {
           latestSnapshot = frame.snapshot;
-          for (const request of latestSnapshot.requests ?? []) {
-            if (!requestOrder.has(request.id)) requestOrder.set(request.id, ++nextRequestOrder);
-          }
           notifyRequestWaiters();
         }
         if (frame?.type === 'event') {
@@ -260,7 +254,6 @@ async function runJourney(ready) {
               ...latestSnapshot,
               requests: index < 0 ? [...requests, request] : requests.map((candidate, candidateIndex) => candidateIndex === index ? request : candidate),
             };
-            requestOrder.set(request.id, ++nextRequestOrder);
             notifyRequestWaiters();
           }
           if (event?.kind === 'entity.remove' && event.value?.entity === 'actor' && latestSnapshot) {
@@ -312,8 +305,9 @@ async function runJourney(ready) {
         receiptWaiters.set(operationId, waiter);
       });
     };
-    const inspectLatestRequestHistory = async (expectedText, conversationId, baselineIds) => {
-      const request = await waitForCompletedRequest(conversationId, baselineIds);
+    const inspectRequestHistory = async (expectedText, conversationId, requestId) => {
+      requireString(requestId, 'provider barrier request_id');
+      const request = await waitForCompletedRequest(conversationId, requestId);
       await page.getByRole('button', { name: 'Timeline', exact: true }).click();
       const row = page.getByRole('row').filter({ hasText: request.id });
       await row.waitFor({ timeout: 30_000 });
@@ -349,14 +343,13 @@ async function runJourney(ready) {
         if (step.action === 'input') {
           const text = requireString(step.text, 'scenario input text');
           let historyConversationId;
-          let historyBaselineIds;
+          let historyRequestId;
           if (typeof step.wait_for_text === 'string') {
             const actorProjection = hostActor(latestSnapshot, actor);
             historyConversationId = actorProjection?.modelConversation;
             if (typeof historyConversationId !== 'string' || historyConversationId.length === 0) {
               throw new Error('actor projection has no model conversation for retained history');
             }
-            historyBaselineIds = new Set(requestsForConversation(historyConversationId).map((request) => request.id));
           }
           const sentBeforeInput = hostOperations.length;
           await sendHostInput(page, text);
@@ -373,14 +366,14 @@ async function runJourney(ready) {
           const barriers = step.provider_barriers ?? [{ phase: step.barrier, expected_request_text: text }];
           if (!Array.isArray(barriers) || barriers.length === 0) throw new Error('input step must declare provider barriers');
           for (const barrier of barriers) {
-            await releaseBarrier(barrier, text);
+            historyRequestId = await releaseBarrier(barrier, text);
           }
           if (step.wait_for_receipt !== false) {
             await page.getByRole('list', { name: 'Command handoff receipts' }).waitFor({ timeout: 30_000 });
             await page.getByText('Admitted for processing').last().waitFor({ timeout: 30_000 });
           }
           if (typeof step.wait_for_text === 'string') {
-            await inspectLatestRequestHistory(step.wait_for_text, historyConversationId, historyBaselineIds);
+            await inspectRequestHistory(step.wait_for_text, historyConversationId, historyRequestId);
           }
         } else if (step.action === 'wait_actor_state') {
           if (!['running', 'waiting', 'retiring', 'retired', 'lost'].includes(step.state)) {
