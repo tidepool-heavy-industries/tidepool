@@ -200,6 +200,8 @@ enum DeclarationSlot {
     CertifiedAuthored {
         turn: DeclTurn,
         evidence: Arc<tidepool_toolchain::declaration_join::CertifiedAuthoredDeclaration>,
+        context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+        surface: AdmittedDeclarationSurface,
     },
     Joined(JoinedDeclaration),
 }
@@ -299,6 +301,8 @@ impl DeclLog {
         generation: Generation,
         turn: DeclTurn,
         evidence: tidepool_toolchain::declaration_join::CertifiedAuthoredDeclaration,
+        context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+        surface: AdmittedDeclarationSurface,
     ) -> bool {
         if evidence.product().owner().module != SessionModule::lib(generation).module_name()
             || !self.commit_reserved_authored(generation, turn.clone())
@@ -310,6 +314,8 @@ impl DeclLog {
             DeclarationSlot::CertifiedAuthored {
                 turn,
                 evidence: Arc::new(evidence),
+                context,
+                surface,
             },
         );
         true
@@ -341,6 +347,18 @@ impl DeclLog {
     ) -> Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>> {
         match self.turns.get(&generation)? {
             DeclarationSlot::Joined(joined) => Some(joined.context.clone()),
+            DeclarationSlot::CertifiedAuthored { context, .. } => Some(context.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn admitted_surface_at(
+        &self,
+        generation: Generation,
+    ) -> Option<&AdmittedDeclarationSurface> {
+        match self.turns.get(&generation)? {
+            DeclarationSlot::Joined(joined) => Some(&joined.surface),
+            DeclarationSlot::CertifiedAuthored { surface, .. } => Some(surface),
             _ => None,
         }
     }

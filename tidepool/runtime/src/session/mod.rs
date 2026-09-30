@@ -16,6 +16,7 @@
 //! persistent stores are handled elsewhere; this module is a standalone, usable
 //! declaration REPL on its own.
 
+mod admission;
 mod binding_table;
 mod dialect;
 pub mod facade;
@@ -51,6 +52,8 @@ pub use persistent::{
     ScopeRetirement, ValuePlaneCommit,
 };
 
+pub use admission::{PrivateExecutionAdmission, RuntimeCellAdmission};
+pub use paired_publication::FinalExecutionIntent;
 pub use paired_publication::{
     AcceptedDeclarationPublication, CertifiedDeclarationPublication, DeclarationPublicationBase,
     DeclarationPublicationRejection, RejectedDeclarationPublication,
@@ -517,9 +520,6 @@ fn authored_identity(
 ) -> Option<recovery::RecoverySymbolIdentity> {
     use tidepool_toolchain::declaration_join::ExportNamespace;
 
-    if identity.record_parent.is_some() {
-        return None;
-    }
     let namespace = match identity.namespace {
         ExportNamespace::Value => "value",
         ExportNamespace::Type => "type",
@@ -531,7 +531,15 @@ fn authored_identity(
         module: identity.module.clone(),
         namespace: namespace.into(),
         occurrence: identity.occurrence.clone(),
-        record_parent: None,
+        record_parent: identity.record_parent.as_ref().map(|parent| {
+            Box::new(recovery::RecoverySymbolIdentity {
+                unit: identity.unit.clone(),
+                module: identity.module.clone(),
+                namespace: "type".into(),
+                occurrence: parent.clone(),
+                record_parent: None,
+            })
+        }),
     })
 }
 
@@ -1806,8 +1814,18 @@ impl SessionLib {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        let authored_context = staged
+            .certified_authored
+            .as_ref()
+            .map(|certificate| {
+                paired_publication::authored_context(self, staged.base_tip, certificate)
+            })
+            .transpose()?;
         let staged_graph = if staged.reserved {
-            Some(self.stage_private_authored_graph(&staged)?)
+            let (context, _) = authored_context
+                .as_ref()
+                .ok_or(SessionError::StaleStagedDeclaration)?;
+            Some(self.stage_private_authored_graph(&staged, context)?)
         } else {
             None
         };
@@ -1855,6 +1873,12 @@ impl SessionLib {
                 staged
                     .certified_authored
                     .expect("authored evidence preflight"),
+                authored_context
+                    .as_ref()
+                    .expect("authored context preflight")
+                    .0
+                    .clone(),
+                authored_context.expect("authored context preflight").1,
             ));
             self.tips.insert(staged.scope, staged.generation);
             staged.generation
@@ -1901,6 +1925,7 @@ impl SessionLib {
     fn stage_private_authored_graph(
         &self,
         staged: &StagedDeclaration,
+        context: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
     ) -> Result<recovery::StagedRecoveryManifest, SessionError> {
         let state = self
             .durable_graph
@@ -1917,16 +1942,12 @@ impl SessionLib {
             .certified_authored
             .as_ref()
             .ok_or_else(|| invalid("reserved declaration has no certified authored product"))?;
-        if staged.turn.parent.is_some()
-            || !staged.turn.retracts.is_empty()
-            || !staged.import_modules.is_empty()
-            || !staged.inject_modules.is_empty()
-            || !staged.visible_values.is_empty()
-            || !certified.instances().classes.is_empty()
-            || !certified.instances().families.is_empty()
-            || !certified.family_closure().is_empty()
+        if staged.turn.parent != (staged.base_tip.0 > 0).then_some(staged.base_tip)
+            || staged.base_tip.0 > 0 && staged.exact_context.is_none()
         {
-            return Err(invalid("authored recovery evidence has unsupported ancestry, live, or instance dependencies"));
+            return Err(invalid(
+                "authored ancestry lacks its admitted exact context",
+            ));
         }
         if certified.product().source_sha256() != Some(certified.source_sha256())
             || certified.product().owner().module != staged.module.module_name()
@@ -1991,18 +2012,55 @@ impl SessionLib {
             .iter()
             .map(recovery::RecoveryArtifactClosure::key)
             .collect();
+        let mut live_dependencies = staged
+            .turn
+            .parent
+            .and_then(|parent| graph.nodes.iter().find(|node| node.id == parent))
+            .map(|node| node.live_dependencies.clone())
+            .unwrap_or_default();
+        live_dependencies.extend(staged.visible_values.iter().map(|(id, _)| {
+            recovery::RecoveryLiveDependency::Binding {
+                binding: recovery::RecoveryBindingId {
+                    session: self.id.0,
+                    variable: id.raw(),
+                },
+                name: id.raw().to_string(),
+            }
+        }));
         graph.nodes.push(recovery::RecoveryNode {
             id: staged.generation,
             parent: staged.turn.parent,
             kind: recovery::RecoveryNodeKind::Authored,
             implementation_refs: Vec::new(),
             artifact_refs,
+            lexical_roots: vec![tidepool_toolchain::declaration_join::ExactModuleIdentity {
+                unit: certified.product().owner().unit.clone(),
+                module: staged.module.module_name(),
+            }],
+            lexical: context.lexical_graph().to_vec(),
             exports,
-            retracts: Vec::new(),
+            retracts: paired_publication::exact_retractions(
+                self,
+                staged.base_tip,
+                &staged.turn.retracts,
+            )?
+            .iter()
+            .map(authored_identity)
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| invalid("unsupported exact retraction identity"))?,
             workbench_imports: staged.turn.workbench_imports.specs().to_vec(),
-            instances: recovery::RecoveryInstanceInventory::default(),
-            live_dependencies: Vec::new(),
-            state: recovery::RecoveryNodeState::ExactArtifactClosure,
+            instances: paired_publication::recovery_instances(
+                certified.instances(),
+                certified.family_closure(),
+            ),
+            state: if live_dependencies.is_empty() {
+                recovery::RecoveryNodeState::ExactArtifactClosure
+            } else {
+                recovery::RecoveryNodeState::LiveValueDependency {
+                    reason: "authored declaration retains exact live bindings".into(),
+                }
+            },
+            live_dependencies,
         });
         for artifact in artifacts {
             if !graph
@@ -2119,11 +2177,28 @@ impl SessionLib {
             return Ok(());
         }
         if let Some(state) = &self.durable_graph {
-            return Err(SessionError::RecoveryManifest {
-                path: state.path.clone(),
-                detail: "attached recovery requires exact retraction evidence before admission"
-                    .into(),
-            });
+            let _ = state;
+            paired_publication::exact_retractions(self, tip, &retracts)?;
+            let receipt = DeclarationReceipt {
+                source: DeclarationSource::default(),
+                binders: Vec::new(),
+                items: Vec::new(),
+            };
+            let mut candidate = self.render_admitted_candidate_in(
+                scope,
+                &SourceImports::new(),
+                &receipt,
+                &[],
+                &[],
+            )?;
+            candidate.turn.retracts = retracts;
+            let mut log = self.log.clone();
+            assert!(log.commit_reserved_authored(candidate.generation, candidate.turn.clone()));
+            candidate.rendered = render::render_module(&log, candidate.generation, &self.env);
+            let scratch = tempfile::tempdir()?;
+            let staged = validate_declaration_candidate(candidate, scratch.path())?;
+            self.adopt_staged_batch_with_receipt_and_vals_in(staged, &[])?;
+            return Ok(());
         }
         let tip_before = self.tips.get(&scope).copied();
         let gen = self.push_turn_in(

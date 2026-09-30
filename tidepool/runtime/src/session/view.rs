@@ -165,6 +165,28 @@ pub struct SessionCompileView {
 }
 
 impl SessionCompileView {
+    /// Canonical runtime view identity; rendered diagnostic observations never
+    /// participate in compiler admission authority.
+    pub(super) fn admission_digest(&self) -> [u8; 32] {
+        let items = |items: &[super::ExportItem]| {
+            items.iter().map(|item| {
+            serde_json::json!({"kind": match item { super::ExportItem::Value { .. } => "value", super::ExportItem::Type { .. } => "type", super::ExportItem::Class { .. } => "class" },
+                "head": item.head_name(), "names": item.all_names().collect::<Vec<_>>()})
+        }).collect::<Vec<_>>()
+        };
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "version": "runtime-compile-view-v1", "session": self.session.0,
+            "scope": self.lexical_scope.0, "imports": self.persistent_imports.specs(),
+            "library": self.library.map(|module| module.module_name()),
+            "visible": self.visible_value_names.iter().map(|(module, names)| (module.module_name(), names)).collect::<Vec<_>>(),
+            "reachable": self.reachable_values.iter().map(SessionModule::module_name).collect::<Vec<_>>(),
+            "shadowing": items(&self.shadowing),
+            "hiding": self.staged_hiding.iter().map(|(module, hidden)| (module.module_name(), items(hidden))).collect::<Vec<_>>(),
+            "exact": self.exact_context.as_ref().map(|context| context.semantic_sha256()),
+        })).expect("runtime view contains serializable identities");
+        *blake3::hash(&bytes).as_bytes()
+    }
+
     pub(super) fn canonicalize(mut self) -> Self {
         sort_modules(&mut self.visible_values);
         self.visible_value_names
