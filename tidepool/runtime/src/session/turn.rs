@@ -5221,6 +5221,46 @@ mod tests {
                 "private value overlays must preserve the exact original declaration context"
             );
         }
+        let intent = resident.freeze_private_execution(&execution).unwrap();
+        let crate::session::ExecutionPublication::Declarations(base) = resident
+            .restage_ephemeral_execution_publication(intent)
+            .unwrap()
+        else {
+            panic!("original declaration and value winners require paired publication")
+        };
+        let crate::session::CertifiedDeclarationPublication::Accepted(accepted) =
+            base.certify().unwrap()
+        else {
+            panic!("the original declaration and certified private Value overlay must join")
+        };
+        assert_eq!(
+            resident
+                .publish_staged_public_manifest(
+                    accepted.stage().unwrap(),
+                    &crate::session::PublicationDecision::new()
+                )
+                .unwrap(),
+            crate::session::PublicManifestCommit::Ephemeral
+        );
+        let public_bindings = resident.public_visibility_snapshot_in(public).unwrap();
+        assert!(public_bindings
+            .bindings
+            .iter()
+            .any(|(name, _)| name == "historical"));
+        assert!(public_bindings
+            .bindings
+            .iter()
+            .any(|(name, _)| name == "local"));
+        let public_context = resident.compile_view_in(public).unwrap();
+        assert!(
+            public_context
+                .exact_declaration_context()
+                .unwrap()
+                .interface_owners()
+                .iter()
+                .any(|owner| owner.module == module),
+            "publication discarded the original Lib identity"
+        );
     }
 
     #[test]
