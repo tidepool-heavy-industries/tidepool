@@ -40,6 +40,7 @@ library tidepool-extract-internal
     Tidepool.ExactHydration
     Tidepool.ExactScope
     Tidepool.HostBindingAuthority
+    Tidepool.HomeProducts
     Tidepool.Identity
     Tidepool.Introspection
     Tidepool.Metadata
