@@ -162,6 +162,8 @@ pub(crate) enum WatchesReq {
     ListRoutesWith,
     #[haskell(module = "Tidepool.Agent.Watch.Internal")]
     ObserveWatchWith(i64),
+    #[haskell(module = "Tidepool.Agent.Watch.Internal")]
+    AwaitWatchWith(i64),
     ForgetWatchWith(i64),
     ObserveWatchProgressWith(i64, i64, i64),
     ObserveCommandWith(String),

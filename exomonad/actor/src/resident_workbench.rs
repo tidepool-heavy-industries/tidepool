@@ -1601,6 +1601,7 @@ pub(crate) enum ResidentActorBoundary {
     RoutePoll(WatchPoll),
     RouteList(ResidentHole),
     WatchPoll(WatchPoll),
+    WatchAwait(WatchPoll),
     WatchForget(WatchForget),
 }
 
@@ -1739,6 +1740,7 @@ impl ResidentActorBoundary {
             Self::RoutePoll(_) => "pollRoute",
             Self::RouteList(_) => "listRoutes",
             Self::WatchPoll(_) => "pollWatch",
+            Self::WatchAwait(_) => "awaitWatch",
             Self::WatchForget(_) => "forgetWatch",
         }
     }
@@ -2107,6 +2109,7 @@ impl ResidentRequest {
             Self::Watches(WatchesReq::ObserveRouteWith(..)) => "pollRoute",
             Self::Watches(WatchesReq::ListRoutesWith) => "listRoutes",
             Self::Watches(WatchesReq::ObserveWatchWith(..)) => "pollWatch",
+            Self::Watches(WatchesReq::AwaitWatchWith(..)) => "awaitWatch",
             Self::Watches(WatchesReq::ObserveWatchProgressWith(..)) => "pollWatch progress",
             Self::Watches(WatchesReq::ObserveCommandWith(..)) => "pollWatch command",
             Self::Watches(WatchesReq::ForgetWatchWith(..)) => "forgetWatch",
@@ -7272,6 +7275,12 @@ where
                     }
                     ResidentRequest::Watches(WatchesReq::ObserveWatchWith(watch_id)) => {
                         Ok(ResidentActorBoundary::WatchPoll(WatchPoll {
+                            continuation: hole,
+                            watch: crate::request_effect::watch_id(watch_id)?,
+                        }))
+                    }
+                    ResidentRequest::Watches(WatchesReq::AwaitWatchWith(watch_id)) => {
+                        Ok(ResidentActorBoundary::WatchAwait(WatchPoll {
                             continuation: hole,
                             watch: crate::request_effect::watch_id(watch_id)?,
                         }))

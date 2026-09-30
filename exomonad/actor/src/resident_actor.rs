@@ -4841,6 +4841,72 @@ where
                     .resume_watch_observation(context.clone(), poll.continuation, observation)
                     .await
             }),
+            ResidentActorBoundary::WatchAwait(poll) => Box::pin(async move {
+                let control = self
+                    .active_workbench_execution
+                    .as_ref()
+                    .and_then(|execution| execution.control.clone())
+                    .unwrap_or_else(crate::resident_tools::WorkbenchExecutionControl::untracked);
+                control.arm_sleep();
+                let waiting = self
+                    .environment
+                    .requests
+                    .await_watch(context.actor, poll.watch);
+                tokio::pin!(waiting);
+                tokio::select! {
+                    observation = &mut waiting => {
+                        if control.claim_expiry() {
+                            let observation = observation.map(|observation| {
+                                watch_pending_observation(&self.environment, poll.watch, observation)
+                            });
+                            let outcome = self.environment.runner
+                                .resume_watch_observation(context.clone(), poll.continuation, observation)
+                                .await;
+                            control.finish_sleep();
+                            outcome
+                        } else {
+                            let (outcome, consumed) = self.environment.runner
+                                .abort_live(
+                                    context.clone(),
+                                    poll.continuation,
+                                    "awaitWatch interrupted by delivered input".into(),
+                                )
+                                .await;
+                            if consumed {
+                                control.acknowledge_cancellation();
+                            }
+                            outcome
+                        }
+                    }
+                    () = control.wait_for_cancellation() => {
+                        let (outcome, consumed) = self.environment.runner
+                            .abort_live(
+                                context.clone(),
+                                poll.continuation,
+                                "awaitWatch interrupted by delivered input".into(),
+                            )
+                            .await;
+                        if consumed {
+                            control.acknowledge_cancellation();
+                        }
+                        outcome
+                    }
+                    terminal = kernel.wait_requested_shutdown() => {
+                        control.request_cancellation();
+                        let (outcome, consumed) = self.environment.runner
+                            .abort_live(
+                                context.clone(),
+                                poll.continuation,
+                                format!("awaitWatch interrupted by actor retirement: {}", terminal.summary),
+                            )
+                            .await;
+                        if consumed {
+                            control.acknowledge_cancellation();
+                        }
+                        outcome
+                    }
+                }
+            }),
             ResidentActorBoundary::WatchProgressPoll {
                 continuation,
                 watch,

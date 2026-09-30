@@ -33,6 +33,7 @@ module Tidepool.Agent.Watch.Internal
   , listRoutes
   , forgetRoute
   , pollWatch
+  , awaitWatch
   , ForgetWatchOutcome (..)
   , forgetWatch
   ) where
@@ -155,6 +156,7 @@ data Watches a where
   ListRoutesWith :: Watches [Int]
   ObserveWatchProgressWith :: Int -> Int -> Int -> Watches (ProgressState progress)
   ObserveWatchWith :: Int -> Watches RawWatchObservation
+  AwaitWatchWith :: Int -> Watches RawWatchObservation
   -- | The completion report of a finished command job, once its settlement
   -- is made.
   ObserveCommandWith :: Text -> Watches (Maybe CommandReport)
@@ -241,6 +243,31 @@ pollWatch
   -> Eff effs (WatchState result)
 pollWatch (Watch (WatchId watchId) (Await _ observe)) = do
   observation <- send (ObserveWatchWith watchId)
+  captureWatchObservation watchId observe observation
+
+-- | Suspend this actor's turn until its registered watch becomes terminal,
+-- then capture the same typed response values 'pollWatch' would observe.
+awaitWatch
+  :: Member Watches effs
+  => Watch result
+  -> Eff effs (Either WatchFailure result)
+awaitWatch (Watch (WatchId watchId) (Await _ observe)) = loop
+  where
+    loop = do
+      observation <- send (AwaitWatchWith watchId)
+      captured <- captureWatchObservation watchId observe observation
+      case captured of
+        WatchPending _ -> loop
+        WatchReady result -> pure (Right result)
+        WatchUnavailable failure -> pure (Left failure)
+
+captureWatchObservation
+  :: Member Watches effs
+  => Int
+  -> (Int -> [(RequestId, ResponseFailure)] -> Eff effs (Maybe result))
+  -> RawWatchObservation
+  -> Eff effs (WatchState result)
+captureWatchObservation watchId observe observation =
   case observation of
     RawWatchPending progress -> pure (WatchPending progress)
     RawWatchReady rawFailures -> do
