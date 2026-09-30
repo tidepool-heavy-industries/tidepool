@@ -21,6 +21,10 @@ mod custody_tests;
 mod documentation_tests;
 #[cfg(test)]
 mod embedded_command_tests;
+#[cfg(test)]
+mod embedded_checkpoint_children_survive_later_failure_tests;
+#[cfg(test)]
+mod embedded_checkpoint_children_tests;
 mod embedded_harness;
 #[cfg(test)]
 mod embedded_pending_compaction_tests;
@@ -4102,6 +4106,16 @@ async fn run_interactive_applications(
     let mut embedded_live = BTreeSet::new();
     let mut embedded_conversations: HashMap<ActorRef, Arc<harness::embedding::Conversation>> =
         HashMap::new();
+    let mut embedded_pending_activations: HashMap<
+        ActorRef,
+        Vec<exomonad_actor::ResidentActivation>,
+    > = HashMap::new();
+    let (embedded_ready_tx, mut embedded_ready_rx) = mpsc::unbounded_channel::<(
+        ActorRef,
+        LocalActorRef,
+        Arc<harness::embedding::Conversation>,
+        oneshot::Sender<()>,
+    )>();
     let (embedded_lifecycle_tx, mut embedded_lifecycle_rx) =
         embedded_projection::LifecycleSender::channel();
     let mut embedded_projection = embedded_projection::EmbeddedProjection::default();
@@ -4337,6 +4351,7 @@ async fn run_interactive_applications(
                     Err(error) => break Some(format!("embedded Engine task failed: {error}")),
                 };
                 embedded_live.remove(&actor);
+                embedded_pending_activations.remove(&actor);
                 let lifecycle = match local_actor.terminal().get().map(|terminal| terminal.kind) {
                     Some(ActorExitKind::Completed | ActorExitKind::Cancelled) => {
                         harness::server::HostActorLifecycle::Retired
@@ -4379,6 +4394,39 @@ async fn run_interactive_applications(
                         }
                     }
                 }
+            }
+            Some((actor, local_actor, conversation, ready_ack)) = embedded_ready_rx.recv() => {
+                let Some(activations) = embedded_pending_activations.remove(&actor) else {
+                    continue;
+                };
+                if !embedded_live.contains(&actor) || !embedded_cancellations.contains_key(&actor) {
+                    continue;
+                }
+                let Ok(_admission) = local_actor.admit_transaction() else {
+                    continue;
+                };
+                embedded_conversations.insert(actor, Arc::clone(&conversation));
+                let mut activation_error = None;
+                for activation in activations {
+                    let sequence = activation.id.sequence();
+                    if let Err(error) = conversation
+                        .input(
+                            &format!("session:{}:{sequence}", activation.request.0),
+                            "resident",
+                            &activation.message,
+                        )
+                        .await
+                    {
+                        activation_error = Some(format!("embedded activation for {actor:?} was not admitted: {error}"));
+                        break;
+                    }
+                }
+                if let Some(error) = activation_error {
+                    embedded_conversations.remove(&actor);
+                    tracing::warn!(?actor, %error, "embedded child attachment refused an activation");
+                    continue;
+                }
+                ready_ack.send(()).ok();
             }
             event = lifecycle.recv() => {
                 let Some(event) = event else { break None };
@@ -4447,26 +4495,132 @@ async fn run_interactive_applications(
                                 Some(format!("{effort:?}")),
                             );
                             let local_actor = installation.actor.clone();
-                            if let Some(error) = embedded_root_attachment_error(
-                                actor,
-                                is_root,
-                                installation.checkpoint.is_some(),
-                                installation.context_parent,
-                            ) {
-                                break Some(error);
+                            if is_root {
+                                if let Some(error) = embedded_root_attachment_error(
+                                    actor,
+                                    true,
+                                    installation.checkpoint.is_some(),
+                                    installation.context_parent,
+                                ) {
+                                    break Some(error);
+                                }
+                            } else if installation.checkpoint.is_none() {
+                                break Some(format!(
+                                    "embedded child actor {actor:?} requires a hosted checkpoint"
+                                ));
                             }
-                            let path = harness::model::AgentPath("/root".into());
                             let initial_input = installation.initial_user_message.clone();
                             let has_initial_input = initial_input.is_some();
-                            let embedded = match embedded_service::attach_actor(
+                            if !is_root {
+                                let queue_admission = match local_actor.admit_transaction() {
+                                    Ok(admission) => admission,
+                                    Err(error) => {
+                                        tracing::warn!(?actor, %error, "embedded child queue admission refused");
+                                        continue;
+                                    }
+                                };
+                                let checkpoint = installation.checkpoint.as_ref().expect("checked checkpoint").clone();
+                                let fork_gate = installation.fork_gate.clone();
+                                let committed_gate = fork_gate.clone();
+                                let runtime = Arc::clone(&service.runtime);
+                                let run_root = launch_context.run_root.clone();
+                                let ready = embedded_ready_tx.clone();
+                                let embedded_lifecycle = embedded_lifecycle_tx.clone();
+                                #[cfg(test)]
+                                let test_transport = service.test_transport();
+                                let (cancel, mut cancellation_rx) = watch::channel(false);
+                                embedded_cancellations.insert(actor, cancel.clone());
+                                embedded_pending_activations.insert(actor, Vec::new());
+                                embedded_live.insert(actor);
+                                embedded_tasks.spawn(async move {
+                                    let result = async {
+                                        if let Some(gate) = committed_gate {
+                                            tokio::select! {
+                                                committed = gate.wait_committed() => {
+                                                    committed.map_err(|error| format!("fork publication refused: {error}"))?;
+                                                }
+                                                _ = cancellation_rx.changed() => return Ok(()),
+                                            }
+                                        }
+                                        tokio::select! {
+                                            published = checkpoint.wait_published() => {
+                                                published.map_err(|refusal| format!("checkpoint publication refused: {refusal:?}"))?;
+                                            }
+                                            _ = cancellation_rx.changed() => return Ok(()),
+                                        }
+                                        if *cancellation_rx.borrow() || local_actor.terminal().get().is_some() {
+                                            return Ok(());
+                                        }
+                                        let mut embedded = embedded_service::attach_checkpoint_actor(
+                                            runtime.as_ref(),
+                                            &run_root,
+                                            *installation,
+                                            initial_input,
+                                        ).await?;
+                                        if *cancellation_rx.borrow() || local_actor.terminal().get().is_some() {
+                                            return Ok(());
+                                        }
+                                        embedded.cancellation = cancel;
+                                        embedded.cancellation_rx = cancellation_rx;
+                                        let (ready_ack, acknowledged) = oneshot::channel();
+                                        ready.send((actor, local_actor.clone(), Arc::clone(&embedded.conversation), ready_ack))
+                                            .map_err(|_| "embedded attachment owner stopped".to_owned())?;
+                                        tokio::select! {
+                                            accepted = acknowledged => {
+                                                accepted.map_err(|_| "embedded attachment was not accepted".to_owned())?;
+                                            }
+                                            _ = embedded.cancellation_rx.changed() => return Ok(()),
+                                        }
+                                        #[cfg(test)]
+                                        let result = if let Some(transport) = test_transport {
+                                            embedded_service::drive_conversation_with_transport::<
+                                                harness::transport::auth::CodexFileAuth, _
+                                            >(
+                                                embedded.driver, runtime, &settings, model, effort,
+                                                instructions, embedded.cancellation_rx,
+                                                embedded_lifecycle, actor, transport,
+                                            ).await
+                                        } else {
+                                            embedded_service::drive_conversation(
+                                                embedded.driver, runtime, &settings, model, effort,
+                                                instructions, embedded.cancellation_rx,
+                                                embedded_lifecycle, actor,
+                                            ).await
+                                        };
+                                        #[cfg(not(test))]
+                                        let result = embedded_service::drive_conversation(
+                                            embedded.driver, runtime, &settings, model, effort,
+                                            instructions, embedded.cancellation_rx,
+                                            embedded_lifecycle, actor,
+                                        ).await;
+                                        result
+                                    }.await;
+                                    (actor, local_actor, result)
+                                });
+                                // The child attachment may wait for checkpoint publication.
+                                // Its actor input queue is already owned here, so advertise
+                                // readiness before that wait: the issuing cell can be waiting
+                                // for this group to become ready before it delivers the capture.
+                                if let Some(gate) = fork_gate {
+                                    if let Err(error) = gate.mark_ready() {
+                                        if let Some(cancel) = embedded_cancellations.get(&actor) {
+                                            cancel.send_replace(true);
+                                        }
+                                        tracing::warn!(?actor, %error, "embedded child fork admission refused");
+                                    }
+                                }
+                                drop(queue_admission);
+                                continue;
+                            }
+                            let attachment = embedded_service::attach_actor(
                                 service,
                                 &launch_context.run_root,
-                                path.clone(),
+                                harness::model::AgentPath("/root".into()),
                                 None,
                                 *installation,
                                 initial_input,
-                            )
-                            .await {
+                            ).await;
+                            let embedded = match attachment {
                                 Ok(embedded) => embedded,
                                 Err(error) => break Some(format!(
                                     "embedded actor {actor:?} could not attach: {error}"
@@ -4686,7 +4840,18 @@ async fn run_interactive_applications(
                     LocalResidentDeployment::SessionReady { activation } => {
                         let actor = activation.id.actor();
                         if launch_context.config.backend.kind() == crate::exomonad::ExomonadBackend::Embedded {
+                            if let Some(pending) = embedded_pending_activations.get_mut(&actor) {
+                                pending.push(activation);
+                                continue;
+                            }
                             let Some(conversation) = embedded_conversations.get(&actor) else {
+                                if actor != root_identity {
+                                    if let Some(cancel) = embedded_cancellations.get(&actor) {
+                                        cancel.send_replace(true);
+                                    }
+                                    tracing::warn!(?actor, "embedded child activation arrived without an attached conversation");
+                                    continue;
+                                }
                                 break Some(format!("embedded actor {actor:?} received an activation before conversation attachment"));
                             };
                             let sequence = activation.id.sequence();
@@ -4696,8 +4861,15 @@ async fn run_interactive_applications(
                                     "resident",
                                     &activation.message,
                                 )
-                                .await
+                            .await
                             {
+                                if actor != root_identity {
+                                    if let Some(cancel) = embedded_cancellations.get(&actor) {
+                                        cancel.send_replace(true);
+                                    }
+                                    tracing::warn!(?actor, %error, "embedded child activation was refused");
+                                    continue;
+                                }
                                 break Some(format!("embedded activation for {actor:?} was not admitted: {error}"));
                             }
                             continue;
@@ -4732,6 +4904,7 @@ async fn run_interactive_applications(
                         if let Some(cancel) = embedded_cancellations.remove(&actor) {
                             cancel.send_replace(true);
                         }
+                        embedded_pending_activations.remove(&actor);
                         embedded_conversations.remove(&actor);
                         let lifecycle = if terminal.kind == ActorExitKind::Failed {
                             harness::server::HostActorLifecycle::Lost

@@ -27,6 +27,13 @@ impl EmbeddedPolicyInstallation {
         self.actor
     }
 
+    pub(super) fn complete(
+        &self,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> ResidentToolFuture {
+        self.policy.complete_boxed(boundary)
+    }
+
     pub(super) fn request_snapshot(&self) -> Result<EmbeddedPolicySnapshot, ResidentToolError> {
         let policy = self.policy.snapshot_for_request()?;
         let tools = project_tools(policy.tools());

@@ -550,6 +550,47 @@ impl ForkGroupRegistry {
         Ok(lease)
     }
 
+    /// Snapshot the opaque host attachment while the registry still admits
+    /// this checkpoint. A child that wins admission retains this capability
+    /// even if the issuer releases the token before the child installs tools.
+    pub(crate) fn admitted_checkpoint(
+        &self,
+        token: &str,
+        session: SessionId,
+    ) -> Result<(CheckpointLease, Option<HostedCheckpointAttachment>), CheckpointRefusal> {
+        let (namespace, _) = token
+            .split_once(':')
+            .ok_or(CheckpointRefusal::UnavailableCheckpoint)?;
+        if namespace != self.checkpoint_namespace.to_string() {
+            return Err(CheckpointRefusal::ProcessRestartUnsupported);
+        }
+        let state = self.state.lock();
+        let lease = match state.checkpoints.get(token) {
+            Some(lease) => lease,
+            None => {
+                return match state.released_checkpoints.get(token) {
+                    Some(released) if released.session == session => {
+                        Err(CheckpointRefusal::ReleasedCheckpoint)
+                    }
+                    Some(_) => Err(CheckpointRefusal::WrongSession),
+                    None => Err(CheckpointRefusal::UnavailableCheckpoint),
+                };
+            }
+        };
+        if lease.session != session {
+            return Err(CheckpointRefusal::WrongSession);
+        }
+        match *lease.phase.borrow() {
+            CheckpointPhase::Pending | CheckpointPhase::Published => {}
+            CheckpointPhase::Failed => return Err(CheckpointRefusal::CaptureFailed),
+            CheckpointPhase::Released | CheckpointPhase::ReleasedAfterPublication => {
+                return Err(CheckpointRefusal::ReleasedCheckpoint);
+            }
+        }
+        let attachment = lease.host_attachment.lock().clone();
+        Ok((lease.clone(), attachment))
+    }
+
     /// Revoke future admissions and return the captured root for retirement.
     /// A retry returns the same scope until retirement is acknowledged.
     /// Admitted children own independent detached scopes.
@@ -1662,6 +1703,41 @@ mod tests {
             groups.checkpoint(&token, SessionId(7)),
             Err(CheckpointRefusal::CaptureFailed)
         ));
+    }
+
+    #[test]
+    fn admitted_child_keeps_host_attachment_after_release_before_installation() {
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let issuer = ActorRef::first(ActorId(1));
+        let (token, drops) = checkpoint_with_attachment(
+            &groups,
+            issuer,
+            WorkbenchForkBoundary {
+                thread_id: "thread".into(),
+                call_id: "call".into(),
+            },
+            ScopeId(9),
+        );
+        let (admitted_lease, admitted_attachment) = groups
+            .admitted_checkpoint(&token, SessionId(7))
+            .expect("child can win admission while publication is pending");
+        groups
+            .settle_checkpoint(&token, SessionId(7), true)
+            .unwrap();
+        groups.release_checkpoint(&token, SessionId(7)).unwrap();
+        assert!(matches!(
+            groups.admitted_checkpoint(&token, SessionId(7)),
+            Err(CheckpointRefusal::ReleasedCheckpoint)
+        ));
+        assert!(admitted_lease.host_attachment::<AttachmentDrop>().is_some());
+        let retained = admitted_attachment
+            .expect("admitted child keeps the opaque attachment")
+            .downcast::<AttachmentDrop>()
+            .expect("installed host receives the original attachment type");
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(admitted_lease);
+        drop(retained);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 
     #[test]

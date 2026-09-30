@@ -43,9 +43,10 @@ use crate::resident_workbench::{
 use crate::{
     ActorDescriptor, ActorExitKind, ActorMachineRegistry, ActorRef, ActorSessionContext,
     ActorTerminal, ActorWorkbenchSource, ChildExitNotice, ExternalApplicationFailure,
-    ExternalFailureDisposition, KernelBehavior, KernelBehaviorError, KernelCallFailure,
-    KernelContext, KernelInvocationFailure, KernelMessage, KernelStep, LocalActorRef, MailboxValue,
-    ResidentActorRunner, ResidentActorWorkbenchError, ResidentToolEndpoint,
+    ExternalFailureDisposition, HostedCheckpointAttachment, KernelBehavior, KernelBehaviorError,
+    KernelCallFailure, KernelContext, KernelInvocationFailure, KernelMessage, KernelStep,
+    LocalActorRef, MailboxValue, ResidentActorRunner, ResidentActorWorkbenchError,
+    ResidentToolEndpoint,
 };
 
 /// A compiled root at the point where ownership moves into its local actor.
@@ -89,6 +90,9 @@ pub struct LocalResidentInstallation {
     pub creator: Option<crate::ActorRef>,
     pub fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
     pub checkpoint: Option<crate::CheckpointLease>,
+    /// Captured at child admission, before checkpoint release can revoke new
+    /// users. The installed host consumes only its own opaque attachment.
+    pub checkpoint_attachment: Option<HostedCheckpointAttachment>,
     pub supervisor_parent: Option<crate::ActorRef>,
     pub context_parent: Option<crate::ActorRef>,
     pub fork_group: Option<crate::ForkGroupId>,
@@ -991,6 +995,7 @@ pub struct ResidentKernelBehavior<H, O> {
     replacement_transfer: Option<replacement::ReplacementTransfer>,
     retained_replacements: Vec<replacement::RetainedHandler>,
     descriptor: ActorDescriptor,
+    admitted_checkpoint: Option<(crate::CheckpointLease, Option<HostedCheckpointAttachment>)>,
     environment: ResidentEnvironment<H, O>,
     boot: Option<ResidentBoot>,
     standing: ResidentStanding,
@@ -1225,6 +1230,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             replacement_transfer: None,
             retained_replacements: Vec::new(),
             descriptor,
+            admitted_checkpoint: None,
             environment,
             boot: Some(boot),
             standing: ResidentStanding::Boot,
@@ -2342,96 +2348,103 @@ where
             .map_err(ResidentCallError::Call)
     }
 
-    async fn start_child(
-        &mut self,
-        kernel: &KernelContext,
-        context: &ActorSessionContext,
+    // Child startup is polled inside the parent's workbench. Heap-own its
+    // async state so nested admission does not accumulate large stack frames.
+    fn start_child<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        context: &'a ActorSessionContext,
         start: crate::ResidentActorStart,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        let crate::ResidentActorStart { parent_hole, child } = start;
-        let fork_group = child.descriptor.fork_group();
-        // Captured before the move below: if this launch minted itself a
-        // fresh session (`child_session_eligibility`) and admission fails
-        // anywhere from here on, that session may already have been
-        // provisioned (published into the shared registry) with nothing
-        // left to own it — discard it outright rather than orphaning it.
-        // A session `try_start_child` never provisioned (ineligible, or
-        // the host fell back to the launching session) is simply not a
-        // member of `child_sessions`, so discarding it here is always safe,
-        // whether or not provisioning ever actually happened.
-        let launch_session = child.descriptor.placement().session;
-        let launch_scope = child.descriptor.placement().lexical_scope;
-        let started = self.try_start_child(kernel, context, child).await;
-        if started.is_err() && launch_session != context.placement.session {
-            self.environment
-                .runner
-                .discard_child_session(launch_session);
-        } else if started.is_err() {
-            if let Err(cleanup) = self
-                .environment
-                .runner
-                .retire_fork_scopes(context.clone(), vec![launch_scope])
-                .await
-            {
-                tracing::warn!(%cleanup, "failed launch scope cleanup was retained");
+    ) -> futures_util::future::BoxFuture<'a, Result<ResidentOutcome, ResidentActorWorkbenchError>>
+    {
+        Box::pin(async move {
+            let crate::ResidentActorStart { parent_hole, child } = start;
+            let fork_group = child.descriptor.fork_group();
+            // Captured before the move below: if this launch minted itself a
+            // fresh session (`child_session_eligibility`) and admission fails
+            // anywhere from here on, that session may already have been
+            // provisioned (published into the shared registry) with nothing
+            // left to own it — discard it outright rather than orphaning it.
+            // A session `try_start_child` never provisioned (ineligible, or
+            // the host fell back to the launching session) is simply not a
+            // member of `child_sessions`, so discarding it here is always safe,
+            // whether or not provisioning ever actually happened.
+            let launch_session = child.descriptor.placement().session;
+            let launch_scope = child.descriptor.placement().lexical_scope;
+            let started = self.try_start_child(kernel, context, child).await;
+            if started.is_err() && launch_session != context.placement.session {
+                self.environment
+                    .runner
+                    .discard_child_session(launch_session);
+            } else if started.is_err() {
+                if let Err(cleanup) = self
+                    .environment
+                    .runner
+                    .retire_fork_scopes(context.clone(), vec![launch_scope])
+                    .await
+                {
+                    tracing::warn!(%cleanup, "failed launch scope cleanup was retained");
+                }
             }
-        }
-        let (child, allocated_label, admitted_worktree) = match started {
-            Ok(started) => started,
-            Err(error) if fork_group.is_some() => {
-                if let Some(group) = fork_group {
-                    if let Ok(children) = self.environment.fork_groups.abort(group, context.actor) {
-                        for child in children {
-                            if let Some(child) = kernel.resolve(child) {
-                                // A child already gone from a failed fork-group admission is
-                                // the common case here; log anything else so an actor that
-                                // refused shutdown does not silently linger.
-                                if let Err(error) = child
-                                    .shutdown(ActorTerminal {
-                                        kind: ActorExitKind::Cancelled,
-                                        summary: "fork group admission failed".into(),
-                                    })
-                                    .await
-                                {
-                                    tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
+            let (child, allocated_label, admitted_worktree) = match started {
+                Ok(started) => started,
+                Err(error) if fork_group.is_some() => {
+                    if let Some(group) = fork_group {
+                        if let Ok(children) =
+                            self.environment.fork_groups.abort(group, context.actor)
+                        {
+                            for child in children {
+                                if let Some(child) = kernel.resolve(child) {
+                                    // A child already gone from a failed fork-group admission is
+                                    // the common case here; log anything else so an actor that
+                                    // refused shutdown does not silently linger.
+                                    if let Err(error) = child
+                                        .shutdown(ActorTerminal {
+                                            kind: ActorExitKind::Cancelled,
+                                            summary: "fork group admission failed".into(),
+                                        })
+                                        .await
+                                    {
+                                        tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
+                                    }
                                 }
                             }
                         }
                     }
+                    return self
+                        .environment
+                        .runner
+                        .resume_fork_failure(context.clone(), parent_hole, error.to_string())
+                        .await;
                 }
-                return self
-                    .environment
-                    .runner
-                    .resume_fork_failure(context.clone(), parent_hole, error.to_string())
-                    .await;
+                Err(error) => return Err(error),
+            };
+            match admitted_worktree {
+                Some(worktree) => {
+                    self.environment
+                        .runner
+                        .resume_fork_starting_parent(
+                            context.clone(),
+                            parent_hole,
+                            child.identity(),
+                            allocated_label,
+                            worktree,
+                        )
+                        .await
+                }
+                None => {
+                    self.environment
+                        .runner
+                        .resume_starting_parent(
+                            context.clone(),
+                            parent_hole,
+                            child.identity(),
+                            allocated_label,
+                        )
+                        .await
+                }
             }
-            Err(error) => return Err(error),
-        };
-        match admitted_worktree {
-            Some(worktree) => {
-                self.environment
-                    .runner
-                    .resume_fork_starting_parent(
-                        context.clone(),
-                        parent_hole,
-                        child.identity(),
-                        allocated_label,
-                        worktree,
-                    )
-                    .await
-            }
-            None => {
-                self.environment
-                    .runner
-                    .resume_starting_parent(
-                        context.clone(),
-                        parent_hole,
-                        child.identity(),
-                        allocated_label,
-                    )
-                    .await
-            }
-        }
+        })
     }
 
     fn validate_worker_context(
@@ -2453,348 +2466,361 @@ where
         Ok(())
     }
 
-    async fn try_start_child(
-        &mut self,
-        kernel: &KernelContext,
-        context: &ActorSessionContext,
+    fn try_start_child<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        context: &'a ActorSessionContext,
         child: crate::start::CapturedChildLaunch,
-    ) -> Result<
-        (
-            LocalActorRef,
-            String,
-            Option<tidepool_bridge_effects::WtWorktreeHandle>,
-        ),
-        ResidentActorWorkbenchError,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<
+            (
+                LocalActorRef,
+                String,
+                Option<tidepool_bridge_effects::WtWorktreeHandle>,
+            ),
+            ResidentActorWorkbenchError,
+        >,
     > {
-        let crate::start::CapturedChildLaunch {
-            mut descriptor,
-            entry,
-            mut launch_worktrees,
-            fork_workspace,
-            seed,
-        } = child;
-        let checkpoint_lease = descriptor
-            .checkpoint_token()
-            .map(|token| {
-                self.environment
-                    .fork_groups
-                    .checkpoint(token, context.placement.session)
-            })
-            .transpose()
-            .map_err(|refusal| {
-                ResidentActorWorkbenchError::ActorProtocol(format!(
-                    "checkpoint refusal: {refusal:?}"
-                ))
-            })?;
-        if descriptor.model().is_none() {
-            let checkpoint_model = checkpoint_lease
-                .as_ref()
-                .and_then(|lease| lease.issuer_model.clone());
-            descriptor = descriptor
-                .with_model(checkpoint_model.or_else(|| self.descriptor.model().cloned()));
-        }
-        if descriptor.fork_effort().is_none() {
-            let checkpoint_effort = checkpoint_lease
-                .as_ref()
-                .and_then(|lease| lease.issuer_effort);
-            descriptor =
-                descriptor.with_fork_effort(checkpoint_effort.or(self.descriptor.fork_effort()));
-        }
-        let fork_group = descriptor.fork_group();
-        let root_admission = self.environment.root_admission_closed.clone();
-        let _root_admission = if descriptor.supervisor_parent().is_none() {
-            let admission = root_admission.read().await;
-            if *admission {
-                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    "swarm root admission is closed".into(),
-                ));
-            }
-            Some(admission)
-        } else {
-            None
-        };
-        let lifetime = if descriptor.supervisor_parent().is_none() {
-            crate::WorkerLifetime::SwarmOwned
-        } else {
-            crate::WorkerLifetime::ParentOwned
-        };
-        let fork_context = if descriptor.context_parent().is_some() {
-            crate::ForkContext::InheritedContext
-        } else {
-            crate::ForkContext::SelectedContext
-        };
-        self.validate_worker_context(lifetime, fork_context)
-            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-        if descriptor.fork_group().is_some() {
-            if checkpoint_lease.is_none()
-                && self.policy_installed
-                && self.fork_publication.boundary().is_none_or(|boundary| {
-                    boundary.thread_id.is_empty() || boundary.call_id.is_empty()
+        Box::pin(async move {
+            let crate::start::CapturedChildLaunch {
+                mut descriptor,
+                entry,
+                mut launch_worktrees,
+                fork_workspace,
+                seed,
+            } = child;
+            let checkpoint_admission = descriptor
+                .checkpoint_token()
+                .map(|token| {
+                    self.environment
+                        .fork_groups
+                        .admitted_checkpoint(token, context.placement.session)
                 })
-            {
-                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    "context fork requires recorded invocation provenance from the hosted transport; use a Codex build that supplies contextCallId".into(),
-                ));
-            }
-            descriptor = descriptor.with_fork_boundary(
-                checkpoint_lease
-                    .as_ref()
-                    .map(|lease| lease.boundary.clone())
-                    .or_else(|| self.fork_publication.boundary().cloned()),
-            );
-            if let Some(lease) = &checkpoint_lease {
-                descriptor = descriptor.with_context_parent(lease.issuer);
-            }
-        }
-        if !self
-            .descriptor
-            .profile()
-            .permits_child(descriptor.profile())
-        {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                "actor profile {:?} cannot start child profile {:?}",
-                self.descriptor.profile(),
-                descriptor.profile()
-            )));
-        }
-        let role = if descriptor.fork_group().is_some() {
-            self.descriptor
-                .effective_role()
-                .preview_child(
-                    descriptor.effective_role().clone(),
-                    descriptor.fork_budget(),
-                )
-                .map_err(ResidentActorWorkbenchError::ActorProtocol)?
-        } else {
-            if !descriptor.effective_role().respects_role_ceiling() {
-                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    "requested effect row exceeds or duplicates the role ceiling".into(),
-                ));
-            }
-            self.descriptor
-                .effective_role()
-                .attenuate_child(descriptor.effective_role().clone())
-        };
-        let role = if let Some(lease) = &checkpoint_lease {
-            lease
-                .issuer_role
-                .preview_child(role, descriptor.fork_budget())
-                .map_err(ResidentActorWorkbenchError::ActorProtocol)?
-        } else {
-            role
-        };
-        descriptor = descriptor.with_effective_role(role);
-        if let Some(group) = fork_group {
-            let requested = crate::ActorPath::parse(descriptor.label())
-                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
-            let allocated = self
-                .environment
-                .fork_groups
-                .claim_with_checkpoint(
-                    group,
-                    context.actor,
-                    &requested,
-                    descriptor.checkpoint_token(),
-                )
-                .map_err(|error| {
-                    ResidentActorWorkbenchError::ActorProtocol(self.name_coordinator(error))
-                })?;
-            descriptor = descriptor.with_actor_path(allocated);
-        } else if descriptor.context_parent().is_some() {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "context fork did not name an admission group".into(),
-            ));
-        }
-        let prepared_workspace = if let Some(seed) = fork_workspace {
-            let admission = self.environment.fork_workspaces.clone().ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol(
-                    "context-fork workspace admission is not installed".into(),
-                )
-            })?;
-            let owner = context.actor;
-            let actor_path = descriptor.label().to_owned();
-            let admitted = admission
-                .admit(
-                    owner,
-                    actor_path,
-                    seed,
-                    crate::ForkWorkspacePolicy {
-                        native_tools: descriptor.effective_role().native_tools(),
-                        workspace: descriptor.effective_role().workspace(),
-                    },
-                )
-                .await
-                .map_err(|error| {
+                .transpose()
+                .map_err(|refusal| {
                     ResidentActorWorkbenchError::ActorProtocol(format!(
-                        "worktree admission for `{}` failed: {}",
-                        descriptor.label(),
-                        error
+                        "checkpoint refusal: {refusal:?}"
                     ))
                 })?;
-            launch_worktrees = vec![admitted.handle().handle_receipt.tree_id.raw.clone()];
-            Some(admitted)
-        } else {
-            None
-        };
-        // The child may carry declarations that import a helper published by
-        // its parent. Fix its own snapshot and include roots before a fresh
-        // machine bootstraps those declarations.
-        let source_layers = self.environment.source_layers.clone();
-        let helper_branch = if let Some(layers) = &source_layers {
-            Some(
-                layers
-                    .prepare_helpers(
-                        context.actor.into(),
-                        &launch_worktrees,
-                        prepared_workspace.is_some(),
-                    )
-                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
-            )
-        } else {
-            None
-        };
-        if let Some(layers) = &source_layers {
-            let layer = match &checkpoint_lease {
-                Some(lease) => layers
-                    .admit_checkpoint_layer(
-                        &lease.issuer_source_layer,
-                        context.actor.into(),
-                        helper_branch.as_deref().unwrap_or_default(),
-                        &launch_worktrees,
-                    )
-                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
-                None => layers
-                    .layer_include_for(
-                        helper_branch.as_deref().unwrap_or_default(),
-                        &launch_worktrees,
-                    )
-                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
-            };
-            descriptor = descriptor.with_source_layer(layer);
-        }
-        if let Some(lease) = &checkpoint_lease {
-            let scope = self
-                .environment
-                .runner
-                .remint_checkpoint_child_scope(
-                    context.clone(),
-                    lease.scope,
-                    descriptor.placement().lexical_scope,
-                )
-                .await?;
-            descriptor = descriptor.with_lexical_scope(scope);
-        }
-        // A launch whose descriptor still names the launching session (the
-        // common case: ineligible, or `InheritedContext`) needs nothing
-        // further — the entry is already resident there. An eligible
-        // `SelectedContext` launch's descriptor names a freshly minted
-        // session instead (`child_session_eligibility`/`capture_decoded`):
-        // provision that session's own dedicated machine now (build,
-        // bootstrap with the run's shared program, install the shared
-        // image registry, mint its own lexical scope), then cross the
-        // entry into it with the same transfer primitive every other
-        // resident-machine-boundary site already uses
-        // (`ResidentActorRunner::transfer_custody`, parcel 6). Failure at
-        // any step here leaves the launching session untouched and starts
-        // nothing; the caller (`start_child`) discards a provisioned but
-        // now-orphaned child session on any error this whole admission
-        // sequence returns from here on, by comparing the ORIGINAL
-        // captured launch's session against the one it actually admits on.
-        let entry = if descriptor.placement().session == context.placement.session {
-            entry
-        } else if !self.environment.runner.supports_child_sessions() {
-            // Eligible, but this host never installed a child-session
-            // factory/bootstrap program (`ResidentActorRunner::supports_child_sessions`)
-            // — fall back to the launching session, rather than failing an
-            // otherwise-ordinary fork over a capability nothing asked for.
-            // `capture_decoded` minted no real lexical scope for this
-            // (eligible) launch, only a placeholder; mint the actual one
-            // here, on the session this actor is actually falling back to.
-            let lexical_scope = self
-                .environment
-                .runner
-                .mint_lexical_scope(context.placement.session)
-                .await?;
-            descriptor = descriptor
-                .with_session(context.placement.session)
-                .with_lexical_scope(lexical_scope);
-            entry
-        } else {
-            let child_session = descriptor.placement().session;
-            let lexical_scope = self
-                .environment
-                .runner
-                .provision_child_session(
-                    child_session,
-                    descriptor.placement().resource_scope,
-                    seed.as_ref(),
-                    descriptor.source_layer(),
-                )
-                .await
-                .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-            descriptor = descriptor.with_lexical_scope(lexical_scope);
-            self.environment
-                .runner
-                .transfer_custody(
-                    entry,
-                    context.placement.session,
-                    child_session,
-                    descriptor.placement().resource_scope,
-                )
-                .await?
-        };
-        // The checkout-derived include roots were fixed before any fresh
-        // child machine bootstrapped inherited declarations.
-        let allocated_label = descriptor.label().to_string();
-        let admitted_worktree = prepared_workspace
-            .as_ref()
-            .map(|prepared| prepared.handle().clone());
-        let bound_worktrees = launch_worktrees.clone();
-        let descriptor_scope = descriptor.placement().lexical_scope;
-        let mut behavior = Self::child(
-            descriptor,
-            self.environment.clone(),
-            entry,
-            launch_worktrees,
-        );
-        behavior.prepared_workspace = prepared_workspace;
-        let child = match kernel.spawn_worker(None, behavior, lifetime).await {
-            Ok(child) => child,
-            Err(error) => {
-                if checkpoint_lease.is_some() {
-                    if let Err(cleanup) = self
-                        .environment
-                        .runner
-                        .retire_checkpoint_scopes(context.placement.session, vec![descriptor_scope])
-                        .await
-                    {
-                        tracing::warn!(%cleanup, "failed checkpoint child scope cleanup was retained");
-                    }
+            let checkpoint_lease = checkpoint_admission
+                .as_ref()
+                .map(|(lease, _)| lease.clone());
+            if descriptor.model().is_none() {
+                let checkpoint_model = checkpoint_lease
+                    .as_ref()
+                    .and_then(|lease| lease.issuer_model.clone());
+                descriptor = descriptor
+                    .with_model(checkpoint_model.or_else(|| self.descriptor.model().cloned()));
+            }
+            if descriptor.fork_effort().is_none() {
+                let checkpoint_effort = checkpoint_lease
+                    .as_ref()
+                    .and_then(|lease| lease.issuer_effort);
+                descriptor = descriptor
+                    .with_fork_effort(checkpoint_effort.or(self.descriptor.fork_effort()));
+            }
+            let fork_group = descriptor.fork_group();
+            let root_admission = self.environment.root_admission_closed.clone();
+            let _root_admission = if descriptor.supervisor_parent().is_none() {
+                let admission = root_admission.read().await;
+                if *admission {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "swarm root admission is closed".into(),
+                    ));
                 }
+                Some(admission)
+            } else {
+                None
+            };
+            let lifetime = if descriptor.supervisor_parent().is_none() {
+                crate::WorkerLifetime::SwarmOwned
+            } else {
+                crate::WorkerLifetime::ParentOwned
+            };
+            let fork_context = if descriptor.context_parent().is_some() {
+                crate::ForkContext::InheritedContext
+            } else {
+                crate::ForkContext::SelectedContext
+            };
+            self.validate_worker_context(lifetime, fork_context)
+                .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+            if descriptor.fork_group().is_some() {
+                if checkpoint_lease.is_none()
+                    && self.policy_installed
+                    && self.fork_publication.boundary().is_none_or(|boundary| {
+                        boundary.thread_id.is_empty() || boundary.call_id.is_empty()
+                    })
+                {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "context fork requires recorded invocation provenance from the hosted transport; use a Codex build that supplies contextCallId".into(),
+                ));
+                }
+                descriptor = descriptor.with_fork_boundary(
+                    checkpoint_lease
+                        .as_ref()
+                        .map(|lease| lease.boundary.clone())
+                        .or_else(|| self.fork_publication.boundary().cloned()),
+                );
+                if let Some(lease) = &checkpoint_lease {
+                    descriptor = descriptor.with_context_parent(lease.issuer);
+                }
+            }
+            if !self
+                .descriptor
+                .profile()
+                .permits_child(descriptor.profile())
+            {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                    "actor profile {:?} cannot start child profile {:?}",
+                    self.descriptor.profile(),
+                    descriptor.profile()
+                )));
+            }
+            let role = if descriptor.fork_group().is_some() {
+                self.descriptor
+                    .effective_role()
+                    .preview_child(
+                        descriptor.effective_role().clone(),
+                        descriptor.fork_budget(),
+                    )
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?
+            } else {
+                if !descriptor.effective_role().respects_role_ceiling() {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "requested effect row exceeds or duplicates the role ceiling".into(),
+                    ));
+                }
+                self.descriptor
+                    .effective_role()
+                    .attenuate_child(descriptor.effective_role().clone())
+            };
+            let role = if let Some(lease) = &checkpoint_lease {
+                lease
+                    .issuer_role
+                    .preview_child(role, descriptor.fork_budget())
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?
+            } else {
+                role
+            };
+            descriptor = descriptor.with_effective_role(role);
+            if let Some(group) = fork_group {
+                let requested = crate::ActorPath::parse(descriptor.label()).map_err(|error| {
+                    ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                })?;
+                let allocated = self
+                    .environment
+                    .fork_groups
+                    .claim_with_checkpoint(
+                        group,
+                        context.actor,
+                        &requested,
+                        descriptor.checkpoint_token(),
+                    )
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(self.name_coordinator(error))
+                    })?;
+                descriptor = descriptor.with_actor_path(allocated);
+            } else if descriptor.context_parent().is_some() {
                 return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    error.to_string(),
+                    "context fork did not name an admission group".into(),
                 ));
             }
-        };
-        // The child now has a principal, so the layer its descriptor carries
-        // can be named as its own. This happens before the child runs, so its
-        // first cell already reaches its own layer and no other.
-        if let Some(layers) = &source_layers {
-            if let Some(lease) = &checkpoint_lease {
-                layers.bind_checkpoint_for(
-                    child.identity().into(),
-                    helper_branch.as_deref().unwrap_or_default(),
-                    &lease.issuer_source_layer,
-                );
+            let prepared_workspace = if let Some(seed) = fork_workspace {
+                let admission = self.environment.fork_workspaces.clone().ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "context-fork workspace admission is not installed".into(),
+                    )
+                })?;
+                let owner = context.actor;
+                let actor_path = descriptor.label().to_owned();
+                let admitted = admission
+                    .admit(
+                        owner,
+                        actor_path,
+                        seed,
+                        crate::ForkWorkspacePolicy {
+                            native_tools: descriptor.effective_role().native_tools(),
+                            workspace: descriptor.effective_role().workspace(),
+                        },
+                    )
+                    .await
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "worktree admission for `{}` failed: {}",
+                            descriptor.label(),
+                            error
+                        ))
+                    })?;
+                launch_worktrees = vec![admitted.handle().handle_receipt.tree_id.raw.clone()];
+                Some(admitted)
             } else {
-                layers.bind_for(
-                    child.identity().into(),
-                    helper_branch.as_deref().unwrap_or_default(),
-                    &bound_worktrees,
-                );
+                None
+            };
+            // The child may carry declarations that import a helper published by
+            // its parent. Fix its own snapshot and include roots before a fresh
+            // machine bootstraps those declarations.
+            let source_layers = self.environment.source_layers.clone();
+            let helper_branch = if let Some(layers) = &source_layers {
+                Some(
+                    layers
+                        .prepare_helpers(
+                            context.actor.into(),
+                            &launch_worktrees,
+                            prepared_workspace.is_some(),
+                        )
+                        .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
+                )
+            } else {
+                None
+            };
+            if let Some(layers) = &source_layers {
+                let layer = match &checkpoint_lease {
+                    Some(lease) => layers
+                        .admit_checkpoint_layer(
+                            &lease.issuer_source_layer,
+                            context.actor.into(),
+                            helper_branch.as_deref().unwrap_or_default(),
+                            &launch_worktrees,
+                        )
+                        .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
+                    None => layers
+                        .layer_include_for(
+                            helper_branch.as_deref().unwrap_or_default(),
+                            &launch_worktrees,
+                        )
+                        .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
+                };
+                descriptor = descriptor.with_source_layer(layer);
             }
-        }
-        Ok((child, allocated_label, admitted_worktree))
+            if let Some(lease) = &checkpoint_lease {
+                let scope = self
+                    .environment
+                    .runner
+                    .remint_checkpoint_child_scope(
+                        context.clone(),
+                        lease.scope,
+                        descriptor.placement().lexical_scope,
+                    )
+                    .await?;
+                descriptor = descriptor.with_lexical_scope(scope);
+            }
+            // A launch whose descriptor still names the launching session (the
+            // common case: ineligible, or `InheritedContext`) needs nothing
+            // further — the entry is already resident there. An eligible
+            // `SelectedContext` launch's descriptor names a freshly minted
+            // session instead (`child_session_eligibility`/`capture_decoded`):
+            // provision that session's own dedicated machine now (build,
+            // bootstrap with the run's shared program, install the shared
+            // image registry, mint its own lexical scope), then cross the
+            // entry into it with the same transfer primitive every other
+            // resident-machine-boundary site already uses
+            // (`ResidentActorRunner::transfer_custody`, parcel 6). Failure at
+            // any step here leaves the launching session untouched and starts
+            // nothing; the caller (`start_child`) discards a provisioned but
+            // now-orphaned child session on any error this whole admission
+            // sequence returns from here on, by comparing the ORIGINAL
+            // captured launch's session against the one it actually admits on.
+            let entry = if descriptor.placement().session == context.placement.session {
+                entry
+            } else if !self.environment.runner.supports_child_sessions() {
+                // Eligible, but this host never installed a child-session
+                // factory/bootstrap program (`ResidentActorRunner::supports_child_sessions`)
+                // — fall back to the launching session, rather than failing an
+                // otherwise-ordinary fork over a capability nothing asked for.
+                // `capture_decoded` minted no real lexical scope for this
+                // (eligible) launch, only a placeholder; mint the actual one
+                // here, on the session this actor is actually falling back to.
+                let lexical_scope = self
+                    .environment
+                    .runner
+                    .mint_lexical_scope(context.placement.session)
+                    .await?;
+                descriptor = descriptor
+                    .with_session(context.placement.session)
+                    .with_lexical_scope(lexical_scope);
+                entry
+            } else {
+                let child_session = descriptor.placement().session;
+                let lexical_scope = self
+                    .environment
+                    .runner
+                    .provision_child_session(
+                        child_session,
+                        descriptor.placement().resource_scope,
+                        seed.as_ref(),
+                        descriptor.source_layer(),
+                    )
+                    .await
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+                descriptor = descriptor.with_lexical_scope(lexical_scope);
+                self.environment
+                    .runner
+                    .transfer_custody(
+                        entry,
+                        context.placement.session,
+                        child_session,
+                        descriptor.placement().resource_scope,
+                    )
+                    .await?
+            };
+            // The checkout-derived include roots were fixed before any fresh
+            // child machine bootstrapped inherited declarations.
+            let allocated_label = descriptor.label().to_string();
+            let admitted_worktree = prepared_workspace
+                .as_ref()
+                .map(|prepared| prepared.handle().clone());
+            let bound_worktrees = launch_worktrees.clone();
+            let descriptor_scope = descriptor.placement().lexical_scope;
+            let mut behavior = Self::child(
+                descriptor,
+                self.environment.clone(),
+                entry,
+                launch_worktrees,
+            );
+            behavior.admitted_checkpoint = checkpoint_admission;
+            behavior.prepared_workspace = prepared_workspace;
+            let child = match kernel.spawn_worker(None, behavior, lifetime).await {
+                Ok(child) => child,
+                Err(error) => {
+                    if checkpoint_lease.is_some() {
+                        if let Err(cleanup) = self
+                            .environment
+                            .runner
+                            .retire_checkpoint_scopes(
+                                context.placement.session,
+                                vec![descriptor_scope],
+                            )
+                            .await
+                        {
+                            tracing::warn!(%cleanup, "failed checkpoint child scope cleanup was retained");
+                        }
+                    }
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        error.to_string(),
+                    ));
+                }
+            };
+            // The child now has a principal, so the layer its descriptor carries
+            // can be named as its own. This happens before the child runs, so its
+            // first cell already reaches its own layer and no other.
+            if let Some(layers) = &source_layers {
+                if let Some(lease) = &checkpoint_lease {
+                    layers.bind_checkpoint_for(
+                        child.identity().into(),
+                        helper_branch.as_deref().unwrap_or_default(),
+                        &lease.issuer_source_layer,
+                    );
+                } else {
+                    layers.bind_for(
+                        child.identity().into(),
+                        helper_branch.as_deref().unwrap_or_default(),
+                        &bound_worktrees,
+                    );
+                }
+            }
+            Ok((child, allocated_label, admitted_worktree))
+        })
     }
 
     async fn resolve_outbound(
@@ -5046,6 +5072,12 @@ where
                             .map_err(|error| {
                                 ResidentActorWorkbenchError::ActorProtocol(error.to_string())
                             })?;
+                        let (checkpoint, checkpoint_attachment) = self
+                            .admitted_checkpoint
+                            .take()
+                            .map_or((None, None), |(lease, attachment)| {
+                                (Some(lease), attachment)
+                            });
                         let installation = LocalResidentInstallation {
                             actor,
                             label: self.descriptor.label().to_owned(),
@@ -5059,20 +5091,8 @@ where
                             instructions: self.descriptor.instructions().map(str::to_owned),
                             creator: self.descriptor.creator(),
                             fork_boundary: self.descriptor.fork_boundary().cloned(),
-                            checkpoint: self
-                                .descriptor
-                                .checkpoint_token()
-                                .map(|token| {
-                                    self.environment
-                                        .fork_groups
-                                        .checkpoint(token, context.placement.session)
-                                })
-                                .transpose()
-                                .map_err(|refusal| {
-                                    ResidentActorWorkbenchError::ActorProtocol(format!(
-                                        "checkpoint refusal: {refusal:?}"
-                                    ))
-                                })?,
+                            checkpoint,
+                            checkpoint_attachment,
                             supervisor_parent: self.descriptor.supervisor_parent(),
                             context_parent: self.descriptor.context_parent(),
                             fork_group: self.descriptor.fork_group(),
@@ -5507,6 +5527,12 @@ where
             .map(|group| self.environment.fork_groups.gate(group, context.actor))
             .transpose()
             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        let (checkpoint, checkpoint_attachment) = self
+            .admitted_checkpoint
+            .take()
+            .map_or((None, None), |(lease, attachment)| {
+                (Some(lease), attachment)
+            });
         self.publish_installation(LocalResidentInstallation {
             actor,
             label: self.descriptor.label().to_owned(),
@@ -5520,20 +5546,8 @@ where
             instructions: self.descriptor.instructions().map(str::to_owned),
             creator: self.descriptor.creator(),
             fork_boundary: self.descriptor.fork_boundary().cloned(),
-            checkpoint: self
-                .descriptor
-                .checkpoint_token()
-                .map(|token| {
-                    self.environment
-                        .fork_groups
-                        .checkpoint(token, context.placement.session)
-                })
-                .transpose()
-                .map_err(|refusal| {
-                    ResidentActorWorkbenchError::ActorProtocol(format!(
-                        "checkpoint refusal: {refusal:?}"
-                    ))
-                })?,
+            checkpoint,
+            checkpoint_attachment,
             supervisor_parent: self.descriptor.supervisor_parent(),
             context_parent: self.descriptor.context_parent(),
             fork_group: self.descriptor.fork_group(),
@@ -5551,268 +5565,278 @@ where
         Ok(())
     }
 
-    async fn initialize(
-        &mut self,
-        kernel: &KernelContext,
-        context: &ActorSessionContext,
+    fn initialize<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        context: &'a ActorSessionContext,
         boot: ResidentBoot,
-    ) -> Result<KernelStep<()>, ResidentActorWorkbenchError> {
-        let boot = match boot {
-            ResidentBoot::Replacement(prepared) => {
-                self.boot = Some(ResidentBoot::Replacement(prepared));
-                return Ok(KernelStep::Continue(()));
+    ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, ResidentActorWorkbenchError>>
+    {
+        Box::pin(async move {
+            let boot = match boot {
+                ResidentBoot::Replacement(prepared) => {
+                    self.boot = Some(ResidentBoot::Replacement(prepared));
+                    return Ok(KernelStep::Continue(()));
+                }
+                boot => boot,
+            };
+            if let Some(terminal) = kernel.requested_shutdown() {
+                return Ok(KernelStep::Stop {
+                    output: (),
+                    terminal,
+                });
             }
-            boot => boot,
-        };
-        if let Some(terminal) = kernel.requested_shutdown() {
-            return Ok(KernelStep::Stop {
-                output: (),
-                terminal,
-            });
-        }
-        if self.worktree_custody.is_none() {
-            if let Some(prepared) = self.prepared_workspace.take() {
-                let actor = context.actor;
-                self.worktree_custody = Some(
-                    tidepool_runtime::spawn_blocking_in_span(move || prepared.install(actor))
-                        .await
-                        .map_err(ResidentActorWorkbenchError::Join)?
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                        })?,
-                );
-            }
-        }
-        if self.worktree_custody.is_none() {
-            match self.launch_worktrees.as_slice() {
-                [] => {}
-                [worktree] => {
-                    let admission = self.environment.fork_workspaces.as_ref().ok_or_else(|| {
-                        ResidentActorWorkbenchError::ActorProtocol(
-                            "pre-bootstrap worktree custody is unavailable".into(),
-                        )
-                    })?;
-                    let admission = admission.clone();
+            if self.worktree_custody.is_none() {
+                if let Some(prepared) = self.prepared_workspace.take() {
                     let actor = context.actor;
-                    let worktree = worktree.clone();
-                    let role = self.descriptor.effective_role().role();
                     self.worktree_custody = Some(
-                        tidepool_runtime::spawn_blocking_in_span(move || {
-                            admission.install_custody(actor, &worktree, role)
-                        })
-                        .await
-                        .map_err(ResidentActorWorkbenchError::Join)?
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                        })?,
+                        tidepool_runtime::spawn_blocking_in_span(move || prepared.install(actor))
+                            .await
+                            .map_err(ResidentActorWorkbenchError::Join)?
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                            })?,
                     );
                 }
-                _ => {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "actor bootstrap requires at most one worktree".into(),
-                    ));
+            }
+            if self.worktree_custody.is_none() {
+                match self.launch_worktrees.as_slice() {
+                    [] => {}
+                    [worktree] => {
+                        let admission =
+                            self.environment.fork_workspaces.as_ref().ok_or_else(|| {
+                                ResidentActorWorkbenchError::ActorProtocol(
+                                    "pre-bootstrap worktree custody is unavailable".into(),
+                                )
+                            })?;
+                        let admission = admission.clone();
+                        let actor = context.actor;
+                        let worktree = worktree.clone();
+                        let role = self.descriptor.effective_role().role();
+                        self.worktree_custody = Some(
+                            tidepool_runtime::spawn_blocking_in_span(move || {
+                                admission.install_custody(actor, &worktree, role)
+                            })
+                            .await
+                            .map_err(ResidentActorWorkbenchError::Join)?
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                            })?,
+                        );
+                    }
+                    _ => {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "actor bootstrap requires at most one worktree".into(),
+                        ));
+                    }
                 }
             }
-        }
-        if let Some(terminal) = kernel.requested_shutdown() {
-            return Ok(KernelStep::Stop {
-                output: (),
-                terminal,
-            });
-        }
-        let outcome = match boot {
-            ResidentBoot::Replacement(_) => {
-                unreachable!("replacement bootstrap parks before initialization")
+            if let Some(terminal) = kernel.requested_shutdown() {
+                return Ok(KernelStep::Stop {
+                    output: (),
+                    terminal,
+                });
             }
-            ResidentBoot::Workbench => {
-                self.set_standing(context.actor, ResidentStanding::Workbench);
-                self.policy_installed = true;
-                return Ok(KernelStep::Continue(()));
-            }
-            ResidentBoot::Prepared(outcome) => *outcome,
-            ResidentBoot::Entry(entry) => {
-                let mut outcome = self
-                    .environment
-                    .runner
-                    .run_rooted_entry(context.clone(), entry, context.placement.resource_scope)
-                    .await?;
-                loop {
-                    let startup_step = self
+            let outcome = match boot {
+                ResidentBoot::Replacement(_) => {
+                    unreachable!("replacement bootstrap parks before initialization")
+                }
+                ResidentBoot::Workbench => {
+                    self.set_standing(context.actor, ResidentStanding::Workbench);
+                    self.policy_installed = true;
+                    return Ok(KernelStep::Continue(()));
+                }
+                ResidentBoot::Prepared(outcome) => *outcome,
+                ResidentBoot::Entry(entry) => {
+                    let mut outcome = self
                         .environment
                         .runner
-                        .capture_startup_step(
-                            context.clone(),
-                            outcome,
-                            context.placement.resource_scope,
-                        )
+                        .run_rooted_entry(context.clone(), entry, context.placement.resource_scope)
                         .await?;
-                    if let Some(terminal) = kernel.requested_shutdown() {
-                        return Ok(KernelStep::Stop {
-                            output: (),
-                            terminal,
-                        });
-                    }
-                    match startup_step {
-                        ResidentActorStartupStep::InstallSource {
-                            continuation,
-                            source,
-                        } => {
-                            self.sources.push(source);
-                            outcome = self
-                                .environment
-                                .runner
-                                .resume_unit(context.clone(), continuation)
-                                .await?;
-                        }
-                        ResidentActorStartupStep::InstallShutdown(shutdown) => {
-                            if self.shutdown_hook.is_some() {
-                                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                                    "actor installed its shutdown hook more than once".into(),
-                                ));
-                            }
-                            let (continuation, hook) = shutdown.into_parts();
-                            self.shutdown_hook = Some(hook);
-                            outcome = self
-                                .environment
-                                .runner
-                                .resume_unit(context.clone(), continuation)
-                                .await?;
-                        }
-                        ResidentActorStartupStep::Attach(attachment) => {
-                            if self.policy_installed {
-                                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                                    "actor installed its Codex application more than once".into(),
-                                ));
-                            }
-                            self.install_interactive_policy(
-                                kernel,
-                                context,
-                                attachment.initial_user_message,
+                    loop {
+                        let startup_step = self
+                            .environment
+                            .runner
+                            .capture_startup_step(
+                                context.clone(),
+                                outcome,
+                                context.placement.resource_scope,
                             )
                             .await?;
-                            outcome = self
-                                .environment
-                                .runner
-                                .resume_unit(context.clone(), attachment.continuation)
-                                .await?;
+                        if let Some(terminal) = kernel.requested_shutdown() {
+                            return Ok(KernelStep::Stop {
+                                output: (),
+                                terminal,
+                            });
                         }
-                        ResidentActorStartupStep::Ready(readiness) => {
-                            self.static_source_count = self.sources.len();
-                            if !self.sources.is_empty() {
-                                let owner = self.descriptor.creator().ok_or_else(|| {
-                                    ResidentActorWorkbenchError::ActorProtocol(
-                                        "source actor has no creator".into(),
-                                    )
-                                })?;
-                                let recipient = kernel.resolve(context.actor).ok_or_else(|| {
-                                    ResidentActorWorkbenchError::ActorProtocol(
-                                        "source actor is absent from its directory".into(),
-                                    )
-                                })?;
-                                let sources = self
-                                    .sources
-                                    .iter()
-                                    .enumerate()
-                                    .filter_map(|(slot, source)| match source.target {
-                                        crate::request::sources::SourceTarget::Request(
-                                            request,
-                                            kind,
-                                        ) => Some((slot, request, kind)),
-                                        crate::request::sources::SourceTarget::Lifecycle(_)
-                                        | crate::request::sources::SourceTarget::Command(_) => None,
-                                    })
-                                    .collect::<Vec<_>>();
-                                let mut lifecycle = Vec::new();
-                                for (slot, source) in self.sources.iter().enumerate() {
-                                    if let crate::request::sources::SourceTarget::Lifecycle(
-                                        target,
-                                    ) = source.target
-                                    {
-                                        if !actor_can_observe(
-                                            owner,
-                                            target,
-                                            &self.environment.actors.lock(),
-                                        ) {
-                                            return Err(
-                                                ResidentActorWorkbenchError::ActorProtocol(
-                                                    "lifecycle source is not authorized".into(),
-                                                ),
-                                            );
-                                        }
-                                        let actor = kernel.resolve(target).ok_or_else(|| {
+                        match startup_step {
+                            ResidentActorStartupStep::InstallSource {
+                                continuation,
+                                source,
+                            } => {
+                                self.sources.push(source);
+                                outcome = self
+                                    .environment
+                                    .runner
+                                    .resume_unit(context.clone(), continuation)
+                                    .await?;
+                            }
+                            ResidentActorStartupStep::InstallShutdown(shutdown) => {
+                                if self.shutdown_hook.is_some() {
+                                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                        "actor installed its shutdown hook more than once".into(),
+                                    ));
+                                }
+                                let (continuation, hook) = shutdown.into_parts();
+                                self.shutdown_hook = Some(hook);
+                                outcome = self
+                                    .environment
+                                    .runner
+                                    .resume_unit(context.clone(), continuation)
+                                    .await?;
+                            }
+                            ResidentActorStartupStep::Attach(attachment) => {
+                                if self.policy_installed {
+                                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                        "actor installed its Codex application more than once"
+                                            .into(),
+                                    ));
+                                }
+                                self.install_interactive_policy(
+                                    kernel,
+                                    context,
+                                    attachment.initial_user_message,
+                                )
+                                .await?;
+                                outcome = self
+                                    .environment
+                                    .runner
+                                    .resume_unit(context.clone(), attachment.continuation)
+                                    .await?;
+                            }
+                            ResidentActorStartupStep::Ready(readiness) => {
+                                self.static_source_count = self.sources.len();
+                                if !self.sources.is_empty() {
+                                    let owner = self.descriptor.creator().ok_or_else(|| {
+                                        ResidentActorWorkbenchError::ActorProtocol(
+                                            "source actor has no creator".into(),
+                                        )
+                                    })?;
+                                    let recipient =
+                                        kernel.resolve(context.actor).ok_or_else(|| {
                                             ResidentActorWorkbenchError::ActorProtocol(
-                                                "lifecycle source target is unavailable".into(),
+                                                "source actor is absent from its directory".into(),
                                             )
                                         })?;
-                                        lifecycle.push((slot, actor));
+                                    let sources = self
+                                        .sources
+                                        .iter()
+                                        .enumerate()
+                                        .filter_map(|(slot, source)| match source.target {
+                                            crate::request::sources::SourceTarget::Request(
+                                                request,
+                                                kind,
+                                            ) => Some((slot, request, kind)),
+                                            crate::request::sources::SourceTarget::Lifecycle(_)
+                                            | crate::request::sources::SourceTarget::Command(_) => {
+                                                None
+                                            }
+                                        })
+                                        .collect::<Vec<_>>();
+                                    let mut lifecycle = Vec::new();
+                                    for (slot, source) in self.sources.iter().enumerate() {
+                                        if let crate::request::sources::SourceTarget::Lifecycle(
+                                            target,
+                                        ) = source.target
+                                        {
+                                            if !actor_can_observe(
+                                                owner,
+                                                target,
+                                                &self.environment.actors.lock(),
+                                            ) {
+                                                return Err(
+                                                    ResidentActorWorkbenchError::ActorProtocol(
+                                                        "lifecycle source is not authorized".into(),
+                                                    ),
+                                                );
+                                            }
+                                            let actor =
+                                                kernel.resolve(target).ok_or_else(|| {
+                                                    ResidentActorWorkbenchError::ActorProtocol(
+                                                        "lifecycle source target is unavailable"
+                                                            .into(),
+                                                    )
+                                                })?;
+                                            lifecycle.push((slot, actor));
+                                        }
                                     }
-                                }
-                                self.source_connections = Some(
-                                    self.environment
-                                        .requests
-                                        .attach_sources(owner, recipient, &sources)
-                                        .map_err(|error| {
-                                            ResidentActorWorkbenchError::ActorProtocol(format!(
-                                                "source attachment rejected: {error:?}"
-                                            ))
-                                        })?,
-                                );
-                                for (slot, source) in self.sources.iter().enumerate() {
-                                    if let crate::request::sources::SourceTarget::Command(key) =
-                                        source.target
-                                    {
+                                    self.source_connections = Some(
+                                        self.environment
+                                            .requests
+                                            .attach_sources(owner, recipient, &sources)
+                                            .map_err(|error| {
+                                                ResidentActorWorkbenchError::ActorProtocol(format!(
+                                                    "source attachment rejected: {error:?}"
+                                                ))
+                                            })?,
+                                    );
+                                    for (slot, source) in self.sources.iter().enumerate() {
+                                        if let crate::request::sources::SourceTarget::Command(key) =
+                                            source.target
+                                        {
+                                            #[allow(
+                                                clippy::expect_used,
+                                                reason = "self.source_connections was set to \
+                                                      Some(..) immediately above, with no \
+                                                      intervening code that clears it"
+                                            )]
+                                            self.source_connections
+                                                .as_mut()
+                                                .expect("attached sources")
+                                                .attach_command(
+                                                    slot,
+                                                    key,
+                                                    owner,
+                                                    &self.environment.commands,
+                                                )
+                                                .map_err(|error| {
+                                                    ResidentActorWorkbenchError::ActorProtocol(
+                                                        format!("command source: {error:?}"),
+                                                    )
+                                                })?;
+                                        }
+                                    }
+                                    for (slot, actor) in lifecycle {
                                         #[allow(
                                             clippy::expect_used,
                                             reason = "self.source_connections was set to \
-                                                      Some(..) immediately above, with no \
-                                                      intervening code that clears it"
+                                                  Some(..) immediately above, with no \
+                                                  intervening code that clears it"
                                         )]
                                         self.source_connections
                                             .as_mut()
-                                            .expect("attached sources")
-                                            .attach_command(
-                                                slot,
-                                                key,
-                                                owner,
-                                                &self.environment.commands,
-                                            )
-                                            .map_err(|error| {
-                                                ResidentActorWorkbenchError::ActorProtocol(format!(
-                                                    "command source: {error:?}"
-                                                ))
-                                            })?;
+                                            .expect("attached source set")
+                                            .attach_lifecycle(slot, &actor);
                                     }
                                 }
-                                for (slot, actor) in lifecycle {
-                                    #[allow(
-                                        clippy::expect_used,
-                                        reason = "self.source_connections was set to \
-                                                  Some(..) immediately above, with no \
-                                                  intervening code that clears it"
-                                    )]
-                                    self.source_connections
-                                        .as_mut()
-                                        .expect("attached source set")
-                                        .attach_lifecycle(slot, &actor);
-                                }
+                                break self
+                                    .environment
+                                    .runner
+                                    .resume_readiness(context.clone(), readiness)
+                                    .await?;
                             }
-                            break self
-                                .environment
-                                .runner
-                                .resume_readiness(context.clone(), readiness)
-                                .await?;
                         }
                     }
                 }
-            }
-        };
-        self.stabilize_program(
-            kernel,
-            context,
-            &crate::CallAncestry::begin(context.actor),
-            outcome,
-        )
-        .await
+            };
+            self.stabilize_program(
+                kernel,
+                context,
+                &crate::CallAncestry::begin(context.actor),
+                outcome,
+            )
+            .await
+        })
     }
 
     async fn run_receiver(
@@ -6818,6 +6842,8 @@ where
     /// The cell level of the run's span tree. `execution` is the tool call's
     /// own identity carried into the actor task, and is how a reconstructed
     /// cell joins back to the provider call that asked for it.
+    // Keep the cell state on the heap before generic timing and task-local
+    // wrappers poll it; those wrappers must not copy a whole cell future.
     #[tracing::instrument(
         name = "cell",
         skip_all,
@@ -6828,356 +6854,365 @@ where
             items = request.items.len(),
         )
     )]
-    async fn execute_workbench(
-        &mut self,
-        kernel: &KernelContext,
-        context: &ActorSessionContext,
+    fn execute_workbench<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        context: &'a ActorSessionContext,
         mut request: WorkbenchRequest,
         installed_tools: Option<crate::InstalledToolLease>,
-    ) -> Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure> {
-        let execution = request.execution_id().cloned();
-        let status_call = request
-            .tool_call()
-            .filter(|call| call.name == crate::status_tool::STATUS_TOOL)
-            .cloned();
-        let reload_spec_call = request
-            .tool_call()
-            .filter(|call| call.name == crate::reload_spec_tool::RELOAD_SPEC_TOOL)
-            .cloned();
-        let reload_helpers_call = request
-            .tool_call()
-            .filter(|call| call.name == crate::reload_helpers_tool::RELOAD_HELPERS_TOOL)
-            .cloned();
-        let tool_dispatch = if let Some(call) = request.tool_call().filter(|call| {
-            call.name != crate::status_tool::STATUS_TOOL
-                && call.name != crate::reload_spec_tool::RELOAD_SPEC_TOOL
-                && call.name != crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
-        }) {
-            let tools = installed_tools
-                .as_ref()
-                .and_then(crate::InstalledToolLease::tools)
-                .filter(|tools| {
-                    tools.declarations.iter().any(|tool| {
-                        tool.name() == call.name
-                            && match tool {
-                                exomonad_tool::HostedTool::Custom(_) => call.arguments.is_string(),
-                                exomonad_tool::HostedTool::Function(_) => {
-                                    call.arguments.is_object()
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+    > {
+        Box::pin(async move {
+            let execution = request.execution_id().cloned();
+            let status_call = request
+                .tool_call()
+                .filter(|call| call.name == crate::status_tool::STATUS_TOOL)
+                .cloned();
+            let reload_spec_call = request
+                .tool_call()
+                .filter(|call| call.name == crate::reload_spec_tool::RELOAD_SPEC_TOOL)
+                .cloned();
+            let reload_helpers_call = request
+                .tool_call()
+                .filter(|call| call.name == crate::reload_helpers_tool::RELOAD_HELPERS_TOOL)
+                .cloned();
+            let tool_dispatch = if let Some(call) = request.tool_call().filter(|call| {
+                call.name != crate::status_tool::STATUS_TOOL
+                    && call.name != crate::reload_spec_tool::RELOAD_SPEC_TOOL
+                    && call.name != crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
+            }) {
+                let tools = installed_tools
+                    .as_ref()
+                    .and_then(crate::InstalledToolLease::tools)
+                    .filter(|tools| {
+                        tools.declarations.iter().any(|tool| {
+                            tool.name() == call.name
+                                && match tool {
+                                    exomonad_tool::HostedTool::Custom(_) => {
+                                        call.arguments.is_string()
+                                    }
+                                    exomonad_tool::HostedTool::Function(_) => {
+                                        call.arguments.is_object()
+                                    }
                                 }
-                            }
+                        })
                     })
-                })
+                    .ok_or_else(|| {
+                        workbench_failure(
+                            &[],
+                            0,
+                            1,
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "unknown tool or invalid argument kind".into(),
+                            ),
+                        )
+                    })?;
+                // Dispatch clones the retained record, so the identity of THAT
+                // record is known at the moment of the call and costs nothing to
+                // carry. It says which installed record served the call, and the
+                // revision that record was built from — not that everything
+                // reachable through the call belongs to one revision.
+                tracing::info!(
+                    actor = %context.actor,
+                    tool = %call.name,
+                    spec = %tools.provenance(),
+                    "hosted tool call served by an installed spec"
+                );
+                Some(Arc::clone(&tools.dispatch))
+            } else {
+                None
+            };
+            if let Some(call) = reload_helpers_call {
+                let arguments =
+                    crate::reload_helpers_tool::parse(call.arguments).map_err(|error| {
+                        workbench_failure(
+                            &[],
+                            0,
+                            1,
+                            ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
+                        )
+                    })?;
+                let output = self.reload_helpers(context, &arguments.also_check).await;
+                return Ok(KernelStep::Continue(workbench_response(
+                    WorkbenchRunStatus::Committed,
+                    vec![WorkbenchItemReceipt {
+                        diagnostics: Vec::new(),
+                        index: 0,
+                        kind: None,
+                        span: None,
+                        source_items: Vec::new(),
+                        status: WorkbenchItemStatus::Committed,
+                        output,
+                        warnings: Vec::new(),
+                        installed_bindings: Vec::new(),
+                        operations: Vec::new(),
+                        terminal_transfer: None,
+                        failure_layer: None,
+                    }],
+                    1,
+                    1,
+                    None,
+                )));
+            }
+            if let Some(call) = reload_spec_call {
+                let arguments =
+                    crate::reload_spec_tool::parse(call.arguments).map_err(|error| {
+                        workbench_failure(
+                            &[],
+                            0,
+                            1,
+                            ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
+                        )
+                    })?;
+                let output = self.reload_agent_spec(context, &arguments.also_check).await;
+                return Ok(KernelStep::Continue(workbench_response(
+                    WorkbenchRunStatus::Committed,
+                    vec![WorkbenchItemReceipt {
+                        diagnostics: Vec::new(),
+                        index: 0,
+                        kind: None,
+                        span: None,
+                        source_items: Vec::new(),
+                        status: WorkbenchItemStatus::Committed,
+                        output,
+                        warnings: Vec::new(),
+                        installed_bindings: Vec::new(),
+                        operations: Vec::new(),
+                        terminal_transfer: None,
+                        failure_layer: None,
+                    }],
+                    1,
+                    1,
+                    None,
+                )));
+            }
+            let workbench = self
+                .active_workbench()
                 .ok_or_else(|| {
                     workbench_failure(
                         &[],
                         0,
-                        1,
+                        request.items.len(),
                         ResidentActorWorkbenchError::ActorProtocol(
-                            "unknown tool or invalid argument kind".into(),
+                            "actor application has no active Haskell workbench".into(),
                         ),
                     )
+                })?
+                .with_json_input(
+                    request
+                        .input
+                        .as_ref()
+                        .map(tidepool_runtime::session::normalize_workbench_input),
+                );
+            if let Some(call) = status_call {
+                let view = crate::status_tool::parse(call.arguments).map_err(|error| {
+                    workbench_failure(
+                        &[],
+                        0,
+                        1,
+                        ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
+                    )
                 })?;
-            // Dispatch clones the retained record, so the identity of THAT
-            // record is known at the moment of the call and costs nothing to
-            // carry. It says which installed record served the call, and the
-            // revision that record was built from — not that everything
-            // reachable through the call belongs to one revision.
-            tracing::info!(
-                actor = %context.actor,
-                tool = %call.name,
-                spec = %tools.provenance(),
-                "hosted tool call served by an installed spec"
-            );
-            Some(Arc::clone(&tools.dispatch))
-        } else {
-            None
-        };
-        if let Some(call) = reload_helpers_call {
-            let arguments = crate::reload_helpers_tool::parse(call.arguments).map_err(|error| {
-                workbench_failure(
-                    &[],
-                    0,
-                    1,
-                    ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
-                )
-            })?;
-            let output = self.reload_helpers(context, &arguments.also_check).await;
-            return Ok(KernelStep::Continue(workbench_response(
-                WorkbenchRunStatus::Committed,
-                vec![WorkbenchItemReceipt {
-                    diagnostics: Vec::new(),
-                    index: 0,
-                    kind: None,
-                    span: None,
-                    source_items: Vec::new(),
-                    status: WorkbenchItemStatus::Committed,
-                    output,
-                    warnings: Vec::new(),
-                    installed_bindings: Vec::new(),
-                    operations: Vec::new(),
-                    terminal_transfer: None,
-                    failure_layer: None,
-                }],
-                1,
-                1,
-                None,
-            )));
-        }
-        if let Some(call) = reload_spec_call {
-            let arguments = crate::reload_spec_tool::parse(call.arguments).map_err(|error| {
-                workbench_failure(
-                    &[],
-                    0,
-                    1,
-                    ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
-                )
-            })?;
-            let output = self.reload_agent_spec(context, &arguments.also_check).await;
-            return Ok(KernelStep::Continue(workbench_response(
-                WorkbenchRunStatus::Committed,
-                vec![WorkbenchItemReceipt {
-                    diagnostics: Vec::new(),
-                    index: 0,
-                    kind: None,
-                    span: None,
-                    source_items: Vec::new(),
-                    status: WorkbenchItemStatus::Committed,
-                    output,
-                    warnings: Vec::new(),
-                    installed_bindings: Vec::new(),
-                    operations: Vec::new(),
-                    terminal_transfer: None,
-                    failure_layer: None,
-                }],
-                1,
-                1,
-                None,
-            )));
-        }
-        let workbench = self
-            .active_workbench()
-            .ok_or_else(|| {
-                workbench_failure(
-                    &[],
-                    0,
-                    request.items.len(),
-                    ResidentActorWorkbenchError::ActorProtocol(
-                        "actor application has no active Haskell workbench".into(),
-                    ),
-                )
-            })?
-            .with_json_input(
-                request
-                    .input
-                    .as_ref()
-                    .map(tidepool_runtime::session::normalize_workbench_input),
-            );
-        if let Some(call) = status_call {
-            let view = crate::status_tool::parse(call.arguments).map_err(|error| {
-                workbench_failure(
-                    &[],
-                    0,
-                    1,
-                    ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
-                )
-            })?;
-            let output = match view {
-                crate::status_tool::StatusView::Changed => {
-                    self.status_text(kernel, context.actor, StatusView::Concise, true)
-                }
-                crate::status_tool::StatusView::Summary => {
-                    self.status_text(kernel, context.actor, StatusView::Concise, false)
-                }
-                crate::status_tool::StatusView::Revisions => {
-                    self.revisions_status_text(kernel, context.actor)
-                }
-                crate::status_tool::StatusView::Detailed => {
-                    self.status_text(kernel, context.actor, StatusView::Expanded, false)
-                }
-                crate::status_tool::StatusView::Lineage => {
-                    self.status_text(kernel, context.actor, StatusView::Lineage, false)
-                }
-                crate::status_tool::StatusView::Trace => {
-                    self.status_text(kernel, context.actor, StatusView::Trace, false)
-                }
-                crate::status_tool::StatusView::Watches => {
-                    self.status_text(kernel, context.actor, StatusView::Watches, false)
-                }
-                crate::status_tool::StatusView::Recovery => workbench
-                    .status_discovery(
-                        context.clone(),
-                        crate::status_tool::StatusDiscovery::Recovery,
-                    )
-                    .await
-                    .map_err(|error| workbench_failure(&[], 0, 1, error))?,
-                crate::status_tool::StatusView::Bindings => workbench
-                    .status_discovery(
-                        context.clone(),
-                        crate::status_tool::StatusDiscovery::Bindings,
-                    )
-                    .await
-                    .map_err(|error| workbench_failure(&[], 0, 1, error))?,
-                crate::status_tool::StatusView::Live => {
-                    let bindings = workbench
-                        .live_bindings(context.clone())
+                let output = match view {
+                    crate::status_tool::StatusView::Changed => {
+                        self.status_text(kernel, context.actor, StatusView::Concise, true)
+                    }
+                    crate::status_tool::StatusView::Summary => {
+                        self.status_text(kernel, context.actor, StatusView::Concise, false)
+                    }
+                    crate::status_tool::StatusView::Revisions => {
+                        self.revisions_status_text(kernel, context.actor)
+                    }
+                    crate::status_tool::StatusView::Detailed => {
+                        self.status_text(kernel, context.actor, StatusView::Expanded, false)
+                    }
+                    crate::status_tool::StatusView::Lineage => {
+                        self.status_text(kernel, context.actor, StatusView::Lineage, false)
+                    }
+                    crate::status_tool::StatusView::Trace => {
+                        self.status_text(kernel, context.actor, StatusView::Trace, false)
+                    }
+                    crate::status_tool::StatusView::Watches => {
+                        self.status_text(kernel, context.actor, StatusView::Watches, false)
+                    }
+                    crate::status_tool::StatusView::Recovery => workbench
+                        .status_discovery(
+                            context.clone(),
+                            crate::status_tool::StatusDiscovery::Recovery,
+                        )
                         .await
-                        .map_err(|error| workbench_failure(&[], 0, 1, error))?;
-                    self.live_status_text(context.actor, &bindings)
-                }
-            };
-            return Ok(KernelStep::Continue(workbench_response(
-                WorkbenchRunStatus::Committed,
-                vec![WorkbenchItemReceipt {
-                    diagnostics: Vec::new(),
-                    index: 0,
-                    kind: None,
-                    span: None,
-                    source_items: Vec::new(),
-                    status: WorkbenchItemStatus::Committed,
-                    output,
-                    warnings: Vec::new(),
-                    installed_bindings: Vec::new(),
-                    operations: Vec::new(),
-                    terminal_transfer: None,
-                    failure_layer: None,
-                }],
-                1,
-                1,
-                None,
-            )));
-        }
-        let mut prepared_cell = None;
-        let mut _cell_dependencies = None;
-        let cell_check = if let Some(cell_source) = request.cell_source() {
-            let (checked, prepared) = match workbench
-                .prepare_cell(context.clone(), cell_source.to_owned())
-                .await
-            {
-                Ok(checked) => checked,
-                Err(ResidentActorWorkbenchError::CellCheck(failure)) => {
-                    return Ok(KernelStep::Continue(cell_check_rejection(
-                        failure,
-                        cell_source,
-                    )));
-                }
-                Err(source) => return Err(workbench_failure(&[], 0, 1, source)),
-            };
-            request.install_cell_items(
-                checked
-                    .items
-                    .iter()
-                    .map(|item| item.source.clone())
-                    .collect(),
-            );
-            match prepared {
-                PreparedCell::Ready {
-                    items,
-                    dependencies,
-                } => {
-                    _cell_dependencies = Some(dependencies);
-                    prepared_cell = Some(items.into_iter().map(Some).collect::<Vec<_>>());
-                }
-                PreparedCell::Rejected { index, diagnostic } => {
-                    let items = (0..=index)
-                        .map(|prior| WorkbenchItemReceipt {
-                            diagnostics: if prior == index {
-                                diagnostic.diagnostics.clone()
-                            } else {
-                                Vec::new()
-                            },
-                            index: prior,
-                            kind: None,
-                            span: None,
-                            source_items: Vec::new(),
-                            status: if prior == index {
-                                WorkbenchItemStatus::Rejected
-                            } else {
-                                WorkbenchItemStatus::NotRun
-                            },
-                            output: if prior == index {
-                                diagnostic.output.clone()
-                            } else {
-                                String::new()
-                            },
-                            warnings: Vec::new(),
-                            installed_bindings: Vec::new(),
-                            operations: Vec::new(),
-                            terminal_transfer: None,
-                            failure_layer: if prior == index {
-                                Some(WorkbenchFailureLayer::Compile)
-                            } else {
-                                None
-                            },
-                        })
-                        .collect();
-                    return Ok(KernelStep::Continue(workbench_response(
-                        WorkbenchRunStatus::Rejected,
+                        .map_err(|error| workbench_failure(&[], 0, 1, error))?,
+                    crate::status_tool::StatusView::Bindings => workbench
+                        .status_discovery(
+                            context.clone(),
+                            crate::status_tool::StatusDiscovery::Bindings,
+                        )
+                        .await
+                        .map_err(|error| workbench_failure(&[], 0, 1, error))?,
+                    crate::status_tool::StatusView::Live => {
+                        let bindings = workbench
+                            .live_bindings(context.clone())
+                            .await
+                            .map_err(|error| workbench_failure(&[], 0, 1, error))?;
+                        self.live_status_text(context.actor, &bindings)
+                    }
+                };
+                return Ok(KernelStep::Continue(workbench_response(
+                    WorkbenchRunStatus::Committed,
+                    vec![WorkbenchItemReceipt {
+                        diagnostics: Vec::new(),
+                        index: 0,
+                        kind: None,
+                        span: None,
+                        source_items: Vec::new(),
+                        status: WorkbenchItemStatus::Committed,
+                        output,
+                        warnings: Vec::new(),
+                        installed_bindings: Vec::new(),
+                        operations: Vec::new(),
+                        terminal_transfer: None,
+                        failure_layer: None,
+                    }],
+                    1,
+                    1,
+                    None,
+                )));
+            }
+            let mut prepared_cell = None;
+            let mut _cell_dependencies = None;
+            let cell_check = if let Some(cell_source) = request.cell_source() {
+                let (checked, prepared) = match workbench
+                    .prepare_cell(context.clone(), cell_source.to_owned())
+                    .await
+                {
+                    Ok(checked) => checked,
+                    Err(ResidentActorWorkbenchError::CellCheck(failure)) => {
+                        return Ok(KernelStep::Continue(cell_check_rejection(
+                            failure,
+                            cell_source,
+                        )));
+                    }
+                    Err(source) => return Err(workbench_failure(&[], 0, 1, source)),
+                };
+                request.install_cell_items(
+                    checked
+                        .items
+                        .iter()
+                        .map(|item| item.source.clone())
+                        .collect(),
+                );
+                match prepared {
+                    PreparedCell::Ready {
                         items,
-                        index,
-                        request.items.len(),
-                        Some(&checked.items),
-                    )));
+                        dependencies,
+                    } => {
+                        _cell_dependencies = Some(dependencies);
+                        prepared_cell = Some(items.into_iter().map(Some).collect::<Vec<_>>());
+                    }
+                    PreparedCell::Rejected { index, diagnostic } => {
+                        let items = (0..=index)
+                            .map(|prior| WorkbenchItemReceipt {
+                                diagnostics: if prior == index {
+                                    diagnostic.diagnostics.clone()
+                                } else {
+                                    Vec::new()
+                                },
+                                index: prior,
+                                kind: None,
+                                span: None,
+                                source_items: Vec::new(),
+                                status: if prior == index {
+                                    WorkbenchItemStatus::Rejected
+                                } else {
+                                    WorkbenchItemStatus::NotRun
+                                },
+                                output: if prior == index {
+                                    diagnostic.output.clone()
+                                } else {
+                                    String::new()
+                                },
+                                warnings: Vec::new(),
+                                installed_bindings: Vec::new(),
+                                operations: Vec::new(),
+                                terminal_transfer: None,
+                                failure_layer: if prior == index {
+                                    Some(WorkbenchFailureLayer::Compile)
+                                } else {
+                                    None
+                                },
+                            })
+                            .collect();
+                        return Ok(KernelStep::Continue(workbench_response(
+                            WorkbenchRunStatus::Rejected,
+                            items,
+                            index,
+                            request.items.len(),
+                            Some(&checked.items),
+                        )));
+                    }
                 }
-            }
-            Some(checked)
-        } else {
-            None
-        };
-        let mut receipts: Vec<WorkbenchItemReceipt> = Vec::new();
-        let mut cell_display_remaining = 8192usize;
-        let mut index = 0;
-        while index < request.items.len() {
-            let source = request.items[index].clone();
-            let mut unit_operations = Vec::new();
-            let mut command_output = Vec::new();
-            // Leave room for a later stop/error receipt without hiding offered command output.
-            let display_budget = if request.tool_call().is_some() {
-                28usize * 1024
+                Some(checked)
             } else {
-                60usize * 1024
+                None
             };
-            let mut display_remaining = display_budget.saturating_sub(
-                receipts
-                    .iter()
-                    .map(|item| item.output.len() + 1)
-                    .sum::<usize>(),
-            );
-            if request.tool_call().is_none() {
-                display_remaining = display_remaining.min(cell_display_remaining);
-            }
-            let block = ParsedBlock {
-                ordinal: index + 1,
-                total: request.items.len(),
-                source,
-            };
-            // The input-unit level of the span tree. Held across this
-            // iteration's two await points by instrumenting the futures
-            // themselves, never by a guard.
-            let unit_span = tracing::info_span!(
-                "unit",
-                index,
-                total = request.items.len(),
-                kind = if request.tool_call().is_some() {
-                    "tool"
+            let mut receipts: Vec<WorkbenchItemReceipt> = Vec::new();
+            let mut cell_display_remaining = 8192usize;
+            let mut index = 0;
+            while index < request.items.len() {
+                let source = request.items[index].clone();
+                let mut unit_operations = Vec::new();
+                let mut command_output = Vec::new();
+                // Leave room for a later stop/error receipt without hiding offered command output.
+                let display_budget = if request.tool_call().is_some() {
+                    28usize * 1024
                 } else {
-                    "cell"
-                },
-            );
-            tracing::info!(
-                target: "exomonad::content",
-                parent: &unit_span,
-                index,
-                source = %block.source,
-                "input unit source"
-            );
-            self.runtime_observation.publish_workbench_posture(
-                crate::ActorWorkbenchPosture::RunningUnit {
-                    input_unit_index: index,
+                    60usize * 1024
+                };
+                let mut display_remaining = display_budget.saturating_sub(
+                    receipts
+                        .iter()
+                        .map(|item| item.output.len() + 1)
+                        .sum::<usize>(),
+                );
+                if request.tool_call().is_none() {
+                    display_remaining = display_remaining.min(cell_display_remaining);
+                }
+                let block = ParsedBlock {
+                    ordinal: index + 1,
                     total: request.items.len(),
-                },
-            );
-            let started =
-                if let (Some(call), Some(dispatch)) = (request.tool_call(), &tool_dispatch) {
+                    source,
+                };
+                // The input-unit level of the span tree. Held across this
+                // iteration's two await points by instrumenting the futures
+                // themselves, never by a guard.
+                let unit_span = tracing::info_span!(
+                    "unit",
+                    index,
+                    total = request.items.len(),
+                    kind = if request.tool_call().is_some() {
+                        "tool"
+                    } else {
+                        "cell"
+                    },
+                );
+                tracing::info!(
+                    target: "exomonad::content",
+                    parent: &unit_span,
+                    index,
+                    source = %block.source,
+                    "input unit source"
+                );
+                self.runtime_observation.publish_workbench_posture(
+                    crate::ActorWorkbenchPosture::RunningUnit {
+                        input_unit_index: index,
+                        total: request.items.len(),
+                    },
+                );
+                let started = if let (Some(call), Some(dispatch)) =
+                    (request.tool_call(), &tool_dispatch)
+                {
                     workbench
                         .begin_tool(
                             context.clone(),
@@ -7215,44 +7250,7 @@ where
                         )),
                     }
                 };
-            let mut step = match started {
-                Ok(step) => step,
-                Err(source) => {
-                    self.abort_incomplete_groups(
-                        kernel,
-                        context.actor,
-                        "Haskell workbench failed during unfold admission",
-                    )
-                    .await;
-                    return Err(workbench_failure(
-                        &receipts,
-                        index,
-                        request.items.len(),
-                        source,
-                    ));
-                }
-            };
-            if let ResidentWorkbenchStep::Running { fragment, outcome } = step {
-                step = match self
-                    .settle_fragment_effects(
-                        kernel,
-                        context,
-                        &workbench,
-                        *fragment,
-                        *outcome,
-                        WorkbenchUnitExecution {
-                            execution: execution.as_ref(),
-                            input_unit_index: index,
-                            total: request.items.len(),
-                            named_tool: request.tool_call().is_some(),
-                            operations: &mut unit_operations,
-                            display_remaining: &mut display_remaining,
-                            command_output: &mut command_output,
-                        },
-                    )
-                    .instrument(unit_span.clone())
-                    .await
-                {
+                let mut step = match started {
                     Ok(step) => step,
                     Err(source) => {
                         self.abort_incomplete_groups(
@@ -7261,154 +7259,255 @@ where
                             "Haskell workbench failed during unfold admission",
                         )
                         .await;
-                        let mut failure = workbench_failure_after_operations(
+                        return Err(workbench_failure(
                             &receipts,
                             index,
                             request.items.len(),
                             source,
-                            unit_operations,
-                        );
-                        if let Some(receipt) = failure
-                            .receipts
-                            .last_mut()
-                            .filter(|receipt| receipt.index == index)
-                        {
-                            receipt.output =
-                                format!("{}\n{}", command_output.join("\n"), receipt.output);
-                        }
-                        return Err(failure);
+                        ));
                     }
                 };
-            }
-            let command_prefix = command_output.join("\n");
-            match step {
-                ResidentWorkbenchStep::Committed {
-                    output,
-                    warnings,
-                    installed_bindings,
-                } => {
-                    let mut warnings = warnings;
-                    let (checked_warnings, diagnostics) = cell_check
-                        .as_ref()
-                        .map(|checked| committed_declaration_warnings(checked, index))
-                        .unwrap_or_default();
-                    warnings.extend(checked_warnings);
-                    let output = crate::workbench_display::resolve_job_binding_placeholder(
-                        output,
-                        &installed_bindings,
-                    );
-                    let output = if request.tool_call().is_some() {
-                        crate::bound_workbench_display(&output, display_remaining)
-                    } else {
-                        output
-                    };
-                    let output = if command_prefix.is_empty() {
-                        output
-                    } else {
-                        format!("{command_prefix}\n{output}")
-                    };
-                    // The tool-result boundary: the result exists and has not
-                    // been returned. A hosted tool call reaches here with its
-                    // own dispatcher; an authored Haskell cell reaches here
-                    // too, under the `haskell` tool name and the same
-                    // installed spec's dispatcher — `status` and
-                    // `reload_agent_spec` and `reload_helpers` are the only committed outcomes
-                    // that never acquire one, so a broken slot can never
-                    // block its own repair.
-                    let hosted_call = request.tool_call().cloned().zip(tool_dispatch.clone());
-                    let cell_call = if hosted_call.is_none() && cell_check.is_some() {
-                        installed_tools
-                            .as_ref()
-                            .and_then(crate::InstalledToolLease::tools)
-                            .map(|tools| {
-                                (
-                                    tidepool_runtime::session::workbench::WorkbenchToolCall {
-                                        name: crate::HASKELL_TOOL.to_string(),
-                                        arguments: serde_json::Value::String(
-                                            request.items[index].clone(),
-                                        ),
-                                    },
-                                    Arc::clone(&tools.dispatch),
-                                )
-                            })
-                    } else {
-                        None
-                    };
-                    let output = match hosted_call.or(cell_call) {
-                        Some((call, dispatch)) => {
-                            match installed_tools
-                                .as_ref()
-                                .and_then(crate::InstalledToolLease::tools)
-                            {
-                                Some(tools) => {
-                                    self.annotate_tool_result(
-                                        kernel, context, &workbench, tools, dispatch, &call, output,
-                                    )
-                                    .await
-                                }
-                                None => output,
-                            }
-                        }
-                        None => output,
-                    };
-                    if let Some(checked) = &cell_check {
-                        let spent = if checked.items[index].verdict.kind
-                            == tidepool_runtime::session::TurnKind::Expr
-                        {
-                            output.chars().count()
-                        } else {
-                            command_prefix.chars().count()
-                        };
-                        cell_display_remaining = cell_display_remaining.saturating_sub(spent);
-                    }
-                    if self.environment.fork_groups.has_ready(context.actor) {
-                        let publication = if self.fork_publication.boundary().is_none() {
-                            self.environment.fork_groups.publish_ready(context.actor)
-                        } else {
-                            Ok(Vec::new())
-                        };
-                        if let Err(source) = publication {
-                            settle_prepared_operations(
-                                &mut unit_operations,
-                                WorkbenchOperationDisposition::Unknown,
-                            );
-                            return Err(workbench_failure_after_operations(
+                if let ResidentWorkbenchStep::Running { fragment, outcome } = step {
+                    step = match self
+                        .settle_fragment_effects(
+                            kernel,
+                            context,
+                            &workbench,
+                            *fragment,
+                            *outcome,
+                            WorkbenchUnitExecution {
+                                execution: execution.as_ref(),
+                                input_unit_index: index,
+                                total: request.items.len(),
+                                named_tool: request.tool_call().is_some(),
+                                operations: &mut unit_operations,
+                                display_remaining: &mut display_remaining,
+                                command_output: &mut command_output,
+                            },
+                        )
+                        .instrument(unit_span.clone())
+                        .await
+                    {
+                        Ok(step) => step,
+                        Err(source) => {
+                            self.abort_incomplete_groups(
+                                kernel,
+                                context.actor,
+                                "Haskell workbench failed during unfold admission",
+                            )
+                            .await;
+                            let mut failure = workbench_failure_after_operations(
                                 &receipts,
                                 index,
                                 request.items.len(),
-                                ResidentActorWorkbenchError::ActorProtocol(source.to_string()),
+                                source,
                                 unit_operations,
-                            ));
+                            );
+                            if let Some(receipt) = failure
+                                .receipts
+                                .last_mut()
+                                .filter(|receipt| receipt.index == index)
+                            {
+                                receipt.output =
+                                    format!("{}\n{}", command_output.join("\n"), receipt.output);
+                            }
+                            return Err(failure);
                         }
-                        settle_prepared_operations(
-                            &mut unit_operations,
-                            WorkbenchOperationDisposition::Committed,
+                    };
+                }
+                let command_prefix = command_output.join("\n");
+                match step {
+                    ResidentWorkbenchStep::Committed {
+                        output,
+                        warnings,
+                        installed_bindings,
+                    } => {
+                        let mut warnings = warnings;
+                        let (checked_warnings, diagnostics) = cell_check
+                            .as_ref()
+                            .map(|checked| committed_declaration_warnings(checked, index))
+                            .unwrap_or_default();
+                        warnings.extend(checked_warnings);
+                        let output = crate::workbench_display::resolve_job_binding_placeholder(
+                            output,
+                            &installed_bindings,
                         );
-                    } else if self.environment.fork_groups.has_incomplete(context.actor) {
-                        self.abort_incomplete_groups(
-                            kernel,
-                            context.actor,
-                            "Haskell input ended before unfold admission committed",
-                        )
-                        .await;
+                        let output = if request.tool_call().is_some() {
+                            crate::bound_workbench_display(&output, display_remaining)
+                        } else {
+                            output
+                        };
+                        let output = if command_prefix.is_empty() {
+                            output
+                        } else {
+                            format!("{command_prefix}\n{output}")
+                        };
+                        // The tool-result boundary: the result exists and has not
+                        // been returned. A hosted tool call reaches here with its
+                        // own dispatcher; an authored Haskell cell reaches here
+                        // too, under the `haskell` tool name and the same
+                        // installed spec's dispatcher — `status` and
+                        // `reload_agent_spec` and `reload_helpers` are the only committed outcomes
+                        // that never acquire one, so a broken slot can never
+                        // block its own repair.
+                        let hosted_call = request.tool_call().cloned().zip(tool_dispatch.clone());
+                        let cell_call = if hosted_call.is_none() && cell_check.is_some() {
+                            installed_tools
+                                .as_ref()
+                                .and_then(crate::InstalledToolLease::tools)
+                                .map(|tools| {
+                                    (
+                                        tidepool_runtime::session::workbench::WorkbenchToolCall {
+                                            name: crate::HASKELL_TOOL.to_string(),
+                                            arguments: serde_json::Value::String(
+                                                request.items[index].clone(),
+                                            ),
+                                        },
+                                        Arc::clone(&tools.dispatch),
+                                    )
+                                })
+                        } else {
+                            None
+                        };
+                        let output = match hosted_call.or(cell_call) {
+                            Some((call, dispatch)) => {
+                                match installed_tools
+                                    .as_ref()
+                                    .and_then(crate::InstalledToolLease::tools)
+                                {
+                                    Some(tools) => {
+                                        self.annotate_tool_result(
+                                            kernel, context, &workbench, tools, dispatch, &call,
+                                            output,
+                                        )
+                                        .await
+                                    }
+                                    None => output,
+                                }
+                            }
+                            None => output,
+                        };
+                        if let Some(checked) = &cell_check {
+                            let spent = if checked.items[index].verdict.kind
+                                == tidepool_runtime::session::TurnKind::Expr
+                            {
+                                output.chars().count()
+                            } else {
+                                command_prefix.chars().count()
+                            };
+                            cell_display_remaining = cell_display_remaining.saturating_sub(spent);
+                        }
+                        if self.environment.fork_groups.has_ready(context.actor) {
+                            let publication = if self.fork_publication.boundary().is_none() {
+                                self.environment.fork_groups.publish_ready(context.actor)
+                            } else {
+                                Ok(Vec::new())
+                            };
+                            if let Err(source) = publication {
+                                settle_prepared_operations(
+                                    &mut unit_operations,
+                                    WorkbenchOperationDisposition::Unknown,
+                                );
+                                return Err(workbench_failure_after_operations(
+                                    &receipts,
+                                    index,
+                                    request.items.len(),
+                                    ResidentActorWorkbenchError::ActorProtocol(source.to_string()),
+                                    unit_operations,
+                                ));
+                            }
+                            settle_prepared_operations(
+                                &mut unit_operations,
+                                WorkbenchOperationDisposition::Committed,
+                            );
+                        } else if self.environment.fork_groups.has_incomplete(context.actor) {
+                            self.abort_incomplete_groups(
+                                kernel,
+                                context.actor,
+                                "Haskell input ended before unfold admission committed",
+                            )
+                            .await;
+                            settle_prepared_operations(
+                                &mut unit_operations,
+                                WorkbenchOperationDisposition::Rejected,
+                            );
+                            receipts.push(WorkbenchItemReceipt {
+                                diagnostics: Vec::new(),
+                                index,
+                                kind: None,
+                                span: None,
+                                source_items: Vec::new(),
+                                status: WorkbenchItemStatus::Rejected,
+                                output:
+                                    "unfold admission ended without committing every fork group"
+                                        .into(),
+                                warnings: Vec::new(),
+                                installed_bindings: Vec::new(),
+                                operations: unit_operations,
+                                terminal_transfer: None,
+                                failure_layer: Some(WorkbenchFailureLayer::Effect),
+                            });
+                            return Ok(KernelStep::Continue(workbench_response(
+                                WorkbenchRunStatus::Rejected,
+                                receipts,
+                                index,
+                                request.items.len(),
+                                cell_check.as_ref().map(|checked| checked.items.as_slice()),
+                            )));
+                        }
+                        receipts.push(WorkbenchItemReceipt {
+                            diagnostics,
+                            index,
+                            kind: None,
+                            span: None,
+                            source_items: Vec::new(),
+                            status: WorkbenchItemStatus::Committed,
+                            output,
+                            warnings,
+                            installed_bindings,
+                            operations: unit_operations,
+                            terminal_transfer: None,
+                            failure_layer: None,
+                        });
+                    }
+                    ResidentWorkbenchStep::Rejected(rejection) => {
+                        let tidepool_runtime::session::CompileRejection {
+                            output,
+                            diagnostics,
+                        } = rejection;
+                        let output = if request.tool_call().is_some() {
+                            crate::bound_workbench_display(&output, display_remaining)
+                        } else {
+                            output
+                        };
+                        let output = if command_prefix.is_empty() {
+                            output
+                        } else {
+                            format!("{command_prefix}\n{output}")
+                        };
                         settle_prepared_operations(
                             &mut unit_operations,
                             WorkbenchOperationDisposition::Rejected,
                         );
+                        self.abort_incomplete_groups(
+                            kernel,
+                            context.actor,
+                            "Haskell input rejected during unfold admission",
+                        )
+                        .await;
                         receipts.push(WorkbenchItemReceipt {
-                            diagnostics: Vec::new(),
+                            diagnostics,
                             index,
                             kind: None,
                             span: None,
                             source_items: Vec::new(),
                             status: WorkbenchItemStatus::Rejected,
-                            output: "unfold admission ended without committing every fork group"
-                                .into(),
+                            output,
                             warnings: Vec::new(),
                             installed_bindings: Vec::new(),
                             operations: unit_operations,
                             terminal_transfer: None,
-                            failure_layer: Some(WorkbenchFailureLayer::Effect),
+                            failure_layer: Some(WorkbenchFailureLayer::Compile),
                         });
                         return Ok(KernelStep::Continue(workbench_response(
                             WorkbenchRunStatus::Rejected,
@@ -7418,191 +7517,129 @@ where
                             cell_check.as_ref().map(|checked| checked.items.as_slice()),
                         )));
                     }
-                    receipts.push(WorkbenchItemReceipt {
-                        diagnostics,
-                        index,
-                        kind: None,
-                        span: None,
-                        source_items: Vec::new(),
-                        status: WorkbenchItemStatus::Committed,
-                        output,
-                        warnings,
-                        installed_bindings,
-                        operations: unit_operations,
-                        terminal_transfer: None,
-                        failure_layer: None,
-                    });
-                }
-                ResidentWorkbenchStep::Rejected(rejection) => {
-                    let tidepool_runtime::session::CompileRejection {
-                        output,
-                        diagnostics,
-                    } = rejection;
-                    let output = if request.tool_call().is_some() {
-                        crate::bound_workbench_display(&output, display_remaining)
-                    } else {
-                        output
-                    };
-                    let output = if command_prefix.is_empty() {
-                        output
-                    } else {
-                        format!("{command_prefix}\n{output}")
-                    };
-                    settle_prepared_operations(
-                        &mut unit_operations,
-                        WorkbenchOperationDisposition::Rejected,
-                    );
-                    self.abort_incomplete_groups(
-                        kernel,
-                        context.actor,
-                        "Haskell input rejected during unfold admission",
-                    )
-                    .await;
-                    receipts.push(WorkbenchItemReceipt {
-                        diagnostics,
-                        index,
-                        kind: None,
-                        span: None,
-                        source_items: Vec::new(),
-                        status: WorkbenchItemStatus::Rejected,
-                        output,
-                        warnings: Vec::new(),
-                        installed_bindings: Vec::new(),
-                        operations: unit_operations,
-                        terminal_transfer: None,
-                        failure_layer: Some(WorkbenchFailureLayer::Compile),
-                    });
-                    return Ok(KernelStep::Continue(workbench_response(
-                        WorkbenchRunStatus::Rejected,
-                        receipts,
-                        index,
-                        request.items.len(),
-                        cell_check.as_ref().map(|checked| checked.items.as_slice()),
-                    )));
-                }
-                ResidentWorkbenchStep::CommandBackgrounded {
-                    job,
-                    binding,
-                    reason,
-                } => {
-                    let reason =
-                        crate::workbench_display::bounded_output(&reason.to_string(), 1024);
-                    let mut output = if request.tool_call().is_some() {
-                        format!(
+                    ResidentWorkbenchStep::CommandBackgrounded {
+                        job,
+                        binding,
+                        reason,
+                    } => {
+                        let reason =
+                            crate::workbench_display::bounded_output(&reason.to_string(), 1024);
+                        let mut output = if request.tool_call().is_some() {
+                            format!(
                             "session_id: {job}\n{reason}. Observation ended; the command remains retained. Poll/send input with write_stdin; read_output navigates output. Later handler effects did not run.\nHaskell binding: {binding} :: Cmd.Job"
                         )
-                    } else {
-                        format!(
+                        } else {
+                            format!(
                             "Retained command · session_id: {job}\n{reason}. Available binding:\n\n{binding} :: Cmd.Job\n\nThe enclosing result was not bound; subsequent statements did not run.\nContinue with: result <- Cmd.await {binding}"
                         )
-                    };
-                    if !command_prefix.is_empty() {
-                        output.push_str(&format!("\n{command_prefix}"));
-                    }
-                    match self
-                        .environment
-                        .commands
-                        .observation(context.actor, &job)
-                        .await
-                    {
-                        Ok(pages) => {
-                            let rendered = crate::workbench_display::bounded_output(
-                                &crate::workbench_display::command_pages(&pages),
-                                display_remaining.saturating_sub(output.len()),
-                            );
-                            if !rendered.is_empty() {
-                                output.push_str(&rendered);
-                                // Explicit pages remain available even when presentation is shortened.
-                                if let Err(error) = self.environment.commands.mark_displayed(
-                                    context.actor,
-                                    &job,
-                                    &pages,
-                                ) {
-                                    output.push_str(&format!("\nOutput cursor unavailable: {error:?}; explicit reads remain non-consuming."));
+                        };
+                        if !command_prefix.is_empty() {
+                            output.push_str(&format!("\n{command_prefix}"));
+                        }
+                        match self
+                            .environment
+                            .commands
+                            .observation(context.actor, &job)
+                            .await
+                        {
+                            Ok(pages) => {
+                                let rendered = crate::workbench_display::bounded_output(
+                                    &crate::workbench_display::command_pages(&pages),
+                                    display_remaining.saturating_sub(output.len()),
+                                );
+                                if !rendered.is_empty() {
+                                    output.push_str(&rendered);
+                                    // Explicit pages remain available even when presentation is shortened.
+                                    if let Err(error) = self.environment.commands.mark_displayed(
+                                        context.actor,
+                                        &job,
+                                        &pages,
+                                    ) {
+                                        output.push_str(&format!("\nOutput cursor unavailable: {error:?}; explicit reads remain non-consuming."));
+                                    }
                                 }
                             }
+                            Err(tidepool_bridge_effects::CommandError::CommandOutputPending) => {
+                                output.push_str("\nNo output yet; streams are starting.")
+                            }
+                            Err(error) => output.push_str(&format!(
+                                "\nOutput unavailable: {error:?}; the same job remains retained."
+                            )),
                         }
-                        Err(tidepool_bridge_effects::CommandError::CommandOutputPending) => {
-                            output.push_str("\nNo output yet; streams are starting.")
-                        }
-                        Err(error) => output.push_str(&format!(
-                            "\nOutput unavailable: {error:?}; the same job remains retained."
-                        )),
+                        receipts.push(WorkbenchItemReceipt {
+                            diagnostics: Vec::new(),
+                            index,
+                            kind: None,
+                            span: None,
+                            source_items: Vec::new(),
+                            status: WorkbenchItemStatus::Stopped,
+                            output,
+                            warnings: Vec::new(),
+                            installed_bindings: vec![binding],
+                            operations: unit_operations,
+                            terminal_transfer: Some(WorkbenchTerminalTransfer::CommandBackgrounded),
+                            failure_layer: None,
+                        });
+                        return Ok(KernelStep::Continue(workbench_response(
+                            WorkbenchRunStatus::Backgrounded,
+                            receipts,
+                            index,
+                            request.items.len(),
+                            cell_check.as_ref().map(|checked| checked.items.as_slice()),
+                        )));
                     }
-                    receipts.push(WorkbenchItemReceipt {
-                        diagnostics: Vec::new(),
-                        index,
-                        kind: None,
-                        span: None,
-                        source_items: Vec::new(),
-                        status: WorkbenchItemStatus::Stopped,
-                        output,
-                        warnings: Vec::new(),
-                        installed_bindings: vec![binding],
-                        operations: unit_operations,
-                        terminal_transfer: Some(WorkbenchTerminalTransfer::CommandBackgrounded),
-                        failure_layer: None,
-                    });
-                    return Ok(KernelStep::Continue(workbench_response(
-                        WorkbenchRunStatus::Backgrounded,
-                        receipts,
-                        index,
-                        request.items.len(),
-                        cell_check.as_ref().map(|checked| checked.items.as_slice()),
-                    )));
-                }
-                ResidentWorkbenchStep::Replied {
-                    request: request_id,
-                    result,
-                    preview,
-                } => {
-                    self.stage_request_reply(kernel, context, request_id, result, preview)
-                        .await
-                        .map_err(|error| {
-                            workbench_failure_after_operations(
-                                &receipts,
-                                index,
-                                request.items.len(),
-                                error,
-                                unit_operations.clone(),
+                    ResidentWorkbenchStep::Replied {
+                        request: request_id,
+                        result,
+                        preview,
+                    } => {
+                        self.stage_request_reply(kernel, context, request_id, result, preview)
+                            .await
+                            .map_err(|error| {
+                                workbench_failure_after_operations(
+                                    &receipts,
+                                    index,
+                                    request.items.len(),
+                                    error,
+                                    unit_operations.clone(),
+                                )
+                            })?;
+                        receipts.push(WorkbenchItemReceipt {
+                            diagnostics: Vec::new(),
+                            index,
+                            kind: None,
+                            span: None,
+                            source_items: Vec::new(),
+                            status: WorkbenchItemStatus::Committed,
+                            output: "Reply submitted.".to_owned(),
+                            warnings: Vec::new(),
+                            installed_bindings: Vec::new(),
+                            operations: unit_operations,
+                            terminal_transfer: Some(WorkbenchTerminalTransfer::ReplyAccepted),
+                            failure_layer: None,
+                        });
+                        return Ok(KernelStep::ContinueLater(workbench_response(
+                            WorkbenchRunStatus::Replied,
+                            receipts,
+                            index + 1,
+                            request.items.len(),
+                            cell_check.as_ref().map(|checked| checked.items.as_slice()),
+                        )));
+                    }
+                    ResidentWorkbenchStep::CancellationAcknowledged {
+                        request: request_id,
+                    } => {
+                        if self.environment.fork_groups.has_incomplete(context.actor) {
+                            self.abort_incomplete_groups(
+                                kernel,
+                                context.actor,
+                                "request cancellation interrupted unfold admission",
                             )
-                        })?;
-                    receipts.push(WorkbenchItemReceipt {
-                        diagnostics: Vec::new(),
-                        index,
-                        kind: None,
-                        span: None,
-                        source_items: Vec::new(),
-                        status: WorkbenchItemStatus::Committed,
-                        output: "Reply submitted.".to_owned(),
-                        warnings: Vec::new(),
-                        installed_bindings: Vec::new(),
-                        operations: unit_operations,
-                        terminal_transfer: Some(WorkbenchTerminalTransfer::ReplyAccepted),
-                        failure_layer: None,
-                    });
-                    return Ok(KernelStep::ContinueLater(workbench_response(
-                        WorkbenchRunStatus::Replied,
-                        receipts,
-                        index + 1,
-                        request.items.len(),
-                        cell_check.as_ref().map(|checked| checked.items.as_slice()),
-                    )));
-                }
-                ResidentWorkbenchStep::CancellationAcknowledged {
-                    request: request_id,
-                } => {
-                    if self.environment.fork_groups.has_incomplete(context.actor) {
-                        self.abort_incomplete_groups(
-                            kernel,
-                            context.actor,
-                            "request cancellation interrupted unfold admission",
-                        )
-                        .await;
-                        self.environment
-                            .requests
-                            .rollback_cancellation_acknowledgement(request_id);
-                        return Err(workbench_failure_after_operations(
+                            .await;
+                            self.environment
+                                .requests
+                                .rollback_cancellation_acknowledgement(request_id);
+                            return Err(workbench_failure_after_operations(
                             &receipts,
                             index,
                             request.items.len(),
@@ -7612,97 +7649,71 @@ where
                             ),
                             unit_operations,
                         ));
-                    }
-                    if self.pending_program.is_some()
-                        || self.pending_reply.is_some()
-                        || self.pending_cancellation.is_some()
-                    {
-                        self.environment
-                            .requests
-                            .rollback_cancellation_acknowledgement(request_id);
-                        return Err(workbench_failure_after_operations(
-                            &receipts,
-                            index,
-                            request.items.len(),
-                            ResidentActorWorkbenchError::ActorProtocol(
-                                "actor settled a second request before resuming the first".into(),
-                            ),
-                            unit_operations,
-                        ));
-                    }
-                    let awaiting =
-                        match std::mem::replace(&mut self.standing, ResidentStanding::Boot) {
-                            ResidentStanding::Interactive(awaiting)
-                                if awaiting.request.request == request_id =>
-                            {
-                                tracing::info!(
-                                    actor = ?context.actor,
-                                    from = "interactive",
-                                    request = ?request_id,
-                                    to = "boot",
-                                    "resident actor standing transition"
-                                );
-                                awaiting
-                            }
-                            ResidentStanding::Interactive(awaiting) => {
-                                self.standing = ResidentStanding::Interactive(awaiting);
-                                self.environment
-                                    .requests
-                                    .rollback_cancellation_acknowledgement(request_id);
-                                return Err(workbench_failure_after_operations(
-                                    &receipts,
-                                    index,
-                                    request.items.len(),
-                                    ResidentActorWorkbenchError::ActorProtocol(
-                                        "cancellation did not match the active request".into(),
-                                    ),
-                                    unit_operations,
-                                ));
-                            }
-                            standing => {
-                                self.standing = standing;
-                                self.environment
-                                    .requests
-                                    .rollback_cancellation_acknowledgement(request_id);
-                                return Err(workbench_failure_after_operations(
-                                    &receipts,
-                                    index,
-                                    request.items.len(),
-                                    ResidentActorWorkbenchError::ActorProtocol(
-                                        "cancellation lost its active request".into(),
-                                    ),
-                                    unit_operations,
-                                ));
-                            }
-                        };
-                    let Some(suspended) = self.suspended_cast.take() else {
-                        self.standing = ResidentStanding::Interactive(awaiting);
-                        self.environment
-                            .requests
-                            .rollback_cancellation_acknowledgement(request_id);
-                        return Err(workbench_failure_after_operations(
-                            &receipts,
-                            index,
-                            request.items.len(),
-                            ResidentActorWorkbenchError::ActorProtocol(
-                                "cancellation lost its mailbox continuation".into(),
-                            ),
-                            unit_operations,
-                        ));
-                    };
-                    let outcome = match self
-                        .environment
-                        .runner
-                        .abandon_cast_handler(
-                            context.clone(),
-                            suspended.receiver_continuation.clone(),
-                            suspended.handler_realm,
-                        )
-                        .await
-                    {
-                        Ok(outcome) => outcome,
-                        Err(error) => {
-                            self.suspended_cast = Some(suspended);
+                        }
+                        if self.pending_program.is_some()
+                            || self.pending_reply.is_some()
+                            || self.pending_cancellation.is_some()
+                        {
+                            self.environment
+                                .requests
+                                .rollback_cancellation_acknowledgement(request_id);
+                            return Err(workbench_failure_after_operations(
+                                &receipts,
+                                index,
+                                request.items.len(),
+                                ResidentActorWorkbenchError::ActorProtocol(
+                                    "actor settled a second request before resuming the first"
+                                        .into(),
+                                ),
+                                unit_operations,
+                            ));
+                        }
+                        let awaiting =
+                            match std::mem::replace(&mut self.standing, ResidentStanding::Boot) {
+                                ResidentStanding::Interactive(awaiting)
+                                    if awaiting.request.request == request_id =>
+                                {
+                                    tracing::info!(
+                                        actor = ?context.actor,
+                                        from = "interactive",
+                                        request = ?request_id,
+                                        to = "boot",
+                                        "resident actor standing transition"
+                                    );
+                                    awaiting
+                                }
+                                ResidentStanding::Interactive(awaiting) => {
+                                    self.standing = ResidentStanding::Interactive(awaiting);
+                                    self.environment
+                                        .requests
+                                        .rollback_cancellation_acknowledgement(request_id);
+                                    return Err(workbench_failure_after_operations(
+                                        &receipts,
+                                        index,
+                                        request.items.len(),
+                                        ResidentActorWorkbenchError::ActorProtocol(
+                                            "cancellation did not match the active request".into(),
+                                        ),
+                                        unit_operations,
+                                    ));
+                                }
+                                standing => {
+                                    self.standing = standing;
+                                    self.environment
+                                        .requests
+                                        .rollback_cancellation_acknowledgement(request_id);
+                                    return Err(workbench_failure_after_operations(
+                                        &receipts,
+                                        index,
+                                        request.items.len(),
+                                        ResidentActorWorkbenchError::ActorProtocol(
+                                            "cancellation lost its active request".into(),
+                                        ),
+                                        unit_operations,
+                                    ));
+                                }
+                            };
+                        let Some(suspended) = self.suspended_cast.take() else {
                             self.standing = ResidentStanding::Interactive(awaiting);
                             self.environment
                                 .requests
@@ -7711,54 +7722,82 @@ where
                                 &receipts,
                                 index,
                                 request.items.len(),
-                                error,
+                                ResidentActorWorkbenchError::ActorProtocol(
+                                    "cancellation lost its mailbox continuation".into(),
+                                ),
                                 unit_operations,
                             ));
-                        }
-                    };
-                    drop(awaiting);
-                    // The cancellation landed: this request no longer owes
-                    // `respond` bindings.
-                    self.outstanding_interactive = None;
-                    self.pending_program = Some(outcome);
-                    self.pending_cancellation = Some(request_id);
-                    receipts.push(WorkbenchItemReceipt {
-                        diagnostics: Vec::new(),
-                        index,
-                        kind: None,
-                        span: None,
-                        source_items: Vec::new(),
-                        status: WorkbenchItemStatus::Committed,
-                        output: String::new(),
-                        warnings: Vec::new(),
-                        installed_bindings: Vec::new(),
-                        operations: unit_operations,
-                        terminal_transfer: Some(
-                            WorkbenchTerminalTransfer::CancellationAcknowledged,
-                        ),
-                        failure_layer: None,
-                    });
-                    return Ok(KernelStep::ContinueLater(workbench_response(
-                        WorkbenchRunStatus::RequestCancelled,
-                        receipts,
-                        index + 1,
-                        request.items.len(),
-                        cell_check.as_ref().map(|checked| checked.items.as_slice()),
-                    )));
+                        };
+                        let outcome = match self
+                            .environment
+                            .runner
+                            .abandon_cast_handler(
+                                context.clone(),
+                                suspended.receiver_continuation.clone(),
+                                suspended.handler_realm,
+                            )
+                            .await
+                        {
+                            Ok(outcome) => outcome,
+                            Err(error) => {
+                                self.suspended_cast = Some(suspended);
+                                self.standing = ResidentStanding::Interactive(awaiting);
+                                self.environment
+                                    .requests
+                                    .rollback_cancellation_acknowledgement(request_id);
+                                return Err(workbench_failure_after_operations(
+                                    &receipts,
+                                    index,
+                                    request.items.len(),
+                                    error,
+                                    unit_operations,
+                                ));
+                            }
+                        };
+                        drop(awaiting);
+                        // The cancellation landed: this request no longer owes
+                        // `respond` bindings.
+                        self.outstanding_interactive = None;
+                        self.pending_program = Some(outcome);
+                        self.pending_cancellation = Some(request_id);
+                        receipts.push(WorkbenchItemReceipt {
+                            diagnostics: Vec::new(),
+                            index,
+                            kind: None,
+                            span: None,
+                            source_items: Vec::new(),
+                            status: WorkbenchItemStatus::Committed,
+                            output: String::new(),
+                            warnings: Vec::new(),
+                            installed_bindings: Vec::new(),
+                            operations: unit_operations,
+                            terminal_transfer: Some(
+                                WorkbenchTerminalTransfer::CancellationAcknowledged,
+                            ),
+                            failure_layer: None,
+                        });
+                        return Ok(KernelStep::ContinueLater(workbench_response(
+                            WorkbenchRunStatus::RequestCancelled,
+                            receipts,
+                            index + 1,
+                            request.items.len(),
+                            cell_check.as_ref().map(|checked| checked.items.as_slice()),
+                        )));
+                    }
+                    ResidentWorkbenchStep::Running { .. } => {
+                        unreachable!("running workbench steps are settled above")
+                    }
                 }
-                ResidentWorkbenchStep::Running { .. } => {
-                    unreachable!("running workbench steps are settled above")
-                }
+                index += 1;
             }
-            index += 1;
-        }
-        Ok(KernelStep::Continue(workbench_response(
-            WorkbenchRunStatus::Committed,
-            receipts,
-            request.items.len(),
-            request.items.len(),
-            cell_check.as_ref().map(|checked| checked.items.as_slice()),
-        )))
+            Ok(KernelStep::Continue(workbench_response(
+                WorkbenchRunStatus::Committed,
+                receipts,
+                request.items.len(),
+                request.items.len(),
+                cell_check.as_ref().map(|checked| checked.items.as_slice()),
+            )))
+        })
     }
 
     async fn abort_unpublished_groups(

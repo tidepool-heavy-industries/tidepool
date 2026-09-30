@@ -1116,7 +1116,7 @@ where
                     state
                         .deferred_mailbox
                         .iter()
-                        .position(|message| matches!(message, KernelMessage::Shutdown { .. }))
+                        .position(|message| deferred_control(message).is_some())
                         .and_then(|index| state.deferred_mailbox.remove(index))
                 } else {
                     None
@@ -1907,6 +1907,25 @@ fn retain_unconfirmed_exit(terminal: &RetainedActorExit, actor: ActorRef, detail
     }
 }
 
+/// Settlement of an admitted execution does not require a resident receiver.
+/// These controls remain sequential with the workbench and retain queue order.
+enum DeferredControl {
+    HostedSettlement,
+    Shutdown,
+}
+
+fn deferred_control(message: &KernelMessage) -> Option<DeferredControl> {
+    match message {
+        KernelMessage::ToolCompleted { .. }
+        | KernelMessage::ReconcileWorkbenchBoundary { .. }
+        | KernelMessage::ReconcileWorkbenchCancellation { .. } => {
+            Some(DeferredControl::HostedSettlement)
+        }
+        KernelMessage::Shutdown { .. } => Some(DeferredControl::Shutdown),
+        _ => None,
+    }
+}
+
 fn schedule_deferred_mailbox<B>(
     myself: &RactorRef<KernelMessage>,
     state: &mut LocalActorState<B>,
@@ -1914,14 +1933,14 @@ fn schedule_deferred_mailbox<B>(
 where
     B: KernelBehavior,
 {
-    let runnable_shutdown = !state.behavior.replacement_staged()
+    let runnable_control = !state.behavior.replacement_staged()
         && state
             .deferred_mailbox
             .iter()
-            .any(|message| matches!(message, KernelMessage::Shutdown { .. }));
+            .any(|message| deferred_control(message).is_some());
     if state.replacement.is_none()
         && state.terminal.get().is_none()
-        && (state.behavior.accepts_mailbox() || runnable_shutdown)
+        && (state.behavior.accepts_mailbox() || runnable_control)
         && !state.deferred_mailbox.is_empty()
         && !state.mailbox_drain_scheduled
     {
@@ -3239,6 +3258,110 @@ mod tests {
                 "shutdown"
             ]
         );
+    }
+
+    async fn assert_settlement_controls_drain_with_parked_mailbox(owned: bool) {
+        let mut fixture = behavior(false);
+        fixture.behavior.mailbox_ready = false;
+        fixture.behavior.owned_workbench = owned;
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        fixture.behavior.workbench_gate = Some((Arc::clone(&entered), Arc::clone(&release)));
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        let workbench = send_workbench(&actor);
+        entered.notified().await;
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let (call_tx, mut call_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::Call {
+                caller: ActorRef::first(crate::ActorId(99)),
+                ancestry: crate::CallAncestry::begin(ActorRef::first(crate::ActorId(99))),
+                request: MailboxValue::probe(SessionId(1), Arc::clone(&dropped)),
+                reply: call_tx.into(),
+            })
+            .unwrap();
+        let boundary = tidepool_runtime::session::WorkbenchForkBoundary {
+            thread_id: "parked-thread".into(),
+            call_id: "completed-call".into(),
+        };
+        let (completed_tx, mut completed_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::ToolCompleted {
+                boundary: boundary.clone(),
+                reply: completed_tx.into(),
+            })
+            .unwrap();
+        let (reconcile_tx, reconcile_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::ReconcileWorkbenchBoundary {
+                boundary,
+                reply: reconcile_tx.into(),
+            })
+            .unwrap();
+        let execution = tidepool_runtime::session::WorkbenchExecutionId::from_digest([78; 16]);
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::ReconcileWorkbenchCancellation {
+                invocation: None,
+                execution: execution.clone(),
+                reply: cancel_tx.into(),
+            })
+            .unwrap();
+        // A subsequent seal acknowledges that the earlier controls entered
+        // the pending workbench queue before its task is released.
+        let (seal_tx, seal_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::SealHostedWork {
+                reply: seal_tx.into(),
+            })
+            .unwrap();
+        seal_rx.await.unwrap();
+        assert!(matches!(
+            completed_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(&*fixture.calls.lock(), &["workbench-start"]);
+        release.notify_one();
+        assert!(workbench.await.unwrap().is_ok());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            assert!(completed_rx.await.unwrap().is_ok());
+            assert!(matches!(reconcile_rx.await.unwrap(), crate::WorkbenchBoundaryReconciliation::Pending));
+            assert!(matches!(cancel_rx.await.unwrap(), crate::WorkbenchCancellationOutcome::UnknownEvaluation { execution: found } if found == execution));
+        }).await.expect("settlement controls must drain without a resident receiver");
+        assert!(matches!(
+            call_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            &*fixture.calls.lock(),
+            &["workbench-start", "workbench-end", "tool-completed"]
+        );
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "done".into(),
+            })
+            .await
+            .unwrap();
+        task.await.unwrap();
+        assert!(call_rx.await.is_err());
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn sequential_workbench_completion_drains_settlement_with_parked_mailbox() {
+        assert_settlement_controls_drain_with_parked_mailbox(false).await;
+    }
+
+    #[tokio::test]
+    async fn owned_workbench_completion_drains_settlement_with_parked_mailbox() {
+        assert_settlement_controls_drain_with_parked_mailbox(true).await;
     }
 
     #[tokio::test]

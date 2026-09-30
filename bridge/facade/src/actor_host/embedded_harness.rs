@@ -9,9 +9,9 @@ use std::{
 use parking_lot::Mutex as ParkingMutex;
 
 use exomonad_actor::{
-    ActorAdmissionLease, ActorExitKind, ActorTerminal, HostedCheckpointAttachment,
-    HostedCheckpointCapture, HostedCheckpointCaptureError, LocalActorRef, ResidentToolError,
-    WorkbenchCancellationOutcome,
+    ActorAdmissionLease, ActorExitKind, ActorRef, ActorTerminal, CheckpointLease,
+    HostedCheckpointAttachment, HostedCheckpointCapture, HostedCheckpointCaptureError,
+    LocalActorRef, ResidentToolError, WorkbenchCancellationOutcome,
 };
 use exomonad_tool::{ToolArguments, ToolInvocationContext};
 use harness::{
@@ -93,6 +93,49 @@ impl EmbeddedHarnessRuntime {
             conversation,
             incoming,
             round_control,
+        })
+    }
+
+    pub(super) fn attach_checkpoint(
+        &self,
+        identity: HostIdentity,
+        actor: LocalActorRef,
+        installation: Arc<EmbeddedPolicyInstallation>,
+        lease: &CheckpointLease,
+        captured: Arc<EmbeddedHostedCheckpoint>,
+    ) -> Result<EmbeddedConversation, EmbeddedError> {
+        if identity.run != self.run {
+            return Err(EmbeddedError::Binding(
+                "embedded checkpoint child belongs to another run".into(),
+            ));
+        }
+        if captured.issuer != lease.issuer {
+            return Err(EmbeddedError::Binding(
+                "embedded checkpoint issuer mismatch".into(),
+            ));
+        }
+        let parent = captured.checkpoint.origin().clone();
+        let (wakes, incoming) = mpsc::unbounded_channel();
+        let host = Arc::new(EmbeddedHostActor::new(
+            identity,
+            actor,
+            installation,
+            self.store.clone(),
+            wakes,
+        )?);
+        // The embedded root also records an empty contract. This installation
+        // has no authoritative checkout revision to record for the child.
+        let conversation = Arc::new(Conversation::from_checkpoint(
+            self.store.clone(),
+            host,
+            &parent,
+            &captured.checkpoint,
+            &json!({}),
+            &json!({}),
+        )?);
+        Ok(EmbeddedConversation {
+            conversation,
+            incoming,
         })
     }
 
@@ -233,6 +276,25 @@ impl HostActor for EmbeddedHostActor {
         &self.identity
     }
 
+    async fn output_committed(&self, operation: &OperationId) -> Result<(), String> {
+        let expected = ConversationIdentity::Embedded {
+            run: self.identity.run.clone(),
+            actor: self.identity.actor.clone(),
+            incarnation: self.identity.incarnation.clone(),
+        };
+        if operation.origin != expected {
+            return Err("foreign embedded output acknowledgment".into());
+        }
+        self.installation
+            .complete(tidepool_runtime::session::WorkbenchForkBoundary {
+                thread_id: format!("{}:{}", self.identity.run, self.identity.actor.0),
+                call_id: operation.call.0.clone(),
+            })
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
     fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
         self.actor
             .admit_transaction()
@@ -260,6 +322,7 @@ impl HostActor for EmbeddedHostActor {
         let tools = snapshot.tools().to_vec();
         let dispatcher: Arc<dyn Provider> = Arc::new(EmbeddedDispatcher {
             identity: self.identity.clone(),
+            issuer: self.actor.identity(),
             snapshot,
             store: self.store.clone(),
         });
@@ -295,19 +358,22 @@ impl HostActor for EmbeddedHostActor {
 #[derive(Clone)]
 struct EmbeddedDispatcher {
     identity: HostIdentity,
+    issuer: ActorRef,
     snapshot: Arc<EmbeddedPolicySnapshot>,
     store: Arc<Store>,
 }
 
-/// Host-owned durable half of a Haskell checkpoint. The actor retains this
-/// value on its existing checkpoint lease and revokes it with that lease.
+/// Host-owned durable half of a Haskell checkpoint. Registry release refuses
+/// new children; an admitted child keeps its captured attachment for install.
 pub(super) struct EmbeddedHostedCheckpoint {
+    issuer: ActorRef,
     pub(super) checkpoint: harness::checkpoint::Checkpoint<()>,
 }
 
 struct EmbeddedCheckpointCapture {
     store: Arc<Store>,
     identity: HostIdentity,
+    issuer: ActorRef,
     operation: OperationId,
     thread_id: String,
 }
@@ -351,7 +417,10 @@ impl HostedCheckpointCapture for EmbeddedCheckpointCapture {
             )
             .map_err(|_| HostedCheckpointCaptureError::CaptureFailed)?;
         Ok(HostedCheckpointAttachment::new(Arc::new(
-            EmbeddedHostedCheckpoint { checkpoint },
+            EmbeddedHostedCheckpoint {
+                issuer: self.issuer,
+                checkpoint,
+            },
         )))
     }
 }
@@ -398,6 +467,7 @@ impl EmbeddedDispatcher {
             Arc::new(EmbeddedCheckpointCapture {
                 store: self.store.clone(),
                 identity: self.identity.clone(),
+                issuer: self.issuer,
                 operation: operation.clone(),
                 thread_id: invocation_context.thread_id.clone(),
             }) as Arc<dyn HostedCheckpointCapture>

@@ -172,6 +172,69 @@ pub(super) async fn attach_actor(
     })
 }
 
+pub(super) async fn attach_checkpoint_actor(
+    runtime: &EmbeddedHarnessRuntime,
+    run_root: &Path,
+    installation: LocalResidentInstallation,
+    initial_input: Option<String>,
+) -> Result<EmbeddedActor, String> {
+    let actor = installation.actor.identity();
+    let lease = installation
+        .checkpoint
+        .as_ref()
+        .ok_or("embedded child requires a checkpoint")?;
+    if installation.context_parent != Some(lease.issuer) {
+        return Err("embedded child context parent does not match checkpoint issuer".into());
+    }
+    let captured = installation
+        .checkpoint_attachment
+        .as_ref()
+        .and_then(|attachment| {
+            attachment.downcast::<super::embedded_harness::EmbeddedHostedCheckpoint>()
+        })
+        .ok_or("embedded child requires its admitted hosted checkpoint attachment")?;
+    let path = AgentPath(format!(
+        "{}/a{}_i{}",
+        captured.checkpoint.origin().0,
+        actor.id.0,
+        actor.incarnation.0,
+    ));
+    let identity = harness::embedding::HostIdentity {
+        run: super::runtime_namespace(run_root),
+        actor: path,
+        incarnation: actor.incarnation.0.to_string(),
+    };
+    let policy = Arc::new(EmbeddedPolicyInstallation::from_installation(&installation));
+    let embedded = runtime
+        .attach_checkpoint(
+            identity,
+            installation.actor.clone(),
+            policy,
+            lease,
+            captured,
+        )
+        .map_err(|error| error.to_string())?;
+    if let Some(input) = initial_input {
+        embedded
+            .conversation
+            .input(
+                &format!("launch:{}:{}", actor.id.0, actor.incarnation.0),
+                "operator",
+                &input,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let conversation = Arc::clone(&embedded.conversation);
+    let (cancel, cancellation) = watch::channel(false);
+    Ok(EmbeddedActor {
+        conversation,
+        driver: embedded,
+        cancellation: cancel,
+        cancellation_rx: cancellation,
+    })
+}
+
 impl Drop for EmbeddedService {
     fn drop(&mut self) {
         if let Some(server) = &self.server {
