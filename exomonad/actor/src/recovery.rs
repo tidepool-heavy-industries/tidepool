@@ -908,27 +908,84 @@ mod tests {
         let journal = ActorRecoveryJournal::open(run.path().join("actors.jsonl")).unwrap();
         let binding = run.path().join("binding.json");
         let path = tidepool_repr::ActorPath::parse("root/recovered").unwrap();
-        let root = descriptor("root").with_effective_role(EffectiveRole::root()).with_actor_path(path.clone());
-        let old = ActorRef { id: ActorId(33), incarnation: Incarnation(1) };
-        let next = ActorRef { id: old.id, incarnation: Incarnation(2) };
-        let placement = RootRecoveryPlacement::new(next,
-            tidepool_runtime::session::RecoveryPublicOwner::new(&path, 2).unwrap(), root.placement());
+        let root = descriptor("root")
+            .with_effective_role(EffectiveRole::root())
+            .with_actor_path(path.clone());
+        let old = ActorRef {
+            id: ActorId(33),
+            incarnation: Incarnation(1),
+        };
+        let next = ActorRef {
+            id: old.id,
+            incarnation: Incarnation(2),
+        };
+        let placement = RootRecoveryPlacement::new(
+            next,
+            tidepool_runtime::session::RecoveryPublicOwner::new(&path, 2).unwrap(),
+            root.placement(),
+        );
         journal.admit(old, &root, &[]).unwrap();
-        journal.prepare_application(old, binding.clone(), Some("source".into())).unwrap();
-        journal.bind_application(old, "conversation".into()).unwrap();
+        journal
+            .prepare_application(old, binding.clone(), Some("source".into()))
+            .unwrap();
+        journal
+            .bind_application(old, "conversation".into())
+            .unwrap();
         journal.admit(next, &root, &[]).unwrap();
-        assert!(journal.certify_root_successor(old, placement.clone(), Some("source"), &binding).is_err());
-        journal.prepare_application(next, binding.clone(), Some("source".into())).unwrap();
-        let proof = journal.certify_root_successor(old, placement.clone(), Some("source"), &binding).unwrap();
+        assert!(journal
+            .certify_root_successor(old, placement.clone(), Some("source"), &binding)
+            .is_err());
+        journal
+            .prepare_application(next, binding.clone(), Some("source".into()))
+            .unwrap();
+        let proof = journal
+            .certify_root_successor(old, placement.clone(), Some("source"), &binding)
+            .unwrap();
         let old_owner = tidepool_runtime::session::RecoveryPublicOwner::new(&path, 1).unwrap();
-        assert!(proof.validate_successor(run.path(), &old_owner, placement.owner(), SessionId(1), ScopeId(1)).unwrap());
-        assert!(!proof.validate_successor(run.path(), &old_owner, placement.owner(), SessionId(9), ScopeId(1)).unwrap());
+        assert!(proof
+            .validate_successor(
+                run.path(),
+                &old_owner,
+                placement.owner(),
+                SessionId(1),
+                ScopeId(1)
+            )
+            .unwrap());
+        assert!(!proof
+            .validate_successor(
+                run.path(),
+                &old_owner,
+                placement.owner(),
+                SessionId(9),
+                ScopeId(1)
+            )
+            .unwrap());
         let foreign = tempfile::tempdir().unwrap();
-        assert!(!proof.validate_successor(foreign.path(), &old_owner, placement.owner(), SessionId(1), ScopeId(1)).unwrap());
-        assert!(journal.certify_root_successor(old, placement.clone(), Some("different-source"), &binding).is_err());
-        let newer = ActorRef { id: old.id, incarnation: Incarnation(3) };
+        assert!(!proof
+            .validate_successor(
+                foreign.path(),
+                &old_owner,
+                placement.owner(),
+                SessionId(1),
+                ScopeId(1)
+            )
+            .unwrap());
+        assert!(journal
+            .certify_root_successor(old, placement.clone(), Some("different-source"), &binding)
+            .is_err());
+        let newer = ActorRef {
+            id: old.id,
+            incarnation: Incarnation(3),
+        };
         journal.admit(newer, &root, &[]).unwrap();
-        assert!(proof.validate_successor(run.path(), &old_owner, placement.owner(), SessionId(1), ScopeId(1)).is_err());
+        assert!(proof
+            .validate_successor(
+                run.path(),
+                &old_owner,
+                placement.owner(),
+                SessionId(1),
+                ScopeId(1)
+            )
+            .is_err());
     }
-
 }

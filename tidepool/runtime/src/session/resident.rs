@@ -2050,6 +2050,25 @@ where
         self.state.bind_durable_public_scope(owner, scope)
     }
 
+    pub fn initialize_durable_public_scope(
+        &mut self,
+        owner: super::RecoveryPublicOwner,
+        scope: ScopeId,
+    ) -> Result<super::PublicManifestCommit, SessionError> {
+        self.state.initialize_durable_public_scope(owner, scope)
+    }
+
+    pub fn transfer_recovered_public_owner(
+        &mut self,
+        predecessor: &super::RecoveryPublicOwner,
+        successor: super::RecoveryPublicOwner,
+        scope: ScopeId,
+        authority: Arc<dyn super::RecoverySuccessorAuthority>,
+    ) -> Result<super::PublicManifestCommit, SessionError> {
+        self.state
+            .transfer_recovered_public_owner(predecessor, successor, scope, authority)
+    }
+
     pub fn confirm_publication_durability(&mut self) -> Result<(), SessionError> {
         if !self.state.has_lib() {
             return Err(SessionError::MissingDeclarationLibrary);

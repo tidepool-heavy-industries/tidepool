@@ -460,21 +460,50 @@ fn initial_public_owner_survives_restart_before_first_cell() {
     let durable = tempfile::tempdir().unwrap();
     let source = tempfile::tempdir().unwrap();
     let manifest = persist_empty_public(durable.path(), source.path(), 4430);
-    let read = recovery::read_v2(&manifest, durable.path()).unwrap().unwrap();
+    let read = recovery::read_v2(&manifest, durable.path())
+        .unwrap()
+        .unwrap();
     assert!(read.graph.nodes.is_empty());
     assert_eq!(read.graph.high_water, Generation(0));
     assert_eq!(read.graph.public_surfaces[0].owner, owner(1));
     let next_source = tempfile::tempdir().unwrap();
     let run = run_owner(durable.path());
-    let mut lib = SessionLib::open(SessionId(4431), next_source.path(), ModuleEnv::standalone_default()).unwrap();
-    lib.attach_owned_recovery_graph_v3(&manifest, run.clone()).unwrap();
+    let mut lib = SessionLib::open(
+        SessionId(4431),
+        next_source.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap();
+    lib.attach_owned_recovery_graph_v3(&manifest, run.clone())
+        .unwrap();
     let mut session = PersistentSession::new(Some(lib), 1024);
     let target = session.mint_isolated_scope();
-    assert_eq!(session.transfer_recovered_public_owner(&owner(1), owner(2), target,
-        Arc::new(TestSuccessor { run, session: SessionId(4431), target })).unwrap(), PublicManifestCommit::Durable);
-    let read = recovery::read_v2(&manifest, durable.path()).unwrap().unwrap();
+    assert_eq!(
+        session
+            .transfer_recovered_public_owner(
+                &owner(1),
+                owner(2),
+                target,
+                Arc::new(TestSuccessor {
+                    run,
+                    session: SessionId(4431),
+                    target
+                })
+            )
+            .unwrap(),
+        PublicManifestCommit::Durable
+    );
+    let read = recovery::read_v2(&manifest, durable.path())
+        .unwrap()
+        .unwrap();
     assert!(read.graph.nodes.is_empty());
     assert_eq!(read.graph.high_water, Generation(0));
     assert_eq!(read.graph.public_surfaces[0].owner, owner(2));
-    assert_eq!(session.public_visibility_snapshot_in(target).unwrap().declaration_tip, Generation(0));
+    assert_eq!(
+        session
+            .public_visibility_snapshot_in(target)
+            .unwrap()
+            .declaration_tip,
+        Generation(0)
+    );
 }

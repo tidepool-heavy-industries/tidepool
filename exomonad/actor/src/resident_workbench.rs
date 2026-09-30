@@ -6762,6 +6762,49 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    /// Establish the exact durable public surface before root readiness.
+    pub(crate) async fn bind_durable_root_public_owner(
+        &self,
+        context: crate::ActorSessionContext,
+        owner: tidepool_runtime::session::RecoveryPublicOwner,
+    ) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, context, _| {
+                session
+                    .initialize_durable_public_scope(owner, context.placement.lexical_scope)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })
+            })
+            .await
+    }
+
+    /// Transfer only the journal-certified durable predecessor to this exact
+    /// newly admitted placement. Runtime fences all pre-transfer offers.
+    pub(crate) async fn transfer_recovered_root_public_owner(
+        &self,
+        context: crate::ActorSessionContext,
+        predecessor: &tidepool_runtime::session::RecoveryPublicOwner,
+        successor: tidepool_runtime::session::RecoveryPublicOwner,
+        authority: Arc<dyn tidepool_runtime::session::RecoverySuccessorAuthority>,
+    ) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
+        let predecessor = predecessor.clone();
+        self.access
+            .with_machine(context, move |session, context, _| {
+                session
+                    .transfer_recovered_public_owner(
+                        &predecessor,
+                        successor,
+                        context.placement.lexical_scope,
+                        authority,
+                    )
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })
+            })
+            .await
+    }
+
     /// Admit one cell's independent lexical write domain and its exact public
     /// baseline in the same machine checkout. Every resumed item keeps this
     /// private scope; publication later compares the captured public view.
