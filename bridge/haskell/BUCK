@@ -257,6 +257,12 @@ export_file(
 )
 
 export_file(
+    name = "session_source",
+    src = "src/Tidepool/Session.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "timing_source",
     src = "src/Tidepool/Timing.hs",
     visibility = ["PUBLIC"],

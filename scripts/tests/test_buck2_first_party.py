@@ -453,13 +453,21 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("source-ambiguous Reindeer target", result.stderr)
 
-    def test_runtime_and_proc_macro_support_leaf_generate_as_native_library_targets(self):
+    def test_runtime_tests_separate_native_admission_from_compiler_resources(self):
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
         runtime, groups = self.groups("tidepool/runtime")
         self.assertIn('name = "tidepool_runtime"', runtime)
-        self.assertNotIn("tidepool_runtime_unit_tests", runtime)
         self.assertNotIn("bridge/haskell/src/Tidepool/Session.hs", groups["tidepool_runtime_sources"].values())
+        self.assertEqual(
+            groups["tidepool_runtime_unit_tests_sources"]["//bridge/haskell:session_source"],
+            "bridge/haskell/src/Tidepool/Session.hs",
+        )
+        self.assertIn('tidepool_rust_binary(\n    name = "tidepool_runtime_unit_tests",', runtime)
+        self.assertIn('binary = ":tidepool_runtime_unit_tests"', runtime)
+        self.assertIn("expected_count = 3", runtime)
+        for heavyweight in ("haskell_worker", "TIDEPOOL_EXTRACT", "trybuild", "//web:"):
+            self.assertNotIn(heavyweight, runtime)
         derive, _ = self.groups("tidepool/bridge-derive")
         self.assertIn("proc_macro = True", derive)
 

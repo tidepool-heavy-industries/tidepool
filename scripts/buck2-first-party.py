@@ -41,7 +41,7 @@ arguments.add_argument(
 arguments.add_argument("--check", action="store_true", help="check generated BUCK files without rewriting them")
 options = arguments.parse_args()
 selected = set(options.package)
-if "tidepool" in selected:
+if selected & {"tidepool", "tidepool-runtime"}:
     selected.add("tidepool-testing")
 SUPPORTED_PACKAGES = {
     "tidepool-atomic-write", "tidepool-repr", "tidepool-heap", "tidepool-bignum",
@@ -62,7 +62,7 @@ NORMAL_DEPENDENCY_ONLY_PACKAGES = {
 }
 UNIT_TEST_PACKAGES = {
     "tidepool-atomic-write", "tidepool-repr", "tidepool-heap", "tidepool-codegen",
-    "tidepool-extract-cmd", "tidepool-toolchain", "tidepool",
+    "tidepool-extract-cmd", "tidepool-toolchain", "tidepool", "tidepool-runtime",
 }
 ISOLATED_UNIT_TEST_PACKAGES = {
     "tidepool-codegen", "tidepool-extract-cmd", "tidepool-toolchain",
@@ -332,9 +332,7 @@ LIBRARY_TEST_FIXTURES = {
         "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.cbor",
         "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.json",
     },
-    # Runtime's only compile-time Haskell source is in its session tests. Those
-    # tests remain on the Cargo path in this slice, so the native library's
-    # source map must not claim the Haskell test source.
+    # Keep test-only compiler sources out of the runtime library action.
     ("tidepool-runtime", "tidepool_runtime"): {
         "bridge/haskell/src/Tidepool/Session.hs",
     },
@@ -450,6 +448,7 @@ def source_inputs(package, target, features=()):
         "bridge/haskell/src/Tidepool/ExtractRequest.hs": "//bridge/haskell:extract_request_source",
         "bridge/haskell/src/Tidepool/Timing.hs": "//bridge/haskell:timing_source",
         "bridge/haskell/src/Tidepool/GhcPipeline.hs": "//bridge/haskell:ghc_pipeline_source",
+        "bridge/haskell/src/Tidepool/Session.hs": "//bridge/haskell:session_source",
         "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v2.cbor": "//bridge/haskell:declaration_join_v2_cbor_fixture",
         "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v2.json": "//bridge/haskell:declaration_join_v2_json_fixture",
         "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v2.cbor": "//bridge/haskell:declaration_inventory_v2_cbor_fixture",
@@ -572,6 +571,23 @@ def render_rule(rule, name, target, package, deps, named, extra="", features=())
     return "\n".join(lines)
 
 
+def runtime_test_cases(binary):
+    """Admission checks use native machines but do not start a compiler worker."""
+    tests = ["session::admission::tests::" + name for name in (
+        "initial_interface_inventory_refuses_missing_extra_duplicate_and_changed_bytes",
+        "native_admission_uses_exact_scoped_roots_and_keeps_its_original_ledger",
+        "native_admission_commits_the_live_machine_export_owner",
+    )]
+    return "\n".join([
+        "tidepool_rust_test_cases(",
+        '    name = "runtime_admission_tests",',
+        f"    binary = {json.dumps(':' + binary)},",
+        "    exact_tests = [", render_strings(tests, 8), "    ],",
+        "    expected_count = 3,", "    jobs = 1,", "    timeout = 30,",
+        "    test_rule_timeout_ms = 150000,", '    visibility = ["PUBLIC"],', ")", "",
+    ])
+
+
 def facade_test_cases(binary):
     """Share one linked test harness while declaring inputs per execution group."""
     process_env = {
@@ -659,6 +675,8 @@ for package_name, package in local.items():
         rules.append('load("//build/rust:codegen-md5.bzl", "tidepool_codegen_md5")\n')
     if package_name in ISOLATED_UNIT_TEST_PACKAGES:
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_isolated_test")\n')
+    if package_name == "tidepool-runtime":
+        rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
     if package_name == "tidepool":
         rules.append('''load("//build/rust:buildscript.bzl", "tidepool_buildscript_run")
 load("//build/rust:facade_build_inputs.bzl", "tidepool_facade_build_inputs")
@@ -678,6 +696,17 @@ load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
     if package_name == "tidepool":
         unit_deps, unit_named = dependency_sets(
             package, enabled_dependencies, forwarded_features, include_dev=True
+        )
+    if package_name == "tidepool-runtime":
+        # trybuild belongs only to the separate compile_fail integration target.
+        # It runs Cargo itself and is deliberately outside this native libtest.
+        unit_package = dict(package)
+        unit_package["dependencies"] = [
+            dependency for dependency in package["dependencies"]
+            if not (dependency["kind"] == "dev" and dependency["name"] == "trybuild")
+        ]
+        unit_deps, unit_named = dependency_sets(
+            unit_package, enabled_dependencies, forwarded_features, include_dev=True
         )
     targets = package["targets"]
     if package_name == "tidepool":
@@ -760,9 +789,14 @@ tidepool_buildscript_run(
             unit_rule = "tidepool_rust_binary"
             unit_extra = '''    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     rustc_flags = ["--test"],'''
+        if package_name == "tidepool-runtime":
+            unit_rule = "tidepool_rust_binary"
+            unit_extra = '    rustc_flags = ["--test"],'
         rules.append(render_rule(unit_rule, unit_target["name"], unit_target, package, unit_deps, unit_named, unit_extra, features=package_features))
         if package_name == "tidepool":
             rules.append(facade_test_cases(unit_target["name"]))
+        if package_name == "tidepool-runtime":
+            rules.append(runtime_test_cases(unit_target["name"]))
     selected_tests = [
         target for target in tests
         if (
