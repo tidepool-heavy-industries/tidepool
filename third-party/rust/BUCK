@@ -473,6 +473,42 @@ cargo.rust_library(
 )
 
 http_archive(
+    name = "archery-1.2.3.crate",
+    sha256 = "33ca55ee147b1926dbea904f50fe4902494e97bc742205abbbf10c709e43815f",
+    strip_prefix = "archery-1.2.3",
+    urls = ["https://static.crates.io/crates/archery/1.2.3/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "archery-1",
+    srcs = [":archery-1.2.3.crate"],
+    crate = "archery",
+    crate_root = "archery-1.2.3.crate/src/lib.rs",
+    edition = "2024",
+    env = {
+        "CARGO_BIN_NAME": "archery",
+        "CARGO_CRATE_NAME": "archery",
+        "CARGO_MANIFEST_DIR": "archery-1.2.3.crate",
+        "CARGO_PKG_AUTHORS": "Diogo Sousa <diogogsousa@gmail.com>",
+        "CARGO_PKG_DESCRIPTION": "Abstract over the atomicity of reference-counting pointers",
+        "CARGO_PKG_HOMEPAGE": "https://github.com/orium/archery",
+        "CARGO_PKG_NAME": "archery",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/orium/archery",
+        "CARGO_PKG_RUST_VERSION": "1.85.0",
+        "CARGO_PKG_VERSION": "1.2.3",
+        "CARGO_PKG_VERSION_MAJOR": "1",
+        "CARGO_PKG_VERSION_MINOR": "2",
+        "CARGO_PKG_VERSION_PATCH": "3",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    features = ["triomphe"],
+    visibility = [],
+    deps = [":triomphe-0.1"],
+)
+
+http_archive(
     name = "arrayref-0.3.9.crate",
     sha256 = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb",
     strip_prefix = "arrayref-0.3.9",
@@ -10071,6 +10107,54 @@ tidepool_buildscript_run(
 )
 
 alias(
+    name = "rpds",
+    actual = ":rpds-1",
+    visibility = ["PUBLIC"],
+)
+
+http_archive(
+    name = "rpds-1.2.1.crate",
+    sha256 = "e025feb26210bc196b908e72deb063b1b4000754304341cbc168a1e72c857ebc",
+    strip_prefix = "rpds-1.2.1",
+    urls = ["https://static.crates.io/crates/rpds/1.2.1/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "rpds-1",
+    srcs = [":rpds-1.2.1.crate"],
+    crate = "rpds",
+    crate_root = "rpds-1.2.1.crate/src/lib.rs",
+    edition = "2024",
+    env = {
+        "CARGO_BIN_NAME": "rpds",
+        "CARGO_CRATE_NAME": "rpds",
+        "CARGO_MANIFEST_DIR": "rpds-1.2.1.crate",
+        "CARGO_PKG_AUTHORS": "Diogo Sousa <diogogsousa@gmail.com>",
+        "CARGO_PKG_DESCRIPTION": "Persistent data structures with structural sharing",
+        "CARGO_PKG_HOMEPAGE": "https://github.com/orium/rpds",
+        "CARGO_PKG_NAME": "rpds",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/orium/rpds",
+        "CARGO_PKG_RUST_VERSION": "1.85.0",
+        "CARGO_PKG_VERSION": "1.2.1",
+        "CARGO_PKG_VERSION_MAJOR": "1",
+        "CARGO_PKG_VERSION_MINOR": "2",
+        "CARGO_PKG_VERSION_PATCH": "1",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    features = [
+        "default",
+        "std",
+    ],
+    visibility = [],
+    deps = [
+        ":archery-1",
+        ":smallvec-1",
+    ],
+)
+
+alias(
     name = "rusqlite",
     actual = ":rusqlite-0.32",
     visibility = ["PUBLIC"],
@@ -13712,6 +13796,40 @@ cargo.rust_library(
         ":tracing-log-0.2",
         ":tracing-serde-0.2",
     ],
+)
+
+http_archive(
+    name = "triomphe-0.1.16.crate",
+    sha256 = "b40688ea6389c8171614b25491f71d4a27946e0c7ce2da1c6de27e25abf1a0ae",
+    strip_prefix = "triomphe-0.1.16",
+    urls = ["https://static.crates.io/crates/triomphe/0.1.16/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "triomphe-0.1",
+    srcs = [":triomphe-0.1.16.crate"],
+    crate = "triomphe",
+    crate_root = "triomphe-0.1.16.crate/src/lib.rs",
+    edition = "2021",
+    env = {
+        "CARGO_BIN_NAME": "triomphe",
+        "CARGO_CRATE_NAME": "triomphe",
+        "CARGO_MANIFEST_DIR": "triomphe-0.1.16.crate",
+        "CARGO_PKG_AUTHORS": "Manish Goregaokar <manishsmail@gmail.com>:The Servo Project Developers",
+        "CARGO_PKG_DESCRIPTION": "A fork of std::sync::Arc with some extra functionality and without weak references (originally servo_arc)",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_NAME": "triomphe",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/Manishearth/triomphe",
+        "CARGO_PKG_RUST_VERSION": "1.81",
+        "CARGO_PKG_VERSION": "0.1.16",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "1",
+        "CARGO_PKG_VERSION_PATCH": "16",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    visibility = [],
 )
 
 http_archive(
