@@ -10,7 +10,6 @@ pub type OwnedWorkbenchTask<B> = OwnedActorTask<B, WorkbenchResponse>;
 pub type OwnedWorkbenchCompletion<B> = OwnedActorCompletion<B, WorkbenchResponse>;
 pub type WorkbenchAdvance<B> = ActorAdvance<B, WorkbenchResponse>;
 pub type WorkbenchAbandonGuard = ActorAbandonGuard;
-pub(super) type WorkbenchTaskExecution<B> = ActorTaskExecution<B, WorkbenchResponse>;
 
 /// Work performed outside the actor turn. Its completion returns a typed
 /// finalizer, so actor-owned state is changed only by the matching mailbox

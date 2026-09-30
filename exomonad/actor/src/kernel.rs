@@ -7,7 +7,7 @@
 use ractor::{ActorRef as RactorRef, RpcReplyPort};
 use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse};
 
-/// Exact identity of one actor-owned workbench execution step. The generation
+/// Exact identity of one actor-owned execution step. The generation
 /// changes for every task in the actor incarnation. The admission generation
 /// identifies the execution even for direct notebook submissions; the optional
 /// request identity is transport correlation metadata.
@@ -271,8 +271,8 @@ pub enum KernelMessage {
         control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
         reply: RpcReplyPort<KernelWorkbenchReply>,
     },
-    /// Wakes the actor after its one owned workbench task returns its behavior.
-    WorkbenchCompleted {
+    /// Wakes the actor when its one admitted task returns a fenced completion.
+    ActorStepCompleted {
         step: WorkbenchStepKey,
         outcome: Box<dyn std::any::Any + Send>,
     },
@@ -327,7 +327,7 @@ impl KernelMessage {
             Self::Tool { .. } => "Tool",
             Self::ToolWithHostedCheckpoint { .. } => "ToolWithHostedCheckpoint",
             Self::Workbench { .. } => "Workbench",
-            Self::WorkbenchCompleted { .. } => "WorkbenchCompleted",
+            Self::ActorStepCompleted { .. } => "ActorStepCompleted",
             Self::ReconcileWorkbenchCancellation { .. } => "ReconcileWorkbenchCancellation",
             Self::ReconcileWorkbenchBoundary { .. } => "ReconcileWorkbenchBoundary",
             Self::ToolCompleted { .. } => "ToolCompleted",
@@ -384,8 +384,8 @@ impl std::fmt::Debug for KernelMessage {
                 .debug_struct("Workbench")
                 .field("request", &invocation.request)
                 .finish_non_exhaustive(),
-            Self::WorkbenchCompleted { step, .. } => formatter
-                .debug_tuple("WorkbenchCompleted")
+            Self::ActorStepCompleted { step, .. } => formatter
+                .debug_tuple("ActorStepCompleted")
                 .field(step)
                 .finish(),
             Self::ReconcileWorkbenchCancellation { execution, .. } => formatter
