@@ -85,6 +85,7 @@ class FirstPartySources(unittest.TestCase):
         self.write("tidepool/toolchain/src/lib.rs", includes + "\n")
         for name in fixtures:
             self.write(f"bridge/haskell/test-cell-splitter/fixtures/declaration-join/{name}", name)
+        self.write("bridge/facade/Cargo.toml", "[package]\nname = 'tidepool'\n")
         self.packages = [self.package("tidepool-repr", "tidepool/repr", [
             ("tidepool_repr", "lib", "src/lib.rs"), ("repr", "test", "tests/suites/repr.rs")]),
             self.package("tidepool-atomic-write", "bridge/atomic-write", [
@@ -106,7 +107,9 @@ class FirstPartySources(unittest.TestCase):
             self.package("tidepool-runtime", "tidepool/runtime", [
                 ("tidepool_runtime", "lib", "src/lib.rs")]),
             self.package("tidepool-toolchain", "tidepool/toolchain", [
-                ("tidepool_toolchain", "lib", "src/lib.rs")])]
+                ("tidepool_toolchain", "lib", "src/lib.rs")]),
+            self.package("tidepool", "bridge/facade", [])]
+        self.packages[-1]["features"] = {"default": ["codex-compat"], "codex-compat": []}
         self.metadata = self.base / "metadata.json"
         self.metadata.write_text(json.dumps({"packages": self.packages,
             "workspace_members": [package["id"] for package in self.packages],
@@ -347,6 +350,11 @@ class FirstPartySources(unittest.TestCase):
         buck = (self.root / "tidepool/repr/BUCK").read_text()
         self.assertIn("//third-party/rust:codex-shoal-protocol", buck)
         self.assertIn('"codex-compat"', buck)
+
+    def test_workspace_default_can_be_suppressed_without_emitting_that_package(self):
+        result = self.generate("--no-default-features", "tidepool")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / "bridge/facade/BUCK").exists())
 
 
 if __name__ == "__main__":

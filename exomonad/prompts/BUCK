@@ -1,0 +1,92 @@
+load("@prelude//:rules.bzl", "export_file")
+
+export_file(
+    name = "haskell_tool_description",
+    src = "haskell-tool-description.md",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_tool_instructions",
+    src = "haskell-tool-instructions.md",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "doc_actors",
+    src = "docs/actors.md",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "doc_cleanup",
+    src = "docs/cleanup.md",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "doc_deadline",
+    src = "docs/deadline.md",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "doc_jev",
+    src = "docs/jev.md",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "doc_lineage",
+    src = "docs/lineage.md",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "doc_recovery",
+    src = "docs/recovery.md",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "doc_refinement",
+    src = "docs/refinement.md",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "doc_reflect",
+    src = "docs/reflect.md",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "doc_request",
+    src = "docs/request.md",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "doc_tree",
+    src = "docs/tree.md",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "doc_unfold",
+    src = "docs/unfold.md",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "doc_watch",
+    src = "docs/watch.md",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "doc_workbench",
+    src = "docs/workbench.md",
+    visibility = ["PUBLIC"],
+)
+

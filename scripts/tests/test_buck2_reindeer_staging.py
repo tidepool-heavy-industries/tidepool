@@ -24,6 +24,7 @@ class ReindeerStaging(unittest.TestCase):
         (self.root / "scripts/buck2-dependencies.py").write_text(
             """import os, pathlib, sys
 out = pathlib.Path(sys.argv[sys.argv.index('--output-dir') + 1])
+pathlib.Path(__file__).resolve().parents[1].joinpath('received-feature-args').write_text(repr(sys.argv[3:]))
 if os.environ.get('FAIL_GENERATOR'):
     raise SystemExit(17)
 (out / 'Cargo.toml').write_text('staged manifest' + chr(10))
@@ -108,6 +109,19 @@ Path('BUCK').write_text(value)
         result = self.run_script("--check")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.contents(), expected)
+
+    def test_workspace_feature_suppressions_are_forwarded_to_reindeer_metadata(self):
+        result = self.run_script(
+            "--no-default-features", "tidepool",
+            "--no-default-features", "exomonad-agent",
+            "--features", "tidepool=other",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        received = (self.root / "received-feature-args").read_text()
+        self.assertEqual(
+            received,
+            "['--no-default-features', 'tidepool', '--no-default-features', 'exomonad-agent', '--features', 'tidepool=other']",
+        )
 
 
 if __name__ == "__main__":

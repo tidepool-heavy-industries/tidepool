@@ -30,6 +30,8 @@ TEST_ROOTS = {
 LIBRARY_ROOTS = {
     "tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen",
     "tidepool-extract-report", "tidepool-bridge-derive", "tidepool-runtime",
+    "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
+    "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-agent",
 }
 ROOTS = TEST_ROOTS | LIBRARY_ROOTS
 LINUX_TARGETS = {None, "cfg(unix)"}
@@ -43,14 +45,19 @@ for value in options.features:
     package_name, separator, raw_features = value.partition("=")
     if not separator or not package_name or not raw_features:
         raise SystemExit(f"invalid --features value {value!r}; expected PACKAGE=FEATURE[,FEATURE...]")
-    feature_overrides.setdefault(package_name, set()).update(
-        feature for feature in raw_features.split(",") if feature
-    )
-unknown = (no_default | set(feature_overrides)) - ROOTS
-if unknown:
-    raise SystemExit("feature selection names an unknown dependency root: " + ", ".join(sorted(unknown)))
-
+    features = [feature for feature in raw_features.split(",") if feature]
+    if len(features) != len(set(features)):
+        raise SystemExit(f"duplicate Cargo feature in --features {value!r}")
+    feature_overrides.setdefault(package_name, set()).update(features)
 baseline = json.loads(subprocess.check_output(metadata_command, cwd=ROOT))
+workspace_packages = {
+    package["name"]
+    for package in baseline["packages"]
+    if package["id"] in baseline["workspace_members"]
+}
+unknown = (no_default | set(feature_overrides)) - workspace_packages
+if unknown:
+    raise SystemExit("feature selection names an unknown workspace package: " + ", ".join(sorted(unknown)))
 metadata_command.append("--no-default-features")
 metadata_command.extend(metadata_feature_args(baseline, no_default, feature_overrides))
 metadata = json.loads(subprocess.check_output(metadata_command, cwd=ROOT))

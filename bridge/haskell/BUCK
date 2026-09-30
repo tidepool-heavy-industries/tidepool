@@ -220,3 +220,10 @@ export_file(
     src = "test-cell-splitter/fixtures/declaration-join/inventory-v3.json",
     visibility = ["PUBLIC"],
 )
+
+export_file(
+    name = "actor_role_source",
+    src = "actors/Tidepool/Actors/Role.hs",
+    mode = "reference",
+    visibility = ["PUBLIC"],
+)

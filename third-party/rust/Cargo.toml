@@ -9,6 +9,7 @@ publish = false
 path = "empty.rs"
 [dependencies]
 "blake3" = { package = "blake3", version = "=1.8.6", default-features = true, features = [] }
+"camino" = { package = "camino", version = "=1.2.5", default-features = true, features = [] }
 "chrono" = { package = "chrono", version = "=0.4.45", default-features = false, features = ["alloc"] }
 "ciborium" = { package = "ciborium", version = "=0.2.2", default-features = true, features = [] }
 "cranelift-codegen" = { package = "cranelift-codegen", version = "=0.129.1", default-features = true, features = [] }
@@ -18,6 +19,7 @@ path = "empty.rs"
 "cranelift-native" = { package = "cranelift-native", version = "=0.129.1", default-features = true, features = [] }
 "env_logger" = { package = "env_logger", version = "=0.11.11", default-features = true, features = [] }
 "frunk" = { package = "frunk", version = "=0.5.0", default-features = true, features = [] }
+"futures-util" = { package = "futures-util", version = "=0.3.34", default-features = true, features = [] }
 "inventory" = { package = "inventory", version = "=0.3.24", default-features = true, features = [] }
 "libc" = { package = "libc", version = "=0.2.189", default-features = true, features = [] }
 "log" = { package = "log", version = "=0.4.33", default-features = true, features = [] }
@@ -26,18 +28,21 @@ path = "empty.rs"
 "proc-macro2" = { package = "proc-macro2", version = "=1.0.107", default-features = true, features = [] }
 "proptest" = { package = "proptest", version = "=1.11.0", default-features = true, features = [] }
 "quote" = { package = "quote", version = "=1.0.47", default-features = true, features = [] }
+"ractor" = { package = "ractor", version = "=0.16.5", default-features = false, features = ["tokio_runtime"] }
 "recursion" = { package = "recursion", version = "=0.5.4", default-features = true, features = [] }
+"rustix" = { package = "rustix", version = "=1.1.4", default-features = true, features = ["event", "fs", "mount", "pipe", "process", "runtime", "stdio", "termios", "thread"] }
 "schemars" = { package = "schemars", version = "=1.2.2", default-features = true, features = [] }
 "serde" = { package = "serde", version = "=1.0.229", default-features = true, features = ["derive"] }
 "serde_json" = { package = "serde_json", version = "=1.0.151", default-features = true, features = ["arbitrary_precision"] }
 "serial_test" = { package = "serial_test", version = "=3.5.0", default-features = true, features = [] }
-"sha2" = { package = "sha2", version = "=0.10.9", default-features = true, features = [] }
+"sha2-0_10_9" = { package = "sha2", version = "=0.10.9", default-features = true, features = [] }
+"sha2-0_11_0" = { package = "sha2", version = "=0.11.0", default-features = true, features = [] }
 "stacker" = { package = "stacker", version = "=0.1.25", default-features = true, features = [] }
 "static_assertions" = { package = "static_assertions", version = "=1.1.0", default-features = true, features = [] }
 "syn" = { package = "syn", version = "=3.0.3", default-features = true, features = ["extra-traits", "full"] }
 "tempfile" = { package = "tempfile", version = "=3.27.0", default-features = true, features = [] }
 "thiserror" = { package = "thiserror", version = "=2.0.20", default-features = true, features = [] }
-"tokio" = { package = "tokio", version = "=1.53.1", default-features = true, features = ["macros", "rt", "sync", "time"] }
+"tokio" = { package = "tokio", version = "=1.53.1", default-features = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "sync", "time"] }
 "tracing" = { package = "tracing", version = "=0.1.44", default-features = true, features = [] }
 "tracing-appender" = { package = "tracing-appender", version = "=0.2.5", default-features = true, features = [] }
 "tracing-subscriber" = { package = "tracing-subscriber", version = "=0.3.23", default-features = true, features = ["env-filter", "json"] }

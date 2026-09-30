@@ -37,10 +37,14 @@ SUPPORTED_PACKAGES = {
     "tidepool-bridge", "tidepool-effect", "tidepool-codegen", "tidepool-extract-cmd",
     "tidepool-extract-report", "tidepool-toolchain", "tidepool-bridge-derive",
     "tidepool-runtime",
+    "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
+    "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-agent",
 }
 NORMAL_DEPENDENCY_ONLY_PACKAGES = {
     "tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen",
     "tidepool-extract-report", "tidepool-bridge-derive", "tidepool-runtime",
+    "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
+    "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-agent",
 }
 UNIT_TEST_PACKAGES = {
     "tidepool-atomic-write", "tidepool-repr", "tidepool-heap", "tidepool-codegen",
@@ -62,7 +66,7 @@ if unsupported:
     )
 
 
-def parse_feature_options():
+def parse_feature_options(workspace_packages):
     no_default = set(options.no_default_features)
     feature_overrides = {}
     for value in options.features:
@@ -73,13 +77,10 @@ def parse_feature_options():
         if len(features) != len(set(features)):
             raise SystemExit(f"duplicate Cargo feature in --features {value!r}")
         feature_overrides.setdefault(package_name, set()).update(features)
-    unknown = (no_default | set(feature_overrides)) - selected
+    unknown = (no_default | set(feature_overrides)) - workspace_packages
     if unknown:
-        raise SystemExit("feature selection names an unselected package: " + ", ".join(sorted(unknown)))
+        raise SystemExit("feature selection names an unknown workspace package: " + ", ".join(sorted(unknown)))
     return no_default, feature_overrides
-
-
-NO_DEFAULT_FEATURES, FEATURE_OVERRIDES = parse_feature_options()
 
 metadata_command = [
     "cargo", "metadata", "--locked", "--format-version", "1",
@@ -90,12 +91,11 @@ baseline_local = {
     package["name"]: package for package in baseline["packages"]
     if package["id"] in baseline["workspace_members"]
 }
+workspace_packages = set(baseline_local)
 unknown = selected - set(baseline_local)
 if unknown:
     raise SystemExit(f"unknown Cargo workspace package(s): {', '.join(sorted(unknown))}")
-unknown_features = (NO_DEFAULT_FEATURES | set(FEATURE_OVERRIDES)) - selected
-if unknown_features:
-    raise SystemExit("feature selection names an unselected package: " + ", ".join(sorted(unknown_features)))
+NO_DEFAULT_FEATURES, FEATURE_OVERRIDES = parse_feature_options(workspace_packages)
 metadata_command.extend(["--no-default-features"])
 metadata_command.extend(metadata_feature_args(baseline, NO_DEFAULT_FEATURES, FEATURE_OVERRIDES))
 metadata = json.loads(subprocess.check_output(metadata_command, cwd=ROOT))
@@ -321,6 +321,22 @@ def source_inputs(package, target):
         "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-typed-v3.json": "//bridge/haskell:declaration_join_typed_v3_json_fixture",
         "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.cbor": "//bridge/haskell:declaration_inventory_v3_cbor_fixture",
         "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.json": "//bridge/haskell:declaration_inventory_v3_json_fixture",
+        "bridge/haskell/actors/Tidepool/Actors/Role.hs": "//bridge/haskell:actor_role_source",
+        "exomonad/prompts/haskell-tool-description.md": "//exomonad/prompts:haskell_tool_description",
+        "exomonad/prompts/haskell-tool-instructions.md": "//exomonad/prompts:haskell_tool_instructions",
+        "exomonad/prompts/docs/actors.md": "//exomonad/prompts:doc_actors",
+        "exomonad/prompts/docs/cleanup.md": "//exomonad/prompts:doc_cleanup",
+        "exomonad/prompts/docs/deadline.md": "//exomonad/prompts:doc_deadline",
+        "exomonad/prompts/docs/jev.md": "//exomonad/prompts:doc_jev",
+        "exomonad/prompts/docs/lineage.md": "//exomonad/prompts:doc_lineage",
+        "exomonad/prompts/docs/recovery.md": "//exomonad/prompts:doc_recovery",
+        "exomonad/prompts/docs/refinement.md": "//exomonad/prompts:doc_refinement",
+        "exomonad/prompts/docs/reflect.md": "//exomonad/prompts:doc_reflect",
+        "exomonad/prompts/docs/request.md": "//exomonad/prompts:doc_request",
+        "exomonad/prompts/docs/tree.md": "//exomonad/prompts:doc_tree",
+        "exomonad/prompts/docs/unfold.md": "//exomonad/prompts:doc_unfold",
+        "exomonad/prompts/docs/watch.md": "//exomonad/prompts:doc_watch",
+        "exomonad/prompts/docs/workbench.md": "//exomonad/prompts:doc_workbench",
     }
     while pending:
         source = pending.pop()

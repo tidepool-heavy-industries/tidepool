@@ -17,6 +17,8 @@ ROOT_NAMES = (
     "tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen",
     "tidepool-extract-cmd", "tidepool-extract-report", "tidepool-toolchain",
     "tidepool-bridge-derive", "tidepool-runtime",
+    "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
+    "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-agent",
 )
 
 
@@ -161,6 +163,13 @@ print(open(os.environ['FAKE_METADATA']).read())
                 ("tidepool-toolchain", None, None, True, []),
                 ("thiserror", None, None, True, []),
             ],
+            "exomonad-model": [],
+            "exomonad-tool": [],
+            "tidepool-bridge-effects": [],
+            "exomonad-node": [],
+            "exomonad-worktree": [],
+            "exomonad-actor": [],
+            "exomonad-agent": [],
         }
         edges_by_root = {}
         for root_name, deps in declarations.items():
