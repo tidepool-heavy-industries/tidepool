@@ -439,7 +439,9 @@ processFile compiler caches timing args path = do
     -- Multi-target extraction can inject stable session values without
     -- becoming a session bind/reference operation.
     let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
-    prepared <- compiler (PreparedProducts (requestModuleCandidates args)) (Map.keysSet (requestRetainedGenerations args)) GeneralCompile scope path (requestIncludes args) (requestBuildProductsDir args)
+    let purpose = if requestCertifyHomeProducts args
+          then CertifyHomeProductsCompile else GeneralCompile
+    prepared <- compiler (PreparedProducts (requestModuleCandidates args)) (Map.keysSet (requestRetainedGenerations args)) purpose scope path (requestIncludes args) (requestBuildProductsDir args)
     let result = pprPipelineResult prepared
     let binds = prBinds result
         tycons = prTyCons result

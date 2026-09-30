@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use ciborium::value::Value;
 use sha2::{Digest, Sha256};
 use tidepool_repr::execution_schema::{
-    CachedHomeOwner, GlobalDecl, ModuleVersion, PreparedProgram, ProjectedGroup, RawModuleProduct,
-    ResultContract, RuntimeRep, Signature, SymbolIdentity, parse_module_products,
+    parse_module_products, CachedHomeOwner, GlobalDecl, ModuleVersion, PreparedProgram,
+    ProjectedGroup, RawModuleProduct, ResultContract, RuntimeRep, Signature, SymbolIdentity,
 };
 
 use crate::cache::{DependencyEvidence, ProductAvailability};
@@ -1577,6 +1577,7 @@ pub(crate) fn certify_products(
         }
         module_bytes.push((
             owner.clone(),
+            source_sha,
             product.interface.clone(),
             product_bytes.to_vec(),
             package_bytes.to_vec(),
@@ -1639,23 +1640,32 @@ pub(crate) fn certify_products(
         .collect::<CertResult<_>>()?;
     let recovery_products = module_bytes
         .into_iter()
-        .map(|(owner, interface, product_bytes, package_bytes)| {
-            let original: Vec<_> = groups
-                .iter()
-                .filter(|group| group.owner() == &owner)
-                .cloned()
-                .collect();
-            let certification = encode_home_certification(&owner, &original, &receipt.packages)?;
-            Ok(crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
-                owner,
-                interface,
-                product_bytes,
-                package_bytes,
-                certification,
-            ))
-        })
+        .map(
+            |(owner, source_sha, interface, product_bytes, package_bytes)| {
+                let original: Vec<_> = groups
+                    .iter()
+                    .filter(|group| group.owner() == &owner)
+                    .cloned()
+                    .collect();
+                let certification =
+                    encode_home_certification(&owner, &original, &receipt.packages)?;
+                Ok(
+                    crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+                        owner,
+                        interface,
+                        product_bytes,
+                        package_bytes,
+                        certification,
+                    )
+                    .with_source_sha256(source_sha),
+                )
+            },
+        )
         .collect::<CertResult<Vec<_>>>()?;
-    Ok(CertifiedProducts { groups, recovery_products })
+    Ok(CertifiedProducts {
+        groups,
+        recovery_products,
+    })
 }
 
 /// Bind a target's declared globals to the same compiler transaction's
@@ -1686,8 +1696,8 @@ pub fn certify_target_owners(
 mod tests {
     use super::*;
     use crate::cache::{ModuleEvidence, SourceEvidence};
-    use tidepool_repr::execution_schema::DecodeLimits;
     use tidepool_repr::execution_schema::testing;
+    use tidepool_repr::execution_schema::DecodeLimits;
 
     fn inherited_owner(module: &str) -> CachedHomeOwner {
         CachedHomeOwner {
@@ -2119,7 +2129,9 @@ mod tests {
         )]);
         assert!(matches!(
             check_direct_package_agreement(&bytes, &owner, &packages),
-            Err(CertificationError::Mismatch("direct package/receipt selection"))
+            Err(CertificationError::Mismatch(
+                "direct package/receipt selection"
+            ))
         ));
     }
 
@@ -2185,23 +2197,23 @@ mod tests {
         let mut accepted = receipt(&bytes, &evidence, source);
         accepted.dependency_witness_sha256 = sha(&raw_evidence);
         let certified = certify_products(
-                None,
-                &CertifiedReceipt {
-                    modules: vec![accepted.clone()],
-                    targets: BTreeMap::new(),
-                    packages: BTreeMap::new()
-                },
-                &parsed,
-                &bytes,
-                &package_bytes,
-                &raw_evidence,
-                &input,
-                &evidence,
-                source,
-                b"producer",
-                &[],
-            )
-            .unwrap();
+            None,
+            &CertifiedReceipt {
+                modules: vec![accepted.clone()],
+                targets: BTreeMap::new(),
+                packages: BTreeMap::new(),
+            },
+            &parsed,
+            &bytes,
+            &package_bytes,
+            &raw_evidence,
+            &input,
+            &evidence,
+            source,
+            b"producer",
+            &[],
+        )
+        .unwrap();
         assert!(certified.groups.is_empty());
         assert_eq!(certified.recovery_products.len(), 1);
         let refs = crate::recovery_artifacts::materialize_certified_products(
@@ -2210,14 +2222,14 @@ mod tests {
             &certified.recovery_products,
         )
         .unwrap();
-        let verified = crate::recovery_artifacts::verify_materialized_ref(
-            directory.path(),
-            &refs[0],
-        )
-        .unwrap();
+        let verified =
+            crate::recovery_artifacts::verify_materialized_ref(directory.path(), &refs[0]).unwrap();
         assert_eq!(verified.product_bytes, bytes);
         assert!(!verified.package_imports_bytes.is_empty());
-        assert_eq!(verified.reference.certification_path.extension().unwrap(), "owners");
+        assert_eq!(
+            verified.reference.certification_path.extension().unwrap(),
+            "owners"
+        );
         let mut substituted = evidence.clone();
         substituted.packages.push("unrelated selection".into());
         assert!(matches!(
@@ -2266,26 +2278,24 @@ mod tests {
         ));
         let mut changed = accepted;
         changed.dependency_witness_sha256 = [7; 32];
-        assert!(
-            certify_products(
-                None,
-                &CertifiedReceipt {
-                    modules: vec![changed],
-                    targets: BTreeMap::new(),
-                    packages: BTreeMap::new()
-                },
-                &parsed,
-                &bytes,
-                &package_bytes,
-                &raw_evidence,
-                &input,
-                &evidence,
-                source,
-                b"producer",
-                &[],
-            )
-            .is_err()
-        );
+        assert!(certify_products(
+            None,
+            &CertifiedReceipt {
+                modules: vec![changed],
+                targets: BTreeMap::new(),
+                packages: BTreeMap::new()
+            },
+            &parsed,
+            &bytes,
+            &package_bytes,
+            &raw_evidence,
+            &input,
+            &evidence,
+            source,
+            b"producer",
+            &[],
+        )
+        .is_err());
     }
 
     #[test]

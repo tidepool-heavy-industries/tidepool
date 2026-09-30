@@ -48,6 +48,7 @@ data RequestField
   | HarnessProfile
   | BuildProductsDir FilePath
   | ModuleCandidates FilePath
+  | CertifyHomeProducts
   | SessionArtifacts FilePath
   | DeclarationJoin FilePath
   | DeclarationJoinOut FilePath
@@ -102,6 +103,7 @@ data WorkerRequest = WorkerRequest
   , requestHarnessProfile :: Bool
   , requestBuildProductsDir :: Maybe FilePath
   , requestModuleCandidates :: Maybe FilePath
+  , requestCertifyHomeProducts :: Bool
   , requestSessionArtifacts :: Maybe FilePath
   , requestDeclarationJoin :: Maybe FilePath
   , requestDeclarationJoinOut :: Maybe FilePath
@@ -146,6 +148,7 @@ emptyWorkerRequest = WorkerRequest
   , requestHarnessProfile = False
   , requestBuildProductsDir = Nothing
   , requestModuleCandidates = Nothing
+  , requestCertifyHomeProducts = False
   , requestSessionArtifacts = Nothing
   , requestDeclarationJoin = Nothing
   , requestDeclarationJoinOut = Nothing
@@ -222,6 +225,7 @@ requestFromFields = foldl apply emptyWorkerRequest
       HarnessProfile -> request { requestHarnessProfile = True }
       BuildProductsDir path -> request { requestBuildProductsDir = Just path }
       ModuleCandidates path -> request { requestModuleCandidates = Just path }
+      CertifyHomeProducts -> request { requestCertifyHomeProducts = True }
       SessionArtifacts path -> request { requestSessionArtifacts = Just path }
       DeclarationJoin path -> request { requestDeclarationJoin = Just path }
       DeclarationJoinOut path -> request { requestDeclarationJoinOut = Just path }
@@ -251,7 +255,7 @@ requestFromFields = foldl apply emptyWorkerRequest
       CellFoldTurn -> request { requestCellFoldTurn = True }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v15"
+workerRequestFlag = "--worker-request-v16"
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -262,15 +266,40 @@ workerRequestFromArgv :: [String] -> Either String (Maybe WorkerRequest)
 workerRequestFromArgv [] = Right Nothing
 workerRequestFromArgv [flag] | flag == workerRequestFlag = Left (workerRequestFlag ++ ": payload is required")
 workerRequestFromArgv [flag, payload]
-  | flag == workerRequestFlag = Just . requestFromFields <$> (decodeHex payload >>= decodeRequest)
+  | flag == workerRequestFlag = do
+      fields <- decodeHex payload >>= decodeRequest
+      validateCertificationFields fields
+      pure (Just (requestFromFields fields))
 workerRequestFromArgv _ = Left "worker requires exactly one versioned request"
+
+-- Certification produces original products for the whole home graph. A
+-- higher-priority dispatch mode or injected product cannot replace that work.
+validateCertificationFields :: [RequestField] -> Either String ()
+validateCertificationFields fields
+  | CertifyHomeProducts `notElem` fields = Right ()
+  | length [() | Input _ <- fields] /= 1 =
+      Left "home-product certification requires exactly one input"
+  | all compatible fields = Right ()
+  | otherwise = Left "home-product certification cannot be combined with another mode or injected products"
+  where
+    compatible field = case field of
+      Input _ -> True
+      OutputDir _ -> True
+      Target _ -> True
+      Targets _ -> True
+      Include _ -> True
+      SessionRoot _ -> True
+      HarnessProfile -> True
+      BuildProductsDir _ -> True
+      CertifyHomeProducts -> True
+      _ -> False
 
 type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 
 decodeRequest :: BS.ByteString -> Either String [RequestField]
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ015"
+  if magic /= "TPREQ016"
     then Left "worker request: unsupported magic or version"
     else do
       (count, rest) <- pWord32 body
@@ -280,7 +309,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ015" <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = "TPREQ016" <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
@@ -303,6 +332,7 @@ encodeField field = case field of
   HarnessProfile -> BS.singleton 24
   BuildProductsDir value -> taggedText 25 value
   ModuleCandidates value -> taggedText 46 value
+  CertifyHomeProducts -> BS.singleton 50
   SessionArtifacts value -> taggedText 49 value
   DeclarationJoin value -> taggedText 47 value
   DeclarationJoinOut value -> taggedText 48 value
@@ -410,6 +440,7 @@ pField bytes = do
     24 -> Right (HarnessProfile, rest)
     25 -> mapParser BuildProductsDir pText rest
     46 -> mapParser ModuleCandidates pText rest
+    50 -> Right (CertifyHomeProducts, rest)
     49 -> mapParser SessionArtifacts pText rest
     47 -> mapParser DeclarationJoin pText rest
     48 -> mapParser DeclarationJoinOut pText rest

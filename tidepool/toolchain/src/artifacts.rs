@@ -15,15 +15,15 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use tempfile::TempDir;
 use tidepool_extract_cmd::ExtractCmd;
-use tidepool_repr::DataConTable;
 use tidepool_repr::execution_schema::DecodeLimits;
 use tidepool_repr::execution_schema::{PreparedProgram, RawModuleProduct};
-use tidepool_repr::serial::{MetaWarnings, read_metadata};
+use tidepool_repr::serial::{read_metadata, MetaWarnings};
+use tidepool_repr::DataConTable;
 
-use crate::prepared_artifact::{PreparedArtifact, prepared_artifact_name};
+use crate::prepared_artifact::{prepared_artifact_name, PreparedArtifact};
 use crate::{
-    CompileError, cache, certified_products, diag, extract_module_name, extract_spawn_error,
-    module_candidates, timing,
+    cache, certified_products, diag, extract_module_name, extract_spawn_error, module_candidates,
+    timing, CompileError,
 };
 
 // ---------------------------------------------------------------------------
@@ -241,6 +241,9 @@ pub struct CompiledArtifacts {
     pub module_products: Vec<RawModuleProduct>,
     pub certified_groups: Vec<certified_products::PendingCertifiedGroup>,
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
+    /// Bound compiler producer identity for this exact invocation. `None`
+    /// means the bundle was assembled from bytes without an endpoint.
+    pub producer_identity: Option<[u8; 32]>,
     /// Exact post-downsweep graph paired with these products when the worker
     /// supplied complete, revalidated cache evidence. A later compiler
     /// request still needs its own precompile graph check before reuse.
@@ -273,7 +276,9 @@ impl ModuleCandidateOffer {
     }
 
     pub fn has_candidates(&self) -> bool {
-        self.selected.as_ref().is_some_and(|set| !set.by_owner.is_empty())
+        self.selected
+            .as_ref()
+            .is_some_and(|set| !set.by_owner.is_empty())
     }
 }
 
@@ -284,9 +289,10 @@ pub struct SealedTurnProducts {
 }
 
 fn has_ready_home_module(evidence: &cache::DependencyEvidence) -> bool {
-    evidence.modules.iter().any(|module| {
-        !module.boot && module.product == cache::ProductAvailability::Ready
-    })
+    evidence
+        .modules
+        .iter()
+        .any(|module| !module.boot && module.product == cache::ProductAvailability::Ready)
 }
 
 fn ensure_ready_module_inventory(
@@ -401,9 +407,13 @@ pub fn seal_turn_outputs(
             "turn target product receipt count".into(),
         ));
     }
-    let pending_imports =
-        certified_products::certify_target_owners(prepared, accepted, &certified.groups, &receipt.packages)
-            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    let pending_imports = certified_products::certify_target_owners(
+        prepared,
+        accepted,
+        &certified.groups,
+        &receipt.packages,
+    )
+    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     module_candidates::publish(
         &offer.producer,
         &offer.include,
@@ -466,13 +476,33 @@ pub fn compile_invocation(
     inv: &CompileInvocation<'_>,
     mut on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
-    compile_invocation_inner(inv, &mut on_stage, true)
+    compile_invocation_inner(inv, &mut on_stage, true, None)
+}
+
+/// Compile a declaration probe in full-home-product mode, which produces
+/// original products for every home module, including modules with no
+/// executable references from the probe. The probe bypasses the memo and
+/// candidate path while retaining the shared certification front door.
+pub(crate) fn compile_authored_products(
+    source: &str,
+    target: &str,
+    include: &[PathBuf],
+    session_root: &Path,
+) -> Result<CompiledArtifacts, CompileError> {
+    let inv = CompileInvocation {
+        source,
+        targets: &[target],
+        include,
+        fallback_module_name: "TidepoolAuthoredProductProbe",
+    };
+    compile_invocation_inner(&inv, &mut |_, _, _| {}, false, Some(session_root))
 }
 
 fn compile_invocation_inner(
     inv: &CompileInvocation<'_>,
     mut on_stage: &mut impl FnMut(&str, Duration, u64),
     allow_candidates: bool,
+    session_root: Option<&Path>,
 ) -> Result<CompiledArtifacts, CompileError> {
     assert!(
         !inv.targets.is_empty(),
@@ -494,6 +524,9 @@ fn compile_invocation_inner(
         .output_dir(temp_dir.path())
         .targets(inv.targets)
         .includes(inv.include);
+    if let Some(root) = session_root {
+        cmd.session_root(root).certify_home_products();
+    }
 
     // Persistent build-products dir (module-granular GHC recompilation
     // avoidance across spawns — see `crate::paths::build_products_dir`'s
@@ -554,7 +587,7 @@ fn compile_invocation_inner(
                             .iter()
                             .any(|module| module.product == cache::ProductAvailability::Ready)
                         {
-                            if let Ok(artifacts) = assemble_with_products(
+                            if let Ok(mut artifacts) = assemble_with_products(
                                 &meta_bytes,
                                 &raw,
                                 &product_bytes,
@@ -562,6 +595,8 @@ fn compile_invocation_inner(
                                 Some(&evidence),
                                 &mut on_stage,
                             ) {
+                                artifacts.producer_identity =
+                                    Some(*endpoint.identity().producer_bytes());
                                 on_stage(
                                     timing::STAGE_CBOR_READ,
                                     load_start.elapsed(),
@@ -633,9 +668,14 @@ fn compile_invocation_inner(
     );
     let (meta_bytes, raw, product_bytes) = match extracted {
         Ok(output) => output,
-        Err(error) if allow_candidates && candidate_set.as_ref().is_some_and(|set| !set.by_owner.is_empty()) => {
+        Err(error)
+            if allow_candidates
+                && candidate_set
+                    .as_ref()
+                    .is_some_and(|set| !set.by_owner.is_empty()) =>
+        {
             tracing::warn!(%error, "candidate compile failed; retrying without candidates");
-            return compile_invocation_inner(inv, on_stage, false);
+            return compile_invocation_inner(inv, on_stage, false, session_root);
         }
         Err(error) => return Err(error),
     };
@@ -651,7 +691,10 @@ fn compile_invocation_inner(
             cache::DependencyEvidence::from_worker(&evidence_bytes, &input_path, inv.source);
         let receipt_bytes = std::fs::read(temp_dir.path().join("certified-products.cbor"))?;
         if receipt_bytes.is_empty() {
-            if candidate_set.as_ref().is_some_and(|set| !set.by_owner.is_empty()) {
+            if candidate_set
+                .as_ref()
+                .is_some_and(|set| !set.by_owner.is_empty())
+            {
                 return Err(CompileError::ExtractFailed(
                     "candidate product certificate unavailable".into(),
                 ));
@@ -726,7 +769,10 @@ fn compile_invocation_inner(
         } else {
             if !fresh_products.is_empty()
                 || !receipt.modules.is_empty()
-                || receipt.targets.values().any(|accepted| !accepted.is_empty())
+                || receipt
+                    .targets
+                    .values()
+                    .any(|accepted| !accepted.is_empty())
             {
                 return Err(CompileError::ExtractFailed(
                     "module or target owner lacks valid final dependency evidence".into(),
@@ -785,6 +831,9 @@ fn compile_invocation_inner(
         }
         artifacts.certified_groups = certified.groups;
         artifacts.recovery_products = certified.recovery_products;
+        artifacts.producer_identity = Some(producer.as_slice().try_into().map_err(|_| {
+            CompileError::ExtractFailed("bound compiler producer identity length".into())
+        })?);
         if let Some(evidence) = evidence.as_ref() {
             module_candidates::publish(
                 &producer,
@@ -814,12 +863,71 @@ fn compile_invocation_inner(
         Ok(artifacts)
     })();
     match assembled {
-        Err(error) if allow_candidates && candidate_set.as_ref().is_some_and(|set| !set.by_owner.is_empty()) => {
+        Err(error)
+            if allow_candidates
+                && candidate_set
+                    .as_ref()
+                    .is_some_and(|set| !set.by_owner.is_empty()) =>
+        {
             tracing::warn!(%error, "candidate certification failed; retrying without candidates");
-            compile_invocation_inner(inv, on_stage, false)
+            compile_invocation_inner(inv, on_stage, false, session_root)
         }
-        result => result,
+        result => {
+            if result.is_err() && std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() == Ok("1") {
+                match retain_failed_compiler_artifacts(temp_dir.path()) {
+                    Ok(retained) => {
+                        return result.map_err(|error| match error {
+                            CompileError::ExtractFailed(message) => {
+                                CompileError::ExtractFailed(format!(
+                                    "{message}; compiler artifacts retained at {}",
+                                    retained.display()
+                                ))
+                            }
+                            other => other,
+                        })
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not retain failed compiler artifacts")
+                    }
+                }
+            }
+            result
+        }
     }
+}
+
+fn retain_failed_compiler_artifacts(directory: &Path) -> std::io::Result<PathBuf> {
+    let retained_root = match std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
+        Some(root) => PathBuf::from(root),
+        None => std::env::current_dir()?.join("target/tidepool-test-runs"),
+    }
+    .join("compiler-failures");
+    std::fs::create_dir_all(&retained_root)?;
+    let retained = TempDir::new_in(&retained_root)?;
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            std::fs::copy(entry.path(), retained.path().join(entry.file_name()))?;
+        }
+    }
+    if let Ok(bytes) = std::fs::read(directory.join("dependencies.json")) {
+        if let Ok(evidence) = serde_json::from_slice::<cache::DependencyEvidence>(&bytes) {
+            let sources = retained.path().join("consumed-sources");
+            std::fs::create_dir(&sources)?;
+            let mut captured = Vec::new();
+            for (ordinal, source) in evidence.sources.iter().enumerate() {
+                let path = PathBuf::from(format!("consumed-sources/{ordinal}.hs"));
+                if std::fs::copy(&source.path, retained.path().join(&path)).is_ok() {
+                    captured.push((source, path));
+                }
+            }
+            std::fs::write(
+                retained.path().join("consumed-sources.json"),
+                serde_json::to_vec(&captured).map_err(std::io::Error::other)?,
+            )?;
+        }
+    }
+    Ok(retained.keep())
 }
 
 enum CompileAttempt<T> {
@@ -1148,6 +1256,7 @@ pub(crate) fn assemble(
         module_products: Vec::new(),
         certified_groups: Vec::new(),
         recovery_products: Vec::new(),
+        producer_identity: None,
         module_inventory: None,
     })
 }
@@ -1516,12 +1625,10 @@ mod module_product_tests {
             .collect();
         assert!(modules.contains("ModuleProductA"));
         assert!(modules.contains("ModuleProductB"));
-        assert!(
-            compiled
-                .module_products
-                .iter()
-                .any(|product| product.module == "ModuleProductA" && product.groups.len() >= 2)
-        );
+        assert!(compiled
+            .module_products
+            .iter()
+            .any(|product| product.module == "ModuleProductA" && product.groups.len() >= 2));
         let inventory = compiled
             .module_inventory
             .expect("safe worker graph must accompany its module products");
@@ -1569,19 +1676,15 @@ mod module_product_tests {
         assert_ne!(changed, first);
         let second =
             compile_targets(&changed, &["consume"], &[root.clone()], |_, _, _| {}).unwrap();
-        assert!(
-            second
-                .module_products
-                .iter()
-                .any(|product| product.module == "ModuleProductA")
-        );
-        assert!(
-            second
-                .certified_groups
-                .iter()
-                .any(|group| group.origin() == ProductOrigin::Cached
-                    && group.owner().module == "ModuleProductA")
-        );
+        assert!(second
+            .module_products
+            .iter()
+            .any(|product| product.module == "ModuleProductA"));
+        assert!(second
+            .certified_groups
+            .iter()
+            .any(|group| group.origin() == ProductOrigin::Cached
+                && group.owner().module == "ModuleProductA"));
         assert_eq!(
             second.targets["consume"].pending_imports.len(),
             second.targets["consume"]
@@ -1598,34 +1701,28 @@ mod module_product_tests {
             .unwrap();
         let changed_again = first.replace("produce + 1", "produce + 3");
         let third = compile_targets(&changed_again, &["consume"], &[root], |_, _, _| {}).unwrap();
-        assert!(
-            third
-                .certified_groups
-                .iter()
-                .any(|group| group.origin() == ProductOrigin::Fresh
-                    && group.owner().module == "ModuleProductA")
-        );
-        assert!(
-            !third
-                .certified_groups
-                .iter()
-                .any(|group| group.origin() == ProductOrigin::Cached
-                    && group.owner().module == "ModuleProductA")
-        );
+        assert!(third
+            .certified_groups
+            .iter()
+            .any(|group| group.origin() == ProductOrigin::Fresh
+                && group.owner().module == "ModuleProductA"));
+        assert!(!third
+            .certified_groups
+            .iter()
+            .any(|group| group.origin() == ProductOrigin::Cached
+                && group.owner().module == "ModuleProductA"));
         match old_cache {
             Some(path) => unsafe { std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", path) },
             None => unsafe { std::env::remove_var("TIDEPOOL_COMPILE_CACHE_DIR") },
         }
     }
-
-
 }
 
 #[cfg(test)]
 mod constructor_identity_tests {
     use super::*;
     use tidepool_repr::execution_schema::ConstructorDecl;
-    use tidepool_repr::serial::{MetaWarnings, write_metadata};
+    use tidepool_repr::serial::{write_metadata, MetaWarnings};
     use tidepool_repr::{DataCon, SrcBang};
 
     /// A real, GHC-produced prepared program — `M3Vertical.hs`'s `entry`,

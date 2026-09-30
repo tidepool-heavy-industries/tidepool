@@ -21,7 +21,7 @@ module Tidepool.GhcPipeline
 import GHC hiding (typeKind)
 import GHC.Driver.Main (hscDesugar, batchMsg, hscTidy)
 import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit)
-import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger))
+import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger, hsc_dflags))
 import GHC.Driver.Monad (reflectGhc, reifyGhc)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, addToHpt, lookupHpt)
 import GHC.Unit.Module.ModDetails (md_types)
@@ -641,11 +641,12 @@ data PipelineVariant = PipelineVariant
   , pvTransformParsed :: ModSummary -> ParsedModule -> ParsedModule
   }
 
-data CompilePurpose = GeneralCompile | LookupTypeCompile
+data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile
   deriving (Eq, Ord, Show)
 
 transformFor :: CompilePurpose -> ModuleName -> ModSummary -> ParsedModule -> ParsedModule
 transformFor GeneralCompile _ _ = id
+transformFor CertifyHomeProductsCompile _ _ = id
 transformFor LookupTypeCompile target summary
   | ms_mod_name summary == target = normalizeLookupWildcards
   | otherwise = id
@@ -695,6 +696,8 @@ data ModuleFront = ModuleFront
   , mfQuasiQuoteOrigins :: QuasiQuoteOrigins
     -- ^ Classified once from the parsed source in 'compileFront'; see
     -- 'classifyQuasiQuoteOrigins'.
+  , mfHasDependentFiles :: Bool
+    -- ^ Request-time inputs recorded by this module's typecheck.
   }
 
 -- Exact artifact operations have no authored source target. They use the
@@ -899,26 +902,28 @@ hexBytes = concatMap hexByte . BS.unpack
 -- not execute a compiler-time provider, so it remains memoizable.
 hasUntrackedCompileTimeExecution :: DynFlags -> Bool
 hasUntrackedCompileTimeExecution flags =
-  any (`xopt` flags) [LangExt.Cpp, LangExt.TemplateHaskell, LangExt.QuasiQuotes]
+  hasUnconditionallyUntrackedCompileTimeExecution flags || xopt LangExt.QuasiQuotes flags
 
--- | Diagnostic only: which extension in 'hasUntrackedCompileTimeExecution'
+-- | Diagnostic only: which option in 'hasUntrackedCompileTimeExecution'
 -- fired, for an exact no-reuse reason rather than a boolean. The first match
 -- in the same order that function checks; a module can enable more than one
 -- of these, in which case the trace names the first.
 untrackedExtensionName :: DynFlags -> Maybe String
-untrackedExtensionName flags = case filter (`xopt` flags)
-    [LangExt.Cpp, LangExt.TemplateHaskell, LangExt.QuasiQuotes] of
-  (ext : _) -> Just (show ext)
-  []        -> Nothing
+untrackedExtensionName flags
+  | gopt Opt_Pp flags = Just "external-preprocessor"
+  | otherwise = case filter (`xopt` flags)
+      [LangExt.Cpp, LangExt.TemplateHaskell, LangExt.QuasiQuotes] of
+    (ext : _) -> Just (show ext)
+    []        -> Nothing
 
--- Cpp and TemplateHaskell splices can run arbitrary compile-time code with
+-- External preprocessing, CPP, and TemplateHaskell splices can run arbitrary compile-time code with
 -- no static bound on what they read (files, environment, 'Name'-based
 -- 'reify' against other modules) or produce, so a module enabling either
 -- always misses the memo -- unconditionally, regardless of any allowlist.
 -- 'QuasiQuotes' is handled separately: see 'pureQuasiQuoters' below.
 hasUnconditionallyUntrackedCompileTimeExecution :: DynFlags -> Bool
 hasUnconditionallyUntrackedCompileTimeExecution flags =
-  any (`xopt` flags) [LangExt.Cpp, LangExt.TemplateHaskell]
+  gopt Opt_Pp flags || any (`xopt` flags) [LangExt.Cpp, LangExt.TemplateHaskell]
 
 -- | Quasiquoters proven pure by inspection, named by their fully-qualified
 -- defining module and identifier ("Module.Path.name"). THE PURITY
@@ -1213,13 +1218,11 @@ directPackageImportRoots env tcg = do
   pure (Set.toAscList (Set.fromList roots))
 
 frontFacts :: ModuleFront -> IO ModuleFacts
-frontFacts front = do
-  dependentFiles <- readIORef (tcg_dependent_files (mfTcGblEnv front))
-  pure ModuleFacts
+frontFacts front = pure ModuleFacts
     { moduleFactTyCons = mg_tcs (mfDesugared front)
     , moduleFactReferences = mfReferencedModules front
     , moduleFactPackageRoots = mfPackageRoots front
-    , moduleFactHasDependentFiles = not (null dependentFiles)
+    , moduleFactHasDependentFiles = mfHasDependentFiles front
     , moduleFactQuasiQuoteOrigins = mfQuasiQuoteOrigins front
     }
 
@@ -1498,6 +1501,10 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                   else pure []
                 when (ms_mod_name modSum == targetModName') $ liftIO $ hPutStrLn stderr $
                   "tidepool-target phase=desugar module=" ++ targetModName
+                dependentFiles <- liftIO (readIORef (tcg_dependent_files tcGblEnv))
+                when (timing && not (null dependentFiles)) $ liftIO $ hPutStrLn stderr $
+                  "tidepool-dependent-files module=" ++ moduleNameString (ms_mod_name modSum)
+                    ++ " files=" ++ show dependentFiles
                 (desugared, dsMs) <- timeSection $ liftIO (hscDesugar hscEnv modSum tcGblEnv)
                 liftIO (modifyIORef' loweringMsRef (+ dsMs))
                 liftIO (modifyIORef' dsMsRef (+ dsMs))
@@ -1512,7 +1519,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                                  , mfCheckedBinderPins = checkedBinderPins
                                  , mfResultType = mResTy
                                  , mfReferencedModules = moduleRefs desugared
-                                 , mfQuasiQuoteOrigins = quasiQuoteOrigins }
+                                 , mfQuasiQuoteOrigins = quasiQuoteOrigins
+                                 , mfHasDependentFiles = not (null dependentFiles) }
               -- The per-module back half: the optimized-Core pass, the
               -- shared interface registration, then stable name externalization.
               -- Interface construction and prepared lowering share the same tidy
@@ -2169,7 +2177,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 , prTargetTcGblEnv = targetEnvironment
                 }
           capturedSources <- liftIO (captureDependencySources modGraphRaw)
-          dependencies <- liftIO (dependencyEvidenceFor hscFinal capturedSources modGraphRaw moduleFacts)
+          dependencies <- liftIO (dependencyEvidenceFor hscFinal capturedSources modGraphRaw
+            (zip (map (ms_mod_name . observationSummary) observations) moduleFacts))
           productInterfaces <- liftIO (readIORef productInterfacesRef)
           let packageRoots = Map.fromList
                 [(ms_mod_name (observationSummary observation), moduleFactPackageRoots facts)
@@ -2455,10 +2464,11 @@ revalidateAcceptedCandidates candidates = and <$> forM candidates (\candidate ->
 -- imports have no selected home path; their ordered absent home candidates
 -- remain evidence because creating one later would introduce shadowing.
 dependencyEvidenceFor
-  :: HscEnv -> ([DependencySource], Bool) -> ModuleGraph -> [ModuleFacts]
+  :: HscEnv -> ([DependencySource], Bool) -> ModuleGraph -> [(ModuleName, ModuleFacts)]
   -> IO DependencyEvidence
 dependencyEvidenceFor env (sources, sourcesComplete) graph moduleFacts = do
   let graphSummaries = [summary | ModuleNode _ summary <- mgModSummaries' graph]
+      factsByName = Map.fromList moduleFacts
       qualifierKey NoPkgQual = "none"
       qualifierKey (ThisPkg unit) = "this:" ++ unitString unit
       qualifierKey (OtherPkg unit) = "other:" ++ unitString unit
@@ -2530,9 +2540,22 @@ dependencyEvidenceFor env (sources, sourcesComplete) graph moduleFacts = do
           ]
       , dependencyModuleProduct = if isBoot then ProductBoot else ProductInterfaceOnly
       }
-  let hasUntrackedExecution =
-        any (hasUntrackedCompileTimeExecution . ms_hspp_opts) graphSummaries
-      complete = sourcesComplete && not (any moduleFactHasDependentFiles moduleFacts)
+  let untrackedExecution summary =
+        let flags = ms_hspp_opts summary
+        in hasUnconditionallyUntrackedCompileTimeExecution flags
+          || if ms_hsc_src summary == HsBootFile
+              -- Boot summaries have no parsed observation in the executable
+              -- walk. Never borrow the regular module's quote evidence.
+              then xopt LangExt.QuasiQuotes flags
+              else case Map.lookup (ms_mod_name summary) factsByName of
+                Nothing -> True
+                Just facts -> moduleFactHasDependentFiles facts
+                  || (xopt LangExt.QuasiQuotes flags && case moduleFactQuasiQuoteOrigins facts of
+                        NoQuasiQuotes -> False
+                        AllPureQuasiQuotes _ -> False
+                        HasUntrackedQuasiQuote _ -> True)
+      hasUntrackedExecution = any untrackedExecution graphSummaries
+      complete = sourcesComplete && not (any (moduleFactHasDependentFiles . snd) moduleFacts)
         && not hasUntrackedExecution
         && all (\resolution -> not (null (dependencyResolutionCandidates resolution))
               || "other:" `isPrefixOf` dependencyResolutionQualifier resolution)
@@ -2676,10 +2699,17 @@ residentCompileOne selection cache memoRef retainedRef baseDFlags baseImportPath
   sessionT0 <- monotonicTime
   retained <- liftIO (readIORef retainedRef)
   hsc0 <- getSession
+  let requestImportPaths = nub (baseImportPaths ++ extraIncludes)
+      sourceState
+        | importPaths (hsc_dflags hsc0) == requestImportPaths = hsc0
+        | otherwise = hsc0 { hsc_mod_graph = mkModuleGraph [] }
+      -- Downsweep can reuse a byte-identical source summary with the previous
+      -- request's import paths. Refresh summaries when the search path changes;
+      -- compiled interfaces and dependency-validated module products stay warm.
   setSession (hscUpdateFlags
     (configureBuildProducts baseDFlags buildProductsDir .
-      (\df -> df { importPaths = nub (baseImportPaths ++ extraIncludes) }))
-    hsc0)
+      (\df -> df { importPaths = requestImportPaths }))
+    sourceState)
   variant <- liftIO $ case mscope of
     Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
     _                                        -> normalVariant purpose path
@@ -2897,7 +2927,8 @@ normalVariant purpose path = do
         -- order.
       , cpResultBinders = [scaffoldOutputBase, scaffoldTargetName]
       , cpBeforeModule = \_ -> pure ()
-      , cpTier = OptimizeCoreReachable
+      , cpTier = if purpose == CertifyHomeProductsCompile
+          then OptimizeEveryModule else OptimizeCoreReachable
         -- Phase barrier (backstop): a target or dependency compile error
         -- already threw a spanned 'SourceError' from inside the compile loop
         -- (each summary's own 'parseModule'/'typecheckModule' redoes its

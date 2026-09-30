@@ -48,9 +48,10 @@ pub struct RecoveryArtifactInput<'a> {
 /// Exact original module bytes and Rust-admitted ownership, retained across a
 /// temporary worker directory's lifetime. Only compiler certification creates
 /// this bundle; materialization rechecks every member before publication.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CertifiedRecoveryProduct {
     owner: CachedHomeOwner,
+    source_sha256: Option<[u8; 32]>,
     interface_bytes: Vec<u8>,
     product_bytes: Vec<u8>,
     package_imports_bytes: Vec<u8>,
@@ -67,6 +68,7 @@ impl CertifiedRecoveryProduct {
     ) -> Self {
         Self {
             owner,
+            source_sha256: None,
             interface_bytes,
             product_bytes,
             package_imports_bytes,
@@ -76,6 +78,23 @@ impl CertifiedRecoveryProduct {
 
     pub fn owner(&self) -> &CachedHomeOwner {
         &self.owner
+    }
+
+    pub fn source_sha256(&self) -> Option<[u8; 32]> {
+        self.source_sha256
+    }
+
+    pub fn interface_bytes(&self) -> &[u8] {
+        &self.interface_bytes
+    }
+
+    pub fn product_bytes(&self) -> &[u8] {
+        &self.product_bytes
+    }
+
+    pub(crate) fn with_source_sha256(mut self, source_sha256: [u8; 32]) -> Self {
+        self.source_sha256 = Some(source_sha256);
+        self
     }
 }
 
@@ -447,13 +466,11 @@ fn prepare_owned_directory(recovery_root: &Path) -> Result<PathBuf, RecoveryArti
             return Err(RecoveryArtifactError::InvalidReference);
         }
         Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            match fs::create_dir(&owned) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => match fs::create_dir(&owned) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        },
         Err(error) => return Err(error.into()),
     }
     let metadata = fs::symlink_metadata(&owned)?;
@@ -495,12 +512,20 @@ pub fn materialize_joined_interface(
         PathBuf::from("artifacts").join(format!("{}.joined.hi", hex(&skinny_iface_sha256)));
     let package_imports_path = package_sidecar_path(&interface_path);
     durable_copy(
-        &owned.join(interface_path.file_name().ok_or(RecoveryArtifactError::InvalidReference)?),
+        &owned.join(
+            interface_path
+                .file_name()
+                .ok_or(RecoveryArtifactError::InvalidReference)?,
+        ),
         &bytes,
         &skinny_iface_sha256,
     )?;
     durable_copy(
-        &owned.join(package_imports_path.file_name().ok_or(RecoveryArtifactError::InvalidReference)?),
+        &owned.join(
+            package_imports_path
+                .file_name()
+                .ok_or(RecoveryArtifactError::InvalidReference)?,
+        ),
         &package_imports,
         &package_imports_sha256,
     )?;
@@ -536,14 +561,18 @@ pub fn materialize_certified_products(
         if Sha256::digest(&product.interface_bytes).as_slice() != owner.skinny_iface_sha256
             || Sha256::digest(&product.product_bytes).as_slice() != owner.product_sha256
         {
-            return Err(RecoveryArtifactError::DigestMismatch(home_interface_path(owner)));
+            return Err(RecoveryArtifactError::DigestMismatch(home_interface_path(
+                owner,
+            )));
         }
         let interface_path = home_interface_path(owner);
         let package_imports_path = package_sidecar_path(&interface_path);
         let certification_path = certification_sidecar_path(&interface_path);
         let product_path = home_product_path(owner);
         if product.package_imports_bytes.len() as u64 > PACKAGE_IMPORTS_LIMIT {
-            return Err(RecoveryArtifactError::InvalidPackageImports(package_imports_path));
+            return Err(RecoveryArtifactError::InvalidPackageImports(
+                package_imports_path,
+            ));
         }
         validate_package_imports(
             &product.package_imports_bytes,
@@ -553,31 +582,50 @@ pub fn materialize_certified_products(
             &package_imports_path,
         )?;
         if product.certification_bytes.len() as u64 > CERTIFICATION_LIMIT {
-            return Err(RecoveryArtifactError::InvalidCertifiedOwners(certification_path));
+            return Err(RecoveryArtifactError::InvalidCertifiedOwners(
+                certification_path,
+            ));
         }
         crate::certified_products::validate_home_certification(&product.certification_bytes, owner)
-            .map_err(|_| RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone()))?;
+            .map_err(|_| {
+                RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone())
+            })?;
         let package_imports_sha256: [u8; 32] =
             Sha256::digest(&product.package_imports_bytes).into();
-        let certification_sha256: [u8; 32] =
-            Sha256::digest(&product.certification_bytes).into();
+        let certification_sha256: [u8; 32] = Sha256::digest(&product.certification_bytes).into();
         durable_copy(
-            &owned.join(interface_path.file_name().ok_or(RecoveryArtifactError::InvalidReference)?),
+            &owned.join(
+                interface_path
+                    .file_name()
+                    .ok_or(RecoveryArtifactError::InvalidReference)?,
+            ),
             &product.interface_bytes,
             &owner.skinny_iface_sha256,
         )?;
         durable_copy(
-            &owned.join(product_path.file_name().ok_or(RecoveryArtifactError::InvalidReference)?),
+            &owned.join(
+                product_path
+                    .file_name()
+                    .ok_or(RecoveryArtifactError::InvalidReference)?,
+            ),
             &product.product_bytes,
             &owner.product_sha256,
         )?;
         durable_copy(
-            &owned.join(package_imports_path.file_name().ok_or(RecoveryArtifactError::InvalidReference)?),
+            &owned.join(
+                package_imports_path
+                    .file_name()
+                    .ok_or(RecoveryArtifactError::InvalidReference)?,
+            ),
             &product.package_imports_bytes,
             &package_imports_sha256,
         )?;
         durable_copy(
-            &owned.join(certification_path.file_name().ok_or(RecoveryArtifactError::InvalidReference)?),
+            &owned.join(
+                certification_path
+                    .file_name()
+                    .ok_or(RecoveryArtifactError::InvalidReference)?,
+            ),
             &product.certification_bytes,
             &certification_sha256,
         )?;
@@ -1039,7 +1087,10 @@ mod tests {
             Err(RecoveryArtifactError::DigestMismatch(_))
         ));
         let retained = verify_materialized_ref(run.path(), &first).unwrap();
-        assert_eq!(retained.package_imports_bytes, original.package_imports_bytes);
+        assert_eq!(
+            retained.package_imports_bytes,
+            original.package_imports_bytes
+        );
         assert_eq!(retained.certification_bytes, original.certification_bytes);
     }
 
