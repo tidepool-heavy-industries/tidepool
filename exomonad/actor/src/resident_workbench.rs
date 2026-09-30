@@ -1390,11 +1390,25 @@ pub struct ResidentActorRunner<H, O> {
 }
 
 pub(crate) struct ExecutionPrivateScope {
+    pub owner: tidepool_runtime::session::RecoveryPublicOwner,
     pub public_scope: tidepool_codegen::scope::ScopeId,
     pub private_scope: tidepool_codegen::scope::ScopeId,
     pub admitted_public: tidepool_runtime::session::PublicVisibilitySnapshot,
     pub decision: Arc<tidepool_runtime::session::PublicationDecision>,
     pub admission: Arc<tidepool_runtime::session::PrivateExecutionAdmission>,
+}
+
+pub(crate) enum PrivateExecutionPublication {
+    Manifest(tidepool_runtime::session::PublicManifestCommit),
+    Rejected {
+        reason: tidepool_toolchain::declaration_join::JoinRejection,
+        diagnostic: String,
+    },
+}
+
+enum PreparedExecutionPublication {
+    Manifest(tidepool_runtime::session::StagedPublicManifest),
+    Rejected(tidepool_runtime::session::RejectedDeclarationPublication),
 }
 
 impl<H, O> Clone for ResidentActorRunner<H, O> {
@@ -6481,22 +6495,168 @@ where
     pub(crate) async fn begin_private_execution(
         &self,
         context: crate::ActorSessionContext,
+        owner: tidepool_runtime::session::RecoveryPublicOwner,
         decision: Arc<tidepool_runtime::session::PublicationDecision>,
     ) -> Result<ExecutionPrivateScope, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, context, _| {
                 let public_scope = context.placement.lexical_scope;
+                session
+                    .bind_durable_public_scope(owner.clone(), public_scope)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })?;
                 let admission = Arc::new(session.begin_private_execution(public_scope).map_err(
                     |error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)),
                 )?);
                 let admitted_public = admission.admitted_public().clone();
                 let private_scope = admission.private_scope();
                 Ok(ExecutionPrivateScope {
+                    owner,
                     public_scope,
                     private_scope,
                     admitted_public,
                     decision,
                     admission,
+                })
+            })
+            .await
+    }
+
+    /// Publish a fixed native execution. Every retry captures only the latest
+    /// public merge baseline; accepted and rejected compiler graphs both
+    /// revalidate under the owning checkout before becoming a terminal result.
+    pub(crate) async fn publish_private_execution(
+        &self,
+        context: crate::ActorSessionContext,
+        execution: Arc<ExecutionPrivateScope>,
+    ) -> Result<PrivateExecutionPublication, ResidentActorWorkbenchError> {
+        if context.placement.lexical_scope != execution.private_scope {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "execution publication requires its admitted private context".into(),
+            ));
+        }
+        let admission = execution.admission.clone();
+        let intent = self
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                session
+                    .freeze_private_execution(&admission)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })
+            })
+            .await?;
+        let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
+        let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
+        loop {
+            if matches!(
+                execution.decision.phase(),
+                tidepool_runtime::session::PublicationPhase::CancellationRequested
+                    | tidepool_runtime::session::PublicationPhase::Terminated
+            ) {
+                return Ok(PrivateExecutionPublication::Manifest(
+                    tidepool_runtime::session::PublicManifestCommit::Cancelled,
+                ));
+            }
+            let owner = execution.owner.clone();
+            let intent = intent.clone();
+            let baseline = self
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    session
+                        .restage_execution_publication(owner, intent)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })
+                })
+                .await?;
+            let compile_cancellation = cancellation.clone();
+            let prepared = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+                tidepool_runtime::with_compiler_transaction_cancellable(
+                    compile_cancellation,
+                    || match baseline {
+                        tidepool_runtime::session::ExecutionPublication::Bindings(base) => {
+                            base.stage().map(PreparedExecutionPublication::Manifest)
+                        }
+                        tidepool_runtime::session::ExecutionPublication::Declarations(base) => {
+                            match base.certify()? {
+                                tidepool_runtime::session::CertifiedDeclarationPublication::Accepted(accepted) => {
+                                    accepted.stage().map(PreparedExecutionPublication::Manifest)
+                                }
+                                tidepool_runtime::session::CertifiedDeclarationPublication::Rejected(rejected) => {
+                                    Ok(PreparedExecutionPublication::Rejected(rejected))
+                                }
+                            }
+                        }
+                    },
+                )
+            }))
+            .await
+            .map_err(ResidentActorWorkbenchError::Join)?
+            .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
+            match prepared {
+                PreparedExecutionPublication::Manifest(ticket) => {
+                    let decision = execution.decision.clone();
+                    let outcome = self
+                        .access
+                        .with_machine(context.clone(), move |session, _, _| {
+                            session
+                                .publish_staged_public_manifest(ticket, &decision)
+                                .map_err(|error| {
+                                    ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                                        error,
+                                    ))
+                                })
+                        })
+                        .await?;
+                    if outcome == tidepool_runtime::session::PublicManifestCommit::Stale {
+                        continue;
+                    }
+                    cancel_on_drop.0 = None;
+                    return Ok(PrivateExecutionPublication::Manifest(outcome));
+                }
+                PreparedExecutionPublication::Rejected(rejected) => {
+                    let outcome = self
+                        .access
+                        .with_machine(context.clone(), move |session, _, _| {
+                            session
+                                .revalidate_declaration_rejection(&rejected)
+                                .map_err(|error| {
+                                    ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                                        error,
+                                    ))
+                                })
+                        })
+                        .await?;
+                    match outcome {
+                        tidepool_runtime::session::DeclarationPublicationRejection::Stale => {
+                            continue
+                        }
+                        tidepool_runtime::session::DeclarationPublicationRejection::Rejected {
+                            reason,
+                            diagnostic,
+                        } => {
+                            cancel_on_drop.0 = None;
+                            return Ok(PrivateExecutionPublication::Rejected {
+                                reason,
+                                diagnostic,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn confirm_publication_durability(
+        &self,
+        context: crate::ActorSessionContext,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                session.confirm_publication_durability().map_err(|error| {
+                    ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                 })
             })
             .await
