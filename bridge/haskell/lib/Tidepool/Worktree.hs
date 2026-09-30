@@ -463,6 +463,7 @@ renderWorktreeId (WorktreeId t) = t
 renderWorktreeError :: WorktreeError -> Text
 renderWorktreeError (SourceDirty d) = "source repository is dirty: " <> T.pack (show (length d.staged)) <> " staged, " <> T.pack (show (length d.unstaged)) <> " unstaged, " <> T.pack (show (length d.untracked)) <> " untracked; commit or stash those changes, or call allowDirtySnapshot on the spec to snapshot the source as it stands"
 renderWorktreeError (NotARepository p) = "not a git repository: " <> p
+renderWorktreeError (GitRepositoryIdentityMismatch path detail) = "Git repository identity mismatch at " <> path <> ": " <> detail
 renderWorktreeError (WorktreeLost i) = "managed worktree " <> renderWorktreeId i <> " is registered but missing on disk"
 renderWorktreeError (DirtySubmoduleUnsupported p) = "dirty submodule is unsupported in v1: " <> p
 renderWorktreeError (SourceOperationInProgress k) = "source repository has an operation in progress: " <> T.pack (show k) <> "; finish or abort it first — there is no snapshot override for this one, because a tree captured mid-operation is not the tree anyone meant"

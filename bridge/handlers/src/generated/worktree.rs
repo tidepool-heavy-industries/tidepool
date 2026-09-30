@@ -13,6 +13,8 @@ pub enum WorktreeError {
     SourceDirty(tidepool_bridge_effects::WtDirtySummary),
     /// the path is not inside a git repository
     NotARepository(String),
+    /// a nested checkout resolves to ancestor or unexpected Git metadata; the operation refuses before changing repository state
+    GitRepositoryIdentityMismatch(String, String),
     /// registered but gone from disk; never silently recreated
     WorktreeLost(tidepool_bridge_effects::WtWorktreeId),
     /// a dirty submodule in the source; v1 refuses rather than capturing a gitlink it did not follow

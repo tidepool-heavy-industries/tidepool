@@ -23,6 +23,13 @@ pub enum WorktreeError {
     #[error("not a git repository: {}", .0.display())]
     NotARepository(PathBuf),
 
+    /// A nested checkout resolved to Git metadata other than the repository
+    /// allocated for that child. Refuse before rewriting its gitfile or
+    /// changing a remote, since Git can otherwise apply the child command to
+    /// an ancestor repository.
+    #[error("Git repository identity mismatch at {}: {detail}", .path.display())]
+    GitRepositoryIdentityMismatch { path: PathBuf, detail: String },
+
     /// The registry still has a record for this id, but the worktree it names
     /// is gone from disk (a human removed it). NEVER silently recreated —
     /// retain-first means a lost tree is reported, not reconstructed.

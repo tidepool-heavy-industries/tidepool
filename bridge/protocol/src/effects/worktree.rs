@@ -861,6 +861,11 @@ fn errors() -> ErrorAdt {
                 doc: "the path is not inside a git repository",
             },
             ErrorVariant {
+                ctor: "GitRepositoryIdentityMismatch",
+                fields: vec![text_field("repositoryPath"), text_field("identityDetail")],
+                doc: "a nested checkout resolves to ancestor or unexpected Git metadata; the operation refuses before changing repository state",
+            },
+            ErrorVariant {
                 ctor: "WorktreeLost",
                 fields: vec![field("lostId", "WorktreeId", "WtWorktreeId")],
                 doc: "registered but gone from disk; never silently recreated",

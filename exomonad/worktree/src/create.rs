@@ -1109,7 +1109,7 @@ impl WorktreeManager {
                     .file_type()
                     .map_err(|error| crate::storage::storage_failure(&entry.path(), error))?;
                 if entry.file_name() == ".git" {
-                    if kind.is_file() {
+                    if kind.is_file() || kind.is_dir() {
                         let _repository = git.write_scope(&directory)?;
                         Self::require_repository_root(git, &directory, &directory)?;
                         let admin = inspect::git_dir(git, &directory)?;
@@ -1122,27 +1122,33 @@ impl WorktreeManager {
                                     crate::storage::storage_failure(ancestor, error)
                                 })?;
                             if canonical_ancestor == canonical_common {
-                                return Err(crate::storage::storage_failure(
-                                    &directory,
-                                    format!(
-                                        "nested Git repository at {} resolves to an ancestor's Git metadata",
-                                        directory.display()
+                                return Err(WorktreeError::GitRepositoryIdentityMismatch {
+                                    path: directory.clone(),
+                                    detail: format!(
+                                        "Git metadata {} aliases ancestor metadata {}",
+                                        canonical_common.display(),
+                                        canonical_ancestor.display()
                                     ),
-                                ));
+                                });
                             }
                         }
-                        if directory == workspace {
+                        if kind.is_file() && directory == workspace {
                             if let Some(expected) = expected_workspace_common {
                                 Self::require_repository_common_dir(git, &directory, expected)?;
                             }
                         }
                         child_common_dirs.push(admin.clone());
                         child_common_dirs.push(common);
-                        let pointer = format!("gitdir: {}\n", admin.display());
-                        tidepool_atomic_write::write_best_effort(&entry.path(), pointer.as_bytes())
+                        if kind.is_file() {
+                            let pointer = format!("gitdir: {}\n", admin.display());
+                            tidepool_atomic_write::write_best_effort(
+                                &entry.path(),
+                                pointer.as_bytes(),
+                            )
                             .map_err(|error| {
                                 crate::storage::storage_failure(&error.path, error.source)
                             })?;
+                        }
                     }
                 } else if kind.is_dir() {
                     child_directories.push(entry.path());
@@ -1168,14 +1174,14 @@ impl WorktreeManager {
         let canonical_expected = fs::canonicalize(expected_root)
             .map_err(|error| crate::storage::storage_failure(expected_root, error))?;
         if canonical_actual != canonical_expected {
-            return Err(crate::storage::storage_failure(
-                cwd,
-                format!(
+            return Err(WorktreeError::GitRepositoryIdentityMismatch {
+                path: cwd.to_path_buf(),
+                detail: format!(
                     "Git repository root {} does not match expected child {}",
                     canonical_actual.display(),
                     canonical_expected.display()
                 ),
-            ));
+            });
         }
         Ok(())
     }
@@ -1191,14 +1197,14 @@ impl WorktreeManager {
         let canonical_expected = fs::canonicalize(expected_common)
             .map_err(|error| crate::storage::storage_failure(expected_common, error))?;
         if canonical_actual != canonical_expected {
-            return Err(crate::storage::storage_failure(
-                cwd,
-                format!(
+            return Err(WorktreeError::GitRepositoryIdentityMismatch {
+                path: cwd.to_path_buf(),
+                detail: format!(
                     "Git repository metadata {} does not match expected submodule metadata {}",
                     canonical_actual.display(),
                     canonical_expected.display()
                 ),
-            ));
+            });
         }
         Ok(())
     }
@@ -1622,7 +1628,10 @@ mod submodule_gitfile_tests {
             WorktreeManager::initialize_submodules(parent.git(), parent.path(), parent.path())
                 .unwrap_err();
 
-        assert!(failure.to_string().contains("ancestor's Git metadata"));
+        assert!(matches!(
+            failure,
+            WorktreeError::GitRepositoryIdentityMismatch { .. }
+        ));
         let after = parent
             .git()
             .try_run(parent.path(), &["remote", "get-url", "origin"])
@@ -1711,6 +1720,95 @@ mod submodule_gitfile_tests {
             .try_run(parent.path(), &["remote", "get-url", "origin"])
             .unwrap();
         assert_eq!(after.trimmed(), before.trimmed());
+    }
+
+    #[test]
+    fn refuses_nested_gitfile_aliasing_embedded_workspace_metadata() {
+        let parent = TestRepo::init().unwrap();
+        parent
+            .git()
+            .try_run(
+                parent.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://example.invalid/root.git",
+                ],
+            )
+            .unwrap();
+        parent
+            .writer()
+            .commit_file(
+                ".gitmodules",
+                "[submodule \"workspace\"]\n\tpath = .exomonad/workspace\n\turl = /tmp/not-used\n",
+                "declare workspace submodule",
+            )
+            .unwrap();
+
+        let workspace = parent.path().join(".exomonad/workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        parent
+            .git()
+            .init_repository(&workspace, &["--initial-branch=main", "-q"])
+            .unwrap();
+        for (key, value) in [
+            ("user.name", "Embedded Workspace"),
+            ("user.email", "workspace@example.invalid"),
+            ("remote.origin.url", "https://example.invalid/workspace.git"),
+        ] {
+            parent
+                .git()
+                .try_run(&workspace, &["config", key, value])
+                .unwrap();
+        }
+        parent
+            .writer_at(&workspace)
+            .commit_file("README", "workspace\n", "workspace seed")
+            .unwrap();
+
+        let nested = workspace.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        let nested_gitfile = nested.join(".git");
+        let nested_gitfile_contents = format!("gitdir: {}\n", workspace.join(".git").display());
+        fs::write(&nested_gitfile, &nested_gitfile_contents).unwrap();
+        let parent_origin_before = parent
+            .git()
+            .try_run(parent.path(), &["remote", "get-url", "origin"])
+            .unwrap();
+        let workspace_origin_before = parent
+            .git()
+            .try_run(&workspace, &["remote", "get-url", "origin"])
+            .unwrap();
+
+        let failure =
+            WorktreeManager::initialize_submodules(parent.git(), parent.path(), parent.path())
+                .unwrap_err();
+
+        assert!(matches!(
+            failure,
+            WorktreeError::GitRepositoryIdentityMismatch { .. }
+        ));
+        assert_eq!(
+            fs::read_to_string(&nested_gitfile).unwrap(),
+            nested_gitfile_contents
+        );
+        assert_eq!(
+            parent
+                .git()
+                .try_run(parent.path(), &["remote", "get-url", "origin"])
+                .unwrap()
+                .trimmed(),
+            parent_origin_before.trimmed()
+        );
+        assert_eq!(
+            parent
+                .git()
+                .try_run(&workspace, &["remote", "get-url", "origin"])
+                .unwrap()
+                .trimmed(),
+            workspace_origin_before.trimmed()
+        );
     }
 }
 

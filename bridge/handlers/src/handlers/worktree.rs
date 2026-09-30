@@ -897,6 +897,12 @@ pub(crate) fn error_to_wire(e: DomainWorktreeError) -> WorktreeError {
         DomainWorktreeError::NotARepository(p) => {
             WorktreeError::NotARepository(p.to_string_lossy().into_owned())
         }
+        DomainWorktreeError::GitRepositoryIdentityMismatch { path, detail } => {
+            WorktreeError::GitRepositoryIdentityMismatch(
+                path.to_string_lossy().into_owned(),
+                detail,
+            )
+        }
         DomainWorktreeError::WorktreeLost(id) => {
             WorktreeError::WorktreeLost(worktree_id_to_wire(&id))
         }
@@ -1160,6 +1166,9 @@ pub fn render_worktree_error(error: &WorktreeError) -> String {
             summary.untracked.len()
         ),
         WorktreeError::NotARepository(path) => format!("not a git repository: {path}"),
+        WorktreeError::GitRepositoryIdentityMismatch(path, detail) => {
+            format!("Git repository identity mismatch at {path}: {detail}")
+        }
         WorktreeError::WorktreeLost(id) => format!(
             "managed worktree {} is registered but missing on disk",
             id.raw
@@ -1809,6 +1818,17 @@ mod tests {
                 "not_a_repository",
                 DomainWorktreeError::NotARepository(PathBuf::from("/not/a/repo")),
                 WorktreeError::NotARepository("/not/a/repo".to_string()),
+            ),
+            (
+                "git_repository_identity_mismatch",
+                DomainWorktreeError::GitRepositoryIdentityMismatch {
+                    path: PathBuf::from("/repo/.exomonad/workspace"),
+                    detail: "child gitdir resolves to parent metadata".into(),
+                },
+                WorktreeError::GitRepositoryIdentityMismatch(
+                    "/repo/.exomonad/workspace".into(),
+                    "child gitdir resolves to parent metadata".into(),
+                ),
             ),
             (
                 "worktree_lost",
