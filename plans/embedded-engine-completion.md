@@ -521,3 +521,53 @@ Logs are retained under `target/completion-evidence/accepted-20260930/`.
 Source/WIP snapshots are under
 `target/completion-evidence/active-wip/20260930T012142Z`. No provider trial,
 backend-default change, or remote publication occurred at this checkpoint.
+
+### 2026-09-30 joined substrate and native application dependencies
+
+Main `daa6b7ace7` contains the embedded-only feature boundary, browser routing,
+awaitWatch subscription, matched harness/web pin `763d38d57691da31d2bf3c3c7493ca9910067540`,
+and native Buck runtime, actor and agent libraries. The native actor/agent build
+passes; this is library compilation, not packaged application acceptance.
+Codex remains excluded from the native graph.
+
+Product integration `7d3e0eea5c` adds owned compiler context receipts, original
+native-source publication, paired first-declaration publication, canonical
+implicit package identities, and additional browser receipt assertions.
+Runtime `af271405a` passes six focused publication tests; independent review
+finds its atomicity and cancellation boundaries sound. It deliberately supports
+only a simple first declaration into an empty public declaration view. There
+is no actor caller yet, and exact Join hydration remains unfinished. These
+tests do not establish concurrent publication acceptance.
+
+The actual awaitWatch policy now passes certification, including implicit
+constraint-tuple selectors, but fails its first native execution with
+`IncompletePromotion(InvalidManagedPointer)`. Preserve pointer validation and
+diagnose the native graph before accepting the actor execution refactor.
+The separate ownership extraction has compiled and passed independent source
+review; it retains sequential dispatch and has not passed its runtime gate.
+
+The real embedded child host-loop case now passes both child reads after later
+parent failure. A repair drains typed hosted settlement controls even while
+ordinary actor mailbox work is parked. A second, helper-driven capture case
+still needs execution after fixing actual SessionReady forwarding and durable
+completion observation. Neither establishes capture-backed launch from an
+unfinished parent cell; that explicit API and its acceptance remain pending.
+
+Mounted harness `ecab0f7` adds a separately keyed npm dependency action, preserving
+internal package symlinks. Native web check/build and 30 tests pass. Native Rust
+execution passes seven completion tests and 23 server tests. Native Tidepool
+facade generation, exact Git dependency handling and final package assembly are
+still in progress. Remote execution/cache acceptance remains separate.
+
+Embedded command handout retains the actual provider-neutral command backend.
+Its execution gate needs the existing delegated cgroup resource owner; a fake
+resource file is not sufficient evidence. Embedded notification send/poll also
+remain to be wired through the existing notification journal and harness input
+owners, preserving receipt provenance and retry identity.
+
+Logs: `/tmp/paired-declaration-publication-gate2.log`,
+`/tmp/product-watch-gate3.log`, `/tmp/embedded-children-hostloop-gate7.log`,
+`/tmp/native-actor-agent-gate2.log`, `/tmp/harness-native-completion-tests.log`,
+and `/tmp/harness-native-web-cache-gate.log`. Source/WIP was preserved under
+`target/completion-evidence/active-wip/20260930T020453Z`. No live provider trial,
+backend-default change, or push has occurred.
