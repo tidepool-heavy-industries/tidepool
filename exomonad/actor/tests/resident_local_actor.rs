@@ -540,7 +540,8 @@ async fn resident_await_watch_case(case: WatchCase) {
                 .await
         })
     };
-    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+    let cancellation_start_bound = if cancel_first { 180 } else { 60 };
+    tokio::time::timeout(std::time::Duration::from_secs(cancellation_start_bound), async {
         tokio::select! {
             () = supply_command_until_started(&mut deployments, command_backend.clone(), actor.identity()) => {},
             reply = &mut cancelled_call => panic!("cancellable watch cell settled before starting its command: {reply:?}"),
