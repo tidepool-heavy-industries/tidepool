@@ -8793,7 +8793,10 @@ where
             let local_execution_id = execution.clone().unwrap_or_else(|| {
                 WorkbenchExecutionId::from_digest(*uuid::Uuid::new_v4().as_bytes())
             });
-            let reservation_owner = RequestReservationOwner::Workbench(local_execution_id.clone());
+            let reservation_owner = RequestReservationOwner::Workbench {
+                execution: local_execution_id.clone(),
+                attempt: crate::request::WorkbenchReservationAttempt::fresh(),
+            };
             let mut execution_state = WorkbenchExecutionState {
                 effects: WorkbenchEffectState {
                     context: context.clone(),
