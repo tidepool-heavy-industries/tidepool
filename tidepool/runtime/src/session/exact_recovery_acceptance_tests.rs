@@ -195,14 +195,87 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         PublicManifestCommit::Durable
     );
     let expected = producer.public_visibility_snapshot_in(public).unwrap();
-    let before = std::fs::read(&manifest).unwrap();
     drop(admission);
     drop(producer);
     drop(producer_root);
-    // All authored modules and request scratch are gone. Only the production
-    // v3 graph and its run-owned certified bytes cross this recovery boundary.
+    // No runtime owner, heap, source tree, or admission handle crosses the
+    // OS-process boundary. These fixture expectations confer no authority;
+    // the child reads and certifies the actual run-owned manifest itself.
+    let spec = RecoveryChildSpec {
+        manifest: manifest.clone(),
+        original: original.0,
+        dependent: dependent.0,
+        epoch: expected.epoch,
+        declaration_tip: expected.declaration_tip.0,
+        result_file: durable.path().join("fresh-worker-result.json"),
+    };
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "session::exact_recovery_acceptance_tests::exact_recovery_fresh_process_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(
+            "TIDEPOOL_EXACT_RECOVERY_CHILD",
+            serde_json::to_string(&spec).unwrap(),
+        )
+        .env("TIDEPOOL_EXTRACT_NO_DAEMON", "1")
+        .env_remove("TIDEPOOL_EXTRACT_DAEMON_SOCKET")
+        .stdin(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "fresh Rust recovery worker failed: {status}"
+    );
+    let child_pid: u32 = serde_json::from_slice(
+        &std::fs::read(&spec.result_file)
+            .expect("exact child phase must execute, not match zero tests"),
+    )
+    .unwrap();
+    assert_ne!(
+        child_pid,
+        std::process::id(),
+        "recovery must execute in a distinct Rust process"
+    );
+    let graph = recovery::read_v2(&manifest, durable.path())
+        .unwrap()
+        .unwrap()
+        .graph;
+    assert_eq!(graph.public_surfaces[0].owner, owner(2));
+    assert_eq!(graph.public_surfaces[0].epoch, expected.epoch + 1);
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RecoveryChildSpec {
+    manifest: PathBuf,
+    original: u64,
+    dependent: u64,
+    epoch: u64,
+    declaration_tip: u64,
+    result_file: PathBuf,
+}
+
+#[test]
+#[ignore = "invoked by the exact fresh-process parent with owned fixture paths"]
+fn exact_recovery_fresh_process_child() {
+    let spec = std::env::var("TIDEPOOL_EXACT_RECOVERY_CHILD")
+        .expect("fresh-process parent must supply fixture expectations");
+    execute_recovery_child(serde_json::from_str(&spec).unwrap());
+}
+
+fn execute_recovery_child(spec: RecoveryChildSpec) {
+    tidepool_testing::eval_harness::require_extract();
+    assert!(std::env::var_os("TIDEPOOL_EXTRACT_DAEMON_SOCKET").is_none());
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let manifest = spec.manifest;
+    let durable = manifest.parent().unwrap();
+    let before = std::fs::read(&manifest).unwrap();
+    let original = Generation(spec.original);
+    let dependent = Generation(spec.dependent);
     let consumer_root = tempfile::tempdir().unwrap();
-    let recovery_owner = run_owner(durable.path());
+    let recovery_owner = run_owner(durable);
     let mut recovered_library = SessionLib::open(
         SessionId(4403),
         consumer_root.path(),
@@ -219,6 +292,57 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
     // replace it with the recovered tip, not use inheritance-only seeding.
     let public = consumer.mint_scope(ScopeId::ROOT).unwrap();
     assert_eq!(std::fs::read(&manifest).unwrap(), before);
+    let graph = recovery::read_v2(&manifest, durable)
+        .unwrap()
+        .unwrap()
+        .graph;
+    for alter_lexical in [false, true] {
+        let mut altered = graph.clone();
+        let original_lexical = altered
+            .nodes
+            .iter()
+            .find(|node| node.id == original)
+            .unwrap()
+            .lexical
+            .clone();
+        let original_roots = altered
+            .nodes
+            .iter()
+            .find(|node| node.id == original)
+            .unwrap()
+            .lexical_roots
+            .clone();
+        let root = altered
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == Generation(spec.declaration_tip))
+            .unwrap();
+        if alter_lexical {
+            // Same exact retained products, but an unauthorized wider lexical
+            // selector/root set cannot replace the already owned byte read.
+            root.lexical.extend(original_lexical);
+            root.lexical_roots.extend(original_roots);
+        } else {
+            root.exports[0].identity.occurrence = "ghostRecoveredExport".into();
+        }
+        altered.seal().unwrap();
+        std::fs::write(&manifest, serde_json::to_vec_pretty(&altered).unwrap()).unwrap();
+        assert!(consumer
+            .transfer_recovered_public_owner(
+                &owner(1),
+                owner(2),
+                public,
+                Arc::new(TestSuccessor {
+                    run: recovery_owner.clone(),
+                    session: SessionId(4403),
+                    target: public
+                })
+            )
+            .is_err());
+        assert!(consumer.lib().durable_public_scopes.is_empty());
+        assert_eq!(consumer.lib().scope_tip(public), Generation(0));
+        std::fs::write(&manifest, &before).unwrap();
+    }
     assert_eq!(
         consumer
             .transfer_recovered_public_owner(
@@ -237,8 +361,8 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
     assert!(consumer.recover_public_scope(&owner(1)).is_err());
     let before = std::fs::read(&manifest).unwrap();
     let snapshot = consumer.public_visibility_snapshot_in(public).unwrap();
-    assert_eq!(snapshot.declaration_tip, expected.declaration_tip);
-    assert_eq!(snapshot.epoch, expected.epoch + 1);
+    assert_eq!(snapshot.declaration_tip, Generation(spec.declaration_tip));
+    assert_eq!(snapshot.epoch, spec.epoch + 1);
     assert!(snapshot.bindings.is_empty());
     let view = consumer.compile_view_in(public).unwrap();
     let context = view.exact_declaration_context().unwrap().clone();
@@ -255,9 +379,7 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
             "retained implementation must not become lexical authority"
         );
     }
-    let read = recovery::read_v2(&manifest, durable.path())
-        .unwrap()
-        .unwrap();
+    let read = recovery::read_v2(&manifest, durable).unwrap().unwrap();
     let projection = read.projection(&owner(2)).unwrap();
     let heads = projection
         .values()
@@ -338,6 +460,11 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
     };
     assert_eq!(result.to_json(), serde_json::json!([42, "42"]));
     assert_eq!(std::fs::read(&manifest).unwrap(), before);
+    std::fs::write(
+        &spec.result_file,
+        serde_json::to_vec(&std::process::id()).unwrap(),
+    )
+    .unwrap();
 }
 
 fn persist_empty_public(root: &Path, source: &Path, id: u64) -> PathBuf {
