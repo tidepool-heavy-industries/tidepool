@@ -7,6 +7,9 @@
 
 use std::sync::Arc;
 
+#[cfg(test)]
+mod capture_workspace_tests;
+
 mod command_settlement;
 mod commands;
 mod owned_workbench;
