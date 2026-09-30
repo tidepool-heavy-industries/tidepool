@@ -1751,7 +1751,7 @@ impl SessionLib {
         visible_values: &[(SessionVarId, String)],
     ) -> Result<DeclarationAdmission<Generation>, SessionError> {
         let slot_matches = if staged.reserved {
-            self.durable_graph.is_some()
+            staged.certified_authored.is_some()
                 && staged.base_generation == staged.generation
                 && self.log.is_reserved(staged.generation)
                 && staged.module == SessionModule::lib(staged.generation)
@@ -1777,7 +1777,7 @@ impl SessionLib {
                 paired_publication::authored_context(self, staged.base_tip, certificate)
             })
             .transpose()?;
-        let staged_graph = if staged.reserved {
+        let staged_graph = if staged.reserved && self.durable_graph.is_some() {
             let (context, _) = authored_context
                 .as_ref()
                 .ok_or(SessionError::StaleStagedDeclaration)?;

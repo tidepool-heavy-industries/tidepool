@@ -3818,7 +3818,7 @@ fn decode_declaration_source(value: &CborValue) -> Result<DeclarationSource, Com
     })
 }
 
-fn decode_cell_out(
+pub(super) fn decode_cell_out(
     bytes: &[u8],
     cell_text: &str,
     compile_generation: u64,

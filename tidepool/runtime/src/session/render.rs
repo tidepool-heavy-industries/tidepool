@@ -102,6 +102,21 @@ impl ExportItem {
         }
     }
 
+    /// Value-namespace names this declaration replaces in the live binding plane.
+    /// Type and class heads coexist with values of the same occurrence.
+    pub(crate) fn value_names(&self) -> impl Iterator<Item = &str> {
+        let head = match self {
+            Self::Value { name } => Some(name.as_str()),
+            _ => None,
+        };
+        let children: &[String] = match self {
+            Self::Type { cons, .. } => cons,
+            Self::Class { methods, .. } => methods,
+            Self::Value { .. } => &[],
+        };
+        head.into_iter().chain(children.iter().map(String::as_str))
+    }
+
     /// Every identifier this item introduces: the head plus constructors or methods.
     /// Used to decide whether a later turn redefines (shadows) this item.
     pub fn all_names(&self) -> impl Iterator<Item = &str> {

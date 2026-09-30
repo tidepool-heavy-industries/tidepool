@@ -1232,7 +1232,7 @@ impl PersistentSession {
     /// visible from `scope` once `receipt`'s names have taken over — the
     /// value plane's half of what makes a later `adopt` stale, alongside the
     /// declaration plane's own generation/tip check.
-    fn declaration_staging_context_in(
+    pub(super) fn declaration_staging_context_in(
         &self,
         scope: ScopeId,
         receipt: &super::DeclarationReceipt,
@@ -1246,7 +1246,7 @@ impl PersistentSession {
         let replaced_names = receipt
             .items
             .iter()
-            .flat_map(super::ExportItem::all_names)
+            .flat_map(super::ExportItem::value_names)
             .collect::<Vec<_>>();
         let visible_entries = self
             .bindings
@@ -1344,7 +1344,7 @@ impl PersistentSession {
         let mut replaced_names: Vec<String> = staged
             .items()
             .iter()
-            .flat_map(super::ExportItem::all_names)
+            .flat_map(super::ExportItem::value_names)
             .map(str::to_owned)
             .collect();
         replaced_names.sort();
@@ -2320,7 +2320,7 @@ impl PersistentSession {
         let mut replaced_names: Vec<String> = receipt
             .items
             .iter()
-            .flat_map(super::ExportItem::all_names)
+            .flat_map(super::ExportItem::value_names)
             .map(str::to_owned)
             .collect();
         replaced_names.sort();

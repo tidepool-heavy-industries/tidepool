@@ -2198,6 +2198,17 @@ where
         self.state.admit_checked_item(prefix, item)
     }
 
+    pub fn adopt_checked_declaration(
+        &mut self,
+        admission: Arc<super::RuntimeCheckedItemAdmission>,
+    ) -> Result<super::DeclarationPlaneCommit, SessionError> {
+        if admission.prefix().admission().visibility().scope != self.run_context.lexical_scope {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        self.settle_dropped_custody();
+        self.state.adopt_checked_declaration(admission)
+    }
+
     pub fn admit_checked_display(
         &mut self,
         prefix: Arc<super::RuntimeCheckedPrefix>,

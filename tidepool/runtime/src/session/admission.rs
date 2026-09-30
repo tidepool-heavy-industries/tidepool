@@ -880,6 +880,135 @@ impl PersistentSession {
             digest,
         }))
     }
+    /// Adopt the compiler-owned original declaration from this same checked
+    /// offer. Its reserved identity and bytes are never rendered or recompiled.
+    pub fn adopt_checked_declaration(
+        &mut self,
+        admission: Arc<RuntimeCheckedItemAdmission>,
+    ) -> Result<super::DeclarationPlaneCommit, SessionError> {
+        let prefix = &admission.prefix;
+        let mut state = prefix.state.lock();
+        let scope = prefix.admission.visibility.scope;
+        let item = &admission.item;
+        if !prefix.admission.belongs_to(self)
+            || !Arc::ptr_eq(&state.snapshot, &admission.snapshot)
+            || state.in_flight.is_some()
+            || state.display_in_flight.is_some()
+            || state.reservation.as_ref().is_none_or(|reserved| {
+                reserved.item != *item || reserved.generation != admission.generation
+            })
+            || self.public_visibility_snapshot_in(scope).as_ref()
+                != Some(&state.snapshot.visibility)
+            || self.compile_view_in(scope).is_none_or(|view| {
+                view.admission_digest() != state.snapshot.view.admission_digest()
+            })
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let certificate = item
+            .planned_declaration()
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        let original_source = item
+            .planned_declaration_source()
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        let generation = *prefix
+            .admission
+            .reserved_generations
+            .first()
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        let module = tidepool_repr::SessionModule::lib(generation);
+        if certificate.product().owner().unit != "main"
+            || certificate.product().owner().module != module.module_name()
+            || !self.lib().log.is_reserved(generation)
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        // Decode only the immutable observations owned by this exact item.
+        // Caller-editable CellCheck fields never supply adoption authority.
+        let checked = super::turn::decode_cell_out(item.cell_observations(), "", 0, "")?;
+        let observation = checked
+            .items
+            .get(item.index())
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        if observation.verdict.kind != super::TurnKind::Decl || observation.source != item.source()
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let receipt = super::DeclarationReceipt {
+            source: super::DeclarationSource {
+                prologue: checked.prologue,
+                body: observation.source.clone(),
+            },
+            binders: observation.verdict.binders.clone(),
+            items: observation.verdict.items.clone(),
+        };
+        let external = state.snapshot.view.persistent_imports().clone();
+        let (external_imports, import_modules, visible_values) =
+            self.declaration_staging_context_in(scope, &receipt, &external)?;
+        let base_tip = self.lib().scope_tip(scope);
+        let turn = super::render::DeclTurn {
+            normalized: receipt.source.clone(),
+            sources: vec![receipt.source.replay_source(&external_imports)],
+            external_imports,
+            workbench_imports: receipt.source.prologue.workbench_imports(),
+            items: receipt.items.clone(),
+            value_types: std::collections::BTreeMap::new(),
+            retracts: Vec::new(),
+            parent: (base_tip.0 > 0).then_some(base_tip),
+        };
+        let staged = super::StagedDeclaration {
+            generation,
+            reserved: true,
+            module,
+            receipt,
+            exact_context: self.lib().log.joined_context_at(base_tip),
+            session_id: self.lib().id,
+            root: self.lib().root.clone(),
+            scope,
+            base_generation: generation,
+            base_tip,
+            turn,
+            import_modules,
+            inject_modules: state
+                .snapshot
+                .view
+                .reachable_values()
+                .iter()
+                .map(|module| module.module_name())
+                .collect(),
+            visible_values,
+            rendered: super::render::RenderedModule {
+                module,
+                source: original_source.to_owned(),
+                body_line: 0,
+                hoisted_lines: false,
+            },
+            certified_authored: Some((**certificate).clone()),
+        };
+        let compiler_prefix = state
+            .snapshot
+            .compiler_prefix
+            .append_declaration(item.clone())?;
+        let committed = self.adopt_staged_declaration_in(staged);
+        if committed.is_ok()
+            || committed
+                .as_ref()
+                .is_err_and(|error| error.published_declaration_commit().is_some())
+        {
+            settle_checked_snapshot(
+                self,
+                &mut state,
+                scope,
+                compiler_prefix,
+                prefix.admission.digest(),
+                None,
+                None,
+            )?;
+            state.reservation = None;
+        }
+        committed
+    }
+
     pub fn retain_lexical_scope(
         &mut self,
         source: ScopeId,
