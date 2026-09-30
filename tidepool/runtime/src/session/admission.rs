@@ -146,7 +146,129 @@ pub struct AdmittedValueInterface {
 #[derive(Debug)]
 struct AdmittedNativeImports {
     entries: Vec<(SymbolIdentity, u64)>,
+    owners: std::collections::BTreeMap<(SymbolIdentity, u64), u64>,
     commitment: [u8; 32],
+}
+
+#[derive(Clone, Debug)]
+struct CheckedNativeImports {
+    base: Arc<AdmittedNativeImports>,
+    tail: Option<Arc<CheckedNativeDelta>>,
+    commitment: [u8; 32],
+}
+
+#[derive(Debug)]
+struct CheckedNativeDelta {
+    previous: Option<Arc<CheckedNativeDelta>>,
+    imports: Vec<SettledNativeImport>,
+    bindings: Vec<SettledNativeBinding>,
+}
+
+#[derive(Debug)]
+struct SettledNativeImport {
+    identity: SymbolIdentity,
+    generation: u64,
+    root_id: u64,
+}
+
+#[derive(Debug)]
+struct SettledNativeBinding {
+    name: String,
+    id: tidepool_repr::SessionVarId,
+    import: SettledNativeImport,
+}
+
+#[derive(Debug, Default)]
+struct CapturedNativeDelta {
+    imports: Vec<SettledNativeImport>,
+    bindings: Vec<SettledNativeBinding>,
+}
+
+impl CheckedNativeImports {
+    fn base(base: Arc<AdmittedNativeImports>) -> Self {
+        Self {
+            commitment: base.commitment,
+            base,
+            tail: None,
+        }
+    }
+
+    fn deltas(&self) -> impl Iterator<Item = &CheckedNativeDelta> {
+        let mut suffix = Vec::new();
+        let mut node = self.tail.as_deref();
+        while let Some(delta) = node {
+            suffix.push(delta);
+            node = delta.previous.as_deref();
+        }
+        suffix.into_iter().rev()
+    }
+
+    fn imports(&self) -> impl Iterator<Item = (&SymbolIdentity, u64)> {
+        self.base
+            .entries
+            .iter()
+            .map(|(identity, generation)| (identity, *generation))
+            .chain(
+                self.deltas()
+                    .flat_map(|delta| delta.imports.iter())
+                    .map(|import| (&import.identity, import.generation)),
+            )
+    }
+
+    fn append(
+        &self,
+        delta: CapturedNativeDelta,
+        index: &std::collections::BTreeMap<(SymbolIdentity, u64), u64>,
+    ) -> Result<(Self, Vec<((SymbolIdentity, u64), u64)>), SessionError> {
+        let mut added = Vec::new();
+        let mut imports = Vec::new();
+        for import in delta.imports {
+            let key = (import.identity.clone(), import.generation);
+            match index.get(&key) {
+                Some(root) if *root != import.root_id => {
+                    return Err(SessionError::StaleStagedDeclaration)
+                }
+                Some(_) => {}
+                None => {
+                    added.push((key, import.root_id));
+                    imports.push(import);
+                }
+            }
+        }
+        if imports.is_empty() && delta.bindings.is_empty() {
+            return Ok((self.clone(), added));
+        }
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"TidepoolSettledNativeDelta1");
+        hash.update(&self.commitment);
+        hash.update(&(imports.len() as u64).to_le_bytes());
+        for import in &imports {
+            frame_native_identity(&mut hash, &import.identity);
+            hash.update(&import.generation.to_le_bytes());
+            hash.update(&import.root_id.to_le_bytes());
+        }
+        hash.update(&(delta.bindings.len() as u64).to_le_bytes());
+        for binding in &delta.bindings {
+            hash.update(&(binding.name.len() as u64).to_le_bytes());
+            hash.update(binding.name.as_bytes());
+            hash.update(&binding.id.raw().to_le_bytes());
+            frame_native_identity(&mut hash, &binding.import.identity);
+            hash.update(&binding.import.generation.to_le_bytes());
+            hash.update(&binding.import.root_id.to_le_bytes());
+        }
+        Ok((
+            Self {
+                base: self.base.clone(),
+                tail: Some(Arc::new(CheckedNativeDelta {
+                    previous: self.tail.clone(),
+                    imports,
+                    bindings: delta.bindings,
+                })),
+                commitment: *hash.finalize().as_bytes(),
+            },
+            added,
+        ))
+    }
 }
 
 fn frame_native_identity(hash: &mut blake3::Hasher, identity: &SymbolIdentity) {
@@ -271,6 +393,7 @@ struct RuntimeCheckedState {
     display_in_flight: Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>>,
     reservation: Option<CheckedItemReservation>,
     interface_index: std::collections::BTreeMap<u64, [u8; 32]>,
+    native_index: std::collections::BTreeMap<(SymbolIdentity, u64), u64>,
 }
 
 #[derive(Debug)]
@@ -362,7 +485,7 @@ pub struct RuntimeCheckedPrefixSnapshot {
     interfaces: CheckedInterfaces,
     _retained_scope: Arc<RuntimeLexicalScopeLease>,
     native_shares: Vec<SourceLeaseKey>,
-    native_imports: Arc<AdmittedNativeImports>,
+    native_imports: CheckedNativeImports,
     compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
     last_display_settlement: Option<CheckedDisplaySettlement>,
     digest: [u8; 32],
@@ -378,10 +501,31 @@ impl RuntimeCheckedPrefixSnapshot {
     pub fn native_shares(&self) -> &[SourceLeaseKey] {
         &self.native_shares
     }
-    /// Baseline imports only. Completed native additions are carried by the
-    /// opaque compiler prefix rather than inferred from the latest machine.
+    /// The original baseline remains available independently of settlements.
     pub fn admitted_retained_imports(&self) -> &[(SymbolIdentity, u64)] {
-        &self.native_imports.entries
+        &self.native_imports.base.entries
+    }
+    /// Only the admitted baseline and exports actually installed by this
+    /// prefix's sealed native targets. Failed displays omit absent bindings.
+    pub fn actual_retained_imports(&self) -> impl Iterator<Item = (&SymbolIdentity, u64)> {
+        self.native_imports.imports()
+    }
+    /// Actual same-prefix bindings in completion order, for selecting native
+    /// lexical winners without promoting a compiled display's absent rows.
+    pub fn settled_native_bindings(
+        &self,
+    ) -> impl Iterator<Item = (&str, &SymbolIdentity, u64, u64)> {
+        self.native_imports
+            .deltas()
+            .flat_map(|delta| delta.bindings.iter())
+            .map(|binding| {
+                (
+                    binding.name.as_str(),
+                    &binding.import.identity,
+                    binding.import.generation,
+                    binding.id.raw(),
+                )
+            })
     }
     pub fn compiler_prefix(&self) -> &tidepool_toolchain::checked_cell::ExactCompiledPrefix {
         &self.compiler_prefix
@@ -570,6 +714,7 @@ impl CheckedDisplayPlan {
         session: &mut PersistentSession,
         scope: ScopeId,
         outcome: CheckedDisplaySettlement,
+        program: Option<tidepool_codegen::prepared_program::ProgramId>,
     ) -> Result<(), SessionError> {
         let prefix = &self.admission.prefix;
         let mut state = prefix.state.lock();
@@ -586,6 +731,17 @@ impl CheckedDisplayPlan {
             .compiler_prefix
             .append_display(self.proof.clone())?;
         let interface = self.proof.value_interface_owned();
+        let native = session.capture_checked_native_delta(
+            scope,
+            self.proof.generation(),
+            program,
+            &state.native_index,
+            self.proof.target_definition_identities(),
+            self.proof
+                .bound_binder_identities()
+                .filter(|(name, _)| *name != self.metadata.name),
+            outcome == CheckedDisplaySettlement::Failed,
+        )?;
         settle_checked_snapshot(
             session,
             &mut state,
@@ -594,6 +750,7 @@ impl CheckedDisplayPlan {
             prefix.admission.digest(),
             Some(interface),
             Some(outcome),
+            Some(native),
         )?;
         state.display_in_flight = None;
         Ok(())
@@ -641,7 +798,11 @@ impl CheckedTurnCompletion {
         Ok(true)
     }
 
-    pub(crate) fn settle(&self, session: &mut PersistentSession) -> Result<(), SessionError> {
+    pub(crate) fn settle(
+        &self,
+        session: &mut PersistentSession,
+        program: tidepool_codegen::prepared_program::ProgramId,
+    ) -> Result<(), SessionError> {
         let mut state = self.prefix.state.lock();
         if !self.prefix.admission.belongs_to(session)
             || state
@@ -655,6 +816,15 @@ impl CheckedTurnCompletion {
             .snapshot
             .compiler_prefix
             .append(self.execution.clone())?;
+        let native = session.capture_checked_native_delta(
+            self.scope,
+            self.execution.generation(),
+            Some(program),
+            &state.native_index,
+            self.execution.target_definition_identities(),
+            self.execution.bound_binder_identities(),
+            false,
+        )?;
         let completed_values = if let Some(private) = &self.prefix.admission.private_execution {
             let mut values = Vec::new();
             for name in self.execution.private_value_overlay_binders() {
@@ -688,6 +858,7 @@ impl CheckedTurnCompletion {
             self.prefix.admission.digest(),
             self.execution.value_interface_owned(),
             None,
+            Some(native),
         )?;
         if let Some((private, values)) = completed_values {
             private.completed_values.lock().extend(values);
@@ -706,6 +877,7 @@ fn settle_checked_snapshot(
     admission: [u8; 32],
     interface: Option<(&str, &Arc<[u8]>)>,
     display_settlement: Option<CheckedDisplaySettlement>,
+    native_delta: Option<CapturedNativeDelta>,
 ) -> Result<(), SessionError> {
     let view = session
         .compile_view_in(scope)
@@ -743,6 +915,13 @@ fn settle_checked_snapshot(
     // the previous snapshot can drop. Outstanding compiler/display owners
     // keep their own old snapshot and lexical lease until they finish.
     let retained = session.retain_lexical_scope(scope)?;
+    let (native_imports, added_native) = match native_delta {
+        Some(delta) => state
+            .snapshot
+            .native_imports
+            .append(delta, &state.native_index)?,
+        None => (state.snapshot.native_imports.clone(), Vec::new()),
+    };
     let snapshot = Arc::new(checked_snapshot(
         view,
         view_digest,
@@ -752,11 +931,12 @@ fn settle_checked_snapshot(
         admission,
         retained,
         display_settlement,
-        state.snapshot.native_imports.clone(),
+        native_imports,
     ));
     if let Some((generation, digest)) = added_interface {
         state.interface_index.insert(generation, digest);
     }
+    state.native_index.extend(added_native);
     state.snapshot = snapshot;
     Ok(())
 }
@@ -782,7 +962,7 @@ fn checked_snapshot(
     admission: [u8; 32],
     retained_scope: Arc<RuntimeLexicalScopeLease>,
     last_display_settlement: Option<CheckedDisplaySettlement>,
-    native_imports: Arc<AdmittedNativeImports>,
+    native_imports: CheckedNativeImports,
 ) -> RuntimeCheckedPrefixSnapshot {
     let native_shares = visibility.source_instances.clone();
     let mut digest = blake3::Hasher::new();
@@ -815,6 +995,8 @@ fn checked_snapshot(
     });
     frame(b"interfaces");
     frame(&interfaces.commitment);
+    frame(b"actual-native-imports");
+    frame(&native_imports.commitment);
     for key in &native_shares {
         frame(b"native");
         frame(&key.instance.raw().to_le_bytes());
@@ -1236,6 +1418,7 @@ impl PersistentSession {
                 prefix.admission.digest(),
                 None,
                 None,
+                None,
             )?;
             state.reservation = None;
         }
@@ -1296,7 +1479,7 @@ impl PersistentSession {
             admission.digest(),
             admission._retained_scope.clone(),
             None,
-            admission.native_imports.clone(),
+            CheckedNativeImports::base(admission.native_imports.clone()),
         ));
         admission
             .prefix_started
@@ -1307,6 +1490,7 @@ impl PersistentSession {
                 std::sync::atomic::Ordering::Acquire,
             )
             .map_err(|_| SessionError::StaleStagedDeclaration)?;
+        let native_index = admission.native_imports.owners.clone();
         Ok(Arc::new(RuntimeCheckedPrefix {
             admission,
             first_item,
@@ -1316,6 +1500,7 @@ impl PersistentSession {
                 display_in_flight: None,
                 reservation: None,
                 interface_index,
+                native_index,
             }),
         }))
     }
@@ -1575,6 +1760,7 @@ impl PersistentSession {
         }
         let mut entries = std::collections::BTreeSet::new();
         let mut bound = std::collections::BTreeSet::new();
+        let mut owners = std::collections::BTreeMap::new();
         let mut hash = blake3::Hasher::new();
         hash.update(b"TidepoolAdmittedNativeImports1");
         for id in self
@@ -1599,6 +1785,10 @@ impl PersistentSession {
             hash.update(&handle.raw().0.to_le_bytes());
             frame_native_identity(&mut hash, &entry.value.identity);
             entries.insert((entry.value.identity.clone(), entry.module.gen.0));
+            owners.insert(
+                (entry.value.identity.clone(), entry.module.gen.0),
+                handle.raw().0,
+            );
             bound.insert(entry.value.identity.clone());
         }
         if let Some(engine) = self.prepared() {
@@ -1615,12 +1805,94 @@ impl PersistentSession {
                 hash.update(&generation.to_le_bytes());
                 hash.update(&root_id.to_le_bytes());
                 frame_native_identity(&mut hash, &identity);
+                owners.insert((identity.clone(), generation), root_id);
                 entries.insert((identity, generation));
             }
         }
         Ok(AdmittedNativeImports {
             entries: entries.into_iter().collect(),
+            owners,
             commitment: *hash.finalize().as_bytes(),
+        })
+    }
+
+    fn capture_checked_native_delta<'a>(
+        &self,
+        scope: ScopeId,
+        generation: u64,
+        program: Option<tidepool_codegen::prepared_program::ProgramId>,
+        known_owners: &std::collections::BTreeMap<(SymbolIdentity, u64), u64>,
+        definitions: impl Iterator<Item = &'a SymbolIdentity>,
+        bound_rows: impl Iterator<Item = (&'a str, u64)>,
+        allow_absent_bindings: bool,
+    ) -> Result<CapturedNativeDelta, SessionError> {
+        if !self.scope_tree().is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
+        let engine = self
+            .prepared()
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        let mut imports = std::collections::BTreeMap::new();
+        // Only exact definitions of this sealed target may join the ledger.
+        // Optional native exports can be absent from a successful installation.
+        for identity in definitions {
+            if let Some(ImportOwner::CodeExport { root_id, .. }) =
+                engine.retained_code_export_owner(identity, 0)
+            {
+                let from_this_install = program.is_some_and(|program| {
+                    engine
+                        .retained_code_export_owner_installed_by(identity, program)
+                        .is_some()
+                });
+                if from_this_install || known_owners.get(&(identity.clone(), 0)) == Some(&root_id) {
+                    imports.insert((identity.clone(), 0), root_id);
+                }
+            }
+        }
+        let mut bindings = Vec::new();
+        for (name, id) in bound_rows {
+            let id = tidepool_repr::SessionVarId::from_extract(id);
+            let Some(entry) = self.bindings().get(id) else {
+                if allow_absent_bindings {
+                    continue;
+                }
+                return Err(SessionError::StaleStagedDeclaration);
+            };
+            let identity = &entry.value.identity;
+            let module = tidepool_repr::SessionModule::val(Generation(generation));
+            if entry.scope != scope
+                || entry.name.0 != name
+                || entry.module != module
+                || identity.module != module.module_name()
+                || identity.namespace != "value"
+                || identity.occurrence != name
+                || identity.record_parent.is_some()
+                || engine.prepared_handle_of(entry.value.handle.raw()) != Some(entry.value.handle)
+            {
+                return Err(SessionError::StaleStagedDeclaration);
+            }
+            let root_id = entry.value.handle.raw().0;
+            imports.insert((identity.clone(), generation), root_id);
+            bindings.push(SettledNativeBinding {
+                name: name.to_owned(),
+                id,
+                import: SettledNativeImport {
+                    identity: identity.clone(),
+                    generation,
+                    root_id,
+                },
+            });
+        }
+        Ok(CapturedNativeDelta {
+            imports: imports
+                .into_iter()
+                .map(|((identity, generation), root_id)| SettledNativeImport {
+                    identity,
+                    generation,
+                    root_id,
+                })
+                .collect(),
+            bindings,
         })
     }
 
@@ -1822,6 +2094,183 @@ mod tests {
             .bindings()
             .get(SessionVarId::from_extract(912))
             .is_some());
+    }
+
+    #[test]
+    fn settled_native_delta_excludes_ambient_exports_and_reuses_only_owned_roots() {
+        use tidepool_repr::execution_schema::{testing, Group};
+        let mut session = PersistentSession::new(None, 1024 * 1024);
+        let baseline = Arc::new(
+            session
+                .capture_admitted_native_imports(ScopeId::ROOT)
+                .unwrap(),
+        );
+        let ambient_identity = testing::identity("Fixture", "entry");
+        let ambient = session
+            .install_prepared(testing::prepare(testing::wire_program()).unwrap())
+            .unwrap();
+        let mut own_wire = testing::wire_program();
+        let own_identity = testing::identity("Own", "entry");
+        let Group::NonRecursive(top) = &mut own_wire.bindings[0] else {
+            unreachable!()
+        };
+        top.identity = own_identity.clone();
+        let own = session
+            .install_prepared(testing::prepare(own_wire).unwrap())
+            .unwrap();
+        let delta = session
+            .capture_checked_native_delta(
+                ScopeId::ROOT,
+                0,
+                Some(own),
+                &baseline.owners,
+                [&ambient_identity, &own_identity].into_iter(),
+                [].into_iter(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(delta.imports.len(), 1);
+        assert_eq!(delta.imports[0].identity, own_identity);
+        let (ledger, added) = CheckedNativeImports::base(baseline.clone())
+            .append(delta, &baseline.owners)
+            .unwrap();
+        let mut index = baseline.owners.clone();
+        index.extend(added);
+        assert!(!ledger
+            .imports()
+            .any(|(identity, _)| identity == &ambient_identity));
+        assert!(ledger
+            .imports()
+            .any(|(identity, _)| identity == &own_identity));
+
+        // A target spelling an ambient definition does not acquire its CAF.
+        let repeated = session
+            .install_prepared(testing::prepare(testing::wire_program()).unwrap())
+            .unwrap();
+        assert_ne!(ambient, repeated);
+        let absent = session
+            .capture_checked_native_delta(
+                ScopeId::ROOT,
+                0,
+                Some(repeated),
+                &index,
+                [&ambient_identity].into_iter(),
+                [].into_iter(),
+                false,
+            )
+            .unwrap();
+        assert!(absent.imports.is_empty());
+        let next = session
+            .capture_checked_native_delta(
+                ScopeId::ROOT,
+                0,
+                Some(repeated),
+                &index,
+                [&own_identity].into_iter(),
+                [].into_iter(),
+                false,
+            )
+            .unwrap();
+        let (unchanged, added) = ledger.append(next, &index).unwrap();
+        assert!(added.is_empty());
+        assert!(Arc::ptr_eq(
+            ledger.tail.as_ref().unwrap(),
+            unchanged.tail.as_ref().unwrap()
+        ));
+        assert!(Arc::ptr_eq(&ledger.base, &baseline));
+    }
+
+    #[test]
+    fn failed_display_delta_records_only_actual_native_rows_and_root_identity() {
+        let mut session = PersistentSession::new(None, 1024 * 1024);
+        let baseline = Arc::new(
+            session
+                .capture_admitted_native_imports(ScopeId::ROOT)
+                .unwrap(),
+        );
+        let scope = session.mint_scope(ScopeId::ROOT).unwrap();
+        let mut page = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "__page",
+            920,
+        );
+        page.value.identity.module = page.module.module_name();
+        page.value.identity.namespace = "value".into();
+        page.value.identity.occurrence = page.name.0.clone();
+        let page_identity = page.value.identity.clone();
+        let page_id = page.id.raw();
+        session.bind_in(scope, page).unwrap();
+        let delta = session
+            .capture_checked_native_delta(
+                scope,
+                920,
+                None,
+                &baseline.owners,
+                [].into_iter(),
+                [("__page", page_id), ("cellDisplay", 921)].into_iter(),
+                true,
+            )
+            .unwrap();
+        assert_eq!(delta.bindings.len(), 1);
+        assert_eq!(delta.bindings[0].name, "__page");
+        assert_eq!(delta.imports.len(), 1);
+        assert_eq!(delta.imports[0].identity, page_identity);
+        let (ledger, added) = CheckedNativeImports::base(baseline.clone())
+            .append(delta, &baseline.owners)
+            .unwrap();
+        assert_eq!(added.len(), 1);
+        assert!(ledger
+            .imports()
+            .any(|(identity, generation)| identity == &page_identity && generation == 920));
+        assert!(!ledger
+            .deltas()
+            .flat_map(|delta| &delta.bindings)
+            .any(|binding| binding.name == "cellDisplay"));
+        assert!(session
+            .capture_checked_native_delta(
+                scope,
+                920,
+                None,
+                &baseline.owners,
+                [].into_iter(),
+                [("__page", page_id), ("cellDisplay", 921)].into_iter(),
+                false,
+            )
+            .is_err());
+        // Missing rows are allowed; a foreign or mismatched live row is not.
+        let mut foreign = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "cellDisplay",
+            921,
+        );
+        foreign.value.identity.module =
+            tidepool_repr::SessionModule::val(Generation(920)).module_name();
+        session.bind_in(ScopeId::ROOT, foreign).unwrap();
+        assert!(session
+            .capture_checked_native_delta(
+                scope,
+                920,
+                None,
+                &baseline.owners,
+                [].into_iter(),
+                [("cellDisplay", 921)].into_iter(),
+                true,
+            )
+            .is_err());
+        let delta = session
+            .capture_checked_native_delta(
+                scope,
+                920,
+                None,
+                &baseline.owners,
+                [].into_iter(),
+                [("__page", page_id)].into_iter(),
+                false,
+            )
+            .unwrap();
+        let mut replaced_owner = baseline.owners.clone();
+        replaced_owner.insert((page_identity, 920), delta.imports[0].root_id + 1);
+        assert!(ledger.append(delta, &replaced_owner).is_err());
     }
 
     #[test]

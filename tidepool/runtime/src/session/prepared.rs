@@ -1741,6 +1741,7 @@ pub struct PreparedEngine {
 /// echo of itself.
 #[derive(Clone)]
 struct CodeExport {
+    program: ProgramId,
     handle: PreparedHandle,
     entry: Option<Signature>,
     /// The exact GHC-loaded package interface selected for this exported
@@ -2374,6 +2375,7 @@ impl PreparedEngine {
             staged.insert(
                 identity,
                 CodeExport {
+                    program,
                     handle,
                     entry,
                     interface_digest,
@@ -2452,6 +2454,16 @@ impl PreparedEngine {
                 root_id: export.handle.raw().0,
             }
         })
+    }
+
+    pub(crate) fn retained_code_export_owner_installed_by(
+        &self,
+        identity: &SymbolIdentity,
+        program: ProgramId,
+    ) -> Option<ImportOwner> {
+        (self.code_exports.get(identity)?.program == program)
+            .then(|| self.retained_code_export_owner(identity, CODE_EXPORT_GENERATION))
+            .flatten()
     }
 
     fn code_export_import(
@@ -5679,6 +5691,10 @@ pub(super) mod tests {
         let (mut engine, bootstrap) = PreparedEngine::bootstrap(prepared.clone()).unwrap();
         let (foreign, _) = PreparedEngine::bootstrap(prepared).unwrap();
         let owner = engine.retained_code_export_owner(&binder, 0).unwrap();
+        assert_eq!(
+            engine.retained_code_export_owner_installed_by(&binder, bootstrap),
+            Some(owner.clone())
+        );
         let foreign_owner = foreign.retained_code_export_owner(&binder, 0).unwrap();
         assert_ne!(owner, foreign_owner);
         assert!(engine.retained_code_export_owner(&binder, 1).is_none());

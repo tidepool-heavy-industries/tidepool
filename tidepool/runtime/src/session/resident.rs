@@ -4766,7 +4766,7 @@ where
             ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. }
         ) {
             if let Some(checked) = checked {
-                checked.settle(&mut self.state)?;
+                checked.settle(&mut self.state, program)?;
             }
         }
         Ok(outcome)
@@ -4954,6 +4954,7 @@ where
         if let Some(plan) = &checked {
             plan.start(&self.state, lexical_scope)?;
         }
+        let mut installed_program = None;
         let result = (|| {
             let prepared = code.prepared.into_owned();
             let provenance = self.provenance_for(&code.sites)?;
@@ -4991,6 +4992,7 @@ where
             } else {
                 (self.state.install_prepared(prepared)?, Vec::new())
             };
+            installed_program = Some(program);
             timing::record_stage(
                 timing::NO_NODE,
                 timing::NO_ROUND,
@@ -5013,7 +5015,7 @@ where
             } else {
                 CheckedDisplaySettlement::Failed
             };
-            plan.settle(&mut self.state, lexical_scope, outcome)?;
+            plan.settle(&mut self.state, lexical_scope, outcome, installed_program)?;
         }
         result
     }
@@ -5155,6 +5157,7 @@ where
         if let Some(plan) = &checked {
             plan.start(&self.state, lexical_scope)?;
         }
+        let mut installed_program = None;
         let result = (|| {
             let install_started = std::time::Instant::now();
             let (program, source_keys) = match (snapshot, compiled.kind) {
@@ -5197,6 +5200,7 @@ where
                 }
                 _ => return Err(PreparedRuntimeError::CertifiedTargetOwners.into()),
             };
+            installed_program = Some(program);
             timing::record_stage(
                 timing::NO_NODE,
                 timing::NO_ROUND,
@@ -5220,7 +5224,7 @@ where
             } else {
                 CheckedDisplaySettlement::Failed
             };
-            plan.settle(&mut self.state, lexical_scope, outcome)?;
+            plan.settle(&mut self.state, lexical_scope, outcome, installed_program)?;
         }
         result
     }
