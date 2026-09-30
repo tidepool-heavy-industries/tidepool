@@ -193,12 +193,7 @@ pub(super) async fn attach_checkpoint_actor(
             attachment.downcast::<super::embedded_harness::EmbeddedHostedCheckpoint>()
         })
         .ok_or("embedded child requires its admitted hosted checkpoint attachment")?;
-    let path = AgentPath(format!(
-        "{}/a{}_i{}",
-        captured.checkpoint.origin().0,
-        actor.id.0,
-        actor.incarnation.0,
-    ));
+    let path = captured.child_path(actor);
     let identity = harness::embedding::HostIdentity {
         run: super::runtime_namespace(run_root),
         actor: path,

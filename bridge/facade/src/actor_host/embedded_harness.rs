@@ -1,7 +1,7 @@
 use std::{
     path::Path,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
 };
@@ -230,6 +230,49 @@ impl Drop for EmbeddedRoundLease {
     }
 }
 
+/// Durable notification owner for one exact embedded actor incarnation. The
+/// conversation stays available for read-only inclusion reconciliation after
+/// retirement, while `live` fences any new input admission.
+#[derive(Clone)]
+pub(super) struct EmbeddedActorBinding {
+    identity: HostIdentity,
+    pub(super) conversation: Option<Arc<Conversation>>,
+    pub(super) inbox: Arc<super::ActorInbox>,
+    pub(super) inbox_key: String,
+    pub(super) delivery: Arc<tokio::sync::Mutex<()>>,
+    live: Arc<AtomicBool>,
+}
+
+impl EmbeddedActorBinding {
+    pub(super) fn new(
+        identity: HostIdentity,
+        inbox: Arc<super::ActorInbox>,
+        inbox_key: String,
+        conversation: Option<Arc<Conversation>>,
+    ) -> Self {
+        Self {
+            identity,
+            conversation,
+            inbox,
+            inbox_key,
+            delivery: Arc::new(tokio::sync::Mutex::new(())),
+            live: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    pub(super) fn is_live(&self) -> bool {
+        self.live.load(Ordering::Acquire)
+    }
+
+    pub(super) fn mark_retired(&self) {
+        self.live.store(false, Ordering::Release);
+    }
+
+    pub(super) fn identity(&self) -> &HostIdentity {
+        &self.identity
+    }
+}
+
 /// The exact actor and installation used by one bound harness conversation.
 /// The run runtime owns Store and its scheduler; this host supplies authority
 /// and an identity-only wake channel for their existing mailbox path.
@@ -371,6 +414,17 @@ struct EmbeddedDispatcher {
 pub(super) struct EmbeddedHostedCheckpoint {
     issuer: ActorRef,
     pub(super) checkpoint: harness::checkpoint::Checkpoint<()>,
+}
+
+impl EmbeddedHostedCheckpoint {
+    pub(super) fn child_path(&self, actor: ActorRef) -> AgentPath {
+        AgentPath(format!(
+            "{}/a{}_i{}",
+            self.checkpoint.origin().0,
+            actor.id.0,
+            actor.incarnation.0
+        ))
+    }
 }
 
 struct EmbeddedCheckpointCapture {
