@@ -709,7 +709,8 @@ fn settle_checked_snapshot(
 ) -> Result<(), SessionError> {
     let view = session
         .compile_view_in(scope)
-        .ok_or(SessionError::DeadScope(scope))?;
+        .ok_or(SessionError::DeadScope(scope))?
+        .with_scoped_injection();
     let view_digest = session
         .compile_view_digest_in(scope)
         .ok_or(SessionError::DeadScope(scope))?;
@@ -1401,7 +1402,8 @@ impl PersistentSession {
             .ok_or(SessionError::DeadScope(public_scope))?;
         let view = self
             .compile_view_in(private_scope)
-            .expect("fresh detached scope has a library");
+            .expect("fresh detached scope has a library")
+            .with_scoped_injection();
         let binding_tip = self
             .binding_tip_id(private_scope)
             .expect("detached scope captures a binding tip");
@@ -1450,7 +1452,8 @@ impl PersistentSession {
         self.reap_admission_leases();
         let view = self
             .compile_view_in(scope)
-            .ok_or(SessionError::DeadScope(scope))?;
+            .ok_or(SessionError::DeadScope(scope))?
+            .with_scoped_injection();
         let view_digest = self
             .compile_view_digest_in(scope)
             .ok_or(SessionError::DeadScope(scope))?;
@@ -1632,13 +1635,7 @@ impl PersistentSession {
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
-        if !Arc::ptr_eq(&execution.owner, self.admission_owner())
-            || execution.owner_epoch != self.admission_owner().epoch()
-            || execution.view().session() != self.lib().session_id()
-            || self.binding_tip_id(execution.private_scope()) != Some(execution.binding_tip())
-        {
-            return Err(SessionError::StaleStagedDeclaration);
-        }
+        self.compile_view_for_execution(&execution)?;
         let mut admission = self.admit_cell_in(
             execution.private_scope(),
             declaration_count,
@@ -1650,6 +1647,24 @@ impl PersistentSession {
             .expect("fresh runtime admission has one owner")
             .private_execution = Some(execution);
         Ok(admission)
+    }
+
+    /// Capture the current private environment before freezing its recipe.
+    /// Trusted setup mounts may extend this scope before whole-cell admission.
+    pub fn compile_view_for_execution(
+        &self,
+        execution: &PrivateExecutionAdmission,
+    ) -> Result<SessionCompileView, SessionError> {
+        if !Arc::ptr_eq(&execution.owner, self.admission_owner())
+            || execution.owner_epoch != self.admission_owner().epoch()
+            || execution.view().session() != self.lib().session_id()
+            || self.binding_tip_id(execution.private_scope()) != Some(execution.binding_tip())
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        self.compile_view_in(execution.private_scope())
+            .map(SessionCompileView::with_scoped_injection)
+            .ok_or(SessionError::DeadScope(execution.private_scope()))
     }
 }
 
@@ -1807,6 +1822,52 @@ mod tests {
             .bindings()
             .get(SessionVarId::from_extract(912))
             .is_some());
+    }
+
+    #[test]
+    fn protected_injection_captures_private_setup_without_sibling_inventory() {
+        let root = tempfile::tempdir().unwrap();
+        let lib =
+            SessionLib::open(SessionId(994), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let execution = Arc::new(session.begin_private_execution(public).unwrap());
+        let sibling = session.mint_scope(ScopeId::ROOT).unwrap();
+        let foreign = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "foreign",
+            918,
+        );
+        let foreign_module = foreign.module;
+        session.bind_in(sibling, foreign).unwrap();
+        let setup =
+            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "input", 919);
+        let setup_module = setup.module;
+        session.bind_in(execution.private_scope(), setup).unwrap();
+        assert!(execution.view().injected_values().is_empty());
+        let ordinary = session.compile_view_in(execution.private_scope()).unwrap();
+        assert!(ordinary.injected_values().contains(&foreign_module));
+        let protected = session.compile_view_for_execution(&execution).unwrap();
+        assert_eq!(protected.injected_values(), protected.reachable_values());
+        assert!(protected.injected_values().contains(&setup_module));
+        assert!(!protected.injected_values().contains(&foreign_module));
+        for module in protected.reachable_values() {
+            let path = root.path().join(module.relative_hi_path());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, [1, 2, 3]).unwrap();
+        }
+        let admitted = session
+            .admit_cell_for_execution(execution.clone(), 0, Arc::new(()), [7; 32], [8; 32])
+            .unwrap();
+        assert_eq!(
+            admitted.view().injected_values(),
+            protected.injected_values()
+        );
+        let foreign_session = PersistentSession::new(None, 1024 * 1024);
+        assert!(matches!(
+            foreign_session.compile_view_for_execution(&execution),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
     }
 
     #[test]

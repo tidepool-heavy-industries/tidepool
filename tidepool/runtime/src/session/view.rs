@@ -271,6 +271,14 @@ impl SessionCompileView {
         &self.injected_values
     }
 
+    /// A protected compiler offer may read only the exact lexical dependency
+    /// closure. Other scopes' live modules do not become compiler inputs.
+    #[must_use]
+    pub fn with_scoped_injection(mut self) -> Self {
+        self.injected_values.clone_from(&self.reachable_values);
+        self
+    }
+
     /// The injected value modules a turn compiled at this scope can reach;
     /// see the field's documentation for what is outside it.
     #[must_use]

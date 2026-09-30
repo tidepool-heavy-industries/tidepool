@@ -2739,6 +2739,16 @@ where
             .map(|view| view.hide_value_names(&hidden))
     }
 
+    pub fn compile_view_for_execution(
+        &self,
+        execution: &super::PrivateExecutionAdmission,
+    ) -> Result<super::SessionCompileView, SessionError> {
+        self.state.compile_view_for_execution(execution)?;
+        self.compile_view_in(execution.private_scope())
+            .map(super::SessionCompileView::with_scoped_injection)
+            .ok_or(SessionError::DeadScope(execution.private_scope()))
+    }
+
     /// Capture an exact, selective declaration surface from `scope` for a
     /// fresh actor's model-visible environment.
     pub fn exact_exports_in(

@@ -4088,7 +4088,7 @@ where
                     response.as_ref(),
                     request,
                     mounted_input.as_ref(),
-                    false,
+                    Some(execution.admission.as_ref()),
                 )?;
                 let prepared = source.prepare(&snapshot.view);
                 let preamble = cell_module_preamble(
@@ -10080,7 +10080,7 @@ where
         response,
         request,
         mounted_input,
-        true,
+        None,
     )
 }
 
@@ -10093,7 +10093,7 @@ fn snapshot_cell_split_owned<H, O>(
     response: Option<&ResponseExpectation>,
     request: Option<crate::RequestId>,
     mounted_input: Option<&MountedHostInput>,
-    reserve_fold: bool,
+    execution: Option<&tidepool_runtime::session::PrivateExecutionAdmission>,
 ) -> Result<(ActorWorkbenchSource, CellSplitSnapshot), ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
@@ -10128,11 +10128,30 @@ where
     }
     .into();
     source.preamble = actor_preamble(&source.preamble, context).into();
-    let view = actor_compile_view(session, context, &source, type_modules)?;
+    let view = if let Some(execution) = execution {
+        if execution.private_scope() != context.placement.lexical_scope {
+            return Err(ResidentActorWorkbenchError::Resident(
+                ResidentError::Session(
+                    tidepool_runtime::session::SessionError::StaleStagedDeclaration,
+                ),
+            ));
+        }
+        let session_view = session
+            .compile_view_for_execution(execution)
+            .map_err(|error| {
+                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+            })?;
+        context
+            .compile_view(session_view)?
+            .with_workbench_imports(&source.workbench_imports)
+            .with_type_modules(type_modules)
+    } else {
+        actor_compile_view(session, context, &source, type_modules)?
+    };
     // The fold can write a Val interface during the whole-cell check. Claim
     // its identity before releasing checkout: rejecting a stale result later
     // cannot undo a compiler overwriting another actor's interface.
-    if reserve_fold {
+    if execution.is_none() {
         session.reserve_value_generations_through(view.next_value_generation());
     }
     let retained = session.prepared_retained();
