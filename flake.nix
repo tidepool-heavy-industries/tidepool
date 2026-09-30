@@ -252,7 +252,7 @@
           interactiveCodex = codex.packages.${system}.default;
           embeddedWebAssets = harnessPkgs.buildNpmPackage {
             pname = "exomonad-harness-web";
-            version = "31ae2e52ca091235c670dbe28aaf730ae148cd4c";
+            version = "814b1697226344e8fd16196666e41c184a73531d";
             src = "${harnessWeb}/web";
             nodejs = harnessPkgs.nodejs_24;
             npmDepsHash = "sha256-yJrPGaSazF06w91mddpNlOyoB6d1cYKXumyaoeWCfeU=";
@@ -262,7 +262,7 @@
               cp -R dist/. "$out/share/exomonad/web/"
               runHook postInstall
             '';
-            passthru.sourceRevision = "31ae2e52ca091235c670dbe28aaf730ae148cd4c";
+            passthru.sourceRevision = "814b1697226344e8fd16196666e41c184a73531d";
           };
           # Tidepool consumes only the standalone private wire crate from the
           # matched Codex checkout. Keep the rest of Codex in its independent
