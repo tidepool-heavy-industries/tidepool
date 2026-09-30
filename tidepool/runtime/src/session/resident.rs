@@ -1192,12 +1192,8 @@ impl PendingPreparedSource {
                     resolved.package_interfaces.clone(),
                 )
                 .map_err(PreparedRuntimeError::Compile)?;
-                let demanded = resolved
-                    .groups
-                    .iter()
-                    .cloned()
-                    .map(|group| DemandedImage::compile(group, registry))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let demanded =
+                    target.compile_demanded(resolved.groups.iter().cloned(), registry)?;
                 CompiledPreparedKind::Certified { target, demanded }
             }
         };
@@ -3815,11 +3811,8 @@ where
                 resolved.package_interfaces.clone(),
             )
             .map_err(PreparedRuntimeError::Compile)?;
-            let demanded = resolved
-                .groups
-                .into_iter()
-                .map(|group| DemandedImage::compile(group, &registry))
-                .collect::<Result<Vec<_>, _>>()
+            let demanded = target
+                .compile_demanded(resolved.groups, &registry)
                 .map_err(PreparedRuntimeError::from)?;
             self.install_certified_turn_in(
                 scope,
@@ -4346,11 +4339,8 @@ where
                 resolved.package_interfaces.clone(),
             )
             .map_err(PreparedRuntimeError::Compile)?;
-            let demanded = resolved
-                .groups
-                .into_iter()
-                .map(|group| DemandedImage::compile(group, &registry))
-                .collect::<Result<Vec<_>, _>>()
+            let demanded = target
+                .compile_demanded(resolved.groups, &registry)
                 .map_err(PreparedRuntimeError::from)?;
             self.install_certified_turn_in(
                 lexical_scope,
@@ -4975,11 +4965,8 @@ where
                     resolved.package_interfaces.clone(),
                 )
                 .map_err(PreparedRuntimeError::Compile)?;
-                let demanded = resolved
-                    .groups
-                    .into_iter()
-                    .map(|group| DemandedImage::compile(group, &registry))
-                    .collect::<Result<Vec<_>, _>>()
+                let demanded = target
+                    .compile_demanded(resolved.groups, &registry)
                     .map_err(PreparedRuntimeError::from)?;
                 self.install_certified_turn_in(
                     lexical_scope,

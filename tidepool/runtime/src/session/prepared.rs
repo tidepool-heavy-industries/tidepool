@@ -18,10 +18,11 @@ use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
     BatchImport, BatchLeaseRequest, BatchProgram, CompileError, CompiledProgram, DemandError,
     DemandedImage, ExecutionError, ImageRegistry, ImportBindings, InheritedSourceDemand,
-    ManagedBuilder, ManagedField, ManagedNode, Parcel, ParkRequest, PreparedCallOptions,
-    PreparedFrameEvidence, PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions,
-    PreparedOuter as CodegenPreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
-    RunOptions, SourceBinder, SourceInstanceLease, MAX_ANSWER_DEPTH,
+    ManagedBuilder, ManagedField, ManagedNode, PackageLiteral, Parcel, ParkRequest,
+    PreparedCallOptions, PreparedFrameEvidence, PreparedHandle, PreparedInput, PreparedMachine,
+    PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter, PreparedResult,
+    PreparedResultBatch, ProgramId, RunOptions, SourceBinder, SourceInstanceLease,
+    MAX_ANSWER_DEPTH,
 };
 // Re-exported: callers of this module's resource-scope cancellation API
 // (`open_realm`/`cancel_handle`/`close_realm`) need both types without a
@@ -31,9 +32,9 @@ pub use tidepool_codegen::machine::MachineDisposition;
 use tidepool_codegen::suspension::ContinuationId;
 pub use tidepool_codegen::suspension::{RealmId, ValueHandle};
 use tidepool_repr::execution_schema::{
-    link_program, CachedHomeOwner, CtorRow, DefinitionsView, Group, HeapRhs, ImportOwner,
-    ImportedValue, JsonLayout, LinkError, MachineImports, ParseError, PreparedProgram, RuntimeRep,
-    Signature, SiteDelivery, SiteRow, SymbolIdentity, TypeNode, TypeNodeId, ValueId,
+    link_program, CachedHomeOwner, CertifiedGroup, CtorRow, DefinitionsView, Group, HeapRhs,
+    ImportOwner, ImportedValue, JsonLayout, LinkError, MachineImports, ParseError, PreparedProgram,
+    RuntimeRep, Signature, SiteDelivery, SiteRow, SymbolIdentity, TypeNode, TypeNodeId, ValueId,
 };
 use tidepool_repr::{DataConId, DataConTable, Literal, PrincipalId, SessionVarId};
 
@@ -452,6 +453,7 @@ pub(crate) struct CertifiedTargetImage {
     prepared: PreparedProgram,
     image: Arc<CompiledProgram>,
     package_interfaces: CertifiedTargetPackageInterfaces,
+    package_literals: BTreeMap<SymbolIdentity, PackageLiteral>,
 }
 
 impl CertifiedTargetImage {
@@ -475,11 +477,34 @@ impl CertifiedTargetImage {
         let image = registry.get_or_compile_prepared(&prepared, || {
             CompiledProgram::compile_prepared_definitions(&prepared).map(Arc::new)
         })?;
+        let package_literals = if package_interfaces.matches_target(&prepared) {
+            image.package_literals(|unit, module| package_interfaces.interface_digest(unit, module))
+        } else {
+            BTreeMap::new()
+        };
         Ok(Self {
             prepared,
             image,
             package_interfaces,
+            package_literals,
         })
+    }
+
+    pub(crate) fn compile_demanded(
+        &self,
+        groups: impl IntoIterator<Item = CertifiedGroup>,
+        registry: &ImageRegistry,
+    ) -> Result<Vec<DemandedImage>, DemandError> {
+        groups
+            .into_iter()
+            .map(|group| {
+                DemandedImage::compile_with_package_literals(
+                    group,
+                    registry,
+                    &self.package_literals,
+                )
+            })
+            .collect()
     }
 
     pub(crate) fn prepared(&self) -> &PreparedProgram {
@@ -2857,10 +2882,29 @@ impl PreparedEngine {
         exact_external: &HashMap<ImportOwner, PreparedHandle>,
         bindings: &BindingTable,
     ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
-        let target_exports: BTreeMap<_, _> = exportable_code_tops(&target.prepared)
+        let mut target_exports: BTreeMap<_, _> = exportable_code_tops(&target.prepared)
             .into_iter()
             .map(|(identity, value, _)| (identity, value))
             .collect();
+        // Literal package imports are native image inputs, not managed exports.
+        // Only the sealed target's admitted literal tokens select these rows.
+        target_exports.extend(
+            target
+                .prepared
+                .bindings()
+                .iter()
+                .flat_map(|group| match group {
+                    Group::NonRecursive(top) => std::slice::from_ref(top),
+                    Group::Recursive(tops) => tops.as_slice(),
+                })
+                .filter(|top| {
+                    top.identity.unit != HOME_UNIT
+                        && top.identity.namespace == "value"
+                        && matches!(top.binding.rhs, HeapRhs::Bytes(_))
+                        && target.package_literals.contains_key(&top.identity)
+                })
+                .map(|top| (top.identity.clone(), top.binding.id)),
+        );
         let mut target_packages = BTreeMap::new();
         let matches_target = target.package_interfaces.matches_target(&target.prepared);
         let certified_exports = target_exports
@@ -3229,9 +3273,10 @@ impl PreparedEngine {
                                     binding,
                                 }
                             };
-                            if package_updates
-                                .insert(binder.clone(), *interface_digest)
-                                .is_some_and(|previous| previous != *interface_digest)
+                            if !target.package_literals.contains_key(binder)
+                                && package_updates
+                                    .insert(binder.clone(), *interface_digest)
+                                    .is_some_and(|previous| previous != *interface_digest)
                             {
                                 return Err(PreparedRuntimeError::MissingCertifiedOwner(
                                     owner.clone(),
@@ -4913,6 +4958,55 @@ pub(super) mod tests {
                 })
             })
             .collect()
+    }
+
+    #[test]
+    fn uncertified_target_literals_cannot_specialize_package_addresses() {
+        let registry = ImageRegistry::new();
+        let mut literal = testing::identity("Fixture.Package", "literal");
+        literal.unit = "fixture-package".into();
+        let mut target_wire = testing::wire_program();
+        target_wire.bindings.push(Group::NonRecursive(TopBinding {
+            identity: literal.clone(),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Bytes(b"literal".to_vec()),
+            },
+        }));
+        let target =
+            CertifiedTargetImage::compile(testing::prepare(target_wire).unwrap(), &registry)
+                .unwrap();
+        assert_eq!(target.image.package_literals(|_, _| Some([9; 32])).len(), 1);
+        assert!(target.package_literals.is_empty());
+        let mut group_wire = testing::wire_program();
+        group_wire.globals.push(GlobalDecl {
+            identity: literal.clone(),
+            rep: RuntimeRep::Address,
+            entry_signature: None,
+            required_evaluated: true,
+            required_generation: None,
+        });
+        let group = CertifiedGroup::admit(
+            CachedHomeOwner {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                module_version: tidepool_repr::execution_schema::ModuleVersion([1; 32]),
+                skinny_iface_sha256: [2; 32],
+                product_sha256: [3; 32],
+            },
+            testing::projected_group(group_wire, 7).unwrap(),
+            vec![ImportOwner::Package {
+                unit: literal.unit.clone(),
+                module: literal.module.clone(),
+                binder: literal,
+                interface_digest: [9; 32],
+            }],
+        )
+        .unwrap();
+        assert!(target.compile_demanded([group], &registry).is_err());
+        assert!(exportable_code_tops(target.prepared())
+            .iter()
+            .all(|(identity, _, _)| identity.unit != "fixture-package"));
     }
 
     fn settled_test_facts(declarations: &[(&str, &str, DataConId)]) -> ProgramFacts {
