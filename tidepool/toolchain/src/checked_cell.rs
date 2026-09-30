@@ -299,8 +299,119 @@ pub enum CheckedExpressionPresentation {
 #[derive(Clone, Debug)]
 pub struct ExactCompiledPrefix {
     cell: Arc<ExactCheckedCell>,
-    completed: Vec<CompletedCheckedItem>,
-    displays: Vec<Arc<ExactCompiledDisplay>>,
+    completed: CheckedPrefixSequence<CompletedCheckedItem>,
+    displays: CheckedPrefixSequence<Arc<ExactCompiledDisplay>>,
+}
+
+/// Immutable ordered proof links. Appending shares the historical leaves and
+/// copies only a logarithmic branch path; snapshots never clone the full prefix.
+#[derive(Clone, Debug)]
+struct CheckedPrefixSequence<T> {
+    root: Option<Arc<CheckedPrefixNode<T>>>,
+}
+
+#[derive(Debug)]
+struct CheckedPrefixNode<T> {
+    length: usize,
+    contents: CheckedPrefixContents<T>,
+}
+
+#[derive(Debug)]
+enum CheckedPrefixContents<T> {
+    Leaf(T),
+    Branch(Arc<CheckedPrefixNode<T>>, Arc<CheckedPrefixNode<T>>),
+}
+
+impl<T> CheckedPrefixSequence<T> {
+    fn new() -> Self {
+        Self { root: None }
+    }
+    fn len(&self) -> usize {
+        self.root.as_ref().map_or(0, |root| root.length)
+    }
+    fn push(&mut self, value: T) {
+        fn branch<T>(
+            left: Arc<CheckedPrefixNode<T>>,
+            right: Arc<CheckedPrefixNode<T>>,
+        ) -> Arc<CheckedPrefixNode<T>> {
+            Arc::new(CheckedPrefixNode {
+                length: left.length + right.length,
+                contents: CheckedPrefixContents::Branch(left, right),
+            })
+        }
+        fn append<T>(
+            node: Arc<CheckedPrefixNode<T>>,
+            leaf: Arc<CheckedPrefixNode<T>>,
+        ) -> Arc<CheckedPrefixNode<T>> {
+            if node.length.is_power_of_two() {
+                branch(node, leaf)
+            } else {
+                let CheckedPrefixContents::Branch(left, right) = &node.contents else {
+                    unreachable!("non-power-of-two prefix is a branch")
+                };
+                branch(left.clone(), append(right.clone(), leaf))
+            }
+        }
+        let leaf = Arc::new(CheckedPrefixNode {
+            length: 1,
+            contents: CheckedPrefixContents::Leaf(value),
+        });
+        self.root = Some(
+            self.root
+                .take()
+                .map_or_else(|| leaf.clone(), |root| append(root, leaf.clone())),
+        );
+    }
+    fn get(&self, mut index: usize) -> Option<&T> {
+        let mut node = self.root.as_deref()?;
+        if index >= node.length {
+            return None;
+        }
+        loop {
+            match &node.contents {
+                CheckedPrefixContents::Leaf(value) => return Some(value),
+                CheckedPrefixContents::Branch(left, right) => {
+                    if index < left.length {
+                        node = left;
+                    } else {
+                        index -= left.length;
+                        node = right;
+                    }
+                }
+            }
+        }
+    }
+    fn iter(&self) -> CheckedPrefixIter<'_, T> {
+        CheckedPrefixIter {
+            pending: self.root.as_deref().into_iter().collect(),
+        }
+    }
+}
+
+struct CheckedPrefixIter<'a, T> {
+    pending: Vec<&'a CheckedPrefixNode<T>>,
+}
+impl<'a, T> Iterator for CheckedPrefixIter<'a, T> {
+    type Item = &'a T;
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(node) = self.pending.pop() {
+            match &node.contents {
+                CheckedPrefixContents::Leaf(value) => return Some(value),
+                CheckedPrefixContents::Branch(left, right) => {
+                    self.pending.push(right);
+                    self.pending.push(left);
+                }
+            }
+        }
+        None
+    }
+}
+impl<'a, T> IntoIterator for &'a CheckedPrefixSequence<T> {
+    type Item = &'a T;
+    type IntoIter = CheckedPrefixIter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1004,8 +1115,8 @@ impl ExactCheckedItem {
         }
         Ok(ExactCompiledPrefix {
             cell: self.cell.clone(),
-            completed: Vec::new(),
-            displays: Vec::new(),
+            completed: CheckedPrefixSequence::new(),
+            displays: CheckedPrefixSequence::new(),
         })
     }
     pub fn validate_observations(
