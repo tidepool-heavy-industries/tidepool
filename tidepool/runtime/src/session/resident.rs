@@ -1946,6 +1946,10 @@ where
         lib: Option<SessionLib>,
     ) -> Self {
         let state = PersistentSession::new(lib, nursery_size);
+        Self::with_state(handlers, captured, state)
+    }
+
+    fn with_state(handlers: H, captured: O, state: PersistentSession) -> Self {
         ResidentSession {
             state,
             handlers,
@@ -1960,6 +1964,15 @@ where
             run_context: SessionRunContext::ROOT,
             custody_cleanup: Arc::new(CustodyCleanup::default()),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_persistent_for_test(
+        handlers: H,
+        captured: O,
+        state: PersistentSession,
+    ) -> Self {
+        Self::with_state(handlers, captured, state)
     }
 
     /// Share `registry` with this session's machine, once it has one
