@@ -46,13 +46,17 @@ This is compile evidence, not execution acceptance.
   or browser-control proof is claimed from that run. Its log is
   [`browser-journey.log`](../target/completion-evidence/next-wave/browser-journey.log).
   The selector and retained-history navigation were repaired in `f6b8f8874b`;
-  the driver native build passed. The second journey is running on the joined
-  foundation; its outcome remains pending.
+  the driver native build passed. The second journey failed at a cookie-path
+  assertion (one failed, 225 skipped, 232.629 seconds); the cookie inspection
+  was repaired to use the authenticated API path in `9febda58bb`. Neither run
+  proves the raw Haskell result or control gates.
 - Runtime publication repair `496178115f` passed eight paired tests and fresh
   independent source review. Checked physical-prefix settlement `637518d5cd`
   was joined, but fresh review found unsupported display/host-mount entry points
   accepting certificates without validating their sealed execution plan. Repair
-  is in progress. Private concurrent admission and fresh-process recovery remain
+  `3829bfbc6` passed a real matched-worker test (one passed, 303 filtered;
+  64.27 seconds), including seven refusals and authenticated prefix advancement;
+  it is joined as `4d64664760`. Private concurrent admission and recovery remain
   open; the v3 codec does not itself hydrate a recovered public session.
 - Protected compiler evidence includes strict same-offer fold, fresh checked
   binding, and hidden nominal binding/expression tests. The hidden case passed
@@ -64,14 +68,24 @@ This is compile evidence, not execution acceptance.
   concurrent actor/worker-tree acceptance.
 - Capture producer/consumer join verification `1f8121067f` passed three focused
   lifetime tests with 402 skipped. The real two-delayed-child Haskell test
-  compiled but has not executed; actual workspace-barrier acceptance is open.
+  was executed alongside the actual workspace-barrier fixture: both failed
+  upstream at prepared original-package root generation, before the child-value
+  assertions. The identified missing root is `Control.Monad.Freer.Internal.qApp`.
+  Package-closure diagnosis is underway; neither capture gate is accepted.
 - SOURCE/boot reuse parcel `3796d50b93` passed the Haskell suite, one Rust witness
   test, and one production Cached-receipt test; independent source review cleared
-  this bounded parcel. Native parity target was joined. Unknown dynamic plugin
-  input policy and wider cache acceptance remain open.
+  this bounded parcel. Native Buck SOURCE reuse executed and passed one test
+  in `native-source-test-r4.log`. Dynamic plugin input policy passed six cases
+  and is joined; its main frontend hook remains with the compiler owner. Native
+  family-consistency and plugin-policy targets also passed (two tests total,
+  `native-compiler-small-gates.log`). Wider cache acceptance remains open.
 - The real-host pending Haskell output across compaction fixture is being
-  exercised and repaired against actual provider/actor ordering. It has not
-  passed and must not be cited as acceptance.
+  compiled but failed at the same original-package root generation defect. The
+  exact selected test failed after 419.25 seconds; it is not acceptance evidence.
+- The measured family-validation structural repair `3ae3b7acf` is joined as
+  `f1e3e53ef0`: 1,024 independent injective families took 83.860 → 1.337 ms
+  and allocated 602.941 → 5.336 MiB. Twelve semantic cases and the retained
+  declaration-join suite passed; see [measurement report](engine-family-validation-cost.md).
 - Native facade execution, exact runtime recovery, complete fixture corpus,
   matched packaging, warm-cache mutation gates, and independent reusable worker
   trees remain open.
