@@ -83,7 +83,7 @@ import Tidepool.DeclarationJoin
   , renderDeclarationInventoryOutcome )
 import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson
-  ( ReportOutcome(..), DiagSeverity(..), Diag(..), SourceRejection(..)
+  ( ReportOutcome(..), DiagSeverity(..), Diag(..), SourceRejection(..), InputRejection(..)
   , diagsFromSourceError, diagFromException, renderDiagsJson )
 import Tidepool.ExtractUtil (capitalize)
 import Tidepool.ExtractRequest (InspectionRequest(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
@@ -244,17 +244,20 @@ dispatch
 dispatch compiler caches timing args = do
   admitted <- trySynchronous $ forM_ (requestSessionArtifacts args) $ \manifest -> do
     scope <- readExactScope manifest >>= either fail pure
+    forM_ (scopeIncludePaths scope) $ \includes ->
+      unless (requestIncludes args == includes)
+        (throwIO SearchInputsChanged)
     forM_ (scopeCheckedCell scope) $ \_ ->
       unless (requestCell args && not (requestTurn args) && not (requestClassify args)
           && null (requestInspections args) && not (isJust (requestDeclarationJoin args))
           && not (requestCertifyHomeProducts args) && not (requestActivationPreview args))
-        (fail "checked-cell authorization requires its dedicated cell-check request")
+        (throwIO CheckedPurposeMismatch)
     forM_ (scopeCheckedItem scope) $ \_ ->
       unless (requestTurn args && not (requestCell args) && not (requestClassify args)
           && null (requestInspections args) && not (isJust (requestDeclarationJoin args))
           && not (requestCertifyHomeProducts args) && not (requestActivationPreview args)
           && not (isJust (requestTurnPin args)) && not (isJust (requestTarget args)))
-        (fail "checked-item authorization requires its dedicated recipe request")
+        (throwIO CheckedPurposeMismatch)
   case admitted of
     Left failure -> reportDiags (Left failure)
     Right () -> case requestDeclarationJoin args of
@@ -425,15 +428,17 @@ reportDiags = reportDiagsWithWarnings . fmap (const [])
 reportDiagsWithWarnings :: Either SomeException [Diag] -> IO ExitCode
 reportDiagsWithWarnings (Left e) = do
   let (outcome, diags) = case fromException e of
-        Just (se :: SourceError) -> (ReportSourceFailure, diagsFromSourceError se)
+        Just (rejection :: InputRejection) -> (ReportInputRejected, [Diag Nothing DiagError (show rejection)])
         Nothing -> case fromException e of
-          Just (SourceRejection message) ->
-            (ReportSourceFailure, [Diag Nothing DiagError message])
+          Just (se :: SourceError) -> (ReportSourceFailure, diagsFromSourceError se)
           Nothing -> case fromException e of
-            Just (LocatedCellRejection (CellSourceSpan sl sc el ec) message) ->
-              (ReportSourceFailure,
-                [Diag (Just ("<cell>", sl, sc, el, ec)) DiagError message])
-            Nothing -> (ReportWorkerFailure, [diagFromException e])
+            Just (SourceRejection message) ->
+              (ReportSourceFailure, [Diag Nothing DiagError message])
+            Nothing -> case fromException e of
+              Just (LocatedCellRejection (CellSourceSpan sl sc el ec) message) ->
+                (ReportSourceFailure,
+                  [Diag (Just ("<cell>", sl, sc, el, ec)) DiagError message])
+              Nothing -> (ReportWorkerFailure, [diagFromException e])
   putStrLn (renderDiagsJson outcome diags)
   -- Debug copy for humans only; stdout (above) is the authoritative machine
   -- contract.

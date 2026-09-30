@@ -16,6 +16,7 @@ pub const REPORT_VERSION: u32 = 2;
 #[serde(rename_all = "kebab-case")]
 pub enum ExtractOutcome {
     Success,
+    InputRejected,
     SourceFailure,
     WorkerFailure,
 }
@@ -124,6 +125,7 @@ mod tests {
     fn decodes_each_outcome_and_severity() {
         for (wire, expected) in [
             ("success", ExtractOutcome::Success),
+            ("input-rejected", ExtractOutcome::InputRejected),
             ("source-failure", ExtractOutcome::SourceFailure),
             ("worker-failure", ExtractOutcome::WorkerFailure),
         ] {

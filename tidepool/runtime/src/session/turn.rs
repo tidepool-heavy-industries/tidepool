@@ -2594,16 +2594,25 @@ pub fn check_cell_admitted(
         )
         .into());
     }
-    if req.session_id != Some(view.session())
-        || req.session_root != view.session_root()
-        || req.compile_generation != view.next_value_generation().0
-        || req.inject_modules != view.injected_module_names()
-        || req.include.len() != admission.include_paths().len()
+    if req.include.len() != admission.include_paths().len()
         || req
             .include
             .iter()
             .zip(admission.include_paths())
             .any(|(requested, admitted)| requested.as_os_str() != admitted.as_os_str())
+    {
+        return Err(CompileError::InputRejected(vec![crate::diag::ExtractDiag {
+            span: None,
+            severity: crate::diag::DiagnosticSeverity::Error,
+            message: "checked request source search inputs differ from its runtime admission"
+                .into(),
+        }])
+        .into());
+    }
+    if req.session_id != Some(view.session())
+        || req.session_root != view.session_root()
+        || req.compile_generation != view.next_value_generation().0
+        || req.inject_modules != view.injected_module_names()
         || req.exact_context.as_deref() != view.exact_declaration_context().map(Arc::as_ref)
     {
         return Err(CompileError::ExtractFailed(
@@ -5157,17 +5166,34 @@ mod tests {
 
     fn compile_public_checked_offer(
         admission: &Arc<crate::session::RuntimeCellAdmission>,
-        mut specification: CheckedCellSpecification,
+        specification: CheckedCellSpecification,
     ) -> (TempDir, ExactCheckedItem) {
-        let temp = TempDir::new().unwrap();
+        compile_public_checked_offer_with_inputs(
+            admission,
+            specification,
+            admission.include_paths(),
+            admission.include_paths(),
+        )
+        .unwrap()
+    }
+
+    fn compile_public_checked_offer_with_inputs(
+        admission: &Arc<crate::session::RuntimeCellAdmission>,
+        mut specification: CheckedCellSpecification,
+        offered_include: &[PathBuf],
+        worker_include: &[PathBuf],
+    ) -> Result<(TempDir, ExactCheckedItem), CompileError> {
+        let temp = TempDir::new()?;
         let source = temp.path().join("cell.txt");
         let template = temp.path().join("CellCheckTemplate.hs");
-        std::fs::write(&source, &specification.cell_source).unwrap();
-        std::fs::write(&template, &specification.template_source).unwrap();
+        std::fs::write(&source, &specification.cell_source)?;
+        std::fs::write(&template, &specification.template_source)?;
         specification.admission_digest = admission.digest();
-        let include = admission.include_paths().to_vec();
-        let include_paths = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        let mut cmd = extract_cmd().unwrap();
+        let include_paths = worker_include
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let mut cmd = extract_cmd()?;
         cmd.input(&source)
             .cell()
             .cell_template(&template)
@@ -5175,34 +5201,140 @@ mod tests {
             .output_dir(temp.path())
             .includes(&include_paths)
             .session_incarnation(admission.view().session().0.to_string());
-        let endpoint = cmd.bind().unwrap();
+        let endpoint = cmd.bind().map_err(map_notfound)?;
         let offer = ModuleCandidateOffer::select_checked_cell(
             endpoint.identity().producer_bytes(),
-            &include,
+            offered_include,
             temp.path(),
             admission.view().exact_declaration_context().cloned(),
             specification,
             Vec::new(),
-        )
-        .unwrap();
+        )?;
         cmd.session_root(offer.checked_value_root().unwrap())
             .session_artifacts(offer.exact_scope_path().unwrap());
         crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
-        let run = endpoint.execute(&cmd).unwrap();
-        assert!(
+        let run = endpoint.execute(&cmd).map_err(map_notfound)?;
+        if let Err(error) = crate::diag::decode_extract_result(
             run.success(),
-            "{}",
-            String::from_utf8_lossy(&run.output.stderr)
-        );
+            &run.output.stdout,
+            &run.output.stderr,
+        ) {
+            return Err(offer.retain_failure(temp.path(), &run.output.stderr, error));
+        }
         let cell = offer
             .admit_checked_cell(temp.path())
-            .unwrap_or_else(|error| {
-                panic!(
-                    "{}",
-                    offer.retain_failure(temp.path(), &run.output.stderr, error)
-                )
-            });
-        (temp, cell.item(0).unwrap())
+            .map_err(|error| offer.retain_failure(temp.path(), &run.output.stderr, error))?;
+        Ok((temp, cell.item(0)?))
+    }
+
+    #[test]
+    fn substituted_search_inputs_refuse_before_compilation_or_prefix_claim() {
+        use crate::session::{ModuleEnv, PersistentSession, SessionLib};
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_repr::SessionId;
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let original_root = root.path().join("original");
+        let alternate_root = root.path().join("alternate");
+        std::fs::create_dir(&original_root).unwrap();
+        std::fs::create_dir(&alternate_root).unwrap();
+        std::fs::write(
+            original_root.join("RootChoice.hs"),
+            include_str!("fixtures/checked-search-original.hs"),
+        )
+        .unwrap();
+        std::fs::write(
+            alternate_root.join("RootChoice.hs"),
+            include_str!("fixtures/checked-search-alternate.hs"),
+        )
+        .unwrap();
+        let lib = SessionLib::open(
+            SessionId(1001),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        let mut state = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = state.mint_scope(ScopeId::ROOT).unwrap();
+        let execution = Arc::new(state.begin_private_execution(public).unwrap());
+        let specification = CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: "let value = RootChoice.value".into(),
+            template_source: include_str!("fixtures/checked-fold-outcome-template.hs")
+                .replace("{{CELL_IMPORTS}}", "import qualified RootChoice"),
+            turn_templates: Vec::new(),
+            injected_modules: Vec::new(),
+            reserved_declaration_modules: Vec::new(),
+        };
+        let original_include = vec![original_root.clone(), root.path().to_path_buf()];
+        let alternate_include = vec![alternate_root.clone(), root.path().to_path_buf()];
+        let admission = state
+            .admit_cell_for_execution(
+                execution,
+                0,
+                Arc::new(specification.clone()),
+                specification.specification_digest(),
+                [1; 32],
+                original_include.clone(),
+            )
+            .unwrap();
+        // The runtime front door refuses different roots before creating a worker offer.
+        let alternate_refs = alternate_include
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        assert!(check_cell_admitted(
+            CellCheckRequest {
+                exact_context: admission.view().exact_declaration_context().cloned(),
+                session_id: Some(admission.view().session()),
+                cell_text: &specification.cell_source,
+                template: &specification.template_source,
+                include: &alternate_refs,
+                session_root: admission.view().session_root(),
+                inject_modules: &[],
+                compile_generation: admission.initial_value_generation().0,
+                compile_view_evidence: "",
+            },
+            admission.clone(),
+            &[],
+            None
+        )
+        .is_err());
+        // A public offer cannot label the original roots while invoking different roots.
+        let failure = compile_public_checked_offer_with_inputs(
+            &admission,
+            specification.clone(),
+            &original_include,
+            &alternate_include,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(failure, CompileError::InputRejected(_)),
+            "{failure}"
+        );
+        // A faithfully labelled alternate compilation can seal, but cannot claim this admission.
+        let (alternate_artifacts, alternate) = compile_public_checked_offer_with_inputs(
+            &admission,
+            specification.clone(),
+            &alternate_include,
+            &alternate_include,
+        )
+        .unwrap();
+        let evidence =
+            std::fs::read_to_string(alternate_artifacts.path().join("dependencies.json")).unwrap();
+        assert!(evidence.contains(alternate_root.join("RootChoice.hs").to_str().unwrap()));
+        assert_eq!(
+            alternate.specification_digest(),
+            admission.specification_digest()
+        );
+        assert!(state
+            .begin_checked_prefix(admission.clone(), alternate)
+            .is_err());
+        let (_artifacts, legitimate) = compile_public_checked_offer(&admission, specification);
+        assert_eq!(legitimate.include_paths(), admission.include_paths());
+        state
+            .begin_checked_prefix(admission, legitimate)
+            .expect("refused alternate roots must leave the original admission unclaimed");
     }
 
     #[test]

@@ -834,7 +834,7 @@ impl ExactDeclarationContext {
         let semantic_sha256 = self.semantic_sha256();
         let mut fields = vec![
             text("TPEXACTSCOPE"),
-            text(if authorization.is_some() { "2" } else { "1" }),
+            text(if authorization.is_some() { "3" } else { "1" }),
             text(hex(&semantic_sha256)),
             Value::Array(
                 materialized

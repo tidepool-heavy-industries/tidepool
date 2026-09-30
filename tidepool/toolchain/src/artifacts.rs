@@ -268,6 +268,54 @@ pub struct ModuleCandidateOffer {
     checked_display: Option<crate::checked_cell::CheckedDisplayOffer>,
 }
 
+// Protected compilation manifests bind the actual worker search order as well
+// as the source and interface recipe. Unsupported path encodings refuse before
+// the invocation builder can perform its ordinary lossy CLI conversion.
+enum CheckedPurpose {
+    Cell,
+    Item,
+    Display,
+}
+
+fn checked_search_authorization(
+    purpose: CheckedPurpose,
+    mut authorization: Value,
+    include: &[PathBuf],
+) -> Result<Value, CompileError> {
+    if include.len() > 4096 {
+        return Err(CompileError::ExtractFailed(
+            "checked search inputs exceed the request bound".into(),
+        ));
+    }
+    let paths = include
+        .iter()
+        .map(|path| {
+            path.as_os_str()
+                .to_str()
+                .filter(|value| path.is_absolute() && value.len() <= 65536)
+                .map(|path| Value::Text(path.to_owned()))
+                .ok_or_else(|| {
+                    CompileError::ExtractFailed(
+                        "checked search input is not absolute bounded UTF-8".into(),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let Value::Array(fields) = &mut authorization else {
+        unreachable!("closed checked authorization")
+    };
+    fields[0] = Value::Text(
+        match purpose {
+            CheckedPurpose::Cell => "cell-check2",
+            CheckedPurpose::Item => "checked-item2",
+            CheckedPurpose::Display => "checked-display2",
+        }
+        .into(),
+    );
+    fields.push(Value::Array(paths));
+    Ok(authorization)
+}
+
 fn checked_offer_context(
     context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
 ) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
@@ -357,6 +405,8 @@ impl ModuleCandidateOffer {
         };
         let checked_values = crate::checked_cell::CheckedValueInputs::capture(checked_values)?;
         fields.push(checked_values.baseline_authorization());
+        let authorization =
+            checked_search_authorization(CheckedPurpose::Cell, authorization, include)?;
         let context = checked_offer_context(context)?;
         Ok(Self {
             selected: immutable_candidates_in_context(&context, producer, include, scratch),
@@ -405,7 +455,11 @@ impl ModuleCandidateOffer {
         };
         checked_item.validate_templates(templates)?;
         checked_item.validate_include(include)?;
-        let authorization = checked_item.authorization(producer, context.semantic_sha256())?;
+        let authorization = checked_search_authorization(
+            CheckedPurpose::Item,
+            checked_item.authorization(producer, context.semantic_sha256())?,
+            include,
+        )?;
         Ok(Self {
             selected: immutable_candidates_in_context(&context, producer, include, scratch),
             producer: producer.to_vec(),
@@ -441,7 +495,7 @@ impl ModuleCandidateOffer {
         )>,
     ) -> Result<Self, CompileError> {
         let context = checked_offer_context(context)?;
-        if include != capture.item().cell_include() {
+        if !crate::checked_cell::same_include_paths(include, capture.item().cell_include()) {
             return Err(CompileError::ExtractFailed(
                 "checked display include search order changed".into(),
             ));
@@ -456,7 +510,11 @@ impl ModuleCandidateOffer {
             presented,
             settled_values,
         };
-        let authorization = display.authorization(producer, context.semantic_sha256())?;
+        let authorization = checked_search_authorization(
+            CheckedPurpose::Display,
+            display.authorization(producer, context.semantic_sha256())?,
+            include,
+        )?;
         Ok(Self {
             selected: immutable_candidates_in_context(&context, producer, include, scratch),
             producer: producer.to_vec(),
@@ -2188,6 +2246,39 @@ fn store_memo(
 #[cfg(test)]
 mod typed_site_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_search_authorization_refuses_lossy_path_encoding() {
+        use std::os::unix::ffi::OsStringExt;
+        let authorization = || Value::Array(vec![Value::Text("cell-check".into())]);
+        let invalid = PathBuf::from(std::ffi::OsString::from_vec(vec![b'/', 0xff]));
+        assert!(
+            checked_search_authorization(CheckedPurpose::Cell, authorization(), &[invalid])
+                .is_err()
+        );
+        let paths = [
+            PathBuf::from("/exact//first"),
+            PathBuf::from("/exact/../second"),
+        ];
+        let encoded =
+            checked_search_authorization(CheckedPurpose::Cell, authorization(), &paths).unwrap();
+        let Value::Array(fields) = encoded else {
+            panic!("authorization must be an array")
+        };
+        assert_eq!(fields[0], Value::Text("cell-check2".into()));
+        assert_eq!(
+            fields[1],
+            Value::Array(vec![
+                Value::Text("/exact//first".into()),
+                Value::Text("/exact/../second".into())
+            ])
+        );
+        assert!(!crate::checked_cell::same_include_paths(
+            &[PathBuf::from("/exact//first")],
+            &[PathBuf::from("/exact/first")]
+        ));
+    }
 
     fn site(id: u64, ty: &str) -> YieldSite {
         YieldSite {

@@ -6,7 +6,7 @@ module Tidepool.DiagJson
   ( ReportOutcome(..)
   , DiagSeverity(..)
   , Diag(..)
-  , SourceRejection(..)
+  , SourceRejection(..), InputRejection(..)
   , diagsFromSourceError
   , diagFromException
   , renderDiagsJson
@@ -37,8 +37,13 @@ import Tidepool.Json (jsonString)
 -- | The result of one accepted compiler-worker request.
 data ReportOutcome
   = ReportSuccess
+  | ReportInputRejected
   | ReportSourceFailure
   | ReportWorkerFailure
+
+-- Compiler-request authority errors occur before GHC source checking.
+data InputRejection = SearchInputsChanged | CheckedPurposeMismatch deriving Show
+instance Exception InputRejection
 
 -- | A source contract rejected during extraction, after GHC typechecking.
 -- Distinct from unexpected worker exceptions; the report keeps that distinction.
@@ -157,6 +162,7 @@ renderDiagsJson outcome diags =
 
 renderOutcome :: ReportOutcome -> String
 renderOutcome ReportSuccess       = "success"
+renderOutcome ReportInputRejected = "input-rejected"
 renderOutcome ReportSourceFailure = "source-failure"
 renderOutcome ReportWorkerFailure = "worker-failure"
 

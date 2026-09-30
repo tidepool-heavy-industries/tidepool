@@ -46,6 +46,7 @@ data ExactScope = ExactScope
   , scopeCheckedCell :: Maybe CheckedCellAdmission
   , scopeCheckedItem :: Maybe CheckedItemAdmission
   , scopeCheckedDisplay :: Maybe CheckedDisplayAdmission
+  , scopeIncludePaths :: Maybe [FilePath]
   } deriving (Eq, Show)
 
 data CheckedDisplayAdmission = CheckedDisplayAdmission
@@ -223,7 +224,7 @@ decodeScope = do
   magic <- string
   version <- string
   unless (magic == "TPEXACTSCOPE"
-      && ((version == "1" && count == 6) || (version == "2" && count == 7)))
+      && ((version == "1" && count == 6) || (version == "3" && count == 7)))
     (fail "unsupported exact scope")
   semantic <- digestField
   interfaces <- bounded 4096 $ do
@@ -273,21 +274,22 @@ decodeScope = do
           (exactUnit iface, exactModule iface) == (originalUnit originalProduct, originalModule originalProduct)
           && exactSha256 iface == originalIfaceSha256 originalProduct) interfaces) products)
     (fail "incomplete or conflicting exact owner closure")
-  (checked, checkedItem, checkedDisplay) <- if version == "1" then pure (Nothing,Nothing,Nothing) else do
+  (checked, checkedItem, checkedDisplay, includes) <- if version == "1" then pure (Nothing,Nothing,Nothing,Nothing) else do
     authCount <- decodeListLen
     purpose <- string
     case purpose of
-      "cell-check" -> do
-        unless (authCount == 8) (fail "invalid cell-check admission")
+      "cell-check2" -> do
+        unless (authCount == 9) (fail "invalid cell-check admission")
         admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
           <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
           <*> bounded 4096 nonempty <*> bounded 4096 nonempty <*> valueInterfaces
         validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
         unique "checked injected modules" (checkedInjectedModules admission)
         unique "checked reserved modules" (checkedReservedModules admission)
-        pure (Just admission,Nothing,Nothing)
-      "checked-item" -> do
-        unless (authCount == 18) (fail "invalid checked-item admission")
+        paths <- includePaths
+        pure (Just admission,Nothing,Nothing,Just paths)
+      "checked-item2" -> do
+        unless (authCount == 19) (fail "invalid checked-item admission")
         admissionDigest <- digestField
         receiptDigest <- digestField
         index <- decodeWord64
@@ -328,10 +330,11 @@ decodeScope = do
         valueInputs <- valueInterfaces
         validateInterfaces injected valueInputs
         validateValues valueImports values
+        paths <- includePaths
         pure (Nothing, Just (CheckedItemAdmission admissionDigest receiptDigest index sourceDigest kind binders
-          templates injected signatures liftPlan presentation generation prefix valueImports observation planned values valueInputs), Nothing)
-      "checked-display" -> do
-        unless (authCount == 17) (fail "invalid checked-display admission")
+          templates injected signatures liftPlan presentation generation prefix valueImports observation planned values valueInputs), Nothing, Just paths)
+      "checked-display2" -> do
+        unless (authCount == 18) (fail "invalid checked-display admission")
         admission <- CheckedDisplayAdmission <$> digestField <*> digestField <*> decodeWord64
           <*> nonempty <*> decodeWord64 <*> decodeWord64 <*> digestField <*> decodeWord64
           <*> bounded 65536 string <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
@@ -348,10 +351,15 @@ decodeScope = do
         unless (displayPresentation admission `elem` ["rendered","opaque"]
             && all ((`elem` displayInjectedModules admission) . fst) (displayValueImports admission))
           (fail "invalid display presentation or imported owner")
-        pure (Nothing,Nothing,Just admission)
+        paths <- includePaths
+        pure (Nothing,Nothing,Just admission,Just paths)
       _ -> fail "unsupported exact compile purpose"
-  pure (ExactScope "" "" semantic interfaces lexical products checked checkedItem checkedDisplay)
+  pure (ExactScope "" "" semantic interfaces lexical products checked checkedItem checkedDisplay includes)
   where
+    includePaths = bounded 4096 $ do
+      path <- absolute
+      when (T.length (T.pack path) > 65536) (fail "checked search path exceeds bound")
+      pure path
     valueInterfaces = bounded 4096 $ do
       array 4
       ExactIfaceArtifact <$> nonempty <*> nonempty <*> absolute <*> digestField <*> pure []

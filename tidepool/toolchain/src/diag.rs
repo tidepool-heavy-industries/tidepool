@@ -45,6 +45,9 @@ pub fn decode_extract_result(
         parse_extract_report(stdout, stderr).map_err(CompileError::MalformedDiagnostics)?;
     match (process_succeeded, report.outcome) {
         (true, ExtractOutcome::Success) => Ok(report),
+        (false, ExtractOutcome::InputRejected) => {
+            Err(CompileError::InputRejected(report.diagnostics))
+        }
         (false, ExtractOutcome::SourceFailure) => {
             Err(CompileError::Diagnostics(report.diagnostics))
         }

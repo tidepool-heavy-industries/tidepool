@@ -1516,7 +1516,7 @@ impl CheckedItemOffer {
         &self,
         include: &[std::path::PathBuf],
     ) -> Result<(), CompileError> {
-        if include != self.item.cell.include {
+        if !same_include_paths(include, &self.item.cell.include) {
             return Err(failure("checked item include search order changed"));
         }
         Ok(())
@@ -1660,6 +1660,17 @@ fn encode_signature(signature: &ExactCheckedSignature) -> Value {
                 .collect(),
         ),
     ])
+}
+
+pub(crate) fn same_include_paths(
+    left: &[std::path::PathBuf],
+    right: &[std::path::PathBuf],
+) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.as_os_str() == right.as_os_str())
 }
 
 pub(crate) fn admit_checked_cell(

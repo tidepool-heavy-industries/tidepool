@@ -38,6 +38,8 @@ pub enum FailureClass {
     /// GHC parse/type/scope error in the user's code, or an unsupported IO
     /// result type — the extractor ran and rejected the source. Fix the code.
     UserHaskell,
+    /// An immutable compiler input/authority contract was rejected before compilation.
+    InputRejected,
     /// A JIT/eval run-time failure: a Haskell `error`/`undefined`, an unhandled
     /// effect, resource exhaustion (stack/heap overflow, blackhole), a caught
     /// JIT signal/trap, a thread-killing crash, an abort, or a run-phase
@@ -59,6 +61,7 @@ impl FailureClass {
     pub fn tag(self) -> &'static str {
         match self {
             FailureClass::UserHaskell => "user-haskell",
+            FailureClass::InputRejected => "input-rejected",
             FailureClass::Runtime => "runtime",
             FailureClass::Infra => "infra",
             FailureClass::VersionSkew => "version-skew",
@@ -138,6 +141,15 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         // structured diagnostics themselves via `crate::diag::render_diagnostics`.
         CompileError::Diagnostics(diags) => FailureEnvelope::new(
             FailureClass::UserHaskell,
+            Phase::Compile,
+            diags
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        ),
+        CompileError::InputRejected(diags) => FailureEnvelope::new(
+            FailureClass::InputRejected,
             Phase::Compile,
             diags
                 .iter()

@@ -52,6 +52,9 @@ pub enum CompileError {
     /// variant therefore denotes an extractor/runtime contract mismatch.
     #[error("extractor contract failure: {0}")]
     ExtractFailed(String),
+    /// Compiler request inputs were refused before GHC source checking.
+    #[error("compiler input rejected ({} diagnostic(s))", .0.len())]
+    InputRejected(Vec<crate::diag::ExtractDiag>),
     /// The extractor ran, exited non-zero, and its stdout parsed as a valid
     /// diagnostics report — this is a real GHC compile failure with real spans.
     #[error("Haskell compilation failed ({} diagnostic(s))", .0.len())]

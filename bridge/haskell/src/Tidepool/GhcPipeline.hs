@@ -38,7 +38,7 @@ import GHC.Types.SourceError (SourceError, srcErrorMessages)
 import GHC.Driver.Errors.Types (GhcMessage(..))
 import GHC.Tc.Errors.Types (TcRnMessage(..), TcRnMessageDetailed(..), DeriveInstanceErrReason(..))
 import GHC.Utils.Logger (LogAction)
-import Tidepool.DiagJson (Diag(..), DiagSeverity(..), spanOf)
+import Tidepool.DiagJson (Diag(..), DiagSeverity(..), InputRejection(..), spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
 import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..))
@@ -803,7 +803,8 @@ runCompile selection retained variant path includes buildProductsDir = do
     -- runs GHC's own expression parser inside the splice; those modules import
     -- GHC.Parser.* / GHC.Types.* etc. Without this, compiling Tidepool.QQ
     -- fails with "member of the hidden package ghc-9.12.2".
-    let extracted = extractionDynFlags dflags includes
+    paths <- liftIO (compileSearchPaths variant includes (importPaths dflags))
+    let extracted = (extractionDynFlags dflags []) { importPaths = paths }
         dflags' = configureBuildProducts extracted buildProductsDir extracted
     setSessionDynFlags dflags'
     -- Withhold unfoldings for retained-generation symbols BEFORE 'load''
@@ -2863,9 +2864,12 @@ residentCompileOne
 residentCompileOne selection cache memoRef retainedRef baseDFlags baseImportPaths timing requestIdentity purpose mscope path extraIncludes buildProductsDir = do
   sessionT0 <- monotonicTime
   retained <- liftIO (readIORef retainedRef)
+  variant <- liftIO $ case mscope of
+    Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
+    _                                        -> normalVariant purpose path
+  requestImportPaths <- liftIO (compileSearchPaths variant extraIncludes baseImportPaths)
   hsc0 <- getSession
-  let requestImportPaths = nub (baseImportPaths ++ extraIncludes)
-      sourceState
+  let sourceState
         | importPaths (hsc_dflags hsc0) == requestImportPaths = hsc0
         | otherwise = hsc0 { hsc_mod_graph = mkModuleGraph [] }
       -- Downsweep can reuse a byte-identical source summary with the previous
@@ -2875,11 +2879,17 @@ residentCompileOne selection cache memoRef retainedRef baseDFlags baseImportPath
     (configureBuildProducts baseDFlags buildProductsDir .
       (\df -> df { importPaths = requestImportPaths }))
     sourceState)
-  variant <- liftIO $ case mscope of
-    Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
-    _                                        -> normalVariant purpose path
   let incarnation = mscope >>= ssIncarnation
   runCompileCycle selection (Just cache) (Just memoRef) retained incarnation timing requestIdentity sessionT0 variant path
+
+-- Protected requests use their complete admitted search order. GHC's boot
+-- defaults (including the worker CWD) are not additional source authority.
+compileSearchPaths :: PipelineVariant -> [FilePath] -> [FilePath] -> IO [FilePath]
+compileSearchPaths variant requested ordinaryBase = case pvExactScope variant >>= scopeIncludePaths of
+  Nothing -> pure (nub (ordinaryBase ++ requested))
+  Just admitted -> do
+    unless (requested == admitted) (throwIO SearchInputsChanged)
+    pure admitted
 
 -- | Retained-entry cap for @Tidepool.Session.*@ 'GutsMemo' entries once
 -- 'sanitizeMemo' lets them outlive their producing transaction (below).
