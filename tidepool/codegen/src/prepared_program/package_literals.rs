@@ -9,6 +9,11 @@ use tidepool_repr::execution_schema::{
     CertifiedGroup, GlobalId, ImportOwner, RuntimeRep, SymbolIdentity,
 };
 
+#[cfg(test)]
+mod tests;
+
+/// Owned bytes and exact import contract, rather than an authorization token.
+/// The runtime's protected target/package owner supplies the interface witness.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct PackageLiteral {
     identity: SymbolIdentity,
@@ -93,9 +98,10 @@ impl GroupPackageLiterals {
 }
 
 impl CompiledProgram {
-    /// Inventory actual immutable byte tops, under the protected interface
-    /// witnesses supplied by the runtime's exact sealed target owner. This
-    /// does not issue machine handles or advertise managed code exports.
+    /// Inventory actual immutable byte tops under caller-supplied interface
+    /// facts. The runtime must first validate its protected same-target package
+    /// certificate; this native storage capsule does not issue that authority.
+    /// It does not issue machine handles or advertise managed code exports.
     pub fn package_literals(
         &self,
         digest_for: impl Fn(&str, &str) -> Option<[u8; 32]>,

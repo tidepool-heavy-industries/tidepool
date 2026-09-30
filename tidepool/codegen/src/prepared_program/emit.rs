@@ -213,6 +213,7 @@ fn emit_function_at(
         bind_captures(
             &mut builder,
             &mut values,
+            plan,
             function.captures,
             &function.descriptor,
             environment,
@@ -224,6 +225,7 @@ fn emit_function_at(
         bind_captures(
             &mut builder,
             &mut values,
+            plan,
             thunk.captures,
             &thunk.descriptor,
             environment,
@@ -1279,6 +1281,7 @@ fn bind_parameters(
 fn bind_captures(
     builder: &mut FunctionBuilder<'_>,
     values: &mut BTreeMap<ValueId, Value>,
+    plan: &ProgramPlan<'_>,
     captures: &[ValueRef],
     descriptor: &ObjectDescriptor,
     environment: Value,
@@ -1287,6 +1290,18 @@ fn bind_captures(
 ) -> Result<(), CompileError> {
     for (logical, capture) in captures.iter().enumerate() {
         let ValueRef::Local(id) = capture else {
+            if let ValueRef::Global(id) = capture {
+                if plan
+                    .import_slots
+                    .get(id.0 as usize)
+                    .is_some_and(|slot| slot.literal.is_some())
+                {
+                    // A selected immutable literal is still addressed by its
+                    // exact global slot. The image pins its static capture;
+                    // no local binder or mutable environment load is needed.
+                    continue;
+                }
+            }
             return Err(unsupported(owner, node));
         };
         let Some(stored) = descriptor
