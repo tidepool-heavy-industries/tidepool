@@ -501,6 +501,14 @@ pub struct ExactCompiledDisplay {
 }
 
 impl ExactCompiledDisplay {
+    pub fn target_definition_identities(
+        &self,
+    ) -> impl Iterator<Item = &tidepool_repr::execution_schema::SymbolIdentity> {
+        target_definition_identities(&self.target)
+    }
+    pub fn bound_binder_identities(&self) -> impl Iterator<Item = (&str, u64)> {
+        bound_binder_identities(&self.bound_binders)
+    }
     pub fn validate_table(&self, table: &tidepool_repr::DataConTable) -> Result<(), CompileError> {
         if table != &self.table {
             return Err(failure("compiled display constructor metadata was edited"));
@@ -675,6 +683,14 @@ impl CheckedDisplayOffer {
 }
 
 impl ExactCompiledItem {
+    pub fn target_definition_identities(
+        &self,
+    ) -> impl Iterator<Item = &tidepool_repr::execution_schema::SymbolIdentity> {
+        target_definition_identities(&self.target)
+    }
+    pub fn bound_binder_identities(&self) -> impl Iterator<Item = (&str, u64)> {
+        bound_binder_identities(&self.bound_binders)
+    }
     /// Only same-check compiled native Value rows may overlay declaration
     /// spellings in their owning private scope. Their declaration context and
     /// qualified original owners remain unchanged.
@@ -1418,6 +1434,30 @@ impl CheckedItemOffer {
             observation_name: self.observation_name.clone(),
         }))
     }
+}
+
+fn target_definition_identities(
+    target: &tidepool_repr::execution_schema::PreparedProgram,
+) -> impl Iterator<Item = &tidepool_repr::execution_schema::SymbolIdentity> {
+    use tidepool_repr::execution_schema::Group;
+    target.bindings().iter().flat_map(|group| {
+        let bindings = match group {
+            Group::NonRecursive(binding) => std::slice::from_ref(binding),
+            Group::Recursive(bindings) => bindings.as_slice(),
+        };
+        bindings.iter().map(|binding| &binding.identity)
+    })
+}
+
+fn bound_binder_identities(bound: &[Value]) -> impl Iterator<Item = (&str, u64)> {
+    bound.iter().map(|binder| {
+        let fields = row(binder, 7).expect("sealed native binder row");
+        (
+            string(&fields[0]).expect("sealed native binder name"),
+            u64::try_from(fields[1].as_integer().expect("sealed native binder ID"))
+                .expect("sealed native binder ID range"),
+        )
+    })
 }
 
 fn read_table(root: &Path) -> Result<tidepool_repr::DataConTable, CompileError> {
