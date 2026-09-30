@@ -66,7 +66,7 @@ fn run_prepared_once_with_nursery(
     let compiled = CompiledProgram::compile(&linked).map_err(PreparedRuntimeError::Compile)?;
     let (mut machine, program) =
         PreparedMachine::new(compiled, PreparedMachineOptions { nursery_bytes })
-            .map_err(PreparedRuntimeError::Run)?;
+            .map_err(PreparedRuntimeError::Install)?;
     let options = PreparedCallOptions {
         observation_budget: RunOptions::default().observation_budget,
         collect_before_observation: true,

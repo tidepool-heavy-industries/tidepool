@@ -51,6 +51,13 @@ pub enum PreparedFailureKind {
     Integrity,
 }
 
+/// The owning prepared operation that failed, before or during execution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreparedFailureStage {
+    Install,
+    Run,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PreparedRuntimeError {
     #[error(transparent)]
@@ -61,6 +68,8 @@ pub enum PreparedRuntimeError {
     Cancelled,
     #[error("prepared compilation rejected: {0}")]
     Compile(CompileError),
+    #[error("prepared installation failed: {0}")]
+    Install(ExecutionError),
     #[error(transparent)]
     Demand(#[from] DemandError),
     #[error("no exact live owner for certified import {0:?}")]
@@ -230,6 +239,52 @@ pub enum PreparedRuntimeError {
 
 impl PreparedRuntimeError {
     #[must_use]
+    pub fn stage(&self) -> PreparedFailureStage {
+        match self {
+            Self::Parse(_)
+            | Self::Link(_)
+            | Self::Compile(_)
+            | Self::Install(_)
+            | Self::Demand(_)
+            | Self::MissingCertifiedOwner(_)
+            | Self::MissingRetainedCertifiedOwner { .. }
+            | Self::CertifiedTargetOwners
+            | Self::ConflictingSettledConstructors
+            | Self::UnreachableCertifiedGroup
+            | Self::SourceScopeAdmission
+            | Self::AmbiguousSourceInstance(_)
+            | Self::AmbiguousSourceGroup { .. }
+            | Self::InvalidCertifiedSourceOwner(_)
+            | Self::DuplicateSite { .. }
+            | Self::SiteConflict { .. } => PreparedFailureStage::Install,
+            Self::Cancelled
+            | Self::Run(_)
+            | Self::UnknownBinding(_)
+            | Self::CrossRealmArgument { .. }
+            | Self::UnsettledEntry { .. }
+            | Self::MachineNotInstalled
+            | Self::ProjectionShape { .. }
+            | Self::UnknownSite { .. }
+            | Self::UntypedRequest { .. }
+            | Self::UnsitedAnswer
+            | Self::UnhandledRequest
+            | Self::DeferredRequiresAsyncHost
+            | Self::Handler { .. }
+            | Self::NoResumeEntry { .. }
+            | Self::AnswerDelivery { .. }
+            | Self::AnswerConstructor { .. }
+            | Self::AnswerShape { .. }
+            | Self::AnswerUnconstructible { .. }
+            | Self::AnswerRejected { .. }
+            | Self::UnknownHandle
+            | Self::HostMount { .. }
+            | Self::NoHostingProgram
+            | Self::NoApplyEntryEntry { .. }
+            | Self::NoApplyValueEntry { .. } => PreparedFailureStage::Run,
+        }
+    }
+
+    #[must_use]
     pub fn kind(&self) -> PreparedFailureKind {
         match self {
             Self::Parse(_)
@@ -271,7 +326,7 @@ impl PreparedRuntimeError {
             Self::Compile(_) => PreparedFailureKind::Rejected,
             // A handler fault is this turn's own failure, so the machine stays reusable.
             Self::Handler { .. } => PreparedFailureKind::Language,
-            Self::Run(error) => match error {
+            Self::Install(error) | Self::Run(error) => match error {
                 ExecutionError::MissingEntry(_)
                 | ExecutionError::Unsupported(_)
                 | ExecutionError::Arguments { .. }
@@ -2090,7 +2145,7 @@ impl PreparedEngine {
             return self
                 .machine
                 .install_program(compiled, imports)
-                .map_err(PreparedRuntimeError::Run);
+                .map_err(PreparedRuntimeError::Install);
         };
         let image = match registry.lookup(&linked) {
             Some(image) => image,
@@ -2104,7 +2159,7 @@ impl PreparedEngine {
         };
         self.machine
             .install_shared(image, imports)
-            .map_err(PreparedRuntimeError::Run)
+            .map_err(PreparedRuntimeError::Install)
     }
 
     /// Create the session's machine from its first turn's program and
@@ -2154,7 +2209,7 @@ impl PreparedEngine {
         };
         let (machine, program) =
             PreparedMachine::new_shared(image, PreparedMachineOptions { nursery_bytes })
-                .map_err(PreparedRuntimeError::Run)?;
+                .map_err(PreparedRuntimeError::Install)?;
         let mut engine = Self::from_machine(machine, registry);
         // The first program can conflict only with itself.
         let plan = engine.plan_evidence(&facts)?;
@@ -2188,7 +2243,7 @@ impl PreparedEngine {
         registry: Option<Arc<ImageRegistry>>,
     ) -> Result<Self, PreparedRuntimeError> {
         let machine = PreparedMachine::empty(PreparedMachineOptions { nursery_bytes })
-            .map_err(PreparedRuntimeError::Run)?;
+            .map_err(PreparedRuntimeError::Install)?;
         Ok(Self::from_machine(machine, registry))
     }
 
@@ -2204,12 +2259,12 @@ impl PreparedEngine {
         for (row, site) in facts.sites.iter().enumerate() {
             let (owner, owner_facts, owner_row) = if let Some(witness) = self.sites.get(&site.site)
             {
-                let owner = self
-                    .programs
-                    .get(&witness.owner)
-                    .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
-                        witness.owner,
-                    )))?;
+                let owner =
+                    self.programs
+                        .get(&witness.owner)
+                        .ok_or(PreparedRuntimeError::Install(
+                            ExecutionError::UnknownProgram(witness.owner),
+                        ))?;
                 (Some(witness.owner), owner, &owner.sites[witness.row])
             } else if let Some((_, earlier)) = planned.iter().find(|(id, _)| *id == site.site) {
                 (None, facts, &facts.sites[*earlier])
@@ -2247,9 +2302,9 @@ impl PreparedEngine {
                     let owner =
                         self.programs
                             .get(&witness.owner)
-                            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
-                                witness.owner,
-                            )))?;
+                            .ok_or(PreparedRuntimeError::Install(
+                                ExecutionError::UnknownProgram(witness.owner),
+                            ))?;
                     (Some(witness.owner), owner, &owner.sites[witness.row])
                 } else if let Some((_, earlier)) = planned.iter().find(|(id, _)| *id == host_id) {
                     (None, facts, &facts.sites[*earlier])
@@ -2362,7 +2417,7 @@ impl PreparedEngine {
                             "failed export stage retains its earlier root"
                         );
                     }
-                    return Err(PreparedRuntimeError::Run(error));
+                    return Err(PreparedRuntimeError::Install(error));
                 }
             };
             // Recovered package definitions may have no incoming edge in this
@@ -2396,7 +2451,7 @@ impl PreparedEngine {
     ) -> Result<(), PreparedRuntimeError> {
         self.machine
             .pin(program)
-            .map_err(PreparedRuntimeError::Run)?;
+            .map_err(PreparedRuntimeError::Install)?;
         let exports =
             match self.stage_code_exports(program, exports, &BTreeMap::new(), &BTreeMap::new()) {
                 Ok(exports) => exports,
@@ -2605,7 +2660,7 @@ impl PreparedEngine {
                     let evaluated = self
                         .machine
                         .handle_is_evaluated(export.handle)
-                        .map_err(PreparedRuntimeError::Run)?;
+                        .map_err(PreparedRuntimeError::Install)?;
                     values.values.insert(
                         identity.clone(),
                         ImportedValue {
@@ -2625,7 +2680,7 @@ impl PreparedEngine {
             let evaluated = self
                 .machine
                 .handle_is_evaluated(handle)
-                .map_err(PreparedRuntimeError::Run)?;
+                .map_err(PreparedRuntimeError::Install)?;
             values.values.insert(
                 identity.clone(),
                 ImportedValue {
@@ -2767,7 +2822,7 @@ impl PreparedEngine {
         let ids = self
             .machine
             .install_shared_batch(programs)
-            .map_err(PreparedRuntimeError::Run)?;
+            .map_err(PreparedRuntimeError::Install)?;
         for (binder, digest) in package_updates {
             self.code_exports
                 .get_mut(&binder)
@@ -3052,7 +3107,7 @@ impl PreparedEngine {
                             "staged sibling source root remains live"
                         );
                     }
-                    return Err(PreparedRuntimeError::Run(error));
+                    return Err(PreparedRuntimeError::Install(error));
                 }
             }
         }
@@ -3106,7 +3161,7 @@ impl PreparedEngine {
                                     .ok_or_else(|| DemandError::MissingSource(key.clone()))?;
                                 self.machine
                                     .handle_is_evaluated(lease.handle())
-                                    .map_err(PreparedRuntimeError::Run)?;
+                                    .map_err(PreparedRuntimeError::Install)?;
                                 BatchImport::Existing {
                                     handle: lease.handle(),
                                     entry_signature: lease.entry_signature().cloned(),
@@ -3210,13 +3265,13 @@ impl PreparedEngine {
                         .get(binder)
                         .expect("source edge selected an in-batch binder");
                     BatchLeaseRequest::for_demanded(group, &demanded[group], binder)
-                        .map_err(PreparedRuntimeError::Run)
+                        .map_err(PreparedRuntimeError::Install)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let installed = self
                 .machine
                 .install_shared_batch_with_leases(programs, requests)
-                .map_err(PreparedRuntimeError::Run)?;
+                .map_err(PreparedRuntimeError::Install)?;
             let target_id = *installed
                 .programs
                 .last()
@@ -3421,7 +3476,7 @@ impl PreparedEngine {
         let program = self
             .machine
             .install_shared(compiled, snapshot.imports)
-            .map_err(PreparedRuntimeError::Run)?;
+            .map_err(PreparedRuntimeError::Install)?;
         tracing::info!(
             target: "tidepool_runtime::prepared_install",
             imports = import_count,
@@ -5645,7 +5700,7 @@ pub(super) mod tests {
         assert!(
             matches!(
                 &bad_result,
-                Err(PreparedRuntimeError::Run(
+                Err(PreparedRuntimeError::Install(
                     ExecutionError::BatchSourceContract(_)
                 ))
             ),
@@ -5768,7 +5823,7 @@ pub(super) mod tests {
         }
         assert!(matches!(
             install(&mut engine, owner.clone(), target(binder.clone(), 0, true)),
-            Err(PreparedRuntimeError::Run(
+            Err(PreparedRuntimeError::Install(
                 ExecutionError::BatchSourceContract(_)
             ))
         ));
@@ -5830,7 +5885,7 @@ pub(super) mod tests {
             .expect("required missing export must refuse the stage");
         assert!(matches!(
             error,
-            PreparedRuntimeError::Run(ExecutionError::MissingEntry(ValueId(999)))
+            PreparedRuntimeError::Install(ExecutionError::MissingEntry(ValueId(999)))
         ));
         assert_eq!(engine.residency(), before);
         assert!(engine.programs.is_empty());
@@ -6000,7 +6055,7 @@ pub(super) mod tests {
         let bad = group(true, [9; 32]);
         assert!(matches!(
             install(&mut engine, &bad),
-            Err(PreparedRuntimeError::Run(
+            Err(PreparedRuntimeError::Install(
                 ExecutionError::BatchSourceContract(_)
             ))
         ));
@@ -6473,7 +6528,7 @@ pub(super) mod tests {
             .map_err(PreparedRuntimeError::Compile)?;
         machine
             .install_program(compiled, bindings)
-            .map_err(PreparedRuntimeError::Run)
+            .map_err(PreparedRuntimeError::Install)
     }
 
     /// The [`ImportedValue`] `link_program` checks a declared import
@@ -6594,6 +6649,52 @@ pub(super) mod tests {
         let mut bindings = BindingTable::new();
         bindings.bind(entry).unwrap();
         (engine, first, top, bindings, index)
+    }
+
+    #[test]
+    fn native_install_refusal_retains_stage_on_shared_and_owned_images() {
+        for shared in [false, true] {
+            let (mut engine, first, _, bindings, index) = engine_with_bound_producer(false);
+            if shared {
+                engine.set_image_registry(Arc::new(ImageRegistry::new()));
+            }
+            let (mut foreign, foreign_program, foreign_top) = producer_machine();
+            let foreign_handle = foreign.retain_top(foreign_program, foreign_top).unwrap();
+            let prepared = plain_import_consumer_program(false, Some(1));
+            let (values, mut imports) = engine
+                .resolve_imports(&prepared, &bindings, &index)
+                .unwrap();
+            imports.insert(producer_identity(), foreign_handle);
+            let linked = link_program(prepared, &values).unwrap();
+            let before = engine.residency();
+            let error = engine.compile_and_install(linked, imports).unwrap_err();
+            assert!(matches!(
+                error,
+                PreparedRuntimeError::Install(ExecutionError::UnknownPreparedHandle)
+            ));
+            assert_eq!(error.stage(), PreparedFailureStage::Install);
+            assert_eq!(error.kind(), PreparedFailureKind::Rejected);
+            assert_eq!(engine.residency(), before);
+
+            let run_error = engine
+                .run_settled(first, RealmId::ROOT)
+                .err()
+                .expect("ordinary producer has no settled scaffold");
+            assert!(matches!(
+                run_error,
+                PreparedRuntimeError::UnsettledEntry { program, .. } if program == first
+            ));
+            assert_eq!(run_error.stage(), PreparedFailureStage::Run);
+            assert_eq!(engine.residency(), before);
+            engine
+                .install(
+                    plain_import_consumer_program(false, Some(1)),
+                    &bindings,
+                    &index,
+                )
+                .unwrap();
+            assert!(foreign.release(foreign_handle));
+        }
     }
 
     #[test]

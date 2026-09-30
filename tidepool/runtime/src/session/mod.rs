@@ -68,8 +68,8 @@ pub use paired_publication::{
     DeclarationPublicationRejection, ExecutionPublication, RejectedDeclarationPublication,
 };
 pub use prepared::{
-    CancelHandle, PreparedEngine, PreparedFailureKind, PreparedRuntimeError, PreparedSettlement,
-    RealmId, SiteTypeEvidence,
+    CancelHandle, PreparedEngine, PreparedFailureKind, PreparedFailureStage, PreparedRuntimeError,
+    PreparedSettlement, RealmId, SiteTypeEvidence,
 };
 pub use publication::{PublicationCancellation, PublicationDecision, PublicationPhase};
 // Re-exported for callers that pass a value across two resident sessions'
