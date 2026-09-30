@@ -123,7 +123,7 @@ impl DurableRootSuccessorAdmission {
 fn owner_for_admission(
     admission: &DurableActorAdmission,
 ) -> Option<tidepool_runtime::session::RecoveryPublicOwner> {
-    let path: tidepool_repr::ActorPath = admission.actor_path.as_ref()?.parse().ok()?;
+    let path = tidepool_repr::ActorPath::parse(admission.actor_path.as_ref()?).ok()?;
     tidepool_runtime::session::RecoveryPublicOwner::new(&path, admission.actor.incarnation.0)
 }
 
