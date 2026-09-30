@@ -366,6 +366,34 @@ where
 }
 
 impl<H, O> OwnedExecution<H, O> {
+    fn expire_after_tool(&mut self) {
+        if let Some(stamp) = self
+            .state
+            .cursor
+            .running
+            .as_mut()
+            .and_then(|current| current.inflight_effect.take())
+        {
+            record_workbench_operation(
+                &mut self.state.cursor.unit.operations,
+                self.state.request.execution_id(),
+                self.state.cursor.index,
+                stamp.ordinal,
+                &stamp.effect,
+                stamp.started.elapsed(),
+                WorkbenchOperationDisposition::Unknown,
+            );
+        }
+        let slot = self
+            .state
+            .cursor
+            .after_tool
+            .as_mut()
+            .expect("timeout retains the original after-tool frame");
+        slot.answer = Some(WorkbenchAfterToolAnswer::TimedOut);
+        slot.enforce_deadline = false;
+    }
+
     fn scopes(
         &self,
     ) -> (
@@ -460,14 +488,7 @@ where
                     cleanup.sync_scope(|| match completed {
                         Some(completed) => apply(behavior, kernel, owned, completed),
                         None => {
-                            let slot = owned
-                                .state
-                                .cursor
-                                .after_tool
-                                .as_mut()
-                                .expect("timeout retains the original after-tool frame");
-                            slot.answer = Some(WorkbenchAfterToolAnswer::TimedOut);
-                            slot.enforce_deadline = false;
+                            owned.expire_after_tool();
                             Ok(WorkbenchAdvance::Park(
                                 behavior.finish_owned_after_tool_task(owned, kernel.clone()),
                             ))
@@ -804,13 +825,45 @@ where
         OwnedWorkbenchTask::serial(move |mut behavior: Self, kernel| {
             Box::pin(async move {
                 let (timing, cleanup) = owned.scopes();
-                let result = timing
-                    .scope(cleanup.scope(behavior.execute_workbench(
+                let deadline = owned
+                    .state
+                    .cursor
+                    .after_tool
+                    .as_ref()
+                    .filter(|slot| slot.enforce_deadline)
+                    .map(|slot| slot.frame.deadline());
+                let result = {
+                    let advance = timing.scope(cleanup.scope(behavior.execute_workbench(
                         &kernel,
                         &mut owned.state,
                         owned.workbench.as_ref(),
-                    )))
-                    .await;
+                    )));
+                    tokio::pin!(advance);
+                    match deadline {
+                        Some(deadline) => tokio::select! {
+                            biased;
+                            result = &mut advance => Some(result),
+                            () = tokio::time::sleep_until(deadline) => None,
+                        },
+                        None => Some(advance.await),
+                    }
+                };
+                let Some(result) = result else {
+                    let completion =
+                        OwnedWorkbenchCompletion::advance(move |behavior: &mut Self, kernel| {
+                            let (timing, cleanup) = owned.scopes();
+                            timing.sync_scope(|| {
+                                cleanup.sync_scope(|| {
+                                    owned.expire_after_tool();
+                                    Ok(WorkbenchAdvance::Park(
+                                        behavior
+                                            .finish_owned_after_tool_task(owned, kernel.clone()),
+                                    ))
+                                })
+                            })
+                        });
+                    return (behavior, completion);
+                };
                 match result {
                     Ok(
                         park @ (WorkbenchRunAdvance::ParkEffect
@@ -1267,6 +1320,13 @@ where
                                 )
                             });
                             if let Err(error) = result {
+                                owned
+                                    .state
+                                    .cursor
+                                    .running
+                                    .as_mut()
+                                    .expect("same effect fragment")
+                                    .inflight_effect = None;
                                 record_workbench_operation(
                                     &mut owned.state.cursor.unit.operations,
                                     owned.state.request.execution_id(),
@@ -1332,6 +1392,13 @@ where
                 ))
             },
             move |_behavior, _kernel, mut owned, result| {
+                owned
+                    .state
+                    .cursor
+                    .running
+                    .as_mut()
+                    .expect("same effect fragment")
+                    .inflight_effect = None;
                 record_workbench_operation(
                     &mut owned.state.cursor.unit.operations,
                     owned.state.request.execution_id(),

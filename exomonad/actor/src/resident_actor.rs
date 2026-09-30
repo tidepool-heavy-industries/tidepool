@@ -1324,6 +1324,7 @@ struct WorkbenchFragmentExecution {
     native_result:
         Option<Result<owned_workbench::WorkbenchFragmentAdvance, ResidentActorWorkbenchError>>,
     parked_effect: Option<ParkedWorkbenchEffect>,
+    inflight_effect: Option<WorkbenchEffectStamp>,
     resume_failure: Option<ResidentActorWorkbenchError>,
     fragment: Option<ResidentWorkbenchFragment>,
     outcome: Option<ResidentOutcome>,
@@ -1335,6 +1336,7 @@ impl WorkbenchFragmentExecution {
             native_start: None,
             native_result: None,
             parked_effect: None,
+            inflight_effect: None,
             resume_failure: None,
             fragment: Some(fragment),
             outcome: Some(outcome),
@@ -1370,6 +1372,12 @@ impl Default for WorkbenchCursor {
             after_tool: None,
         }
     }
+}
+
+struct WorkbenchEffectStamp {
+    ordinal: usize,
+    effect: String,
+    started: std::time::Instant,
 }
 
 struct ParkedWorkbenchEffect {
@@ -6636,6 +6644,11 @@ where
                     // is what `record_workbench_operation` reports as
                     // `elapsed_ms` once the match below settles it.
                     let effect_started = std::time::Instant::now();
+                    current.inflight_effect = Some(WorkbenchEffectStamp {
+                        ordinal,
+                        effect: effect.clone(),
+                        started: effect_started,
+                    });
                     // The effect level. The boundary's own service work is
                     // spread across the match below, so this is an event on
                     // the input-unit span rather than a span of its own;
@@ -6683,6 +6696,7 @@ where
                             .begin_reply(context.actor, attempt.request)
                         {
                             Ok(()) => {
+                                current.inflight_effect = None;
                                 record_workbench_operation(
                                     unit.operations,
                                     unit.execution,
@@ -6702,6 +6716,7 @@ where
                             }
                             Err(error) if attempt.recoverable => {
                                 tracing::info!(rejection = ?error, "reply rejected");
+                                current.inflight_effect = None;
                                 record_workbench_operation(
                                     unit.operations,
                                     unit.execution,
@@ -6737,6 +6752,7 @@ where
                             }
                             Err(error) => {
                                 tracing::info!(rejection = ?error, "reply rejected");
+                                current.inflight_effect = None;
                                 record_workbench_operation(
                                     unit.operations,
                                     unit.execution,
@@ -6763,6 +6779,7 @@ where
                                     acknowledgement.request,
                                 ) {
                                 Ok(_) => {
+                                    current.inflight_effect = None;
                                     record_workbench_operation(
                                         unit.operations,
                                         unit.execution,
@@ -6779,6 +6796,7 @@ where
                                     ));
                                 }
                                 Err(error) if acknowledgement.recoverable => {
+                                    current.inflight_effect = None;
                                     record_workbench_operation(
                                         unit.operations,
                                         unit.execution,
@@ -6812,6 +6830,7 @@ where
                                     continue;
                                 }
                                 Err(error) => {
+                                    current.inflight_effect = None;
                                     record_workbench_operation(
                                         unit.operations,
                                         unit.execution,
@@ -6922,6 +6941,7 @@ where
                             };
                             current.outcome = Some(match resolved {
                                 Ok(outcome) => {
+                                    current.inflight_effect = None;
                                     record_workbench_operation(
                                         unit.operations,
                                         unit.execution,
@@ -6938,6 +6958,7 @@ where
                                     job,
                                     reason,
                                 }) => {
+                                    current.inflight_effect = None;
                                     record_workbench_operation(
                                         unit.operations,
                                         unit.execution,
@@ -6954,6 +6975,7 @@ where
                                         .map(FragmentAdvance::Settled);
                                 }
                                 Err(error) => {
+                                    current.inflight_effect = None;
                                     record_workbench_operation(
                                         unit.operations,
                                         unit.execution,
