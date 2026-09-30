@@ -3,9 +3,11 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -20,7 +22,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.binary = Path(self.tmp.name) / 'test-binary'
         self.binary.write_text('placeholder')
-        self.all_tests = 'suite::works: test\nsuite::ignored: test\n'
+        self.all_tests = 'suite::works: test\nsuite::also_works: test\nsuite::ignored: test\n'
         self.ignored_tests = 'suite::ignored: test\n'
 
     def tearDown(self):
@@ -63,6 +65,46 @@ class IsolatedLibtestTests(unittest.TestCase):
         test_calls = [argv for argv, _ in calls if '--list' not in argv]
         self.assertEqual(len(test_calls), 1, 'one fresh process must run per selected test')
         self.assertEqual(test_calls[0][1:], ['--exact', 'suite::works', '--nocapture'])
+
+    def test_focused_jobs_default_to_one_and_can_be_overridden(self):
+        class Executor:
+            def __init__(self, max_workers):
+                workers.append(max_workers)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def map(self, function, values):
+                return map(function, values)
+
+        def run(argv, timeout):
+            discovered = self.discover(argv)
+            if discovered is not None:
+                return discovered
+            return subprocess.CompletedProcess(
+                argv, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', ''
+            )
+
+        workers = []
+        with patch.object(runner.concurrent.futures, 'ThreadPoolExecutor', Executor):
+            result, _, _ = self.invoke(
+                ['--exact', 'suite::works', '--exact', 'suite::also_works',
+                 '--expected-count', '2'], run
+            )
+        self.assertEqual(result, 0)
+        self.assertEqual(workers, [1])
+
+        workers.clear()
+        with patch.object(runner.concurrent.futures, 'ThreadPoolExecutor', Executor):
+            result, _, _ = self.invoke(
+                ['--exact', 'suite::works', '--exact', 'suite::also_works',
+                 '--expected-count', '2', '--jobs', '2'], run
+            )
+        self.assertEqual(result, 0)
+        self.assertEqual(workers, [2])
 
     def test_zero_and_wrong_expected_counts_fail_before_execution(self):
         launched = []
@@ -144,6 +186,24 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertIn('FAIL suite::works', output)
         self.assertIn('0 passed; 1 failed', output)
 
+        def child_then_empty_parent(argv, timeout):
+            discovered = self.discover(argv)
+            if discovered is not None:
+                return discovered
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                'child output: test result: ok. 1 passed; 0 failed; 0 ignored;\n'
+                'test result: ok. 0 passed; 0 failed; 0 ignored; 1 measured; 1 filtered out;\n',
+                '',
+            )
+
+        result, output, _ = self.invoke(
+            ['--exact', 'suite::works', '--expected-count', '1'], child_then_empty_parent
+        )
+        self.assertEqual(result, 1)
+        self.assertIn('FAIL suite::works', output)
+
     def test_test_failure_and_timeout_are_counted(self):
         def fail(argv, timeout):
             discovered = self.discover(argv)
@@ -186,6 +246,63 @@ class IsolatedLibtestTests(unittest.TestCase):
         pid = int(pid_file.read_text())
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
+
+    def test_runner_signal_kills_test_process_group_and_descendant(self):
+        binary = Path(self.tmp.name) / 'fake-libtest'
+        child_pid_file = Path(self.tmp.name) / 'descendant.pid'
+        binary.write_text(
+            '#!/usr/bin/env python3\n'
+            'import subprocess, sys, time\n'
+            "if '--list' in sys.argv and '--ignored' in sys.argv:\n"
+            '    raise SystemExit(0)\n'
+            "if '--list' in sys.argv:\n"
+            "    print('suite::hangs: test')\n"
+            '    raise SystemExit(0)\n'
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            f"open({str(child_pid_file)!r}, 'w').write(str(child.pid))\n"
+            'time.sleep(60)\n'
+        )
+        binary.chmod(0o755)
+        helper = subprocess.Popen(
+            [
+                sys.executable,
+                str(SCRIPT),
+                str(binary),
+                '--exact',
+                'suite::hangs',
+                '--expected-count',
+                '1',
+                '--timeout',
+                '30',
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not child_pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(child_pid_file.exists(), 'selected test process never started')
+            child_pid = int(child_pid_file.read_text())
+            os.kill(helper.pid, signal.SIGTERM)
+            stdout, stderr = helper.communicate(timeout=5)
+            self.assertEqual(helper.returncode, 128 + signal.SIGTERM, (stdout, stderr))
+            self.assertIn('interrupted by signal', stderr)
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail('test descendant survived runner interruption')
+        finally:
+            if helper.poll() is None:
+                helper.kill()
+            helper.communicate(timeout=5)
 
     def test_discovery_timeout_fails_closed(self):
         def timeout(argv, timeout):

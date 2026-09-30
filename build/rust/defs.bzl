@@ -48,6 +48,7 @@ def tidepool_rust_isolated_test(
         expected_count = None,
         ignored = False,
         timeout = 300,
+        jobs = None,
         resources = [],
         run_env = {},
         test_rule_timeout_ms = None,
@@ -63,6 +64,8 @@ def tidepool_rust_isolated_test(
         fail("expected_count must be positive")
     if timeout <= 0:
         fail("timeout must be positive")
+    if jobs != None and jobs <= 0:
+        fail("jobs must be positive")
     env = _test_environment(env, haskell_worker)
     compiler_env, flags = _common(name, package_name, package_dir, version, env, rustc_flags)
     rust_binary(
@@ -72,6 +75,8 @@ def tidepool_rust_isolated_test(
         **kwargs
     )
     args = ["$(location :" + name + "_binary)", "--timeout", str(timeout)]
+    if jobs != None:
+        args.extend(["--jobs", str(jobs)])
     for test in exact_tests:
         args.extend(["--exact", test])
     if expected_count != None:

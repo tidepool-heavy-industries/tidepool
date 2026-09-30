@@ -7,11 +7,53 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 
 
 DEFAULT_TIMEOUT = 300
 DISCOVERY_TIMEOUT = 30
-RESULT = re.compile(r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;")
+RESULT = re.compile(
+    r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;.*$",
+    re.MULTILINE,
+)
+ACTIVE_PROCESSES = {}
+ACTIVE_PROCESSES_LOCK = threading.Lock()
+
+
+class RunnerInterrupted(Exception):
+    def __init__(self, signum):
+        self.signum = signum
+
+
+def _signal_active_processes(signum, _frame):
+    with ACTIVE_PROCESSES_LOCK:
+        processes = list(ACTIVE_PROCESSES.values())
+    for process in processes:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    raise RunnerInterrupted(signum)
+
+
+def _kill_and_reap(process):
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        return process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        # Do not wait indefinitely on inherited pipes from an escaped child.
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            return '', ''
+        return '', ''
 
 
 def execute(args, timeout):
@@ -23,24 +65,21 @@ def execute(args, timeout):
         text=True,
         start_new_session=True,
     )
+    with ACTIVE_PROCESSES_LOCK:
+        ACTIVE_PROCESSES[process.pid] = process
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as error:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        stdout, stderr = process.communicate()
+        stdout, stderr = _kill_and_reap(process)
         raise subprocess.TimeoutExpired(
             args, timeout, output=stdout or error.output, stderr=stderr or error.stderr
         ) from None
     except BaseException:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.communicate()
+        _kill_and_reap(process)
         raise
+    finally:
+        with ACTIVE_PROCESSES_LOCK:
+            ACTIVE_PROCESSES.pop(process.pid, None)
     return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
@@ -79,9 +118,15 @@ def parse_args(argv):
         '--timeout', type=float, default=DEFAULT_TIMEOUT,
         help=f'maximum seconds per test process (default: {DEFAULT_TIMEOUT})',
     )
+    parser.add_argument(
+        '--jobs', type=int,
+        help='maximum concurrent test processes (focused selection defaults to 1)',
+    )
     options = parser.parse_args(argv)
     if options.timeout <= 0:
         parser.error('--timeout must be positive')
+    if options.jobs is not None and options.jobs <= 0:
+        parser.error('--jobs must be positive')
     if options.expected_count is not None and options.expected_count <= 0:
         parser.error('--expected-count must be positive')
     if options.exact_names and options.expected_count is None:
@@ -133,7 +178,8 @@ def run_one(binary, name, ignored, timeout):
         return False, detail, error.stderr or ''
     except OSError as error:
         return False, f'could not start test process: {error}', ''
-    summary = RESULT.search(result.stdout)
+    summaries = list(RESULT.finditer(result.stdout))
+    summary = summaries[-1] if summaries else None
     passed = (
         result.returncode == 0
         and summary is not None
@@ -159,18 +205,30 @@ def main(argv=None):
             options.binary, name, name in ignored_names, options.timeout
         )
 
-    # Each selected case is a separate process; only light cases run in parallel.
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=min(8, len(selected), os.cpu_count() or 1)
-    ) as pool:
-        for name, (passed, output, stderr) in pool.map(run, selected):
-            print(f'{"PASS" if passed else "FAIL"} {name}', flush=True)
-            if not passed:
-                failures += 1
-                if output:
-                    print(output, end='' if output.endswith('\n') else '\n')
-                if stderr:
-                    print(stderr, end='' if stderr.endswith('\n') else '\n', file=sys.stderr)
+    jobs = options.jobs
+    if jobs is None:
+        jobs = 1 if options.exact_names else min(8, os.cpu_count() or 1)
+    jobs = min(jobs, len(selected))
+    old_handlers = {}
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        old_handlers[signum] = signal.signal(signum, _signal_active_processes)
+    try:
+        # Each selected case is a separate process; focused groups default to serial.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+            for name, (passed, output, stderr) in pool.map(run, selected):
+                print(f'{"PASS" if passed else "FAIL"} {name}', flush=True)
+                if not passed:
+                    failures += 1
+                    if output:
+                        print(output, end='' if output.endswith('\n') else '\n')
+                    if stderr:
+                        print(stderr, end='' if stderr.endswith('\n') else '\n', file=sys.stderr)
+    except RunnerInterrupted as error:
+        print(f'libtest runner interrupted by signal {error.signum}', file=sys.stderr)
+        return 128 + error.signum
+    finally:
+        for signum, handler in old_handlers.items():
+            signal.signal(signum, handler)
     passed = len(selected) - failures
     print(
         f'Isolated libtest: {passed} passed; {failures} failed; '
