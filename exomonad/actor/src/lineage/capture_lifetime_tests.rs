@@ -1,6 +1,14 @@
 use super::*;
 use tidepool_runtime::session::PersistentSession;
 
+fn drain_dropped_capsules(session: &mut PersistentSession) {
+    // A normal runtime admission entry drains its owner's retirement queue.
+    let temporary = session.retain_lexical_scope(ScopeId::ROOT).unwrap();
+    let scope = temporary.scope();
+    drop(temporary);
+    session.retire_scope(scope);
+}
+
 fn capture(
     groups: &ForkGroupRegistry,
     session: &mut PersistentSession,
@@ -69,10 +77,10 @@ fn released_capture_preserves_two_admissions_until_last_lexical_share() {
         .mint_scope_from_lease(second.retained_scope().unwrap())
         .unwrap();
     drop(first);
-    session.reap_admission_leases();
+    drain_dropped_capsules(&mut session);
     assert!(session.scope_tree().is_live(retained_scope));
     drop(second);
-    session.reap_admission_leases();
+    drain_dropped_capsules(&mut session);
     assert!(!session.scope_tree().is_live(retained_scope));
     assert!(!groups.retains_session(SessionId(7)));
     assert!(session.scope_tree().is_live(first_child));
@@ -91,7 +99,7 @@ fn undelivered_capture_releases_its_runtime_capsule() {
         vec![(SessionId(7), original)]
     );
     session.retire_scope(original);
-    session.reap_admission_leases();
+    drain_dropped_capsules(&mut session);
     assert!(!session.scope_tree().is_live(retained_scope));
     assert!(!groups.retains_session(SessionId(7)));
     assert!(matches!(
