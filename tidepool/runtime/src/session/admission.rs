@@ -423,6 +423,7 @@ struct RuntimeCheckedState {
 struct CheckedItemReservation {
     item: tidepool_toolchain::checked_cell::ExactCheckedItem,
     generation: Generation,
+    digest: [u8; 32],
 }
 
 /// Runtime-owned exact item and value identity reserved before compilation.
@@ -591,6 +592,12 @@ impl RuntimeCheckedPrefix {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        let reservation = state
+            .reservation
+            .as_ref()
+            .expect("checked reservation preflighted");
+        execution.validate_runtime_admission(reservation.digest, self.admission.digest())?;
+        execution.validate_settled_native_bindings(state.snapshot.settled_native_bindings())?;
         // Appending checks the compiler-owned same-cell identity and order.
         validate_private_value_overlay(
             self,
@@ -701,6 +708,8 @@ impl CheckedDisplayPlan {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        self.proof
+            .validate_settled_native_bindings(state.snapshot.settled_native_bindings())?;
         session.validate_new_binding_ids(self.binding_ids)?;
         refuse_ephemeral_declaration_replacement(
             prefix,
@@ -1280,10 +1289,6 @@ impl PersistentSession {
                 }
                 name
             });
-        state.reservation = Some(CheckedItemReservation {
-            item: item.clone(),
-            generation,
-        });
         let mut digest = blake3::Hasher::new();
         digest.update(b"TidepoolRuntimeCheckedItem1");
         digest.update(&snapshot.digest());
@@ -1300,6 +1305,11 @@ impl PersistentSession {
             }
         }
         let digest = *digest.finalize().as_bytes();
+        state.reservation = Some(CheckedItemReservation {
+            item: item.clone(),
+            generation,
+            digest,
+        });
         drop(state);
         Ok(Arc::new(RuntimeCheckedItemAdmission {
             prefix,
@@ -1479,6 +1489,7 @@ impl PersistentSession {
     ) -> Result<Arc<RuntimeCheckedPrefix>, SessionError> {
         if !admission.belongs_to(self)
             || first_item.admission_digest() != admission.digest()
+            || first_item.specification_digest() != admission.specification_digest()
             || !initial_interfaces_match(
                 &admission.interfaces,
                 first_item.baseline_value_interfaces(),
