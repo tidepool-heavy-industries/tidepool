@@ -131,6 +131,7 @@ import Data.Word (Word64)
 import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellDisplayTarget(..), CellGenericDeclaration(..), CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), omitCellGenericDeclarations, omitCellDisplayDeclarations)
 import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts)
+import Tidepool.FamilyConsistency (validateCompilationFamilies)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
 import Tidepool.Introspection (normalizeLookupWildcards)
@@ -1528,6 +1529,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                   origins <- liftIO (classifyQuasiQuoteOrigins classifyEnv parsed)
                   transformed <- liftIO (pvTransformParsed variant classifyEnv modSum parsed)
                   typed <- typecheckModule transformed
+                  familyEnvironment <- getSession
+                  liftIO (validateCompilationFamilies familyEnvironment (fst (tm_internals_ typed)))
                   pure (typed, origins)
                 liftIO (modifyIORef' tcMsRef (+ tcMs))
                 hscEnv0 <- getSession
@@ -2287,6 +2290,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
               origins <- liftIO (classifyQuasiQuoteOrigins current parsed)
               transformed <- liftIO (pvTransformParsed variant current summary parsed)
               typed <- typecheckModule transformed
+              familyEnvironment <- getSession
+              liftIO (validateCompilationFamilies familyEnvironment (fst (tm_internals_ typed)))
               let tcg = fst (tm_internals_ typed)
                   inspectionProbes = capturedInspectionProbes typed tcg
                   retainInterface reason = do

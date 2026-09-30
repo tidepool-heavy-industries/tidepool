@@ -26,6 +26,7 @@ haskell_library(
         "Tidepool/GhcPipeline.hs": "src/Tidepool/GhcPipeline.hs",
         "Tidepool/ExactHydration.hs": "src/Tidepool/ExactHydration.hs",
         "Tidepool/ExactScope.hs": "src/Tidepool/ExactScope.hs",
+        "Tidepool/FamilyConsistency.hs": "src/Tidepool/FamilyConsistency.hs",
         "Tidepool/HostBindingAuthority.hs": "src/Tidepool/HostBindingAuthority.hs",
         "Tidepool/Identity.hs": "src/Tidepool/Identity.hs",
         "Tidepool/Introspection.hs": "src/Tidepool/Introspection.hs",

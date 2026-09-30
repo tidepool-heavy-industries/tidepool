@@ -43,6 +43,7 @@ library tidepool-extract-internal
     Tidepool.ExactScope
     Tidepool.HostBindingAuthority
     Tidepool.HomeProducts
+    Tidepool.FamilyConsistency
     Tidepool.Identity
     Tidepool.Introspection
     Tidepool.Metadata
