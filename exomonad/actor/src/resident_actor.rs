@@ -1097,7 +1097,7 @@ fn install_cell_preparation(
             items,
             dependencies,
         } => {
-            cursor.dependencies = Some(dependencies);
+            cursor.dependencies = Some(dependencies.into());
             cursor.prepared_cell = Some(items.into_iter().map(Some).collect::<Vec<_>>());
         }
         PreparedCell::Rejected {
@@ -1167,7 +1167,7 @@ struct WorkbenchCursor {
     preparation_done: bool,
     dispatch_initialized: bool,
     prepared_cell: Option<Vec<Option<crate::resident_workbench::PreparedCellItem>>>,
-    dependencies: Option<tidepool_runtime::session::resident::BindingLease>,
+    dependencies: Option<crate::resident_workbench::CellPreparationLease>,
     cell_check: Option<tidepool_runtime::session::CellCheck>,
     receipts: Vec<WorkbenchItemReceipt>,
     cell_display_remaining: usize,

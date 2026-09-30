@@ -171,6 +171,7 @@ where
                 detail: "actor application has no active Haskell workbench".into(),
             }));
         };
+        let workbench = workbench.with_compilation_authority(compilation_authority.clone());
         let workbench = workbench.with_json_input(
             request
                 .input
