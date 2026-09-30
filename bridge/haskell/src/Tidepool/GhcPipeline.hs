@@ -10,7 +10,7 @@ module Tidepool.GhcPipeline
   , stripMonadHead, isClosureType, renderType
   , splitTupleType
   , CellDisplayPass(..), cellDisplayDeclarations
-  , cellExpressionPlans, satisfiesCapturedConstraint
+  , cellExpressionPlans, cellExpressionEvidence, cellCheckedBinderSignatures, satisfiesCapturedConstraint
   , checkCellInstances
     -- * Resident session
   , withResidentPipelineSelected
@@ -130,6 +130,7 @@ import Data.Generics (everything, mkQ)
 import Data.Foldable (toList)
 import Data.Word (Word64)
 import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellDisplayTarget(..), CellGenericDeclaration(..), CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), omitCellGenericDeclarations, omitCellDisplayDeclarations)
+import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
 import Tidepool.Introspection (normalizeLookupWildcards)
@@ -314,7 +315,10 @@ checkCellInstances compile plan = do
 -- execution evidence: Rust selects one wrapper from it and never learns
 -- policy from a failed wrapper compile.
 cellExpressionPlans :: CheckedEnvironmentResult -> IO [CellExpressionPlan]
-cellExpressionPlans result = forM expressionIds $ \identifier -> do
+cellExpressionPlans result = map fst <$> cellExpressionEvidence result
+
+cellExpressionEvidence :: CheckedEnvironmentResult -> IO [(CellExpressionPlan, CheckedSignature)]
+cellExpressionEvidence result = forM expressionIds $ \identifier -> do
   effectConstructor <- maybe
     (fail "effect-row helper type was not captured") pure
     (capturedEffectConstructor environment)
@@ -335,14 +339,15 @@ cellExpressionPlans result = forM expressionIds $ \identifier -> do
         (mkInvisFunTys predicates body)
   rendered <- satisfiesCapturedConstraint (crHscEnv result) environment
     "__tidepoolCellDisplayConstraint" quantified
-  pure CellExpressionPlan
-    { expressionPlanKey = occurrence
-    , expressionPlanLift = liftPlan
-    , expressionPlanPresentation = if rendered then ExpressionRendered else ExpressionOpaque
-    , expressionPlanType = renderCellPinType names stableType
-    , expressionPlanHeads = nominalHeadsOfType stableType
-    , expressionPlanImports = cellPinTypeImports names stableType
-    }
+  let plan = CellExpressionPlan
+        { expressionPlanKey = occurrence
+        , expressionPlanLift = liftPlan
+        , expressionPlanPresentation = if rendered then ExpressionRendered else ExpressionOpaque
+        , expressionPlanType = renderCellPinType names stableType
+        , expressionPlanHeads = nominalHeadsOfType stableType
+        , expressionPlanImports = cellPinTypeImports names stableType
+        }
+  pure (plan, captureCheckedSignature (crHscEnv result) occurrence stableType)
   where
     environment = crTargetTcGblEnv result
     names = mkNamePprCtx (PromTickCtx True True)
@@ -353,6 +358,21 @@ cellExpressionPlans result = forM expressionIds $ \identifier -> do
       , let occurrence = occNameString (nameOccName (idName identifier))
       , "__tidepool_cell_expr_" `isPrefixOf` occurrence
       ]
+
+cellCheckedBinderSignatures :: CheckedEnvironmentResult -> IO [CheckedSignature]
+cellCheckedBinderSignatures result = forM identifiers $ \identifier -> do
+  supply <- mkSplitUniqSupply 'z'
+  stable <- maybe (fail "checked binder has a dependently-kinded unresolved type") pure
+    (stabilizeCellEvidenceType supply (stabilizeEffectRows (idType identifier)))
+  when (zonkAnyTyCon `elementOfUniqSet` tyConsOfType stable) $
+    fail "checked binder still contains an unresolved internal type"
+  pure (captureCheckedSignature (crHscEnv result)
+    (occNameString (nameOccName (idName identifier))) stable)
+  where
+    identifiers = Map.elems $ Map.fromList
+      [(occNameString (nameOccName (idName identifier)), identifier)
+      | identifier <- collectDataIds (tcg_binds (crTargetTcGblEnv result))
+      , "__tidepool_cell_pin_" `isPrefixOf` occNameString (nameOccName (idName identifier))]
 
 -- | Solve the class predicate carried by a reserved generated helper after
 -- replacing its final type argument with the checked value type. This keeps
@@ -645,18 +665,18 @@ data PipelineVariant = PipelineVariant
     -- source-less @Val.G\<g\>@ ifaces). Empty on the normal path.
   , pvPlan :: Bool -> ModuleGraph -> Ghc CompilePlan
     -- ^ @pvPlan timingEnabled downsweepGraph@.
-  , pvTransformParsed :: ModSummary -> ParsedModule -> ParsedModule
+  , pvTransformParsed :: HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
   }
 
 data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile
   deriving (Eq, Ord, Show)
 
-transformFor :: CompilePurpose -> ModuleName -> ModSummary -> ParsedModule -> ParsedModule
-transformFor GeneralCompile _ _ = id
-transformFor CertifyHomeProductsCompile _ _ = id
-transformFor LookupTypeCompile target summary
-  | ms_mod_name summary == target = normalizeLookupWildcards
-  | otherwise = id
+transformFor :: CompilePurpose -> ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
+transformFor GeneralCompile _ _ _ = pure
+transformFor CertifyHomeProductsCompile _ _ _ = pure
+transformFor LookupTypeCompile target _ summary
+  | ms_mod_name summary == target = pure . normalizeLookupWildcards
+  | otherwise = pure
 
 -- | The seam values for one run, derived from the downsweep graph.
 data CompilePlan = CompilePlan
@@ -1502,7 +1522,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 ((typechecked, quasiQuoteOrigins), tcMs) <- timeSection $ do
                   parsed <- parseModule modSum
                   origins <- liftIO (classifyQuasiQuoteOrigins classifyEnv parsed)
-                  typed <- typecheckModule (pvTransformParsed variant modSum parsed)
+                  transformed <- liftIO (pvTransformParsed variant classifyEnv modSum parsed)
+                  typed <- typecheckModule transformed
                   pure (typed, origins)
                 liftIO (modifyIORef' tcMsRef (+ tcMs))
                 hscEnv0 <- getSession
@@ -2260,7 +2281,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                   ++ " target=" ++ show isTarget
               parsed <- parseModule summary
               origins <- liftIO (classifyQuasiQuoteOrigins current parsed)
-              typed <- typecheckModule (pvTransformParsed variant summary parsed)
+              transformed <- liftIO (pvTransformParsed variant current summary parsed)
+              typed <- typecheckModule transformed
               let tcg = fst (tm_internals_ typed)
                   inspectionProbes = capturedInspectionProbes typed tcg
                   retainInterface reason = do

@@ -11,13 +11,13 @@ import Codec.CBOR.Write (toStrictByteString)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Control.Exception
-  ( evaluate, try, catch, finally, throwIO, SomeAsyncException, SomeException, Exception
+  ( evaluate, try, finally, throwIO, SomeAsyncException, SomeException, Exception
   , fromException, toException, IOException )
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (intercalate, nub)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
 import Data.Word (Word64)
-import Control.Monad (foldM, forM, forM_, when)
+import Control.Monad (foldM, forM, forM_, when, unless)
 import System.Exit (ExitCode(..), exitWith)
 import System.IO (hClose, hPutStrLn, openBinaryTempFile, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8)
 import qualified System.Info as SystemInfo
@@ -36,6 +36,7 @@ import GHC.Types.Name (nameOccName)
 import GHC.Types.Id (idName)
 import GHC.Types.Name.Occurrence (occNameString)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 
 import Tidepool.Binders
   ( extractBindersNamed
@@ -52,7 +53,7 @@ import Tidepool.GhcPipeline
   , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..)
   , withResidentPipelineSelectedRequests, withExactInterfaceTransaction
   , CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances
-  , cellExpressionPlans
+  , cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, stripMonadHead )
 import Tidepool.ExecutionEncode (encodeWireProgram, encodeModuleProducts)
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelected, projectPreparedModuleGroups, preparedRootIdentity, resolveTextPackageUnit)
@@ -89,7 +90,8 @@ import Tidepool.ExtractRequest (InspectionRequest(..), WorkerRequest(..), worker
 import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
 import Tidepool.ExactScope
   ( ExactCompilation(..), ExactScope(..), ExactProduct(..), ExactOriginalGroup(..)
-  , revalidateExactScope, writeExactCompilation )
+  , CheckedCellAdmission(..), readExactScope, revalidateExactScope, writeExactCompilation )
+import Tidepool.CheckedCell (encodeCheckedSignature)
 import Tidepool.Session
   ( SessionScope(..), preparedScaffoldTargetName, preparedResumeTargetName
   , preparedApplyEntryTargetName, preparedApplyValueTargetName
@@ -234,10 +236,19 @@ runParsedInvocation compiler caches parsedWorkerRequest = do
 -- | Dispatch one decoded worker request.
 dispatch
   :: Compiler -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
-dispatch compiler caches timing args =
-  case requestDeclarationJoin args of
-    Just manifest -> runDeclarationOperation args manifest
-    Nothing -> dispatchSource compiler caches timing args
+dispatch compiler caches timing args = do
+  admitted <- trySynchronous $ forM_ (requestSessionArtifacts args) $ \manifest -> do
+    scope <- readExactScope manifest >>= either fail pure
+    forM_ (scopeCheckedCell scope) $ \_ ->
+      unless (requestCell args && not (requestTurn args) && not (requestClassify args)
+          && null (requestInspections args) && not (isJust (requestDeclarationJoin args))
+          && not (requestCertifyHomeProducts args) && not (requestActivationPreview args))
+        (fail "checked-cell authorization requires its dedicated cell-check request")
+  case admitted of
+    Left failure -> reportDiags (Left failure)
+    Right () -> case requestDeclarationJoin args of
+      Just manifest -> runDeclarationOperation args manifest
+      Nothing -> dispatchSource compiler caches timing args
 
 dispatchSource :: Compiler -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
 dispatchSource compiler caches timing args =
@@ -1010,6 +1021,10 @@ runCellMode compiler caches args cellPath = do
     cellSource <- readFile cellPath
     templatePath <- requireArg "--cell-template" (requestCellTemplate args)
     template <- readFile templatePath
+    admittedScope <- traverse (\manifest -> readExactScope manifest >>= either fail pure)
+      (requestSessionArtifacts args)
+    forM_ admittedScope $ \scope -> forM_ (scopeCheckedCell scope) $ \admission ->
+      validateCheckedCellAdmission args admission cellSource template
     initialPlan <- analyzeCell template cellSource >>= either throwCellSplitError pure
     initialSource <- either fail pure (renderCellCheckSource template initialPlan)
     let outDir = fromMaybe
@@ -1046,9 +1061,27 @@ runCellMode compiler caches args cellPath = do
         pure (finalized, finalizedSource, finalizedResult)
     -- Statement preparation checks these rendered pins in their actual value
     -- modules before any declaration commits or effect runs.
-    expressionPlans <- cellExpressionPlans compiled
-    BS.writeFile out
-      (encodeCellOut finalPlan (crCheckedBinderPins compiled) expressionPlans finalSource)
+    expressionEvidence <- cellExpressionEvidence compiled
+    let outputBytes = encodeCellOut finalPlan (crCheckedBinderPins compiled)
+          (map fst expressionEvidence) finalSource
+    BS.writeFile out outputBytes
+    forM_ admittedScope $ \scope -> forM_ (scopeCheckedCell scope) $ \admission -> do
+      binderSignatures <- cellCheckedBinderSignatures compiled
+      cellNow <- readFile cellPath
+      templateNow <- readFile templatePath
+      validateCheckedCellAdmission args admission cellNow templateNow
+      verified <- revalidateExactScope (crHscEnv compiled) scope
+      either fail pure verified
+      let text = encodeString . T.pack
+          signatures = binderSignatures ++ map snd expressionEvidence
+          receipt = encodeListLen 9
+            <> text "TPEXACTCHECK" <> text "1" <> text (scopeRequestSha256 scope)
+            <> text (checkedAdmissionDigest admission) <> text (checkedCellSha256 admission)
+            <> text (checkedTemplateSha256 admission) <> text (shaHex outputBytes)
+            <> text (shaHex (TE.encodeUtf8 (T.pack finalSource)))
+            <> encodeListLen (fromIntegral (length signatures))
+            <> foldMap encodeCheckedSignature signatures
+      BS.writeFile (outDir </> "checked-cell.cbor") (toStrictByteString receipt)
     -- Best-effort, and entirely inside this SAME 'try': a fold failure (an
     -- ineligible cell shape, a missing template, a real compile rejection)
     -- must never turn a SUCCESSFUL whole-cell check into a reported failure.
@@ -1066,6 +1099,17 @@ runCellMode compiler caches args cellPath = do
         pure ()
     Right _ -> pure ()
   reportDiagsWithWarnings res
+
+validateCheckedCellAdmission :: WorkerRequest -> CheckedCellAdmission -> String -> String -> IO ()
+validateCheckedCellAdmission args admission cellSource template = do
+  templateDigests <- forM (requestTurnTemplates args) $ \(kind, path) -> do
+    bytes <- BS.readFile path
+    pure (kind, shaHex bytes)
+  unless (shaHex (TE.encodeUtf8 (T.pack cellSource)) == checkedCellSha256 admission
+      && shaHex (TE.encodeUtf8 (T.pack template)) == checkedTemplateSha256 admission
+      && templateDigests == checkedTurnTemplates admission
+      && requestInjectVals args == checkedInjectedModules admission)
+    (fail "cell body, wrapper or injected interfaces differ from immutable admission")
 
 -- | After a successful whole-cell check, attempt ONE further compile in the
 -- SAME worker invocation — no separate spawn — when the cell resolved to

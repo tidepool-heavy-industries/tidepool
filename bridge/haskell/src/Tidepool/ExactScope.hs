@@ -2,6 +2,7 @@
 
 module Tidepool.ExactScope
   ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..)
+  , CheckedCellAdmission(..)
   , readExactScope, revalidateExactScope
   , writeExactCompilation
   ) where
@@ -39,6 +40,16 @@ data ExactScope = ExactScope
   , scopeInterfaces :: [(ExactIfaceArtifact, FilePath, String)]
   , scopeLexical :: [((String, String), [(String, String)])]
   , scopeProducts :: [ExactProduct]
+  , scopeCheckedCell :: Maybe CheckedCellAdmission
+  } deriving (Eq, Show)
+
+data CheckedCellAdmission = CheckedCellAdmission
+  { checkedAdmissionDigest :: String
+  , checkedCellSha256 :: String
+  , checkedTemplateSha256 :: String
+  , checkedTurnTemplates :: [(String, String)]
+  , checkedInjectedModules :: [String]
+  , checkedReservedModules :: [String]
   } deriving (Eq, Show)
 
 data ExactProduct = ExactProduct
@@ -152,10 +163,12 @@ reserveCompilationDirectory parent transaction = attempt (0 :: Int)
 
 decodeScope :: Decoder s ExactScope
 decodeScope = do
-  array 6
+  count <- decodeListLen
   magic <- string
   version <- string
-  unless (magic == "TPEXACTSCOPE" && version == "1") (fail "unsupported exact scope")
+  unless (magic == "TPEXACTSCOPE"
+      && ((version == "1" && count == 6) || (version == "2" && count == 7)))
+    (fail "unsupported exact scope")
   semantic <- digestField
   interfaces <- bounded 4096 $ do
     array 7
@@ -204,7 +217,17 @@ decodeScope = do
           (exactUnit iface, exactModule iface) == (originalUnit originalProduct, originalModule originalProduct)
           && exactSha256 iface == originalIfaceSha256 originalProduct) interfaces) products)
     (fail "incomplete or conflicting exact owner closure")
-  pure (ExactScope "" "" semantic interfaces lexical products)
+  checked <- if version == "1" then pure Nothing else do
+    array 7
+    purpose <- string
+    unless (purpose == "cell-check") (fail "unsupported exact compile purpose")
+    admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
+      <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
+      <*> bounded 4096 nonempty <*> bounded 4096 nonempty
+    unique "checked injected modules" (checkedInjectedModules admission)
+    unique "checked reserved modules" (checkedReservedModules admission)
+    pure (Just admission)
+  pure (ExactScope "" "" semantic interfaces lexical products checked)
 
 identity :: Decoder s SymbolIdentity
 identity = do

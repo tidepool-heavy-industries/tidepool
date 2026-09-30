@@ -261,6 +261,7 @@ pub struct ModuleCandidateOffer {
     producer: Vec<u8>,
     include: Vec<PathBuf>,
     exact: Option<crate::declaration_context::ExactCompilationRequest>,
+    checked_cell: Option<crate::checked_cell::CheckedCellSpecification>,
 }
 
 impl ModuleCandidateOffer {
@@ -270,6 +271,7 @@ impl ModuleCandidateOffer {
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: None,
+            checked_cell: None,
         }
     }
 
@@ -284,7 +286,51 @@ impl ModuleCandidateOffer {
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation(&scratch.join("exact-scope"), producer)?),
+            checked_cell: None,
         })
+    }
+
+    pub fn select_checked_cell(
+        producer: &[u8],
+        include: &[PathBuf],
+        scratch: &Path,
+        context: Arc<crate::declaration_join::ExactDeclarationContext>,
+        specification: crate::checked_cell::CheckedCellSpecification,
+    ) -> Result<Self, CompileError> {
+        let authorization = specification.manifest_value()?;
+        Ok(Self {
+            selected: None,
+            producer: producer.to_vec(),
+            include: include.to_vec(),
+            exact: Some(context.prepare_compilation_with_authorization(
+                &scratch.join("exact-scope"),
+                producer,
+                Some(authorization),
+            )?),
+            checked_cell: Some(specification),
+        })
+    }
+
+    pub fn admit_checked_cell(
+        &self,
+        root: &Path,
+    ) -> Result<Arc<crate::checked_cell::ExactCheckedCell>, CompileError> {
+        let exact = self.exact.as_ref().ok_or_else(|| {
+            CompileError::ExtractFailed(
+                "checked-cell authority requires an exact compiler offer".into(),
+            )
+        })?;
+        let specification = self.checked_cell.as_ref().ok_or_else(|| {
+            CompileError::ExtractFailed("ordinary compile offer cannot admit a checked cell".into())
+        })?;
+        crate::checked_cell::admit_checked_cell(
+            root,
+            &self.producer,
+            exact.semantic_sha256,
+            &exact.request_sha256,
+            specification,
+            exact.validate_outputs(root)?,
+        )
     }
 
     pub fn exact_scope_path(&self) -> Option<&Path> {

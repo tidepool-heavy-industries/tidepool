@@ -765,6 +765,15 @@ impl ExactDeclarationContext {
         root: &Path,
         producer: &[u8],
     ) -> Result<ExactCompilationRequest, CompileError> {
+        self.prepare_compilation_with_authorization(root, producer, None)
+    }
+
+    pub(crate) fn prepare_compilation_with_authorization(
+        self: &Arc<Self>,
+        root: &Path,
+        producer: &[u8],
+        authorization: Option<Value>,
+    ) -> Result<ExactCompilationRequest, CompileError> {
         use sha2::Digest;
         if !root.is_absolute()
             || self.producer == [0; 32]
@@ -779,9 +788,9 @@ impl ExactDeclarationContext {
         self.validate_artifacts(&materialized.artifacts)?;
         let groups = self.inherited_groups(root)?;
         let semantic_sha256 = self.semantic_sha256();
-        let value = Value::Array(vec![
+        let mut fields = vec![
             text("TPEXACTSCOPE"),
-            text("1"),
+            text(if authorization.is_some() { "2" } else { "1" }),
             text(hex(&semantic_sha256)),
             Value::Array(
                 materialized
@@ -883,7 +892,11 @@ impl ExactDeclarationContext {
                     })
                     .collect::<Result<Vec<_>, CompileError>>()?,
             ),
-        ]);
+        ];
+        if let Some(authorization) = authorization {
+            fields.push(authorization);
+        }
+        let value = Value::Array(fields);
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&value, &mut bytes).map_err(failure)?;
         if bytes.len() > 4 * 1024 * 1024 {

@@ -27,6 +27,7 @@ library tidepool-extract-internal
   exposed-modules:
     Tidepool.Binders
     Tidepool.CborEncode
+    Tidepool.CheckedCell
     Tidepool.DependencyEvidence
     Tidepool.DeclarationJoin
     Tidepool.WorkerServer
