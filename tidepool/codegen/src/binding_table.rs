@@ -618,10 +618,11 @@ impl BindingTable {
     ) -> Option<Vec<SourceInstanceLease>> {
         let mut seen = HashSet::new();
         if keys.iter().any(|key| {
-            !seen.insert(key.clone()) ||
-            self.source_instances
-                .get(key)
-                .is_none_or(|lease| lease.owner != scope || lease.owner_retired)
+            !seen.insert(key.clone())
+                || self
+                    .source_instances
+                    .get(key)
+                    .is_none_or(|lease| lease.owner != scope || lease.owner_retired)
         }) {
             return None;
         }
@@ -1553,6 +1554,45 @@ impl BindingTable {
             })
             .filter_map(|id| self.live.get(id).map(|entry| entry.module));
         owned.chain(inherited).chain(promoted)
+    }
+
+    /// Exact live identities available to this scope, including shadowed
+    /// owners, inherited and promoted custody, and observation dependencies.
+    /// This does not grant another scope's same-module bindings.
+    pub fn scope_reachable_binding_ids(
+        &self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+    ) -> Vec<SessionVarId> {
+        if !tree.is_live(scope) {
+            return Vec::new();
+        }
+        let tip = self.tips.get(&scope);
+        let owners = if tip.is_some() {
+            vec![scope]
+        } else {
+            tree.lookup_chain(scope)
+        };
+        let own = self
+            .live
+            .values()
+            .filter(|entry| owners.contains(&entry.scope))
+            .map(|entry| entry.id);
+        let inherited = tip
+            .into_iter()
+            .flat_map(|tip| tip.visible.values().chain(tip.retained.iter()))
+            .copied();
+        let promoted = owners
+            .iter()
+            .flat_map(|owner| self.promoted.get(owner).into_iter().flat_map(HashSet::iter))
+            .copied();
+        let mut ids = self
+            .dependency_closure(own.chain(inherited).chain(promoted))
+            .into_iter()
+            .filter(|id| self.live.contains_key(id))
+            .collect::<Vec<_>>();
+        ids.sort_by_key(|id| id.raw());
+        ids
     }
 
     /// Number of live bindings.
