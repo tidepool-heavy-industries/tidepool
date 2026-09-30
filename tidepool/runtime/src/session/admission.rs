@@ -23,7 +23,26 @@ pub struct PrivateExecutionAdmission {
     private_scope: ScopeId,
     view: SessionCompileView,
     binding_tip: BindingTipId,
+    pub(super) completed_values: parking_lot::Mutex<
+        std::collections::HashMap<tidepool_repr::SessionVarId, CertifiedPrivateValueWrite>,
+    >,
     pub(super) final_intent: OnceLock<Arc<super::FinalExecutionIntent>>,
+}
+
+pub(super) struct CertifiedPrivateValueWrite {
+    name: String,
+    identity: SymbolIdentity,
+    generation: Generation,
+    root_id: u64,
+    pub(super) execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
+}
+impl CertifiedPrivateValueWrite {
+    pub(super) fn matches(&self, entry: &tidepool_codegen::binding_table::BindingEntry) -> bool {
+        entry.module == tidepool_repr::SessionModule::val(self.generation)
+            && entry.value.identity == self.identity
+            && entry.value.handle.raw().0 == self.root_id
+            && entry.name.0 == self.name
+    }
 }
 
 impl PrivateExecutionAdmission {
@@ -406,16 +425,11 @@ impl RuntimeCheckedPrefix {
             return Err(SessionError::StaleStagedDeclaration);
         }
         // Appending checks the compiler-owned same-cell identity and order.
-        refuse_ephemeral_declaration_replacement(
+        validate_private_value_overlay(
             self,
             session,
             &state.snapshot,
-            execution
-                .item()
-                .binders()
-                .iter()
-                .map(String::as_str)
-                .chain(execution.observation_name()),
+            execution.private_value_overlay_binders(),
         )?;
         state.snapshot.compiler_prefix.append(execution.clone())?;
         state.in_flight = Some(execution.clone());
@@ -449,6 +463,31 @@ fn refuse_ephemeral_declaration_replacement<'a>(
         .iter()
         .flat_map(|(item, _)| item.value_names())
         .any(|name| names.contains(name))
+    {
+        return Err(SessionError::UnsupportedPrivateValueReplacement);
+    }
+    Ok(())
+}
+
+fn validate_private_value_overlay<'a>(
+    prefix: &RuntimeCheckedPrefix,
+    session: &PersistentSession,
+    snapshot: &RuntimeCheckedPrefixSnapshot,
+    names: impl Iterator<Item = &'a str>,
+) -> Result<(), SessionError> {
+    if prefix.admission.private_execution.is_none() {
+        return Ok(());
+    }
+    let names = names.collect::<std::collections::BTreeSet<_>>();
+    // A native Value winner can hide a plain declaration Value head while
+    // retaining its qualified original. Type-family members require their
+    // complete certified export policy and remain conservatively refused.
+    if super::paired_publication::declaration_value_members(
+        session.lib(),
+        snapshot.visibility.declaration_tip,
+    )?
+    .iter()
+    .any(|name| names.contains(name.as_str()))
     {
         return Err(SessionError::UnsupportedPrivateValueReplacement);
     }
@@ -571,6 +610,37 @@ pub(crate) struct CheckedTurnCompletion {
 }
 
 impl CheckedTurnCompletion {
+    pub(crate) fn validates_private_overlay(
+        &self,
+        session: &PersistentSession,
+        scope: ScopeId,
+        binders: &[&super::BoundBinder],
+    ) -> Result<bool, SessionError> {
+        let Some(private) = &self.prefix.admission.private_execution else {
+            return Ok(false);
+        };
+        if !self.prefix.admission.belongs_to(session)
+            || private.private_scope != scope
+            || self.scope != scope
+            || self
+                .prefix
+                .state
+                .lock()
+                .in_flight
+                .as_ref()
+                .is_none_or(|execution| !Arc::ptr_eq(execution, &self.execution))
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        self.execution.validate_bound_binders(
+            &binders
+                .iter()
+                .map(|binder| super::turn::encode_bound_binder_authority(binder))
+                .collect::<Vec<_>>(),
+        )?;
+        Ok(true)
+    }
+
     pub(crate) fn settle(&self, session: &mut PersistentSession) -> Result<(), SessionError> {
         let mut state = self.prefix.state.lock();
         if !self.prefix.admission.belongs_to(session)
@@ -585,6 +655,31 @@ impl CheckedTurnCompletion {
             .snapshot
             .compiler_prefix
             .append(self.execution.clone())?;
+        let completed_values = if let Some(private) = &self.prefix.admission.private_execution {
+            let mut values = Vec::new();
+            for name in self.execution.private_value_overlay_binders() {
+                let entry = session
+                    .resolve_in(self.scope, name)
+                    .filter(|entry| {
+                        entry.scope == self.scope
+                            && entry.module.gen.0 == self.execution.generation()
+                    })
+                    .ok_or(SessionError::StaleStagedDeclaration)?;
+                values.push((
+                    entry.id,
+                    CertifiedPrivateValueWrite {
+                        name: name.to_owned(),
+                        identity: entry.value.identity.clone(),
+                        generation: entry.module.gen,
+                        root_id: entry.value.handle.raw().0,
+                        execution: self.execution.clone(),
+                    },
+                ));
+            }
+            Some((private, values))
+        } else {
+            None
+        };
         settle_checked_snapshot(
             session,
             &mut state,
@@ -594,6 +689,9 @@ impl CheckedTurnCompletion {
             self.execution.value_interface_owned(),
             None,
         )?;
+        if let Some((private, values)) = completed_values {
+            private.completed_values.lock().extend(values);
+        }
         state.in_flight = None;
         state.reservation = None;
         Ok(())
@@ -1321,6 +1419,7 @@ impl PersistentSession {
             private_scope,
             view,
             binding_tip,
+            completed_values: parking_lot::Mutex::new(std::collections::HashMap::new()),
             final_intent: OnceLock::new(),
         })
     }

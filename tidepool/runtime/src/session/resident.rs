@@ -3816,7 +3816,7 @@ where
                 "host binding mount produced a handle with no hosting program".into(),
             ))));
         };
-        self.bind_prepared(program, scope, gen, &[(binder, handle)])?;
+        self.bind_prepared(program, scope, gen, &[(binder, handle)], None)?;
         self.binding_provenance
             .insert(binder.var_id, Arc::new(ProgramProvenance::default()));
         Ok(())
@@ -3846,7 +3846,7 @@ where
         };
         // `bind_prepared` owns the handle from here, releasing it on failure.
         transfer.commit();
-        self.bind_prepared(program, scope, gen, &[(binder, handle)])?;
+        self.bind_prepared(program, scope, gen, &[(binder, handle)], None)?;
         self.binding_provenance.insert(binder.var_id, provenance);
         Ok(())
     }
@@ -4606,6 +4606,7 @@ where
                             lexical_scope,
                             generation,
                             &[(binder, handle)],
+                            checked.as_deref(),
                         )?;
                         self.binding_provenance
                             .insert(binder.var_id, Arc::clone(&provenance));
@@ -4644,7 +4645,13 @@ where
                 };
                 let bound: Vec<(&BoundBinder, PreparedHandle)> =
                     binders.iter().zip(fields).collect();
-                self.bind_prepared(program, lexical_scope, generation, &bound)?;
+                self.bind_prepared(
+                    program,
+                    lexical_scope,
+                    generation,
+                    &bound,
+                    checked.as_deref(),
+                )?;
                 for binder in binders {
                     self.binding_provenance
                         .insert(binder.var_id, Arc::clone(&provenance));
@@ -4723,7 +4730,21 @@ where
         scope: ScopeId,
         generation: Generation,
         bound: &[(&BoundBinder, PreparedHandle)],
+        checked: Option<&CheckedTurnCompletion>,
     ) -> Result<(), ResidentError> {
+        let binders = bound.iter().map(|(binder, _)| *binder).collect::<Vec<_>>();
+        let overlay_validation = checked
+            .map(|completion| completion.validates_private_overlay(&self.state, scope, &binders))
+            .transpose();
+        let private_overlay = match overlay_validation {
+            Ok(validation) => validation.unwrap_or(false),
+            Err(error) => {
+                if let Some(engine) = self.state.prepared_mut() {
+                    engine.release_all(bound.iter().map(|(_, handle)| *handle));
+                }
+                return Err(error.into());
+            }
+        };
         let scope_is_live = self.state.scope_tree().is_live(scope);
         let engine = self.state.require_prepared()?;
         if !scope_is_live {
@@ -4744,7 +4765,8 @@ where
                 }
             }
         }
-        for (index, ((binder, handle), root)) in bound.iter().zip(roots).enumerate() {
+        let mut entries = Vec::with_capacity(bound.len());
+        for ((binder, handle), root) in bound.iter().zip(roots) {
             // The identity a later turn's `GlobalDecl` names when it imports
             // this binder: its thin value module and name.
             let identity = SymbolIdentity {
@@ -4767,12 +4789,19 @@ where
                 defining_expr: None,
                 scope,
             };
-            if let Err(error) = self.state.bind_replacing_decl_in(scope, entry) {
-                if let Some(engine) = self.state.prepared_mut() {
-                    engine.release_all(bound[index..].iter().map(|(_, handle)| *handle));
-                }
-                return Err(error.into());
-            }
+            entries.push(entry);
+        }
+        if private_overlay {
+            self.state.bind_checked_private_values_in(
+                checked.expect("private overlay has its sealed completion owner"),
+                scope,
+                entries,
+                &binders,
+            )?;
+        } else {
+            self.state.bind_replacing_decls_in(scope, entries)?;
+        }
+        for _ in bound {
             self.advance_public_visibility(scope);
         }
         self.state.set_val_gen(generation);
@@ -5231,9 +5260,13 @@ where
                     .into());
                 }
             };
-            if let Err(error) =
-                self.bind_prepared(program, lexical_scope, generation, &[(page, page_handle)])
-            {
+            if let Err(error) = self.bind_prepared(
+                program,
+                lexical_scope,
+                generation,
+                &[(page, page_handle)],
+                None,
+            ) {
                 self.release_display_fields(metadata_handle, alias_handle)?;
                 return Err(error);
             }

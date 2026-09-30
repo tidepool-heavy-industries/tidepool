@@ -2370,6 +2370,58 @@ impl PersistentSession {
         Ok(MaterializationSetCommit { bindings })
     }
 
+    /// A sealed checked native item overlays Value heads in its exact private
+    /// scope. Its original declaration module remains available by qualification.
+    pub(crate) fn bind_checked_private_values_in(
+        &mut self,
+        completion: &super::admission::CheckedTurnCompletion,
+        scope: ScopeId,
+        entries: Vec<BindingEntry>,
+        binders: &[&super::BoundBinder],
+    ) -> Result<MaterializationSetCommit, SessionError> {
+        match completion.validates_private_overlay(self, scope, binders) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.discard_unbound_entries(entries);
+                return Err(SessionError::StaleStagedDeclaration);
+            }
+            Err(error) => {
+                self.discard_unbound_entries(entries);
+                return Err(error);
+            }
+        }
+        if entries.len() != binders.len()
+            || entries.iter().zip(binders).any(|(entry, binder)| {
+                entry.name.0 != binder.name
+                    || entry.id != SessionVarId::from_extract(binder.var_id)
+                    || entry.value.identity.module != binder.module
+                    || entry.value.identity.occurrence != binder.name
+                    || entry.value.identity.namespace != "value"
+                    || entry.value.identity.record_parent.is_some()
+            })
+        {
+            self.discard_unbound_entries(entries);
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        if !self.scopes.is_live(scope) {
+            self.discard_unbound_entries(entries);
+            return Err(SessionError::DeadScope(scope));
+        }
+        let bindings = entries
+            .into_iter()
+            .map(|entry| {
+                let receipt = ValuePlaneCommit {
+                    name: entry.name.0.clone(),
+                    module: entry.module,
+                };
+                self.binding_index.on_bind(&entry);
+                self.bindings.bind_in(scope, entry);
+                receipt
+            })
+            .collect();
+        Ok(MaterializationSetCommit { bindings })
+    }
+
     /// Root-scope [`Self::bind_replacing_decls_in`].
     pub fn bind_replacing_decls(
         &mut self,

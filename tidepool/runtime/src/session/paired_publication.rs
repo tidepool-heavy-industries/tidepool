@@ -58,6 +58,7 @@ pub struct FinalExecutionIntent {
     write_ids: Vec<SessionVarId>,
     source_keys: Vec<SourceLeaseKey>,
     head_replacements: Vec<DeclarationHeadReplacement>,
+    _completed_values: Vec<Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>>,
     reserved: Generation,
 }
 
@@ -416,6 +417,20 @@ pub(super) fn exact_retractions(
     Ok(exact)
 }
 
+pub(super) fn declaration_value_members(
+    lib: &SessionLib,
+    generation: Generation,
+) -> Result<BTreeSet<String>, SessionError> {
+    Ok(tip(lib, generation)?
+        .into_iter()
+        .flat_map(|tip| tip.exports)
+        .filter(|export| export.head.namespace == ExportNamespace::Type)
+        .flat_map(|export| export.children)
+        .filter(|identity| identity.namespace == ExportNamespace::Value)
+        .map(|identity| identity.occurrence)
+        .collect())
+}
+
 pub(super) fn recovery_instances(
     instances: &InstanceInventory,
     closure: &[ExportIdentity],
@@ -552,6 +567,7 @@ impl PersistentSession {
             source_keys,
             Some(admission.scope_lease.clone()),
             admission.durable_owner.clone(),
+            &admission.completed_values.lock(),
         )?;
         assert!(
             admission.final_intent.set(intent.clone()).is_ok(),
@@ -568,6 +584,10 @@ impl PersistentSession {
         source_keys: Vec<SourceLeaseKey>,
         private_scope_lease: Option<Arc<super::RuntimeLexicalScopeLease>>,
         durable_owner: Option<RecoveryPublicOwner>,
+        completed_values: &std::collections::HashMap<
+            SessionVarId,
+            super::admission::CertifiedPrivateValueWrite,
+        >,
     ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
         if private_scope == admitted.scope || !self.scope_tree().is_live(private_scope) {
             return Err(SessionError::DeadScope(private_scope));
@@ -651,10 +671,12 @@ impl PersistentSession {
                                     && identity.occurrence == entry.name.0
                             })
                     })
-                })
+                }) && completed_values
+                    .get(id)
+                    .is_none_or(|proof| !proof.matches(entry))
             })
         }) {
-            return Err(invalid_at(&lib.root, "a final value write overlaps a retained declaration without a certified retraction"));
+            return Err(invalid_at(&lib.root, "a final value write overlaps a retained declaration without certified private Value ownership or an exact retraction"));
         }
         let source_keys = source_keys
             .into_iter()
@@ -697,6 +719,14 @@ impl PersistentSession {
             private,
             private_base,
             writes,
+            _completed_values: write_ids
+                .iter()
+                .filter_map(|id| {
+                    completed_values
+                        .get(id)
+                        .map(|proof| proof.execution.clone())
+                })
+                .collect(),
             write_ids,
             source_keys,
             head_replacements,
@@ -811,6 +841,7 @@ impl PersistentSession {
             source_keys,
             None,
             Some(owner.clone()),
+            &std::collections::HashMap::new(),
         )?;
         self.restage_declaration_publication(owner, intent)
     }
