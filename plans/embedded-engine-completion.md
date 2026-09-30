@@ -6,6 +6,97 @@ precedence over compatibility and earlier implementation choices. Migrate
 consumers instead of retaining weak internal boundaries. Persisted formats need
 explicit migration/refusal. This document does not claim M2 acceptance.
 
+## Approved completion sequence — 2026-09-29
+
+This sequence supersedes conflicting earlier rollout and completion claims below.
+The user approved implementation after a source-based completion review. The
+finish line includes the new engine, the complete embedded application, native
+Buck delivery, and a separately approved live browser trial. Embedded becomes
+the default for new runs only after acceptance. Existing runs keep their recorded
+backend. Stock Codex remains independently usable; Codex is excluded from Buck.
+
+Starting revisions: main/Buck `b87f7a9b10`, joined engine `fb781d25a1`, M2 facade
+`cacd0ccf9e`, harness library `3ff873a86acdb7e640c25392d1b88e7412758a60`.
+The browser asset pin must match that library revision. Compiler, runtime and
+child-attachment WIP was saved under
+`target/completion-evidence/active-wip/20260930T000915Z` before implementation.
+
+### Application order and owners
+
+1. Root joins the accepted baselines and records each candidate's exact source
+   and tests. Compiler fixes parsed-quasiquote dependency evidence and rejects
+   incompatible certification request modes. Runtime closes real authored
+   admission, using reserved slots and exact lexical baselines rather than
+   allocator high-water equality. Harness closes actual host fork readiness and
+   diagnoses the capture-test stack overflow, retaining operation-phase evidence.
+2. Compiler issues exact multi-turn authored deltas and owned AcceptedJoin
+   receipts: original export/record-parent identities, dictionary-to-class and
+   axiom-to-family edges, selected instances and the full family consistency
+   closure. Include all consulted package interfaces, including lazy orphan and
+   family loads. Complete verified recursive/boot candidate reuse; unknown
+   compile-time dependencies remain misses. Carry products into durable resident
+   storage and close native demand/instance/reclamation acceptance.
+3. Runtime pairs declaration, binding and native-instance visibility under the
+   existing publication owner. Reserve durable sparse IDs before staging and
+   burn failures. Stage outside checkout; revalidate the complete graph and
+   admission snapshot; order cancellation against commit; rename the manifest
+   before a preflighted infallible live swap. Stale successes/rejections restage
+   without effects. Post-rename durability uncertainty stays published. Reopen
+   exact Authored/Join graphs and lost-value tombstones without source/effect,
+   heap, continuation or live-token replay. Version changed formats explicitly.
+4. Actor execution records own private scope, immutable source/tool leases,
+   continuations, controls, receipts and publication. Lifecycle stays actor-owned;
+   structured actor turns remain non-reentrant. Reuse the existing scheduler,
+   replay registry and checkout. Park compilation/external waits outside actor
+   handlers, fence completions by execution and continuation generation, and
+   scope cancellation/after-tool/request cleanup to the exact execution.
+5. Harness adds explicit capture-backed unfold beside ordinary deferred unfold.
+   Rust verifies every member's admitted checkpoint and selected scope, publishes
+   and releases a ready group before resuming the cell, aborts prepublication
+   failures, and retains successful children after later failure. An effectful
+   awaitWatch subscribes atomically through the existing request/watch owner and
+   parks without checkout; Await itself remains a dependency description.
+   Complete addressed browser input/control and full model/Haskell actor tree
+   projection, pending-call compaction/reconnect and honest host-loss behavior.
+6. Build owners introduce an embedded-only product with legacy Codex dependencies
+   disabled, including startup's executable discovery. Extend native Buck through
+   compiler/runtime, actor/facade, matched harness/browser and package assembly.
+   Keep generation, fixtures, compilation, linking and execution separately
+   keyed. Use standard native Haskell component granularity; custom module/SCC
+   rules are a measured follow-up. Nix supplies toolchains; the resident compiler
+   stays a runtime service. Keep the credential-file bridge explicit.
+
+### Required completion evidence
+
+- Actual resident cache miss/hit, dependency/boot/package invalidation,
+  source-hidden consumers, instance/family isolation, demand omission, rollback,
+  inherited versus fresh instances, and final-owner reclamation.
+- A parks, B publishes, A resumes without erasing B; completion-order shadowing;
+  old captures retain meaning; invalid joins expose no partial delta.
+- Two parked cells plus progressing third/control, both cancellation/commit
+  orders, stale completions, pre/post-rename faults, recovery and retained
+  uncertain cleanup.
+- An unfinished real hosted cell captures, launches two children, receives typed
+  results, then fails; children and capture remain usable. Cover release races,
+  mixed-context rejection, partial launch failure and real host-loop readiness.
+- Actual application/browser journey: raw Haskell, recursive tree, typed routing,
+  reload, raw/structured pending compaction, cancellation, authenticated reconnect
+  and explicit unavailable live state after host loss.
+- Required repository verification constituents at the final joined revision,
+  matching harness/web tests and native Buck packaged startup. Retain exact
+  nonzero executed counts, source/artifact hashes and logs. Demonstrate controlled
+  input invalidation and distinguish warm daemon reuse from action-cache hits.
+- Prepare exact task, model/round limits and budget for separate live approval.
+  The browser Sol/Luna trial must produce reviewed integrated work, checks,
+  retained trace and resource disposition. Only then switch new-run defaults.
+
+Root integrates shared interfaces and also implements a concrete parcel. Up to
+8 workers own disjoint compiler, runtime, actor, harness, browser, build and review
+work; Sol owns cross-component mechanisms and Luna bounded components. Preserve
+WIP and daemons, use admitted concurrent builds, and keep remote Buck disabled
+until its separate infrastructure gates pass. Publish dependencies before root
+when credentials are available; otherwise retain verified bundles.
+
 ## Starting evidence
 
 | Owner | Checkpoint | Evidence / limit |
