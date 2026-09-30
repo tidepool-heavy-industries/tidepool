@@ -16,6 +16,7 @@ pub mod actor_host;
 pub mod compile_report;
 pub mod exomonad;
 pub mod haskell_sources;
+pub mod model_turn;
 #[cfg(feature = "codex-compat")]
 mod host_dynamic_tools;
 pub mod run_map;

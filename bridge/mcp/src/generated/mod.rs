@@ -21,6 +21,7 @@ pub mod introspection;
 pub mod jev;
 pub mod journal;
 pub mod lookup;
+pub mod model_call;
 pub mod notifications;
 pub mod read_state;
 pub mod recipe_check;
@@ -55,6 +56,7 @@ pub use introspection::*;
 pub use jev::*;
 pub use journal::*;
 pub use lookup::*;
+pub use model_call::*;
 pub use notifications::*;
 pub use read_state::*;
 pub use recipe_check::*;
@@ -100,6 +102,7 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         agent_session_decl(),
         reflect_decl(),
         source_decl(),
+        model_call_decl(),
         bound_worktree_decl(),
         worktree_registry_decl(),
         worktree_allocation_decl(),
@@ -122,6 +125,7 @@ pub(crate) const CURATED_EFFECTS: &[&str] = &[
     "Forks",
     "AgentTools",
     "AgentSession",
+    "ModelCall",
     "BoundWorktree",
     "WorktreeRegistry",
     "WorktreeAllocation",
@@ -309,6 +313,15 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
         ],
     ),
     ("AgentSession", &["AgentSessionWith", "AgentAttachWith"]),
+    (
+        "ModelCall",
+        &[
+            "ModelStartWith",
+            "ModelResumeWith",
+            "ModelAnnotateWith",
+            "ModelCloseWith",
+        ],
+    ),
     (
         "BoundWorktree",
         &[

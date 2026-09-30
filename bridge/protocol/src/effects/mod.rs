@@ -39,6 +39,7 @@ pub mod introspection;
 pub mod jev;
 pub mod journal;
 pub mod lookup;
+pub mod model;
 pub mod notifications;
 pub mod read_state;
 pub mod recipe_check;
@@ -97,6 +98,7 @@ pub fn all() -> Vec<Effect> {
         agent_session::agent_session(),
         reflect::reflect(),
         source::source(),
+        model::model(),
         worktree_facades::bound_worktree(),
         worktree_facades::worktree_registry(),
         worktree_facades::worktree_allocation(),
