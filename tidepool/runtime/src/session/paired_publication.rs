@@ -10,8 +10,8 @@ use tidepool_repr::{Generation, SessionModule, SessionVarId};
 use tidepool_toolchain::declaration_join::{
     AcceptedJoin, CertifiedAuthoredDeclaration, CertifiedDeclarationJoin, DeclarationExport,
     DeclarationJoinInput, DeclarationWrite, ExactDeclarationContext, ExactLexicalNode,
-    ExactModuleIdentity, ExportIdentity, InstanceInventory, JoinDecision, JoinRejection,
-    ModuleSnapshot, RejectedJoin, ReservedJoin,
+    ExactModuleIdentity, ExportIdentity, ExportNamespace, InstanceInventory, JoinDecision,
+    JoinRejection, ModuleSnapshot, RejectedJoin, ReservedJoin,
 };
 
 use super::persistent::PersistentSession;
@@ -52,7 +52,17 @@ pub struct FinalExecutionIntent {
     writes: Vec<AuthoredWrite>,
     write_ids: Vec<SessionVarId>,
     source_keys: Vec<SourceLeaseKey>,
+    head_replacements: Vec<DeclarationHeadReplacement>,
     reserved: Generation,
+}
+
+/// Name-winning publication is separate from an exact withdrawal. A runtime
+/// value replaces the current term head even when another execution replaced
+/// the admitted declaration while this execution was suspended.
+#[derive(Clone)]
+struct DeclarationHeadReplacement {
+    namespace: ExportNamespace,
+    occurrence: String,
 }
 
 /// One current public graph paired with the unchanged final execution intent.
@@ -146,11 +156,24 @@ fn tip(lib: &SessionLib, generation: Generation) -> Result<Option<DeclarationTip
             joined.evidence.family_closure().to_vec(),
         )
     } else if let Some(authored) = lib.log.certified_authored_at(generation) {
-        (
-            authored.lexical_exports().to_vec(),
-            authored.instances().clone(),
-            authored.family_closure().to_vec(),
-        )
+        let inherited = turn
+            .parent
+            .map(|parent| tip(lib, parent))
+            .transpose()?
+            .flatten();
+        let instances = merge_instances(
+            &lib.root,
+            inherited
+                .as_ref()
+                .map(|tip| tip.instances.clone())
+                .unwrap_or_default(),
+            authored.instances(),
+        )?;
+        let mut families = inherited.map(|tip| tip.families).unwrap_or_default();
+        families.extend_from_slice(authored.family_closure());
+        families.sort();
+        families.dedup();
+        (authored.lexical_exports().to_vec(), instances, families)
     } else {
         return Err(invalid_at(
             &lib.root,
@@ -249,16 +272,26 @@ fn extend_admitted_surface(
         .collect::<Vec<_>>();
     let mut pending = roots.clone();
     let mut lexical = BTreeMap::new();
+    let inherited_edges = prior
+        .lexical
+        .iter()
+        .map(|node| (&node.owner, node.imports.as_slice()))
+        .collect::<BTreeMap<_, _>>();
     while let Some(owner) = pending.pop() {
         if lexical.contains_key(&owner) {
             continue;
         }
         let edges = imports
             .get(&owner)
+            .copied()
+            .or_else(|| inherited_edges.get(&owner).copied())
             .ok_or_else(|| {
                 invalid_at(
                     path,
-                    "admitted surface root lacks exact original source import evidence",
+                    format!(
+                        "admitted surface root {}:{} lacks exact original source import evidence",
+                        owner.unit, owner.module
+                    ),
                 )
             })?
             .to_vec();
@@ -416,6 +449,63 @@ impl PersistentSession {
     /// writes shadowed within the same execution do not become final winners.
     pub fn freeze_execution_intent(
         &mut self,
+        admission: &super::PrivateExecutionAdmission,
+        write_ids: Vec<SessionVarId>,
+        source_keys: Vec<SourceLeaseKey>,
+    ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
+        if admission.view().session() != self.lib().session_id()
+            || self.binding_tip_id(admission.private_scope()) != Some(admission.binding_tip())
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        if let Some(intent) = admission.final_intent.get() {
+            if self
+                .public_visibility_snapshot_in(admission.private_scope())
+                .as_ref()
+                != Some(&intent.private)
+            {
+                return Err(SessionError::StaleStagedDeclaration);
+            }
+            let mut writes = write_ids
+                .into_iter()
+                .filter(|id| {
+                    intent
+                        .private
+                        .bindings
+                        .iter()
+                        .any(|(_, current)| current == id)
+                })
+                .collect::<Vec<_>>();
+            writes.sort_by_key(|id| id.raw());
+            writes.dedup();
+            let keys = source_keys
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            if writes != intent.write_ids || keys != intent.source_keys {
+                return Err(invalid_at(
+                    &self.lib().root,
+                    "execution final intent is already frozen with different writes",
+                ));
+            }
+            return Ok(intent.clone());
+        }
+        let intent = self.freeze_execution_intent_from_snapshot(
+            admission.admitted_public(),
+            admission.private_scope(),
+            write_ids,
+            source_keys,
+        )?;
+        assert!(
+            admission.final_intent.set(intent.clone()).is_ok(),
+            "exclusive session checkout finalizes an admission once"
+        );
+        Ok(intent)
+    }
+
+    fn freeze_execution_intent_from_snapshot(
+        &mut self,
         admitted: &PublicVisibilitySnapshot,
         private_scope: ScopeId,
         write_ids: Vec<SessionVarId>,
@@ -497,11 +587,37 @@ impl PersistentSession {
             .collect::<Vec<_>>();
         write_ids.sort_by_key(|id| id.raw());
         write_ids.dedup();
+        let final_declarations =
+            tip(lib, private.declaration_tip)?.ok_or(SessionError::StaleStagedDeclaration)?;
+        if write_ids.iter().any(|id| {
+            self.bindings().get(*id).is_some_and(|entry| {
+                final_declarations.exports.iter().any(|export| {
+                    std::iter::once(&export.head)
+                        .chain(export.children.iter())
+                        .any(|identity| identity.occurrence == entry.name.0)
+                })
+            })
+        }) {
+            return Err(invalid_at(&lib.root, "a final value write overlaps a retained declaration without a certified retraction"));
+        }
         let source_keys = source_keys
             .into_iter()
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
+        let head_replacements = write_ids
+            .iter()
+            .map(|id| {
+                let entry = self
+                    .bindings()
+                    .get(*id)
+                    .expect("final binding was validated");
+                DeclarationHeadReplacement {
+                    namespace: ExportNamespace::Value,
+                    occurrence: entry.name.0.clone(),
+                }
+            })
+            .collect();
         self.bindings()
             .prepare_exact_publication_in(
                 self.scope_tree(),
@@ -519,6 +635,7 @@ impl PersistentSession {
             writes,
             write_ids,
             source_keys,
+            head_replacements,
             reserved,
         }))
     }
@@ -561,7 +678,8 @@ impl PersistentSession {
         })
     }
 
-    pub fn snapshot_declaration_publication(
+    #[cfg(test)]
+    pub(crate) fn snapshot_declaration_publication(
         &mut self,
         owner: RecoveryPublicOwner,
         admitted: &PublicVisibilitySnapshot,
@@ -569,8 +687,12 @@ impl PersistentSession {
         write_ids: Vec<SessionVarId>,
         source_keys: Vec<SourceLeaseKey>,
     ) -> Result<DeclarationPublicationBase, SessionError> {
-        let intent =
-            self.freeze_execution_intent(admitted, private_scope, write_ids, source_keys)?;
+        let intent = self.freeze_execution_intent_from_snapshot(
+            admitted,
+            private_scope,
+            write_ids,
+            source_keys,
+        )?;
         self.restage_declaration_publication(owner, intent)
     }
 
@@ -695,11 +817,13 @@ impl DeclarationPublicationBase {
         let mut writes = Vec::new();
         for write in &self.intent.writes {
             expected_exports.retain(|export| !write.retractions.contains(&export.head));
-            extend_exports_by_head(
-                &mut expected_exports,
-                write.evidence.introduced_exports(),
-                |export| export.head.occurrence.as_str(),
-            );
+            for introduced in write.evidence.introduced_exports() {
+                expected_exports.retain(|export| {
+                    export.head.namespace != introduced.head.namespace
+                        || export.head.occurrence != introduced.head.occurrence
+                });
+                expected_exports.push(introduced.clone());
+            }
             // Selection is exact and additive. A missing private head or a
             // retracted spelling never removes a latest-public dfun/axiom.
             expected_instances = merge_instances(
@@ -715,6 +839,12 @@ impl DeclarationPublicationBase {
                 retractions: write.retractions.clone(),
             });
         }
+        expected_exports.retain(|export| {
+            !self.intent.head_replacements.iter().any(|replacement| {
+                replacement.namespace == export.head.namespace
+                    && replacement.occurrence == export.head.occurrence
+            })
+        });
         family_closure.sort();
         family_closure.dedup();
         let input = DeclarationJoinInput {
@@ -977,6 +1107,7 @@ impl AcceptedDeclarationPublication {
                 })
             })
             .flat_map(|export| std::iter::once(&export.head).chain(export.children.iter()))
+            .filter(|identity| identity.namespace != ExportNamespace::Type)
             .map(|identity| identity.occurrence.clone())
             .collect::<Vec<_>>();
         let final_bindings = base
@@ -1640,5 +1771,208 @@ mod tests {
             retained.exact_declaration_context().unwrap(),
             &context
         ));
+    }
+    fn commit_source(session: &mut PersistentSession, scope: ScopeId, source: &str) -> Generation {
+        session.define_scoped_in(scope, &[source]).unwrap()
+    }
+
+    #[test]
+    fn paired_rich_fixed_suffix_rebases_nonempty_base_and_final_value_winners() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("declarations.json");
+        let mut lib =
+            SessionLib::open(SessionId(996), root.path(), ModuleEnv::standalone_default()).unwrap();
+        lib.attach_recovery_graph_v2(&path).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let owner = RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/rich-fixed").unwrap(),
+            1,
+        )
+        .unwrap();
+        session
+            .bind_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        let base_admission = session.begin_private_execution(public).unwrap();
+        let base_original = commit_source(
+            &mut session,
+            base_admission.private_scope(),
+            include_str!("fixtures/paired-rich-base.hs"),
+        );
+        let base = accepted(
+            session
+                .snapshot_declaration_publication(
+                    owner.clone(),
+                    base_admission.admitted_public(),
+                    base_admission.private_scope(),
+                    vec![],
+                    vec![],
+                )
+                .unwrap(),
+        );
+        assert_eq!(base.receipt.instances().classes.len(), 1);
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(base.stage().unwrap(), &PublicationDecision::new())
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+
+        let a = session.begin_private_execution(public).unwrap();
+        let b = session.begin_private_execution(public).unwrap();
+        assert_ne!(a.admitted_public().declaration_tip, Generation(0));
+        let a_first = commit_source(
+            &mut session,
+            a.private_scope(),
+            include_str!("fixtures/paired-rich-A1.hs"),
+        );
+        let a_second = commit_source(
+            &mut session,
+            a.private_scope(),
+            include_str!("fixtures/paired-rich-A2.hs"),
+        );
+        session
+            .lib_mut()
+            .retract_many_in(
+                a.private_scope(),
+                &["retractValue".into(), "baseValue".into()],
+            )
+            .unwrap();
+        let value = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "retractValue",
+            401,
+        );
+        let value_id = value.id;
+        session.bind_in(a.private_scope(), value).unwrap();
+        let intent = session
+            .freeze_execution_intent(&a, vec![value_id], vec![])
+            .unwrap();
+        assert_eq!(intent.writes.len(), 3);
+        assert_eq!(intent.writes[2].retractions.len(), 2);
+        let high_water = session.lib().log.generation();
+        let repeated = session
+            .freeze_execution_intent(&a, vec![value_id], vec![])
+            .unwrap();
+        assert!(Arc::ptr_eq(&intent, &repeated));
+        assert_eq!(session.lib().log.generation(), high_water);
+        assert!(session.freeze_execution_intent(&a, vec![], vec![]).is_err());
+        let reserved = intent.reserved_generation();
+        let old_a = accepted(
+            session
+                .restage_declaration_publication(owner.clone(), intent.clone())
+                .unwrap(),
+        )
+        .stage()
+        .unwrap();
+
+        let b_original = commit_source(
+            &mut session,
+            b.private_scope(),
+            include_str!("fixtures/paired-rich-B.hs"),
+        );
+        let b_publication = accepted(
+            session
+                .snapshot_declaration_publication(
+                    owner.clone(),
+                    b.admitted_public(),
+                    b.private_scope(),
+                    vec![],
+                    vec![],
+                )
+                .unwrap(),
+        );
+        assert!(b_publication.base.reserved > reserved);
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(
+                    b_publication.stage().unwrap(),
+                    &PublicationDecision::new()
+                )
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+        let decision = PublicationDecision::new();
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(old_a, &decision)
+                .unwrap(),
+            PublicManifestCommit::Stale
+        );
+        assert_eq!(decision.phase(), PublicationPhase::Running);
+        let publication = accepted(
+            session
+                .restage_declaration_publication(owner.clone(), intent.clone())
+                .unwrap(),
+        );
+        assert_eq!(publication.base.reserved, reserved);
+        assert!(Arc::ptr_eq(publication.intent(), &intent));
+        let proof = publication.receipt.clone();
+        assert_eq!(proof.instances().classes.len(), 2);
+        assert_eq!(proof.instances().families.len(), 2);
+        assert!(proof.family_closure().len() >= 2);
+        for (name, original) in [
+            ("firstPrivate", a_first),
+            ("privateWinner", a_second),
+            ("fromLaterPublic", b_original),
+            ("baseValue", b_original),
+        ] {
+            let export = proof
+                .exports()
+                .iter()
+                .find(|export| export.head.occurrence == name)
+                .unwrap();
+            assert_eq!(
+                export.head.module,
+                SessionModule::lib(original).module_name()
+            );
+        }
+        assert!(!proof
+            .exports()
+            .iter()
+            .any(|export| export.head.occurrence == "retractValue"));
+        let record = proof
+            .exports()
+            .iter()
+            .find(|export| export.head.occurrence == "PublicRecord")
+            .unwrap();
+        assert_eq!(
+            record.head.module,
+            SessionModule::lib(base_original).module_name()
+        );
+        assert!(record
+            .children
+            .iter()
+            .any(|child| child.occurrence == "publicField"
+                && child.record_parent.as_deref() == Some("PublicRecord")));
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(publication.stage().unwrap(), &decision)
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+        assert_eq!(session.lib().scope_tip(public), reserved);
+        assert!(session
+            .public_visibility_snapshot_in(public)
+            .unwrap()
+            .bindings
+            .iter()
+            .any(|(name, id)| name == "retractValue" && *id == value_id));
+        let graph = recovery::read_v2(&path, root.path())
+            .unwrap()
+            .unwrap()
+            .graph;
+        let node = graph.nodes.iter().find(|node| node.id == reserved).unwrap();
+        assert!(node
+            .implementation_refs
+            .iter()
+            .any(|reference| *reference > reserved));
+        assert_eq!(node.instances.classes.len(), 2);
+        assert_eq!(
+            node.lexical_roots[0].module,
+            SessionModule::lib(reserved).module_name()
+        );
+        session.retire_scope(a.private_scope());
+        assert!(session.bindings().get(value_id).is_some());
     }
 }

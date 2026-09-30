@@ -1327,6 +1327,7 @@ pub(crate) struct ExecutionPrivateScope {
     pub private_scope: tidepool_codegen::scope::ScopeId,
     pub admitted_public: tidepool_runtime::session::PublicVisibilitySnapshot,
     pub decision: Arc<tidepool_runtime::session::PublicationDecision>,
+    pub admission: Arc<tidepool_runtime::session::PrivateExecutionAdmission>,
 }
 
 impl<H, O> Clone for ResidentActorRunner<H, O> {
@@ -6388,23 +6389,17 @@ where
         self.access
             .with_machine(context, move |session, context, _| {
                 let public_scope = context.placement.lexical_scope;
-                let admitted_public = session
-                    .public_visibility_snapshot_in(public_scope)
-                    .ok_or_else(|| {
-                        ResidentActorWorkbenchError::ActorProtocol(
-                            "workbench public lexical scope is unavailable".into(),
-                        )
-                    })?;
-                let private_scope = session.mint_detached_scope(public_scope).ok_or_else(|| {
-                    ResidentActorWorkbenchError::ActorProtocol(
-                        "workbench public lexical scope was retired".into(),
-                    )
-                })?;
+                let admission = Arc::new(session.begin_private_execution(public_scope).map_err(
+                    |error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)),
+                )?);
+                let admitted_public = admission.admitted_public().clone();
+                let private_scope = admission.private_scope();
                 Ok(ExecutionPrivateScope {
                     public_scope,
                     private_scope,
                     admitted_public,
                     decision,
+                    admission,
                 })
             })
             .await

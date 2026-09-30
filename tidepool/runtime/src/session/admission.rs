@@ -2,7 +2,7 @@
 
 use std::any::Any;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tidepool_codegen::binding_table::{BindingTipId, SourceLeaseKey};
 use tidepool_codegen::scope::ScopeId;
@@ -18,6 +18,7 @@ pub struct PrivateExecutionAdmission {
     private_scope: ScopeId,
     view: SessionCompileView,
     binding_tip: BindingTipId,
+    pub(super) final_intent: OnceLock<Arc<super::FinalExecutionIntent>>,
 }
 
 impl PrivateExecutionAdmission {
@@ -129,6 +130,7 @@ impl PersistentSession {
             private_scope,
             view,
             binding_tip,
+            final_intent: OnceLock::new(),
         })
     }
 
@@ -183,6 +185,13 @@ impl PersistentSession {
         frame(&scope.0.to_le_bytes());
         frame(&visibility.epoch.to_le_bytes());
         frame(&visibility.declaration_tip.0.to_le_bytes());
+        match visibility.machine_incarnation {
+            Some(incarnation) => {
+                frame(&[1]);
+                frame(&incarnation.0.to_le_bytes());
+            }
+            None => frame(&[0]),
+        }
         frame(&view.next_value_generation().0.to_le_bytes());
         frame(&view.admission_digest());
         if let Some(context) = view.exact_declaration_context() {
