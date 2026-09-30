@@ -315,7 +315,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
     if candidates.len() != 1
         || candidates[0].boot
         || candidates[0].product != ProductAvailability::Ready
-        || std::fs::canonicalize(&candidates[0].source)? != std::fs::canonicalize(source_path)?
+        || !candidates[0].is_generated_source()
     {
         return Err(contract(
             "planned original is absent or ambiguous in its final source graph",
