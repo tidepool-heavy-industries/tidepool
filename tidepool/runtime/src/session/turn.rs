@@ -5300,12 +5300,15 @@ mod tests {
             let CompileError::Diagnostics(diagnostics) = failure else {
                 panic!("a dependency type error must remain a structured source failure")
             };
-            assert!(diagnostics.iter().any(|diagnostic| {
-                diagnostic.severity == crate::diag::DiagnosticSeverity::Error
-                    && diagnostic.span.as_ref().is_some_and(|span| {
-                        Path::new(&span.file) == dependency && span.start_line == 3
-                    })
-            }), "the original dependency source span must survive the load barrier");
+            assert!(
+                diagnostics.iter().any(|diagnostic| {
+                    diagnostic.severity == crate::diag::DiagnosticSeverity::Error
+                        && diagnostic.span.as_ref().is_some_and(|span| {
+                            Path::new(&span.file) == dependency && span.start_line == 3
+                        })
+                }),
+                "the original dependency source span must survive the load barrier"
+            );
         };
         assert_source_failure(ordinary().unwrap_err());
         assert_source_failure(
@@ -5324,7 +5327,7 @@ mod tests {
         .unwrap();
         ordinary().unwrap();
         let (_artifacts, first) = compile_public_checked_offer(&admission, specification);
-        state.begin_checked_prefix(admission, &first).unwrap();
+        state.begin_checked_prefix(admission, first).unwrap();
     }
 
     #[test]
