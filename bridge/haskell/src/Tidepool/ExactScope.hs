@@ -10,7 +10,7 @@ import Codec.CBOR.Decoding
 import Codec.CBOR.Read (deserialiseFromBytes)
 import qualified Codec.CBOR.Encoding as E
 import Codec.CBOR.Write (toStrictByteString)
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, try, throwIO)
 import Control.Monad (replicateM, unless, when)
 import qualified Crypto.Hash.SHA256 as SHA
 import qualified Data.ByteString as BS
@@ -23,6 +23,7 @@ import Data.Word (Word64)
 import Numeric (showHex)
 import System.Directory (getFileSize, createDirectory, createDirectoryIfMissing, makeAbsolute)
 import System.FilePath (isAbsolute, takeDirectory, (</>))
+import System.IO.Error (isAlreadyExistsError)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.PackageWitness
@@ -114,8 +115,10 @@ writeExactCompilation compilation evidence = do
     (fail "exact compile source differs from consumed source")
   unchanged <- revalidateDependencyEvidence evidence
   unless unchanged (fail "exact compile consumed source changed before receipt")
-  let directory = takeDirectory path </> ".exact-compilations" </> show transaction
-      snapshot = directory </> "source.hs"
+  let parent = takeDirectory path </> ".exact-compilations"
+  createDirectoryIfMissing True parent
+  directory <- reserveCompilationDirectory parent transaction
+  let snapshot = directory </> "source.hs"
       encodeArray values = E.encodeListLen (fromIntegral (length values)) <> mconcat values
       text = E.encodeString . T.pack
       importRow (qualifier, name, boot, unit) = encodeArray
@@ -127,10 +130,25 @@ writeExactCompilation compilation evidence = do
         , text (scopeSemanticSha256 scope), text path, text (digest bytes)
         , text snapshot, text (renderDependencyEvidence evidence)
         , encodeArray (map moduleRow imports)]
-  createDirectoryIfMissing True (takeDirectory directory)
-  createDirectory directory
   BS.writeFile snapshot bytes
   BS.writeFile (directory </> "receipt.cbor") (toStrictByteString receipt)
+
+-- One worker request can check, refine and compile several sources. The
+-- request identity correlates diagnostics; it cannot identify one immutable
+-- compilation snapshot. Atomic directory creation also keeps concurrent
+-- writers from replacing an earlier successful receipt.
+reserveCompilationDirectory :: FilePath -> Word64 -> IO FilePath
+reserveCompilationDirectory parent transaction = attempt (0 :: Int)
+  where
+    attempt ordinal
+      | ordinal >= 4096 = fail "excessive exact compilations in one request"
+      | otherwise = do
+          let path = parent </> (show transaction ++ "-" ++ show ordinal)
+          reserved <- try (createDirectory path) :: IO (Either IOException ())
+          case reserved of
+            Right () -> pure path
+            Left failure | isAlreadyExistsError failure -> attempt (ordinal + 1)
+            Left failure -> throwIO failure
 
 decodeScope :: Decoder s ExactScope
 decodeScope = do
