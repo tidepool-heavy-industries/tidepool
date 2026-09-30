@@ -928,7 +928,12 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
           tmplWithImports <- insertCheckedTypeImports typeImports tmplSrc
           spliced <- case admitted of
             Nothing -> pure (spliceTemplate tmplWithImports turnSrc bindersStr)
-            Just admission -> checkedRecipeSource admission tmplWithImports turnSrc
+            Just admission -> do
+              withPrefix <- if null (itemValueImports admission) then pure tmplWithImports else
+                replaceRecipeMarker "default (Int, Double, Text)\n"
+                  (concatMap (\(moduleName',names) -> "import " ++ moduleName' ++ " (" ++ intercalate ", " names ++ ")\n")
+                    (itemValueImports admission) ++ "default (Int, Double, Text)\n") tmplWithImports
+              checkedRecipeSource admission withPrefix turnSrc
           if requestActivationPreview args
             then do
               let replace body = T.unpack (T.replace (T.pack "{{ACTIVATION_PREVIEW}}") (T.pack body) (T.pack spliced))
@@ -1267,7 +1272,7 @@ attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled admitt
             let admission = CheckedItemAdmission (checkedAdmissionDigest cellAdmission) (shaHex receipt) 0
                   (shaHex (TE.encodeUtf8 (T.pack turnSrc))) "bind" (sbBinders sb)
                   (checkedTurnTemplates cellAdmission) (checkedInjectedModules cellAdmission)
-                  signatures Nothing Nothing generation (checkedAdmissionDigest cellAdmission)
+                  signatures Nothing Nothing generation (checkedAdmissionDigest cellAdmission) []
             validateCheckedItemAdmission args admission turnSrc sb
             pure (Just admission)
         let typeImports = if isJust admitted then [] else nub (concatMap checkedPinImports [pin | Just pin <- pins])

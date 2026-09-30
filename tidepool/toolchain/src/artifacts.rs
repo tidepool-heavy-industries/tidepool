@@ -333,6 +333,7 @@ impl ModuleCandidateOffer {
             generation,
         };
         checked_item.validate_templates(templates)?;
+        checked_item.validate_include(include)?;
         let authorization = checked_item.authorization(producer, context.semantic_sha256())?;
         Ok(Self {
             selected: None,
@@ -367,6 +368,7 @@ impl ModuleCandidateOffer {
             &exact.request_sha256,
             specification,
             exact.validate_outputs(root)?,
+            &self.include,
         )
     }
 

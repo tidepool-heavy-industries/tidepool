@@ -21,7 +21,7 @@ import GHC.Iface.Env (lookupOrig)
 import GHC.Iface.Load (importDecl)
 import GHC.Tc.Utils.Monad (initIfaceLoad)
 import qualified GHC.Data.Maybe as MErr
-import GHC.Types.Name (nameModule_maybe, nameOccName)
+import GHC.Types.Name (nameModule_maybe, nameOccName, wiredInNameTyThing_maybe)
 import GHC.Types.Name.Occurrence
   ( isDataOcc, mkDataOcc, mkTcOcc, occNameString )
 import GHC.Types.Name.Ppr (mkNamePprCtx)
@@ -100,14 +100,17 @@ rewriteCheckedAnnotations env annotations parsed = do
         "data" -> pure (mkDataOcc (signatureOccurrence entry))
         _ -> fail "checked signature has an invalid namespace"
       name <- initIfaceLoad env (lookupOrig owner occurrence)
-      found <- lookupType env name
+      found <- case wiredInNameTyThing_maybe name of
+        Just thing -> pure (Just thing)
+        Nothing -> lookupType env name
       exists <- case found of
         Just _ -> pure True
         Nothing | isHomeUnit (hsc_home_unit env) (moduleUnit owner) -> pure False
         Nothing -> initIfaceLoad env (importDecl name) >>= \loaded -> pure $ case loaded of
           MErr.Succeeded _ -> True
           MErr.Failed _ -> False
-      unless exists (fail "checked signature Name is unavailable in the admitted environment")
+      unless exists (fail ("checked signature Name is unavailable in the admitted environment: "
+        ++ signatureUnit entry ++ ":" ++ signatureModule entry ++ ":" ++ signatureNamespace entry ++ ":" ++ signatureOccurrence entry))
       pure (entry, name)
     pure (binder, names)
   counts <- newIORef []

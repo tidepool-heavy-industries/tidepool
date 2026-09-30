@@ -13,6 +13,7 @@ haskell_library(
     name = "tidepool_extract_internal",
     srcs = {
         "Tidepool/Binders.hs": "src/Tidepool/Binders.hs",
+        "Tidepool/CheckedCell.hs": "src/Tidepool/CheckedCell.hs",
         "Tidepool/CborEncode.hs": "src/Tidepool/CborEncode.hs",
         "Tidepool/DependencyEvidence.hs": "src/Tidepool/DependencyEvidence.hs",
         "Tidepool/DeclarationJoin.hs": "src/Tidepool/DeclarationJoin.hs",
@@ -24,6 +25,7 @@ haskell_library(
         "Tidepool/FatIface.hs": "src/Tidepool/FatIface.hs",
         "Tidepool/GhcPipeline.hs": "src/Tidepool/GhcPipeline.hs",
         "Tidepool/ExactHydration.hs": "src/Tidepool/ExactHydration.hs",
+        "Tidepool/ExactScope.hs": "src/Tidepool/ExactScope.hs",
         "Tidepool/HostBindingAuthority.hs": "src/Tidepool/HostBindingAuthority.hs",
         "Tidepool/Identity.hs": "src/Tidepool/Identity.hs",
         "Tidepool/Introspection.hs": "src/Tidepool/Introspection.hs",

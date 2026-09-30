@@ -277,16 +277,150 @@ pub struct CellCheck {
     admission: Option<Arc<super::RuntimeCellAdmission>>,
 }
 
+/// Editable diagnostic observations carry no checked execution authority.
+#[derive(Clone, Debug, Default)]
+pub struct CellCheckObservations {
+    pub prologue: SourcePrologue,
+    pub items: Vec<CellAnalysisItem>,
+    pub pins: Vec<CheckedBinderPin>,
+    pub checked_source: String,
+    pub checked_cell_text: String,
+    pub compile_generation: u64,
+    pub compile_view_evidence: String,
+    pub expression_plans: Vec<CheckedExpressionPlan>,
+    pub warnings: Vec<crate::diag::ExtractDiag>,
+}
+
+impl From<CellCheckObservations> for CellCheck {
+    fn from(observation: CellCheckObservations) -> Self {
+        Self {
+            prologue: observation.prologue,
+            items: observation.items,
+            pins: observation.pins,
+            checked_source: observation.checked_source,
+            checked_cell_text: observation.checked_cell_text,
+            compile_generation: observation.compile_generation,
+            compile_view_evidence: observation.compile_view_evidence,
+            expression_plans: observation.expression_plans,
+            warnings: observation.warnings,
+            authority: None,
+            admission: None,
+        }
+    }
+}
+
 impl CellCheck {
     pub fn checked_item(&self, item_index: usize) -> Result<ExactCheckedItem, CompileError> {
-        self.authority
+        let authority = self.authority.as_ref().ok_or_else(|| {
+            CompileError::ExtractFailed(
+                "cell observations have no runtime-admitted compiler authority".into(),
+            )
+        })?;
+        if self.checked_source != authority.checked_source()
+            || self.items.len() != authority.item_count()
+        {
+            return Err(CompileError::ExtractFailed(
+                "checked module observation was edited".into(),
+            ));
+        }
+        let item = authority.item(item_index)?;
+        let observation = self.items.get(item_index).ok_or_else(|| {
+            CompileError::ExtractFailed("checked item observation is absent".into())
+        })?;
+        let kind = match observation.verdict.kind {
+            TurnKind::Decl => tidepool_toolchain::checked_cell::CheckedItemKind::Declaration,
+            TurnKind::Bind => tidepool_toolchain::checked_cell::CheckedItemKind::Bind,
+            TurnKind::Expr => tidepool_toolchain::checked_cell::CheckedItemKind::Expression,
+        };
+        let pins = if observation.verdict.kind == TurnKind::Bind {
+            observation
+                .verdict
+                .binders
+                .iter()
+                .map(|binder| {
+                    let matches = self
+                        .pins
+                        .iter()
+                        .filter(|pin| {
+                            pin.key == format!("__tidepool_cell_pin_{item_index}_{binder}")
+                        })
+                        .collect::<Vec<_>>();
+                    match matches.as_slice() {
+                        [pin] => Ok(encode_checked_pin(pin)),
+                        _ => Err(CompileError::ExtractFailed(
+                            "checked pin observation missing or duplicated".into(),
+                        )),
+                    }
+                })
+                .collect::<Result<Vec<_>, CompileError>>()?
+        } else {
+            Vec::new()
+        };
+        let expressions = self
+            .expression_plans
+            .iter()
+            .filter(|plan| plan.key == format!("__tidepool_cell_expr_{item_index}"))
+            .collect::<Vec<_>>();
+        let expression = match expressions.as_slice() {
+            [] => None,
+            [plan] => Some(encode_checked_expression(plan)),
+            _ => {
+                return Err(CompileError::ExtractFailed(
+                    "checked expression observation duplicated".into(),
+                ))
+            }
+        };
+        item.validate_observations(
+            &observation.source,
+            kind,
+            &observation.verdict.binders,
+            &pins,
+            expression.as_ref(),
+        )?;
+        Ok(item)
+    }
+
+    pub fn attach_fold_prefix(
+        &self,
+        folded: &mut TurnResult,
+        item_admission: Arc<super::RuntimeCheckedItemAdmission>,
+    ) -> Result<(), CompileError> {
+        let prefix = item_admission.prefix();
+        let admission = self
+            .admission
             .as_ref()
-            .ok_or_else(|| {
-                CompileError::ExtractFailed(
-                    "cell observations have no runtime-admitted compiler authority".into(),
-                )
-            })?
-            .item(item_index)
+            .ok_or_else(|| CompileError::ExtractFailed("fold has no runtime admission".into()))?;
+        if !Arc::ptr_eq(admission, prefix.admission()) {
+            return Err(CompileError::ExtractFailed(
+                "fold prefix belongs to another runtime admission".into(),
+            ));
+        }
+        let item = self.checked_item(0)?;
+        let TurnResult::Bind { compiled, .. } = folded else {
+            return Err(CompileError::ExtractFailed(
+                "fold is not the checked bind".into(),
+            ));
+        };
+        let certification = compiled
+            .certification
+            .as_mut()
+            .ok_or_else(|| CompileError::ExtractFailed("fold has no sealed products".into()))?;
+        let execution = certification.checked_execution.as_ref().ok_or_else(|| {
+            CompileError::ExtractFailed("fold has no checked execution proof".into())
+        })?;
+        if execution.item() != item_admission.item()
+            || execution.generation() != item_admission.generation().0
+            || !execution.item().same_cell(&item)
+            || execution.item().index() != 0
+            || item_admission.snapshot().compiler_prefix().next_item() != 0
+            || !execution.matches_target(&compiled.prepared)
+        {
+            return Err(CompileError::ExtractFailed(
+                "fold authority differs from the next checked item".into(),
+            ));
+        }
+        certification.checked_prefix = Some(prefix.clone());
+        Ok(())
     }
 
     pub fn admission(&self) -> Option<&Arc<super::RuntimeCellAdmission>> {
@@ -333,7 +467,7 @@ impl CellCheck {
         plan.authority = self
             .authority
             .as_ref()
-            .map(|authority| authority.item(item_index))
+            .map(|_| self.checked_item(item_index))
             .transpose()?;
         Ok(plan)
     }
@@ -369,12 +503,57 @@ impl CellCheck {
                 pin.authority = self
                     .authority
                     .as_ref()
-                    .map(|authority| authority.item(item_index))
+                    .map(|_| self.checked_item(item_index))
                     .transpose()?;
                 Ok(pin)
             })
             .collect()
     }
+}
+
+fn encode_nominal_heads(heads: &[NominalHead]) -> CborValue {
+    CborValue::Array(
+        heads
+            .iter()
+            .map(|head| {
+                CborValue::Array(vec![
+                    CborValue::Text(head.unit.clone()),
+                    CborValue::Text(head.module.clone()),
+                    CborValue::Text(head.name.clone()),
+                ])
+            })
+            .collect(),
+    )
+}
+fn encode_checked_pin(pin: &CheckedBinderPin) -> CborValue {
+    CborValue::Array(vec![
+        CborValue::Text(pin.key.clone()),
+        CborValue::Text(pin.ty.clone()),
+        encode_nominal_heads(&pin.heads),
+        CborValue::Array(pin.imports.iter().cloned().map(CborValue::Text).collect()),
+    ])
+}
+fn encode_checked_expression(plan: &CheckedExpressionPlan) -> CborValue {
+    CborValue::Array(vec![
+        CborValue::Text(plan.key.clone()),
+        CborValue::Text(
+            match plan.lift {
+                ExpressionLift::Effectful => "effectful",
+                ExpressionLift::Pure => "pure",
+            }
+            .into(),
+        ),
+        CborValue::Text(
+            match plan.presentation {
+                ExpressionPresentation::Rendered => "rendered",
+                ExpressionPresentation::Opaque => "opaque",
+            }
+            .into(),
+        ),
+        CborValue::Text(plan.type_display.clone()),
+        encode_nominal_heads(&plan.heads),
+        CborValue::Array(plan.imports.iter().cloned().map(CborValue::Text).collect()),
+    ])
 }
 
 /// Checking failure with the GHC source plan, when lexing/classification succeeded.
@@ -2584,7 +2763,45 @@ fn check_cell_impl(
 /// When `req.verdict` is supplied, a missing template for the verdict's
 /// selector is caught here, before any process is spawned.
 pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
-    run_turn_with_pin(req, None, false)
+    run_turn_with_pin(req, None, false, None)
+}
+
+/// Compile only the next item of a runtime-owned completed prefix. Body,
+/// verdict, annotation Names and wrapper recipes come from its same check.
+pub fn run_checked_item(
+    req: TurnRequest<'_>,
+    item_admission: Arc<super::RuntimeCheckedItemAdmission>,
+) -> Result<TurnResult, TurnFailure> {
+    let prefix = item_admission.prefix();
+    let item = item_admission.item();
+    let snapshot = item_admission.snapshot();
+    let view = snapshot.view();
+    let verdict = req.verdict.as_ref().ok_or_else(|| {
+        CompileError::ExtractFailed("checked item requires its sealed verdict".into())
+    })?;
+    let kind = match verdict.kind {
+        TurnKind::Decl => tidepool_toolchain::checked_cell::CheckedItemKind::Declaration,
+        TurnKind::Bind => tidepool_toolchain::checked_cell::CheckedItemKind::Bind,
+        TurnKind::Expr => tidepool_toolchain::checked_cell::CheckedItemKind::Expression,
+    };
+    if req.turn_text != item.source()
+        || kind != item.kind()
+        || verdict.binders != item.binders()
+        || req.session_id != Some(view.session())
+        || req.session_root != view.session_root()
+        || req.exact_context.as_deref() != view.exact_declaration_context().map(Arc::as_ref)
+        || req.inject_modules != snapshot.compiler_prefix().injected_modules()
+        || req.gen != item_admission.generation().0
+        || req.target.is_some()
+        || item.admission_digest() != prefix.admission().digest()
+        || item.index() != snapshot.compiler_prefix().next_item()
+    {
+        return Err(CompileError::ExtractFailed(
+            "checked item request differs from its protected admission and completed prefix".into(),
+        )
+        .into());
+    }
+    run_turn_with_pin(req, None, false, Some(item_admission))
 }
 
 /// Compile the internal input-mount/preview module. Its bind shape is known
@@ -2598,7 +2815,7 @@ pub fn run_activation_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailu
         )
         .into());
     }
-    run_turn_with_pin(req, None, true)
+    run_turn_with_pin(req, None, true, None)
 }
 
 /// One module supplies the mount's checked type and an independently callable
@@ -2632,6 +2849,12 @@ pub fn run_turn_pinned(
     req: TurnRequest<'_>,
     pins: &[CheckedBinderPin],
 ) -> Result<TurnResult, TurnFailure> {
+    if pins.iter().any(|pin| pin.authority.is_some()) {
+        return Err(CompileError::ExtractFailed(
+            "runtime-admitted pins require the dedicated checked-item recipe".into(),
+        )
+        .into());
+    }
     let Some(TurnClassification {
         kind: TurnKind::Bind,
         binders,
@@ -2689,6 +2912,7 @@ pub fn run_turn_pinned(
         },
         Some(&pin),
         false,
+        None,
     )
 }
 
@@ -2727,6 +2951,7 @@ fn run_turn_with_pin(
     req: TurnRequest<'_>,
     pin: Option<&str>,
     activation_preview: bool,
+    checked: Option<Arc<super::RuntimeCheckedItemAdmission>>,
 ) -> Result<TurnResult, TurnFailure> {
     let verdict_arg = match &req.verdict {
         Some(TurnClassification { kind, binders, .. }) => {
@@ -2750,6 +2975,21 @@ fn run_turn_with_pin(
     };
 
     let temp = TempDir::new()?;
+    let snapshot = checked.as_ref().map(|admission| admission.snapshot());
+    let admitted_root = temp.path().join("admitted-values");
+    let input_root = if let Some(snapshot) = &snapshot {
+        std::fs::create_dir_all(&admitted_root)?;
+        for interface in snapshot.interfaces() {
+            let path = admitted_root.join(interface.module().relative_hi_path());
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, interface.bytes())?;
+        }
+        admitted_root.as_path()
+    } else {
+        req.session_root
+    };
     let turn_path = temp.path().join("turn.txt");
     std::fs::write(&turn_path, req.turn_text)?;
     let turn_out_path = temp.path().join("turn.cbor");
@@ -2769,7 +3009,7 @@ fn run_turn_with_pin(
     cmd.turn_out(&turn_out_path)
         .output_dir(temp.path())
         .includes(req.include)
-        .session_root(req.session_root)
+        .session_root(input_root)
         .inject_vals(req.inject_modules)
         .bind_gen(req.gen);
     if let Some(session_id) = req.session_id {
@@ -2790,12 +3030,33 @@ fn run_turn_with_pin(
 
     let endpoint = cmd.bind().map_err(map_notfound)?;
     let include: Vec<_> = req.include.iter().map(|path| path.to_path_buf()).collect();
-    let offer = select_module_candidate_offer(
-        endpoint.identity().producer_bytes(),
-        &include,
-        temp.path(),
-        req.exact_context.clone(),
-    )?;
+    let offer = if let Some(admission) = &checked {
+        ModuleCandidateOffer::select_checked_item(
+            endpoint.identity().producer_bytes(),
+            &include,
+            temp.path(),
+            req.exact_context.clone().ok_or_else(|| {
+                CompileError::ExtractFailed(
+                    "checked item requires protected exact declarations".into(),
+                )
+            })?,
+            admission.item().clone(),
+            admission.snapshot().compiler_prefix().clone(),
+            admission.digest(),
+            req.gen,
+            &req.templates
+                .iter()
+                .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                .collect::<Vec<_>>(),
+        )?
+    } else {
+        select_module_candidate_offer(
+            endpoint.identity().producer_bytes(),
+            &include,
+            temp.path(),
+            req.exact_context.clone(),
+        )?
+    };
     if let Some(manifest) = offer.exact_scope_path() {
         cmd.session_artifacts(manifest);
     }
@@ -2844,7 +3105,7 @@ fn run_turn_with_pin(
         });
     }
 
-    decode_turn_output_dir(temp.path(), &offer).map_err(|error| TurnFailure {
+    let mut result = decode_turn_output_dir(temp.path(), &offer).map_err(|error| TurnFailure {
         error: tidepool_toolchain::artifacts::retain_compiler_failure(
             temp.path(),
             &output.stderr,
@@ -2865,7 +3126,49 @@ fn run_turn_with_pin(
                     DecodedTurnOut::Decl { .. } => None,
                 }
             }),
-    })
+    })?;
+    if let Some(admission) = checked {
+        let compiled = match &mut result {
+            TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => compiled,
+            TurnResult::Decl(_) => {
+                return Err(
+                    CompileError::ExtractFailed("checked declaration is unproved".into()).into(),
+                )
+            }
+        };
+        let certification = compiled.certification.as_mut().ok_or_else(|| {
+            CompileError::ExtractFailed("checked item lacks sealed native products".into())
+        })?;
+        if certification.checked_execution.is_none() {
+            return Err(CompileError::ExtractFailed(
+                "checked item lacks a sealed execution recipe".into(),
+            )
+            .into());
+        }
+        certification.checked_item = Some(admission.item().clone());
+        certification.checked_prefix = Some(admission.prefix().clone());
+        if let Some((module, bytes)) = certification
+            .checked_execution
+            .as_ref()
+            .and_then(|execution| execution.value_interface())
+        {
+            let generation = module
+                .strip_prefix("Tidepool.Session.Val.G")
+                .and_then(|suffix| suffix.parse::<u64>().ok())
+                .ok_or_else(|| {
+                    CompileError::ExtractFailed("checked binding has no exact Val.G owner".into())
+                })?;
+            let output = req.session_root.join(
+                tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation))
+                    .relative_hi_path(),
+            );
+            if let Some(parent) = output.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(output, bytes)?;
+        }
+    }
+    Ok(result)
 }
 
 pub(super) fn select_module_candidate_offer(
@@ -4585,9 +4888,13 @@ mod tests {
             .is_err());
         let pins = checked.pins_for_item(0).unwrap();
         assert_eq!(pins[0].ty, "Int");
+        let prefix = session
+            .begin_checked_prefix(admission.clone(), item.clone())
+            .unwrap();
+        let item_admission = session.admit_checked_item(prefix, item.clone()).unwrap();
         let TurnResult::Bind {
             bound, compiled, ..
-        } = run_turn_pinned(
+        } = run_checked_item(
             TurnRequest {
                 exact_context: Some(context.clone()),
                 session_id: Some(view.session()),
@@ -4596,12 +4903,12 @@ mod tests {
                 include: &include,
                 session_root: view.session_root(),
                 inject_modules: &injected,
-                gen: view.next_value_generation().0 + 1,
+                gen: view.next_value_generation().0,
                 verdict: Some(checked.items[0].verdict.clone()),
                 target: None,
                 retained_imports: &[],
             },
-            &pins,
+            item_admission,
         )
         .unwrap()
         else {
@@ -4610,6 +4917,14 @@ mod tests {
         assert_eq!(bound[0].name, "result");
         assert_eq!(bound[0].type_display, "Int");
         let certification = compiled.certification.unwrap();
+        certification
+            .validate_checked_bind(&compiled.prepared, view.next_value_generation().0, &bound)
+            .unwrap();
+        let mut edited = bound.clone();
+        edited[0].name = "edited".into();
+        assert!(certification
+            .validate_checked_bind(&compiled.prepared, view.next_value_generation().0, &edited)
+            .is_err());
         assert!(
             certification
                 .groups

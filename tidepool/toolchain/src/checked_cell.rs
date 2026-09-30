@@ -142,9 +142,13 @@ pub struct ExactCheckedCell {
     evidence: crate::cache::DependencyEvidence,
     observations: Vec<u8>,
     items: Vec<CheckedItem>,
+    include: Vec<std::path::PathBuf>,
 }
 
 impl ExactCheckedCell {
+    pub fn item_count(&self) -> usize {
+        self.items.len()
+    }
     pub fn admission_digest(&self) -> [u8; 32] {
         self.specification.admission_digest
     }
@@ -270,6 +274,21 @@ impl ExactCompiledPrefix {
         self.completed
             .iter()
             .filter_map(|completed| completed.value_interface())
+    }
+    fn value_imports(&self) -> Vec<(String, Vec<String>)> {
+        let mut winners = std::collections::BTreeMap::new();
+        for completed in &self.completed {
+            if let Some((module, _)) = completed.value_interface() {
+                for name in completed.item.binders() {
+                    winners.insert(name.clone(), module.to_owned());
+                }
+            }
+        }
+        let mut imports = std::collections::BTreeMap::<String, Vec<String>>::new();
+        for (name, module) in winners {
+            imports.entry(module).or_default().push(name);
+        }
+        imports.into_iter().collect()
     }
 }
 
@@ -425,6 +444,15 @@ impl CheckedItemOffer {
             expected.expression.clone().unwrap_or(Value::Null),
             Value::Integer(self.generation.into()),
             text(hex(&self.runtime_prefix_digest)),
+            Value::Array(
+                self.prefix
+                    .value_imports()
+                    .iter()
+                    .map(|(module, names)| {
+                        array([text(module), Value::Array(names.iter().map(text).collect())])
+                    })
+                    .collect(),
+            ),
         ]))
     }
     pub(crate) fn validate_templates(
@@ -433,6 +461,15 @@ impl CheckedItemOffer {
     ) -> Result<(), CompileError> {
         if templates != &self.item.cell.specification.turn_templates {
             return Err(failure("checked-item wrapper was edited after admission"));
+        }
+        Ok(())
+    }
+    pub(crate) fn validate_include(
+        &self,
+        include: &[std::path::PathBuf],
+    ) -> Result<(), CompileError> {
+        if include != self.item.cell.include {
+            return Err(failure("checked item include search order changed"));
         }
         Ok(())
     }
@@ -549,6 +586,7 @@ pub(crate) fn admit_checked_cell(
     request_digest: &str,
     specification: &CheckedCellSpecification,
     admissions: Vec<ExactSourceAdmission>,
+    include: &[std::path::PathBuf],
 ) -> Result<Arc<ExactCheckedCell>, CompileError> {
     let receipt = read(root.join("checked-cell.cbor"), 8 * 1024 * 1024)?;
     let value = decode(&receipt)?;
@@ -680,6 +718,7 @@ pub(crate) fn admit_checked_cell(
         evidence: source.evidence,
         observations,
         items,
+        include: include.to_vec(),
     }))
 }
 
