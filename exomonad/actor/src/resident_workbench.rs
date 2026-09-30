@@ -15270,8 +15270,8 @@ mod request_tests {
     }
 
     #[tokio::test]
-    async fn captured_haskell_binding_outlives_failed_parent_and_released_token_for_admitted_child()
-    {
+    async fn captured_haskell_binding_outlives_failed_parent_and_released_token_for_two_delayed_children(
+    ) {
         let (machines, context, source, _root) = actor_registry_fixture();
         let workbench =
             ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
@@ -15290,19 +15290,26 @@ mod request_tests {
             )
             .await
             .expect("parent Haskell binding compiles");
-        if let ResidentWorkbenchStep::Running { fragment, outcome } = parent {
-            workbench
+        let parent = match parent {
+            ResidentWorkbenchStep::Running { fragment, outcome } => workbench
                 .settle_item(context.clone(), *fragment, *outcome)
                 .await
-                .expect("parent binding commits");
-        }
+                .expect("parent binding commits"),
+            step => step,
+        };
+        assert!(matches!(parent, ResidentWorkbenchStep::Committed { .. }));
 
-        let captured_scope = runner
-            .capture_context_scope(context.clone())
+        let (captured_scope, retained) = runner
+            .capture_retained_context_scope(context.clone())
             .await
-            .expect("capture exact parent Haskell environment");
+            .expect("capture independently owned parent Haskell environment");
+        let retained_scope = retained.scope();
         let groups = crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default());
-        let token = groups.capture_checkpoint(
+        let boundary = tidepool_runtime::session::WorkbenchForkBoundary {
+            thread_id: "thread".into(),
+            call_id: "unfinished-parent".into(),
+        };
+        let token = groups.capture_checkpoint_with_retained_scope(
             "real Haskell context".into(),
             context.actor,
             crate::EffectiveRole::root(),
@@ -15311,101 +15318,164 @@ mod request_tests {
             crate::CheckpointSourceLayer::default(),
             context.placement.session,
             captured_scope,
-            tidepool_runtime::session::WorkbenchForkBoundary {
-                thread_id: "thread".into(),
-                call_id: "call".into(),
-            },
+            boundary.clone(),
+            None,
+            retained,
         );
         groups
             .settle_checkpoint(&token, context.placement.session, true)
             .expect("Haskell checkpoint answer delivered");
-
-        let failed = workbench
-            .begin_fragment_split(
-                context.clone(),
-                source.clone(),
-                Vec::new(),
-                ParsedBlock {
-                    ordinal: 1,
-                    total: 1,
-                    source: "sleep (minutes 0) >> error \"parent failed\"".into(),
-                },
-                None,
-            )
-            .await
-            .expect("parent failing continuation compiles");
-        let ResidentWorkbenchStep::Running { outcome, .. } = failed else {
-            panic!("parent failing continuation runs");
+        let first = groups
+            .admitted_checkpoint(&token, context.placement.session)
+            .expect("first child admitted before parent completion")
+            .0;
+        let second = groups
+            .admitted_checkpoint(&token, context.placement.session)
+            .expect("second child admitted before parent completion")
+            .0;
+        let (release_first, first_ready) = tokio::sync::oneshot::channel();
+        let (release_second, second_ready) = tokio::sync::oneshot::channel();
+        let delayed_child = |admitted: crate::lineage::CheckpointLease,
+                             ready: tokio::sync::oneshot::Receiver<()>,
+                             actor_id| {
+            let runner = &runner;
+            let workbench = &workbench;
+            let context = context.clone();
+            async move {
+                // Production start_child retains this exact share before its
+                // asynchronous workspace admission. Model that await here;
+                // the actor integration fixture exercises the actual adapter.
+                let capsule = Arc::clone(admitted.retained_scope().unwrap());
+                ready.await.expect("workspace admission resumes");
+                let provisional = workbench
+                    .access
+                    .with_machine(context.clone(), |session, _, _| {
+                        Ok(session.mint_isolated_scope())
+                    })
+                    .await
+                    .expect("child provisional scope");
+                let mut child = context;
+                child.actor = crate::ActorRef::first(crate::ActorId(actor_id));
+                child.placement.lexical_scope = provisional;
+                child.placement.lexical_scope = runner
+                    .remint_checkpoint_child_scope_from_lease(child.clone(), capsule, provisional)
+                    .await
+                    .expect("released token cannot erase admitted lexical state");
+                (child, admitted)
+            }
         };
-        let ResidentOutcome::Suspended { hole, .. } = *outcome else {
-            panic!("parent suspends before failure");
-        };
-        assert!(matches!(
-            runner.resume_unit(context.clone(), hole).await,
-            Err(ResidentActorWorkbenchError::Delivered(_))
-        ));
-        groups.retire_actor(context.actor);
-        assert!(groups.retains_session(context.placement.session));
-
-        let provisional = workbench
-            .access
-            .with_machine(context.clone(), |session, _, _| {
-                Ok(session.mint_isolated_scope())
-            })
-            .await
-            .expect("child provisional scope");
-        let mut child = context.clone();
-        child.actor = crate::ActorRef::first(crate::ActorId(2));
-        child.placement.lexical_scope = provisional;
-        let child_scope = runner
-            .remint_checkpoint_child_scope(child.clone(), captured_scope, provisional)
-            .await
-            .expect("child owns independent inherited scope");
-        child.placement.lexical_scope = child_scope;
-        let retired = groups
-            .release_checkpoint(&token, context.placement.session)
-            .expect("release token after child admission");
-        runner
-            .retire_checkpoint_scopes(context.placement.session, retired.into_iter().collect())
-            .await
-            .expect("release captured scope by session owner");
-        groups
-            .confirm_checkpoint_release(&token, context.placement.session, captured_scope)
-            .expect("retirement acknowledged");
-        assert!(!groups.retains_session(context.placement.session));
-        assert!(matches!(
-            groups.checkpoint(&token, context.placement.session),
-            Err(crate::CheckpointRefusal::ReleasedCheckpoint)
-        ));
-
-        let child_step = workbench
-            .begin_fragment_split(
-                child.clone(),
-                source,
-                Vec::new(),
-                ParsedBlock {
-                    ordinal: 1,
-                    total: 1,
-                    source: "childValue <- pure (capturedValue + 1)".into(),
-                },
-                None,
-            )
-            .await
-            .expect("admitted child compiles against captured Haskell binding");
-        if let ResidentWorkbenchStep::Running { fragment, outcome } = child_step {
-            workbench
-                .settle_item(child.clone(), *fragment, *outcome)
+        let retire_original = async {
+            let failed = workbench
+                .begin_fragment_split(
+                    context.clone(),
+                    source.clone(),
+                    Vec::new(),
+                    ParsedBlock {
+                        ordinal: 1,
+                        total: 1,
+                        source: "sleep (minutes 0) >> error \"parent failed\"".into(),
+                    },
+                    None,
+                )
                 .await
-                .expect("child uses captured binding after token release");
-        }
-        let names = workbench
+                .expect("parent failing continuation compiles");
+            let ResidentWorkbenchStep::Running { outcome, .. } = failed else {
+                panic!("parent failing continuation runs");
+            };
+            let ResidentOutcome::Suspended { hole, .. } = *outcome else {
+                panic!("parent suspends before failure");
+            };
+            assert!(matches!(
+                runner.resume_unit(context.clone(), hole).await,
+                Err(ResidentActorWorkbenchError::Delivered(_))
+            ));
+            assert!(groups
+                .settle_checkpoints(context.actor, &boundary, false)
+                .is_empty());
+            groups.retire_actor(context.actor);
+            let retired = groups
+                .release_checkpoint(&token, context.placement.session)
+                .expect("release token while both children await workspace admission");
+            runner
+                .retire_checkpoint_scopes(context.placement.session, retired.into_iter().collect())
+                .await
+                .expect("original captured scope retires before remint");
+            groups
+                .confirm_checkpoint_release(&token, context.placement.session, captured_scope)
+                .expect("original scope retirement acknowledged");
+            assert!(groups.retains_session(context.placement.session));
+            assert!(matches!(
+                groups.admitted_checkpoint(&token, context.placement.session),
+                Err(crate::CheckpointRefusal::ReleasedCheckpoint)
+            ));
+            release_first.send(()).unwrap();
+            release_second.send(()).unwrap();
+        };
+        let ((first, first_lease), (second, second_lease), ()) = tokio::join!(
+            delayed_child(first, first_ready, 2),
+            delayed_child(second, second_ready, 3),
+            retire_original,
+        );
+        drop(first_lease);
+        assert!(groups.retains_session(context.placement.session));
+        drop(second_lease);
+        assert!(!groups.retains_session(context.placement.session));
+        workbench
             .access
-            .with_machine(child, move |session, context, _| {
-                Ok(session.binding_names_in(context.placement.lexical_scope))
+            .with_machine(context.clone(), |session, context, _| {
+                // Ordinary owner admission reaps the dropped lexical capsule.
+                let temporary = session.retain_lexical_scope(ScopeId::ROOT)?;
+                let scope = temporary.scope();
+                drop(temporary);
+                session.retire_scope(scope);
+                assert!(session.compile_view_in(retained_scope).is_none());
+                session.retire_scope(context.placement.lexical_scope);
+                Ok(())
             })
             .await
-            .expect("inspect child scope");
-        assert!(names.contains(&"childValue".to_owned()));
+            .expect("capsule and failed parent release their roots");
+
+        for child in [first, second] {
+            let step = workbench
+                .begin_fragment_split(
+                    child.clone(),
+                    source.clone(),
+                    Vec::new(),
+                    ParsedBlock {
+                        ordinal: 1,
+                        total: 1,
+                        source: "capturedValue + 1".into(),
+                    },
+                    None,
+                )
+                .await
+                .expect("child compiles against inherited binding after final capsule release");
+            let step = match step {
+                ResidentWorkbenchStep::Running { fragment, outcome } => workbench
+                    .settle_item(child.clone(), *fragment, *outcome)
+                    .await
+                    .expect("child uses independently retained binding"),
+                step => step,
+            };
+            let ResidentWorkbenchStep::Committed { output, .. } = step else {
+                panic!("child value did not commit");
+            };
+            assert_eq!(output.trim(), "42", "actual inherited value must render");
+            workbench
+                .access
+                .with_machine(child.clone(), |session, context, _| {
+                    let scope = context.placement.lexical_scope;
+                    assert!(session
+                        .binding_names_in(scope)
+                        .contains(&"capturedValue".into()));
+                    session.retire_scope(scope);
+                    assert!(session.compile_view_in(scope).is_none());
+                    assert_eq!(session.scope_binding_count(scope), 0);
+                    Ok(())
+                })
+                .await
+                .expect("last child releases inherited binding ownership");
+        }
     }
 
     #[tokio::test]
