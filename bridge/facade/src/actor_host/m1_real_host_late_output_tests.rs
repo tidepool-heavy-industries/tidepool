@@ -22,6 +22,7 @@ struct PendingCellTransport {
     declared_tools: StdMutex<Option<Vec<serde_json::Value>>>,
     compaction_seen: mpsc::UnboundedSender<()>,
     compaction_release: AsyncMutex<Option<oneshot::Receiver<()>>>,
+    before_compaction: mpsc::UnboundedSender<(ResponsesRequest, oneshot::Sender<ResponsesTurn>)>,
     successor: mpsc::UnboundedSender<(ResponsesRequest, oneshot::Sender<ResponsesTurn>)>,
     late_output: mpsc::UnboundedSender<ResponsesRequest>,
 }
@@ -39,6 +40,12 @@ fn final_turn(response_id: &str, text: &str) -> ResponsesTurn {
     }
 }
 
+fn usage_turn(response_id: &str, text: &str, input_tokens: u64) -> ResponsesTurn {
+    let mut turn = final_turn(response_id, text);
+    turn.usage.input_tokens = input_tokens;
+    turn
+}
+
 fn output_for_call(request: &ResponsesRequest) -> impl Iterator<Item = &harness::item::Item> {
     request.input.iter().filter(|item| {
         item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == CELL_CALL_ID
@@ -46,11 +53,7 @@ fn output_for_call(request: &ResponsesRequest) -> impl Iterator<Item = &harness:
 }
 
 fn retains_declared_tools(transport: &PendingCellTransport, request: &ResponsesRequest) -> bool {
-    let current = request
-        .tools
-        .iter()
-        .map(|tool| tool.0.clone())
-        .collect::<Vec<_>>();
+    let current = request.tools.iter().cloned().collect::<Vec<_>>();
     transport.declared_tools.lock().unwrap().as_ref() == Some(&current)
 }
 
@@ -75,31 +78,27 @@ impl ResponsesTransport for PendingCellTransport {
 
         match self.normal_rounds.fetch_add(1, Ordering::SeqCst) + 1 {
             1 => {
-                if !request.tools.iter().any(|tool| tool.0["name"] == "haskell") {
+                if !request.tools.iter().any(|tool| tool["name"] == "haskell") {
                     return Err(TransportError::Stream(
                         "the real root declaration did not expose the Haskell tool".into(),
                     ));
                 }
-                *self.declared_tools.lock().unwrap() =
-                    Some(request.tools.iter().map(|tool| tool.0.clone()).collect());
+                *self.declared_tools.lock().unwrap() = Some(request.tools.clone());
                 Ok(ResponsesTurn {
                     response_id: "m1-late-cell-start".into(),
                     items: vec![harness::item::Item(json!({
                         "type":"custom_tool_call",
                         "call_id":CELL_CALL_ID,
                         "name":"haskell",
-                        "input":"do { sleep (seconds 8); pure (40 + 2 :: Int) }"
+                        "input":"do { sleep (seconds 30); pure (40 + 2 :: Int) }"
                     }))],
-                    usage: Usage {
-                        input_tokens: 100_001,
-                        ..Usage::default()
-                    },
+                    usage: Usage::default(),
                 })
             }
             2 => {
                 if !retains_declared_tools(self, &request) {
                     return Err(TransportError::Stream(
-                        "post-compaction tool declarations changed during the resident call".into(),
+                        "pre-compaction tool declarations changed during the resident call".into(),
                     ));
                 }
                 if !request
@@ -117,6 +116,30 @@ impl ResponsesTransport for PendingCellTransport {
                     ));
                 }
                 let (reply, response) = oneshot::channel();
+                self.before_compaction
+                    .send((request, reply))
+                    .map_err(|_| TransportError::Stream("test dropped pending request".into()))?;
+                response
+                    .await
+                    .map_err(|_| TransportError::Stream("test dropped pending response".into()))
+            }
+            3 => {
+                if !retains_declared_tools(self, &request) {
+                    return Err(TransportError::Stream(
+                        "post-compaction tool declarations changed during the resident call".into(),
+                    ));
+                }
+                if !request
+                    .input
+                    .iter()
+                    .any(|item| item.0["call_id"] == CELL_CALL_ID)
+                    || output_for_call(&request).next().is_some()
+                {
+                    return Err(TransportError::Stream(
+                        "post-compaction request did not preserve exactly the pending call".into(),
+                    ));
+                }
+                let (reply, response) = oneshot::channel();
                 self.successor
                     .send((request, reply))
                     .map_err(|_| TransportError::Stream("test dropped successor request".into()))?;
@@ -124,7 +147,7 @@ impl ResponsesTransport for PendingCellTransport {
                     .await
                     .map_err(|_| TransportError::Stream("test dropped successor response".into()))
             }
-            3 => {
+            4 => {
                 if !retains_declared_tools(self, &request) {
                     return Err(TransportError::Stream(
                         "late-output tool declarations changed during the resident call".into(),
@@ -158,8 +181,8 @@ impl ResponsesTransport for PendingCellTransport {
     }
 }
 
-async fn wait_for_cell_state(host: &RunningBrowserHost, computing: bool) {
-    tokio::time::timeout(Duration::from_secs(15), async {
+async fn wait_for_cell_state(host: &RunningBrowserHost, computing: bool, timeout: Duration) {
+    tokio::time::timeout(timeout, async {
         while host.campaign.actor.hosted_cell_computing() != computing {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -210,6 +233,7 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
 
     let (compaction_tx, mut compaction_rx) = mpsc::unbounded_channel();
     let (compaction_release_tx, compaction_release_rx) = oneshot::channel();
+    let (before_compaction_tx, mut before_compaction_rx) = mpsc::unbounded_channel();
     let (successor_tx, mut successor_rx) = mpsc::unbounded_channel();
     let (late_output_tx, mut late_output_rx) = mpsc::unbounded_channel();
     let transport: Arc<dyn ResponsesTransport> = Arc::new(PendingCellTransport {
@@ -217,6 +241,7 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
         declared_tools: StdMutex::new(None),
         compaction_seen: compaction_tx,
         compaction_release: AsyncMutex::new(Some(compaction_release_rx)),
+        before_compaction: before_compaction_tx,
         successor: successor_tx,
         late_output: late_output_tx,
     });
@@ -251,11 +276,31 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
         FIRST_INPUT,
     )
     .await;
+    let (pending_request, pending_reply) =
+        tokio::time::timeout(Duration::from_secs(60), before_compaction_rx.recv())
+            .await
+            .expect("provider did not receive the pending-call turn")
+            .expect("provider dropped the pending-call turn");
+    assert!(
+        pending_request
+            .input
+            .iter()
+            .any(|item| item.0["call_id"] == CELL_CALL_ID)
+    );
+    assert_eq!(output_for_call(&pending_request).count(), 0);
+    wait_for_cell_state(&host, true, Duration::from_secs(180)).await;
+    pending_reply
+        .send(usage_turn(
+            "m1-late-cell-trigger-compaction",
+            "The resident operation is still running.",
+            100_001,
+        ))
+        .expect("Engine stopped before compaction threshold was applied");
     tokio::time::timeout(Duration::from_secs(30), compaction_rx.recv())
         .await
         .expect("provider did not enter compaction")
         .expect("provider dropped compaction signal");
-    wait_for_cell_state(&host, true).await;
+    wait_for_cell_state(&host, true, Duration::from_secs(30)).await;
     compaction_release_tx
         .send(())
         .expect("compaction request was no longer waiting");
@@ -272,7 +317,7 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
             .any(|item| item.0["call_id"] == CELL_CALL_ID)
     );
     assert_eq!(output_for_call(&successor_request).count(), 0);
-    wait_for_cell_state(&host, true).await;
+    wait_for_cell_state(&host, true, Duration::from_secs(30)).await;
     successor_reply
         .send(final_turn(
             "m1-late-cell-waiting",
@@ -280,7 +325,7 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
         ))
         .expect("Engine stopped before pending output could settle");
 
-    wait_for_cell_state(&host, false).await;
+    wait_for_cell_state(&host, false, Duration::from_secs(60)).await;
     submit_host_input(
         &client,
         host.address,
