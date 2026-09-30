@@ -4030,6 +4030,48 @@ mod ambiguity_advice_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn generic_tool_policy_certifies_canonical_constraint_tuple_selector() {
+        use tidepool_repr::{Generation, SessionModule};
+        use tidepool_testing::effect_surface::TestEffectSurface;
+        use tidepool_toolchain::artifacts::{compile_invocation, CompileInvocation};
+
+        tidepool_testing::eval_harness::require_extract();
+        let surface = TestEffectSurface::minimal(&[tidepool_mcp::agent_tools_decl()])
+            .expect("owned AgentTools effect surface");
+        let source_root = tempfile::tempdir().unwrap();
+        let path = source_root
+            .path()
+            .join(SessionModule::lib(Generation(1)).relative_hs_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, include_str!("fixtures/constraint-tuple-G1.hs")).unwrap();
+        let mut includes = vec![source_root.path().to_path_buf()];
+        includes.extend_from_slice(surface.include_paths());
+        let artifacts = compile_invocation(&CompileInvocation {
+            source: "module TidepoolConstraintTupleProbe where\nimport qualified Tidepool.Session.Lib.G1 as Original\nresult = Original.policy\n",
+            targets: &["result"],
+            include: &includes,
+            fallback_module_name: "TidepoolConstraintTupleProbe",
+        }, |_, _, _| {}).expect("generic policy must retain a complete package witness");
+        let imports = artifacts
+            .certified_groups
+            .iter()
+            .flat_map(|group| group.imports())
+            .chain(
+                artifacts
+                    .targets
+                    .values()
+                    .flat_map(|target| target.pending_imports.iter()),
+            );
+        assert!(imports.into_iter().any(|owner| matches!(owner,
+            PendingImportOwner::Package { unit, module, binder, interface_digest }
+                if binder.occurrence == "$p1CTuple2"
+                    && unit == &binder.unit
+                    && module == &binder.module
+                    && *interface_digest != [0; 32]
+        )), "generic policy must certify the original constraint-tuple selector as an exact package import");
+    }
+
     /// Force tests that replace `TIDEPOOL_EXTRACT` to exercise that process
     /// boundary even when the surrounding test runner owns a compile daemon.
     /// Each nextest case has its own process, but it still inherits the
