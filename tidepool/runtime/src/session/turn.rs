@@ -5053,10 +5053,14 @@ mod tests {
         let original_product = certificate.product().clone();
         let replacement = checked.checked_item(1).unwrap();
         let binding = checked.checked_item(2).unwrap();
-        assert!(binding.signatures()[0]
-            .names()
-            .iter()
-            .any(|name| name.module() == module && name.occurrence() == "LocalBox"));
+        assert!(
+            binding.signatures()[0]
+                .names()
+                .iter()
+                .any(|name| name.module() == module && name.occurrence() == "LocalBox"),
+            "local nominal signature: {:?}",
+            binding.signatures()
+        );
         let expression = checked.checked_item(3).unwrap();
         assert!(expression.expression_presentation().unwrap().is_some());
         let prefix = declaration.initial_prefix().unwrap();

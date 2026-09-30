@@ -11,5 +11,5 @@ makeLocal = LocalBox
 historical :: Int
 historical = 40
 let historical = 41
-let local = makeLocal historical
+let local = (makeLocal historical :: LocalBox)
 (localValue local, Tidepool.Session.Lib.G1.historical)
