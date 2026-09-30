@@ -2315,6 +2315,61 @@ impl PreparedEngine {
             .map(|identity| (identity.clone(), CODE_EXPORT_GENERATION))
     }
 
+    /// Resolve an advertised immutable export through this engine's exact live
+    /// ledger. Native `ValueHandle` identities are issued process-wide and
+    /// never reused; retaining that identity fences a later install against a
+    /// different machine or a replacement root, even at the same generation.
+    pub(crate) fn retained_code_export_owner(
+        &self,
+        identity: &SymbolIdentity,
+        generation: u64,
+    ) -> Option<ImportOwner> {
+        if generation != CODE_EXPORT_GENERATION {
+            return None;
+        }
+        let export = self.code_exports.get(identity)?;
+        (self.machine.prepared_handle_of(export.handle.raw()) == Some(export.handle)).then(|| {
+            ImportOwner::CodeExport {
+                binder: identity.clone(),
+                generation,
+                root_id: export.handle.raw().0,
+            }
+        })
+    }
+
+    fn code_export_import(
+        &self,
+        owner: &ImportOwner,
+        declaration: &tidepool_repr::execution_schema::GlobalDecl,
+    ) -> Result<BatchImport, PreparedRuntimeError> {
+        let ImportOwner::CodeExport {
+            binder,
+            generation,
+            root_id,
+        } = owner
+        else {
+            unreachable!("code export import has a code export owner")
+        };
+        let export = self
+            .code_exports
+            .get(binder)
+            .filter(|export| {
+                binder == &declaration.identity
+                    && declaration.required_generation == Some(*generation)
+                    && *generation == CODE_EXPORT_GENERATION
+                    && export.handle.raw().0 == *root_id
+                    && export.handle.rep() == declaration.rep
+                    && self.machine.prepared_handle_of(export.handle.raw()) == Some(export.handle)
+            })
+            .ok_or_else(|| PreparedRuntimeError::MissingCertifiedOwner(owner.clone()))?;
+        // The batch owner checks the declared callable signature and required
+        // evaluatedness against this producer's signature and live native root.
+        Ok(BatchImport::Existing {
+            handle: export.handle,
+            entry_signature: export.entry.clone(),
+        })
+    }
+
     /// How many package tops later turns can import instead of recompiling.
     #[must_use]
     pub fn code_export_count(&self) -> usize {
@@ -2540,6 +2595,9 @@ impl PreparedEngine {
                             entry_signature: None,
                         });
                     }
+                    ImportOwner::CodeExport { .. } => {
+                        imports.push(self.code_export_import(owner, declaration)?);
+                    }
                     ImportOwner::Package {
                         unit,
                         module,
@@ -2701,6 +2759,12 @@ impl PreparedEngine {
                 ImportOwner::Retained { generation, .. } => {
                     declaration.required_generation == Some(*generation)
                 }
+                ImportOwner::CodeExport {
+                    binder, generation, ..
+                } => {
+                    binder == &declaration.identity
+                        && declaration.required_generation == Some(*generation)
+                }
                 ImportOwner::Package {
                     unit,
                     module,
@@ -2767,7 +2831,9 @@ impl PreparedEngine {
                     version: version.clone(),
                     binder: binder.clone(),
                 }),
-                ImportOwner::Retained { .. } | ImportOwner::Package { .. } => None,
+                ImportOwner::Retained { .. }
+                | ImportOwner::CodeExport { .. }
+                | ImportOwner::Package { .. } => None,
             })
             .collect::<Vec<_>>();
         let mut reachable = BTreeSet::new();
@@ -2785,7 +2851,9 @@ impl PreparedEngine {
                                     version: version.clone(),
                                     binder: binder.clone(),
                                 }),
-                                ImportOwner::Retained { .. } | ImportOwner::Package { .. } => None,
+                                ImportOwner::Retained { .. }
+                                | ImportOwner::CodeExport { .. }
+                                | ImportOwner::Package { .. } => None,
                             }),
                     );
                 }
@@ -2933,6 +3001,9 @@ impl PreparedEngine {
                                 handle,
                                 entry_signature: None,
                             }
+                        }
+                        ImportOwner::CodeExport { .. } => {
+                            self.code_export_import(owner, declaration)?
                         }
                         ImportOwner::Package {
                             unit,
@@ -5437,6 +5508,118 @@ pub(super) mod tests {
         engine.quiesce_and_collect_now().unwrap();
         assert_eq!(engine.residency().programs, 1);
         assert!(engine.unpin(bootstrap));
+    }
+
+    #[test]
+    fn retained_code_export_owners_fence_identity_generation_and_native_root() {
+        let prepared = testing::prepare(testing::wire_program()).unwrap();
+        let binder = testing::identity("Fixture", "entry");
+        let (mut engine, bootstrap) = PreparedEngine::bootstrap(prepared.clone()).unwrap();
+        let (foreign, _) = PreparedEngine::bootstrap(prepared).unwrap();
+        let owner = engine.retained_code_export_owner(&binder, 0).unwrap();
+        let foreign_owner = foreign.retained_code_export_owner(&binder, 0).unwrap();
+        assert_ne!(owner, foreign_owner);
+        assert!(engine.retained_code_export_owner(&binder, 1).is_none());
+        let mut wrong_identity = binder.clone();
+        wrong_identity.unit = "another-package".into();
+        assert!(engine
+            .retained_code_export_owner(&wrong_identity, 0)
+            .is_none());
+        let ImportOwner::CodeExport { root_id, .. } = owner.clone() else {
+            panic!("native export must have a distinct owner");
+        };
+        let registry = ImageRegistry::new();
+        let target = |identity: SymbolIdentity, generation, bad_signature| {
+            let mut wire = testing::wire_program();
+            let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+                unreachable!()
+            };
+            top.identity.unit = HOME_UNIT.into();
+            if bad_signature {
+                wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+            }
+            wire.expressions.nodes[0] = ExprFrame::Call {
+                callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+                signature: SignatureId(0),
+                arguments: vec![],
+            };
+            wire.globals.push(GlobalDecl {
+                identity,
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: Some(SignatureId(0)),
+                required_evaluated: true,
+                required_generation: Some(generation),
+            });
+            CertifiedTargetImage::compile(testing::prepare(wire).unwrap(), &registry).unwrap()
+        };
+        let install = |engine: &mut PreparedEngine, owner: ImportOwner, target| {
+            engine.install_certified_turn(
+                target,
+                &[owner],
+                &BTreeMap::new(),
+                vec![],
+                &[],
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &BindingTable::new(),
+            )
+        };
+        let before = engine.residency();
+        for (refused, image) in [
+            (foreign_owner, target(binder.clone(), 0, false)),
+            (
+                ImportOwner::CodeExport {
+                    binder: binder.clone(),
+                    generation: 1,
+                    root_id,
+                },
+                target(binder.clone(), 1, false),
+            ),
+            (
+                ImportOwner::CodeExport {
+                    binder: wrong_identity.clone(),
+                    generation: 0,
+                    root_id,
+                },
+                target(wrong_identity, 0, false),
+            ),
+        ] {
+            assert!(matches!(install(&mut engine, refused.clone(), image),
+                Err(PreparedRuntimeError::MissingCertifiedOwner(actual)) if actual == refused));
+            assert_eq!(engine.residency(), before);
+        }
+        assert!(matches!(
+            install(&mut engine, owner.clone(), target(binder.clone(), 0, true)),
+            Err(PreparedRuntimeError::Run(
+                ExecutionError::BatchSourceContract(_)
+            ))
+        ));
+        assert_eq!(engine.residency(), before);
+        let staged = install(&mut engine, owner, target(binder.clone(), 0, false)).unwrap();
+        assert!(staged.leases.is_empty());
+        let program = engine.commit_certified_turn(staged);
+        let result = engine
+            .machine
+            .run_entry_retained(
+                program,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 0,
+                    collect_before_observation: true,
+                },
+                RealmId::ROOT,
+            )
+            .unwrap();
+        assert_eq!(result.values, vec![PreparedResult::Scalar(42)]);
+        assert!(engine.unpin(program));
+        assert!(engine.unpin(bootstrap));
+        engine.quiesce_and_collect_now().unwrap();
+        let export = engine.code_exports.remove(&binder).unwrap();
+        assert!(engine.release(export.handle));
+        assert!(engine.retained_code_export_owner(&binder, 0).is_none());
+        engine.quiesce_and_collect_now().unwrap();
+        assert_eq!(engine.residency().programs, 0);
     }
 
     #[test]

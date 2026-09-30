@@ -150,7 +150,9 @@ impl SourceGroupOutline {
                     version: version.clone(),
                     binder: binder.clone(),
                 }),
-                ImportOwner::Retained { .. } | ImportOwner::Package { .. } => None,
+                ImportOwner::Retained { .. }
+                | ImportOwner::CodeExport { .. }
+                | ImportOwner::Package { .. } => None,
             })
             .collect();
         Self::from_definitions(
