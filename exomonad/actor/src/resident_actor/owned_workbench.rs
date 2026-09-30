@@ -215,6 +215,59 @@ struct OwnedExecution<H, O> {
     resources: Arc<ExecutionResourceOwners>,
 }
 
+pub(super) struct WorkbenchUnitStart {
+    pub request: WorkbenchUnitStartRequest,
+    pub span: tracing::Span,
+}
+
+pub(super) enum WorkbenchUnitStartRequest {
+    Tool {
+        dispatch: Arc<RootCustody>,
+        name: String,
+        arguments: serde_json::Value,
+    },
+    Prepared {
+        block: ParsedBlock,
+        item: crate::resident_workbench::PreparedCellItem,
+        display_remaining: usize,
+    },
+}
+
+pub(super) async fn begin_unit<H, O>(
+    workbench: &crate::ResidentActorWorkbench<H, O>,
+    context: ActorSessionContext,
+    start: WorkbenchUnitStart,
+) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    async {
+        match start.request {
+            WorkbenchUnitStartRequest::Tool {
+                dispatch,
+                name,
+                arguments,
+            } => {
+                workbench
+                    .begin_tool(context, dispatch, name, arguments)
+                    .await
+            }
+            WorkbenchUnitStartRequest::Prepared {
+                block,
+                item,
+                display_remaining,
+            } => {
+                workbench
+                    .begin_prepared_cell_item(context, block, item, display_remaining)
+                    .await
+            }
+        }
+    }
+    .instrument(start.span)
+    .await
+}
+
 impl<H, O> OwnedExecution<H, O> {
     fn scopes(
         &self,
@@ -484,17 +537,27 @@ where
                     )))
                     .await;
                 match result {
-                    Ok(WorkbenchRunAdvance::ParkEffect) => {
+                    Ok(
+                        park @ (WorkbenchRunAdvance::ParkEffect | WorkbenchRunAdvance::ParkUnit),
+                    ) => {
                         tracing::debug!(actor = ?owned.state.effects.context.actor,
-                        input_unit_index = owned.state.cursor.index, "serial cursor yielded its captured effect wait");
+                        input_unit_index = owned.state.cursor.index, "serial cursor yielded its captured unit or effect");
                         let completion = OwnedWorkbenchCompletion::advance(
                             move |behavior: &mut Self, kernel| {
                                 let (timing, cleanup) = owned.scopes();
                                 timing.sync_scope(|| {
                                     cleanup.sync_scope(|| {
-                                        Ok(WorkbenchAdvance::Park(
-                                            behavior.owned_effect_task(owned, kernel.clone()),
-                                        ))
+                                        Ok(WorkbenchAdvance::Park(match park {
+                                            WorkbenchRunAdvance::ParkEffect => {
+                                                behavior.owned_effect_task(owned, kernel.clone())
+                                            }
+                                            WorkbenchRunAdvance::ParkUnit => {
+                                                Self::owned_unit_task(owned)
+                                            }
+                                            WorkbenchRunAdvance::Complete(_) => {
+                                                unreachable!("captured execution parks")
+                                            }
+                                        }))
                                     })
                                 })
                             },
@@ -504,7 +567,7 @@ where
                     result => {
                         let result = result.map(|advance| match advance {
                             WorkbenchRunAdvance::Complete(step) => step,
-                            WorkbenchRunAdvance::ParkEffect => {
+                            WorkbenchRunAdvance::ParkEffect | WorkbenchRunAdvance::ParkUnit => {
                                 unreachable!("effect wait handled above")
                             }
                         });
@@ -518,6 +581,34 @@ where
                 }
             })
         })
+    }
+
+    fn owned_unit_task(mut owned: OwnedExecution<H, O>) -> OwnedWorkbenchTask<Self> {
+        let start = owned
+            .state
+            .cursor
+            .starting
+            .take()
+            .expect("one native unit is captured before its checkout");
+        Self::owned_step_task(
+            owned,
+            move |owned| {
+                let context = owned.state.effects.context.clone();
+                let workbench = owned
+                    .workbench
+                    .as_ref()
+                    .expect("native unit retains original admitted workbench");
+                Box::pin(begin_unit(workbench, context, start))
+            },
+            |_behavior, _kernel, mut owned, started| {
+                assert!(
+                    owned.state.cursor.started.is_none(),
+                    "one native result per unit"
+                );
+                owned.state.cursor.started = Some(started);
+                Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
+            },
+        )
     }
 
     fn owned_effect_task(

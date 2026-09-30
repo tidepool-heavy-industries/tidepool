@@ -1293,6 +1293,8 @@ struct WorkbenchCursor {
     cell_display_remaining: usize,
     index: usize,
     running: Option<WorkbenchFragmentExecution>,
+    starting: Option<owned_workbench::WorkbenchUnitStart>,
+    started: Option<Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>>,
     unit: WorkbenchUnitState,
     tool_dispatch: Option<Arc<RootCustody>>,
 }
@@ -1336,6 +1338,8 @@ impl Default for WorkbenchCursor {
             cell_display_remaining: 8192,
             index: 0,
             running: None,
+            starting: None,
+            started: None,
             unit: WorkbenchUnitState::default(),
             tool_dispatch: None,
         }
@@ -1404,6 +1408,7 @@ impl OwnedWorkbenchWait {
 
 enum WorkbenchRunAdvance {
     Complete(KernelStep<WorkbenchResponse>),
+    ParkUnit,
     ParkEffect,
 }
 
@@ -7469,72 +7474,80 @@ where
                 let source = request.items[cursor.index].clone();
                 let mut step = None;
                 if cursor.running.is_none() {
-                    cursor.unit = WorkbenchUnitState::default();
-                    // Leave room for a later stop/error receipt without hiding offered command output.
-                    let display_budget = if request.tool_call().is_some() {
-                        28usize * 1024
-                    } else {
-                        60usize * 1024
-                    };
-                    cursor.unit.display_remaining = display_budget.saturating_sub(
-                        cursor
-                            .receipts
-                            .iter()
-                            .map(|item| item.output.len() + 1)
-                            .sum::<usize>(),
-                    );
-                    if request.tool_call().is_none() {
-                        cursor.unit.display_remaining = cursor
-                            .unit
-                            .display_remaining
-                            .min(cursor.cell_display_remaining);
-                    }
-                    let block = ParsedBlock {
-                        ordinal: cursor.index + 1,
-                        total: request.items.len(),
-                        source,
-                    };
-                    // The input-unit level of the span tree. Held across this
-                    // iteration's two await points by instrumenting the futures
-                    // themselves, never by a guard.
-                    let unit_span = tracing::info_span!(
-                        "unit",
-                        index = cursor.index,
-                        total = request.items.len(),
-                        kind = if request.tool_call().is_some() {
-                            "tool"
-                        } else {
-                            "cell"
-                        },
-                    );
-                    tracing::info!(
-                        target: "exomonad::content",
-                        parent: &unit_span,
-                        index = cursor.index,
-                        source = %block.source,
-                        "input unit source"
-                    );
-                    self.runtime_observation.publish_workbench_posture(
-                        crate::ActorWorkbenchPosture::RunningUnit {
-                            input_unit_index: cursor.index,
-                            total: request.items.len(),
-                        },
-                    );
-                    let started = if let (Some(call), Some(dispatch)) =
-                        (request.tool_call(), &cursor.tool_dispatch)
-                    {
-                        workbench
-                            .begin_tool(
-                                context.clone(),
-                                Arc::clone(dispatch),
-                                call.name.clone(),
-                                call.arguments.clone(),
-                            )
-                            .instrument(unit_span.clone())
-                            .await
-                    } else {
-                        match cursor.prepared_cell.as_mut() {
-                            Some(items) => {
+                    let started = match cursor.started.take() {
+                        Some(started) => started,
+                        None => {
+                            cursor.unit = WorkbenchUnitState::default();
+                            // Leave room for a later stop/error receipt without hiding offered command output.
+                            let display_budget = if request.tool_call().is_some() {
+                                28usize * 1024
+                            } else {
+                                60usize * 1024
+                            };
+                            cursor.unit.display_remaining = display_budget.saturating_sub(
+                                cursor
+                                    .receipts
+                                    .iter()
+                                    .map(|item| item.output.len() + 1)
+                                    .sum::<usize>(),
+                            );
+                            if request.tool_call().is_none() {
+                                cursor.unit.display_remaining = cursor
+                                    .unit
+                                    .display_remaining
+                                    .min(cursor.cell_display_remaining);
+                            }
+                            let block = ParsedBlock {
+                                ordinal: cursor.index + 1,
+                                total: request.items.len(),
+                                source,
+                            };
+                            // The input-unit level of the span tree. Held across this
+                            // iteration's two await points by instrumenting the futures
+                            // themselves, never by a guard.
+                            let unit_span = tracing::info_span!(
+                                "unit",
+                                index = cursor.index,
+                                total = request.items.len(),
+                                kind = if request.tool_call().is_some() {
+                                    "tool"
+                                } else {
+                                    "cell"
+                                },
+                            );
+                            tracing::info!(
+                                target: "exomonad::content",
+                                parent: &unit_span,
+                                index = cursor.index,
+                                source = %block.source,
+                                "input unit source"
+                            );
+                            self.runtime_observation.publish_workbench_posture(
+                                crate::ActorWorkbenchPosture::RunningUnit {
+                                    input_unit_index: cursor.index,
+                                    total: request.items.len(),
+                                },
+                            );
+                            let request_start = if let (Some(call), Some(dispatch)) =
+                                (request.tool_call(), &cursor.tool_dispatch)
+                            {
+                                owned_workbench::WorkbenchUnitStartRequest::Tool {
+                                    dispatch: Arc::clone(dispatch),
+                                    name: call.name.clone(),
+                                    arguments: call.arguments.clone(),
+                                }
+                            } else {
+                                let Some(items) = cursor.prepared_cell.as_mut() else {
+                                    let source = ResidentActorWorkbenchError::CompileInfrastructure(
+                                        "authored cell reached execution without compiler preparation".into(),
+                                    );
+                                    return Err(workbench_failure(
+                                        &cursor.receipts,
+                                        cursor.index,
+                                        request.items.len(),
+                                        source,
+                                    ));
+                                };
                                 let prepared = items[cursor.index].take().ok_or_else(|| {
                                     workbench_failure(
                                         &cursor.receipts,
@@ -7545,20 +7558,22 @@ where
                                         ),
                                     )
                                 })?;
-                                workbench
-                                    .begin_prepared_cell_item(
-                                        context.clone(),
-                                        block,
-                                        prepared,
-                                        cursor.cell_display_remaining,
-                                    )
-                                    .instrument(unit_span.clone())
-                                    .await
+                                owned_workbench::WorkbenchUnitStartRequest::Prepared {
+                                    block,
+                                    item: prepared,
+                                    display_remaining: cursor.cell_display_remaining,
+                                }
+                            };
+                            let start = owned_workbench::WorkbenchUnitStart {
+                                request: request_start,
+                                span: unit_span,
+                            };
+                            if effects.park_effects {
+                                assert!(cursor.starting.is_none(), "one pending native unit");
+                                cursor.starting = Some(start);
+                                return Ok(WorkbenchRunAdvance::ParkUnit);
                             }
-                            None => Err(ResidentActorWorkbenchError::CompileInfrastructure(
-                                "authored cell reached execution without compiler preparation"
-                                    .into(),
-                            )),
+                            owned_workbench::begin_unit(workbench, context.clone(), start).await
                         }
                     };
                     let started = match started {
@@ -9458,7 +9473,7 @@ where
                 .await
                 .map(|advance| match advance {
                     WorkbenchRunAdvance::Complete(step) => step,
-                    WorkbenchRunAdvance::ParkEffect => {
+                    WorkbenchRunAdvance::ParkEffect | WorkbenchRunAdvance::ParkUnit => {
                         unreachable!("legacy workbench remains serial")
                     }
                 });
