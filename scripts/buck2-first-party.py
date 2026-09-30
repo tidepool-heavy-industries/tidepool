@@ -655,7 +655,7 @@ def facade_test_cases(binary):
          host_env, host_resources, True, False, 600),
         ("facade_browser_test", [prefix +
             "production_browser_executes_resident_haskell_retries_and_controls_root"],
-         browser_env, browser_resources, True, True, 600),
+         browser_env, browser_resources, True, True, 900),
         ("tidepool_unit_tests_all", [], browser_env, browser_resources, True, False, 600),
     ]
     rules = []

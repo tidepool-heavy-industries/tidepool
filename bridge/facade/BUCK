@@ -924,8 +924,8 @@ tidepool_rust_test_cases(
     expected_count = 1,
     ignored = True,
     jobs = 1,
-    timeout = 600,
-    test_rule_timeout_ms = 660000,
+    timeout = 900,
+    test_rule_timeout_ms = 960000,
     env = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
         "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",

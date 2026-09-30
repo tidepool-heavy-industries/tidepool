@@ -8,6 +8,32 @@ const FOREST_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const HOSTED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const ABORT_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+pub(super) fn cell_output_matches(
+    item: &harness::item::Item,
+    call_id: &str,
+    expected: &str,
+) -> bool {
+    if item.0["type"] != "custom_tool_call_output" || item.0["call_id"] != call_id {
+        return false;
+    }
+    let Some(output) = item.0["output"].as_str() else {
+        return false;
+    };
+    let Ok(response) = serde_json::from_str::<serde_json::Value>(output) else {
+        return false;
+    };
+    matches!(response["status"].as_str(), Some("completed" | "committed"))
+        && response["total"] == 1
+        && response["nextIndex"] == 1
+        && response["items"].as_array().is_some_and(|items| {
+            items.len() == 1
+                && items[0]["status"] == "committed"
+                && items[0]["output"]
+                    .as_str()
+                    .is_some_and(|value| value.trim() == expected)
+        })
+}
+
 pub(super) struct RunningBrowserHost {
     pub(super) campaign: test_campaign::TestCampaign,
     pub(super) runtime: Arc<embedded_harness::EmbeddedHarnessRuntime>,

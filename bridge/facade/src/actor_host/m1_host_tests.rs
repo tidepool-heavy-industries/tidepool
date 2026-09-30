@@ -7,7 +7,7 @@ use harness::{
     model::AgentPath,
     transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError, Usage},
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -15,7 +15,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 #[path = "m1_host_fixture.rs"]
 mod host_fixture;
-use host_fixture::RunningBrowserHost;
+use host_fixture::{RunningBrowserHost, cell_output_matches};
 
 #[path = "m1_browser_process.rs"]
 mod browser_process;
@@ -121,25 +121,23 @@ impl ResponsesTransport for HostCellTransport {
                 }))],
                 usage: Usage::default(),
             }),
-            2 => Ok(ResponsesTurn {
-                response_id: "wait-for-resident-cell".into(),
-                items: vec![harness::item::Item(json!({
-                    "type":"message",
-                    "role":"assistant",
-                    "phase":"final_answer",
-                    "content":[{"type":"output_text","text":"Waiting for the resident cell."}]
-                }))],
-                usage: Usage::default(),
-            }),
-            3 => {
+            2..=4 => {
+                let completed = request.input.iter().any(|item| {
+                    item.0["type"] == "custom_tool_call_output"
+                        && item.0["call_id"] == "host-real-cell"
+                });
                 self.second_request.send(request).unwrap();
                 Ok(ResponsesTurn {
-                    response_id: "host-cell-result".into(),
+                    response_id: format!("host-cell-observation-{round}"),
                     items: vec![harness::item::Item(json!({
                         "type":"message",
                         "role":"assistant",
                         "phase":"final_answer",
-                        "content":[{"type":"output_text","text":"The resident cell returned 42."}]
+                        "content":[{"type":"output_text","text":if completed {
+                            "The resident cell settled."
+                        } else {
+                            "Waiting for the resident cell."
+                        }}]
                     }))],
                     usage: Usage::default(),
                 })
@@ -304,7 +302,17 @@ async fn production_host_retains_http_haskell_commands_and_reconnects_without_re
         .parse::<i64>()
         .unwrap();
 
-    let request_after_cell = tokio::time::timeout(Duration::from_secs(120), second_rx.recv())
+    let request_after_cell = tokio::time::timeout(Duration::from_secs(120), async {
+        while let Some(request) = second_rx.recv().await {
+            if request.input.iter().any(|item| {
+                item.0["type"] == "custom_tool_call_output"
+                    && item.0["call_id"] == "host-real-cell"
+            }) {
+                return Some(request);
+            }
+        }
+        None
+    })
         .await
         .unwrap_or_else(|_| {
             panic!(
@@ -326,7 +334,7 @@ async fn production_host_retains_http_haskell_commands_and_reconnects_without_re
         request_after_cell
             .input
             .iter()
-            .any(|item| item.0["call_id"] == "host-real-cell" && item.0.to_string().contains("42")),
+            .any(|item| cell_output_matches(item, "host-real-cell", "42")),
         "successor request must retain the real resident Haskell result: {:#?}",
         request_after_cell.input
     );

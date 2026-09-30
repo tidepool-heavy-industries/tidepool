@@ -7,8 +7,28 @@ supersedes the earlier completion-wave sequencing.
 
 ## Final delivery wave: joined checkpoint
 
+On `83c46c44a2` plus strict result checks, the TPCERT3 matched native gate
+executed five cases: the expanded checked-cell original/publication case,
+root Ready/authentication failure and running-cell cancellation passed;
+positive HTTP Haskell/result retention and the browser journey failed.
+The positive cases retained a missing folded-output diagnostic and did not
+deliver the expected completed call result. See
+[`receipt3-joined-gates.log`](../target/completion-evidence/final-delivery/receipt3-joined-gates.log).
+This supersedes any positive-Haskell inference from the earlier host checks:
+their result assertion searched rendered JSON for `42` and was insufficient
+to prove a committed value. The current assertion checks the original call ID,
+completed response, single committed item and exact output. M1 remains open.
+The following fixture repair observes the original call output regardless of
+which provider turn receives it; its new execution remains pending.
+
+The matched TPCERT3 executable/library copies and hashes are retained under
+[`native-receipt3-pair/`](../target/completion-evidence/final-delivery/native-receipt3-pair/).
+Production cold restart has passed the previous receipt-size obstacle but
+fails with `closed execution cannot admit global GlobalId(9)`; recovery
+acceptance remains pending the owning runtime repair.
+
 Joined private execution `ddd36f2436` plus the terminal reply consumer and
-generated source mappings passed **3/3 real host tests**, exit 0: raw Haskell,
+generated source mappings passed **3/3 host test selections**, exit 0: raw Haskell,
 retained HTTP commands/reconnect without replay, cancellation of a running
 Haskell cell, and root Ready/authentication-failure retirement. The native
 group reused one linked binary and ran three fresh processes concurrently.

@@ -37,30 +37,31 @@ fn final_answer(text: &str) -> harness::item::Item {
 }
 
 fn real_cell_returned_42(item: &harness::item::Item) -> bool {
-    if item.0["type"] != "custom_tool_call_output" || item.0["call_id"] != "browser-real-cell" {
-        return false;
-    }
-    let Some(output) = item.0["output"].as_str() else {
-        return false;
-    };
-    let Ok(response) = serde_json::from_str::<Value>(output) else {
-        return false;
-    };
-    matches!(response["status"].as_str(), Some("completed" | "committed"))
-        && response["total"] == 1
-        && response["nextIndex"] == 1
-        && response["items"].as_array().is_some_and(|items| {
-            items.len() == 1
-                && items[0]["status"] == "committed"
-                && items[0]["output"]
-                    .as_str()
-                    .is_some_and(|value| value.trim() == "42")
-        })
+    cell_output_matches(item, "browser-real-cell", "42")
 }
 
 #[async_trait]
 impl ResponsesTransport for BrowserTransport {
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        for item in request.input.iter().filter(|item| {
+            item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == "browser-real-cell"
+        }) {
+            let response = item.0["output"]
+                .as_str()
+                .and_then(|output| serde_json::from_str::<Value>(output).ok());
+            let signature = response.as_ref().map(|response| {
+                json!({
+                    "keys": response.as_object().map(|object| object.keys().collect::<Vec<_>>()),
+                    "status": response["status"],
+                    "nextIndex": response["nextIndex"],
+                    "total": response["total"],
+                    "items": response["items"].as_array().map(|items| items.iter().map(|item| {
+                        json!({"status":item["status"], "outputIs42":item["output"].as_str().is_some_and(|value| value.trim() == "42")})
+                    }).collect::<Vec<_>>()),
+                })
+            });
+            eprintln!("browser gate raw-cell reply signature={signature:?}");
+        }
         let (id, phase, item) = {
             let mut state = self.state.lock();
             state.requests += 1;
@@ -214,7 +215,11 @@ async fn drive_browser(
             {"action":"retire"}
         ]}
     });
-    let outcome = tokio::time::timeout(Duration::from_secs(180), async {
+    // Includes compiler preparation for both real cells; control deadlines
+    // below independently bound interruption and browser readiness.
+    let journey_started = tokio::time::Instant::now();
+    let mut last_phase = "driver_startup";
+    let outcome = tokio::time::timeout(Duration::from_secs(420), async {
         process.send_frame(&ready).await?;
         let mut started = false;
         let mut waiting: Option<Barrier> = None;
@@ -230,6 +235,8 @@ async fn drive_browser(
                 }
                 barrier = barriers.recv(), if started && waiting.is_none() => {
                     let barrier = barrier.ok_or("scripted provider closed before browser completion")?;
+                    last_phase = barrier.phase;
+                    eprintln!("browser gate phase={last_phase} elapsed={:?}", journey_started.elapsed());
                     if barrier.phase == "cancel_wait" {
                         tokio::time::timeout(Duration::from_secs(10), async {
                             while !fixture.campaign.actor.hosted_cell_computing() {
@@ -254,7 +261,11 @@ async fn drive_browser(
                 frame = process.next_frame() => {
                     let frame = frame?.ok_or("browser exited without a result")?;
                     match frame["type"].as_str() {
-                        Some("driver_started") if !started => started = true,
+                        Some("driver_started") if !started => {
+                            started = true;
+                            last_phase = "driver_started";
+                            eprintln!("browser gate phase={last_phase} elapsed={:?}", journey_started.elapsed());
+                        }
                         Some("provider_release") => {
                             let barrier = waiting.take().ok_or("browser released an absent barrier")?;
                             if frame["id"] != barrier.id { return Err("browser released another barrier identity".into()); }
@@ -275,7 +286,10 @@ async fn drive_browser(
                 }
             }
         }
-    }).await.unwrap_or_else(|_| Err("browser journey exceeded its deadline".into()));
+    }).await.unwrap_or_else(|_| Err(format!(
+        "browser journey exceeded its deadline at phase={last_phase}, elapsed={:?}",
+        journey_started.elapsed(),
+    )));
     process.finish(outcome, secret).await
 }
 
