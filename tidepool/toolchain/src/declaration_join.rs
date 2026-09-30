@@ -1395,9 +1395,13 @@ mod authored_tests {
             ExactDeclarationContext::new(&[std::sync::Arc::new(certified)], &[], Vec::new())
                 .unwrap();
         let artifacts = tempfile::tempdir().unwrap();
-        let groups = context.inherited_groups(artifacts.path()).unwrap();
+        let endpoint = ExtractCmd::new().unwrap().bind().unwrap();
+        let request = std::sync::Arc::new(context)
+            .prepare_compilation(artifacts.path(), endpoint.identity().producer_bytes())
+            .expect("one preparation stage retains the complete certified package closure");
         assert!(
-            groups
+            request
+                .groups
                 .iter()
                 .flat_map(|group| group.imports())
                 .any(|import| {
@@ -1408,6 +1412,21 @@ mod authored_tests {
                 }),
             "the real tuple type representation must be certified, not optimized out"
         );
+        let interface = &request.artifacts[0].interface.path;
+        let saved = std::fs::read(interface).unwrap();
+        std::fs::write(interface, b"changed after preparation").unwrap();
+        assert!(
+            request
+                .context
+                .validate_artifacts(&request.artifacts)
+                .is_err(),
+            "the preparation snapshot does not authorize changed post-worker artifacts"
+        );
+        std::fs::write(interface, saved).unwrap();
+        request
+            .context
+            .validate_artifacts(&request.artifacts)
+            .unwrap();
     }
 
     #[test]

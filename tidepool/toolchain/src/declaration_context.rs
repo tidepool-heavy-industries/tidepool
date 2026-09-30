@@ -7,14 +7,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::certified_products::{
-    certify_inherited_products, InheritedProductInput, PendingCertifiedGroup,
+    certify_inherited_products_with_validation, InheritedProductInput, PendingCertifiedGroup,
 };
 use crate::declaration_join::{
     AcceptedJoin, CertifiedAuthoredDeclaration, DeclarationArtifact, ExactIfaceArtifact,
     ExactInterfaceOwner, ExactLexicalNode, ExactModuleIdentity, ModuleSnapshot,
 };
 use crate::recovery_artifacts::{
-    self, CertifiedJoinedInterface, CertifiedRecoveryProduct, RecoveryArtifactRef, RecoveryJoinRef,
+    self, CertifiedJoinedInterface, CertifiedRecoveryProduct, PackageInterfaceValidation,
+    RecoveryArtifactRef, RecoveryJoinRef,
 };
 use crate::CompileError;
 
@@ -712,16 +713,36 @@ impl ExactDeclarationContext {
         &self,
         root: &Path,
     ) -> Result<MaterializedExactDeclarationContext, CompileError> {
+        self.materialize_with_validation(root, &mut PackageInterfaceValidation::default())
+            .map(|(materialized, _)| materialized)
+    }
+
+    fn materialize_with_validation(
+        &self,
+        root: &Path,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<
+        (
+            MaterializedExactDeclarationContext,
+            Vec<RecoveryArtifactRef>,
+        ),
+        CompileError,
+    > {
         let references = if self.products.is_empty() {
             Vec::new()
         } else {
-            recovery_artifacts::materialize_certified_products(root, self.producer, &self.products)
-                .map_err(failure)?
+            recovery_artifacts::materialize_certified_products_with_validation(
+                root,
+                self.producer,
+                &self.products,
+                validation,
+            )
+            .map_err(failure)?
         };
         let joined = self
             .joins
             .iter()
-            .map(|join| join.materialize(root))
+            .map(|join| join.materialize_with_validation(root, validation))
             .collect::<Result<Vec<_>, _>>()
             .map_err(failure)?;
         let requirements = self
@@ -730,13 +751,13 @@ impl ExactDeclarationContext {
             .map(|interface| (&interface.owner, &interface.requirements))
             .collect::<BTreeMap<_, _>>();
         let mut artifacts = Vec::new();
-        for reference in references {
+        for reference in &references {
             let owner = identity(&reference.unit, &reference.module);
             artifacts.push(DeclarationArtifact {
                 interface: ExactIfaceArtifact {
-                    unit: reference.unit,
+                    unit: reference.unit.clone(),
                     module: reference.module.clone(),
-                    path: root.join(reference.interface_path),
+                    path: root.join(&reference.interface_path),
                     sha256: hex(&reference.skinny_iface_sha256),
                     requirements: requirements[&owner]
                         .iter()
@@ -744,8 +765,8 @@ impl ExactDeclarationContext {
                         .collect(),
                 },
                 product: Some(ModuleSnapshot {
-                    module: reference.module,
-                    path: root.join(reference.product_path),
+                    module: reference.module.clone(),
+                    path: root.join(&reference.product_path),
                     sha256: hex(&reference.product_sha256),
                 }),
             });
@@ -766,10 +787,13 @@ impl ExactDeclarationContext {
                 product: None,
             });
         }
-        Ok(MaterializedExactDeclarationContext {
-            artifacts,
-            lexical: self.lexical.clone(),
-        })
+        Ok((
+            MaterializedExactDeclarationContext {
+                artifacts,
+                lexical: self.lexical.clone(),
+            },
+            references,
+        ))
     }
 
     pub(crate) fn inherited_groups(
@@ -779,20 +803,39 @@ impl ExactDeclarationContext {
         if self.products.is_empty() {
             return Ok(Vec::new());
         }
-        let references =
-            recovery_artifacts::materialize_certified_products(root, self.producer, &self.products)
-                .map_err(failure)?;
+        let mut validation = PackageInterfaceValidation::default();
+        let references = recovery_artifacts::materialize_certified_products_with_validation(
+            root,
+            self.producer,
+            &self.products,
+            &mut validation,
+        )
+        .map_err(failure)?;
+        self.materialized_groups(root, &references, &mut validation)
+    }
+
+    fn materialized_groups(
+        &self,
+        root: &Path,
+        references: &[RecoveryArtifactRef],
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<Vec<PendingCertifiedGroup>, CompileError> {
         let verified = references
             .iter()
-            .map(|reference| recovery_artifacts::verify_materialized_ref(root, reference))
+            .map(|reference| {
+                recovery_artifacts::verify_materialized_ref_with_validation(
+                    root, reference, validation,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()
             .map_err(failure)?;
-        certify_inherited_products(
+        certify_inherited_products_with_validation(
             &verified
                 .iter()
                 .map(|artifact| InheritedProductInput { artifact })
                 .collect::<Vec<_>>(),
             &[],
+            validation,
         )
         .map_err(failure)
     }
@@ -828,9 +871,12 @@ impl ExactDeclarationContext {
             ));
         }
         std::fs::create_dir_all(root)?;
-        let materialized = self.materialize(root)?;
+        // Package reads share one synchronous preparation snapshot. It does not
+        // escape this stage; post-worker verification opens a fresh snapshot.
+        let mut validation = PackageInterfaceValidation::default();
+        let (materialized, references) = self.materialize_with_validation(root, &mut validation)?;
         self.validate_artifacts(&materialized.artifacts)?;
-        let groups = self.inherited_groups(root)?;
+        let groups = self.materialized_groups(root, &references, &mut validation)?;
         let semantic_sha256 = self.semantic_sha256();
         let mut fields = vec![
             text("TPEXACTSCOPE"),
