@@ -1,44 +1,51 @@
 -- | Revalidate immutable home products in one fresh compiler transaction.
--- Boot declarations are source inputs, not executable products. Their HMIs
--- are rebuilt for this transaction and selected only by SOURCE importers.
+-- Boot declarations are source inputs, not executable products. A boot SCC
+-- receives fresh GHC load validation before its original prepared bodies reuse.
 module Tidepool.HomeProducts
   ( hydrateCandidateHomeProducts ) where
 
 import Control.Exception
   ( SomeException, SomeAsyncException, displayException, fromException, throwIO, try )
-import Control.Monad (forM, unless)
+import Control.Monad (forM_, unless)
 import Control.Monad.IO.Class (liftIO)
 import Data.Map.Strict qualified as Map
 import Data.IORef (readIORef)
 import GHC
   ( Ghc, ModSummary(..), getSession, parseModule, setSession, typecheckModule
-  , tm_internals_, unLoc, ms_mod_name, SafeHaskellMode(Sf_None) )
+  , tm_internals_, ms_mod_name, LoadHowMuch(LoadAllTargets), SuccessFlag(..)
+  , topSortModuleGraph )
 import GHC.Driver.Env
-  ( HscEnv(..), hscUpdateFlags, hscUpdateHPT )
+  ( HscEnv(..), hsc_HPT, hscUpdateHPT )
 import GHC.Driver.Monad (reflectGhc, reifyGhc)
-import GHC.Iface.Make (mkIfaceTc)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
-import GHC.Iface.Tidy (mkBootModDetailsTc)
 import GHC.Driver.Session (GeneralFlag(Opt_Pp), gopt, xopt)
 import GHC.LanguageExtensions.Type qualified as LangExt
 import GHC.Tc.Types (tcg_dependent_files)
 import GHC.Types.SourceFile (HscSource(..))
-import GHC.Unit.Home.ModInfo
-  ( HomeModInfo(..), addToHpt, emptyHomeModInfoLinkable )
+import GHC.Unit.Home.ModInfo (addToHpt, lookupHpt)
+import GHC.Unit.Module.Graph
+  ( ModuleGraph, ModuleGraphNode(..), mgModSummaries', mkModuleGraph )
+import GHC.Driver.Make (load')
+import GHC.Types.Error (mkUnknownDiagnostic)
+import GHC.Data.Graph.Directed (flattenSCCs)
 import GHC.Unit.Module.ModIface (ModIface, mi_module)
-import GHC.Unit.Module (moduleName)
+import GHC.Unit.Module (moduleName, moduleNameString)
+import GHC.Utils.Outputable (ppr, renderWithContext, defaultSDocContext)
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact, freshExactState, hydrateExactScope )
-import Tidepool.RetainedUnfoldings (scopeRetainedHscEnv)
+import Tidepool.RetainedUnfoldings (scopeRetainedHscEnv, scopeRetainedModuleGraph)
 
 -- Every ordinary summary and every boot summary is from the current
 -- downsweep. The caller has already checked source/package witnesses and
 -- closed the candidate set over all selected home imports, including SOURCE.
--- No target summary belongs to this set.
+-- No target summary belongs to this set. The load graph uses the same
+-- representation flags as the producer load pass; validation order uses the
+-- original downsweep graph retained in the environment.
 hydrateCandidateHomeProducts
-  :: HscEnv -> [(ExactIfaceArtifact, ModIface)] -> [ModSummary] -> [ModSummary]
+  :: HscEnv -> ModuleGraph -> [(ExactIfaceArtifact, ModIface)]
+  -> [ModSummary] -> [ModSummary]
   -> Ghc (Either String HscEnv)
-hydrateCandidateHomeProducts initial interfaces summaries boots = reifyGhc $ \session -> do
+hydrateCandidateHomeProducts initial loadGraph interfaces summaries boots = reifyGhc $ \session -> do
   result <- try (reflectGhc hydrate session)
   case result of
     Left failure | Just (_ :: SomeAsyncException) <- fromException failure -> throwIO failure
@@ -51,51 +58,75 @@ hydrateCandidateHomeProducts initial interfaces summaries boots = reifyGhc $ \se
     Right environment -> pure (Right environment)
   where
     hydrate = do
-      ordinary <- liftIO (hydrateExactScope initial interfaces)
-      setSession ordinary
-      bootEntries <- forM boots $ \summary -> do
-        unless (ms_hsc_src summary == HsBootFile) $
-          liftIO (ioError (userError "cached home boot input is not a boot summary"))
+      let selected = Map.fromList [(ms_mod_name summary, ()) | summary <- summaries]
+          selectedGraph = mkModuleGraph
+            [node | node@(ModuleNode _ summary) <- mgModSummaries' loadGraph
+              , Map.member (ms_mod_name summary) selected]
+          ordered = [summary | ModuleNode _ summary <- flattenSCCs
+            (topSortModuleGraph True (hsc_mod_graph initial) Nothing)
+            , ms_hsc_src summary == HsSrcFile
+            , Map.member (ms_mod_name summary) selected]
+          ordinaryByName = Map.fromList
+            [(moduleName (mi_module iface), iface) | (_, iface) <- interfaces]
+          ordinaryNames = Map.fromList [(ms_mod_name summary, ()) | summary <- ordered]
+          bootNames = Map.fromList [(ms_mod_name summary, ()) | summary <- boots]
+          graphBootNames = Map.fromList [(ms_mod_name summary, ())
+            | ModuleNode _ summary <- mgModSummaries' selectedGraph
+            , ms_hsc_src summary == HsBootFile]
+      unless (Map.keysSet selected == Map.keysSet ordinaryByName
+          && Map.keysSet selected == Map.keysSet ordinaryNames
+          && length summaries == Map.size selected
+          && length interfaces == Map.size ordinaryByName
+          && length boots == Map.size bootNames
+          && Map.keysSet bootNames == Map.keysSet graphBootNames) $
+        liftIO (ioError (userError "cached home owner/graph inventory differs"))
+      forM_ (summaries ++ boots) $ \summary ->
         unless (not (gopt Opt_Pp (ms_hspp_opts summary)) && not (any
             (`xopt` ms_hspp_opts summary)
             [LangExt.Cpp, LangExt.TemplateHaskell, LangExt.QuasiQuotes])) $
-          liftIO (ioError (userError "cached home boot input has untracked compile-time inputs"))
-        parsed <- parseModule summary
-        typed <- typecheckModule parsed
+          liftIO (ioError (userError "cached home input has untracked compile-time inputs"))
+      validationBase <- if null boots then pure initial else do
+        -- In a boot SCC, an early extraction pass can consume a load-produced
+        -- ordinary interface before that owner gets its prepared interface.
+        -- Recreate that compiler state rather than guessing provenance from
+        -- SOURCE syntax. The immutable prepared bodies still avoid extraction
+        -- and lowering; this conservative path does not avoid GHC's load pass.
+        setSession initial {hsc_mod_graph = selectedGraph}
+        flag <- load' Nothing LoadAllTargets mkUnknownDiagnostic Nothing
+          (scopeRetainedModuleGraph selectedGraph)
+        unless (case flag of Succeeded -> True; Failed -> False) $
+          liftIO (ioError (userError "cached home SOURCE graph failed fresh load"))
         current <- getSession
-        let tcg = fst (tm_internals_ typed)
-            scoped = scopeRetainedHscEnv (ms_mod summary)
-              (hscUpdateFlags (const (ms_hspp_opts summary)) current)
-        dependentFiles <- liftIO (readIORef (tcg_dependent_files tcg))
-        unless (null dependentFiles) $
-          liftIO (ioError (userError "cached home boot input read untracked dependent files"))
-        details <- liftIO (mkBootModDetailsTc (hsc_logger scoped) tcg)
-        iface <- liftIO (mkIfaceTc scoped Sf_None details summary Nothing tcg)
-        pure (ms_mod_name summary, HomeModInfo iface details emptyHomeModInfoLinkable)
-      current <- getSession
-      let bootTable = Map.fromList bootEntries
-          scopedFor summary = hscUpdateHPT (\hpt -> foldr
-            (\(_, imported) table -> case Map.lookup (unLoc imported) bootTable of
-                Just hmi -> addToHpt table (unLoc imported) hmi
-                Nothing -> table)
-            hpt (ms_srcimps summary)) current
-          ordinaryByName = Map.fromList
-            [(moduleName (mi_module iface), iface) | (_, iface) <- interfaces]
-      unless (length bootEntries == Map.size bootTable) $
-        liftIO (ioError (userError "duplicate cached home boot owner"))
-      accepted <- liftIO $ forM summaries $ \summary -> case Map.lookup
-          (ms_mod_name summary) ordinaryByName of
-        Nothing -> pure False
-        Just iface -> do
-          let allBootsPresent = all (\(_, imported) -> Map.member (unLoc imported) bootTable)
-                (ms_srcimps summary)
-          if not allBootsPresent then pure False else do
-            decision <- checkOldIface (scopeRetainedHscEnv (ms_mod summary) (scopedFor summary))
-              summary (Just iface)
-            pure $ case decision of
-              UpToDateItem _ -> True
-              OutOfDateItem _ _ -> False
-      unless (and accepted) $
-        liftIO (ioError (userError "cached home product failed fresh SOURCE/interface validation"))
-      setSession current
-      pure current
+        forM_ boots $ \summary -> do
+          unless (ms_hsc_src summary == HsBootFile) $
+            liftIO (ioError (userError "cached home boot input is not a boot summary"))
+          parsed <- parseModule summary
+          typed <- typecheckModule parsed
+          dependentFiles <- liftIO (readIORef (tcg_dependent_files (fst (tm_internals_ typed))))
+          unless (null dependentFiles) $
+            liftIO (ioError (userError "cached home boot input read untracked dependent files"))
+        setSession current
+        pure current
+      hydrated <- liftIO (hydrateExactScope validationBase interfaces)
+      setSession (if null boots then hydrated else validationBase)
+      forM_ ordered $ \summary -> do
+        iface <- maybe
+          (liftIO (ioError (userError "cached interface owner missing"))) pure
+          (Map.lookup (ms_mod_name summary) ordinaryByName)
+        current <- getSession
+        decision <- liftIO $ checkOldIface
+          (scopeRetainedHscEnv (ms_mod summary) current) summary (Just iface)
+        case decision of
+          UpToDateItem _ -> pure ()
+          OutOfDateItem reason _ -> liftIO (ioError (userError
+            ("cached home product failed fresh interface validation: "
+              ++ moduleNameString (ms_mod_name summary) ++ ": "
+              ++ renderWithContext defaultSDocContext (ppr reason))))
+        hmi <- maybe
+          (liftIO (ioError (userError "hydrated home product owner missing"))) pure
+          (lookupHpt (hsc_HPT hydrated) (ms_mod_name summary))
+        setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name summary) hmi) current)
+      final <- getSession
+      let restored = final {hsc_mod_graph = hsc_mod_graph initial}
+      setSession restored
+      pure restored

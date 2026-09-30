@@ -14,6 +14,8 @@ extra-source-files:
   test-prepared-stg/ModuleProductA.hs
   test-prepared-stg/ModuleProductB.hs
   test-cell-splitter/fixtures/declaration-join/*/*.hs
+  test-source-boot/fixtures/*.hs
+  test-source-boot/fixtures/*.hs-boot
 
 -- Internal (unexposed) sub-library: the genuinely shared extractor
 -- implementation, compiled ONCE per configuration instead of once per
@@ -273,6 +275,26 @@ test-suite execution-corpus-projection
   default-language: GHC2024
   default-extensions: OverloadedStrings
   ghc-options:      -Wall
+
+test-suite source-boot-product-reuse-test
+  type:             exitcode-stdio-1.0
+  main-is:          Main.hs
+  hs-source-dirs:   test-source-boot
+  build-depends:
+    base >= 4.20 && < 5,
+    ghc >= 9.12 && < 9.13,
+    containers,
+    bytestring,
+    cborg,
+    cryptohash-sha256,
+    text,
+    directory,
+    filepath,
+    process,
+    tidepool-extract-internal
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
+  ghc-options: -Wall
 
 test-suite prepared-stg-pipeline-test
   type:             exitcode-stdio-1.0

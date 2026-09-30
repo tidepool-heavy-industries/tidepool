@@ -653,6 +653,103 @@ mod tests {
     use super::*;
     use crate::cache::{ModuleEvidence, SourceEvidence};
 
+    #[test]
+    #[ignore = "requires matched Haskell worker and Rust frontend"]
+    #[serial_test::serial]
+    fn real_worker_source_boot_products_reuse_and_refuse_changed_boot() {
+        use crate::artifacts::compile_targets;
+        use crate::certified_products::ProductOrigin;
+
+        struct RestoreEnvironment(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for RestoreEnvironment {
+            fn drop(&mut self) {
+                for (name, value) in self.0.drain(..) {
+                    match value {
+                        Some(value) => unsafe { std::env::set_var(name, value) },
+                        None => unsafe { std::env::remove_var(name) },
+                    }
+                }
+            }
+        }
+        let names = [
+            "TIDEPOOL_COMPILE_CACHE_DIR",
+            tidepool_extract_cmd::DAEMON_SOCKET_ENV,
+        ];
+        let _restore = RestoreEnvironment(
+            names
+                .iter()
+                .map(|&name| (name, std::env::var_os(name)))
+                .collect(),
+        );
+        let cache = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
+            // Every invocation below starts a new worker. The test must not
+            // accidentally validate reuse through a surrounding shared daemon.
+            std::env::remove_var(tidepool_extract_cmd::DAEMON_SOCKET_ENV);
+        }
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bridge/haskell/test-source-boot/fixtures");
+        for name in ["CacheEven.hs", "CacheEven.hs-boot", "CacheOdd.hs"] {
+            fs::copy(fixtures.join(name), work.path().join(name)).unwrap();
+        }
+        let wrapper = fs::read_to_string(fixtures.join("CacheEntry.hs")).unwrap();
+        let compile = |salt: u32| {
+            compile_targets(
+                &format!("{wrapper}\n-- distinct consumer {salt}\n"),
+                &["result"],
+                &[work.path().to_path_buf()],
+                |_, _, _| {},
+            )
+            .unwrap()
+        };
+        let assert_origin =
+            |artifacts: &crate::artifacts::CompiledArtifacts, expected| {
+                for name in ["CacheEven", "CacheOdd"] {
+                    assert!(artifacts.certified_groups.iter().any(|group|
+                    group.owner().module == name && group.origin() == expected),
+                    "{name} did not have expected {expected:?} product origin");
+                    assert!(!artifacts
+                        .certified_groups
+                        .iter()
+                        .any(|group| group.owner().module == name && group.origin() != expected));
+                }
+            };
+        let cold = compile(0);
+        assert_origin(&cold, ProductOrigin::Fresh);
+        let warm = compile(1);
+        assert_origin(&warm, ProductOrigin::Cached);
+        let fresh = compile(2);
+        assert_origin(&fresh, ProductOrigin::Cached);
+        let boot = work.path().join("CacheEven.hs-boot");
+        let original = fs::read(&boot).unwrap();
+        fs::write(&boot, b"module CacheEven where\neven' :: Bool -> Bool\n").unwrap();
+        assert!(compile_targets(
+            &format!("{wrapper}\n-- changed boot\n"),
+            &["result"],
+            &[work.path().to_path_buf()],
+            |_, _, _| {}
+        )
+        .is_err());
+        fs::write(&boot, &original).unwrap();
+        assert_origin(&compile(3), ProductOrigin::Cached);
+        fs::write(
+            &boot,
+            [b"{-# LANGUAGE CPP #-}\n".as_slice(), &original].concat(),
+        )
+        .unwrap();
+        assert!(compile_targets(
+            &format!("{wrapper}\n-- untracked boot CPP\n"),
+            &["result"],
+            &[work.path().to_path_buf()],
+            |_, _, _| {}
+        )
+        .is_err());
+        fs::write(&boot, &original).unwrap();
+        assert_origin(&compile(5), ProductOrigin::Cached);
+    }
+
     fn digest(bytes: &[u8]) -> String {
         sha(bytes)
     }
@@ -877,6 +974,101 @@ mod tests {
         assert_eq!(fields[0].as_text(), Some("TPMCAN"));
         assert_eq!(fields[1].as_text(), Some("5"));
         assert_eq!(fields[2], Value::Array(vec![]));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn source_boot_witness_survives_selection_and_invalidates_ordinary_product() {
+        use crate::cache::{ImportQualifier, ModuleImportEvidence, ResolutionEvidence};
+        let root = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let source = root.path().join("CacheOdd.hs");
+        let boot = root.path().join("CacheEven.hs-boot");
+        fs::write(
+            &source,
+            "module CacheOdd where\nimport {-# SOURCE #-} CacheEven\n",
+        )
+        .unwrap();
+        let boot_bytes = b"module CacheEven where\neven' :: Int -> Bool\n";
+        fs::write(&boot, boot_bytes).unwrap();
+        write_record(
+            root.path(),
+            &source,
+            "u",
+            "CacheOdd",
+            product_bytes("u", "CacheOdd", &[0x42]),
+        );
+        let record_path = fs::read_dir(root.path().join(RECORD_DIR).join(sha(b"endpoint")))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mut record: Record =
+            ciborium::de::from_reader(fs::read(&record_path).unwrap().as_slice()).unwrap();
+        let boot = fs::canonicalize(boot).unwrap();
+        record.evidence.sources.push(SourceEvidence {
+            path: boot.clone(),
+            sha256: digest(boot_bytes),
+        });
+        record.evidence.modules[0]
+            .imports
+            .push(ModuleImportEvidence {
+                qualifier: ImportQualifier::Unqualified,
+                module: "CacheEven".into(),
+                boot: true,
+                selected: Some(boot.clone()),
+            });
+        record.evidence.modules.push(ModuleEvidence {
+            unit: "u".into(),
+            module: "CacheEven".into(),
+            boot: true,
+            source: boot.clone(),
+            imports: vec![],
+            product: ProductAvailability::Boot,
+        });
+        record.evidence.resolutions.push(ResolutionEvidence {
+            qualifier: ImportQualifier::Unqualified,
+            module: "CacheEven".into(),
+            boot: true,
+            selected: Some(boot.clone()),
+            candidates: vec![boot.clone()],
+        });
+        assert!(record.evidence.valid(&record.target_source));
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&record, &mut encoded).unwrap();
+        fs::write(&record_path, encoded).unwrap();
+        let selected = select_in(root.path(), scratch.path()).unwrap();
+        assert_eq!(selected.by_owner.len(), 1);
+        let manifest: Value =
+            ciborium::de::from_reader(fs::read(&selected.manifest_path).unwrap().as_slice())
+                .unwrap();
+        let fields = manifest.as_array().unwrap();
+        let candidate = fields[2].as_array().unwrap()[0].as_array().unwrap();
+        let imported = candidate[9].as_array().unwrap()[0].as_array().unwrap();
+        assert_eq!(imported[1].as_text(), Some("CacheEven"));
+        assert_eq!(imported[2], Value::Bool(true));
+        assert_eq!(imported[3].as_text(), boot.to_str());
+        // The defining ordinary source is unchanged. Its consumed boot input
+        // must still invalidate the durable product before compiler admission.
+        fs::write(&boot, b"module CacheEven where\neven' :: Bool -> Bool\n").unwrap();
+        assert!(select_in(root.path(), scratch.path())
+            .unwrap()
+            .by_owner
+            .is_empty());
+        fs::write(&boot, boot_bytes).unwrap();
+        assert_eq!(
+            select_in(root.path(), scratch.path())
+                .unwrap()
+                .by_owner
+                .len(),
+            1
+        );
+        fs::remove_file(&boot).unwrap();
+        assert!(select_in(root.path(), scratch.path())
+            .unwrap()
+            .by_owner
+            .is_empty());
     }
 
     #[test]
