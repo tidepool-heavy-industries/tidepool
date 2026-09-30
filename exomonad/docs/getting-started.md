@@ -230,6 +230,17 @@ live outside source or in the separately mounted build directory.
 or Git state. `exomonad run-map` reads a run's recorded artifacts without starting
 or attaching to anything.
 
+`exomonad run-map <run-dir> --perfetto` exports recorded host trace metadata for
+Perfetto. Use `--since 15m`, `--actor ID@INCARNATION`, `--execution ID`, or
+`--call-id ID` to bound the timeline. `--from-unix-ms` and `--until-unix-ms`
+accept UTC Unix milliseconds. Selector flags filter timeline events while the
+actor inventory and review retain their normal scope. The export includes
+trace source file and line references plus counts for time cutoff, selectors,
+and the timeline limit. It exports metadata only; model input, output, and
+errors are not included. It does not make missing identifiers into causal
+links. Usage remains unknown until a harness-owned evidence export is
+available.
+
 ## Where to go next
 
 - [The workspace package in depth](../examples/workspace/README.md), with a

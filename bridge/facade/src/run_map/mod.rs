@@ -36,7 +36,7 @@ pub use review::{
 use serde::Serialize;
 pub use trace::{
     ActorLifecycle, CallTiming, Cancellation, CorrelationCounts, DurationSummary, RunProvenance,
-    TimingLink, TraceSummary,
+    TimelineEvent, TimelineFilter, TimingLink, TraceSummary,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -182,6 +182,18 @@ pub fn read_observed_run(
     window: TimeWindow,
     observation: &Observation,
 ) -> io::Result<RunMap> {
+    read_observed_run_filtered(run, limits, window, observation, &TimelineFilter::default())
+}
+
+/// Read a run and apply selectors to the bounded timeline projection only.
+/// The actor inventory, review, and summary retain their existing semantics.
+pub fn read_observed_run_filtered(
+    run: &Path,
+    limits: Limits,
+    window: TimeWindow,
+    observation: &Observation,
+    timeline_filter: &TimelineFilter,
+) -> io::Result<RunMap> {
     window.validate()?;
     let read_bound = u64::try_from(limits.bytes_per_record)
         .ok()
@@ -200,7 +212,9 @@ pub fn read_observed_run(
         actors: Vec::new(),
         diagnostics: Vec::new(),
         usage: Evidence::Unknown {
-            reason: "Per-response usage reconciliation not implemented".into(),
+            reason:
+                "No read-only harness export of stored response usage is available to this reader"
+                    .into(),
         },
         acceptance: Evidence::Unknown {
             reason: "No structured acceptance evidence consumed".into(),
@@ -397,7 +411,13 @@ pub fn read_observed_run(
     let mut events = None;
     let mut trace_unavailable = String::new();
     if let Some(path) = trace_path {
-        let (summary, read) = trace::read_trace(&path, limits, window, &mut report.diagnostics);
+        let (summary, read) = trace::read_trace(
+            &path,
+            limits,
+            window,
+            &mut report.diagnostics,
+            timeline_filter,
+        );
         report.trace = summary;
         if report.trace.unclassified_dispatch_failures > 0 {
             report.diagnostics.push(format!(
@@ -433,6 +453,37 @@ pub fn read_observed_run(
     Ok(report)
 }
 impl RunMap {
+    /// Perfetto JSON trace. Exported payloads contain metadata and source
+    /// references only; source content must be retrieved separately.
+    pub fn perfetto_trace(&self) -> serde_json::Value {
+        let mut events: Vec<serde_json::Value> = self.trace.timeline.iter().map(|event| {
+            let mut args = serde_json::Map::new();
+            args.insert("certainty".into(), serde_json::Value::String(event.certainty.into()));
+            args.insert("source".into(), serde_json::Value::String(event.source.clone()));
+            if let Some(value) = &event.actor { args.insert("actor".into(), value.clone().into()); }
+            if let Some(value) = &event.execution { args.insert("execution".into(), value.clone().into()); }
+            if let Some(value) = &event.call_id { args.insert("call_id".into(), value.clone().into()); }
+            let mut row = serde_json::json!({
+                "name": event.name, "cat": event.category,
+                "ph": if event.duration_ms.is_some() { "X" } else { "i" },
+                "ts": event.at_unix_ms.saturating_mul(1000),
+                "pid": event.actor.as_deref().and_then(|actor| actor.split('@').next()).and_then(|id| id.parse::<u64>().ok()).unwrap_or(0),
+                "tid": 0, "args": args,
+            });
+            if let Some(duration) = event.duration_ms { row["dur"] = serde_json::json!(duration.saturating_mul(1000)); }
+            row
+        }).collect();
+        events.push(serde_json::json!({
+            "name": "run-map export bounds", "cat": "metadata", "ph": "M",
+            "args": { "from_unix_ms": self.window.from_unix_ms, "until_unix_ms": self.window.until_unix_ms,
+                "omitted_timeline_events": self.trace.omitted_timeline_events,
+                "timeline_filtered_events": self.trace.timeline_filtered_events,
+                "timeline_outside_window_events": self.trace.timeline_outside_window_events,
+                "source": self.source }
+        }));
+        serde_json::json!({"displayTimeUnit":"ms", "traceEvents": events})
+    }
+
     pub fn concise(&self) -> String {
         let mut output = format!("{}: {} observed actor directories, {} recorded events, {} diagnostics; usage and acceptance unknown (not peak concurrency)", self.source, self.actors.len(), self.actors.iter().map(|actor| actor.events.len()).sum::<usize>(), self.diagnostics.len());
         if let (Evidence::Observed { value: run_id, .. }, Evidence::Observed { value: model, .. }) =

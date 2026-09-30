@@ -50,6 +50,31 @@ pub struct TraceSummary {
     pub timing_correlations: CorrelationCounts,
     pub timing_links: Vec<TimingLink>,
     pub omitted_timing_links: u64,
+    /// Bounded event projection for Perfetto export. These are observations,
+    /// not causal edges; missing correlation identifiers remain absent.
+    pub timeline: Vec<TimelineEvent>,
+    pub omitted_timeline_events: u64,
+    pub timeline_filtered_events: u64,
+    pub timeline_outside_window_events: u64,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct TimelineEvent {
+    pub name: String,
+    pub category: String,
+    pub at_unix_ms: u64,
+    pub duration_ms: Option<u64>,
+    pub actor: Option<String>,
+    pub execution: Option<String>,
+    pub call_id: Option<String>,
+    pub certainty: &'static str,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TimelineFilter {
+    pub actor: Option<String>,
+    pub execution: Option<String>,
+    pub call_id: Option<String>,
 }
 #[derive(Debug, Serialize)]
 pub struct TimingLink {
@@ -75,6 +100,10 @@ impl Default for TraceSummary {
             timing_correlations: CorrelationCounts::default(),
             timing_links: Vec::new(),
             omitted_timing_links: 0,
+            timeline: Vec::new(),
+            omitted_timeline_events: 0,
+            timeline_filtered_events: 0,
+            timeline_outside_window_events: 0,
         }
     }
 }
@@ -578,6 +607,7 @@ pub(super) fn read_trace(
     limits: Limits,
     window: TimeWindow,
     diagnostics: &mut Vec<String>,
+    timeline_filter: &TimelineFilter,
 ) -> (TraceSummary, TraceEvents) {
     let mut summary = TraceSummary::default();
     let mut events = TraceEvents::default();
@@ -642,6 +672,8 @@ pub(super) fn read_trace(
         };
         events.observe(time, &record);
         if !window.contains(time) {
+            summary.timeline_outside_window_events =
+                summary.timeline_outside_window_events.saturating_add(1);
             continue;
         }
         let source = format!("{}:{}", path.display(), index + 1);
@@ -650,6 +682,61 @@ pub(super) fn read_trace(
         let target = record["target"].as_str().unwrap_or("");
         let span = &record["span"];
         let spans = record["spans"].as_array();
+        if !message.is_empty() {
+            let actor = fields["actor"]
+                .as_str()
+                .and_then(actor_key)
+                .or_else(|| {
+                    Some(format!(
+                        "{}@{}",
+                        lenient_u64(&fields["actor"])?,
+                        lenient_u64(&fields["incarnation"])?
+                    ))
+                })
+                .or_else(|| span_field(&record, "actor").and_then(actor_key));
+            let execution = span_field(&record, "execution")
+                .map(str::to_owned)
+                .or_else(|| fields["execution"].as_str().map(str::to_owned));
+            let call_id = span_field(&record, "call_id")
+                .map(str::to_owned)
+                .or_else(|| fields["call_id"].as_str().map(str::to_owned));
+            let matches = timeline_filter
+                .actor
+                .as_ref()
+                .is_none_or(|want| actor.as_ref() == Some(want))
+                && timeline_filter
+                    .execution
+                    .as_ref()
+                    .is_none_or(|want| execution.as_ref() == Some(want))
+                && timeline_filter
+                    .call_id
+                    .as_ref()
+                    .is_none_or(|want| call_id.as_ref() == Some(want));
+            if matches {
+                if summary.timeline.len() < 100_000 {
+                    summary.timeline.push(TimelineEvent {
+                        name: message.to_owned(),
+                        category: target.to_owned(),
+                        at_unix_ms: time,
+                        duration_ms: if message == "call timing" {
+                            lenient_u64(&fields["total_ms"])
+                        } else {
+                            elapsed_ms(fields)
+                        },
+                        actor,
+                        execution,
+                        call_id,
+                        certainty: "observed",
+                        source: source.clone(),
+                    });
+                } else {
+                    summary.omitted_timeline_events += 1;
+                }
+            } else {
+                summary.timeline_filtered_events =
+                    summary.timeline_filtered_events.saturating_add(1);
+            }
+        }
         if let (Some(phase), Some(ms)) = (
             fields["phase"].as_str().and_then(known_phase),
             fields["elapsed_ms"].as_u64(),
@@ -800,6 +887,7 @@ mod tests {
                 until_unix_ms: Some(1790157608000),
             },
             &mut diagnostics,
+            &TimelineFilter::default(),
         );
         assert_eq!(summary.phases["compiler_service"].count, 1);
         assert_eq!(summary.phases["compiler_service"].total_ms, 830);
@@ -836,10 +924,72 @@ mod tests {
             Limits::default(),
             TimeWindow::default(),
             &mut diagnostics,
+            &TimelineFilter::default(),
         );
         assert!(summary.host_tools.is_empty());
         assert!(diagnostics
             .iter()
             .any(|line| line.contains("incomplete trace tail")));
+    }
+
+    #[test]
+    fn timeline_filter_keeps_recorded_refs_and_does_not_join_missing_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.jsonl");
+        let records = [
+            serde_json::json!({"timestamp":"2026-09-23T10:00:00Z","target":"host","fields":{"message":"call timing","actor":2,"incarnation":1,"tool":"haskell","total_ms":40,"outcome":"ok"}}),
+            serde_json::json!({"timestamp":"2026-09-23T10:00:01Z","target":"host","fields":{"message":"jev call answered","elapsed_ms":12},"spans":[{"name":"cell","execution":"exec-1"}]}),
+        ];
+        fs::write(
+            &path,
+            records
+                .iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let mut diagnostics = Vec::new();
+        let (summary, _) = read_trace(
+            &path,
+            Limits::default(),
+            TimeWindow::default(),
+            &mut diagnostics,
+            &TimelineFilter {
+                actor: Some("2@1".into()),
+                ..TimelineFilter::default()
+            },
+        );
+        assert_eq!(summary.timeline.len(), 1);
+        assert_eq!(summary.timeline[0].actor.as_deref(), Some("2@1"));
+        assert!(summary.timeline[0].call_id.is_none());
+        assert!(summary.timeline[0].source.ends_with("trace.jsonl:1"));
+        assert_eq!(summary.timeline[0].certainty, "observed");
+    }
+
+    #[test]
+    fn sanitized_wave_fixture_exports_overlapping_observations_without_flow_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.jsonl");
+        fs::write(&path, include_str!("fixtures/review-trace.jsonl")).unwrap();
+        let mut diagnostics = Vec::new();
+        let (summary, _) = read_trace(
+            &path,
+            Limits::default(),
+            TimeWindow::default(),
+            &mut diagnostics,
+            &TimelineFilter::default(),
+        );
+        assert!(summary
+            .timeline
+            .iter()
+            .any(|event| event.execution.as_deref() == Some("exec-root-1")));
+        assert!(summary
+            .timeline
+            .iter()
+            .any(|event| event.actor.as_deref() == Some("2@1") && event.duration_ms.is_some()));
+        assert!(summary.timeline.iter().any(|event| event.call_id.is_none()));
+        let export = serde_json::to_value(&summary.timeline).unwrap();
+        assert!(!export.to_string().contains("flow"));
+        assert!(export.to_string().contains("review-trace.jsonl:"));
     }
 }

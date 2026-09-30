@@ -73,6 +73,18 @@ enum Command {
         /// Number of slowest hosted calls to list.
         #[arg(long, default_value_t = 15)]
         slowest: usize,
+        /// Filter timeline events to actor key `ID@INCARNATION`.
+        #[arg(long)]
+        actor: Option<String>,
+        /// Filter timeline events to a recorded execution identifier.
+        #[arg(long)]
+        execution: Option<String>,
+        /// Filter timeline events to a recorded hosted call identifier.
+        #[arg(long)]
+        call_id: Option<String>,
+        /// Emit a bounded Perfetto-compatible JSON trace.
+        #[arg(long)]
+        perfetto: bool,
         #[arg(long)]
         json: bool,
     },
@@ -305,6 +317,10 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             until_unix_ms,
             since,
             slowest,
+            actor,
+            execution,
+            call_id,
+            perfetto,
             json,
         } => {
             let now_unix_ms = std::time::SystemTime::now()
@@ -320,7 +336,7 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 codex_home,
                 slowest_calls: slowest,
             };
-            let report = tidepool::run_map::read_observed_run(
+            let report = tidepool::run_map::read_observed_run_filtered(
                 &run_dir,
                 tidepool::run_map::Limits::default(),
                 tidepool::run_map::TimeWindow {
@@ -330,8 +346,18 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                     until_unix_ms,
                 },
                 &observation,
+                &tidepool::run_map::TimelineFilter {
+                    actor,
+                    execution,
+                    call_id,
+                },
             )?;
-            if json {
+            if perfetto {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report.perfetto_trace())?
+                );
+            } else if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!("{}", report.concise());
@@ -482,7 +508,7 @@ mod tests {
                 "exomonad", "run-map", "/sanitized/run", "--from-unix-ms", "10",
                 "--until-unix-ms", "20", "--json"
             ]).unwrap().command,
-            Command::RunMap { run_dir, from_unix_ms: Some(10), until_unix_ms: Some(20), since: None, slowest: 15, json: true }
+            Command::RunMap { run_dir, from_unix_ms: Some(10), until_unix_ms: Some(20), since: None, slowest: 15, actor: None, execution: None, call_id: None, perfetto: false, json: true }
                 if run_dir == std::path::Path::new("/sanitized/run")
         ));
         assert!(Cli::try_parse_from(["exomonad", "run-map"]).is_err());
