@@ -571,3 +571,46 @@ Logs: `/tmp/paired-declaration-publication-gate2.log`,
 and `/tmp/harness-native-web-cache-gate.log`. Source/WIP was preserved under
 `target/completion-evidence/active-wip/20260930T020453Z`. No live provider trial,
 backend-default change, or push has occurred.
+
+### 2026-09-30 native executable and exact-owner integration
+
+Main `a8f8bc2bc0` builds `//bridge/facade:exomonad` natively with Buck
+(403 local actions, zero cache hits). The gate used the exact pinned harness
+`763d38d57691da31d2bf3c3c7493ca9910067540` from local Git because its
+canonical remote revision is unpublished. The temporary source override was
+restored byte-for-byte; canonical remote fetching and packaged startup remain
+unverified. Codex is excluded. Evidence: `/tmp/native-facade-offline-gate2.log`
+and `target/completion-evidence/native-facade-offline/`.
+
+Product integration `037b415634` compiles the facade and actor library/test
+targets with default features disabled. It includes exact-context carriers,
+protected target package-interface witnesses, cold same-batch package exports,
+and sequential execution-state ownership. One cold-package execution/rollback
+test passes; these changes do not enable concurrent actors or exact Join
+hydration. Evidence: `/tmp/joined-actor-context-check.log` and
+`/tmp/cold-package-native-gate3.log`.
+
+The next real awaitWatch gate fails before execution because retained original
+`Tidepool.Aeson.FromJSON` groups require `GHC.Internal.Real.$fIntegralInt`,
+which the optimized target omitted. The producer must recover the exact package
+code closure required by demanded original groups. Interface certification alone
+cannot supply missing code. Preserve the earlier InvalidManagedPointer failure
+as an unresolved subsequent gate. Evidence: `/tmp/product-watch-cold-package-gate6.log`.
+
+Harness `0331cc3a783a40e65611a776d4c880b42431fe2a` adds atomically paired
+deferred and before-call checkpoint cuts, with explicit schema 5-to-6 migration.
+The live Engine fixture passes two child completions while the parent claim is
+pending, followed by parent failure; three schema checks and workspace compile
+checks pass. Independent source review is clear. The resident captured-unfold
+adapter and matching application pin are still being implemented. Evidence:
+`/tmp/harness-captured-checkpoint-gate3.log`.
+
+The real embedded command backend passes one delegated execution test with
+`CommandExited 0`, clean cleanup and expected stdout (74.54 seconds). Evidence:
+`/tmp/embedded-command-delegated-gate7.log`. Notification integration remains
+unaccepted: independent review found that an admitted front message can prevent
+a second queued message from progressing without another external trigger.
+
+WIP snapshots: `target/completion-evidence/active-wip/20260930T025247Z`.
+No push, live provider trial or backend-default change occurred. Full M1, M2,
+source-hidden compiler consumers and final package acceptance remain open.
