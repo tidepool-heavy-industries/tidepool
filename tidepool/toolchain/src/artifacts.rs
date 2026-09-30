@@ -1319,7 +1319,7 @@ fn compile_invocation_inner(
                 )
                 .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
                 target.package_interfaces = certified_products::certify_target_package_interfaces(
-                    target.prepared.prepared(),
+                    target.prepared.prepared_shared(),
                     &package_closure,
                 )
                 .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;

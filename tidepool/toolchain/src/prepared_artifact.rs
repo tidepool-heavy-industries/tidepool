@@ -79,6 +79,10 @@ impl PreparedArtifact {
         &self.bytes
     }
 
+    pub(crate) fn prepared_shared(&self) -> &Arc<PreparedProgram> {
+        &self.prepared
+    }
+
     pub fn prepared(&self) -> &PreparedProgram {
         &self.prepared
     }

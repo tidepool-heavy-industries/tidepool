@@ -122,7 +122,9 @@ pub struct CertifiedTargetPackageInterfaces {
 
 impl CertifiedTargetPackageInterfaces {
     pub fn matches_target(&self, target: &PreparedProgram) -> bool {
-        self.target.as_deref().is_some_and(|bound| bound == target)
+        self.target
+            .as_deref()
+            .is_some_and(|bound| std::ptr::eq(bound, target) || bound == target)
     }
 
     pub fn interface_digest(&self, unit: &str, module: &str) -> Option<[u8; 32]> {
@@ -133,7 +135,7 @@ impl CertifiedTargetPackageInterfaces {
 }
 
 pub(crate) fn certify_target_package_interfaces(
-    target: &PreparedProgram,
+    target: &std::sync::Arc<PreparedProgram>,
     packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
 ) -> CertResult<CertifiedTargetPackageInterfaces> {
     let mut interfaces = BTreeMap::new();
@@ -153,7 +155,7 @@ pub(crate) fn certify_target_package_interfaces(
         interfaces.insert(owner.clone(), witness.sha256);
     }
     Ok(CertifiedTargetPackageInterfaces {
-        target: Some(std::sync::Arc::new(target.clone())),
+        target: Some(target.clone()),
         interfaces,
     })
 }
@@ -1844,8 +1846,9 @@ mod tests {
                 sha256: sha(b"selected interface"),
             },
         )]);
-        let target = testing::prepare(testing::wire_program()).unwrap();
+        let target = std::sync::Arc::new(testing::prepare(testing::wire_program()).unwrap());
         let retained = certify_target_package_interfaces(&target, &packages).unwrap();
+        assert!(std::sync::Arc::ptr_eq(retained.target.as_ref().unwrap(), &target));
         assert!(retained.matches_target(&target));
         assert_eq!(
             retained.interface_digest("fixture-unit", "Package"),
