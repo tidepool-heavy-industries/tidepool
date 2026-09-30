@@ -107,7 +107,7 @@ async function signIn(page, secret) {
   await page.goto(new URL('/', secret.baseUrl).toString(), { waitUntil: 'domcontentloaded' });
   await page.getByLabel('Session secret').fill(secret.value);
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await page.getByRole('status', { name: 'Session authenticated' }).waitFor({ timeout: 30_000 });
+  await page.getByRole('status').filter({ hasText: /^Session authenticated$/ }).waitFor({ timeout: 30_000 });
   await page.getByRole('heading', { name: 'Tree' }).waitFor({ timeout: 30_000 });
 }
 
@@ -149,6 +149,8 @@ async function runJourney(ready) {
     page.setDefaultTimeout(30_000);
     const hostOperations = [];
     const hostOperationWaiters = [];
+    const requestWaiters = [];
+    const requestOrder = new Map();
     const commandReceipts = [];
     const receiptWaiters = new Map();
     let latestSnapshot;
@@ -156,6 +158,35 @@ async function runJourney(ready) {
     let droppedFirstAck = 0;
     let droppedFirstReceipt = 0;
     let filteredSnapshotReceipt = 0;
+    let nextRequestOrder = 0;
+    const requestsForConversation = (conversationId) => (latestSnapshot?.requests ?? [])
+      .filter((request) => request.conversationId === conversationId);
+    const newestCompletedRequest = (conversationId, baselineIds) => requestsForConversation(conversationId)
+      .filter((request) => request.state === 'completed' && !baselineIds.has(request.id))
+      .sort((left, right) => (requestOrder.get(right.id) ?? 0) - (requestOrder.get(left.id) ?? 0))[0];
+    const notifyRequestWaiters = () => {
+      for (let index = requestWaiters.length - 1; index >= 0; index -= 1) {
+        const waiter = requestWaiters[index];
+        const request = newestCompletedRequest(waiter.conversationId, waiter.baselineIds);
+        if (!request) continue;
+        requestWaiters.splice(index, 1);
+        clearTimeout(waiter.timer);
+        waiter.resolve(request);
+      }
+    };
+    const waitForCompletedRequest = (conversationId, baselineIds, timeoutMs = 120_000) => {
+      const existing = newestCompletedRequest(conversationId, baselineIds);
+      if (existing) return Promise.resolve(existing);
+      return new Promise((resolve, reject) => {
+        const waiter = { conversationId, baselineIds, resolve, reject, timer: undefined };
+        waiter.timer = setTimeout(() => {
+          const index = requestWaiters.indexOf(waiter);
+          if (index >= 0) requestWaiters.splice(index, 1);
+          reject(new Error('actor conversation did not publish a completed retained request'));
+        }, timeoutMs);
+        requestWaiters.push(waiter);
+      });
+    };
     await page.routeWebSocket('**/api/ws', (socket) => {
       const server = socket.connectToServer();
       socket.onMessage((payload) => {
@@ -185,7 +216,13 @@ async function runJourney(ready) {
           frame.snapshot.commandReceipts = frame.snapshot.commandReceipts.filter((receipt) => receipt.commandId !== operationId);
           filteredSnapshotReceipt += before - frame.snapshot.commandReceipts.length;
         }
-        if (frame?.type === 'snapshot') latestSnapshot = frame.snapshot;
+        if (frame?.type === 'snapshot') {
+          latestSnapshot = frame.snapshot;
+          for (const request of latestSnapshot.requests ?? []) {
+            if (!requestOrder.has(request.id)) requestOrder.set(request.id, ++nextRequestOrder);
+          }
+          notifyRequestWaiters();
+        }
         if (frame?.type === 'event') {
           const event = frame.event?.event;
           if (operationId && event?.kind === 'command.receipt' && event.value?.commandId === operationId) {
@@ -208,10 +245,27 @@ async function runJourney(ready) {
               };
             }
           }
+          if (event?.kind === 'request.upsert' && latestSnapshot) {
+            const request = event.value;
+            const requests = latestSnapshot.requests ?? [];
+            const index = requests.findIndex((candidate) => candidate.id === request?.id);
+            latestSnapshot = {
+              ...latestSnapshot,
+              requests: index < 0 ? [...requests, request] : requests.map((candidate, candidateIndex) => candidateIndex === index ? request : candidate),
+            };
+            requestOrder.set(request.id, ++nextRequestOrder);
+            notifyRequestWaiters();
+          }
           if (event?.kind === 'entity.remove' && event.value?.entity === 'actor' && latestSnapshot) {
             latestSnapshot = {
               ...latestSnapshot,
               actors: (latestSnapshot.actors ?? []).filter((candidate) => candidate.identity?.actor !== event.value.id),
+            };
+          }
+          if (event?.kind === 'entity.remove' && event.value?.entity === 'request' && latestSnapshot) {
+            latestSnapshot = {
+              ...latestSnapshot,
+              requests: (latestSnapshot.requests ?? []).filter((candidate) => candidate.id !== event.value.id),
             };
           }
           if (event?.kind === 'command.receipt') {
@@ -251,6 +305,24 @@ async function runJourney(ready) {
         receiptWaiters.set(operationId, waiter);
       });
     };
+    const inspectLatestRequestHistory = async (expectedText, conversationId, baselineIds) => {
+      const request = await waitForCompletedRequest(conversationId, baselineIds);
+      await page.getByRole('button', { name: 'Timeline', exact: true }).click();
+      const row = page.getByRole('row').filter({ hasText: request.id });
+      await row.waitFor({ timeout: 30_000 });
+      const historyResponsePromise = page.waitForResponse((response) =>
+        new URL(response.url()).pathname === `/api/history/${encodeURIComponent(request.id)}`, { timeout: 30_000 });
+      await row.getByRole('button', { name: 'Inspect history', exact: true }).click();
+      const response = await historyResponsePromise;
+      assert.equal(response.status(), 200, 'retained request history was not available through the UI');
+      const historyPage = await response.json();
+      assert.equal(historyPage.requestId, request.id, 'history view returned a different request identity');
+      const history = page.getByRole('region', { name: 'Retained request history' });
+      await history.getByRole('list', { name: 'Retained request items' }).getByText(expectedText, { exact: false })
+        .waitFor({ timeout: 30_000 });
+      await page.getByRole('button', { name: 'Close history', exact: true }).click();
+      await selectHostActor(page, actor);
+    };
     let lastOperation;
       await signIn(page, { baseUrl, value: sessionSecret });
       const sessionCookie = (await context.cookies(baseUrl)).find((cookie) => cookie.name === 'harness_session');
@@ -268,6 +340,16 @@ async function runJourney(ready) {
       for (const step of scenario.steps) {
         if (step.action === 'input') {
           const text = requireString(step.text, 'scenario input text');
+          let historyConversationId;
+          let historyBaselineIds;
+          if (typeof step.wait_for_text === 'string') {
+            const actorProjection = hostActor(latestSnapshot, actor);
+            historyConversationId = actorProjection?.modelConversation;
+            if (typeof historyConversationId !== 'string' || historyConversationId.length === 0) {
+              throw new Error('actor projection has no model conversation for retained history');
+            }
+            historyBaselineIds = new Set(requestsForConversation(historyConversationId).map((request) => request.id));
+          }
           const sentBeforeInput = hostOperations.length;
           await sendHostInput(page, text);
           const retained = await page.evaluate(() => JSON.parse(sessionStorage.getItem('harness.embeddedCommands.v1') ?? '[]'));
@@ -290,7 +372,7 @@ async function runJourney(ready) {
             await page.getByText('Admitted for processing').last().waitFor({ timeout: 30_000 });
           }
           if (typeof step.wait_for_text === 'string') {
-            await page.getByText(step.wait_for_text, { exact: false }).last().waitFor({ timeout: 120_000 });
+            await inspectLatestRequestHistory(step.wait_for_text, historyConversationId, historyBaselineIds);
           }
         } else if (step.action === 'wait_actor_state') {
           if (!['running', 'waiting', 'retiring', 'retired', 'lost'].includes(step.state)) {
@@ -343,7 +425,7 @@ async function runJourney(ready) {
             ? page.waitForResponse((response) => new URL(response.url()).pathname === `/api/commands/${operationId}`, { timeout: 30_000 })
             : undefined;
           await page.reload({ waitUntil: 'domcontentloaded' });
-          await page.getByRole('status', { name: 'Session authenticated' }).waitFor({ timeout: 30_000 });
+          await page.getByRole('status').filter({ hasText: /^Session authenticated$/ }).waitFor({ timeout: 30_000 });
           await page.getByRole('heading', { name: 'Tree' }).waitFor({ timeout: 30_000 });
           await selectHostActor(page, actor);
           if (statusResponse && lastOperation) {
