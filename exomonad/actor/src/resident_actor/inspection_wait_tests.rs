@@ -3,7 +3,9 @@ use crate::{ActorId, ActorPlacement, ActorSourceImports, ActorWorkbenchSource};
 use tidepool_codegen::scope::ScopeId;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::SessionId;
-use tidepool_runtime::session::{registry::SlotKind, CheckoutError, ResidentError, SessionError};
+use tidepool_runtime::session::{
+    registry::SlotKind, CheckoutError, ModuleEnv, ResidentError, SessionError, SessionLib,
+};
 
 type Registry = ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>;
 type Workbench = ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>;
@@ -24,14 +26,22 @@ fn context(session: SessionId, scope: ScopeId) -> ActorSessionContext {
     }
 }
 
-fn fixture() -> (Arc<Registry>, Workbench, SessionId, ScopeId) {
+fn fixture() -> (
+    Arc<Registry>,
+    Workbench,
+    SessionId,
+    ScopeId,
+    tempfile::TempDir,
+) {
     let machines = Arc::new(Registry::new());
     let session_id = SessionId(11);
+    let root = tempfile::tempdir().unwrap();
+    let lib = SessionLib::open(session_id, root.path(), ModuleEnv::standalone_default()).unwrap();
     let mut session = ResidentSession::unbootstrapped(
         frunk::HNil,
         tidepool_mcp::CapturedOutput::new(),
         tidepool_runtime::DEFAULT_NURSERY_SIZE,
-        None,
+        Some(lib),
     );
     let retired = session.mint_isolated_scope();
     session.retire_scope(retired);
@@ -43,11 +53,11 @@ fn fixture() -> (Arc<Registry>, Workbench, SessionId, ScopeId) {
         None,
         Vec::new(),
     );
-    (machines, workbench, session_id, retired)
+    (machines, workbench, session_id, retired, root)
 }
 
 async fn unknown_session(request: InspectionRequest) {
-    let (machines, workbench, other, _) = fixture();
+    let (machines, workbench, other, _, _root) = fixture();
     let missing = SessionId(12);
     let before = machines.peek(other, ResidentSession::run_context).unwrap();
     let error = inspect(&workbench, context(missing, ScopeId::ROOT), request)
@@ -66,7 +76,7 @@ async fn unknown_session(request: InspectionRequest) {
 }
 
 async fn retired_scope(request: InspectionRequest) {
-    let (machines, workbench, session, retired) = fixture();
+    let (machines, workbench, session, retired, _root) = fixture();
     let before = machines
         .peek(session, ResidentSession::run_context)
         .unwrap();
