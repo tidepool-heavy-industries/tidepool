@@ -1340,43 +1340,62 @@ fn embedded_root_attachment_error(
     None
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "compose the existing Store and actor authority owners"
+)]
 async fn dispatch_embedded_browser_command(
-    command_id: &str,
-    command: harness::server::ClientCommand,
+    operation: harness::embedding::ClientOperationId,
+    command: &harness::server::HostCommand,
+    store: &harness::store::Store,
     run: &str,
     nodes: &[exomonad_actor::ActorGraphNode],
     live: &BTreeSet<ActorRef>,
     projection: &embedded_projection::EmbeddedProjection,
     conversation_for: impl Fn(ActorRef) -> Option<Arc<harness::embedding::Conversation>>,
     lifecycle: &embedded_projection::LifecycleSender,
-) -> harness::server::CommandReceiptOutcome {
-    let route = |target: Option<harness::embedding::HostIdentity>, reason: String| {
-        harness::server::CommandReceiptOutcome::Refused { target, reason }
-    };
+) -> Result<Option<harness::server::CommandReceipt>, String> {
+    use harness::{embedding::HostControlError, server::CommandReceiptOutcome};
 
-    let harness::server::ClientCommand::Host { command } = command else {
-        return route(
-            None,
-            "standalone submit is unavailable while the browser is attached to an embedded host"
-                .into(),
-        );
+    let command_run = &command.target().run;
+    let retained = store
+        .embedded_command(command_run, operation)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "browser command was not durably queued".to_owned())?;
+    if retained.command != *command {
+        return Err("browser operation identity has conflicting command contents".into());
+    }
+    // Retained observations outlive actor admission and projection retention.
+    // Retry never consults a retired actor or sends another input wake.
+    if let Some(receipt) = retained.receipt {
+        return Ok(Some(receipt));
+    }
+    let Some(_) = store
+        .claim_embedded_command(command_run, operation)
+        .map_err(|error| error.to_string())?
+    else {
+        // Another delivery has already claimed this operation. In particular,
+        // an uncertain control cannot be replayed against a later round.
+        return Ok(None);
     };
-    let target = match &command {
-        harness::server::HostCommand::Input { target, .. }
-        | harness::server::HostCommand::Interrupt { target }
-        | harness::server::HostCommand::Retire { target } => target.clone(),
+    let settle = |outcome| {
+        store
+            .settle_embedded_command(command_run, operation, outcome)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    };
+    let target = command.target().clone();
+    let refuse = |reason: String| {
+        settle(CommandReceiptOutcome::Refused {
+            target: Some(target.clone()),
+            reason,
+        })
     };
     if target.run != run {
-        return route(
-            Some(target),
-            "target belongs to a different host run".into(),
-        );
+        return refuse("target belongs to a different host run".into());
     }
     let Some(actor) = projection.resolve_identity(run, &target, nodes) else {
-        return route(
-            Some(target),
-            "target actor identity is not present in this host run".into(),
-        );
+        return refuse("target actor identity is not present in this host run".into());
     };
     let is_live = nodes
         .iter()
@@ -1384,49 +1403,106 @@ async fn dispatch_embedded_browser_command(
         .is_some_and(|node| node.terminal.is_none())
         && live.contains(&actor);
     if !is_live {
-        return route(Some(target), "target actor is no longer live".into());
+        return refuse("target actor is no longer live".into());
     }
     let Some(conversation) = conversation_for(actor) else {
-        return route(Some(target), "target has no live model conversation".into());
+        return refuse("target has no live model conversation".into());
     };
 
-    match command {
+    let control = match command {
         harness::server::HostCommand::Input { text, .. } => {
-            match conversation.input(command_id, "browser", &text).await {
-                Ok(receipt) => harness::server::CommandReceiptOutcome::Admitted {
-                    target: Some(target),
-                    envelope_id: receipt.envelope_id.to_string(),
-                    wake_error: receipt.wake_error,
-                },
-                Err(error) => route(Some(target), error.to_string()),
-            }
-        }
-        harness::server::HostCommand::Interrupt { .. } => match conversation
-            .control(harness::embedding::HostControl::Interrupt)
-            .await
-        {
-            Ok(_) => harness::server::CommandReceiptOutcome::ControlRequested {
-                target,
-                control: harness::server::CommandControl::Interrupt,
-            },
-            Err(error) => route(Some(target), error.to_string()),
-        },
-        harness::server::HostCommand::Retire { .. } => {
-            match conversation
-                .control(harness::embedding::HostControl::Retire)
-                .await
-            {
-                Ok(_) => {
-                    lifecycle.publish(actor, harness::server::HostActorLifecycle::Retiring);
-                    harness::server::CommandReceiptOutcome::ControlRequested {
-                        target,
-                        control: harness::server::CommandControl::Retire,
+            return match conversation.command_input(operation, text).await {
+                Ok(receipt) => Ok(Some(receipt)),
+                Err(error) => {
+                    // A Store failure after the atomic admission commit must
+                    // not turn a real envelope into a refused operation.
+                    if let Some(receipt) = store
+                        .embedded_command(command_run, operation)
+                        .map_err(|error| error.to_string())?
+                        .and_then(|record| record.receipt)
+                    {
+                        Ok(Some(receipt))
+                    } else {
+                        settle(CommandReceiptOutcome::Unconfirmed {
+                            target,
+                            reason: error.to_string(),
+                        })
                     }
                 }
-                Err(error) => route(Some(target), error.to_string()),
+            };
+        }
+        harness::server::HostCommand::Interrupt { expected_round, .. } => {
+            harness::embedding::HostControl::Interrupt {
+                expected_round: *expected_round,
             }
         }
+        harness::server::HostCommand::Retire { .. } => harness::embedding::HostControl::Retire,
+    };
+    match conversation.control(control).await {
+        Ok(_) => {
+            let control = match command {
+                harness::server::HostCommand::Retire { .. } => {
+                    lifecycle.publish(actor, harness::server::HostActorLifecycle::Retiring);
+                    harness::server::CommandControl::Retire
+                }
+                harness::server::HostCommand::Interrupt { .. } => {
+                    harness::server::CommandControl::Interrupt
+                }
+                harness::server::HostCommand::Input { .. } => {
+                    unreachable!("input returns its atomic receipt")
+                }
+            };
+            settle(CommandReceiptOutcome::ControlRequested { target, control })
+        }
+        Err(HostControlError::Refused(reason)) => refuse(reason),
+        Err(HostControlError::Unconfirmed(reason)) => {
+            settle(CommandReceiptOutcome::Unconfirmed { target, reason })
+        }
     }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "drain through the existing Store and actor authority owners"
+)]
+async fn drain_embedded_browser_commands(
+    store: &harness::store::Store,
+    control: &harness::server::ServerControl,
+    run: &str,
+    nodes: &[exomonad_actor::ActorGraphNode],
+    live: &BTreeSet<ActorRef>,
+    projection: &embedded_projection::EmbeddedProjection,
+    conversations: &HashMap<ActorRef, embedded_harness::EmbeddedActorBinding>,
+    lifecycle: &embedded_projection::LifecycleSender,
+) -> Result<(), String> {
+    // The channel is a wake hint. Store rows survive the persist/enqueue gap
+    // and are also drained by the existing host health tick.
+    for record in store
+        .queued_embedded_commands(run)
+        .map_err(|error| error.to_string())?
+    {
+        if let Some(receipt) = dispatch_embedded_browser_command(
+            record.operation_id,
+            &record.command,
+            store,
+            run,
+            nodes,
+            live,
+            projection,
+            |actor| {
+                conversations
+                    .get(&actor)
+                    .filter(|binding| binding.is_live())
+                    .and_then(|binding| binding.conversation())
+            },
+            lifecycle,
+        )
+        .await?
+        {
+            control.publish_command_receipt(receipt);
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -4248,6 +4324,7 @@ async fn run_interactive_applications(
             &embedded_run,
             &(host_graph)(),
             &embedded_projection::LifecycleState::default(),
+            |_| None,
         );
     }
     let failure = AssertUnwindSafe(async {
@@ -4267,6 +4344,7 @@ async fn run_interactive_applications(
                             &embedded_run,
                             &(host_graph)(),
                             &states,
+                            |actor| embedded_conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
                         );
                     }
                     for actor in states.keys() {
@@ -4292,11 +4370,19 @@ async fn run_interactive_applications(
                         };
                         break Some(format!("embedded browser server failed: {detail}"));
                     }
+                    if let Err(error) = drain_embedded_browser_commands(
+                        &service.runtime.store(), &service.control, &embedded_run,
+                        &(host_graph)(), &embedded_live, &embedded_projection,
+                        &embedded_conversations, &embedded_lifecycle_tx,
+                    ).await {
+                        break Some(format!("embedded browser command drain failed: {error}"));
+                    }
                     embedded_projection.publish(
                         &service.control,
                         &embedded_run,
                         &(host_graph)(),
                         &(*embedded_lifecycle_rx.borrow()).clone(),
+                        |actor| embedded_conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
                     );
                 }
                 #[cfg(feature = "codex-compat")]
@@ -4435,29 +4521,39 @@ async fn run_interactive_applications(
                 let Some(command) = command else {
                     break Some("embedded browser command channel closed".into());
                 };
-                let control = &embedded_service.as_ref().expect("branch requires service").control;
-                let command_id = command.command_id;
-                let nodes = (host_graph)();
-                let outcome = dispatch_embedded_browser_command(
-                    &command_id,
-                    command.command,
-                    &embedded_run,
-                    &nodes,
-                    &embedded_live,
-                    &embedded_projection,
-                    |actor| embedded_conversations.get(&actor)
-                        .filter(|binding| binding.is_live())
-                        .and_then(|binding| binding.conversation()),
-                    &embedded_lifecycle_tx,
-                )
-                .await;
-                if let harness::server::CommandReceiptOutcome::Refused { reason, .. } = &outcome {
-                    tracing::warn!(%reason, command_id = %command_id, "embedded browser command was refused");
+                let service = embedded_service.as_ref().expect("branch requires service");
+                let store = service.runtime.store();
+                match command.command {
+                    harness::server::ClientCommand::Host { operation_id, command } => {
+                        // A settled retry is readable even when there are no
+                        // queued rows left and its actor has already retired.
+                        match store.embedded_command(&embedded_run, operation_id) {
+                            Ok(Some(record)) if record.command == command => {
+                                if let Some(receipt) = record.receipt {
+                                    service.control.publish_command_receipt(receipt);
+                                }
+                            }
+                            Ok(_) => {},
+                            Err(error) => break Some(format!("embedded command lookup failed: {error}")),
+                        }
+                    }
+                    harness::server::ClientCommand::Submit { .. } => {
+                        service.control.publish_command_receipt(harness::server::CommandReceipt {
+                            command_id: command.command_id,
+                            outcome: harness::server::CommandReceiptOutcome::Refused {
+                                target: None,
+                                reason: "standalone submit is unavailable while the browser is attached to an embedded host".into(),
+                            },
+                        });
+                    }
                 }
-                control.publish_command_receipt(harness::server::CommandReceipt {
-                    command_id,
-                    outcome,
-                });
+                if let Err(error) = drain_embedded_browser_commands(
+                    &store, &service.control, &embedded_run, &(host_graph)(),
+                    &embedded_live, &embedded_projection, &embedded_conversations,
+                    &embedded_lifecycle_tx,
+                ).await {
+                    break Some(format!("embedded browser command drain failed: {error}"));
+                }
             }
             Some(result) = embedded_tasks.join_next(), if !embedded_tasks.is_empty() => {
                 let (actor, local_actor, outcome) = match result {
@@ -4847,6 +4943,7 @@ async fn run_interactive_applications(
                                 &embedded_run,
                                 &(host_graph)(),
                                 &lifecycle_states,
+                                |actor| embedded_conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
                             );
                             let runtime = Arc::clone(&service.runtime);
                             #[cfg(test)]

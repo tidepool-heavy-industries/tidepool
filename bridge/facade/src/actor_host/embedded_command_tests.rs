@@ -6,7 +6,8 @@ use std::sync::{
 use exomonad_actor::{ActorGraphNode, ActorId, ActorRef, ActorWorkbenchPosture, Incarnation};
 use harness::{
     embedding::{
-        AdmissionGuard, Conversation, EmbeddedError, HostActor, HostControl, HostIdentity,
+        AdmissionGuard, ClientOperationId, Conversation, EmbeddedError, EmbeddedRoundId, HostActor,
+        HostControl, HostControlError, HostIdentity,
     },
     model::AgentPath,
     server::{ClientCommand, CommandControl, CommandReceiptOutcome, HostCommand},
@@ -23,6 +24,8 @@ impl AdmissionGuard for TestLease {}
 struct TestHost {
     identity: HostIdentity,
     wakes: AtomicUsize,
+    admissions: AtomicUsize,
+    uncertain_retire: std::sync::atomic::AtomicBool,
     controls: std::sync::Mutex<Vec<HostControl>>,
     fail_retire: std::sync::atomic::AtomicBool,
 }
@@ -34,6 +37,7 @@ impl HostActor for TestHost {
     }
 
     fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+        self.admissions.fetch_add(1, Ordering::Relaxed);
         Ok(Box::new(TestLease))
     }
 
@@ -46,15 +50,19 @@ impl HostActor for TestHost {
         Ok(())
     }
 
-    async fn control(&self, control: HostControl) -> Result<Value, String> {
+    async fn control(&self, control: HostControl) -> Result<Value, HostControlError> {
         let refuse_retire =
             matches!(&control, HostControl::Retire) && self.fail_retire.load(Ordering::Relaxed);
         self.controls
             .lock()
             .expect("test host control mutex")
             .push(control);
-        if refuse_retire {
-            Err("retirement refused".into())
+        if self.uncertain_retire.load(Ordering::Relaxed) {
+            Err(HostControlError::Unconfirmed(
+                "retirement acknowledgment lost".into(),
+            ))
+        } else if refuse_retire {
+            Err(HostControlError::Refused("retirement refused".into()))
         } else {
             Ok(serde_json::json!({ "requested": true }))
         }
@@ -62,6 +70,7 @@ impl HostActor for TestHost {
 }
 
 struct RoutingFixture {
+    store: Arc<Store>,
     projection: embedded_projection::EmbeddedProjection,
     nodes: Vec<ActorGraphNode>,
     live: BTreeSet<ActorRef>,
@@ -83,18 +92,24 @@ impl RoutingFixture {
         let root_host = Arc::new(TestHost {
             identity: root_identity.clone(),
             wakes: AtomicUsize::new(0),
+            admissions: AtomicUsize::new(0),
+            uncertain_retire: std::sync::atomic::AtomicBool::new(false),
             controls: std::sync::Mutex::new(Vec::new()),
             fail_retire: std::sync::atomic::AtomicBool::new(false),
         });
         let first_host = Arc::new(TestHost {
             identity: first_identity.clone(),
             wakes: AtomicUsize::new(0),
+            admissions: AtomicUsize::new(0),
+            uncertain_retire: std::sync::atomic::AtomicBool::new(false),
             controls: std::sync::Mutex::new(Vec::new()),
             fail_retire: std::sync::atomic::AtomicBool::new(false),
         });
         let second_host = Arc::new(TestHost {
             identity: second_identity.clone(),
             wakes: AtomicUsize::new(0),
+            admissions: AtomicUsize::new(0),
+            uncertain_retire: std::sync::atomic::AtomicBool::new(false),
             controls: std::sync::Mutex::new(Vec::new()),
             fail_retire: std::sync::atomic::AtomicBool::new(false),
         });
@@ -107,7 +122,7 @@ impl RoutingFixture {
                 .expect("attach first host"),
         );
         let second_conversation = Arc::new(
-            Conversation::attach(store, second_host.clone(), Some(&root))
+            Conversation::attach(store.clone(), second_host.clone(), Some(&root))
                 .expect("attach second host"),
         );
         let mut projection = embedded_projection::EmbeddedProjection::default();
@@ -117,6 +132,7 @@ impl RoutingFixture {
         let (lifecycle, lifecycle_rx) = embedded_projection::LifecycleSender::channel();
 
         Self {
+            store,
             projection,
             nodes: vec![
                 model_node(root_actor),
@@ -139,10 +155,21 @@ impl RoutingFixture {
         }
     }
 
-    async fn dispatch(&self, command_id: &str, command: ClientCommand) -> CommandReceiptOutcome {
-        dispatch_embedded_browser_command(
-            command_id,
+    async fn dispatch(&self, _description: &str, command: ClientCommand) -> CommandReceiptOutcome {
+        let ClientCommand::Host {
+            operation_id,
             command,
+        } = command
+        else {
+            panic!("routing fixtures require exact embedded host commands");
+        };
+        self.store
+            .enqueue_embedded_command(operation_id, &command)
+            .unwrap();
+        dispatch_embedded_browser_command(
+            operation_id,
+            &command,
+            &self.store,
             "run",
             &self.nodes,
             &self.live,
@@ -151,6 +178,9 @@ impl RoutingFixture {
             &self.lifecycle,
         )
         .await
+        .unwrap()
+        .expect("command settled")
+        .outcome
     }
 }
 
@@ -159,6 +189,10 @@ fn actor(id: u64) -> ActorRef {
         id: ActorId(id),
         incarnation: Incarnation::FIRST,
     }
+}
+
+fn new_operation() -> ClientOperationId {
+    ClientOperationId(uuid::Uuid::new_v4())
 }
 
 fn identity(run: &str, path: &str, actor: ActorRef) -> HostIdentity {
@@ -199,6 +233,7 @@ async fn production_dispatch_admits_input_only_to_the_exact_actor() {
         .dispatch(
             "input-1",
             ClientCommand::Host {
+                operation_id: new_operation(),
                 command: HostCommand::Input {
                     target: target.clone(),
                     text: "hello child".into(),
@@ -234,6 +269,7 @@ async fn production_dispatch_refuses_wrong_run_and_incarnation_before_admission(
             .dispatch(
                 "invalid-target",
                 ClientCommand::Host {
+                    operation_id: new_operation(),
                     command: HostCommand::Input {
                         target: target.clone(),
                         text: "must not wake".into(),
@@ -264,7 +300,9 @@ async fn production_dispatch_routes_interrupt_and_retire_to_their_exact_actors()
         .dispatch(
             "interrupt-2",
             ClientCommand::Host {
+                operation_id: new_operation(),
                 command: HostCommand::Interrupt {
+                    expected_round: EmbeddedRoundId(uuid::Uuid::new_v4()),
                     target: second_identity.clone(),
                 },
             },
@@ -282,6 +320,7 @@ async fn production_dispatch_routes_interrupt_and_retire_to_their_exact_actors()
         .dispatch(
             "retire-1",
             ClientCommand::Host {
+                operation_id: new_operation(),
                 command: HostCommand::Retire {
                     target: first_identity.clone(),
                 },
@@ -309,7 +348,7 @@ async fn production_dispatch_routes_interrupt_and_retire_to_their_exact_actors()
             .lock()
             .expect("second controls")
             .as_slice(),
-        [HostControl::Interrupt]
+        [HostControl::Interrupt { .. }]
     ));
     assert_eq!(
         fixture.lifecycle_rx.borrow()[&first],
@@ -331,6 +370,7 @@ async fn refused_retirement_does_not_publish_retiring_lifecycle() {
         .dispatch(
             "retire-refused",
             ClientCommand::Host {
+                operation_id: new_operation(),
                 command: HostCommand::Retire {
                     target: target.clone(),
                 },
@@ -347,10 +387,218 @@ async fn refused_retirement_does_not_publish_retiring_lifecycle() {
     };
     assert_eq!(actual, target);
     assert!(
-        reason.starts_with("host refused:") && reason.contains("retirement refused"),
+        reason == "retirement refused",
         "refusal should retain host error context: {reason}"
     );
     assert!(!fixture.lifecycle_rx.borrow().contains_key(&actor));
+}
+
+#[tokio::test]
+async fn admitted_retry_after_retirement_does_not_resolve_admit_or_wake() {
+    let mut fixture = RoutingFixture::new();
+    let actor = actor(1);
+    let operation_id = new_operation();
+    let command = HostCommand::Input {
+        target: fixture.hosts[&actor].identity.clone(),
+        text: "retain this exact input".into(),
+    };
+    let first = fixture
+        .dispatch(
+            "first input",
+            ClientCommand::Host {
+                operation_id,
+                command: command.clone(),
+            },
+        )
+        .await;
+    assert!(matches!(first, CommandReceiptOutcome::Admitted { .. }));
+    let admissions = fixture.hosts[&actor].admissions.load(Ordering::Relaxed);
+    assert_eq!(fixture.hosts[&actor].wakes.load(Ordering::Relaxed), 1);
+    fixture.nodes.clear();
+    fixture.live.clear();
+    let duplicate = dispatch_embedded_browser_command(
+        operation_id,
+        &command,
+        &fixture.store,
+        "run",
+        &fixture.nodes,
+        &fixture.live,
+        &fixture.projection,
+        |_| panic!("retained retry must not resolve a live actor"),
+        &fixture.lifecycle,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(duplicate.outcome, first);
+    assert_eq!(
+        fixture.hosts[&actor].admissions.load(Ordering::Relaxed),
+        admissions
+    );
+    assert_eq!(fixture.hosts[&actor].wakes.load(Ordering::Relaxed), 1);
+    let conflicting = HostCommand::Input {
+        target: command.target().clone(),
+        text: "changed payload".into(),
+    };
+    assert!(fixture
+        .store
+        .enqueue_embedded_command(operation_id, &conflicting)
+        .is_err());
+    assert_eq!(fixture.hosts[&actor].wakes.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn claimed_control_and_retained_uncertainty_never_redispatch() {
+    let fixture = RoutingFixture::new();
+    let actor = actor(1);
+    let operation_id = new_operation();
+    let command = HostCommand::Retire {
+        target: fixture.hosts[&actor].identity.clone(),
+    };
+    fixture
+        .store
+        .enqueue_embedded_command(operation_id, &command)
+        .unwrap();
+    fixture
+        .store
+        .claim_embedded_command("run", operation_id)
+        .unwrap()
+        .unwrap();
+    let dispatch = || {
+        dispatch_embedded_browser_command(
+            operation_id,
+            &command,
+            &fixture.store,
+            "run",
+            &fixture.nodes,
+            &fixture.live,
+            &fixture.projection,
+            |_| panic!("claimed control must not resolve a live actor"),
+            &fixture.lifecycle,
+        )
+    };
+    assert!(dispatch().await.unwrap().is_none());
+    let retained = fixture
+        .store
+        .settle_embedded_command(
+            "run",
+            operation_id,
+            CommandReceiptOutcome::Unconfirmed {
+                target: command.target().clone(),
+                reason: "previous host lost after claim".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(dispatch().await.unwrap(), Some(retained));
+    assert!(fixture.hosts[&actor].controls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn failed_control_acknowledgment_is_retained_as_unconfirmed() {
+    let fixture = RoutingFixture::new();
+    let actor = actor(1);
+    fixture.hosts[&actor]
+        .uncertain_retire
+        .store(true, Ordering::Relaxed);
+    let operation_id = new_operation();
+    let command = HostCommand::Retire {
+        target: fixture.hosts[&actor].identity.clone(),
+    };
+    let first = fixture
+        .dispatch(
+            "uncertain retire",
+            ClientCommand::Host {
+                operation_id,
+                command: command.clone(),
+            },
+        )
+        .await;
+    assert!(matches!(&first, CommandReceiptOutcome::Unconfirmed { .. }));
+    assert_eq!(
+        fixture
+            .dispatch(
+                "retry uncertain retire",
+                ClientCommand::Host {
+                    operation_id,
+                    command,
+                }
+            )
+            .await,
+        first
+    );
+    assert_eq!(fixture.hosts[&actor].controls.lock().unwrap().len(), 1);
+    assert!(!fixture.lifecycle_rx.borrow().contains_key(&actor));
+}
+
+#[tokio::test]
+async fn durable_command_drain_runs_without_a_channel_hint_and_skips_claimed_work() {
+    let fixture = RoutingFixture::new();
+    let actor = actor(1);
+    let operation_id = new_operation();
+    let command = HostCommand::Input {
+        target: fixture.hosts[&actor].identity.clone(),
+        text: "persisted before wake".into(),
+    };
+    fixture
+        .store
+        .enqueue_embedded_command(operation_id, &command)
+        .unwrap();
+    let claimed = new_operation();
+    fixture
+        .store
+        .enqueue_embedded_command(
+            claimed,
+            &HostCommand::Retire {
+                target: command.target().clone(),
+            },
+        )
+        .unwrap();
+    fixture
+        .store
+        .claim_embedded_command("run", claimed)
+        .unwrap()
+        .unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let inbox = Arc::new(
+        ActorInbox::open(
+            scratch.path().join("inbox.jsonl"),
+            scratch.path().join("cursor.json"),
+        )
+        .unwrap(),
+    );
+    let binding = embedded_harness::EmbeddedActorBinding::new(
+        command.target().clone(),
+        inbox,
+        "test-drain".into(),
+        Some(fixture.conversations[&actor].clone()),
+    );
+    let conversations = HashMap::from([(actor, binding)]);
+    let (_, control, _channel) = harness::server::server(scratch.path().into());
+    for _ in 0..2 {
+        drain_embedded_browser_commands(
+            &fixture.store,
+            &control,
+            "run",
+            &fixture.nodes,
+            &fixture.live,
+            &fixture.projection,
+            &conversations,
+            &fixture.lifecycle,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        fixture
+            .store
+            .embedded_command("run", operation_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        harness::store::EmbeddedCommandState::InputAdmitted
+    );
+    assert_eq!(fixture.hosts[&actor].wakes.load(Ordering::Relaxed), 1);
+    assert!(fixture.hosts[&actor].controls.lock().unwrap().is_empty());
 }
 
 #[cfg(not(feature = "codex-compat"))]

@@ -665,8 +665,12 @@ async fn browser_interrupt_cancels_one_engine_round_and_driver_accepts_later_inp
     .await
     .unwrap();
     let conversation = Arc::clone(&embedded.conversation);
+    let inactive_round = harness::embedding::EmbeddedRoundId(uuid::Uuid::new_v4());
+    assert_eq!(conversation.active_round(), None);
     assert!(conversation
-        .control(harness::embedding::HostControl::Interrupt)
+        .control(harness::embedding::HostControl::Interrupt {
+            expected_round: inactive_round,
+        })
         .await
         .is_err());
 
@@ -705,9 +709,14 @@ async fn browser_interrupt_cancels_one_engine_round_and_driver_accepts_later_inp
         lifecycle_rx.borrow().1,
         harness::server::HostActorLifecycle::Running
     );
+    let first_round = conversation
+        .active_round()
+        .expect("running provider round identity");
     assert_eq!(
         conversation
-            .control(harness::embedding::HostControl::Interrupt)
+            .control(harness::embedding::HostControl::Interrupt {
+                expected_round: first_round,
+            })
             .await
             .unwrap()["requested"],
         true
@@ -738,7 +747,9 @@ async fn browser_interrupt_cancels_one_engine_round_and_driver_accepts_later_inp
         "interrupted durable head was not retained"
     );
     assert!(conversation
-        .control(harness::embedding::HostControl::Interrupt)
+        .control(harness::embedding::HostControl::Interrupt {
+            expected_round: first_round,
+        })
         .await
         .is_err());
 

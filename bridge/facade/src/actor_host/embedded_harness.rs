@@ -16,8 +16,8 @@ use exomonad_actor::{
 use exomonad_tool::{ToolArguments, ToolInvocationContext};
 use harness::{
     embedding::{
-        AdmissionGuard, Conversation, EmbeddedError, HostActor, HostControl, HostIdentity,
-        ToolSurface,
+        AdmissionGuard, Conversation, EmbeddedError, EmbeddedRoundId, HostActor, HostControl,
+        HostControlError, HostIdentity, ToolSurface,
     },
     mailbox::DurableMailboxWake,
     model::{AgentPath, ConversationIdentity, OperationId},
@@ -174,6 +174,7 @@ pub(super) struct EmbeddedRoundControl {
 
 #[derive(Clone)]
 pub(super) struct RoundCancellationHandle {
+    id: EmbeddedRoundId,
     sender: watch::Sender<bool>,
 }
 
@@ -190,7 +191,10 @@ impl EmbeddedRoundControl {
             return Err("an embedded Engine round is already active".into());
         }
         let (sender, receiver) = watch::channel(false);
-        let handle = RoundCancellationHandle { sender };
+        let handle = RoundCancellationHandle {
+            id: EmbeddedRoundId(uuid::Uuid::new_v4()),
+            sender,
+        };
         *active = Some(handle.clone());
         Ok(EmbeddedRoundLease {
             control: self.clone(),
@@ -199,12 +203,20 @@ impl EmbeddedRoundControl {
         })
     }
 
-    pub(super) fn interrupt_current(&self) -> Result<(), String> {
-        let handle = self
-            .active
-            .lock()
-            .clone()
+    pub(super) fn active_round(&self) -> Option<EmbeddedRoundId> {
+        self.active.lock().as_ref().map(|handle| handle.id)
+    }
+
+    pub(super) fn interrupt(&self, expected_round: EmbeddedRoundId) -> Result<(), String> {
+        let active = self.active.lock();
+        let handle = active
+            .as_ref()
             .ok_or_else(|| "no embedded Engine round is active".to_owned())?;
+        if handle.id != expected_round {
+            return Err("the targeted embedded Engine round is no longer active".into());
+        }
+        // Match and signal under the active slot lock. A delayed request never
+        // resolves its old identity to a successor round.
         handle.cancel();
         Ok(())
     }
@@ -382,6 +394,10 @@ impl HostActor for EmbeddedHostActor {
         &self.identity
     }
 
+    fn active_round(&self) -> Option<EmbeddedRoundId> {
+        self.round_control.active_round()
+    }
+
     async fn output_committed(&self, operation: &OperationId) -> Result<(), String> {
         let expected = ConversationIdentity::Embedded {
             run: self.identity.run.clone(),
@@ -441,7 +457,7 @@ impl HostActor for EmbeddedHostActor {
             .map_err(|_| "embedded Engine wake receiver closed".into())
     }
 
-    async fn control(&self, control: HostControl) -> Result<Value, String> {
+    async fn control(&self, control: HostControl) -> Result<Value, HostControlError> {
         match control {
             HostControl::Retire => {
                 self.actor
@@ -450,13 +466,14 @@ impl HostActor for EmbeddedHostActor {
                         summary: "embedded host requested retirement".into(),
                     })
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| HostControlError::Unconfirmed(error.to_string()))?;
                 Ok(json!({"requested":true}))
             }
-            HostControl::Interrupt => self
+            HostControl::Interrupt { expected_round } => self
                 .round_control
-                .interrupt_current()
-                .map(|()| json!({"requested":true})),
+                .interrupt(expected_round)
+                .map(|()| json!({"requested":true}))
+                .map_err(HostControlError::Refused),
         }
     }
 }
@@ -667,27 +684,38 @@ mod round_control_tests {
     use super::*;
 
     #[test]
-    fn interrupt_requires_an_active_round_and_stale_handles_do_not_retarget() {
+    fn delayed_interrupt_never_targets_a_successor_round() {
         let control = Arc::new(EmbeddedRoundControl::default());
-        assert!(control.interrupt_current().is_err());
+        let absent = EmbeddedRoundId(uuid::Uuid::new_v4());
+        assert!(control.interrupt(absent).is_err());
+        assert_eq!(control.active_round(), None);
 
         let first = control.begin().expect("first round");
-        let mut first_receiver = first.cancellation();
+        let first_id = control.active_round().expect("active first round");
+        let first_receiver = first.cancellation();
         let old_handle = first.handle.clone();
-        control.interrupt_current().expect("interrupt first round");
-        assert!(*first_receiver.borrow_and_update());
+        assert!(control.begin().is_err());
+        control.interrupt(first_id).expect("interrupt first round");
+        assert!(*first_receiver.borrow());
         drop(first);
-        assert!(control.interrupt_current().is_err());
+        assert!(control.interrupt(first_id).is_err());
 
         let second = control.begin().expect("second round");
-        old_handle.cancel();
+        let second_id = control.active_round().expect("active second round");
+        assert_ne!(first_id, second_id);
         let second_receiver = second.cancellation();
+        assert!(control.interrupt(first_id).is_err());
+        old_handle.cancel();
         assert!(
             !*second_receiver.borrow(),
-            "an old cancellation handle must signal only its own watch instance"
+            "a delayed interrupt or old handle must not cancel its successor"
         );
-        control.interrupt_current().expect("interrupt second round");
+        control
+            .interrupt(second_id)
+            .expect("interrupt second round");
         assert!(*second_receiver.borrow());
+        drop(second);
+        assert_eq!(control.active_round(), None);
     }
 }
 
@@ -1062,6 +1090,7 @@ mod tests {
             &conversation.identity().run,
             &campaign.forest.inspect_host_graph(),
             &LifecycleState::default(),
+            |_| conversation.active_round(),
         );
         let mut reconnect_identity = None;
         for _ in 0..2 {

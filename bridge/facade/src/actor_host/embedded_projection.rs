@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use exomonad_actor::{ActorExitKind, ActorGraphNode, ActorRef, ActorWorkbenchPosture};
 use harness::{
-    embedding::HostIdentity,
+    embedding::{EmbeddedRoundId, HostIdentity},
     model::AgentPath,
     server::{HostActorKind, HostActorLifecycle, HostActorProjection, ServerControl},
 };
@@ -105,6 +105,7 @@ impl EmbeddedProjection {
         run: &str,
         nodes: &[ActorGraphNode],
         states: &LifecycleState,
+        active_round_for: impl Fn(ActorRef) -> Option<EmbeddedRoundId>,
     ) -> (Vec<HostActorProjection>, Vec<serde_json::Value>) {
         let mut actors = Vec::new();
         let mut conversations = Vec::new();
@@ -146,6 +147,14 @@ impl EmbeddedProjection {
                     HostActorKind::Workflow
                 },
                 lifecycle,
+                active_round: if matches!(
+                    lifecycle,
+                    HostActorLifecycle::Retired | HostActorLifecycle::Lost
+                ) {
+                    None
+                } else {
+                    active_round_for(node.actor)
+                },
                 model_conversation: conversation.clone(),
             });
             if let Some(path) = conversation {
@@ -165,8 +174,9 @@ impl EmbeddedProjection {
         run: &str,
         nodes: &[ActorGraphNode],
         states: &LifecycleState,
+        active_round_for: impl Fn(ActorRef) -> Option<EmbeddedRoundId>,
     ) {
-        let (actors, conversations) = self.projection(run, nodes, states);
+        let (actors, conversations) = self.projection(run, nodes, states, active_round_for);
         control.update_host_projection(run.to_owned(), actors, conversations);
     }
 }
@@ -235,6 +245,7 @@ mod tests {
             "run",
             &[node(1, None, false), node(2, Some(actor(1)), true)],
             &LifecycleState::new(),
+            |_| None,
         );
         assert_eq!(actors.len(), 2);
         assert_eq!(actors[0].kind, HostActorKind::Workflow);
@@ -267,7 +278,7 @@ mod tests {
         });
         let child = node(2, Some(actor(1)), true);
         let (actors, conversations) =
-            projection.projection("run", &[root, child], &LifecycleState::default());
+            projection.projection("run", &[root, child], &LifecycleState::default(), |_| None);
 
         assert_eq!(actors.len(), 2);
         let projected_root = actors
@@ -288,6 +299,40 @@ mod tests {
         assert!(conversations.iter().any(|conversation| {
             conversation["id"] == "/root/1" && conversation["state"] == "idle"
         }));
+    }
+
+    #[test]
+    fn active_round_is_observed_from_its_owner_and_terminal_state_clears_it() {
+        let mut projection = EmbeddedProjection::default();
+        let identity = HostIdentity {
+            run: "run".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "1".into(),
+        };
+        projection.attached(actor(1), &identity);
+        let round = EmbeddedRoundId(uuid::Uuid::new_v4());
+        let mut root = node(1, None, true);
+        let (actors, _) = projection.projection(
+            "run",
+            std::slice::from_ref(&root),
+            &LifecycleState::default(),
+            |_| Some(round),
+        );
+        assert_eq!(actors[0].active_round, Some(round));
+        let (actors, _) = projection.projection(
+            "run",
+            std::slice::from_ref(&root),
+            &LifecycleState::default(),
+            |_| None,
+        );
+        assert_eq!(actors[0].active_round, None);
+        root.terminal = Some(ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "retired".into(),
+        });
+        let (actors, _) =
+            projection.projection("run", &[root], &LifecycleState::default(), |_| Some(round));
+        assert_eq!(actors[0].active_round, None);
     }
 
     #[test]
