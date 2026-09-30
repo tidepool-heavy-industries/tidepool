@@ -617,10 +617,70 @@ fn read_checked(path: &Path, expected: &[u8; 32]) -> Result<Vec<u8>, RecoveryArt
 
 fn durable_copy(path: &Path, bytes: &[u8], digest: &[u8; 32]) -> Result<(), RecoveryArtifactError> {
     reject_symlink(path)?;
+    if verify_existing_durable(path, bytes.len(), digest)? {
+        return Ok(());
+    }
     tidepool_atomic_write::write_durable_new(path, bytes).map_err(io::Error::from)?;
     reject_symlink(path)?;
     read_checked(path, digest)?;
     Ok(())
+}
+
+fn verify_existing_durable(
+    path: &Path,
+    expected_len: usize,
+    digest: &[u8; 32],
+) -> Result<bool, RecoveryArtifactError> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(RecoveryArtifactError::InvalidReference);
+    }
+    if metadata.len() != expected_len as u64 {
+        return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
+    }
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0; expected_len.clamp(1, 64 * 1024)];
+    let mut remaining = metadata.len();
+    while remaining != 0 {
+        let limit = buffer.len().min(remaining as usize);
+        let read = file.read(&mut buffer[..limit])?;
+        if read == 0 {
+            return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
+        }
+        hasher.update(&buffer[..read]);
+        remaining -= read as u64;
+    }
+    if file.read(&mut buffer[..1])? != 0 || hasher.finalize().as_slice() != digest {
+        return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
+    }
+    let current = fs::symlink_metadata(path)?;
+    if !current.is_file() {
+        return Err(RecoveryArtifactError::InvalidReference);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if current.dev() != metadata.dev() || current.ino() != metadata.ino() {
+            return Err(RecoveryArtifactError::InvalidReference);
+        }
+    }
+    // A readable existing file is not evidence that a previous publication's
+    // durability completed. Confirm this descriptor and its directory now.
+    file.sync_all()?;
+    tidepool_atomic_write::sync_parent_directory(path).map_err(io::Error::from)?;
+    Ok(true)
 }
 
 fn reject_symlink(path: &Path) -> Result<(), RecoveryArtifactError> {
@@ -1149,6 +1209,84 @@ mod tests {
             ));
             assert_eq!(fs::read(&target).unwrap(), b"owned");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_copy_nonregular_fifo_refuses_without_blocking() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("fifo");
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: the C string is terminated and valid for the call; the path
+        // is a new entry in this test's private directory.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let digest: [u8; 32] = Sha256::digest(b"owned").into();
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            durable_copy(&path, b"owned", &digest),
+            Err(RecoveryArtifactError::InvalidReference)
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        assert!(matches!(
+            durable_copy(root.path(), b"owned", &digest),
+            Err(RecoveryArtifactError::InvalidReference)
+        ));
+    }
+
+    #[test]
+    fn durable_copy_racing_publishers_verify_the_actual_winner() {
+        use std::sync::{Arc, Barrier};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("same.cbor");
+        let digest: [u8; 32] = Sha256::digest(b"owned").into();
+        let barrier = Arc::new(Barrier::new(2));
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    durable_copy(&path, b"owned", &digest)
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+        assert_eq!(fs::read(&path).unwrap(), b"owned");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+
+        let path = root.path().join("mixed.cbor");
+        let barrier = Arc::new(Barrier::new(2));
+        let wrong = {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                tidepool_atomic_write::write_durable_new(&path, b"other").unwrap()
+            })
+        };
+        let correct = {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                durable_copy(&path, b"owned", &digest)
+            })
+        };
+        if wrong.join().unwrap() {
+            assert!(matches!(
+                correct.join().unwrap(),
+                Err(RecoveryArtifactError::DigestMismatch(_))
+            ));
+            assert_eq!(fs::read(&path).unwrap(), b"other");
+        } else {
+            correct.join().unwrap().unwrap();
+            assert_eq!(fs::read(&path).unwrap(), b"owned");
+        }
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
     }
 
     #[test]

@@ -24,6 +24,7 @@ blake3.workspace = true
 sha2 = "0.10"
 which = "8"
 tracing.workspace = true
+libc.workspace = true
 
 [dev-dependencies]
 serial_test.workspace = true
