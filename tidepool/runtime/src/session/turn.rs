@@ -4443,6 +4443,7 @@ mod tests {
                 0,
                 Arc::new(admission_specification.clone()),
                 admission_specification.specification_digest(),
+                [0; 32],
             )
             .unwrap();
         let (checked, folded) = check_cell_admitted(

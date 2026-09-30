@@ -5157,6 +5157,7 @@ where
     /// Release affine roots whose handles were dropped while the machine was
     /// checked into a registry or otherwise unavailable to the token itself.
     fn settle_dropped_custody(&mut self) -> usize {
+        self.state.reap_admission_leases();
         let leases = std::mem::take(&mut *self.custody_cleanup.binding_leases.lock());
         let mut released = Vec::new();
         for retained in leases {

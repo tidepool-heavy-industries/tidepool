@@ -14,6 +14,7 @@ use super::{PersistentSession, PublicVisibilitySnapshot, SessionCompileView, Ses
 /// Its scope retains exact binding and native shares through the existing
 /// binding-store owner; completion must retire that scope once.
 pub struct PrivateExecutionAdmission {
+    pub(super) owner: Arc<RuntimeAdmissionOwner>,
     admitted: PublicVisibilitySnapshot,
     private_scope: ScopeId,
     view: SessionCompileView,
@@ -41,6 +42,8 @@ impl PrivateExecutionAdmission {
 /// leases; compiler evidence binds its digest without interpreting authority.
 /// Original declaration identities are burned before checking any source.
 pub struct RuntimeCellAdmission {
+    owner: Arc<RuntimeAdmissionOwner>,
+    retained_scope: ScopeId,
     view: SessionCompileView,
     visibility: PublicVisibilitySnapshot,
     reserved_generations: Vec<Generation>,
@@ -48,7 +51,30 @@ pub struct RuntimeCellAdmission {
     interfaces: Vec<AdmittedValueInterface>,
     specification: Arc<dyn Any + Send + Sync>,
     specification_digest: [u8; 32],
+    authority_digest: [u8; 32],
     digest: [u8; 32],
+}
+
+/// An admission lifetime exists before the lazy machine bootstrap and is
+/// distinct from recoverable source-session IDs and per-store counters.
+pub(super) struct RuntimeAdmissionOwner {
+    identity: uuid::Uuid,
+    retired: parking_lot::Mutex<Vec<ScopeId>>,
+}
+
+impl RuntimeAdmissionOwner {
+    pub(super) fn new() -> Self {
+        Self {
+            identity: uuid::Uuid::new_v4(),
+            retired: parking_lot::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl Drop for RuntimeCellAdmission {
+    fn drop(&mut self) {
+        self.owner.retired.lock().push(self.retained_scope);
+    }
 }
 
 /// Exact injected interface bytes captured by the runtime owner. These
@@ -103,16 +129,32 @@ impl RuntimeCellAdmission {
     pub fn specification_digest(&self) -> [u8; 32] {
         self.specification_digest
     }
+    pub fn authority_digest(&self) -> [u8; 32] {
+        self.authority_digest
+    }
+    pub(super) fn belongs_to(&self, session: &PersistentSession) -> bool {
+        Arc::ptr_eq(&self.owner, session.admission_owner())
+    }
     pub fn specification(&self) -> &Arc<dyn Any + Send + Sync> {
         &self.specification
     }
 }
 
 impl PersistentSession {
+    /// Capsule drops happen outside checkout. The next owner entry retires
+    /// their detached lease scopes through the same binding/native owner.
+    pub(crate) fn reap_admission_leases(&mut self) {
+        let retired = std::mem::take(&mut *self.admission_owner().retired.lock());
+        for scope in retired {
+            self.retire_scope(scope);
+        }
+    }
+
     pub fn begin_private_execution(
         &mut self,
         public_scope: ScopeId,
     ) -> Result<PrivateExecutionAdmission, SessionError> {
+        self.reap_admission_leases();
         let admitted = self
             .public_visibility_snapshot_in(public_scope)
             .ok_or(SessionError::DeadScope(public_scope))?;
@@ -126,6 +168,7 @@ impl PersistentSession {
             .binding_tip_id(private_scope)
             .expect("detached scope captures a binding tip");
         Ok(PrivateExecutionAdmission {
+            owner: self.admission_owner().clone(),
             admitted,
             private_scope,
             view,
@@ -140,7 +183,9 @@ impl PersistentSession {
         declaration_count: usize,
         specification: Arc<dyn Any + Send + Sync>,
         specification_digest: [u8; 32],
+        authority_digest: [u8; 32],
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        self.reap_admission_leases();
         let view = self
             .compile_view_in(scope)
             .ok_or(SessionError::DeadScope(scope))?;
@@ -180,7 +225,9 @@ impl PersistentSession {
             digest.update(bytes);
         };
         frame(b"TidepoolRuntimeCellAdmission1");
+        frame(self.admission_owner().identity.as_bytes());
         frame(&specification_digest);
+        frame(&authority_digest);
         frame(&view.session().0.to_le_bytes());
         frame(&scope.0.to_le_bytes());
         frame(&visibility.epoch.to_le_bytes());
@@ -219,7 +266,13 @@ impl PersistentSession {
                 frame(parent.as_bytes());
             }
         }
+        let digest = *digest.finalize().as_bytes();
+        let retained_scope = self
+            .mint_detached_scope(scope)
+            .ok_or(SessionError::DeadScope(scope))?;
         Ok(Arc::new(RuntimeCellAdmission {
+            owner: self.admission_owner().clone(),
+            retained_scope,
             view,
             visibility,
             reserved_generations,
@@ -227,7 +280,58 @@ impl PersistentSession {
             interfaces,
             specification,
             specification_digest,
-            digest: *digest.finalize().as_bytes(),
+            authority_digest,
+            digest,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::{ModuleEnv, SessionId, SessionLib};
+
+    #[test]
+    fn admission_owner_fences_same_library_and_scope_counters() {
+        let root = tempfile::tempdir().unwrap();
+        let make_session = || {
+            PersistentSession::new(
+                Some(
+                    SessionLib::open(SessionId(983), root.path(), ModuleEnv::standalone_default())
+                        .unwrap(),
+                ),
+                1024 * 1024,
+            )
+        };
+        let mut first = make_session();
+        let mut second = make_session();
+        let first_public = first.mint_scope(ScopeId::ROOT).unwrap();
+        let second_public = second.mint_scope(ScopeId::ROOT).unwrap();
+        let private = first.begin_private_execution(first_public).unwrap();
+        let second_private = second.begin_private_execution(second_public).unwrap();
+        assert_eq!(private.private_scope(), second_private.private_scope());
+        assert_eq!(private.binding_tip(), second_private.binding_tip());
+        assert_eq!(private.view().session(), second_private.view().session());
+        assert_eq!(private.admitted_public().machine_incarnation, None);
+        assert_eq!(second_private.admitted_public().machine_incarnation, None);
+        assert!(matches!(
+            second.freeze_execution_intent(&private, vec![], vec![]),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
+        let first_cell = first
+            .admit_cell_in(private.private_scope(), 0, Arc::new(()), [7; 32], [8; 32])
+            .unwrap();
+        let second_cell = second
+            .admit_cell_in(
+                second_private.private_scope(),
+                0,
+                Arc::new(()),
+                [7; 32],
+                [8; 32],
+            )
+            .unwrap();
+        assert_ne!(first_cell.digest(), second_cell.digest());
+        assert!(first_cell.belongs_to(&first));
+        assert!(!first_cell.belongs_to(&second));
     }
 }

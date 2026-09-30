@@ -26,6 +26,7 @@ use super::{
 #[derive(Clone)]
 struct DeclarationTip {
     generation: Generation,
+    owner: ExactModuleIdentity,
     turn: DeclTurn,
     context: Arc<ExactDeclarationContext>,
     surface: AdmittedDeclarationSurface,
@@ -46,6 +47,7 @@ struct AuthoredWrite {
 /// baseline, never this private suffix, exact winners, leases, or reserved ID.
 /// The private scope keeps live roots owned until publication or abandonment.
 pub struct FinalExecutionIntent {
+    owner: Arc<super::admission::RuntimeAdmissionOwner>,
     admitted: PublicVisibilitySnapshot,
     private: PublicVisibilitySnapshot,
     private_base: Option<DeclarationTip>,
@@ -75,6 +77,12 @@ pub struct DeclarationPublicationBase {
     includes: Vec<PathBuf>,
     session_root: PathBuf,
     expected_public_version: String,
+}
+
+/// One stage for the same fixed final intent and atomic publication owner.
+pub enum ExecutionPublication {
+    Bindings(PublicManifestBase),
+    Declarations(DeclarationPublicationBase),
 }
 
 pub enum CertifiedDeclarationPublication {
@@ -149,8 +157,13 @@ fn tip(lib: &SessionLib, generation: Generation) -> Result<Option<DeclarationTip
             )
         })?
         .clone();
-    let (exports, instances, families) = if let Some(joined) = lib.log.joined_at(generation) {
+    let (owner, exports, instances, families) = if let Some(joined) = lib.log.joined_at(generation)
+    {
         (
+            ExactModuleIdentity {
+                unit: joined.evidence.reserved().unit.clone(),
+                module: joined.evidence.reserved().module.clone(),
+            },
             joined.evidence.exports().to_vec(),
             joined.evidence.instances().clone(),
             joined.evidence.family_closure().to_vec(),
@@ -173,7 +186,12 @@ fn tip(lib: &SessionLib, generation: Generation) -> Result<Option<DeclarationTip
         families.extend_from_slice(authored.family_closure());
         families.sort();
         families.dedup();
-        (authored.lexical_exports().to_vec(), instances, families)
+        (
+            module_owner(authored),
+            authored.lexical_exports().to_vec(),
+            instances,
+            families,
+        )
     } else {
         return Err(invalid_at(
             &lib.root,
@@ -182,6 +200,7 @@ fn tip(lib: &SessionLib, generation: Generation) -> Result<Option<DeclarationTip
     };
     Ok(Some(DeclarationTip {
         generation,
+        owner,
         turn,
         context,
         surface,
@@ -453,7 +472,8 @@ impl PersistentSession {
         write_ids: Vec<SessionVarId>,
         source_keys: Vec<SourceLeaseKey>,
     ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
-        if admission.view().session() != self.lib().session_id()
+        if !Arc::ptr_eq(&admission.owner, self.admission_owner())
+            || admission.view().session() != self.lib().session_id()
             || self.binding_tip_id(admission.private_scope()) != Some(admission.binding_tip())
         {
             return Err(SessionError::StaleStagedDeclaration);
@@ -465,6 +485,15 @@ impl PersistentSession {
                 != Some(&intent.private)
             {
                 return Err(SessionError::StaleStagedDeclaration);
+            }
+            if write_ids.iter().any(|id| {
+                self.bindings()
+                    .get(*id)
+                    .is_none_or(|entry| entry.scope != admission.private_scope())
+            }) {
+                return Err(SessionError::InvalidPublicBindingPromotion(
+                    tidepool_codegen::binding_table::BindingPromotionError::MissingOrForeignBinding,
+                ));
             }
             let mut writes = write_ids
                 .into_iter()
@@ -559,12 +588,6 @@ impl PersistentSession {
                 retractions,
             });
         }
-        if writes.is_empty() {
-            return Err(invalid_at(
-                &lib.root,
-                "declaration intent has no authored suffix",
-            ));
-        }
         for id in &write_ids {
             if self
                 .bindings()
@@ -587,14 +610,18 @@ impl PersistentSession {
             .collect::<Vec<_>>();
         write_ids.sort_by_key(|id| id.raw());
         write_ids.dedup();
-        let final_declarations =
-            tip(lib, private.declaration_tip)?.ok_or(SessionError::StaleStagedDeclaration)?;
+        let final_declarations = tip(lib, private.declaration_tip)?;
         if write_ids.iter().any(|id| {
             self.bindings().get(*id).is_some_and(|entry| {
-                final_declarations.exports.iter().any(|export| {
-                    std::iter::once(&export.head)
-                        .chain(export.children.iter())
-                        .any(|identity| identity.occurrence == entry.name.0)
+                final_declarations.as_ref().is_some_and(|tip| {
+                    tip.exports.iter().any(|export| {
+                        std::iter::once(&export.head)
+                            .chain(export.children.iter())
+                            .any(|identity| {
+                                identity.namespace == ExportNamespace::Value
+                                    && identity.occurrence == entry.name.0
+                            })
+                    })
                 })
             })
         }) {
@@ -629,6 +656,7 @@ impl PersistentSession {
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
         let reserved = self.lib_mut().reserve_join_generation_durable()?;
         Ok(Arc::new(FinalExecutionIntent {
+            owner: self.admission_owner().clone(),
             admitted: admitted.clone(),
             private,
             private_base,
@@ -641,11 +669,36 @@ impl PersistentSession {
     }
 
     /// Capture only the latest public merge baseline for a fixed execution.
+    pub fn restage_execution_publication(
+        &mut self,
+        owner: RecoveryPublicOwner,
+        intent: Arc<FinalExecutionIntent>,
+    ) -> Result<ExecutionPublication, SessionError> {
+        let base = self.restage_declaration_publication(owner, intent)?;
+        let declaration_conflict = base.current_public.as_ref().is_some_and(|tip| {
+            tip.exports.iter().any(|export| {
+                base.intent.head_replacements.iter().any(|replacement| {
+                    replacement.namespace == export.head.namespace
+                        && replacement.occurrence == export.head.occurrence
+                })
+            })
+        });
+        if base.intent.writes.is_empty() && !declaration_conflict {
+            Ok(ExecutionPublication::Bindings(base.public))
+        } else {
+            Ok(ExecutionPublication::Declarations(base))
+        }
+    }
+
+    /// Capture a declaration join baseline when the fixed intent requires one.
     pub fn restage_declaration_publication(
         &mut self,
         owner: RecoveryPublicOwner,
         intent: Arc<FinalExecutionIntent>,
     ) -> Result<DeclarationPublicationBase, SessionError> {
+        if !Arc::ptr_eq(&intent.owner, self.admission_owner()) {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
         let public = self.snapshot_publication(
             owner,
             intent.admitted.scope,
@@ -760,9 +813,14 @@ impl DeclarationPublicationBase {
             .collect::<Vec<_>>();
         let owner = authored
             .last()
-            .expect("nonempty frozen suffix")
-            .product()
-            .owner();
+            .map(|certificate| module_owner(certificate))
+            .or_else(|| self.current_public.as_ref().map(|tip| tip.owner.clone()))
+            .ok_or_else(|| {
+                invalid(
+                    &self.public,
+                    "empty declaration intent uses binding-only publication",
+                )
+            })?;
         for generation in selected_tips {
             lexical.push(ExactLexicalNode {
                 owner: ExactModuleIdentity {
@@ -860,7 +918,9 @@ impl DeclarationPublicationBase {
                 .as_ref()
                 .map(|tip| anchor(tip.generation))
                 .transpose()?,
-            private_tip: Some(anchor(self.intent.private.declaration_tip)?),
+            private_tip: (self.intent.private.declaration_tip != Generation(0))
+                .then(|| anchor(self.intent.private.declaration_tip))
+                .transpose()?,
             writes,
             reserved: ReservedJoin {
                 unit: owner.unit.clone(),
@@ -1049,11 +1109,7 @@ impl AcceptedDeclarationPublication {
             });
             turn.value_types
                 .retain(|name, _| !write.turn.retracts.contains(name));
-            extend_exports_by_head(
-                &mut turn.items,
-                &write.turn.items,
-                super::ExportItem::head_name,
-            );
+            extend_exports_by_head(&mut turn.items, &write.turn.items);
             turn.value_types.extend(write.turn.value_types.clone());
             turn.workbench_imports.extend(&write.turn.workbench_imports);
         }
@@ -1204,6 +1260,209 @@ mod tests {
                 panic!("unexpected rejection: {:?}", rejected.receipt.outcome())
             }
         }
+    }
+
+    #[test]
+    fn paired_binding_only_intent_removes_later_value_head_and_preserves_type_namespace() {
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("declarations.json");
+        let mut lib =
+            SessionLib::open(SessionId(984), root.path(), ModuleEnv::standalone_default())
+                .unwrap()
+                .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
+        lib.attach_recovery_graph_v2(&path).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let owner = RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/binding-late").unwrap(),
+            1,
+        )
+        .unwrap();
+        session
+            .bind_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        let a = session.begin_private_execution(public).unwrap();
+        let value =
+            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "%%", 501);
+        let value_id = value.id;
+        session.bind_in(a.private_scope(), value).unwrap();
+        let intent = session
+            .freeze_execution_intent(&a, vec![value_id], vec![])
+            .unwrap();
+        assert!(intent.writes.is_empty());
+        assert!(matches!(
+            session
+                .restage_execution_publication(owner.clone(), intent.clone())
+                .unwrap(),
+            ExecutionPublication::Bindings(_)
+        ));
+        let b = session.begin_private_execution(public).unwrap();
+        let original = commit_source(
+            &mut session,
+            b.private_scope(),
+            include_str!("fixtures/paired-late-operator.hs"),
+        );
+        let b_intent = session.freeze_execution_intent(&b, vec![], vec![]).unwrap();
+        let b_stage = accepted(
+            session
+                .restage_declaration_publication(owner.clone(), b_intent)
+                .unwrap(),
+        )
+        .stage()
+        .unwrap();
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(b_stage, &PublicationDecision::new())
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+        let ExecutionPublication::Declarations(base) = session
+            .restage_execution_publication(owner.clone(), intent.clone())
+            .unwrap()
+        else {
+            panic!("later value head requires a compiler-certified join");
+        };
+        let publication = accepted(base);
+        let proof = publication.receipt.clone();
+        assert!(
+            proof
+                .exports()
+                .iter()
+                .any(|export| export.head.occurrence == "%%"
+                    && export.head.namespace == ExportNamespace::Type),
+            "certified exports: {:?}",
+            proof.exports()
+        );
+        assert!(!proof
+            .exports()
+            .iter()
+            .any(|export| export.head.occurrence == "%%"
+                && export.head.namespace == ExportNamespace::Value));
+        assert!(proof
+            .exports()
+            .iter()
+            .any(|export| export.head.occurrence == "laterUnrelated"
+                && export.head.module == SessionModule::lib(original).module_name()));
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(
+                    publication.stage().unwrap(),
+                    &PublicationDecision::new()
+                )
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+        assert_eq!(
+            session.lib().scope_tip(public),
+            intent.reserved_generation()
+        );
+        assert!(session
+            .public_visibility_snapshot_in(public)
+            .unwrap()
+            .bindings
+            .contains(&("%%".into(), value_id)));
+        session.retire_scope(a.private_scope());
+        assert!(session.bindings().get(value_id).is_some());
+    }
+
+    #[test]
+    fn paired_authored_parent_inventory_survives_value_only_tip_and_instance_only_suffix() {
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("declarations.json");
+        let mut lib =
+            SessionLib::open(SessionId(985), root.path(), ModuleEnv::standalone_default())
+                .unwrap()
+                .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
+        lib.attach_recovery_graph_v2(&path).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let owner = RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/authored-inventory").unwrap(),
+            1,
+        )
+        .unwrap();
+        session
+            .bind_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        let initial = commit_source(
+            &mut session,
+            public,
+            include_str!("fixtures/paired-rich-base.hs"),
+        );
+        let value_only = commit_source(
+            &mut session,
+            public,
+            include_str!("fixtures/paired-public-value-only.hs"),
+        );
+        assert!(session
+            .lib()
+            .log
+            .certified_authored_at(value_only)
+            .unwrap()
+            .instances()
+            .classes
+            .is_empty());
+        let public_tip = tip(session.lib(), value_only).unwrap().unwrap();
+        assert_eq!(public_tip.instances.classes.len(), 1);
+        assert_eq!(public_tip.instances.families.len(), 1);
+        let a = session.begin_private_execution(public).unwrap();
+        let b = session.begin_private_execution(public).unwrap();
+        let private = commit_source(
+            &mut session,
+            a.private_scope(),
+            include_str!("fixtures/paired-instance-only.hs"),
+        );
+        assert!(session
+            .lib()
+            .log
+            .certified_authored_at(private)
+            .unwrap()
+            .introduced_exports()
+            .is_empty());
+        let intent = session.freeze_execution_intent(&a, vec![], vec![]).unwrap();
+        let accepted_a = accepted(
+            session
+                .restage_declaration_publication(owner.clone(), intent.clone())
+                .unwrap(),
+        );
+        assert_eq!(accepted_a.receipt.instances().classes.len(), 2);
+        assert_eq!(accepted_a.receipt.instances().families.len(), 2);
+        assert!(accepted_a
+            .receipt
+            .exports()
+            .iter()
+            .any(|export| export.head.module == SessionModule::lib(initial).module_name()));
+        let conflicting = commit_source(
+            &mut session,
+            b.private_scope(),
+            include_str!("fixtures/paired-instance-only.hs"),
+        );
+        assert_ne!(private, conflicting);
+        let b_intent = session.freeze_execution_intent(&b, vec![], vec![]).unwrap();
+        let b_publication = accepted(
+            session
+                .restage_declaration_publication(owner.clone(), b_intent)
+                .unwrap(),
+        );
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(
+                    b_publication.stage().unwrap(),
+                    &PublicationDecision::new()
+                )
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+        assert!(matches!(
+            session
+                .restage_declaration_publication(owner, intent)
+                .unwrap()
+                .certify()
+                .unwrap(),
+            CertifiedDeclarationPublication::Rejected(_)
+        ));
     }
 
     #[test]

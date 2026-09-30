@@ -56,7 +56,7 @@ pub use admission::{PrivateExecutionAdmission, RuntimeCellAdmission};
 pub use paired_publication::FinalExecutionIntent;
 pub use paired_publication::{
     AcceptedDeclarationPublication, CertifiedDeclarationPublication, DeclarationPublicationBase,
-    DeclarationPublicationRejection, RejectedDeclarationPublication,
+    DeclarationPublicationRejection, ExecutionPublication, RejectedDeclarationPublication,
 };
 pub use prepared::{
     CancelHandle, PreparedEngine, PreparedFailureKind, PreparedRuntimeError, PreparedSettlement,

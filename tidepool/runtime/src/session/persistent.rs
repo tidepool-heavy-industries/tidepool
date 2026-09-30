@@ -96,6 +96,7 @@ fn value_import_specs(entries: impl IntoIterator<Item = (String, SessionModule)>
 /// wrapping, decl/pure-bind routing, output draining, continuation-id minting)
 /// and delegate the machine and persistent-store operations here.
 pub struct PersistentSession {
+    admission_owner: Arc<super::admission::RuntimeAdmissionOwner>,
     /// The resident machine — `None` before the first turn bootstraps it,
     /// `Some` when idle/suspended, and moved out onto the eval thread for a
     /// turn's duration (stowed-XOR-running).
@@ -195,6 +196,7 @@ impl PersistentSession {
     /// machine is not bootstrapped until the first turn.
     pub fn new(lib: Option<SessionLib>, nursery_size: usize) -> Self {
         PersistentSession {
+            admission_owner: Arc::new(super::admission::RuntimeAdmissionOwner::new()),
             machine: None,
             machine_incarnation: None,
             image_registry: None,
@@ -211,6 +213,10 @@ impl PersistentSession {
             stub_generations: std::collections::BTreeSet::new(),
             retired_stub_sources: Vec::new(),
         }
+    }
+
+    pub(super) fn admission_owner(&self) -> &Arc<super::admission::RuntimeAdmissionOwner> {
+        &self.admission_owner
     }
 
     /// Record that `generation`'s `Val.G<g>` module is a hand-written source

@@ -75,6 +75,13 @@ fn op_wrap(name: &str) -> String {
 }
 
 impl ExportItem {
+    pub(crate) fn head_namespace(&self) -> tidepool_toolchain::declaration_join::ExportNamespace {
+        use tidepool_toolchain::declaration_join::ExportNamespace;
+        match self {
+            Self::Value { .. } => ExportNamespace::Value,
+            Self::Type { .. } | Self::Class { .. } => ExportNamespace::Type,
+        }
+    }
     /// The closed declaration kind GHC assigned this export.
     #[must_use]
     pub fn kind(&self) -> DeclarationKind {
@@ -118,7 +125,14 @@ impl ExportItem {
             ExportItem::Value { name } => op_wrap(name),
             // A type synonym or family (empty cons) renders as a bare head;
             // `(..)` is rejected by GHC for synonyms.
-            ExportItem::Type { name, cons } if cons.is_empty() => op_wrap(name),
+            ExportItem::Type { name, cons } if cons.is_empty() => {
+                let rendered = op_wrap(name);
+                if rendered != *name {
+                    format!("type {rendered}")
+                } else {
+                    rendered
+                }
+            }
             ExportItem::Type { name, .. } => format!("{}(..)", op_wrap(name)),
             // A class always exports with `(..)` so methods are visible to instances.
             ExportItem::Class { name, .. } => format!("{}(..)", op_wrap(name)),
@@ -126,15 +140,13 @@ impl ExportItem {
     }
 }
 
-/// Replace complete export groups by head name. Constructor or method
+/// Replace complete export groups by namespace and head name. Constructor or method
 /// collisions between different heads remain for GHC to diagnose.
-pub(super) fn extend_exports_by_head<T: Clone>(
-    exports: &mut Vec<T>,
-    introduced: &[T],
-    head: impl Fn(&T) -> &str,
-) {
+pub(super) fn extend_exports_by_head(exports: &mut Vec<ExportItem>, introduced: &[ExportItem]) {
     for item in introduced {
-        exports.retain(|prior| head(prior) != head(item));
+        exports.retain(|prior| {
+            prior.head_name() != item.head_name() || prior.head_namespace() != item.head_namespace()
+        });
         exports.push(item.clone());
     }
 }
@@ -497,17 +509,25 @@ impl DeclLog {
     /// This is the metadata-preserving form of [`Self::current_heads_at`].
     #[must_use]
     pub fn current_items_at(&self, tip: Generation) -> Vec<(ExportItem, u64)> {
-        let mut map: std::collections::BTreeMap<String, (ExportItem, u64)> =
-            std::collections::BTreeMap::new();
+        let mut map: std::collections::BTreeMap<
+            (
+                tidepool_toolchain::declaration_join::ExportNamespace,
+                String,
+            ),
+            (ExportItem, u64),
+        > = std::collections::BTreeMap::new();
         for g in self.chain_from_root(tip) {
             let turn = self
                 .turn(g)
                 .expect("scope chain contains only committed nodes");
             for r in &turn.retracts {
-                map.remove(r);
+                map.retain(|(_, name), _| name != r);
             }
             for item in &turn.items {
-                map.insert(item.head_name().to_string(), (item.clone(), g.0));
+                map.insert(
+                    (item.head_namespace(), item.head_name().to_string()),
+                    (item.clone(), g.0),
+                );
             }
         }
         map.into_values().collect()
@@ -557,7 +577,7 @@ impl DeclLog {
             for retracted in &turn.retracts {
                 exports.retain(|item: &ExportItem| item.head_name() != retracted);
             }
-            extend_exports_by_head(&mut exports, &turn.items, ExportItem::head_name);
+            extend_exports_by_head(&mut exports, &turn.items);
         }
         exports
     }
@@ -835,7 +855,7 @@ fn cumulative_exports_before(log: &DeclLog, gen_one_based: usize) -> Vec<ExportI
         // A turn removes prior exports it either redefines OR retracts; then
         // re-adds its own. (A retraction adds nothing.)
         acc.retain(|prior| !turn.retracts.iter().any(|r| r == prior.head_name()));
-        extend_exports_by_head(&mut acc, &turn.items, ExportItem::head_name);
+        extend_exports_by_head(&mut acc, &turn.items);
     }
     acc
 }
@@ -902,9 +922,12 @@ pub fn render_module_with_vals(
     );
     let stripped_sources = [&this.normalized.body];
 
-    // Heads this turn (re)defines — drives the `hiding` clause on the prior-gen
-    // import (head-name match only; see `cumulative_exports_before`).
-    let new_heads: Vec<&str> = this.items.iter().map(ExportItem::head_name).collect();
+    // Typed heads this turn defines drive the prior-generation hiding list.
+    let new_heads: Vec<_> = this
+        .items
+        .iter()
+        .map(|item| (item.head_namespace(), item.head_name()))
+        .collect();
     // Hide from the prior-gen import every head this turn REDEFINES or RETRACTS.
     // For a retraction the name is still in `prior` (retracts take effect for
     // LATER gens via `cumulative_exports_before`); hiding it here drops it from
@@ -913,7 +936,8 @@ pub fn render_module_with_vals(
     let hidden_prior: Vec<&ExportItem> = prior
         .iter()
         .filter(|p| {
-            new_heads.contains(&p.head_name()) || this.retracts.iter().any(|r| r == p.head_name())
+            new_heads.contains(&(p.head_namespace(), p.head_name()))
+                || this.retracts.iter().any(|r| r == p.head_name())
         })
         .collect();
 
