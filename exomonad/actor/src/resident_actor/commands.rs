@@ -38,6 +38,7 @@ where
         context: &ActorSessionContext,
         continuation: ResidentHole,
         request: CommandsReq,
+        invocation: Option<&super::invocation_work::InvocationWork>,
     ) -> CommandResolution {
         let permitted = self
             .descriptor
@@ -52,7 +53,7 @@ where
             request,
             permitted,
             None,
-            None,
+            invocation,
         )
         .await
     }
