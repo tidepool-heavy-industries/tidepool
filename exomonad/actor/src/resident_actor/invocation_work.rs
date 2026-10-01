@@ -560,11 +560,7 @@ impl InvocationWork {
                     match publish_retired_confirmed(environment, actor, terminal).await {
                         Err(error) => Err(error),
                         Ok(()) => {
-                            let (reply, release) = tokio::sync::oneshot::channel();
-                            let request = Arc::new(ReleaseAwait {
-                                actor,
-                                reply: Mutex::new(Some(reply)),
-                            });
+                            let (request, release) = ReleaseAwait::channel(actor);
                             match environment
                                 .deployments
                                 .try_send(LocalResidentDeployment::ReleaseAwait(request))

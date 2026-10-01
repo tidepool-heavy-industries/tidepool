@@ -5699,20 +5699,7 @@ async fn run_interactive_applications(
                         // retirement in flight. An actor without a row never
                         // held interactive resources.
                         let actor = request.actor;
-                        let settled = if embedded_live.contains(&actor) {
-                            None
-                        } else if let Some((_, error)) = embedded_cleanup_failures.iter().find(|(failed, _)| *failed == actor) {
-                            Some(embedded_resource_release(Some(error)))
-                        } else {
-                            match application_owners.lock().get(&actor) {
-                                None => Some(exomonad_actor::ResourceRelease::Released),
-                                Some(owner) => owner
-                                    .retirement
-                                    .lock()
-                                    .as_ref()
-                                    .map(InteractiveCleanupReceipt::release),
-                            }
-                        };
+                        let settled = observed_resource_release(actor, &embedded_live, &embedded_cleanup_failures, &application_owners);
                         match settled {
                             Some(release) => { request.answer(release); }
                             None => release_waiters.entry(actor).or_default().push(request),
@@ -6377,6 +6364,15 @@ async fn run_interactive_applications(
     .await
     .unwrap_or_else(|_| Some("interactive application supervisor panicked".into()));
 
+    close_release_observations(&mut lifecycle, &mut release_waiters, |actor| {
+        observed_resource_release(
+            actor,
+            &embedded_live,
+            &embedded_cleanup_failures,
+            &application_owners,
+        )
+    });
+
     let native_retirement = if failure.is_some() {
         NativeRetirement::Preserve
     } else {
@@ -6389,8 +6385,14 @@ async fn run_interactive_applications(
     for cancellation in embedded_cancellations.values() {
         cancellation.send_replace(true);
     }
-    let embedded_cleanup =
-        drain_embedded_shutdown(&mut embedded_tasks, APPLICATION_SHUTDOWN_TIMEOUT).await;
+    let embedded_cleanup = drain_embedded_shutdown(
+        &mut embedded_tasks,
+        APPLICATION_SHUTDOWN_TIMEOUT,
+        |actor, release| {
+            answer_release_waiters(&mut release_waiters, actor, release);
+        },
+    )
+    .await;
     let embedded_service_cleanup = match embedded_service.as_mut() {
         Some(service) => service
             .shutdown()
@@ -6483,6 +6485,7 @@ async fn run_interactive_applications(
         let mut failure = None;
         while let Some(result) = retirements.join_next().await {
             if let Ok(receipt) = &result {
+                answer_release_waiters(&mut release_waiters, receipt.actor, receipt.release());
                 if let Some(owner) = application_owners.lock().get_mut(&receipt.actor) {
                     owner.retirement.lock().get_or_insert_with(|| receipt.clone());
                 }
@@ -6506,6 +6509,7 @@ async fn run_interactive_applications(
     .unwrap_or_else(|_| Some("interactive application cleanup timed out".into()));
     #[cfg(not(feature = "codex-compat"))]
     let cleanup_failure: Option<String> = None;
+    retain_unsettled_release_waiters(&mut release_waiters);
     let earlier_embedded_cleanup = (!embedded_cleanup_failures.is_empty()).then(|| {
         embedded_cleanup_failures
             .into_iter()
@@ -6548,18 +6552,88 @@ fn embedded_resource_release(
     }
 }
 
+fn observed_resource_release(
+    actor: ActorRef,
+    embedded_live: &BTreeSet<ActorRef>,
+    embedded_cleanup_failures: &[(ActorRef, embedded_service::EmbeddedDriverError)],
+    owners: &InteractiveOwners,
+) -> Option<exomonad_actor::ResourceRelease> {
+    if embedded_live.contains(&actor) {
+        None
+    } else if let Some((_, error)) = embedded_cleanup_failures
+        .iter()
+        .find(|(failed, _)| *failed == actor)
+    {
+        Some(embedded_resource_release(Some(error)))
+    } else {
+        match owners.lock().get(&actor) {
+            None => Some(exomonad_actor::ResourceRelease::Released),
+            Some(owner) => owner
+                .retirement
+                .lock()
+                .as_ref()
+                .map(InteractiveCleanupReceipt::release),
+        }
+    }
+}
+
+/// Fence admission and preserve release waits already queued when shutdown wins.
+fn close_release_observations(
+    lifecycle: &mut mpsc::Receiver<LocalResidentDeployment>,
+    waiters: &mut HashMap<ActorRef, Vec<Arc<exomonad_actor::ReleaseAwait>>>,
+    mut observed: impl FnMut(ActorRef) -> Option<exomonad_actor::ResourceRelease>,
+) {
+    lifecycle.close();
+    while let Ok(event) = lifecycle.try_recv() {
+        if let LocalResidentDeployment::ReleaseAwait(request) = event {
+            match observed(request.actor) {
+                Some(release) => {
+                    request.answer(release);
+                }
+                None => waiters.entry(request.actor).or_default().push(request),
+            }
+        }
+    }
+}
+
+fn retain_unsettled_release_waiters(
+    waiters: &mut HashMap<ActorRef, Vec<Arc<exomonad_actor::ReleaseAwait>>>,
+) {
+    for (_, requests) in waiters.drain() {
+        for request in requests {
+            request.answer(exomonad_actor::ResourceRelease::Retained(
+                "host shutdown ended without confirming this actor's resource release".into(),
+            ));
+        }
+    }
+}
+
+fn answer_release_waiters(
+    waiters: &mut HashMap<ActorRef, Vec<Arc<exomonad_actor::ReleaseAwait>>>,
+    actor: ActorRef,
+    release: exomonad_actor::ResourceRelease,
+) {
+    for waiter in waiters.remove(&actor).unwrap_or_default() {
+        waiter.answer(release.clone());
+    }
+}
+
 async fn drain_embedded_shutdown<A: fmt::Debug + Send + 'static, L: Send + 'static>(
     tasks: &mut JoinSet<(A, L, Result<(), embedded_service::EmbeddedDriverError>)>,
     grace: Duration,
+    mut released: impl FnMut(A, exomonad_actor::ResourceRelease),
 ) -> Option<String> {
     let mut failure = None;
     match tokio::time::timeout(grace, async {
         while let Some(result) = tasks.join_next().await {
             match result {
-                Ok((_actor, _local_actor, Ok(()))) => {}
-                Ok((actor, _local_actor, Err(error))) => {
-                    tracing::warn!(?actor, %error, "embedded Engine stopped with an error during host shutdown");
-                    failure.get_or_insert_with(|| format!("embedded Engine {actor:?}: {error}"));
+                Ok((actor, _local_actor, outcome)) => {
+                    let release = embedded_resource_release(outcome.as_ref().err());
+                    if let Err(error) = outcome {
+                        tracing::warn!(?actor, %error, "embedded Engine stopped with an error during host shutdown");
+                        failure.get_or_insert_with(|| format!("embedded Engine {actor:?}: {error}"));
+                    }
+                    released(actor, release);
                 }
                 Err(error) => {
                     failure.get_or_insert_with(|| format!("embedded Engine task: {error}"));

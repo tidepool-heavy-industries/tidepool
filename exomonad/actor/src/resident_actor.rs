@@ -63,8 +63,9 @@ use tracing::Instrument;
 use crate::mailbox::{InstalledReceiver, ResidentOutbound};
 use crate::request::{RequestRegistry, RequestReservationOwner};
 use crate::resident_workbench::{
-    ForkGroupBoundary, PreparedCell, ResidentActorBoundary, ResidentActorStartupStep,
-    ResidentKernelBoundary, ResidentWorkbenchFragment, ResidentWorkbenchStep,
+    AgentStopProjection, ForkGroupBoundary, PreparedCell, ResidentActorBoundary,
+    ResidentActorStartupStep, ResidentKernelBoundary, ResidentWorkbenchFragment,
+    ResidentWorkbenchStep,
 };
 use crate::{
     ActorDescriptor, ActorExitKind, ActorMachineRegistry, ActorRef, ActorSessionContext,
@@ -211,6 +212,20 @@ pub struct ReleaseAwait {
 }
 
 impl ReleaseAwait {
+    /// Create an exact-actor release observation and its acknowledgement.
+    pub fn channel(
+        actor: ActorRef,
+    ) -> (Arc<Self>, tokio::sync::oneshot::Receiver<ResourceRelease>) {
+        let (reply, release) = tokio::sync::oneshot::channel();
+        (
+            Arc::new(Self {
+                actor,
+                reply: Mutex::new(Some(reply)),
+            }),
+            release,
+        )
+    }
+
     /// Deliver the host's answer. Returns false when the waiter is gone.
     pub fn answer(&self, release: ResourceRelease) -> bool {
         self.reply
@@ -2286,26 +2301,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         {
             return AgentStopProjection::StoppedNow;
         }
-        let (reply, release) = tokio::sync::oneshot::channel();
-        let request = Arc::new(ReleaseAwait {
-            actor,
-            reply: Mutex::new(Some(reply)),
-        });
-        if self
-            .environment
-            .deployments
-            .try_send(LocalResidentDeployment::ReleaseAwait(request))
-            .is_err()
-        {
-            return AgentStopProjection::StoppedNow;
-        }
-        match tokio::time::timeout(RELEASE_WAIT, release).await {
-            Ok(Ok(ResourceRelease::Released)) | Ok(Err(_)) => AgentStopProjection::StoppedNow,
-            Ok(Ok(ResourceRelease::Retained(detail))) => {
-                AgentStopProjection::StoppedRetaining(detail)
-            }
-            Err(_) => AgentStopProjection::StoppedReleasing,
-        }
+        tracked_stopped_projection(actor, &self.environment.deployments, RELEASE_WAIT).await
     }
 
     /// Unlike the other `deployments` producers in this file, a `WatchChanged`
@@ -12677,6 +12673,35 @@ pub(crate) async fn shutdown_forest_root(
     }
 }
 
+async fn tracked_stopped_projection(
+    actor: ActorRef,
+    deployments: &mpsc::Sender<LocalResidentDeployment>,
+    grace: std::time::Duration,
+) -> AgentStopProjection {
+    let (request, release) = ReleaseAwait::channel(actor);
+    match deployments.try_send(LocalResidentDeployment::ReleaseAwait(request)) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            return AgentStopProjection::StoppedRetaining(
+                "host release observation unavailable: lifecycle channel full".into(),
+            )
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            return AgentStopProjection::StoppedRetaining(
+                "host release observation unavailable: lifecycle channel closed".into(),
+            )
+        }
+    }
+    match tokio::time::timeout(grace, release).await {
+        Ok(Ok(ResourceRelease::Released)) => AgentStopProjection::StoppedNow,
+        Ok(Ok(ResourceRelease::Retained(detail))) => AgentStopProjection::StoppedRetaining(detail),
+        Ok(Err(_)) => AgentStopProjection::StoppedRetaining(
+            "host release acknowledgement lost; cleanup unconfirmed".into(),
+        ),
+        Err(_) => AgentStopProjection::StoppedReleasing,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -12780,6 +12805,86 @@ mod tests {
         }
         .hosted_boundary()
         .is_some());
+    }
+
+    #[tokio::test]
+    async fn tracked_release_observation_full_and_closed_channels_retain_uncertainty() {
+        let actor = ActorRef::first(ActorId(2));
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let (request, _) = super::ReleaseAwait::channel(actor);
+        sender
+            .try_send(super::LocalResidentDeployment::ReleaseAwait(request))
+            .unwrap();
+        assert!(matches!(
+            super::tracked_stopped_projection(actor, &sender, std::time::Duration::from_secs(1))
+                .await,
+            AgentStopProjection::StoppedRetaining(_)
+        ));
+        receiver.close();
+        assert!(matches!(
+            super::tracked_stopped_projection(actor, &sender, std::time::Duration::from_secs(1))
+                .await,
+            AgentStopProjection::StoppedRetaining(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn tracked_release_observation_requires_exact_acknowledgement() {
+        let actor = ActorRef::first(ActorId(2));
+        for release in [
+            Some(super::ResourceRelease::Released),
+            Some(super::ResourceRelease::Retained("cleanup failed".into())),
+            None,
+        ] {
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+            let observation = super::tracked_stopped_projection(
+                actor,
+                &sender,
+                std::time::Duration::from_secs(1),
+            );
+            let host = async {
+                let Some(super::LocalResidentDeployment::ReleaseAwait(request)) =
+                    receiver.recv().await
+                else {
+                    panic!("missing wait");
+                };
+                assert_eq!(request.actor, actor);
+                if let Some(release) = release.clone() {
+                    assert!(request.answer(release));
+                }
+            };
+            let (outcome, ()) = tokio::join!(observation, host);
+            match release {
+                Some(super::ResourceRelease::Released) => {
+                    assert!(matches!(outcome, AgentStopProjection::StoppedNow))
+                }
+                Some(super::ResourceRelease::Retained(detail)) => assert!(
+                    matches!(outcome, AgentStopProjection::StoppedRetaining(actual) if actual == detail)
+                ),
+                None => assert!(matches!(outcome, AgentStopProjection::StoppedRetaining(_))),
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tracked_release_observation_timeout_remains_releasing() {
+        let actor = ActorRef::first(ActorId(2));
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let observation =
+            super::tracked_stopped_projection(actor, &sender, std::time::Duration::from_secs(1));
+        let host = async {
+            let Some(super::LocalResidentDeployment::ReleaseAwait(request)) = receiver.recv().await
+            else {
+                panic!("missing wait");
+            };
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            assert!(
+                !request.answer(super::ResourceRelease::Released),
+                "timed-out waiter must not become confirmation"
+            );
+        };
+        let (outcome, ()) = tokio::join!(observation, host);
+        assert!(matches!(outcome, AgentStopProjection::StoppedReleasing));
     }
 
     #[tokio::test]
