@@ -182,30 +182,34 @@ full. `EXOMONAD_TRACE=info` leaves content out. The directory is ignored by Git.
 
 Use `exomonad stop --run-id <run> --session <session>` for intentional shutdown;
 stopping only tmux leaves the supervised host running. A host failure restarts
-with backoff and a finite retry limit. Recovery reopens the same run under its
-exclusive incarnation lock, stops every predecessor application whose exact
-supervisor identity can be proven, resumes the recorded conversation, reloads
-the last accepted source, and sends a recovery notice before new work. Child
-conversations resume independently when their accepted source, process stop,
-lineage, launch policy, and optional worktree custody all verify. Their logical
-actor IDs remain stable and their incarnations advance. Actors whose evidence
-cannot be verified remain visibly unavailable. Run status records recovered
+with backoff and a finite retry limit. Embedded host recovery reopens the same
+run under its exclusive incarnation lock and follows the exact root startup
+chain. It verifies the accepted source and compiler-issued bootstrap identity,
+then observes the public manifest owner and Store owner independently. The new
+root retains its installed executable entry without evaluating it until the
+manifest, Store binding, and ApplicationBound journal event are durable. Only
+then can the host attach the retained conversation and accept new work.
+Actors whose evidence cannot be verified remain visibly unavailable. Run
+status records recovered
 predecessor and successor identities, lost live state, and a bounded resource
 service snapshot with retained allocations and cleanup failures. It also
 samples run-directory storage through a bounded walk and reports when that
 sample was truncated.
-Recovery requires the lifecycle v2 journal and its durable creation marker.
-Runs with only the older `actor-lifecycle.v1.jsonl`, or without hosted-operation
-ownership journals, remain inspectable but are not resumed automatically.
-There is no automatic journal migration; renaming an old journal does not make
-its ownership evidence sufficient.
+Recovery requires version 5 records in `actor-lifecycle.v2.jsonl`, including
+its durable creation marker and atomic root startup intent. Older formats,
+including version 4 raw compiled-program hashes, are refused without rewriting
+their evidence. There is no automatic journal migration; renaming an old
+journal does not make its ownership evidence sufficient. Fresh launches of the
+deprecated Codex backend remain supported, but its recovery is refused because
+it does not record the required startup intent and bootstrap identity.
 Live Haskell values, requests, watches, and bindings are reported lost rather
 than reconstructed. Unresolved tool calls are not replayed automatically.
 
-If the first host startup fails before publishing its root binding and lifecycle
-evidence, restarting that run may remain unavailable. Start a fresh run and
-retain the failed run's artifacts for inspection and confirmed cleanup. Host
-incarnations are never rolled back to bypass missing ownership evidence.
+An interrupted embedded startup can advance through a fresh root admission
+when its exact startup chain and independently observed owners remain valid.
+Missing or changed evidence leaves the run unavailable. Retain the failed
+run's artifacts for inspection and confirmed cleanup. Host incarnations are
+never rolled back to bypass missing ownership evidence.
 
 A stopped run's live heap and handles are gone. Durable command ownership,
 cleanup failures, accepted source, and process evidence remain until retirement

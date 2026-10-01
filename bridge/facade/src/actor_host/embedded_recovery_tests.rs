@@ -100,6 +100,7 @@ impl harness::engine::ResponsesTransport for RecoveryTransport {
 }
 
 fn configuration(root: &Path) -> ActorHostConfig {
+    let startup_driver = root.join("startup-driver");
     ActorHostConfig {
         systemd_slice: None,
         source_exclude: vec![],
@@ -107,7 +108,11 @@ fn configuration(root: &Path) -> ActorHostConfig {
         command_resources: None,
         exomonad_executable: std::env::current_exe().unwrap(),
         workspace_inputs: None,
-        haskell_root: crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+        haskell_root: if startup_driver.exists() {
+            startup_driver
+        } else {
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap()
+        },
         workspace: root.join("project"),
         run_root: root.join("run"),
         root_binding_path: root.join("root-binding.json"),
@@ -155,7 +160,7 @@ fn production_recovery_process() {
                 match incoming.recv().await.unwrap() {
                     ActorHostReadiness::EmbeddedReady {root:actor, address} => {
                         std::fs::write(root.join(format!("{phase}.ready")), serde_json::to_vec(&json!({
-                            "actor":actor, "address":address.to_string()
+                            "actor":actor, "address":address.to_string(), "pid":std::process::id()
                         })).unwrap()).unwrap();
                     }
                     ActorHostReadiness::CoordinationFailed {error,..} => panic!("production startup failed: {error}"),
@@ -288,31 +293,6 @@ async fn wait_calls(root: &Path, phase: &str) {
     .unwrap();
 }
 
-fn snapshot_store(root: &Path) -> Vec<(&'static str, Vec<u8>)> {
-    ["store.sqlite", "store.sqlite-wal", "store.sqlite-shm"]
-        .into_iter()
-        .filter_map(|name| {
-            std::fs::read(root.join("run/harness").join(name))
-                .ok()
-                .map(|bytes| (name, bytes))
-        })
-        .collect()
-}
-
-fn restore_store(root: &Path, snapshot: &[(&str, Vec<u8>)]) {
-    let directory = root.join("run/harness");
-    for name in ["store.sqlite", "store.sqlite-wal", "store.sqlite-shm"] {
-        match std::fs::remove_file(directory.join(name)) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => panic!("cannot restore owned Store fixture: {error}"),
-        }
-    }
-    for (name, bytes) in snapshot {
-        std::fs::write(directory.join(name), bytes).unwrap();
-    }
-}
-
 async fn refused(root: &Path, phase: &str, process: &mut Process, expected: &str) {
     tokio::time::timeout(Duration::from_secs(360), async {
         loop {
@@ -368,6 +348,14 @@ fn fixture() -> PathBuf {
     retained_root
 }
 
+fn finish_fixture(root: PathBuf) {
+    if std::env::var("TIDEPOOL_KEEP_TEST_LOGS").ok().as_deref() == Some("1") {
+        eprintln!("retained production recovery evidence: {}", root.display());
+    } else {
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 #[tokio::test]
 async fn production_startup_and_cold_successor_preserve_bound_conversation_without_replay() {
     tidepool_testing::eval_harness::require_extract();
@@ -387,7 +375,6 @@ async fn production_startup_and_cold_successor_preserve_bound_conversation_witho
         old_calls, "1",
         "first input must run exactly one provider turn"
     );
-    let predecessor_store = snapshot_store(root);
     let records = exomonad_actor::ActorRecoveryJournal::read_observed(
         &root.join("run/actor-lifecycle.v2.jsonl"),
     )
@@ -454,89 +441,342 @@ async fn production_startup_and_cold_successor_preserve_bound_conversation_witho
         Some(embedded_recovery::conversation(&new))
     );
     drop(store);
-    let successor_store = snapshot_store(root);
-    let journal_path = root.join("run/actor-lifecycle.v2.jsonl");
-    let journal = std::fs::read_to_string(&journal_path).unwrap();
-    let lines: Vec<_> = journal.split_inclusive('\n').collect();
-    let bound = lines
-        .iter()
-        .position(|line| {
-            let row: serde_json::Value = serde_json::from_str(line).unwrap();
-            row["event"] == "application_bound"
-                && row["actor"] == serde_json::to_value(new_actor).unwrap()
-        })
-        .unwrap();
-    let prepared_prefix = lines[..bound].concat();
-    assert!(prepared_prefix.contains("application_prepared"));
-    // These are actual journal prefixes and actual Store snapshots from the
-    // stopped production processes. No descriptor or authority is reconstructed.
-    std::fs::write(&journal_path, &prepared_prefix).unwrap();
-    restore_store(root, &predecessor_store);
-    let manifest = std::fs::read(root.join("run/root-declarations.json")).unwrap();
-    let mut conflicting = start(root, "manifest-store-gap");
-    refused(
-        root,
-        "manifest-store-gap",
-        &mut conflicting,
-        "latest prepared root has no exact successor Store binding",
+    finish_fixture(retained_root);
+}
+
+pub(super) fn startup_checkpoint(checkpoint: &str) {
+    if std::env::var("TIDEPOOL_STARTUP_CRASH_AT").ok().as_deref() == Some(checkpoint) {
+        let root = PathBuf::from(std::env::var_os("TIDEPOOL_RECOVERY_TEST_ROOT").unwrap());
+        let phase = std::env::var("TIDEPOOL_RECOVERY_TEST_PHASE").unwrap();
+        std::fs::write(root.join(format!("{phase}.checkpoint")), checkpoint).unwrap();
+        std::process::exit(77);
+    }
+}
+
+#[tokio::test]
+async fn production_authored_root_failure_is_not_evaluated_before_durable_binding() {
+    tidepool_testing::eval_harness::require_extract();
+    let retained_root = fixture();
+    let root = retained_root.as_path();
+    fn copy_actors(source: &Path, target: &Path) {
+        std::fs::create_dir_all(target).unwrap();
+        for entry in std::fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let output = target.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_actors(&entry.path(), &output);
+            } else {
+                std::fs::copy(entry.path(), output).unwrap();
+            }
+        }
+    }
+    copy_actors(
+        &crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+        &root.join("startup-driver"),
+    );
+    std::fs::write(
+        root.join("startup-driver/Tidepool/Actors/Internal/ExomonadDriver.hs"),
+        include_str!("fixtures/startup_authored_failure.hs"),
     )
-    .await;
-    assert_eq!(
-        std::fs::read_to_string(&journal_path).unwrap(),
-        prepared_prefix
-    );
-    assert_eq!(
-        std::fs::read(root.join("run/root-declarations.json")).unwrap(),
-        manifest
-    );
-    drop(conflicting);
-    // Store CAS was durable, but ApplicationBound had not yet been appended.
-    // Startup may finish only that row, then admit its own fresh successor.
-    restore_store(root, &successor_store);
-    let mut reconciled = start(root, "bound-gap");
-    assert_ne!(reconciled.0.id(), first_pid);
-    assert_ne!(reconciled.0.id(), second.0.id());
-    let recovered_ready = ready(root, "bound-gap", &mut reconciled).await;
-    let recovered_actor: ActorRef =
-        serde_json::from_value(recovered_ready["actor"].clone()).unwrap();
-    assert_eq!(recovered_actor.id, new_actor.id);
-    assert_eq!(recovered_actor.incarnation.0, new_actor.incarnation.0 + 1);
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    .unwrap();
+    let mut process = start_crashing(root, "authored-failure-before-bound", "bound");
+    crashed(root, "authored-failure-before-bound", &mut process).await;
+    let records = ActorRecoveryJournal::open(root.join("run/actor-lifecycle.v2.jsonl"))
+        .unwrap()
+        .validated_records()
+        .unwrap();
+    let head = latest_durable_root_application(&records).unwrap().unwrap();
+    assert!(head.application.as_ref().unwrap().conversation.is_some());
     assert!(
-        !root.join("bound-gap.calls").exists(),
-        "reconciliation replayed a prior input"
-    );
-    let records = exomonad_actor::ActorRecoveryJournal::read_observed(&journal_path).unwrap();
-    assert_eq!(
-        records
-            .iter()
-            .find(|record| record.admission.actor == new_actor)
+        !std::fs::read_to_string(root.join("authored-failure-before-bound.log"))
             .unwrap()
-            .application
-            .as_ref()
-            .unwrap()
-            .conversation,
-        Some(embedded_recovery::conversation(&new))
+            .contains("startup authored failure sentinel")
     );
-    let recovered_identity =
-        embedded_recovery::host_identity(&root.join("run"), "/root", recovered_actor);
+    finish_fixture(retained_root);
+}
+
+fn start_crashing(root: &Path, phase: &str, checkpoint: &str) -> Process {
+    let output = std::fs::File::create(root.join(format!("{phase}.log"))).unwrap();
+    Process(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", PROCESS_TEST, "--ignored", "--nocapture"])
+            .env("TIDEPOOL_RECOVERY_TEST_ROOT", root)
+            .env("TIDEPOOL_RECOVERY_TEST_PHASE", phase)
+            .env("TIDEPOOL_STARTUP_CRASH_AT", checkpoint)
+            .stdout(Stdio::from(output.try_clone().unwrap()))
+            .stderr(Stdio::from(output))
+            .spawn()
+            .unwrap(),
+    )
+}
+
+async fn crashed(root: &Path, phase: &str, process: &mut Process) {
+    tokio::time::timeout(Duration::from_secs(360), async {
+        loop {
+            if let Some(status) = process.0.try_wait().unwrap() {
+                assert_eq!(
+                    status.code(),
+                    Some(77),
+                    "wrong startup crash: {}",
+                    std::fs::read_to_string(root.join(format!("{phase}.log"))).unwrap()
+                );
+                assert!(root.join(format!("{phase}.checkpoint")).exists());
+                assert!(!root.join(format!("{phase}.ready")).exists());
+                assert!(!root.join(format!("{phase}.calls")).exists());
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("startup crash did not reach its transition");
+}
+
+#[test]
+fn startup_head_follows_predecessors_across_fresh_ids_and_lower_incarnations() {
+    fn record(
+        actor: ActorRef,
+        predecessor: Option<ActorRef>,
+    ) -> exomonad_actor::DurableActorRecord {
+        let conversation = embedded_recovery::host_identity(Path::new("run"), "/root", actor);
+        let intent = exomonad_actor::RootStartupIntent {
+            bootstrap_identity: "bootstrap".into(),
+            predecessor,
+            manifest_predecessor: None,
+            manifest: None,
+            store_predecessor: None,
+            binding_path: "binding.json".into(),
+            accepted_source: None,
+            conversation: embedded_recovery::conversation(&conversation),
+        };
+        exomonad_actor::DurableActorRecord {
+            admission: serde_json::from_value(json!({
+                "actor": actor, "label": "root", "creator": null,
+                "supervisor_parent": null, "context_parent": null,
+                "actor_path": "root", "role": "root", "model": null,
+                "effort": null, "instructions": null, "launch_worktrees": [], "source_layer": [],
+            }))
+            .unwrap(),
+            startup: Some(intent.clone()),
+            application: Some(exomonad_actor::DurableActorApplication {
+                binding_path: intent.binding_path.clone(),
+                accepted_source: None,
+                intended_conversation: Some(intent.conversation),
+                conversation: None,
+            }),
+            terminal: None,
+        }
+    }
+    let old = ActorRef {
+        id: exomonad_actor::ActorId(41),
+        incarnation: exomonad_actor::Incarnation(17),
+    };
+    let head = ActorRef {
+        id: exomonad_actor::ActorId(9),
+        incarnation: exomonad_actor::Incarnation(3),
+    };
+    let mut records = vec![record(old, None), record(head, Some(old))];
     assert_eq!(
         latest_durable_root_application(&records)
             .unwrap()
             .unwrap()
-            .application
-            .as_ref()
-            .unwrap()
-            .conversation,
-        Some(embedded_recovery::conversation(&recovered_identity))
+            .admission
+            .actor,
+        head
     );
+    assert_eq!(
+        root_startup_chain(&records)
+            .unwrap()
+            .iter()
+            .map(|record| record.admission.actor)
+            .collect::<Vec<_>>(),
+        vec![head, old]
+    );
+    records[1].application.as_mut().unwrap().conversation = records[1]
+        .application
+        .as_ref()
+        .unwrap()
+        .intended_conversation
+        .clone();
+    assert_eq!(root_startup_chain(&records).unwrap().len(), 1);
+    records.push(record(ActorRef::first(exomonad_actor::ActorId(55)), None));
+    assert!(latest_durable_root_application(&records).is_err());
+}
+
+pub(super) fn uncertain_store_reader() -> Option<rusqlite::Connection> {
+    if std::env::var("TIDEPOOL_RECOVERY_TEST_PHASE")
+        .ok()
+        .as_deref()
+        != Some("uncertain-store")
+    {
+        return None;
+    }
+    let root = PathBuf::from(std::env::var_os("TIDEPOOL_RECOVERY_TEST_ROOT").unwrap());
+    let connection = rusqlite::Connection::open(root.join("run/harness/store.sqlite")).unwrap();
+    connection
+        .execute_batch("BEGIN; SELECT COUNT(*) FROM embedded_bindings;")
+        .unwrap();
+    Some(connection)
+}
+
+#[tokio::test]
+async fn production_uncertain_store_write_never_activates_visible_binding() {
+    tidepool_testing::eval_harness::require_extract();
+    let retained_root = fixture();
+    let root = retained_root.as_path();
+    let mut first = start_crashing(root, "before-uncertainty", "store");
+    crashed(root, "before-uncertainty", &mut first).await;
+    let mut uncertain = start(root, "uncertain-store");
+    refused(
+        root,
+        "uncertain-store",
+        &mut uncertain,
+        "binding committed but WAL durability confirmation is unavailable",
+    )
+    .await;
+    let records = exomonad_actor::ActorRecoveryJournal::read_observed(
+        &root.join("run/actor-lifecycle.v2.jsonl"),
+    )
+    .unwrap();
+    let head = latest_durable_root_application(&records).unwrap().unwrap();
+    assert!(head.application.as_ref().unwrap().conversation.is_none());
+    let visible =
+        embedded_recovery::host_identity(&root.join("run"), "/root", head.admission.actor);
     let store = harness::store::Store::open(root.join("run/harness/store.sqlite")).unwrap();
-    assert!(store.embedded_binding_matches(&recovered_identity).unwrap());
-    assert!(!store.embedded_binding_matches(&new).unwrap());
-    reconciled.0.kill().unwrap();
-    reconciled.0.wait().unwrap();
+    assert!(
+        store.embedded_binding_matches(&visible).unwrap(),
+        "error after commit must leave visible successor evidence"
+    );
     drop(store);
-    std::fs::remove_dir_all(retained_root).unwrap();
+    let mut successor = start(root, "after-uncertainty");
+    let observed = ready(root, "after-uncertainty", &mut successor).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!root.join("after-uncertainty.calls").exists());
+    let actor: ActorRef = serde_json::from_value(observed["actor"].clone()).unwrap();
+    let identity = embedded_recovery::host_identity(&root.join("run"), "/root", actor);
+    input(observed["address"].as_str().unwrap(), &identity, None).await;
+    wait_calls(root, "after-uncertainty").await;
+    assert_eq!(
+        std::fs::read_to_string(root.join("after-uncertainty.calls")).unwrap(),
+        "1"
+    );
+    successor.0.kill().unwrap();
+    successor.0.wait().unwrap();
+    finish_fixture(retained_root);
+}
+
+#[tokio::test]
+async fn production_old_startup_journal_is_refused_without_rewriting_evidence() {
+    for version in [3, 4] {
+        let retained_root = fixture();
+        let root = retained_root.as_path();
+        std::fs::create_dir_all(root.join("run")).unwrap();
+        let journal = root.join("run/actor-lifecycle.v2.jsonl");
+        let bytes = format!("{{\"version\":{version},\"sequence\":1,\"event\":\"created\"}}\n");
+        std::fs::write(&journal, &bytes).unwrap();
+        let mut process = start(root, "old-startup-journal");
+        refused(
+            root,
+            "old-startup-journal",
+            &mut process,
+            "unsupported actor journal version",
+        )
+        .await;
+        assert_eq!(std::fs::read(&journal).unwrap(), bytes.as_bytes());
+        assert!(!root.join("run/root-declarations.json").exists());
+        finish_fixture(retained_root);
+    }
+}
+
+#[tokio::test]
+async fn production_missing_manifest_refuses_bound_root_without_rewriting_journal() {
+    tidepool_testing::eval_harness::require_extract();
+    let retained_root = fixture();
+    let root = retained_root.as_path();
+    let mut first = start_crashing(root, "retained-bound-root", "bound");
+    crashed(root, "retained-bound-root", &mut first).await;
+    let journal = root.join("run/actor-lifecycle.v2.jsonl");
+    let journal_bytes = std::fs::read(&journal).unwrap();
+    let manifest = root.join("run/root-declarations.json");
+    let retained_manifest = root.join("run/retained-root-declarations.json");
+    let manifest_bytes = std::fs::read(&manifest).unwrap();
+    std::fs::rename(&manifest, &retained_manifest).unwrap();
+    let mut refused_root = start(root, "missing-manifest");
+    refused(
+        root,
+        "missing-manifest",
+        &mut refused_root,
+        "root startup lost its retained public manifest",
+    )
+    .await;
+    assert_eq!(std::fs::read(&journal).unwrap(), journal_bytes);
+    assert_eq!(std::fs::read(&retained_manifest).unwrap(), manifest_bytes);
+    assert!(!manifest.exists());
+    finish_fixture(retained_root);
+}
+
+#[tokio::test]
+async fn production_repeated_startup_crashes_roll_split_owners_forward_without_replay() {
+    tidepool_testing::eval_harness::require_extract();
+    let retained_root = fixture();
+    let root = retained_root.as_path();
+    for (index, checkpoint) in [
+        "admitted", "manifest", "manifest", "store", "manifest", "manifest", "store", "bound",
+        "released",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let phase = format!("crash-{index}-{checkpoint}");
+        let mut process = start_crashing(root, &phase, checkpoint);
+        crashed(root, &phase, &mut process).await;
+        let records = exomonad_actor::ActorRecoveryJournal::read_observed(
+            &root.join("run/actor-lifecycle.v2.jsonl"),
+        )
+        .unwrap();
+        let head = latest_durable_root_application(&records).unwrap().unwrap();
+        assert!(head.startup.is_some());
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.startup.is_some())
+                .count(),
+            index + 1
+        );
+        assert_eq!(
+            head.application.as_ref().unwrap().conversation.is_some(),
+            matches!(checkpoint, "bound" | "released")
+        );
+        if index == 5 {
+            let intent = head.startup.as_ref().unwrap();
+            assert_ne!(
+                intent.store_predecessor,
+                Some(embedded_recovery::conversation(
+                    &embedded_recovery::host_identity(
+                        &root.join("run"),
+                        "/root",
+                        intent.manifest_predecessor.unwrap()
+                    )
+                )),
+                "split owners must be independently observed"
+            );
+        }
+    }
+    let mut final_process = start(root, "finally-ready");
+    let final_ready = ready(root, "finally-ready", &mut final_process).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!root.join("finally-ready.calls").exists());
+    let actor: ActorRef = serde_json::from_value(final_ready["actor"].clone()).unwrap();
+    let identity = embedded_recovery::host_identity(&root.join("run"), "/root", actor);
+    input(final_ready["address"].as_str().unwrap(), &identity, None).await;
+    wait_calls(root, "finally-ready").await;
+    assert_eq!(
+        std::fs::read_to_string(root.join("finally-ready.calls")).unwrap(),
+        "1"
+    );
+    final_process.0.kill().unwrap();
+    final_process.0.wait().unwrap();
+    finish_fixture(retained_root);
 }
 
 async fn cell_settled(root: &Path, phase: &str, process: &mut Process) {
@@ -701,5 +941,5 @@ async fn production_cold_successor_executes_retained_original_declaration_in_fre
         std::fs::read_to_string(root.join("publish-original.calls")).unwrap(),
         original_calls
     );
-    std::fs::remove_dir_all(retained_root).unwrap();
+    finish_fixture(retained_root);
 }
