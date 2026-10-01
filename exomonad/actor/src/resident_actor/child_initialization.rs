@@ -10,10 +10,18 @@ pub(super) struct ChildInitializationFrame {
     pub context: crate::ActorSessionContext,
     pub boot: super::ResidentBoot,
     pub lexical: Arc<RuntimeLexicalScopeLease>,
+    pub durable: Option<tidepool_runtime::session::RecoveryPublicOwner>,
     pub checkpoint: Option<(
         crate::CheckpointLease,
         Option<crate::HostedCheckpointAttachment>,
     )>,
+}
+
+/// A visible child surface whose directory durability is still unconfirmed.
+/// The original boot is kept here until confirmation or acknowledged stop.
+pub(super) struct PublishedChildInitialization {
+    pub frame: ChildInitializationFrame,
+    pub detail: String,
 }
 
 pub(super) enum ChildWorkspacePreparation {
@@ -201,6 +209,143 @@ mod tests {
     use crate::ActorId;
     use tidepool_codegen::scope::ScopeId;
     use tidepool_repr::ActorPath;
+
+    fn preparation_frame() -> (
+        ChildInitializationFrame,
+        tidepool_runtime::session::PersistentSession,
+    ) {
+        let actor = ActorRef::first(ActorId(7));
+        let (release, descriptor, session) = scheduler_fixture(actor);
+        let context = descriptor
+            .with_lexical_scope(release.lexical.scope())
+            .session_context(actor);
+        (
+            ChildInitializationFrame {
+                context,
+                boot: super::super::ResidentBoot::Workbench,
+                lexical: release.into_lexical(),
+                durable: None,
+                checkpoint: None,
+            },
+            session,
+        )
+    }
+
+    fn workspace_handle() -> tidepool_bridge_effects::WtWorktreeHandle {
+        use tidepool_bridge_effects::{WtBranchName, WtGitOid, WtWorktreeId, WtWorktreeReceipt};
+        tidepool_bridge_effects::WtWorktreeHandle {
+            handle_receipt: WtWorktreeReceipt {
+                tree_id: WtWorktreeId {
+                    raw: "prepared-child".into(),
+                },
+                cwd: "/fixture-child".into(),
+                branch: WtBranchName {
+                    raw: "child".into(),
+                },
+                source_head: WtGitOid {
+                    raw: "0123456789012345678901234567890123456789".into(),
+                },
+                snapshot_ref: None,
+                created_at: 0,
+            },
+        }
+    }
+
+    struct WorkspaceOwner(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl crate::ForkWorkspaceCustody for WorkspaceOwner {
+        fn actor_stopped(&self, _: &crate::ActorTerminal) {}
+        fn process_may_exist(&self) {}
+    }
+
+    impl Drop for WorkspaceOwner {
+        fn drop(&mut self) {
+            if let Some(send) = self.0.take() {
+                send.send(()).ok();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_workspace_failure_keeps_original_boot_and_lexical_share() {
+        let (frame, mut session) = preparation_frame();
+        let actor = frame.context.actor;
+        let scope = frame.lexical.scope();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let called = Arc::clone(&calls);
+        let prepared = crate::PreparedForkWorkspace::new(workspace_handle(), move |actual| {
+            assert_eq!(actual, actor);
+            called.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(crate::ForkWorkspaceAdmissionError {
+                detail: "configured installer refused".into(),
+            })
+        });
+        let result = prepare_workspace(frame, ChildWorkspacePreparation::Prepared(prepared)).await;
+        assert!(
+            matches!(result.result, Err(crate::ResidentActorWorkbenchError::ActorProtocol(ref detail)) if detail == "configured installer refused")
+        );
+        assert!(matches!(
+            result.frame.boot,
+            super::super::ResidentBoot::Workbench
+        ));
+        assert_eq!(result.frame.context.actor, actor);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(session.scope_tree().is_live(scope));
+        drop(result);
+        let _ = session.retain_lexical_scope(ScopeId::ROOT).unwrap();
+        assert!(!session.scope_tree().is_live(scope));
+    }
+
+    #[tokio::test]
+    async fn owned_workspace_dropped_prepared_result_releases_its_custody_and_scope() {
+        let (frame, mut session) = preparation_frame();
+        let scope = frame.lexical.scope();
+        let (dropped, observe) = tokio::sync::oneshot::channel();
+        let prepared = crate::PreparedForkWorkspace::new(workspace_handle(), move |_| {
+            Ok(Arc::new(WorkspaceOwner(Some(dropped))))
+        });
+        let result = prepare_workspace(frame, ChildWorkspacePreparation::Prepared(prepared)).await;
+        assert!(result.result.is_ok());
+        assert!(session.scope_tree().is_live(scope));
+        drop(result);
+        observe.await.unwrap();
+        let _ = session.retain_lexical_scope(ScopeId::ROOT).unwrap();
+        assert!(!session.scope_tree().is_live(scope));
+    }
+
+    #[tokio::test]
+    async fn owned_workspace_cancelled_wait_keeps_installer_and_actor_scope_owners() {
+        let (frame, mut session) = preparation_frame();
+        let kept_by_actor = Arc::clone(&frame.lexical);
+        let scope = kept_by_actor.scope();
+        let (entered, observe) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let wait = std::sync::Mutex::new(wait);
+        let (dropped, observe_drop) = tokio::sync::oneshot::channel();
+        let prepared = crate::PreparedForkWorkspace::new(workspace_handle(), move |_| {
+            entered.send(()).unwrap();
+            wait.lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap();
+            Ok(Arc::new(WorkspaceOwner(Some(dropped))))
+        });
+        let task = tokio::spawn(prepare_workspace(
+            frame,
+            ChildWorkspacePreparation::Prepared(prepared),
+        ));
+        observe.await.unwrap();
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        assert!(session.scope_tree().is_live(scope));
+        release.send(()).unwrap();
+        observe_drop.await.unwrap();
+        // The behavior's existing lease, rather than the cancelled future,
+        // keeps the child target live until acknowledged owner cleanup.
+        drop(kept_by_actor);
+        let _ = session.retain_lexical_scope(ScopeId::ROOT).unwrap();
+        assert!(!session.scope_tree().is_live(scope));
+    }
 
     #[test]
     fn release_refuses_actor_allocation_scope_source_and_policy_changes() {
