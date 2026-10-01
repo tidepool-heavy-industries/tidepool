@@ -206,6 +206,23 @@ pub enum ForkGroupError {
     },
 }
 
+#[derive(Clone, Copy)]
+enum ForkGroupBoundary<'a> {
+    Any,
+    Resident,
+    At(&'a WorkbenchForkBoundary),
+}
+
+impl ForkGroupBoundary<'_> {
+    fn matches(self, boundary: Option<&WorkbenchForkBoundary>) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Resident => boundary.is_none(),
+            Self::At(expected) => boundary == Some(expected),
+        }
+    }
+}
+
 struct ForkGroup {
     owner: ActorRef,
     completion_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
@@ -1625,10 +1642,28 @@ impl ForkGroupRegistry {
     }
 
     pub fn publish_ready(&self, owner: ActorRef) -> Result<Vec<ForkGroupId>, ForkGroupError> {
+        self.publish_ready_matching(owner, ForkGroupBoundary::Any)
+    }
+
+    pub(crate) fn publish_ready_in_resident(
+        &self,
+        owner: ActorRef,
+    ) -> Result<Vec<ForkGroupId>, ForkGroupError> {
+        self.publish_ready_matching(owner, ForkGroupBoundary::Resident)
+    }
+
+    fn publish_ready_matching(
+        &self,
+        owner: ActorRef,
+        boundary: ForkGroupBoundary<'_>,
+    ) -> Result<Vec<ForkGroupId>, ForkGroupError> {
         let mut state = self.state.lock();
         let mut published = Vec::new();
         for (id, group) in &mut state.groups {
-            if group.owner == owner && *group.phase.borrow() == ForkGroupPhase::Ready {
+            if group.owner == owner
+                && boundary.matches(group.completion_boundary.as_ref())
+                && *group.phase.borrow() == ForkGroupPhase::Ready
+            {
                 group.publication = Some(ForkGroupPublication::Deferred);
                 group.phase.send_replace(ForkGroupPhase::Committed);
                 published.push(*id);
@@ -1640,11 +1675,29 @@ impl ForkGroupRegistry {
 
     #[must_use]
     pub fn has_ready(&self, owner: ActorRef) -> bool {
-        self.state
-            .lock()
-            .groups
-            .values()
-            .any(|group| group.owner == owner && *group.phase.borrow() == ForkGroupPhase::Ready)
+        self.has_ready_matching(owner, ForkGroupBoundary::Any)
+    }
+
+    #[must_use]
+    pub(crate) fn has_ready_at_boundary(
+        &self,
+        owner: ActorRef,
+        boundary: &WorkbenchForkBoundary,
+    ) -> bool {
+        self.has_ready_matching(owner, ForkGroupBoundary::At(boundary))
+    }
+
+    #[must_use]
+    pub(crate) fn has_ready_in_resident(&self, owner: ActorRef) -> bool {
+        self.has_ready_matching(owner, ForkGroupBoundary::Resident)
+    }
+
+    fn has_ready_matching(&self, owner: ActorRef, boundary: ForkGroupBoundary<'_>) -> bool {
+        self.state.lock().groups.values().any(|group| {
+            group.owner == owner
+                && boundary.matches(group.completion_boundary.as_ref())
+                && *group.phase.borrow() == ForkGroupPhase::Ready
+        })
     }
 
     #[must_use]
@@ -1657,7 +1710,7 @@ impl ForkGroupRegistry {
     }
 
     pub fn abort_unpublished(&self, owner: ActorRef) -> Vec<ActorRef> {
-        self.abort_pending(owner, true, None)
+        self.abort_pending(owner, true, None, ForkGroupBoundary::Any)
     }
 
     pub(crate) fn abort_incomplete(
@@ -1665,7 +1718,7 @@ impl ForkGroupRegistry {
         owner: ActorRef,
         selected: Option<&[ForkGroupId]>,
     ) -> Vec<ActorRef> {
-        self.abort_pending(owner, false, selected)
+        self.abort_pending(owner, false, selected, ForkGroupBoundary::Any)
     }
 
     pub(crate) fn abort_incomplete_at_boundary(
@@ -1673,28 +1726,39 @@ impl ForkGroupRegistry {
         owner: ActorRef,
         boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
     ) -> Vec<ActorRef> {
-        let selected = {
-            let state = self.state.lock();
-            state
-                .groups
-                .iter()
-                .filter_map(|(id, group)| {
-                    (group.owner == owner
-                        && group.completion_boundary.as_ref() == Some(boundary)
-                        && matches!(
-                            *group.phase.borrow(),
-                            ForkGroupPhase::Staging | ForkGroupPhase::Aborted
-                        ))
-                    .then_some(*id)
-                })
-                .collect::<Vec<_>>()
-        };
-        self.abort_pending(owner, false, Some(&selected))
+        self.abort_pending(owner, false, None, ForkGroupBoundary::At(boundary))
+    }
+
+    pub(crate) fn abort_incomplete_in_resident(
+        &self,
+        owner: ActorRef,
+        selected: Option<&[ForkGroupId]>,
+    ) -> Vec<ActorRef> {
+        self.abort_pending(owner, false, selected, ForkGroupBoundary::Resident)
+    }
+
+    #[must_use]
+    pub(crate) fn has_incomplete_at_boundary(
+        &self,
+        owner: ActorRef,
+        boundary: &WorkbenchForkBoundary,
+    ) -> bool {
+        self.has_incomplete_matching(owner, ForkGroupBoundary::At(boundary))
+    }
+
+    #[must_use]
+    pub(crate) fn has_incomplete_in_resident(&self, owner: ActorRef) -> bool {
+        self.has_incomplete_matching(owner, ForkGroupBoundary::Resident)
     }
 
     pub(crate) fn has_incomplete(&self, owner: ActorRef) -> bool {
+        self.has_incomplete_matching(owner, ForkGroupBoundary::Any)
+    }
+
+    fn has_incomplete_matching(&self, owner: ActorRef, boundary: ForkGroupBoundary<'_>) -> bool {
         self.state.lock().groups.values().any(|group| {
             group.owner == owner
+                && boundary.matches(group.completion_boundary.as_ref())
                 && matches!(
                     *group.phase.borrow(),
                     ForkGroupPhase::Staging | ForkGroupPhase::Aborted
@@ -1707,7 +1771,7 @@ impl ForkGroupRegistry {
         owner: ActorRef,
         groups: &[ForkGroupId],
     ) -> Vec<ActorRef> {
-        self.abort_pending(owner, true, Some(groups))
+        self.abort_pending(owner, true, Some(groups), ForkGroupBoundary::Any)
     }
 
     fn abort_pending(
@@ -1715,6 +1779,7 @@ impl ForkGroupRegistry {
         owner: ActorRef,
         include_ready: bool,
         selected: Option<&[ForkGroupId]>,
+        boundary: ForkGroupBoundary<'_>,
     ) -> Vec<ActorRef> {
         let mut state = self.state.lock();
         let ids: Vec<_> = state
@@ -1722,6 +1787,7 @@ impl ForkGroupRegistry {
             .iter()
             .filter_map(|(id, group)| {
                 (group.owner == owner
+                    && boundary.matches(group.completion_boundary.as_ref())
                     && selected.is_none_or(|groups| groups.contains(id))
                     && *group.phase.borrow() != ForkGroupPhase::Committed
                     && (include_ready || *group.phase.borrow() != ForkGroupPhase::Ready))

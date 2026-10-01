@@ -3601,12 +3601,14 @@ where
         request: crate::RequestId,
         result: RootCustody,
         carried_preview: Option<String>,
+        boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
     ) -> Result<(), ResidentActorWorkbenchError> {
         let settled = async {
-            if self.environment.fork_groups.has_incomplete(context.actor) {
+            if self.has_incomplete_groups(context.actor, boundary) {
                 self.abort_incomplete_groups(
                     kernel,
                     context.actor,
+                    boundary,
                     "request reply interrupted unfold admission",
                 )
                 .await;
@@ -7863,9 +7865,11 @@ where
                         cursor.cell_display_remaining =
                             cursor.cell_display_remaining.saturating_sub(spent);
                     }
-                    if self.environment.fork_groups.has_ready(context.actor) {
+                    if self.has_ready_groups(context.actor, effects.publication.boundary()) {
                         let publication = if effects.publication.boundary().is_none() {
-                            self.environment.fork_groups.publish_ready(context.actor)
+                            self.environment
+                                .fork_groups
+                                .publish_ready_in_resident(context.actor)
                         } else {
                             Ok(Vec::new())
                         };
@@ -7886,10 +7890,13 @@ where
                             &mut cursor.unit.operations,
                             WorkbenchOperationDisposition::Committed,
                         );
-                    } else if self.environment.fork_groups.has_incomplete(context.actor) {
+                    } else if self
+                        .has_incomplete_groups(context.actor, effects.publication.boundary())
+                    {
                         self.abort_incomplete_groups(
                             kernel,
                             context.actor,
+                            effects.publication.boundary(),
                             "Haskell input ended before unfold admission committed",
                         )
                         .await;
@@ -8114,6 +8121,7 @@ where
                             self.abort_incomplete_groups(
                                 kernel,
                                 context.actor,
+                                effects.publication.boundary(),
                                 "Haskell workbench failed during unfold admission",
                             )
                             .await;
@@ -8169,6 +8177,7 @@ where
                                 self.abort_incomplete_groups(
                                     kernel,
                                     context.actor,
+                                    effects.publication.boundary(),
                                     "Haskell workbench failed during unfold admission",
                                 )
                                 .await;
@@ -8344,6 +8353,7 @@ where
                         self.abort_incomplete_groups(
                             kernel,
                             context.actor,
+                            effects.publication.boundary(),
                             "Haskell input rejected during unfold admission",
                         )
                         .await;
@@ -8429,17 +8439,24 @@ where
                         result,
                         preview,
                     } => {
-                        self.stage_request_reply(kernel, context, request_id, result, preview)
-                            .await
-                            .map_err(|error| {
-                                workbench_failure_after_operations(
-                                    &cursor.receipts,
-                                    cursor.index,
-                                    request.items.len(),
-                                    error,
-                                    cursor.unit.operations.clone(),
-                                )
-                            })?;
+                        self.stage_request_reply(
+                            kernel,
+                            context,
+                            request_id,
+                            result,
+                            preview,
+                            effects.publication.boundary(),
+                        )
+                        .await
+                        .map_err(|error| {
+                            workbench_failure_after_operations(
+                                &cursor.receipts,
+                                cursor.index,
+                                request.items.len(),
+                                error,
+                                cursor.unit.operations.clone(),
+                            )
+                        })?;
                         cursor.receipts.push(WorkbenchItemReceipt {
                             diagnostics: Vec::new(),
                             index: cursor.index,
@@ -8470,10 +8487,12 @@ where
                     ResidentWorkbenchStep::CancellationAcknowledged {
                         request: request_id,
                     } => {
-                        if self.environment.fork_groups.has_incomplete(context.actor) {
+                        if self.has_incomplete_groups(context.actor, effects.publication.boundary())
+                        {
                             self.abort_incomplete_groups(
                                 kernel,
                                 context.actor,
+                                effects.publication.boundary(),
                                 "request cancellation interrupted unfold admission",
                             )
                             .await;
@@ -9154,21 +9173,59 @@ where
         Ok(())
     }
 
+    fn has_ready_groups(
+        &self,
+        owner: ActorRef,
+        boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
+    ) -> bool {
+        match boundary {
+            Some(boundary) => self
+                .environment
+                .fork_groups
+                .has_ready_at_boundary(owner, boundary),
+            None => self.environment.fork_groups.has_ready_in_resident(owner),
+        }
+    }
+
+    fn has_incomplete_groups(
+        &self,
+        owner: ActorRef,
+        boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
+    ) -> bool {
+        match boundary {
+            Some(boundary) => self
+                .environment
+                .fork_groups
+                .has_incomplete_at_boundary(owner, boundary),
+            None => self
+                .environment
+                .fork_groups
+                .has_incomplete_in_resident(owner),
+        }
+    }
+
     async fn abort_incomplete_groups(
         &self,
         kernel: &KernelContext,
         owner: ActorRef,
+        boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
         summary: &str,
     ) {
         let selected = self
             .active_route
             .as_ref()
             .map(|(_, groups)| groups.as_slice());
-        for child in self
-            .environment
-            .fork_groups
-            .abort_incomplete(owner, selected)
-        {
+        let children = match boundary {
+            Some(boundary) => self
+                .environment
+                .fork_groups
+                .abort_incomplete_at_boundary(owner, boundary),
+            None => self
+                .environment
+                .fork_groups
+                .abort_incomplete_in_resident(owner, selected),
+        };
+        for child in children {
             if let Some(child) = kernel.resolve(child) {
                 // A child already gone from a failed fork-group admission is
                 // the common case here; log anything else so an actor that
@@ -10195,12 +10252,15 @@ where
                                 .begin_reply(context.actor, attempt.request)
                             {
                                 Ok(()) => {
+                                    let publication_boundary =
+                                        self.fork_publication.boundary().cloned();
                                     self.stage_request_reply(
                                         kernel,
                                         &context,
                                         attempt.request,
                                         attempt.result,
                                         attempt.preview,
+                                        publication_boundary.as_ref(),
                                     )
                                     .await?;
                                     return Ok(true);

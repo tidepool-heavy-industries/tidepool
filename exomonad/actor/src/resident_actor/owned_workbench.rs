@@ -485,7 +485,11 @@ where
                                 tokio::select! {
                                     biased;
                                     completed = &mut operation => break Some(completed),
-                                    () = tokio::time::sleep_until(deadline) => break None,
+                                    () = tokio::time::sleep_until(deadline) => {
+                                        control.request_cancellation();
+                                        operation.await;
+                                        break None;
+                                    },
                                     _ = progress.tick() => observation.publish_workbench_posture(
                                         crate::ActorWorkbenchPosture::AwaitingEffect {
                                             input_unit_index: index, total,
