@@ -12055,7 +12055,7 @@ where
     pub async fn admit_root_with_identity(
         &self,
         descriptor: ActorDescriptor,
-        outcome: ResidentOutcome,
+        outcome: impl Into<ResidentRootEntry> + Send,
         identity: ActorRef,
     ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
         let admission = self.environment.root_admission_closed.read().await;
