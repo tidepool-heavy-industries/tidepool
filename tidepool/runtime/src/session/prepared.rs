@@ -16,11 +16,11 @@ use tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces;
 use super::binding_table::BindingIndex;
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
-    BatchImport, BatchLeaseRequest, BatchProgram, CompileError, CompiledProgram, DemandError,
-    DemandedImage, ExecutionError, ImageRegistry, ImportBindings, InheritedSourceDemand,
-    ManagedBuilder, ManagedField, ManagedNode, PackageLiteral, Parcel, ParkRequest,
-    PreparedCallOptions, PreparedFrameEvidence, PreparedHandle, PreparedInput, PreparedMachine,
-    PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter, PreparedResult,
+    BatchImport, BatchLeaseRequest, BatchProgram, CompileError, CompiledProgram, DefinitionFacts,
+    DemandError, DemandedImage, ExecutionError, ImageRegistry, ImportBindings,
+    InheritedSourceDemand, ManagedBuilder, ManagedField, ManagedNode, PackageLiteral, Parcel,
+    ParkRequest, PreparedCallOptions, PreparedFrameEvidence, PreparedHandle, PreparedInput,
+    PreparedMachine, PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter, PreparedResult,
     PreparedResultBatch, ProgramId, RunOptions, SourceBinder, SourceInstanceLease,
     MAX_ANSWER_DEPTH,
 };
@@ -378,7 +378,7 @@ impl From<LinkError> for PreparedRuntimeError {
 /// the identity and entry signature an importer links against.
 struct ProgramFacts {
     entry: Option<ValueId>,
-    tops: BTreeMap<ValueId, (SymbolIdentity, Option<Signature>)>,
+    definitions: Arc<DefinitionFacts>,
     /// The `Tidepool.Internal.Resume.Settled` constructors this program
     /// declares, when its entry is a turn's settled scaffold.
     settled: Option<SettledIds>,
@@ -394,27 +394,14 @@ struct ProgramFacts {
     /// without compiling a fresh fragment for it.
     apply_entry: Option<ValueId>,
     apply_value: Option<ValueId>,
-    /// The typed sites this program declares and the type graph they point
-    /// into, kept for site-evidence resolution and answer validation after
-    /// the machine has taken the program's code.
-    sites: Vec<SiteRow>,
-    types: Vec<TypeNode>,
-    /// The request constructors this program answers at a synthetic site,
-    /// by bridge id, each with the index of its row in `sites`.
-    verb_sites: Vec<(DataConId, usize)>,
-    /// Constructor identities and bridge ids by this program's local
-    /// `ConstructorId`, so two programs' type graphs compare by identity
-    /// rather than local index, and a bridge `HaskellValue`'s constructor resolves
-    /// to the row that admits it.
-    constructors: Vec<(SymbolIdentity, DataConId, SymbolIdentity)>,
-    /// Compiler-authenticated runtime IDs for the JSON constructors. This is
-    /// the only JSON role inventory consumed by answer validation.
-    json_layout: Option<JsonLayout<DataConId>>,
-    /// `constructors`, indexed by qualified identity `(module, occurrence)`
-    /// and built once in [`Self::of`], so a leaf lookup
-    /// ([`Self::constructor_named`]) is one map lookup rather than a full
-    /// scan repeated per leaf of an answer.
-    by_identity: BTreeMap<(String, String), DataConId>,
+}
+
+impl std::ops::Deref for ProgramFacts {
+    type Target = DefinitionFacts;
+
+    fn deref(&self) -> &Self::Target {
+        &self.definitions
+    }
 }
 
 /// What installing one program adds to the machine-owned evidence indexes.
@@ -608,12 +595,6 @@ struct SettledIds {
 impl SettledIds {
     const MODULE: &'static str = "Tidepool.Internal.Resume";
 
-    fn of(constructors: &[(SymbolIdentity, DataConId, SymbolIdentity)]) -> Option<Self> {
-        Self::from_constructor_facts(constructors.iter())
-            .ok()
-            .flatten()
-    }
-
     /// Recover the settled constructor pair from exact admitted constructor
     /// declarations. A reduced entry can import the two constructors from
     /// separate source owners, so requiring one `ProgramFacts` value to carry
@@ -622,11 +603,19 @@ impl SettledIds {
     fn from_facts<'a>(
         facts: impl IntoIterator<Item = &'a ProgramFacts>,
     ) -> Result<Option<Self>, PreparedRuntimeError> {
-        Self::from_constructor_facts(
-            facts
+        Self::from_constructor_facts(facts.into_iter().flat_map(|facts| {
+            ["Done", "Suspended"]
                 .into_iter()
-                .flat_map(|facts| facts.constructors.iter()),
-        )
+                .flat_map(move |occurrence| {
+                    facts
+                        .by_identity
+                        .get(Self::MODULE)
+                        .and_then(|module| module.get(occurrence))
+                        .into_iter()
+                        .flatten()
+                        .map(move |index| &facts.constructors[*index])
+                })
+        }))
     }
 
     fn from_constructor_facts<'a>(
@@ -681,94 +670,46 @@ impl ProgramFacts {
     }
 
     fn of_definitions(prepared: DefinitionsView<'_>, entry: Option<ValueId>) -> Self {
-        let tops: BTreeMap<ValueId, (SymbolIdentity, Option<Signature>)> = prepared
-            .bindings()
-            .iter()
-            .flat_map(|group| match group {
-                Group::NonRecursive(top) => std::slice::from_ref(top),
-                Group::Recursive(tops) => tops.as_slice(),
-            })
-            .map(|top| {
-                let export = match &top.binding.rhs {
-                    HeapRhs::Function { signature, .. } | HeapRhs::Thunk { signature, .. } => {
-                        prepared.signatures().get(signature.0 as usize).cloned()
-                    }
-                    HeapRhs::Constructor { .. } | HeapRhs::Bytes(_) => None,
-                };
-                (top.binding.id, (top.identity.clone(), export))
-            })
-            .collect();
+        Self::from_definitions(Arc::new(DefinitionFacts::new(prepared)), entry)
+    }
+
+    fn from_image(image: &CompiledProgram, entry: Option<ValueId>) -> Self {
+        Self::from_definitions(Arc::clone(image.definition_facts()), entry)
+    }
+
+    fn from_definitions(definitions: Arc<DefinitionFacts>, entry: Option<ValueId>) -> Self {
         let entry_module = entry
             .as_ref()
-            .and_then(|entry| tops.get(entry))
-            .map(|(identity, _)| identity.module.clone());
-        let resume = entry_module.clone().and_then(|module| {
-            tops.iter().find_map(|(id, (identity, _))| {
+            .and_then(|entry| definitions.tops.get(entry))
+            .map(|(identity, _)| identity.module.as_str());
+        let resume = entry_module.and_then(|module| {
+            definitions.tops.iter().find_map(|(id, (identity, _))| {
                 (identity.module == module && identity.occurrence == PREPARED_RESUME_TARGET)
                     .then_some(*id)
             })
         });
-        let apply_entry = entry_module.clone().and_then(|module| {
-            tops.iter().find_map(|(id, (identity, _))| {
+        let apply_entry = entry_module.and_then(|module| {
+            definitions.tops.iter().find_map(|(id, (identity, _))| {
                 (identity.module == module && identity.occurrence == PREPARED_APPLY_ENTRY_TARGET)
                     .then_some(*id)
             })
         });
         let apply_value = entry_module.and_then(|module| {
-            tops.iter().find_map(|(id, (identity, _))| {
+            definitions.tops.iter().find_map(|(id, (identity, _))| {
                 (identity.module == module && identity.occurrence == PREPARED_APPLY_VALUE_TARGET)
                     .then_some(*id)
             })
         });
-        let constructors: Vec<(SymbolIdentity, DataConId, SymbolIdentity)> = prepared
-            .constructors()
-            .iter()
-            .map(|declaration| {
-                (
-                    declaration.identity.clone(),
-                    declaration.host_id,
-                    declaration.family.clone(),
-                )
-            })
-            .collect();
-        let by_identity: BTreeMap<(String, String), DataConId> = constructors
-            .iter()
-            .map(|(identity, host_id, _)| {
-                (
-                    (identity.module.clone(), identity.occurrence.clone()),
-                    *host_id,
-                )
-            })
-            .collect();
-        let json_layout = prepared
-            .json_layout()
-            .map(|layout| (*layout).map(|constructor| constructors[constructor.0 as usize].1));
-        let sites = prepared.sites().to_vec();
-        // Validation guarantees every entry names a declared constructor and
-        // an admitted row.
-        let verb_sites = prepared
-            .verb_sites()
-            .iter()
-            .filter_map(|(constructor, site)| {
-                let (_, host_id, _) = constructors.get(constructor.0 as usize)?;
-                let row = sites.iter().position(|row| row.site == *site)?;
-                Some((*host_id, row))
-            })
-            .collect();
-        Self {
+        let mut facts = Self {
             entry,
-            tops,
-            settled: SettledIds::of(&constructors),
+            settled: None,
+            definitions,
             resume,
             apply_entry,
             apply_value,
-            sites,
-            verb_sites,
-            types: prepared.types().to_vec(),
-            constructors,
-            by_identity,
-            json_layout,
-        }
+        };
+        facts.settled = SettledIds::from_facts([&facts]).ok().flatten();
+        facts
     }
 
     fn type_node(&self, id: TypeNodeId) -> Option<&TypeNode> {
@@ -833,8 +774,10 @@ impl ProgramFacts {
     /// The bridge id of a declared constructor, by qualified identity.
     fn constructor_named(&self, module: &str, occurrence: &str) -> Option<DataConId> {
         self.by_identity
-            .get(&(module.to_string(), occurrence.to_string()))
-            .copied()
+            .get(module)
+            .and_then(|module| module.get(occurrence))
+            .and_then(|indices| indices.last())
+            .map(|index| self.constructors[*index].1)
     }
 
     /// The declared row for `host_id` among `node`'s rows, when `node` is a
@@ -2247,7 +2190,7 @@ impl PreparedEngine {
         nursery_bytes: usize,
         registry: Option<Arc<ImageRegistry>>,
     ) -> Result<(Self, ProgramId), PreparedRuntimeError> {
-        let facts = ProgramFacts::of(&prepared);
+        let entry = prepared.entry();
         let exports = exportable_code_tops(&prepared);
         let linked = link_program(prepared, &MachineImports::default())?;
         let image = match &registry {
@@ -2263,6 +2206,7 @@ impl PreparedEngine {
                 Arc::new(CompiledProgram::compile(&linked).map_err(PreparedRuntimeError::Compile)?)
             }
         };
+        let facts = ProgramFacts::from_image(&image, Some(entry));
         let (machine, program) =
             PreparedMachine::new_shared(image, PreparedMachineOptions { nursery_bytes })
                 .map_err(PreparedRuntimeError::Install)?;
@@ -2790,7 +2734,7 @@ impl PreparedEngine {
         }
         let facts: Vec<_> = demanded
             .iter()
-            .map(|selected| ProgramFacts::of_definitions(selected.group().definitions(), None))
+            .map(|selected| ProgramFacts::from_image(selected.image(), None))
             .collect();
         let plans = self.plan_batch_evidence(&facts)?;
         let mut programs = Vec::with_capacity(demanded.len());
@@ -3190,9 +3134,12 @@ impl PreparedEngine {
         let result = (|| -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
             let mut facts: Vec<_> = demanded
                 .iter()
-                .map(|selected| ProgramFacts::of_definitions(selected.group().definitions(), None))
+                .map(|selected| ProgramFacts::from_image(selected.image(), None))
                 .collect();
-            facts.push(ProgramFacts::of(&target.prepared));
+            facts.push(ProgramFacts::from_image(
+                &target.image,
+                Some(target.prepared.entry()),
+            ));
             // A reduced target need not redeclare the Settled constructors:
             // it may reuse the exact original definitions already installed
             // by an earlier target or one of this batch's source groups.
@@ -5265,29 +5212,27 @@ pub(super) mod tests {
                 (identity, *host_id, family)
             })
             .collect::<Vec<_>>();
-        let by_identity = constructors
-            .iter()
-            .map(|(identity, host_id, _)| {
-                (
-                    (identity.module.clone(), identity.occurrence.clone()),
-                    *host_id,
-                )
-            })
-            .collect();
-        ProgramFacts {
-            entry: None,
-            tops: BTreeMap::new(),
-            settled: SettledIds::of(&constructors),
-            resume: None,
-            apply_entry: None,
-            apply_value: None,
-            sites: Vec::new(),
-            types: Vec::new(),
-            verb_sites: Vec::new(),
-            constructors,
-            json_layout: None,
-            by_identity,
+        let mut by_identity = BTreeMap::<_, BTreeMap<_, Vec<usize>>>::new();
+        for (index, (identity, _, _)) in constructors.iter().enumerate() {
+            by_identity
+                .entry(identity.module.clone())
+                .or_default()
+                .entry(identity.occurrence.clone())
+                .or_default()
+                .push(index);
         }
+        ProgramFacts::from_definitions(
+            Arc::new(DefinitionFacts {
+                tops: BTreeMap::new(),
+                sites: Vec::new(),
+                types: Vec::new(),
+                verb_sites: Vec::new(),
+                constructors,
+                json_layout: None,
+                by_identity,
+            }),
+            None,
+        )
     }
 
     #[test]
@@ -5309,6 +5254,15 @@ pub(super) mod tests {
         let conflicting_done = settled_test_facts(&[("other-unit", "Done", DataConId(1))]);
         assert!(matches!(
             SettledIds::from_facts([&done, &suspended, &conflicting_done]),
+            Err(PreparedRuntimeError::ConflictingSettledConstructors)
+        ));
+
+        let duplicate_done = settled_test_facts(&[
+            ("fixture", "Done", DataConId(1)),
+            ("fixture", "Done", DataConId(3)),
+        ]);
+        assert!(matches!(
+            SettledIds::from_facts([&duplicate_done, &suspended]),
             Err(PreparedRuntimeError::ConflictingSettledConstructors)
         ));
 
@@ -5354,6 +5308,12 @@ pub(super) mod tests {
         assert_eq!(first.len(), 2);
         assert_eq!(second.len(), 2);
         assert_ne!(first, second);
+        for (first, second) in first.iter().zip(&second) {
+            assert!(Arc::ptr_eq(
+                &engine.programs[first].definitions,
+                &engine.programs[second].definitions,
+            ));
+        }
         assert_eq!(registry.misses(), 2);
         assert_eq!(registry.hits(), 2);
         assert_eq!(engine.residency().programs, 5);
@@ -5536,6 +5496,10 @@ pub(super) mod tests {
         assert_ne!(reused.target, installed_target);
         let reused_target = reused.target;
         assert_eq!(engine.commit_certified_turn(reused), reused_target);
+        assert!(Arc::ptr_eq(
+            &engine.programs[&installed_target].definitions,
+            &engine.programs[&reused_target].definitions,
+        ));
         assert!(engine.unpin(reused_target));
         let mut scopes = tidepool_codegen::scope::ScopeTree::new();
         let source_scope = scopes.mint_isolated();

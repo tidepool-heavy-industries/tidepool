@@ -6,8 +6,10 @@
 use crate::entry_abi::EntryAbi;
 mod addresses;
 mod capabilities;
+mod facts;
 mod failures;
 mod fingerprint;
+pub use facts::DefinitionFacts;
 mod lifetime;
 #[cfg(test)]
 mod lifetime_tests;
@@ -424,6 +426,7 @@ unsafe extern "C" fn prepared_recorded_failure(vmctx: *mut crate::context::VMCon
 /// Pins generated entries, descriptors and immutable images together. Each run
 /// owns its mutable heap; materialization may force values before releasing it.
 pub struct CompiledProgram {
+    definition_facts: Arc<DefinitionFacts>,
     pub(crate) pipeline: CodegenPipeline,
     pub(crate) entries: BTreeMap<ValueId, CompiledEntry>,
     pub(crate) descriptors: Vec<Arc<ObjectDescriptor>>,
@@ -520,7 +523,7 @@ pub(crate) struct TopExport {
 //     `compile_with` mutates them, and `get_finalized_function`'s raw code
 //     pointer is a stable address into memory this program's `Drop` alone
 //     frees.
-//   - `descriptors`, `descriptor_registry`, `statics`, `top_slots`,
+//   - `definition_facts`, `descriptors`, `descriptor_registry`, `statics`, `top_slots`,
 //     `import_slots`, `interned_constructors`, `byte_tops`, `externals`,
 //     `heap_top_specs`, `callables`, `thunk_entries`:
 //     plain owned data (`Vec`/`BTreeMap`/`Arc<..>` of `Send + Sync` content,
@@ -540,6 +543,11 @@ unsafe impl Sync for CompiledProgram {}
 static_assertions::assert_impl_all!(CompiledProgram: Send, Sync);
 
 impl CompiledProgram {
+    /// Shared immutable evidence for every installation of this image.
+    pub fn definition_facts(&self) -> &Arc<DefinitionFacts> {
+        &self.definition_facts
+    }
+
     /// Collector roots in an installation's block, classified by the admitted
     /// runtime representation. Byte tops and Address imports contain literal
     /// pool addresses, whose lifetime belongs to the machine's permanent pool.
@@ -1396,6 +1404,7 @@ impl CompiledProgram {
             },
         );
         Ok(Self {
+            definition_facts: Arc::new(DefinitionFacts::new(plan.program)),
             pipeline,
             entries,
             descriptors,
