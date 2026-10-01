@@ -199,13 +199,13 @@ mod tests {
     }
 
     fn context() -> ToolInvocationContext {
-        ToolInvocationContext {
-            context_call_id: None,
-            thread_id: "embedded-run".into(),
-            turn_id: "request-1".into(),
-            call_id: "call-1".into(),
-            namespace: Some("embedded".into()),
-        }
+        ToolInvocationContext::external(
+            "embedded-run".into(),
+            "request-1".into(),
+            "call-1".into(),
+            None,
+            Some("embedded".into()),
+        )
     }
 
     #[test]

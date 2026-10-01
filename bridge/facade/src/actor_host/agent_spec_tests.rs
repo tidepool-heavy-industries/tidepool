@@ -1320,13 +1320,13 @@ async fn a_nested_shell_record_declares_its_tools_in_place_and_both_halves_answe
         tokio::spawn(policy.dispatch_boxed(ToolInvocation {
             name: "bash".into(),
             arguments: ToolArguments::Structured(serde_json::json!({"cmd":script})),
-            context: Some(ToolInvocationContext {
-                context_call_id: Some("nested-bash".into()),
-                thread_id: "nested-thread".into(),
-                turn_id: "nested-turn".into(),
-                call_id: "nested-bash".into(),
-                namespace: None,
-            }),
+            context: Some(ToolInvocationContext::external(
+                "nested-thread".into(),
+                "nested-turn".into(),
+                "nested-bash".into(),
+                Some("nested-bash".into()),
+                None,
+            )),
         }))
     };
     let backend = super::command_jobs_tests::TestCommands::completed("nested-ok");

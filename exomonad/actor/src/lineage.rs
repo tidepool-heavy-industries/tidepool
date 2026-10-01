@@ -2163,10 +2163,7 @@ mod tests {
         let (token, drops) = checkpoint_with_attachment(
             &groups,
             issuer,
-            WorkbenchForkBoundary {
-                thread_id: "thread".into(),
-                call_id: "call".into(),
-            },
+            WorkbenchForkBoundary::external("thread".into(), "call".into(), "call".into()),
             ScopeId(3),
         );
         let retained_waiter = groups.checkpoint(&token, SessionId(7)).unwrap();
@@ -2196,10 +2193,7 @@ mod tests {
         let (token, drops) = checkpoint_with_attachment(
             &groups,
             issuer,
-            WorkbenchForkBoundary {
-                thread_id: "thread".into(),
-                call_id: "call".into(),
-            },
+            WorkbenchForkBoundary::external("thread".into(), "call".into(), "call".into()),
             ScopeId(9),
         );
         let (admitted_lease, admitted_attachment) = groups
@@ -2228,14 +2222,10 @@ mod tests {
     fn failed_workbench_boundary_drops_only_its_pending_host_attachments() {
         let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
         let issuer = ActorRef::first(ActorId(1));
-        let failed_boundary = WorkbenchForkBoundary {
-            thread_id: "thread".into(),
-            call_id: "failed".into(),
-        };
-        let live_boundary = WorkbenchForkBoundary {
-            thread_id: "thread".into(),
-            call_id: "live".into(),
-        };
+        let failed_boundary =
+            WorkbenchForkBoundary::external("thread".into(), "failed".into(), "failed".into());
+        let live_boundary =
+            WorkbenchForkBoundary::external("thread".into(), "live".into(), "live".into());
         let (_, failed_drops) =
             checkpoint_with_attachment(&groups, issuer, failed_boundary.clone(), ScopeId(3));
         let (live, live_drops) =
@@ -2260,19 +2250,14 @@ mod tests {
         let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
         let issuer = ActorRef::first(ActorId(1));
         let other = ActorRef::first(ActorId(2));
-        let boundary = WorkbenchForkBoundary {
-            thread_id: "thread".into(),
-            call_id: "call".into(),
-        };
+        let boundary =
+            WorkbenchForkBoundary::external("thread".into(), "call".into(), "call".into());
         let (_, failed_drops) =
             checkpoint_with_attachment(&groups, issuer, boundary.clone(), ScopeId(3));
         let (published, published_drops) = checkpoint_with_attachment(
             &groups,
             issuer,
-            WorkbenchForkBoundary {
-                call_id: "published".into(),
-                ..boundary.clone()
-            },
+            WorkbenchForkBoundary::external("thread".into(), "call".into(), "published".into()),
             ScopeId(4),
         );
         let (unrelated, unrelated_drops) =
@@ -2302,10 +2287,8 @@ mod tests {
     async fn checkpoint_waits_for_exact_boundary_and_survives_issuer_retirement() {
         let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
         let issuer = ActorRef::first(ActorId(1));
-        let boundary = WorkbenchForkBoundary {
-            thread_id: "thread".into(),
-            call_id: "call".into(),
-        };
+        let boundary =
+            WorkbenchForkBoundary::external("thread".into(), "call".into(), "call".into());
         let token = groups.capture_checkpoint(
             "research".into(),
             issuer,
@@ -2327,10 +2310,7 @@ mod tests {
         assert!(groups
             .settle_checkpoints(
                 issuer,
-                &WorkbenchForkBoundary {
-                    thread_id: "thread".into(),
-                    call_id: "other".into(),
-                },
+                &WorkbenchForkBoundary::external("thread".into(), "other".into(), "other".into(),),
                 true
             )
             .is_empty());
@@ -2349,10 +2329,8 @@ mod tests {
     async fn failed_checkpoint_refuses_delegation_and_restart_namespace() {
         let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
         let issuer = ActorRef::first(ActorId(1));
-        let boundary = WorkbenchForkBoundary {
-            thread_id: "thread".into(),
-            call_id: "call".into(),
-        };
+        let boundary =
+            WorkbenchForkBoundary::external("thread".into(), "call".into(), "call".into());
         let token = groups.capture_checkpoint(
             "research".into(),
             issuer,
@@ -2388,10 +2366,8 @@ mod tests {
     async fn delivered_checkpoint_survives_later_failure_of_its_workbench_boundary() {
         let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
         let issuer = ActorRef::first(ActorId(1));
-        let boundary = WorkbenchForkBoundary {
-            thread_id: "thread".into(),
-            call_id: "call".into(),
-        };
+        let boundary =
+            WorkbenchForkBoundary::external("thread".into(), "call".into(), "call".into());
         let capture = |name: &str, scope: ScopeId| {
             groups.capture_checkpoint(
                 name.into(),
@@ -2438,10 +2414,8 @@ mod tests {
     async fn release_is_idempotent_and_revokes_pending_or_published_lease() {
         let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
         let issuer = ActorRef::first(ActorId(1));
-        let boundary = WorkbenchForkBoundary {
-            thread_id: "thread".into(),
-            call_id: "call".into(),
-        };
+        let boundary =
+            WorkbenchForkBoundary::external("thread".into(), "call".into(), "call".into());
         let capture = || {
             groups.capture_checkpoint(
                 "seed".into(),
@@ -2537,10 +2511,7 @@ mod tests {
             crate::CheckpointSourceLayer::default(),
             SessionId(7),
             ScopeId(3),
-            WorkbenchForkBoundary {
-                thread_id: "thread".into(),
-                call_id: "call".into(),
-            },
+            WorkbenchForkBoundary::external("thread".into(), "call".into(), "call".into()),
         );
         let (first, paths) = groups
             .begin(
@@ -2618,28 +2589,19 @@ mod tests {
                 crate::CheckpointSourceLayer::default(),
                 SessionId(7),
                 ScopeId(if name == "first" { 3 } else { 4 }),
-                WorkbenchForkBoundary {
-                    thread_id: "thread".into(),
-                    call_id: name.into(),
-                },
+                WorkbenchForkBoundary::external("thread".into(), name.into(), name.into()),
             )
         };
         let first = capture("first");
         let second = capture("second");
         groups.settle_checkpoints(
             issuer,
-            &WorkbenchForkBoundary {
-                thread_id: "thread".into(),
-                call_id: "first".into(),
-            },
+            &WorkbenchForkBoundary::external("thread".into(), "first".into(), "first".into()),
             true,
         );
         groups.settle_checkpoints(
             issuer,
-            &WorkbenchForkBoundary {
-                thread_id: "thread".into(),
-                call_id: "second".into(),
-            },
+            &WorkbenchForkBoundary::external("thread".into(), "second".into(), "second".into()),
             true,
         );
         let admit = |token: &str, label: &str, child: ActorRef| {
@@ -2719,10 +2681,8 @@ mod tests {
         let issuer = ActorRef::first(ActorId(1));
         let coordinator = ActorRef::first(ActorId(2));
         let child = ActorRef::first(ActorId(3));
-        let boundary = WorkbenchForkBoundary {
-            thread_id: "thread".into(),
-            call_id: "call".into(),
-        };
+        let boundary =
+            WorkbenchForkBoundary::external("thread".into(), "call".into(), "call".into());
         let token = groups.capture_checkpoint(
             "research".into(),
             issuer,
@@ -2919,18 +2879,21 @@ mod tests {
     fn completion_boundary_selects_only_its_exact_pending_groups() {
         let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
         let owner = ActorRef::first(ActorId(1));
-        let first_boundary = tidepool_runtime::session::WorkbenchForkBoundary {
-            thread_id: "thread-a".into(),
-            call_id: "call-a".into(),
-        };
-        let second_boundary = tidepool_runtime::session::WorkbenchForkBoundary {
-            thread_id: "thread-a".into(),
-            call_id: "call-b".into(),
-        };
-        let unmatched = tidepool_runtime::session::WorkbenchForkBoundary {
-            thread_id: "thread-b".into(),
-            call_id: "call-a".into(),
-        };
+        let first_boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "thread-a".into(),
+            "call-a".into(),
+            "call-a".into(),
+        );
+        let second_boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "thread-a".into(),
+            "call-b".into(),
+            "call-b".into(),
+        );
+        let unmatched = tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "thread-b".into(),
+            "call-a".into(),
+            "call-a".into(),
+        );
 
         let make_group = |name: &str,
                           child: ActorRef,

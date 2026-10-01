@@ -277,25 +277,26 @@ impl Driver {
         let call_id = uuid::Uuid::new_v4().simple().to_string();
         let result = self
             .pump(endpoint.dispatch_boxed(ToolInvocation {
-                context: Some(ToolInvocationContext {
-                    context_call_id: Some(call_id.clone()),
-                    thread_id: "recipe-check".into(),
-                    turn_id: call_id.clone(),
-                    call_id: call_id.clone(),
-                    namespace: Some("haskell".into()),
-                }),
+                context: Some(ToolInvocationContext::external(
+                    "recipe-check".into(),
+                    call_id.clone(),
+                    call_id.clone(),
+                    Some(call_id.clone()),
+                    Some("haskell".into()),
+                )),
                 name: exomonad_actor::HASKELL_TOOL.into(),
                 arguments: ToolArguments::Raw(source.clone()),
             }))
             .await?;
         // Complete the actual admitting tool boundary before another actor is driven.
         let completion = self
-            .pump(
-                endpoint.complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary {
-                    thread_id: "recipe-check".into(),
+            .pump(endpoint.complete_boxed(
+                tidepool_runtime::session::WorkbenchForkBoundary::external(
+                    "recipe-check".into(),
+                    call_id.clone(),
                     call_id,
-                }),
-            )
+                ),
+            ))
             .await?;
         let result = result.map_err(|error| {
             runtime_error(format!("resident recipe turn failed:\n{source}\n{error}"))

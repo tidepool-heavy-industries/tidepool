@@ -355,13 +355,13 @@ async fn structured_bash_uses_compiled_handler_and_shared_command_owner() {
     let invocation = ToolInvocation {
         name: "bash".into(),
         arguments: ToolArguments::Structured(serde_json::json!({"cmd":script})),
-        context: Some(ToolInvocationContext {
-            context_call_id: Some("raw-once".into()),
-            thread_id: "raw-thread".into(),
-            turn_id: "raw-turn".into(),
-            call_id: "raw-once".into(),
-            namespace: None,
-        }),
+        context: Some(ToolInvocationContext::external(
+            "raw-thread".into(),
+            "raw-turn".into(),
+            "raw-once".into(),
+            Some("raw-once".into()),
+            None,
+        )),
     };
     let first = tokio::spawn(policy.dispatch_boxed(invocation.clone()));
     let backend = TestCommands::new();
@@ -1520,13 +1520,13 @@ async fn disconnected_foreground_caller_retries_the_same_handoff_without_reexecu
         .store(true, std::sync::atomic::Ordering::Release);
     let call_id = uuid::Uuid::new_v4().to_string();
     let invocation = || ToolInvocation {
-        context: Some(ToolInvocationContext {
-            context_call_id: Some(call_id.clone()),
-            thread_id: "disconnected-foreground".into(),
-            turn_id: call_id.clone(),
-            call_id: call_id.clone(),
-            namespace: Some("haskell".into()),
-        }),
+        context: Some(ToolInvocationContext::external(
+            "disconnected-foreground".into(),
+            call_id.clone(),
+            call_id.clone(),
+            Some(call_id.clone()),
+            Some("haskell".into()),
+        )),
         name: exomonad_actor::HASKELL_TOOL.into(),
         arguments: ToolArguments::Raw(include_str!("command_foreground_stop.hs").into()),
     };
@@ -1552,10 +1552,11 @@ async fn disconnected_foreground_caller_retries_the_same_handoff_without_reexecu
         .as_str()
         .unwrap();
     policy
-        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary {
-            thread_id: "disconnected-foreground".into(),
+        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "disconnected-foreground".into(),
+            call_id.clone(),
             call_id,
-        })
+        ))
         .await
         .unwrap();
     let usable = committed(&campaign, &format!("Cmd.status {binding}")).await;

@@ -16572,10 +16572,11 @@ mod request_tests {
             .expect("capture independently owned parent Haskell environment");
         let retained_scope = retained.scope();
         let groups = crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default());
-        let boundary = tidepool_runtime::session::WorkbenchForkBoundary {
-            thread_id: "thread".into(),
-            call_id: "unfinished-parent".into(),
-        };
+        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "thread".into(),
+            "unfinished-parent".into(),
+            "unfinished-parent".into(),
+        );
         let token = groups.capture_checkpoint_with_retained_scope(
             "real Haskell context".into(),
             context.actor,
@@ -16764,10 +16765,11 @@ mod request_tests {
             crate::CheckpointSourceLayer::default(),
             context.placement.session,
             scope,
-            tidepool_runtime::session::WorkbenchForkBoundary {
-                thread_id: "thread".into(),
-                call_id: "call".into(),
-            },
+            tidepool_runtime::session::WorkbenchForkBoundary::external(
+                "thread".into(),
+                "call".into(),
+                "call".into(),
+            ),
         );
         groups
             .settle_checkpoint(&token, context.placement.session, true)
