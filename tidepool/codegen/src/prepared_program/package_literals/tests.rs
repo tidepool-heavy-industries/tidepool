@@ -750,3 +750,51 @@ fn source_literal_inventory_excludes_mixed_original_groups() {
     assert!(mixed.source_literals().is_empty());
     assert_eq!(producer.source_literals().len(), 1);
 }
+
+#[test]
+fn source_literal_batch_refuses_a_mixed_producer_with_matching_bytes_and_owner() {
+    let registry = ImageRegistry::new();
+    let producer = source_literal_producer(literal_owner(), 1, BYTES, &registry);
+    let consumer = DemandedImage::compile_with_literals(
+        source_literal_consumer(false, literal_owner().module_version),
+        &registry,
+        &BTreeMap::new(),
+        &producer.source_literals(),
+    )
+    .unwrap();
+    let mut wire = testing::wire_program();
+    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
+    wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(0)))]);
+    let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+        unreachable!()
+    };
+    top.identity = source_literal_identity();
+    top.identity.occurrence = "extraCallable".into();
+    top.binding.id = ValueId(1);
+    wire.bindings.insert(
+        0,
+        Group::NonRecursive(TopBinding {
+            identity: source_literal_identity(),
+            binding: HeapBinding {
+                id: ValueId(0),
+                rhs: HeapRhs::Bytes(BYTES.to_vec()),
+            },
+        }),
+    );
+    let mixed = CertifiedGroup::admit(
+        literal_owner(),
+        testing::projected_group(wire, 1).unwrap(),
+        vec![],
+    )
+    .unwrap();
+    let mixed = DemandedImage::compile(mixed, &registry).unwrap();
+    assert!(mixed.source_literals().is_empty());
+    let mut machine = machine();
+    let before = machine.residency();
+    assert!(matches!(
+        install_source_literal(&mut machine, &consumer, &mixed),
+        Err(ExecutionError::BatchSourceContract(_))
+    ));
+    assert_eq!(machine.residency(), before);
+    assert!(install_source_literal(&mut machine, &consumer, &producer).is_ok());
+}

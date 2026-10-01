@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tidepool_repr::execution_schema::{
     CachedHomeOwner, CertifiedGroup, GlobalId, Group, HeapRhs, ImportOwner, RuntimeRep,
-    SymbolIdentity,
+    SymbolIdentity, ValueId,
 };
 
 #[cfg(test)]
@@ -41,6 +41,36 @@ pub(crate) struct SourceLiteralOwner {
     pub owner: CachedHomeOwner,
     pub original_ordinal: u32,
     pub binder: SourceBinder,
+}
+
+impl SourceLiteralOwner {
+    pub(super) fn from_group(group: &CertifiedGroup) -> Option<(ValueId, Self)> {
+        let definitions = group.definitions();
+        let [Group::NonRecursive(top)] = definitions.bindings() else {
+            return None;
+        };
+        let [binder] = group.binders() else {
+            return None;
+        };
+        if binder != &top.identity
+            || !matches!(top.binding.rhs, HeapRhs::Bytes(_))
+            || !group.imports().is_empty()
+            || !definitions.globals().is_empty()
+        {
+            return None;
+        }
+        Some((
+            top.binding.id,
+            Self {
+                owner: group.owner().clone(),
+                original_ordinal: group.original_ordinal(),
+                binder: SourceBinder {
+                    version: group.owner().module_version.clone(),
+                    binder: binder.clone(),
+                },
+            },
+        ))
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -163,52 +193,34 @@ impl DemandedImage {
     pub fn source_literals(&self) -> BTreeMap<SourceBinder, SourceLiteral> {
         let group = self.group();
         let image = self.image();
-        let definitions = group.definitions();
-        let [Group::NonRecursive(top)] = definitions.bindings() else {
+        let Some((value, source)) = image.source_literal_producer.as_ref() else {
             return BTreeMap::new();
         };
-        let HeapRhs::Bytes(bytes) = &top.binding.rhs else {
-            return BTreeMap::new();
-        };
-        let [binder] = group.binders() else {
-            return BTreeMap::new();
-        };
-        if binder != &top.identity
-            || !group.imports().is_empty()
-            || !definitions.globals().is_empty()
-            || image.certified_source.as_ref()
-                != Some(&(group.owner().clone(), group.original_ordinal()))
+        if &source.owner != group.owner()
+            || source.original_ordinal != group.original_ordinal()
+            || group.binders() != [source.binder.binder.clone()]
         {
             return BTreeMap::new();
         }
-        let Some(export) = image.top_exports.get(&top.binding.id) else {
+        let Some(export) = image.top_exports.get(value) else {
             return BTreeMap::new();
         };
-        let Some(storage) = image.byte_tops.get(&top.binding.id) else {
+        let Some(storage) = image.byte_tops.get(value) else {
             return BTreeMap::new();
         };
-        if export.identity != *binder
+        if export.identity != source.binder.binder
             || export.rep != RuntimeRep::Address
             || export.entry_signature.is_some()
             || !export.evaluated
-            || storage.len() != bytes.len() + 1
             || storage.last() != Some(&0)
-            || &storage[..bytes.len()] != bytes.as_slice()
         {
             return BTreeMap::new();
         }
-        let key = SourceBinder {
-            version: group.owner().module_version.clone(),
-            binder: binder.clone(),
-        };
+        let key = source.binder.clone();
         BTreeMap::from([(
             key.clone(),
             SourceLiteral {
-                source: SourceLiteralOwner {
-                    owner: group.owner().clone(),
-                    original_ordinal: group.original_ordinal(),
-                    binder: key,
-                },
+                source: source.clone(),
                 storage: Arc::clone(storage),
             },
         )])
