@@ -1758,8 +1758,7 @@ impl PersistentSession {
             .ok_or(SessionError::DeadScope(public_scope))?;
         let surface = state
             .graph
-            .public_surfaces
-            .iter()
+            .public_surfaces()
             .find(|surface| &surface.owner == owner)
             .ok_or(SessionError::WrongPublicManifestTicket)?;
         if state.unconfirmed.is_some()
@@ -1785,7 +1784,7 @@ impl PersistentSession {
             detail: error.to_string(),
         })?
         .ok_or(SessionError::WrongPublicManifestTicket)?;
-        if !read.artifact_losses.is_empty() || read.graph.checksum != state.graph.checksum {
+        if !read.artifact_losses.is_empty() || read.graph.checksum() != state.graph.checksum() {
             return Err(SessionError::WrongPublicManifestTicket);
         }
         self.begin_private_execution(public_scope)

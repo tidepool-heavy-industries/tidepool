@@ -5805,8 +5805,7 @@ pub(super) mod tests {
             .unwrap()
             .graph;
         let surface = graph
-            .public_surfaces
-            .iter()
+            .public_surfaces()
             .find(|surface| surface.owner == owner)
             .unwrap();
         assert_eq!(surface.source_instances.len(), keys.len());

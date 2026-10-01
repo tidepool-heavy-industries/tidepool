@@ -239,7 +239,7 @@ fn snapshot_digest(snapshot: &PublicVisibilitySnapshot) -> serde_json::Value {
 fn paired_version(base: &PublicManifestBase) -> String {
     let target = match &base.target {
         super::PublicPublicationBaseline::Durable { owner, graph } => serde_json::json!({
-            "mode": "durable", "owner": owner, "graph": graph.checksum, "high_water": graph.high_water.0 }),
+            "mode": "durable", "owner": owner, "graph": graph.checksum(), "high_water": graph.high_water().0 }),
         super::PublicPublicationBaseline::Ephemeral => serde_json::json!({ "mode": "ephemeral" }),
     };
     let bytes = serde_json::to_vec(&serde_json::json!({
@@ -1074,13 +1074,14 @@ impl AcceptedDeclarationPublication {
         )?);
         let baseline = match &base.public.target {
             super::PublicPublicationBaseline::Durable { graph, .. } => {
-                Some((graph.checksum.clone(), graph.high_water))
+                Some((graph.checksum().to_owned(), graph.high_water()))
             }
             super::PublicPublicationBaseline::Ephemeral => None,
         };
         let error_path = base.public.path.clone();
         if let super::PublicPublicationBaseline::Durable { owner, graph } = &mut base.public.target
         {
+            let mut candidate = graph.candidate();
             let root = base
                 .public
                 .path
@@ -1160,64 +1161,60 @@ impl AcceptedDeclarationPublication {
             for write in &base.intent.writes {
                 workbench_imports.extend(&write.turn.workbench_imports);
             }
-            graph.nodes.push(recovery::RecoveryNode {
-                id: base.reserved,
-                parent: None,
-                kind: recovery::RecoveryNodeKind::Join,
-                implementation_refs,
-                artifact_refs,
-                exports,
-                lexical_roots: vec![ExactModuleIdentity {
-                    unit: receipt.reserved().unit.clone(),
-                    module: receipt.reserved().module.clone(),
-                }],
-                lexical: context.lexical_graph().to_vec(),
-                retracts: Vec::new(),
-                workbench_imports: workbench_imports.specs().to_vec(),
-                instances: recovery_instances(receipt.instances(), receipt.family_closure()),
-                state: if live_dependencies.is_empty() {
-                    recovery::RecoveryNodeState::ExactArtifactClosure
-                } else {
-                    recovery::RecoveryNodeState::LiveValueDependency {
-                        reason: "joined declaration retains exact live dependencies".into(),
-                    }
-                },
-                live_dependencies,
-            });
+            candidate
+                .insert_node(recovery::RecoveryNode {
+                    id: base.reserved,
+                    parent: None,
+                    kind: recovery::RecoveryNodeKind::Join,
+                    implementation_refs,
+                    artifact_refs,
+                    exports,
+                    lexical_roots: vec![ExactModuleIdentity {
+                        unit: receipt.reserved().unit.clone(),
+                        module: receipt.reserved().module.clone(),
+                    }],
+                    lexical: context.lexical_graph().to_vec(),
+                    retracts: Vec::new(),
+                    workbench_imports: workbench_imports.specs().to_vec(),
+                    instances: recovery_instances(receipt.instances(), receipt.family_closure()),
+                    state: if live_dependencies.is_empty() {
+                        recovery::RecoveryNodeState::ExactArtifactClosure
+                    } else {
+                        recovery::RecoveryNodeState::LiveValueDependency {
+                            reason: "joined declaration retains exact live dependencies".into(),
+                        }
+                    },
+                    live_dependencies,
+                })
+                .map_err(|error| invalid_at(&error_path, error.to_string()))?;
             for artifact in artifacts {
-                if !graph
-                    .artifacts
-                    .iter()
-                    .any(|existing| existing.artifact_id() == artifact.artifact_id())
-                {
-                    graph.artifacts.push(artifact);
-                }
+                candidate
+                    .insert_artifact(artifact)
+                    .map_err(|error| invalid_at(&error_path, error.to_string()))?;
             }
-            graph
-                .artifact_dependencies
-                .extend(materialized.artifact_dependencies.into_iter().map(
-                    |(source, target, dependency)| recovery::RecoveryArtifactDependency {
+            for (source, target, dependency) in materialized.artifact_dependencies {
+                candidate
+                    .insert_interface_edge(recovery::RecoveryArtifactDependency {
                         source,
                         target,
                         dependency,
-                    },
-                ));
-            if let Some(surface) = graph
-                .public_surfaces
-                .iter_mut()
-                .find(|surface| &surface.owner == owner)
-            {
-                surface.declaration_root = Some(base.reserved);
-            } else {
-                graph.public_surfaces.push(recovery::RecoveryPublicSurface {
-                    owner: owner.clone(),
-                    declaration_root: Some(base.reserved),
-                    epoch: 0,
-                    bindings: Vec::new(),
-                    source_instances: Vec::new(),
-                });
+                    })
+                    .map_err(|error| invalid_at(&error_path, error.to_string()))?;
             }
-            graph
+            let mut surface =
+                graph
+                    .surface(owner)
+                    .cloned()
+                    .unwrap_or_else(|| recovery::RecoveryPublicSurface {
+                        owner: owner.clone(),
+                        declaration_root: None,
+                        epoch: 0,
+                        bindings: Vec::new(),
+                        source_instances: Vec::new(),
+                    });
+            surface.declaration_root = Some(base.reserved);
+            candidate.replace_surface(surface);
+            *graph = candidate
                 .seal()
                 .map_err(|error| invalid_at(&error_path, error.to_string()))?;
         }
@@ -2210,11 +2207,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .graph;
-        let joined = graph
-            .nodes
-            .iter()
-            .find(|node| node.id == generation)
-            .unwrap();
+        let joined = graph.nodes().find(|node| node.id == generation).unwrap();
         let mut expected_refs = vec![original_b, first_generation];
         expected_refs.sort();
         assert_eq!(joined.implementation_refs, expected_refs);
@@ -2223,7 +2216,10 @@ mod tests {
             .children
             .iter()
             .all(|child| child.occurrence != "OldShape")));
-        assert_eq!(graph.public_surfaces[0].declaration_root, Some(generation));
+        assert_eq!(
+            graph.public_surfaces().next().unwrap().declaration_root,
+            Some(generation)
+        );
         session.retire_scope(private_a);
         session.retire_scope(private_b);
         assert!(session.bindings().get(value_a_id).is_some());
@@ -2517,15 +2513,17 @@ mod tests {
             .unwrap()
             .unwrap()
             .graph;
-        let joined = graph
-            .nodes
-            .iter()
-            .find(|node| node.id == generation)
-            .unwrap();
+        let joined = graph.nodes().find(|node| node.id == generation).unwrap();
         assert_eq!(joined.kind, recovery::RecoveryNodeKind::Join);
         assert_eq!(joined.implementation_refs, vec![Generation(1)]);
-        assert_eq!(graph.public_surfaces[0].declaration_root, Some(generation));
-        assert!(!graph.public_surfaces[0]
+        assert_eq!(
+            graph.public_surfaces().next().unwrap().declaration_root,
+            Some(generation)
+        );
+        assert!(!graph
+            .public_surfaces()
+            .next()
+            .unwrap()
             .bindings
             .iter()
             .any(|binding| binding.name == "answer"));
@@ -2758,7 +2756,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .graph;
-        let node = graph.nodes.iter().find(|node| node.id == reserved).unwrap();
+        let node = graph.nodes().find(|node| node.id == reserved).unwrap();
         assert!(node
             .implementation_refs
             .iter()

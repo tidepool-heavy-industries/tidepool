@@ -558,7 +558,7 @@ impl PublicManifestBase {
                         path: self.path.clone(),
                         detail: "recovery manifest has no parent directory".into(),
                     })?;
-                let surface = graph.public_surfaces.iter().find(|s| s.owner == owner);
+                let surface = graph.public_surfaces().find(|s| s.owner == owner);
                 let epoch = surface.map_or(0, |s| s.epoch);
                 let bindings = self
                     .final_bindings
@@ -587,8 +587,8 @@ impl PublicManifestBase {
                 })?;
                 StagedPublicationTarget::Durable {
                     owner,
-                    base_checksum: graph.checksum,
-                    base_high_water: graph.high_water,
+                    base_checksum: graph.checksum().to_owned(),
+                    base_high_water: graph.high_water(),
                     staged,
                 }
             }
@@ -1085,8 +1085,8 @@ impl SessionLib {
                     &base.path,
                     owner,
                     base.public_scope,
-                    &graph.checksum,
-                    graph.high_water,
+                    &graph.checksum(),
+                    graph.high_water(),
                 ),
             PublicPublicationBaseline::Ephemeral => Ok(base.session == self.id
                 && !self
@@ -1116,8 +1116,8 @@ impl SessionLib {
             return Err(SessionError::WrongPublicManifestTicket);
         }
         Ok(!(state.unconfirmed.is_some()
-            || state.graph.checksum != checksum
-            || state.graph.high_water != high_water))
+            || state.graph.checksum() != checksum
+            || state.graph.high_water() != high_water))
     }
 
     fn publish_staged_public_manifest_unchecked(
@@ -1197,7 +1197,7 @@ impl SessionLib {
                 detail: "previous recovery publication still needs durability confirmation".into(),
             });
         }
-        if self.log.generation() != state.graph.high_water {
+        if self.log.generation() != state.graph.high_water() {
             return Err(SessionError::RecoveryManifest {
                 path: state.path.clone(),
                 detail: "declaration allocator and durable high-water diverged".into(),
@@ -1283,8 +1283,7 @@ impl SessionLib {
         let state = self.durable_graph.as_ref()?;
         let restored = state
             .graph
-            .nodes
-            .iter()
+            .nodes()
             .filter(|node| self.log.recovered_at(node.id).is_some())
             .flat_map(|node| {
                 node.lexical_roots
@@ -1297,8 +1296,7 @@ impl SessionLib {
             .collect();
         let mut unavailable_bindings = state
             .graph
-            .public_surfaces
-            .iter()
+            .public_surfaces()
             .flat_map(|surface| &surface.bindings)
             .filter(|binding| binding.owner.session != self.id.0)
             .map(|binding| UnavailableBinding {
@@ -1312,7 +1310,7 @@ impl SessionLib {
         });
         unavailable_bindings.dedup();
         Some(DeclarationRecoveryReport {
-            source_session: state.graph.source_session,
+            source_session: state.graph.source_session(),
             successor_session: self.id.0,
             restored,
             unavailable_bindings,
@@ -2016,7 +2014,7 @@ impl SessionLib {
             path: state.path.clone(),
             detail: detail.into(),
         };
-        if state.unconfirmed.is_some() || state.graph.high_water < staged.generation {
+        if state.unconfirmed.is_some() || state.graph.high_water() < staged.generation {
             return Err(SessionError::StaleStagedDeclaration);
         }
         let certified = staged
@@ -2102,7 +2100,7 @@ impl SessionLib {
                     .map_err(|error| invalid(&error.to_string()))?,
             ));
         }
-        let mut graph = state.graph.clone();
+        let mut graph = state.graph.candidate();
         let artifact_refs = artifacts
             .iter()
             .map(recovery::RecoveryArtifactClosure::artifact_id)
@@ -2119,64 +2117,58 @@ impl SessionLib {
             })
             .ok_or_else(|| invalid("authored native root is absent from its artifact closure"))?;
         let live_dependencies = certified_native_dependencies(context, &[authored_root])?;
-        graph.nodes.push(recovery::RecoveryNode {
-            id: staged.generation,
-            parent: staged.turn.parent,
-            kind: recovery::RecoveryNodeKind::Authored,
-            implementation_refs: Vec::new(),
-            artifact_refs,
-            lexical_roots: vec![tidepool_toolchain::declaration_join::ExactModuleIdentity {
-                unit: certified.product().owner().unit.clone(),
-                module: staged.module.module_name(),
-            }],
-            lexical: context.lexical_graph().to_vec(),
-            exports,
-            retracts: paired_publication::exact_retractions(
-                self,
-                staged.base_tip,
-                &staged.turn.retracts,
-            )?
-            .iter()
-            .map(authored_identity)
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| invalid("unsupported exact retraction identity"))?,
-            workbench_imports: staged.turn.workbench_imports.specs().to_vec(),
-            instances: paired_publication::recovery_instances(
-                certified.instances(),
-                certified.family_closure(),
-            ),
-            state: if live_dependencies.is_empty() {
-                recovery::RecoveryNodeState::ExactArtifactClosure
-            } else {
-                recovery::RecoveryNodeState::LiveValueDependency {
-                    reason: "authored declaration retains exact live bindings".into(),
-                }
-            },
-            live_dependencies,
-        });
-        for artifact in artifacts {
-            if !graph
-                .artifacts
+        graph
+            .insert_node(recovery::RecoveryNode {
+                id: staged.generation,
+                parent: staged.turn.parent,
+                kind: recovery::RecoveryNodeKind::Authored,
+                implementation_refs: Vec::new(),
+                artifact_refs,
+                lexical_roots: vec![tidepool_toolchain::declaration_join::ExactModuleIdentity {
+                    unit: certified.product().owner().unit.clone(),
+                    module: staged.module.module_name(),
+                }],
+                lexical: context.lexical_graph().to_vec(),
+                exports,
+                retracts: paired_publication::exact_retractions(
+                    self,
+                    staged.base_tip,
+                    &staged.turn.retracts,
+                )?
                 .iter()
-                .any(|existing| existing.artifact_id() == artifact.artifact_id())
-            {
-                graph.artifacts.push(artifact);
-            }
-        }
-        graph.artifact_dependencies.extend(
-            context
-                .artifact_view()
-                .interface_dependencies()
-                .into_iter()
-                .map(
-                    |(source, target, dependency)| recovery::RecoveryArtifactDependency {
-                        source,
-                        target,
-                        dependency,
-                    },
+                .map(authored_identity)
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| invalid("unsupported exact retraction identity"))?,
+                workbench_imports: staged.turn.workbench_imports.specs().to_vec(),
+                instances: paired_publication::recovery_instances(
+                    certified.instances(),
+                    certified.family_closure(),
                 ),
-        );
-        graph.seal().map_err(|error| invalid(&error.to_string()))?;
+                state: if live_dependencies.is_empty() {
+                    recovery::RecoveryNodeState::ExactArtifactClosure
+                } else {
+                    recovery::RecoveryNodeState::LiveValueDependency {
+                        reason: "authored declaration retains exact live bindings".into(),
+                    }
+                },
+                live_dependencies,
+            })
+            .map_err(|error| invalid(&error.to_string()))?;
+        for artifact in artifacts {
+            graph
+                .insert_artifact(artifact)
+                .map_err(|error| invalid(&error.to_string()))?;
+        }
+        for (source, target, dependency) in context.artifact_view().interface_dependencies() {
+            graph
+                .insert_interface_edge(recovery::RecoveryArtifactDependency {
+                    source,
+                    target,
+                    dependency,
+                })
+                .map_err(|error| invalid(&error.to_string()))?;
+        }
+        let graph = graph.seal().map_err(|error| invalid(&error.to_string()))?;
         recovery::stage_v2(&state.path, root, graph).map_err(|error| invalid(&error.to_string()))
     }
 
@@ -2889,7 +2881,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .graph
-                .high_water,
+                .high_water(),
             Generation(1)
         );
         let staged = validate_declaration_candidate(candidate, lib.include_dir()).unwrap();
@@ -2922,15 +2914,21 @@ mod tests {
             .exists());
         let retained = recovery::read_v2(&manifest, root.path()).unwrap().unwrap();
         assert!(retained.artifact_losses.is_empty());
-        assert_eq!(retained.graph.high_water, Generation(2));
-        assert_eq!(retained.graph.nodes.len(), 1);
-        assert_eq!(retained.graph.nodes[0].id, Generation(1));
+        assert_eq!(retained.graph.high_water(), Generation(2));
+        assert_eq!(retained.graph.nodes().count(), 1);
+        assert_eq!(retained.graph.nodes().next().unwrap().id, Generation(1));
         assert_eq!(
-            retained.graph.nodes[0].kind,
+            retained.graph.nodes().next().unwrap().kind,
             recovery::RecoveryNodeKind::Authored
         );
-        assert!(!retained.graph.nodes[0].artifact_refs.is_empty());
-        assert!(retained.graph.public_surfaces.is_empty());
+        assert!(!retained
+            .graph
+            .nodes()
+            .next()
+            .unwrap()
+            .artifact_refs
+            .is_empty());
+        assert!(retained.graph.public_surfaces().next().is_none());
         assert_eq!(
             lib.reserve_join_generation_durable().unwrap(),
             Generation(3)
@@ -2959,14 +2957,14 @@ mod tests {
         );
         let retained = recovery::read_v2(&manifest, root.path()).unwrap().unwrap();
         assert!(retained.artifact_losses.is_empty());
-        assert_eq!(retained.graph.nodes.len(), 1);
+        assert_eq!(retained.graph.nodes().count(), 1);
         assert_eq!(
-            retained.graph.nodes[0].kind,
+            retained.graph.nodes().next().unwrap().kind,
             recovery::RecoveryNodeKind::Authored
         );
-        assert_eq!(retained.graph.nodes[0].id, Generation(1));
-        assert!(retained.graph.public_surfaces.is_empty());
-        assert!(!retained.graph.artifacts.is_empty());
+        assert_eq!(retained.graph.nodes().next().unwrap().id, Generation(1));
+        assert!(retained.graph.public_surfaces().next().is_none());
+        assert!(!retained.graph.artifacts().next().is_none());
         assert!(lib.retract("DirectFlag").is_err());
         assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(1));
         assert_eq!(lib.generation(), Generation(1));
@@ -2994,9 +2992,9 @@ mod tests {
             .unwrap()
             .unwrap()
             .graph;
-        assert_eq!(graph.high_water, Generation(4));
-        assert!(graph.nodes.is_empty());
-        assert!(graph.public_surfaces.is_empty());
+        assert_eq!(graph.high_water(), Generation(4));
+        assert!(graph.nodes().next().is_none());
+        assert!(graph.public_surfaces().next().is_none());
         let bytes = std::fs::read(&manifest).unwrap();
         assert!(lib
             .reserve_declaration_generations_durable(0)

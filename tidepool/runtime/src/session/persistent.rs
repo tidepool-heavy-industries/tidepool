@@ -1807,8 +1807,7 @@ impl PersistentSession {
         }
         let surface = state
             .graph
-            .public_surfaces
-            .iter()
+            .public_surfaces()
             .find(|surface| &surface.owner == owner)
             .ok_or_else(|| SessionError::RecoveryManifest {
                 path: state.path.clone(),
@@ -2036,8 +2035,7 @@ impl PersistentSession {
             || snapshot.declaration_tip != Generation(0)
                 && (!state
                     .graph
-                    .nodes
-                    .iter()
+                    .nodes()
                     .any(|node| node.id == snapshot.declaration_tip)
                     || lib
                         .log
@@ -2064,13 +2062,13 @@ impl PersistentSession {
             )
             .map_err(|error| invalid(error.to_string()))?
             .ok_or(SessionError::WrongPublicManifestTicket)?;
-            if !read.artifact_losses.is_empty() || read.graph.checksum != state.graph.checksum {
+            if !read.artifact_losses.is_empty() || read.graph.checksum() != state.graph.checksum() {
                 return Err(SessionError::WrongPublicManifestTicket);
             }
-        } else if state.graph.high_water != Generation(0)
-            || !state.graph.nodes.is_empty()
-            || !state.graph.artifacts.is_empty()
-            || !state.graph.public_surfaces.is_empty()
+        } else if state.graph.high_water() != Generation(0)
+            || !state.graph.nodes().next().is_none()
+            || !state.graph.artifacts().next().is_none()
+            || !state.graph.public_surfaces().next().is_none()
         {
             return Err(SessionError::WrongPublicManifestTicket);
         }
@@ -2088,8 +2086,7 @@ impl PersistentSession {
         let sources = self.recovery_source_instances(snapshot.source_instances.iter().cloned())?;
         if let Some(surface) = state
             .graph
-            .public_surfaces
-            .iter()
+            .public_surfaces()
             .find(|surface| surface.owner == owner)
         {
             if lib.durable_public_scopes.get(&owner) != Some(&target)
@@ -2210,8 +2207,7 @@ impl PersistentSession {
             Some(Failure::ExistingPublicOwner)
         } else if state
             .graph
-            .public_surfaces
-            .iter()
+            .public_surfaces()
             .any(|surface| surface.owner == successor)
         {
             Some(Failure::ExistingSuccessor)
@@ -2224,15 +2220,10 @@ impl PersistentSession {
                 reason,
             });
         }
-        let index = state
+        let surface = state
             .graph
-            .public_surfaces
-            .iter()
-            .position(|surface| &surface.owner == predecessor)
-            .ok_or_else(|| {
-                invalid("manifest owner differs from the exact durable predecessor".into())
-            })?;
-        let surface = &state.graph.public_surfaces[index];
+            .surface(predecessor)
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
         let generation = surface.declaration_root.unwrap_or(Generation(0));
         if generation != Generation(0) && lib.log.recovered_at(generation).is_none() {
             return Err(invalid(
@@ -2262,8 +2253,8 @@ impl PersistentSession {
         .map_err(|error| invalid(error.to_string()))?
         .ok_or_else(|| invalid("current manifest is not the exact retained graph".into()))?;
         if !current.artifact_losses.is_empty()
-            || current.graph.checksum != state.graph.checksum
-            || current.graph.high_water != state.graph.high_water
+            || current.graph.checksum() != state.graph.checksum()
+            || current.graph.high_water() != state.graph.high_water()
         {
             return Err(invalid("manifest changed before successor transfer".into()));
         }
@@ -2271,10 +2262,13 @@ impl PersistentSession {
             .epoch
             .checked_add(1)
             .ok_or_else(|| invalid("public visibility epoch exhausted".into()))?;
-        let mut graph = state.graph.clone();
-        graph.public_surfaces[index].owner = successor.clone();
-        graph.public_surfaces[index].epoch = epoch;
-        graph.seal().map_err(|error| invalid(error.to_string()))?;
+        let mut graph = state.graph.candidate();
+        let mut replacement = surface.clone();
+        replacement.owner = successor.clone();
+        replacement.epoch = epoch;
+        graph.remove_surface(predecessor);
+        graph.replace_surface(replacement);
+        let graph = graph.seal().map_err(|error| invalid(error.to_string()))?;
         let staged = super::recovery::stage_v2(&state.path, root, graph)
             .map_err(|error| invalid(error.to_string()))?;
         owner.validate_owner()?;
@@ -2352,8 +2346,7 @@ impl PersistentSession {
             .validate_owner()?;
         let surface = state
             .graph
-            .public_surfaces
-            .iter()
+            .public_surfaces()
             .find(|surface| &surface.owner == owner)
             .ok_or(SessionError::WrongPublicManifestTicket)?;
         if lib.durable_public_scopes.get(owner) != Some(&target)
@@ -3607,19 +3600,17 @@ mod checkpoint_scope_tests {
                 .unwrap()
                 .unwrap()
                 .graph;
-        assert_eq!(restored.public_surfaces.len(), 2);
+        assert_eq!(restored.public_surfaces().count(), 2);
         assert_eq!(
             restored
-                .public_surfaces
-                .iter()
+                .public_surfaces()
                 .filter(|surface| surface.owner == actor_a)
                 .count(),
             1
         );
         assert_eq!(
             restored
-                .public_surfaces
-                .iter()
+                .public_surfaces()
                 .filter(|surface| surface.owner == actor_b)
                 .count(),
             1
@@ -3880,8 +3871,9 @@ mod checkpoint_scope_tests {
             .as_ref()
             .unwrap()
             .graph
-            .public_surfaces
-            .is_empty());
+            .public_surfaces()
+            .next()
+            .is_none());
     }
 
     #[test]

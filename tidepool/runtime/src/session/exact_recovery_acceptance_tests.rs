@@ -102,7 +102,13 @@ fn recovered_owner_validation_checks_the_current_owned_manifest_without_minting_
     );
     assert_eq!(std::fs::read(&manifest).unwrap(), before_bytes);
 
-    let mut newer = session.lib().durable_graph.as_ref().unwrap().graph.clone();
+    let mut newer = session
+        .lib()
+        .durable_graph
+        .as_ref()
+        .unwrap()
+        .graph
+        .wire_for_test();
     newer.high_water.0 += 1;
     newer.seal().unwrap();
     std::fs::write(&manifest, serde_json::to_vec(&newer).unwrap()).unwrap();
@@ -287,9 +293,7 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         .as_ref()
         .unwrap()
         .graph
-        .public_surfaces
-        .iter()
-        .find(|surface| surface.owner == owner(1))
+        .surface(&owner(1))
         .unwrap()
         .clone();
     assert_eq!(
@@ -307,9 +311,7 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
             .as_ref()
             .unwrap()
             .graph
-            .public_surfaces
-            .iter()
-            .find(|surface| surface.owner == owner(1)),
+            .surface(&owner(1)),
         Some(&parent_surface)
     );
     let child_admission = producer
@@ -425,20 +427,15 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         .unwrap()
         .graph;
     let successor = graph
-        .public_surfaces
-        .iter()
-        .find(|surface| surface.owner == owner(2))
+        .surface(&owner(2))
         .expect("exact root successor surface");
     assert_eq!(successor.epoch, expected.epoch + 1);
     assert!(graph
-        .public_surfaces
-        .iter()
+        .public_surfaces()
         .all(|surface| surface.owner != owner(1)));
     for child in [child_owner, uncertain_owner] {
         let surface = graph
-            .public_surfaces
-            .iter()
-            .find(|surface| surface.owner == child)
+            .surface(&child)
             .expect("retained nonempty child surface");
         assert_eq!(surface.epoch, 1);
         assert_eq!(surface.declaration_root, Some(expected.declaration_tip));
@@ -506,21 +503,10 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
         .unwrap()
         .graph;
     for alter_lexical in [false, true] {
-        let mut altered = graph.clone();
-        let original_lexical = altered
-            .nodes
-            .iter()
-            .find(|node| node.id == original)
-            .unwrap()
-            .lexical
-            .clone();
-        let original_roots = altered
-            .nodes
-            .iter()
-            .find(|node| node.id == original)
-            .unwrap()
-            .lexical_roots
-            .clone();
+        let mut altered = graph.wire_for_test();
+        let original_node = graph.node(original).unwrap();
+        let original_lexical = original_node.lexical.clone();
+        let original_roots = original_node.lexical_roots.clone();
         let root = altered
             .nodes
             .iter_mut()
@@ -775,7 +761,8 @@ fn owned_manifest_read_refuses_foreign_run_symlink_and_changed_public_selectors(
     let mut altered = recovery::read_v2(&manifest, durable.path())
         .unwrap()
         .unwrap()
-        .graph;
+        .graph
+        .wire_for_test();
     altered.public_surfaces[0].owner = owner(2);
     altered.seal().unwrap();
     // The same retained products with copied, edited public selectors cannot
@@ -803,13 +790,13 @@ fn successor_transfer_fences_old_admissions_after_durable_and_uncertain_rename()
         .unwrap();
         lib.attach_owned_recovery_graph_v3(&manifest, run.clone())
             .unwrap();
-        lib.fail_recovery_durability_once = uncertain;
         let mut session = PersistentSession::new(Some(lib), 1024);
         let target = session.mint_scope(ScopeId::ROOT).unwrap();
         let old = session.begin_private_execution(target).unwrap();
         let old_intent = session
             .freeze_execution_intent(&old, vec![], vec![])
             .unwrap();
+        session.lib_mut().fail_recovery_durability_once = uncertain;
         let outcome = session
             .transfer_recovered_public_owner(
                 &owner(1),
@@ -927,7 +914,10 @@ fn successor_transfer_retains_only_the_sealed_live_bootstrap_dependencies() {
             .unwrap();
         // Current-machine bootstrap handles are retained locally. They never
         // become reminted persisted source instances during owner transfer.
-        assert!(persisted.graph.public_surfaces[0]
+        assert!(persisted
+            .graph
+            .surface(&owner(1))
+            .unwrap()
             .source_instances
             .is_empty());
         session
@@ -1008,9 +998,9 @@ fn initial_public_owner_survives_restart_before_first_cell() {
     let read = recovery::read_v2(&manifest, durable.path())
         .unwrap()
         .unwrap();
-    assert!(read.graph.nodes.is_empty());
-    assert_eq!(read.graph.high_water, Generation(0));
-    assert_eq!(read.graph.public_surfaces[0].owner, owner(1));
+    assert!(read.graph.nodes().next().is_none());
+    assert_eq!(read.graph.high_water(), Generation(0));
+    assert_eq!(read.graph.surface(&owner(1)).unwrap().owner, owner(1));
     let next_source = tempfile::tempdir().unwrap();
     let run = run_owner(durable.path());
     let mut lib = SessionLib::open(
@@ -1041,9 +1031,9 @@ fn initial_public_owner_survives_restart_before_first_cell() {
     let read = recovery::read_v2(&manifest, durable.path())
         .unwrap()
         .unwrap();
-    assert!(read.graph.nodes.is_empty());
-    assert_eq!(read.graph.high_water, Generation(0));
-    assert_eq!(read.graph.public_surfaces[0].owner, owner(2));
+    assert!(read.graph.nodes().next().is_none());
+    assert_eq!(read.graph.high_water(), Generation(0));
+    assert_eq!(read.graph.surface(&owner(2)).unwrap().owner, owner(2));
     assert_eq!(
         session
             .public_visibility_snapshot_in(target)
@@ -1074,7 +1064,8 @@ fn durable_child_initializer_preserves_parent_and_refuses_a_local_only_owner() {
         .as_ref()
         .unwrap()
         .graph
-        .public_surfaces[0]
+        .surface(&owner(1))
+        .unwrap()
         .clone();
     let child = session.mint_detached_scope(parent).unwrap();
     let child_owner = RecoveryPublicOwner::new(
@@ -1110,9 +1101,7 @@ fn durable_child_initializer_preserves_parent_and_refuses_a_local_only_owner() {
             .as_ref()
             .unwrap()
             .graph
-            .public_surfaces
-            .iter()
-            .find(|surface| surface.owner == owner(1)),
+            .surface(&owner(1)),
         Some(&parent_surface)
     );
     assert!(session.lib().tips.contains_key(&child));

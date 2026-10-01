@@ -33,6 +33,7 @@ tracing.workspace = true
 parking_lot.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 static_assertions.workspace = true
+rpds = "=1.2.1"
 
 [dev-dependencies]
 trybuild.workspace = true

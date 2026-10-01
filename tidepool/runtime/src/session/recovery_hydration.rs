@@ -135,17 +135,17 @@ impl SessionLib {
         .map_err(|error| recovery::graph_error(&state.path, error))?
         .ok_or(SessionError::WrongPublicManifestTicket)?;
         if !read.artifact_losses.is_empty()
-            || read.graph.checksum != state.graph.checksum
-            || read.graph.high_water != state.graph.high_water
+            || read.graph.checksum() != state.graph.checksum()
+            || read.graph.high_water() != state.graph.high_water()
         {
             return Err(SessionError::WrongPublicManifestTicket);
         }
         retained.validate_owner()?;
-        Ok(read
+        let matches = read
             .graph
-            .public_surfaces
-            .iter()
-            .any(|surface| &surface.owner == expected))
+            .public_surfaces()
+            .any(|surface| &surface.owner == expected);
+        Ok(matches)
     }
 
     /// A path alone can initialize an empty graph, but cannot admit a retained
@@ -257,7 +257,7 @@ impl SessionLib {
                 (graph, inventory)
             }
         };
-        if authority.is_none() && !graph.public_surfaces.is_empty() {
+        if authority.is_none() && !graph.public_surfaces().next().is_none() {
             return Err(invalid(
                 "retained public recovery requires its configured run owner".into(),
             ));
@@ -297,18 +297,18 @@ impl SessionLib {
             detail,
         };
         let mut log = DeclLog::new();
-        if !log.restore_high_water(graph.high_water) {
+        if !log.restore_high_water(graph.high_water()) {
             return Err(invalid(
                 "could not restore burned declaration identities".into(),
             ));
         }
         let mut contexts = BTreeMap::new();
-        for node in &graph.nodes {
+        for node in graph.nodes() {
             let context = Arc::new(inventory.context(&node.artifact_refs, node.lexical.clone())?);
             validate_recovery_native_markers(node, &context).map_err(invalid)?;
             contexts.insert(node.id, context);
         }
-        for surface in &graph.public_surfaces {
+        for surface in graph.public_surfaces() {
             let Some(generation) = surface.declaration_root else {
                 continue;
             };
@@ -316,9 +316,7 @@ impl SessionLib {
                 continue;
             }
             let node = graph
-                .nodes
-                .iter()
-                .find(|node| node.id == generation)
+                .node(generation)
                 .ok_or_else(|| invalid("recovered public root is absent".into()))?;
             if node.lexical_roots.len() != 1 {
                 return Err(invalid(

@@ -7764,8 +7764,8 @@ mod authored_publication_tests {
             .is_some());
         let manifest = root.join("declarations.json");
         let graph = recovery::read_v2(&manifest, root).unwrap().unwrap().graph;
-        assert_eq!(graph.nodes.len(), 1);
-        assert_eq!(graph.nodes[0].id, Generation(1));
+        assert_eq!(graph.nodes().count(), 1);
+        assert_eq!(graph.nodes().next().unwrap().id, Generation(1));
         assert!(session
             .state
             .lib()

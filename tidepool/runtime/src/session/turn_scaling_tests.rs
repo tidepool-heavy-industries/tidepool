@@ -1087,18 +1087,12 @@ fn persisted_root_state(
     let graph: crate::session::recovery::RecoveryGraph =
         serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
     let root = graph
-        .public_surfaces
-        .iter()
+        .public_surfaces()
         .find(|surface| &surface.owner == owner)
         .unwrap()
         .declaration_root
         .unwrap();
-    graph
-        .nodes
-        .into_iter()
-        .find(|node| node.id == root)
-        .unwrap()
-        .state
+    graph.node(root).unwrap().state.clone()
 }
 
 #[test]

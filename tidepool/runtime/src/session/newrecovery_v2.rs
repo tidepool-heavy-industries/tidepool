@@ -13,13 +13,18 @@ use tidepool_toolchain::recovery_artifacts::{
     RecoveryJoinRef, RecoveryValueInterfaceRef,
 };
 
+#[path = "newrecovery_v2/snapshots.rs"]
+mod snapshots;
+use snapshots::{GraphEncoding, GraphRead};
+pub(crate) use snapshots::{RecoveryGraph, RecoveryGraphCandidate};
+
 const VERSION: u32 = 5;
 const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v5";
 const MAX_MANIFEST_BYTES: usize = 64 << 20;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RecoveryGraph {
+pub(crate) struct RecoveryGraphWire {
     pub version: u32,
     pub public_schema: String,
     pub source_session: u64,
@@ -367,13 +372,11 @@ struct ValidatedRecoveryGraph(RecoveryGraph);
 
 impl ValidatedRecoveryGraph {
     fn check(graph: RecoveryGraph) -> Result<Self, RecoveryError> {
-        graph.validate()?;
-        Ok(Self(graph))
+        Ok(Self(graph.into_staging_snapshot()?))
     }
 
-    fn seal(mut graph: RecoveryGraph) -> Result<Self, RecoveryError> {
-        graph.seal()?;
-        Ok(Self(graph))
+    fn seal(graph: RecoveryGraphCandidate) -> Result<Self, RecoveryError> {
+        Ok(Self(graph.seal()?))
     }
 
     fn validate_artifact_files(
@@ -503,8 +506,8 @@ pub(crate) fn stage_high_water_range_v2(
             .checked_add(count)
             .ok_or_else(|| error("recovery generation space exhausted"))?,
     );
-    let mut candidate = graph.clone();
-    candidate.high_water = next;
+    let mut candidate = graph.candidate();
+    candidate.set_high_water(next)?;
     stage_metadata_v2(path, ValidatedRecoveryGraph::seal(candidate)?)
 }
 
@@ -527,23 +530,22 @@ pub(crate) fn stage_public_visibility_v2(
     initial_declaration_root: Option<Generation>,
 ) -> Result<StagedRecoveryManifest, RecoveryError> {
     graph.validate()?;
-    let mut candidate = graph.clone();
-    let surface = match candidate
-        .public_surfaces
-        .iter_mut()
-        .find(|surface| surface.owner == owner)
-    {
-        Some(surface) => surface,
-        None if expected_epoch == 0 => {
-            candidate.public_surfaces.push(RecoveryPublicSurface {
-                owner,
-                declaration_root: initial_declaration_root,
-                epoch: 0,
-                bindings: Vec::new(),
-                source_instances: Vec::new(),
-            });
-            candidate.public_surfaces.last_mut().unwrap()
-        }
+    let mut candidate = graph.candidate();
+    let mut surface = match graph.surface(&owner) {
+        Some(surface) => RecoveryPublicSurface {
+            owner,
+            declaration_root: surface.declaration_root,
+            epoch: surface.epoch,
+            bindings,
+            source_instances,
+        },
+        None if expected_epoch == 0 => RecoveryPublicSurface {
+            owner,
+            declaration_root: initial_declaration_root,
+            epoch: 0,
+            bindings,
+            source_instances,
+        },
         None => return Err(error("paired public surface is missing")),
     };
     if surface.epoch != expected_epoch {
@@ -552,8 +554,7 @@ pub(crate) fn stage_public_visibility_v2(
     surface.epoch = expected_epoch
         .checked_add(1)
         .ok_or_else(|| error("public visibility epoch exhausted"))?;
-    surface.bindings = bindings;
-    surface.source_instances = source_instances;
+    candidate.replace_surface(surface);
     let candidate = ValidatedRecoveryGraph::seal(candidate)?;
     stage_validated_v2(path, recovery_root, candidate)
 }
@@ -575,8 +576,8 @@ fn high_water_candidate(
             expected.0, next.0
         )));
     }
-    let mut candidate = graph.clone();
-    candidate.high_water = next;
+    let mut candidate = graph.candidate();
+    candidate.set_high_water(next)?;
     ValidatedRecoveryGraph::seal(candidate)
 }
 
@@ -652,8 +653,7 @@ pub(crate) fn read_v2_bytes(
                 errors,
             )) => {
                 let artifacts = graph
-                    .artifacts
-                    .iter()
+                    .artifacts()
                     .map(|artifact| (artifact.artifact_id(), artifact))
                     .collect::<BTreeMap<_, _>>();
                 let losses = errors
@@ -695,7 +695,7 @@ impl RecoveryGraph {
         let mut products = Vec::new();
         let mut joins = Vec::new();
         let mut values = Vec::new();
-        for artifact in &self.artifacts {
+        for artifact in self.artifacts() {
             match artifact {
                 RecoveryArtifactClosure::Home(reference) => products.push(reference.clone()),
                 RecoveryArtifactClosure::Join(reference) => joins.push(reference.clone()),
@@ -705,13 +705,11 @@ impl RecoveryGraph {
             }
         }
         let descriptors = self
-            .artifacts
-            .iter()
+            .artifacts()
             .map(|artifact| artifact.descriptor())
             .collect::<Vec<_>>();
         let interfaces = self
-            .artifact_dependencies
-            .iter()
+            .artifact_dependencies()
             .map(|edge| (edge.source, edge.target, edge.dependency.clone()))
             .collect::<Vec<_>>();
         tidepool_toolchain::declaration_join::RecoveredArtifactInventory::capture(
@@ -725,80 +723,12 @@ impl RecoveryGraph {
     }
 
     pub(crate) fn empty(source_session: u64, lineage: u64) -> Result<Self, RecoveryError> {
-        let mut graph = Self {
-            version: VERSION,
-            public_schema: PAIRED_PUBLIC_SCHEMA.into(),
-            source_session,
-            lineage,
-            high_water: Generation(0),
-            public_surfaces: Vec::new(),
-            nodes: Vec::new(),
-            artifacts: Vec::new(),
-            artifact_dependencies: Vec::new(),
-            checksum: String::new(),
-        };
-        graph.seal()?;
-        Ok(graph)
+        Self::from_wire(RecoveryGraphWire::empty(source_session, lineage)?)
     }
 
-    /// Fill the digest after the owner has assembled a complete graph.
-    pub(crate) fn seal(&mut self) -> Result<(), RecoveryError> {
-        self.version = VERSION;
-        self.public_schema = PAIRED_PUBLIC_SCHEMA.into();
-        self.nodes.sort_by_key(|node| node.id);
-        self.artifacts
-            .sort_by_key(RecoveryArtifactClosure::artifact_id);
-        for artifact in &mut self.artifacts {
-            if let RecoveryArtifactClosure::ValueInterface(reference) = artifact {
-                reference.requirements.sort();
-                reference.requirements.dedup();
-            }
-        }
-        self.artifact_dependencies
-            .sort_by_key(|edge| (edge.source, edge.target, edge.dependency.clone()));
-        self.artifact_dependencies.dedup();
-        self.public_surfaces.sort_by(|a, b| a.owner.cmp(&b.owner));
-        for surface in &mut self.public_surfaces {
-            surface.bindings.sort_by(|a, b| a.name.cmp(&b.name));
-            surface.source_instances.sort_by(|a, b| {
-                (
-                    &a.machine_incarnation,
-                    &a.instance,
-                    &a.module_version,
-                    &a.binder,
-                )
-                    .cmp(&(
-                        &b.machine_incarnation,
-                        &b.instance,
-                        &b.module_version,
-                        &b.binder,
-                    ))
-            });
-        }
-        for node in &mut self.nodes {
-            node.implementation_refs.sort();
-            node.implementation_refs.dedup();
-            node.lexical_roots.sort();
-            node.lexical_roots.dedup();
-            node.lexical.sort_by(|a, b| a.owner.cmp(&b.owner));
-            for lexical in &mut node.lexical {
-                lexical.imports.sort();
-                lexical.imports.dedup();
-            }
-            node.artifact_refs.sort();
-            node.artifact_refs.dedup();
-        }
-        self.checksum.clear();
-        validate_shape(self)?;
-        self.checksum = checksum(self)?;
-        Ok(())
-    }
-
+    /// An opaque snapshot was authenticated on decode or sealed by its owner.
+    /// Its revision token may reflect a valid input's original array order.
     pub(crate) fn validate(&self) -> Result<(), RecoveryError> {
-        validate_shape(self)?;
-        if self.checksum != checksum(self)? {
-            return Err(error("recovery graph checksum mismatch"));
-        }
         Ok(())
     }
 
@@ -810,8 +740,7 @@ impl RecoveryGraph {
     ) -> Result<Vec<RecoveryLostPublicBinding>, RecoveryError> {
         self.validate()?;
         let surface = self
-            .public_surfaces
-            .iter()
+            .public_surfaces()
             .find(|surface| &surface.owner == owner);
         Ok(surface
             .into_iter()
@@ -853,14 +782,13 @@ impl RecoveryGraph {
     ) -> Result<BTreeMap<RecoverySymbolIdentity, RecoveryHead>, RecoveryError> {
         self.validate()?;
         let Some(root) = self
-            .public_surfaces
-            .iter()
+            .public_surfaces()
             .find(|surface| &surface.owner == owner)
             .and_then(|surface| surface.declaration_root)
         else {
             return Ok(BTreeMap::new());
         };
-        let by_id: BTreeMap<_, _> = self.nodes.iter().map(|node| (node.id, node)).collect();
+        let by_id: BTreeMap<_, _> = self.nodes().map(|node| (node.id, node)).collect();
         let mut chain = Vec::new();
         let mut cursor = Some(root);
         while let Some(id) = cursor {
@@ -908,7 +836,7 @@ impl RecoveryGraph {
     /// verbatim by later turns, matching `SourceImports::extend`.
     pub(crate) fn workbench_imports(&self, root: Generation) -> Result<Vec<String>, RecoveryError> {
         self.validate()?;
-        let by_id: BTreeMap<_, _> = self.nodes.iter().map(|node| (node.id, node)).collect();
+        let by_id: BTreeMap<_, _> = self.nodes().map(|node| (node.id, node)).collect();
         let mut chain = Vec::new();
         let mut cursor = Some(root);
         while let Some(id) = cursor {
@@ -947,7 +875,7 @@ impl RecoveryGraph {
         let root = fs::canonicalize(root)
             .map_err(|e| error(format!("could not resolve recovery root: {e}")))?;
         let mut losses = BTreeMap::new();
-        for artifact in &self.artifacts {
+        for artifact in self.artifacts() {
             let (interface, product) = artifact.paths();
             validate_relative(interface)?;
             if let Some(product) = product {
@@ -977,18 +905,108 @@ impl RecoveryGraph {
     }
 }
 
-fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
-    if graph.version != VERSION {
+fn normalize_artifact(artifact: &mut RecoveryArtifactClosure) {
+    if let RecoveryArtifactClosure::ValueInterface(reference) = artifact {
+        reference.requirements.sort();
+        reference.requirements.dedup();
+    }
+}
+fn normalize_surface(surface: &mut RecoveryPublicSurface) {
+    surface.bindings.sort_by(|a, b| a.name.cmp(&b.name));
+    surface.source_instances.sort_by(|a, b| {
+        (
+            &a.machine_incarnation,
+            &a.instance,
+            &a.module_version,
+            &a.binder,
+        )
+            .cmp(&(
+                &b.machine_incarnation,
+                &b.instance,
+                &b.module_version,
+                &b.binder,
+            ))
+    });
+}
+fn normalize_node(node: &mut RecoveryNode) {
+    node.implementation_refs.sort();
+    node.implementation_refs.dedup();
+    node.lexical_roots.sort();
+    node.lexical_roots.dedup();
+    node.lexical.sort_by(|a, b| a.owner.cmp(&b.owner));
+    for lexical in &mut node.lexical {
+        lexical.imports.sort();
+        lexical.imports.dedup();
+    }
+    node.artifact_refs.sort();
+    node.artifact_refs.dedup();
+}
+
+impl RecoveryGraphWire {
+    pub(crate) fn empty(source_session: u64, lineage: u64) -> Result<Self, RecoveryError> {
+        let mut graph = Self {
+            version: VERSION,
+            public_schema: PAIRED_PUBLIC_SCHEMA.into(),
+            source_session,
+            lineage,
+            high_water: Generation(0),
+            public_surfaces: Vec::new(),
+            nodes: Vec::new(),
+            artifacts: Vec::new(),
+            artifact_dependencies: Vec::new(),
+            checksum: String::new(),
+        };
+        graph.seal()?;
+        Ok(graph)
+    }
+
+    /// Fill the digest after the owner has assembled a complete graph.
+    pub(crate) fn seal(&mut self) -> Result<(), RecoveryError> {
+        self.version = VERSION;
+        self.public_schema = PAIRED_PUBLIC_SCHEMA.into();
+        self.nodes.sort_by_key(|node| node.id);
+        self.artifacts
+            .sort_by_key(RecoveryArtifactClosure::artifact_id);
+        self.artifact_dependencies
+            .sort_by_key(|edge| (edge.source, edge.target, edge.dependency.clone()));
+        self.artifact_dependencies.dedup();
+        self.public_surfaces.sort_by(|a, b| a.owner.cmp(&b.owner));
+        for row in &mut self.nodes {
+            normalize_node(row);
+        }
+        for row in &mut self.artifacts {
+            normalize_artifact(row);
+        }
+        for row in &mut self.public_surfaces {
+            normalize_surface(row);
+        }
+        self.checksum.clear();
+        validate_shape(self)?;
+        self.checksum = checksum(self)?;
+        Ok(())
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), RecoveryError> {
+        validate_shape(self)?;
+        if self.checksum != checksum(self)? {
+            return Err(error("recovery graph checksum mismatch"));
+        }
+        Ok(())
+    }
+}
+
+fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
+    if graph.version() != VERSION {
         return Err(error(format!(
             "unsupported recovery version {}",
-            graph.version
+            graph.version()
         )));
     }
-    if graph.public_schema != PAIRED_PUBLIC_SCHEMA {
+    if graph.public_schema() != PAIRED_PUBLIC_SCHEMA {
         return Err(error("unsupported paired public visibility schema"));
     }
     let mut public_owners = BTreeSet::new();
-    for surface in &graph.public_surfaces {
+    for surface in graph.public_surfaces() {
         if tidepool_repr::ActorPath::parse(&surface.owner.path).is_err()
             || surface.owner.incarnation == 0
             || !public_owners.insert(&surface.owner)
@@ -1029,12 +1047,12 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
             return Err(error("public winners require a visibility epoch"));
         }
     }
-    if graph.lineage == 0 {
+    if graph.lineage() == 0 {
         return Err(error("recovery lineage must be nonzero"));
     }
     let mut nodes = BTreeMap::new();
-    for node in &graph.nodes {
-        if node.id.0 == 0 || node.id > graph.high_water || nodes.insert(node.id, node).is_some() {
+    for node in graph.nodes() {
+        if node.id.0 == 0 || node.id > graph.high_water() || nodes.insert(node.id, node).is_some() {
             return Err(error(format!(
                 "invalid or duplicate recovery node {}",
                 node.id.0
@@ -1181,7 +1199,7 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
             }
         }
     }
-    for node in &graph.nodes {
+    for node in graph.nodes() {
         if node.parent.is_some_and(|id| !nodes.contains_key(&id))
             || node
                 .implementation_refs
@@ -1198,7 +1216,7 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
         .keys()
         .map(|id| (*id, 0usize))
         .collect::<BTreeMap<_, _>>();
-    for node in &graph.nodes {
+    for node in graph.nodes() {
         for dependency in node.parent.iter().chain(node.implementation_refs.iter()) {
             *incoming
                 .get_mut(dependency)
@@ -1226,7 +1244,7 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
             "recovery parent and implementation references contain a cycle",
         ));
     }
-    for surface in &graph.public_surfaces {
+    for surface in graph.public_surfaces() {
         if surface
             .declaration_root
             .is_some_and(|root| !nodes.contains_key(&root))
@@ -1235,14 +1253,14 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
         }
         if surface
             .declaration_root
-            .is_some_and(|root| root > graph.high_water)
+            .is_some_and(|root| root > graph.high_water())
         {
             return Err(error("recovery public root exceeds high-water"));
         }
     }
 
     let mut artifacts = BTreeMap::new();
-    for artifact in &graph.artifacts {
+    for artifact in graph.artifacts() {
         let (interface, product) = artifact.paths();
         let owner = artifact.owner();
         if owner.unit.is_empty()
@@ -1259,7 +1277,12 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
             return Err(error("duplicate recovery artifact reference"));
         }
     }
-    for edge in &graph.artifact_dependencies {
+    let mut unique_edges = BTreeSet::new();
+    for edge in graph.artifact_dependencies() {
+        if !unique_edges.insert((edge.source, edge.target, &edge.dependency)) {
+            return Err(error("duplicate recovery artifact dependency"));
+        }
+
         if !matches!(edge.dependency, ArtifactDependency::Interface) {
             return Err(error(
                 "native recovery edges must derive from original certification",
@@ -1271,7 +1294,7 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
             ));
         }
     }
-    for node in &graph.nodes {
+    for node in graph.nodes() {
         let node_artifacts = node.artifact_refs.iter().copied().collect::<BTreeSet<_>>();
         if node
             .artifact_refs
@@ -1331,7 +1354,7 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
                         node.id.0
                     ))
                 })?;
-                if !graph.artifact_dependencies.iter().any(|edge| {
+                if !graph.artifact_dependencies().any(|edge| {
                     edge.source == reference.artifact_id
                         && edge.target == *target
                         && edge.dependency == ArtifactDependency::Interface
@@ -1343,7 +1366,7 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
                 }
             }
         }
-        if graph.artifact_dependencies.iter().any(|edge| {
+        if graph.artifact_dependencies().any(|edge| {
             node_artifacts.contains(&edge.source) && !node_artifacts.contains(&edge.target)
         }) {
             return Err(error(format!(
@@ -1362,8 +1385,7 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
         }
     }
     let referenced_artifacts: BTreeSet<_> = graph
-        .nodes
-        .iter()
+        .nodes()
         .flat_map(|node| node.artifact_refs.iter().copied())
         .collect();
     let owned_modules: BTreeSet<_> = referenced_artifacts
@@ -1371,7 +1393,7 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
         .filter_map(|key| artifacts.get(key).copied())
         .map(|artifact| artifact.owner())
         .collect();
-    for node in &graph.nodes {
+    for node in graph.nodes() {
         if node
             .lexical
             .iter()
@@ -1386,35 +1408,12 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
     Ok(())
 }
 
-fn checksum(graph: &RecoveryGraph) -> Result<String, RecoveryError> {
-    #[derive(Serialize)]
-    struct UnsignedRecoveryGraph<'a> {
-        version: u32,
-        public_schema: &'a str,
-        source_session: u64,
-        lineage: u64,
-        #[serde(with = "generation_serde")]
-        high_water: Generation,
-        public_surfaces: &'a [RecoveryPublicSurface],
-        nodes: &'a [RecoveryNode],
-        artifacts: &'a [RecoveryArtifactClosure],
-        artifact_dependencies: &'a [RecoveryArtifactDependency],
-        checksum: &'static str,
-    }
-    let unsigned = UnsignedRecoveryGraph {
-        version: graph.version,
-        public_schema: &graph.public_schema,
-        source_session: graph.source_session,
-        lineage: graph.lineage,
-        high_water: graph.high_water,
-        public_surfaces: &graph.public_surfaces,
-        nodes: &graph.nodes,
-        artifacts: &graph.artifacts,
-        artifact_dependencies: &graph.artifact_dependencies,
+fn checksum(graph: &impl GraphRead) -> Result<String, RecoveryError> {
+    let bytes = serde_json::to_vec(&GraphEncoding {
+        graph,
         checksum: "",
-    };
-    let bytes = serde_json::to_vec(&unsigned)
-        .map_err(|e| error(format!("could not encode recovery graph: {e}")))?;
+    })
+    .map_err(|e| error(format!("could not encode recovery graph: {e}")))?;
     let mut domain = b"tidepool-recovery-graph-v5\0".to_vec();
     domain.extend_from_slice(&bytes);
     Ok(blake3::hash(&domain).to_hex().to_string())
@@ -1716,7 +1715,11 @@ mod tests {
         }
     }
 
-    fn fixture(root: &Path) -> RecoveryGraph {
+    fn snapshot(wire: &RecoveryGraphWire) -> RecoveryGraph {
+        RecoveryGraph::from_wire(wire.clone()).unwrap()
+    }
+
+    fn fixture(root: &Path) -> RecoveryGraphWire {
         let source = tempfile::tempdir().unwrap();
         let iface = source.path().join("Lib.hi");
         let product = source.path().join("Lib.product");
@@ -1783,7 +1786,7 @@ mod tests {
             kind: RecoveryExportKind::Value,
             children: vec![],
         };
-        let mut graph = RecoveryGraph {
+        let mut graph = RecoveryGraphWire {
             version: VERSION,
             public_schema: PAIRED_PUBLIC_SCHEMA.into(),
             source_session: 41,
@@ -1857,6 +1860,137 @@ mod tests {
     }
 
     #[test]
+    fn persistent_snapshots_share_history_payloads_across_publication_candidates() {
+        let root = tempfile::tempdir().unwrap();
+        let mut wire = fixture(root.path());
+        let RecoveryArtifactClosure::Home(home) = &wire.artifacts[0] else {
+            unreachable!()
+        };
+        let mut value = value_interface_from(home, "Val1");
+        value.requirements.push(module("main", "Lib"));
+        value.artifact_id = ArtifactDescriptor::from_recovery_value_interface(&value).id;
+        let edge = RecoveryArtifactDependency {
+            source: value.artifact_id,
+            target: wire.artifacts[0].artifact_id(),
+            dependency: ArtifactDependency::Interface,
+        };
+        wire.nodes[0].artifact_refs.push(value.artifact_id);
+        wire.artifacts
+            .push(RecoveryArtifactClosure::ValueInterface(value));
+        wire.artifact_dependencies.push(edge);
+        let mut untouched_surface = wire.public_surfaces[0].clone();
+        untouched_surface.owner = owner("untouched");
+        untouched_surface.declaration_root = None;
+        wire.public_surfaces.push(untouched_surface);
+        let template = wire.nodes[0].clone();
+        wire.nodes = (1..=128)
+            .map(|id| RecoveryNode {
+                id: Generation(id),
+                ..template.clone()
+            })
+            .collect();
+        wire.public_surfaces[0].declaration_root = None;
+        wire.high_water = Generation(128);
+        wire.seal().unwrap();
+        let original = snapshot(&wire);
+        let baseline = original.clone();
+        let mut candidate = baseline.candidate();
+        candidate.set_high_water(Generation(129)).unwrap();
+        candidate
+            .insert_node(RecoveryNode {
+                id: Generation(129),
+                ..template
+            })
+            .unwrap();
+        let mut surface = baseline.surface(&owner("root")).unwrap().clone();
+        surface.epoch = 1;
+        candidate.replace_surface(surface);
+        // Re-presenting immutable facts must not replace retained payloads.
+        candidate
+            .insert_artifact(baseline.artifacts().next().unwrap().clone())
+            .unwrap();
+        let successor = candidate.seal().unwrap();
+        let unchanged = original
+            .nodes()
+            .filter(|node| std::ptr::eq(*node, successor.node(node.id).unwrap()))
+            .count();
+        assert_eq!(unchanged, 128);
+        assert!(original
+            .artifacts()
+            .zip(successor.artifacts())
+            .all(|(a, b)| std::ptr::eq(a, b)));
+        assert!(original
+            .nodes()
+            .zip(baseline.nodes())
+            .all(|(a, b)| std::ptr::eq(a, b)));
+        assert!(original
+            .artifact_dependencies()
+            .zip(successor.artifact_dependencies())
+            .all(|(a, b)| std::ptr::eq(a, b)));
+        assert!(std::ptr::eq(
+            original.surface(&owner("untouched")).unwrap(),
+            successor.surface(&owner("untouched")).unwrap()
+        ));
+        assert!(!std::ptr::eq(
+            original.surface(&owner("root")).unwrap(),
+            successor.surface(&owner("root")).unwrap()
+        ));
+        assert_eq!(original.high_water(), Generation(128));
+        assert_eq!(original.surface(&owner("root")).unwrap().epoch, 0);
+        assert_eq!(successor.high_water(), Generation(129));
+        assert_eq!(successor.nodes().count(), 129);
+        let bytes = serde_json::to_vec(&successor).unwrap();
+        let decoded: RecoveryGraph = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded, successor);
+        eprintln!("persistent-recovery history_rows=128 retained_payload_copies=0 snapshot_and_candidate_roots_shared=true");
+    }
+
+    #[test]
+    fn wire_admission_preserves_original_revision_and_refuses_duplicate_rows() {
+        let root = tempfile::tempdir().unwrap();
+        let mut wire = fixture(root.path());
+        wire.nodes.reverse();
+        wire.checksum = checksum(&wire).unwrap();
+        let raw_token = wire.checksum.clone();
+        let admitted = snapshot(&wire);
+        assert_eq!(admitted.checksum(), raw_token);
+        assert!(serde_json::to_vec(&admitted).is_err());
+        assert_eq!(
+            admitted.nodes().map(|node| node.id).collect::<Vec<_>>(),
+            vec![Generation(1), Generation(2)]
+        );
+        let mut candidate = admitted.candidate();
+        candidate.set_high_water(Generation(3)).unwrap();
+        let canonical = candidate.seal().unwrap();
+        let encoded = serde_json::to_vec(&canonical).unwrap();
+        let decoded: RecoveryGraph = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, canonical);
+        assert_eq!(admitted.checksum(), raw_token);
+        let canonical_wire = canonical.wire_for_test();
+        assert_eq!(encoded, serde_json::to_vec(&canonical_wire).unwrap());
+        for kind in 0..4 {
+            let mut duplicate = wire.clone();
+            match kind {
+                0 => duplicate.nodes.push(duplicate.nodes[0].clone()),
+                1 => duplicate.artifacts.push(duplicate.artifacts[0].clone()),
+                2 => duplicate
+                    .public_surfaces
+                    .push(duplicate.public_surfaces[0].clone()),
+                _ => {
+                    let edge = RecoveryArtifactDependency {
+                        source: duplicate.artifacts[0].artifact_id(),
+                        target: duplicate.artifacts[0].artifact_id(),
+                        dependency: ArtifactDependency::Interface,
+                    };
+                    duplicate.artifact_dependencies = vec![edge.clone(), edge];
+                }
+            }
+            duplicate.checksum = checksum(&duplicate).unwrap();
+            assert!(RecoveryGraph::from_wire(duplicate).is_err());
+        }
+    }
+
+    #[test]
     fn interface_recovery_retains_native_requirements_and_selected_evidence() {
         let dir = tempfile::tempdir().unwrap();
         let mut graph = fixture(dir.path());
@@ -1905,11 +2039,13 @@ mod tests {
         graph.seal().unwrap();
         let before = graph.clone();
         assert!(matches!(
-            graph.projection(&owner("root"), &BTreeMap::new()).unwrap()[&identity("answer")],
+            snapshot(&graph)
+                .projection(&owner("root"), &BTreeMap::new())
+                .unwrap()[&identity("answer")],
             RecoveryHead::Tombstone(_)
         ));
         assert!(matches!(
-            graph
+            snapshot(&graph)
                 .interface_projection(&owner("root"), &BTreeMap::new())
                 .unwrap()[&identity("answer")],
             RecoveryHead::Available {
@@ -1918,7 +2054,9 @@ mod tests {
             }
         ));
         assert_eq!(
-            graph.public_binding_tombstones(&owner("root")).unwrap()[0]
+            snapshot(&graph)
+                .public_binding_tombstones(&owner("root"))
+                .unwrap()[0]
                 .winner
                 .variable,
             7
@@ -1934,7 +2072,9 @@ mod tests {
             }],
         )]);
         assert!(matches!(
-            graph.interface_projection(&owner("root"), &losses).unwrap()[&identity("answer")],
+            snapshot(&graph)
+                .interface_projection(&owner("root"), &losses)
+                .unwrap()[&identity("answer")],
             RecoveryHead::Tombstone(_)
         ));
         graph.nodes[1].state = RecoveryNodeState::MissingArtifactClosure {
@@ -1943,7 +2083,7 @@ mod tests {
         graph.nodes[1].live_dependencies.clear();
         graph.seal().unwrap();
         assert!(matches!(
-            graph
+            snapshot(&graph)
                 .interface_projection(&owner("root"), &BTreeMap::new())
                 .unwrap()[&identity("answer")],
             RecoveryHead::Tombstone(_)
@@ -1962,7 +2102,7 @@ mod tests {
         graph.nodes.retain(|node| node.id == Generation(1));
         graph.seal().unwrap();
         assert!(matches!(
-            stage_v2(&manifest, root.path(), graph.clone())
+            stage_v2(&manifest, root.path(), snapshot(&graph))
                 .unwrap()
                 .publish(),
             RecoveryPublishOutcome::Durable { .. }
@@ -1984,8 +2124,15 @@ mod tests {
             Generation(3)
         );
         let retained = read_v2(&manifest, root.path()).unwrap().unwrap();
-        assert_eq!(retained.graph.nodes, graph.nodes);
-        assert_eq!(retained.graph.high_water, Generation(3));
+        assert_eq!(
+            retained
+                .graph
+                .nodes()
+                .map(|node| node.id)
+                .collect::<Vec<_>>(),
+            graph.nodes.iter().map(|node| node.id).collect::<Vec<_>>()
+        );
+        assert_eq!(retained.graph.high_water(), Generation(3));
     }
 
     #[test]
@@ -2019,7 +2166,7 @@ mod tests {
             });
         graph.seal().unwrap();
         assert!(matches!(
-            stage_v2(&manifest, root.path(), graph.clone())
+            stage_v2(&manifest, root.path(), snapshot(&graph))
                 .unwrap()
                 .publish(),
             RecoveryPublishOutcome::Durable { .. }
@@ -2082,7 +2229,7 @@ mod tests {
             },
             generation: 1,
         };
-        let mut graph = RecoveryGraph::empty(41, 99).unwrap();
+        let mut graph = RecoveryGraphWire::empty(41, 99).unwrap();
         graph.high_water = Generation(2);
         graph.artifacts = vec![original.clone(), value.clone()];
         graph.nodes = vec![RecoveryNode {
@@ -2114,7 +2261,7 @@ mod tests {
         graph.seal().unwrap();
         let manifest = root.path().join("accepted.json");
         assert!(matches!(
-            stage_v2(&manifest, root.path(), graph.clone())
+            stage_v2(&manifest, root.path(), snapshot(&graph))
                 .unwrap()
                 .publish(),
             RecoveryPublishOutcome::Durable { .. }
@@ -2165,7 +2312,9 @@ mod tests {
             forged.seal().unwrap();
             let path = root.path().join(format!("refused-{index}.json"));
             assert!(matches!(
-                stage_v2(&path, root.path(), forged).unwrap().publish(),
+                stage_v2(&path, root.path(), snapshot(&forged))
+                    .unwrap()
+                    .publish(),
                 RecoveryPublishOutcome::Durable { .. }
             ));
             let bytes = fs::read(&path).unwrap();
@@ -2236,7 +2385,7 @@ mod tests {
         let manifest = root.path().join("declarations.json");
         let graph = fixture(root.path());
         assert!(matches!(
-            stage_v2(&manifest, root.path(), graph.clone())
+            stage_v2(&manifest, root.path(), snapshot(&graph))
                 .unwrap()
                 .publish(),
             RecoveryPublishOutcome::Durable { .. }
@@ -2263,7 +2412,7 @@ mod tests {
         graph.nodes.retain(|node| node.id == Generation(1));
         graph.seal().unwrap();
         assert!(matches!(
-            stage_v2(&manifest, root.path(), graph.clone())
+            stage_v2(&manifest, root.path(), snapshot(&graph))
                 .unwrap()
                 .publish(),
             RecoveryPublishOutcome::Durable { .. }
@@ -2286,7 +2435,7 @@ mod tests {
     fn binding_only_publication_is_durable_and_restarts_as_a_winner_tombstone() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("declarations.json");
-        let original = RecoveryGraph::empty(41, 99).unwrap();
+        let original = RecoveryGraphWire::empty(41, 99).unwrap();
         let root = owner("root");
         let first = RecoveryPublicBinding {
             name: "answer".into(),
@@ -2298,7 +2447,7 @@ mod tests {
         let staged = stage_public_visibility_v2(
             &manifest,
             dir.path(),
-            &original,
+            &snapshot(&original),
             root.clone(),
             0,
             vec![first],
@@ -2311,9 +2460,12 @@ mod tests {
             RecoveryPublishOutcome::Durable { graph, .. } => graph,
             _ => panic!("expected durable publication"),
         };
-        assert_eq!(published.public_surfaces[0].declaration_root, None);
-        assert_eq!(published.high_water, Generation(0));
-        assert_eq!(published.public_surfaces[0].epoch, 1);
+        assert_eq!(
+            published.public_surfaces().next().unwrap().declaration_root,
+            None
+        );
+        assert_eq!(published.high_water(), Generation(0));
+        assert_eq!(published.public_surfaces().next().unwrap().epoch, 1);
         let next = RecoveryPublicBinding {
             name: "answer".into(),
             owner: RecoveryBindingId {
@@ -2356,10 +2508,10 @@ mod tests {
             _ => panic!("expected durable unchanged-winner publication"),
         };
         assert_eq!(
-            repeated.public_surfaces[0].bindings,
-            replacement.public_surfaces[0].bindings
+            repeated.public_surfaces().next().unwrap().bindings,
+            replacement.public_surfaces().next().unwrap().bindings
         );
-        assert_eq!(repeated.public_surfaces[0].epoch, 3);
+        assert_eq!(repeated.public_surfaces().next().unwrap().epoch, 3);
         assert_ne!(fs::read(&manifest).unwrap(), replacement_bytes);
         assert_eq!(
             repeated.public_binding_tombstones(&root).unwrap(),
@@ -2392,7 +2544,7 @@ mod tests {
         let manifest = dir.path().join("declarations.json");
         let parent = owner("root");
         let child = owner("root/child");
-        let initial = RecoveryGraph::empty(41, 99).unwrap();
+        let initial = RecoveryGraphWire::empty(41, 99).unwrap();
         let binding = |variable| RecoveryPublicBinding {
             name: "answer".into(),
             owner: RecoveryBindingId {
@@ -2403,7 +2555,7 @@ mod tests {
         let parent_graph = match stage_public_visibility_v2(
             &manifest,
             dir.path(),
-            &initial,
+            &snapshot(&initial),
             parent.clone(),
             0,
             vec![binding(1)],
@@ -2444,7 +2596,7 @@ mod tests {
         )
         .is_err());
         let restored = read_v2(&manifest, dir.path()).unwrap().unwrap().graph;
-        assert_eq!(restored.public_surfaces.len(), 2);
+        assert_eq!(restored.public_surfaces().count(), 2);
         assert_eq!(
             restored.public_binding_tombstones(&parent).unwrap()[0]
                 .winner
@@ -2459,8 +2611,7 @@ mod tests {
         );
         assert_eq!(
             restored
-                .public_surfaces
-                .iter()
+                .public_surfaces()
                 .map(|surface| surface.epoch)
                 .collect::<Vec<_>>(),
             vec![1, 1]
@@ -2480,8 +2631,10 @@ mod tests {
             source_instances: vec![],
         });
         graph.seal().unwrap();
-        let parent = graph.projection(&owner("root"), &BTreeMap::new()).unwrap();
-        let child = graph
+        let parent = snapshot(&graph)
+            .projection(&owner("root"), &BTreeMap::new())
+            .unwrap();
+        let child = snapshot(&graph)
             .projection(&owner("root/child"), &BTreeMap::new())
             .unwrap();
         assert!(matches!(
@@ -2499,7 +2652,7 @@ mod tests {
 
     #[test]
     fn duplicate_or_invalid_actor_surfaces_are_refused() {
-        let mut graph = RecoveryGraph::empty(41, 99).unwrap();
+        let mut graph = RecoveryGraphWire::empty(41, 99).unwrap();
         let surface = RecoveryPublicSurface {
             owner: owner("root"),
             declaration_root: None,
@@ -2622,16 +2775,26 @@ mod tests {
         graph.seal().unwrap();
         let manifest = dir.path().join("declarations.json");
         assert!(matches!(
-            stage_v2(&manifest, dir.path(), graph.clone())
+            stage_v2(&manifest, dir.path(), snapshot(&graph))
                 .unwrap()
                 .publish(),
             RecoveryPublishOutcome::Durable { .. }
         ));
         let read = read_v2(&manifest, dir.path()).unwrap().unwrap();
-        assert_eq!(read.graph.nodes[0].instances, graph.nodes[0].instances);
-        assert!(read.graph.nodes[0].instances.classes.is_empty());
+        assert_eq!(
+            read.graph.nodes().next().unwrap().instances,
+            graph.nodes[0].instances
+        );
+        assert!(read
+            .graph
+            .nodes()
+            .next()
+            .unwrap()
+            .instances
+            .classes
+            .is_empty());
         assert!(read.artifact_losses.is_empty());
-        let mut changed = read.graph;
+        let mut changed = read.graph.wire_for_test();
         changed.nodes[0].instances.family_consistency_closure.pop();
         assert!(changed.validate().is_err());
     }
@@ -2763,11 +2926,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let graph = fixture(dir.path());
         let bytes = serde_json::to_vec(&graph).unwrap();
-        let decoded: RecoveryGraph = serde_json::from_slice(&bytes).unwrap();
+        let decoded: RecoveryGraphWire = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(decoded, graph);
         decoded.validate().unwrap();
-        graph.validate_artifact_files(dir.path()).unwrap();
-        let projected = graph.projection(&owner("root"), &BTreeMap::new()).unwrap();
+        snapshot(&graph)
+            .validate_artifact_files(dir.path())
+            .unwrap();
+        let projected = snapshot(&graph)
+            .projection(&owner("root"), &BTreeMap::new())
+            .unwrap();
         assert!(
             matches!(projected.get(&identity("answer")), Some(RecoveryHead::Tombstone(t)) if t.winner == Generation(2))
         );
@@ -2818,11 +2985,25 @@ mod tests {
             }
         };
         fs::remove_file(dir.path().join(product)).unwrap();
-        let candidate = high_water_candidate(&graph, Generation(3)).unwrap().0;
-        assert_eq!(candidate.high_water, Generation(3));
-        assert_eq!(candidate.public_surfaces, graph.public_surfaces);
-        assert_eq!(candidate.nodes, graph.nodes);
-        assert!(high_water_candidate(&graph, Generation(4)).is_err());
+        let candidate = high_water_candidate(&snapshot(&graph), Generation(3))
+            .unwrap()
+            .0;
+        assert_eq!(candidate.high_water(), Generation(3));
+        assert_eq!(
+            candidate
+                .public_surfaces()
+                .map(|surface| surface.clone())
+                .collect::<Vec<_>>(),
+            graph.public_surfaces
+        );
+        assert_eq!(
+            candidate
+                .nodes()
+                .map(|node| node.clone())
+                .collect::<Vec<_>>(),
+            graph.nodes
+        );
+        assert!(high_water_candidate(&snapshot(&graph), Generation(4)).is_err());
     }
 
     #[test]
@@ -2832,13 +3013,13 @@ mod tests {
         let manifest_path = dir.path().join("recovery.json");
         fs::write(&manifest_path, b"previous manifest").unwrap();
 
-        let staged = stage_high_water_v2(&manifest_path, &graph, Generation(3)).unwrap();
-        assert_eq!(staged.candidate_graph().high_water, Generation(3));
+        let staged = stage_high_water_v2(&manifest_path, &snapshot(&graph), Generation(3)).unwrap();
+        assert_eq!(staged.candidate_graph().high_water(), Generation(3));
         assert_eq!(fs::read(&manifest_path).unwrap(), b"previous manifest");
         drop(staged);
         assert_eq!(fs::read(&manifest_path).unwrap(), b"previous manifest");
 
-        match stage_high_water_v2(&manifest_path, &graph, Generation(3))
+        match stage_high_water_v2(&manifest_path, &snapshot(&graph), Generation(3))
             .unwrap()
             .publish()
         {
@@ -2847,9 +3028,21 @@ mod tests {
                 publication,
             } => {
                 assert_eq!(publication.path(), manifest_path);
-                assert_eq!(published.high_water, Generation(3));
-                assert_eq!(published.public_surfaces, graph.public_surfaces);
-                assert_eq!(published.nodes, graph.nodes);
+                assert_eq!(published.high_water(), Generation(3));
+                assert_eq!(
+                    published
+                        .public_surfaces()
+                        .map(|surface| surface.clone())
+                        .collect::<Vec<_>>(),
+                    graph.public_surfaces
+                );
+                assert_eq!(
+                    published
+                        .nodes()
+                        .map(|node| node.clone())
+                        .collect::<Vec<_>>(),
+                    graph.nodes
+                );
             }
             RecoveryPublishOutcome::BeforeRename { path, detail } => {
                 panic!(
@@ -2863,8 +3056,15 @@ mod tests {
         }
 
         let restored = read_v2(&manifest_path, dir.path()).unwrap().unwrap();
-        assert_eq!(restored.graph.high_water, Generation(3));
-        assert_eq!(restored.graph.public_surfaces, graph.public_surfaces);
+        assert_eq!(restored.graph.high_water(), Generation(3));
+        assert_eq!(
+            restored
+                .graph
+                .public_surfaces()
+                .map(|surface| surface.clone())
+                .collect::<Vec<_>>(),
+            graph.public_surfaces
+        );
         assert!(restored.artifact_losses.is_empty());
     }
 
@@ -2873,7 +3073,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let graph = fixture(dir.path());
         let manifest_path = dir.path().join("recovery.json");
-        let staged = stage_high_water_v2(&manifest_path, &graph, Generation(3)).unwrap();
+        let staged = stage_high_water_v2(&manifest_path, &snapshot(&graph), Generation(3)).unwrap();
         fs::create_dir(&manifest_path).unwrap();
 
         match staged.publish() {
@@ -2894,7 +3094,7 @@ mod tests {
         let graph = fixture(dir.path());
         let manifest = dir.path().join("recovery.json");
         assert!(matches!(
-            stage_v2(&manifest, dir.path(), graph.clone())
+            stage_v2(&manifest, dir.path(), snapshot(&graph))
                 .unwrap()
                 .publish(),
             RecoveryPublishOutcome::Durable { .. }
@@ -2908,9 +3108,11 @@ mod tests {
             }
         };
         fs::write(dir.path().join(product), b"changed").unwrap();
-        assert!(stage_v2(&manifest, dir.path(), graph.clone()).is_err());
+        assert!(stage_v2(&manifest, dir.path(), snapshot(&graph)).is_err());
         assert_eq!(fs::read(&manifest).unwrap(), published);
-        let losses = graph.validate_artifact_files(dir.path()).unwrap();
+        let losses = snapshot(&graph)
+            .validate_artifact_files(dir.path())
+            .unwrap();
         assert!(losses.contains_key(&artifact_id));
         assert!(losses
             .values()
@@ -2932,8 +3134,12 @@ mod tests {
             }
         };
         fs::remove_file(dir.path().join(product)).unwrap();
-        let losses = graph.validate_artifact_files(dir.path()).unwrap();
-        let projected = graph.projection(&owner("root"), &losses).unwrap();
+        let losses = snapshot(&graph)
+            .validate_artifact_files(dir.path())
+            .unwrap();
+        let projected = snapshot(&graph)
+            .projection(&owner("root"), &losses)
+            .unwrap();
         assert!(
             matches!(projected.get(&identity("answer")), Some(RecoveryHead::Tombstone(t)) if t.winner == Generation(2))
         );
@@ -2947,7 +3153,7 @@ mod tests {
         graph.nodes[1].artifact_refs = graph.nodes[0].artifact_refs.clone();
         graph.seal().unwrap();
         let manifest_path = dir.path().join("recovery.json");
-        match stage_v2(&manifest_path, dir.path(), graph.clone())
+        match stage_v2(&manifest_path, dir.path(), snapshot(&graph))
             .unwrap()
             .publish()
         {
@@ -2993,7 +3199,9 @@ mod tests {
         graph.nodes[1].retracts = vec![old.clone()];
         graph.seal().unwrap();
 
-        let projected = graph.projection(&owner("root"), &BTreeMap::new()).unwrap();
+        let projected = snapshot(&graph)
+            .projection(&owner("root"), &BTreeMap::new())
+            .unwrap();
         assert!(!projected.contains_key(&old));
         assert!(matches!(
             projected.get(&replacement),
@@ -3010,7 +3218,7 @@ mod tests {
             .push("qualified Data.Map.Strict as Map".into());
         graph.seal().unwrap();
         assert_eq!(
-            graph.workbench_imports(Generation(2)).unwrap(),
+            snapshot(&graph).workbench_imports(Generation(2)).unwrap(),
             [
                 "qualified Data.Map.Strict as Map",
                 "Data.Proxy (Proxy (..))"
