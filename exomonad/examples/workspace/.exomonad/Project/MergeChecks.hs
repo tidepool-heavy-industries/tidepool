@@ -1,14 +1,40 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Project.MergeChecks (redPreserved, greenReceipt, commandFailure, checkedHeadChanged, dirtyAfterSuccess) where
+module Project.MergeChecks (redPreserved, greenReceipt, commandFailure, checkedHeadChanged, dirtyAfterSuccess, MergeProbe (probeCommand), mergeProbe) where
 
 import Prelude hiding (writeFile)
 import Control.Monad (void)
 import Control.Monad.Freer (Eff, Member)
 import qualified Data.Text as Text
+import Data.Text (Text)
+import GHC.Generics (Generic)
+import qualified Tidepool.Actor as Actor
+import qualified Tidepool.Actor.Record as R
+import Tidepool.Actors.Exomonad hiding (checkpoint)
+import qualified Tidepool.Command as Cmd
+import Tidepool.Effects.Core (Commands)
+import Tidepool.Effects.Row (knownEffects)
 import Tidepool.Check
+
+-- Fixture commands use the managed checkout's authority and return the exact
+-- original terminal receipt and capture to the recipe actor.
+data MergeProbe mode = MergeProbe
+  { probeState :: mode :- State ()
+  , probeCommand :: mode :- Call [Text] (R.Reply Cmd.RunResult)
+  } deriving Generic
+
+type MergeProbeEffects = LocalEffects MergeProbe '[Replies, Commands]
+
+mergeProbe :: ActorSpec MergeProbe MergeProbeEffects
+mergeProbe = R.definition "merge-check-fixture" (Actor.Selected knownEffects) MergeProbe
+  { probeState = ()
+  , probeCommand = Cmd.run . Cmd.withMemory (Cmd.MiB 64) . Cmd.argv
+  }
 
 -- A failed integration check leaves its staged and unstaged diagnostics in
 -- the managed checkout while the named publication branch stays at the
@@ -17,76 +43,68 @@ redPreserved :: Member RecipeCheck effects => Eff effects ()
 redPreserved = do
   owner <- root
   before <- git owner ["rev-parse", "HEAD"]
-  ownerPath <- git owner ["rev-parse", "--show-toplevel"]
-  let externalEdit directory name line = do
-        writeFile owner "fixture.patch" (Text.unlines
-          [ "diff --git a/" <> name <> " b/" <> name
-          , "new file mode 100644", "--- /dev/null", "+++ b/" <> name
-          , "@@ -0,0 +1 @@", "+" <> line ])
-        void $ git owner ["-C", directory, "apply", ownerPath <> "/fixture.patch"]
   let branch = "recipe/red-preserved"
   void $ git owner ["branch", branch, before]
-  created <- turn owner $ Text.unlines
+  void $ turn owner $ Text.unlines
     [ "import qualified Exomonad.Contrib.Merge as M"
+    , "import qualified Project.MergeChecks as Fixture"
     , "Right sourceTree <- createWorktree (fromRef \"recipe/red-preserved\" \"red-source\")"
     , "Right integration <- createWorktree (fromRef \"recipe/red-preserved\" \"red-preserved\")"
     , "merger <- R.start (M.mergeInto (worktreeId integration) (Just \"recipe/red-preserved\") [\"sh\", \"-c\", \"printf 'staged-check\\n' > red-preserved.txt; git add -- red-preserved.txt; printf 'working-check\\n' > red-preserved.txt; printf intentional-red >&2; exit 7\"])"
-    , "worktreeId integration"
+    , "let managedIntegration = worktreeId integration"
+    , "sourceProbe <- R.start (R.withWorktree (worktreeId sourceTree) Fixture.mergeProbe)"
+    , "integrationProbe <- R.start (R.withWorktree (worktreeId integration) Fixture.mergeProbe)"
     ]
-  check "the integration actor owns a managed checkout"
-    ("WorktreeId" `Text.isInfixOf` lastOutput created)
-  pathResult <- turn owner "cwd (handleReceipt integration)"
-  let integrationPath = Text.dropAround (== '"') (Text.strip (lastOutput pathResult))
-  reflogBefore <- git owner ["-C", integrationPath, "reflog", "--format=%gs"]
-  sourcePathResult <- turn owner "cwd (handleReceipt sourceTree)"
-  let sourcePath = Text.dropAround (== '"') (Text.strip (lastOutput sourcePathResult))
-  externalEdit sourcePath "red-preserved.txt" "candidate"
-  void $ git owner ["-C", sourcePath, "add", "--", "red-preserved.txt"]
-  void $ git owner ["-C", sourcePath, "commit", "-m", "red preservation candidate", "--", "red-preserved.txt"]
-  candidate <- git owner ["-C", sourcePath, "rev-parse", "HEAD"]
+  assertCell owner "integration actor owns the allocated managed checkout"
+    "managedIntegration == worktreeId integration"
   void $ turn owner $ Text.unlines
-    [ "let request = M.PublishRequest \"red preservation\" (worktreeId sourceTree) " <> gitOidLiteral candidate <> " \"merge red preservation candidate\""
+    [ "let commandAt probe args = R.call (Fixture.probeCommand (R.client probe)) args"
+    , "let gitAt probe args = commandAt probe ([\"git\"] ++ args)"
+    , "reflogBefore <- gitAt integrationProbe [\"reflog\", \"--format=%gs\"]"
+    , "sourceEdit <- commandAt sourceProbe [\"sh\", \"-c\", \"printf 'candidate\\n' > red-preserved.txt\"]"
+    , "sourceAdded <- gitAt sourceProbe [\"add\", \"--\", \"red-preserved.txt\"]"
+    , "sourceCommitted <- gitAt sourceProbe [\"-c\", \"user.name=Recipe\", \"-c\", \"user.email=recipe@example.invalid\", \"commit\", \"-m\", \"red preservation candidate\", \"--\", \"red-preserved.txt\"]"
+    , "Right candidate <- worktreeHead sourceTree"
+    ]
+  assertCell owner "red fixture commits exact source with clean command receipts"
+    "all (\\result -> Cmd.commandResult result == Cmd.CommandResult (Cmd.CommandExited 0) Cmd.CommandClean) [sourceEdit, sourceAdded, sourceCommitted]"
+  void $ turn owner $ Text.unlines
+    [ "let request = M.PublishRequest \"red preservation\" (worktreeId sourceTree) candidate \"merge red preservation candidate\""
     , "first <- R.call (M.publish (R.client merger)) request"
     ]
-  receipt <- turn owner $ Text.unlines
+  void $ turn owner $ Text.unlines
     [ "view <- R.call (M.mergeView (R.client merger)) ()"
     , "inspectFull (case first of { M.RedPreserved _ checked evidence -> M.integrationHead evidence == checked && not (M.integrationPassed evidence) && Cmd.commandOutcome (Cmd.commandResult (M.integrationReceipt evidence)) == Cmd.CommandExited 7 && Cmd.commandCleanup (Cmd.commandResult (M.integrationReceipt evidence)) == Cmd.CommandClean && case reverse (M.mergeHistory view) of { M.MergeHistory _ _ (M.IntegrationRed _ retained) : _ -> retained == evidence; _ -> False }; _ -> False })"
     ]
-  check "red evidence retains the actual terminal receipt and the same proof in history"
-    (lastOutput receipt == "True")
-  externalEdit integrationPath "post-check.txt" "post-check-edit"
-  result <- turn owner $ Text.unlines
+  assertCell owner "red evidence retains terminal receipt and same history proof"
+    ("(case first of { M.RedPreserved _ checked evidence -> M.integrationHead evidence == checked && not (M.integrationPassed evidence) && Cmd.commandOutcome (Cmd.commandResult (M.integrationReceipt evidence)) == Cmd.CommandExited 7 && Cmd.commandCleanup (Cmd.commandResult (M.integrationReceipt evidence)) == Cmd.CommandClean && case reverse (M.mergeHistory view) of { M.MergeHistory _ _ (M.IntegrationRed _ retained) : _ -> retained == evidence; _ -> False }; _ -> False })")
+  void $ turn owner "postEdit <- commandAt integrationProbe [\"sh\", \"-c\", \"printf 'post-check-edit\\n' > post-check.txt\"]"
+  assertCell owner "later edit fixture completes cleanly"
+    "Cmd.commandResult postEdit == Cmd.CommandResult (Cmd.CommandExited 0) Cmd.CommandClean"
+  void $ turn owner $ Text.unlines
     [ "headAfter <- worktreeHead integration"
     , "second <- R.call (M.publish (R.client merger)) request"
-    , "(first, headAfter == Right " <> gitOidLiteral candidate <> ", second)"
+    , "secondView <- R.call (M.mergeView (R.client merger)) ()"
+    , "published <- gitAt sourceProbe [\"rev-parse\", \"refs/heads/recipe/red-preserved\"]"
+    , "status <- gitAt integrationProbe [\"status\", \"--short\", \"--\", \"red-preserved.txt\"]"
+    , "staged <- gitAt integrationProbe [\"diff\", \"--cached\", \"--\", \"red-preserved.txt\"]"
+    , "working <- gitAt integrationProbe [\"diff\", \"--\", \"red-preserved.txt\"]"
+    , "reflog <- gitAt integrationProbe [\"reflog\", \"--format=%gs\"]"
+    , "later <- gitAt integrationProbe [\"status\", \"--short\", \"--\", \"post-check.txt\"]"
     ]
-  let observed = lastOutput result
-  check "the red result retains the previous and checked heads plus failed check evidence"
-    (all (`Text.isInfixOf` observed)
-      ["RedPreserved", before, candidate, "intentional-red"])
-  retained <- turn owner $ "inspectFull (headAfter == Right " <> gitOidLiteral candidate
-    <> " && case second of { M.MergeBlocked reason -> \"publication branch\" `T.isInfixOf` reason; _ -> False })"
-  check ("the red head is retained and next publish refused; observed: " <> observed)
-    (lastOutput retained == "True")
-  published <- git owner ["rev-parse", "refs/heads/" <> branch]
-  check "the named publication branch remains at the previous green head"
-    (published == before)
-  status <- git owner ["-C", integrationPath, "status", "--short", "--", "red-preserved.txt"]
-  staged <- git owner ["-C", integrationPath, "diff", "--cached", "--", "red-preserved.txt"]
-  working <- git owner ["-C", integrationPath, "diff", "--", "red-preserved.txt"]
-  check "the failed check's staged and working edits survive in the integration checkout"
-    (status == "MM red-preserved.txt"
-      && "staged-check" `Text.isInfixOf` staged
-      && "working-check" `Text.isInfixOf` working)
-  reflog <- git owner ["-C", integrationPath, "reflog", "--format=%gs"]
-  check "the red path never records a destructive reset"
-    (not (any (Text.isInfixOf "reset:")
-      (take (length (Text.lines reflog) - length (Text.lines reflogBefore)) (Text.lines reflog))))
-
-  later <- git owner ["-C", integrationPath, "status", "--short", "--", "post-check.txt"]
-  check "a later refused publish preserves edits made after the failed check"
-    (later == "?? post-check.txt")
-  void $ turn owner "R.finish merger"
+  assertCell owner "red result retains previous and checked heads plus original failed receipt"
+    ("case first of { M.RedPreserved previous checked evidence -> previous == " <> gitOidLiteral before <> " && checked == candidate && M.integrationHead evidence == candidate && Cmd.stderr (M.integrationReceipt evidence) == Right \"intentional-red\"; _ -> False }")
+  assertCell owner "red head remains and next publish refuses with no second check"
+    "headAfter == Right candidate && case (second, M.mergeHistory secondView) of { (M.MergeBlocked _, [M.MergeHistory _ _ (M.IntegrationRed _ original), M.MergeHistory _ _ (M.PublicationBlocked _)]) -> case first of { M.RedPreserved _ _ evidence -> original == evidence; _ -> False }; _ -> False }"
+  assertCell owner "named publication branch stays at previous green head"
+    ("fmap T.strip (Cmd.stdout published) == Right (renderGitOid " <> gitOidLiteral before <> ")")
+  assertCell owner "text: staged and working diagnostic edits survive failed check"
+    "fmap T.strip (Cmd.stdout status) == Right \"MM red-preserved.txt\" && case (Cmd.stdout staged, Cmd.stdout working) of { (Right stagedText, Right workingText) -> \"staged-check\" `T.isInfixOf` stagedText && \"working-check\" `T.isInfixOf` workingText; _ -> False }"
+  assertCell owner "text: failed check never records destructive reset in Git reflog"
+    "case (Cmd.stdout reflogBefore, Cmd.stdout reflog) of { (Right before, Right after) -> not (any (T.isInfixOf \"reset:\") (take (length (T.lines after) - length (T.lines before)) (T.lines after))); _ -> False }"
+  assertCell owner "text: refused later publish preserves post-check edit"
+    "fmap T.strip (Cmd.stdout later) == Right \"?? post-check.txt\""
+  void $ turn owner "R.finish merger\nR.finish sourceProbe\nR.finish integrationProbe"
 
 -- A command exit is integration evidence, even when it executes no tests. Its
 -- exact argv, checked head, outcome and original output stay separately usable.
@@ -96,6 +114,7 @@ greenReceipt = do
   before <- checkpoint owner ".gitignore" "ignored-build/\n" "ignore disposable check output"
   void $ turn owner $ Text.unlines
     [ "import qualified Exomonad.Contrib.Merge as M"
+    , "import qualified Project.MergeChecks as Fixture"
     , "Right sourceTree <- createWorktree (fromRef \"HEAD\" \"green-source\")"
     , "Right integration <- createWorktree (fromRef \"HEAD\" \"green-receipt\")"
     , "let command = [\"sh\", \"-c\", \"mkdir -p ignored-build; printf artifact > ignored-build/output; printf zero-tests\"]"
@@ -103,16 +122,16 @@ greenReceipt = do
     , "result <- R.call (M.publish (R.client merger)) (M.PublishRequest \"green receipt\" (worktreeId sourceTree) " <> gitOidLiteral before <> " \"green receipt\")"
     , "view <- R.call (M.mergeView (R.client merger)) ()"
     ]
-  retained <- turn owner $ Text.unlines
+  void $ turn owner $ Text.unlines
     [ "inspectFull (case result of { M.Published checked previous evidence -> checked == " <> gitOidLiteral before <> " && previous == checked && M.integrationHead evidence == checked && M.integrationArgv evidence == command && M.integrationPassed evidence && Cmd.stdout (M.integrationReceipt evidence) == Right \"zero-tests\" && case reverse (M.mergeHistory view) of { M.MergeHistory _ _ (M.IntegrationPublished _ retained) : _ -> retained == evidence; _ -> False }; _ -> False })"
     ]
-  check "green publication retains exact command evidence without claiming test execution"
-    (lastOutput retained == "True")
-  classified <- turn owner $ Text.unlines
+  assertCell owner "green publication retains exact command evidence without claiming tests"
+    ("(case result of { M.Published checked previous evidence -> checked == " <> gitOidLiteral before <> " && previous == checked && M.integrationHead evidence == checked && M.integrationArgv evidence == command && M.integrationPassed evidence && Cmd.stdout (M.integrationReceipt evidence) == Right \"zero-tests\" && case reverse (M.mergeHistory view) of { M.MergeHistory _ _ (M.IntegrationPublished _ retained) : _ -> retained == evidence; _ -> False }; _ -> False })")
+  void $ turn owner $ Text.unlines
     [ "inspectFull (case result of { M.Published _ _ evidence -> let original = M.integrationReceipt evidence; completion = Cmd.commandResult original; retained = original { Cmd.commandResult = completion { Cmd.commandCleanup = Cmd.CommandRetained } }; unknown = original { Cmd.commandResult = completion { Cmd.commandCleanup = Cmd.CommandCleanupUnknown \"unconfirmed\" } }; failed = original { Cmd.commandResult = completion { Cmd.commandOutcome = Cmd.CommandExited 9 } } in all (not . M.integrationPassed) [evidence { M.integrationReceipt = retained }, evidence { M.integrationReceipt = unknown }, evidence { M.integrationReceipt = failed }]; _ -> False })"
     ]
-  check "retained cleanup, unknown cleanup and nonzero exit cannot be green"
-    (lastOutput classified == "True")
+  assertCell owner "retained, unknown cleanup and failed exit cannot be green"
+    ("(case result of { M.Published _ _ evidence -> let original = M.integrationReceipt evidence; completion = Cmd.commandResult original; retained = original { Cmd.commandResult = completion { Cmd.commandCleanup = Cmd.CommandRetained } }; unknown = original { Cmd.commandResult = completion { Cmd.commandCleanup = Cmd.CommandCleanupUnknown \"unconfirmed\" } }; failed = original { Cmd.commandResult = completion { Cmd.commandOutcome = Cmd.CommandExited 9 } } in all (not . M.integrationPassed) [evidence { M.integrationReceipt = retained }, evidence { M.integrationReceipt = unknown }, evidence { M.integrationReceipt = failed }]; _ -> False })")
   void $ turn owner "R.finish merger"
 
 -- A failed pre-merge Git lookup must remain a failure, never become an empty
@@ -121,21 +140,23 @@ commandFailure :: Member RecipeCheck effects => Eff effects ()
 commandFailure = do
   owner <- root
   before <- git owner ["rev-parse", "HEAD"]
-  observed <- turn owner $ Text.unlines
+  void $ turn owner $ Text.unlines
     [ "import qualified Exomonad.Contrib.Merge as M"
+    , "import qualified Project.MergeChecks as Fixture"
     , "Right sourceTree <- createWorktree (fromRef \"HEAD\" \"git-failure-source\")"
     , "Right integration <- createWorktree (fromRef \"HEAD\" \"git-failure\")"
     , "merger <- R.start (M.mergeInto (worktreeId integration) (Just \"recipe/missing-publication-branch\") [\"sh\", \"-c\", \"touch should-not-run\"])"
-    , "result <- R.call (M.publish (R.client merger)) (M.PublishRequest \"git failure\" (worktreeId sourceTree) " <> gitOidLiteral before <> " \"git failure\")"
+    , "let request = M.PublishRequest \"git failure\" (worktreeId sourceTree) " <> gitOidLiteral before <> " \"git failure\""
+    , "result <- R.call (M.publish (R.client merger)) request"
     , "headAfter <- worktreeHead integration"
-    , "inspectFull (headAfter == Right " <> gitOidLiteral before <> " && case result of { M.MergeFailed reason -> \"git rev-parse\" `T.isInfixOf` reason && \"CommandExited\" `T.isInfixOf` reason; _ -> False })"
+    , "view <- R.call (M.mergeView (R.client merger)) ()"
+    , "inspectFull (headAfter == Right " <> gitOidLiteral before <> " && case result of { M.MergeFailed _ -> case M.mergeHistory view of { [M.MergeHistory _ candidate (M.PublishFailed _)] -> candidate == Just (M.publishCandidate request); _ -> False }; _ -> False })"
     ]
-  check "failed Git lookup produces MergeFailed and preserves the head"
-    (lastOutput observed == "True")
-  pathResult <- turn owner "cwd (handleReceipt integration)"
-  let path = Text.dropAround (== '"') (Text.strip (lastOutput pathResult))
-  status <- git owner ["-C", path, "status", "--short"]
-  check "the integration command never ran after the failed Git lookup" (Text.null status)
+  assertCell owner "failed Git lookup preserves head and admits no integration command"
+    ("(headAfter == Right " <> gitOidLiteral before <> " && case result of { M.MergeFailed _ -> case M.mergeHistory view of { [M.MergeHistory _ candidate (M.PublishFailed _)] -> candidate == Just (M.publishCandidate request); _ -> False }; _ -> False })")
+  void $ turn owner "integrationProbe <- R.start (R.withWorktree (worktreeId integration) Fixture.mergeProbe)\nstatus <- R.call (Fixture.probeCommand (R.client integrationProbe)) [\"git\", \"status\", \"--short\"]\nR.finish integrationProbe"
+  assertCell owner "integration command never ran after failed Git lookup"
+    "Cmd.stdout status == Right \"\""
   void $ turn owner "R.finish merger"
 
 -- A successful command that changes HEAD has not checked the head it leaves
@@ -146,18 +167,19 @@ checkedHeadChanged = do
   before <- git owner ["rev-parse", "HEAD"]
   let branch = "recipe/changed-check-head"
   void $ git owner ["branch", branch, before]
-  observed <- turn owner $ Text.unlines
+  void $ turn owner $ Text.unlines
     [ "import qualified Exomonad.Contrib.Merge as M"
+    , "import qualified Project.MergeChecks as Fixture"
     , "Right sourceTree <- createWorktree (fromRef \"HEAD\" \"changed-head-source\")"
     , "Right integration <- createWorktree (fromRef \"HEAD\" \"changed-head\")"
     , "merger <- R.start (M.mergeInto (worktreeId integration) (Just \"recipe/changed-check-head\") [\"git\", \"-c\", \"user.name=Recipe\", \"-c\", \"user.email=recipe@example.invalid\", \"commit\", \"--allow-empty\", \"-m\", \"unchecked command commit\"])"
     , "result <- R.call (M.publish (R.client merger)) (M.PublishRequest \"changed head\" (worktreeId sourceTree) " <> gitOidLiteral before <> " \"changed head\")"
     , "view <- R.call (M.mergeView (R.client merger)) ()"
     , "headAfter <- worktreeHead integration"
-    , "inspectFull (headAfter /= Right " <> gitOidLiteral before <> " && case (result, reverse (M.mergeHistory view)) of { (M.MergeBlocked reason, M.MergeHistory _ _ (M.IntegrationBlocked evidence _) : _) -> \"changed HEAD\" `T.isInfixOf` reason && M.integrationHead evidence == " <> gitOidLiteral before <> " && M.integrationPassed evidence; _ -> False })"
+    , "inspectFull (headAfter /= Right " <> gitOidLiteral before <> " && case (result, reverse (M.mergeHistory view)) of { (M.MergeBlocked _, M.MergeHistory _ _ (M.IntegrationBlocked evidence _) : _) -> M.integrationHead evidence == " <> gitOidLiteral before <> " && M.integrationPassed evidence; _ -> False })"
     ]
-  check "changed HEAD blocks publication while the original successful receipt remains retained"
-    (lastOutput observed == "True")
+  assertCell owner "changed HEAD blocks publication retaining original checked receipt"
+    ("(headAfter /= Right " <> gitOidLiteral before <> " && case (result, reverse (M.mergeHistory view)) of { (M.MergeBlocked _, M.MergeHistory _ _ (M.IntegrationBlocked evidence _) : _) -> M.integrationHead evidence == " <> gitOidLiteral before <> " && M.integrationPassed evidence; _ -> False })")
   published <- git owner ["rev-parse", "refs/heads/" <> branch]
   check "the unchecked command commit was not published" (published == before)
   void $ turn owner "R.finish merger"
@@ -170,8 +192,9 @@ dirtyAfterSuccess = do
   before <- checkpoint owner "checked-source.txt" "committed source\n" "source before successful dirty check"
   let branch = "recipe/dirty-success"
   void $ git owner ["branch", branch, before]
-  observed <- turn owner $ Text.unlines
+  void $ turn owner $ Text.unlines
     [ "import qualified Exomonad.Contrib.Merge as M"
+    , "import qualified Project.MergeChecks as Fixture"
     , "import Tidepool.Worktree (SubmissionObservation (..), WorkingState (..), DirtySummary (..))"
     , "Right sourceTree <- createWorktree (fromRef \"HEAD\" \"dirty-success-source\")"
     , "Right integration <- createWorktree (fromRef \"HEAD\" \"dirty-success\")"
@@ -180,15 +203,13 @@ dirtyAfterSuccess = do
     , "result <- R.call (M.publish (R.client merger)) (M.PublishRequest \"dirty source\" (worktreeId sourceTree) " <> gitOidLiteral before <> " \"dirty source\")"
     , "view <- R.call (M.mergeView (R.client merger)) ()"
     , "headAfter <- worktreeHead integration"
-    , "inspectFull (headAfter == Right " <> gitOidLiteral before <> " && case (result, reverse (M.mergeHistory view)) of { (M.MergeBlocked reason, M.MergeHistory _ _ (M.IntegrationBlocked evidence _) : _) -> \"dirty or in progress\" `T.isInfixOf` reason && M.integrationHead evidence == " <> gitOidLiteral before <> " && M.integrationArgv evidence == command && M.integrationPassed evidence && Cmd.stdout (M.integrationReceipt evidence) == Right \"successful-dirty-check\" && case M.integrationSubmission evidence of { Just submission -> case changes (workingState submission) of { DirtySummary staged unstaged untracked _ -> all (not . null) [staged, unstaged, untracked] }; Nothing -> False }; _ -> False })"
+    , "inspectFull (headAfter == Right " <> gitOidLiteral before <> " && case (result, reverse (M.mergeHistory view)) of { (M.MergeBlocked _, M.MergeHistory _ _ (M.IntegrationBlocked evidence _) : _) -> M.integrationHead evidence == " <> gitOidLiteral before <> " && M.integrationArgv evidence == command && M.integrationPassed evidence && Cmd.stdout (M.integrationReceipt evidence) == Right \"successful-dirty-check\" && case M.integrationSubmission evidence of { Just submission -> case changes (workingState submission) of { DirtySummary staged unstaged untracked _ -> all (not . null) [staged, unstaged, untracked] }; Nothing -> False }; _ -> False })"
     ]
-  check "successful command with unchanged HEAD retains dirty source proof and blocks publication"
-    (lastOutput observed == "True")
+  assertCell owner "successful command retains dirty source proof and blocks publication"
+    ("(headAfter == Right " <> gitOidLiteral before <> " && case (result, reverse (M.mergeHistory view)) of { (M.MergeBlocked _, M.MergeHistory _ _ (M.IntegrationBlocked evidence _) : _) -> M.integrationHead evidence == " <> gitOidLiteral before <> " && M.integrationArgv evidence == command && M.integrationPassed evidence && Cmd.stdout (M.integrationReceipt evidence) == Right \"successful-dirty-check\" && case M.integrationSubmission evidence of { Just submission -> case changes (workingState submission) of { DirtySummary staged unstaged untracked _ -> all (not . null) [staged, unstaged, untracked] }; Nothing -> False }; _ -> False })")
   published <- git owner ["rev-parse", "refs/heads/" <> branch]
   check "dirty tested source is not published as its original commit" (published == before)
-  pathResult <- turn owner "cwd (handleReceipt integration)"
-  let path = Text.dropAround (== '"') (Text.strip (lastOutput pathResult))
-  status <- git owner ["-C", path, "status", "--short"]
-  check "blocked publication preserves both tracked and untracked check edits"
-    ("MM checked-source.txt" `Text.isInfixOf` status && "?? unchecked-source.txt" `Text.isInfixOf` status)
+  void $ turn owner "integrationProbe <- R.start (R.withWorktree (worktreeId integration) Fixture.mergeProbe)\nstatus <- R.call (Fixture.probeCommand (R.client integrationProbe)) [\"git\", \"status\", \"--short\"]\nR.finish integrationProbe"
+  assertCell owner "text: blocked publication preserves tracked and untracked diagnostic edits"
+    "case Cmd.stdout status of { Right text -> \"MM checked-source.txt\" `T.isInfixOf` text && \"?? unchecked-source.txt\" `T.isInfixOf` text; _ -> False }"
   void $ turn owner "R.finish merger"

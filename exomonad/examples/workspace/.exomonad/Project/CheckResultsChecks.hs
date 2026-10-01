@@ -31,23 +31,25 @@ import Exomonad.Contrib.CheckResults
 preparedCompletion :: Member RecipeCheck effects => Eff effects ()
 preparedCompletion = do
   owner <- root
-  concrete <- turn owner "import SessionHelpers\nlet candidateOid = \"0123456789abcdef0123456789abcdef01234567\" :: GitOid\nconcreteGate <- runCheck me candidateOid (Cmd.MiB 64) (CheckDefinition \"concrete invocation\" \"fixture\" \"lib\" \"one\" 0)\nconcreteGate"
-  check "session entrypoint infers effects without a cell annotation" ("NonPositiveExpected 0" `Text.isInfixOf` lastOutput concrete)
+  void $ turn owner "import SessionHelpers\nlet candidateOid = \"0123456789abcdef0123456789abcdef01234567\" :: GitOid\nconcreteGate <- runCheck me candidateOid (Cmd.MiB 64) (CheckDefinition \"concrete invocation\" \"fixture\" \"lib\" \"one\" 0)\nconcreteGate"
+  assertCell owner "session entrypoint infers effects without cell annotation"
+    "case concreteGate of { GateSetupRefused (NonPositiveExpected 0) -> True; _ -> False }"
   void $ turn owner "let spec = FocusedSpec \"prepared fixture\" \"fixture-source\" \"fixture-package\" \"lib\" \"fixture::one\" 1"
   void $ turn owner "Right failedPreparation <- startFocusedAfterWith [\"scripts/cargo-focused-test\"] (Cmd.MiB 256) spec [\"sh\", \"-c\", \"echo missing-assets >&2; exit 9\"]"
-  void $ awaitOutput owner "Cmd.status (runJob failedPreparation)" (Text.isInfixOf "CommandFinished")
-  failure <- turn owner "preparedFailure <- collectFocused failedPreparation\npreparedDiagnosis <- diagnoseFocused preparedFailure\n(focusedPreparation preparedFailure, focusedEvidencePath preparedFailure, diagnosisBranch preparedDiagnosis, focusedExecution preparedFailure)"
-  check "failed preparation prevents test execution and retains its own classification"
-    (all (`Text.isInfixOf` lastOutput failure) ["PreparationFailed 9", "Nothing", "SetupIncomplete", "ExecutionUnknown"])
+  void $ turn owner "Cmd.await (runJob failedPreparation)"
+  void $ turn owner "preparedFailure <- collectFocused failedPreparation\npreparedDiagnosis <- diagnoseFocused preparedFailure\n(focusedPreparation preparedFailure, focusedEvidencePath preparedFailure, diagnosisBranch preparedDiagnosis, focusedExecution preparedFailure)"
+  assertCell owner "failed preparation prevents tests retaining exact classification"
+    "focusedPreparation preparedFailure == PreparationFailed 9 && focusedEvidencePath preparedFailure == Nothing && diagnosisBranch preparedDiagnosis == SetupIncomplete && focusedExecution preparedFailure == ExecutionUnknown && Cmd.completedJob (focusedCommand preparedFailure) == runJob failedPreparation"
   void $ turn owner "Right successfulPreparation <- startFocusedAfterWith [\"scripts/cargo-focused-test\"] (Cmd.MiB 256) spec [\"sh\", \"-c\", \"printf prepared\"]"
-  void $ awaitOutput owner "Cmd.status (runJob successfulPreparation)" (Text.isInfixOf "CommandFinished")
-  success <- turn owner "preparedSuccess <- collectFocused successfulPreparation\nfocusedPreparation preparedSuccess"
-  check "successful preparation is retained separately from the check result" (lastOutput success == "PreparationPassed")
+  void $ turn owner "Cmd.await (runJob successfulPreparation)"
+  void $ turn owner "preparedSuccess <- collectFocused successfulPreparation\nfocusedPreparation preparedSuccess"
+  assertCell owner "successful preparation remains separate from check result"
+    "focusedPreparation preparedSuccess == PreparationPassed && Cmd.completedJob (focusedCommand preparedSuccess) == runJob successfulPreparation"
   void $ turn owner "interrupted <- Cmd.background (Cmd.withStdin (Cmd.argv [\"sh\", \"-c\", \"read line\"]))\nCmd.cancel interrupted"
-  void $ awaitOutput owner "Cmd.status interrupted" (Text.isInfixOf "CommandFinished")
-  cancelled <- turn owner "cancelledResult <- collectFocused (PreparedFocusedRun spec interrupted)\n(focusedPreparation cancelledResult, focusedPassed cancelledResult)"
-  check "interrupted preparation never claims success" (all (`Text.isInfixOf` lastOutput cancelled) ["PreparationUnknown", "False"])
-
+  void $ turn owner "Cmd.await interrupted"
+  void $ turn owner "cancelledResult <- collectFocused (PreparedFocusedRun spec interrupted)\n(focusedPreparation cancelledResult, focusedPassed cancelledResult)"
+  assertCell owner "interrupted preparation never claims success"
+    "focusedPreparation cancelledResult == PreparationUnknown && not (focusedPassed cancelledResult) && Cmd.completedJob (focusedCommand cancelledResult) == interrupted"
 -- A completed job is attached late; two other jobs settle through the same
 -- record actor. The fixture uses the focused runner's retained JSON shape.
 completionRouting :: Member RecipeCheck effects => Eff effects ()
@@ -60,181 +62,153 @@ completionRouting = do
         , "late <- Cmd.background (fixture \"pass\")"
         ]
   void $ turn owner setup
-  planRefusals <- turn owner
+  void $ turn owner
     "let zero = PlanCheck { planName = \"zero\", planRunner = [\"scripts/cargo-focused-test\"], planSpec = const (spec { focusedExpected = 0 }), planMemory = Cmd.MiB 64, planPreparation = WithoutPreparation }\nlet empty = PlanCheck { planName = \"empty preparation\", planRunner = [\"scripts/cargo-focused-test\"], planSpec = const spec, planMemory = Cmd.MiB 64, planPreparation = PrepareWith (const []) }\nRight refusedPlan <- startCheckPlan me (\"0123456789abcdef0123456789abcdef01234567\" :: GitOid) [zero, empty]\nrefusedReport <- readCheckPlan refusedPlan\n(planPassed refusedReport, planSummary refusedReport, planWatcher refusedPlan)"
-  check "plan retains all setup refusals without admitting a command or watcher"
-    (all (`Text.isInfixOf` lastOutput planRefusals)
-      ["False", "not all requested checks ran", "NonPositiveExpected 0", "EmptyPreparation", "Nothing"])
-  duplicatePlan <- turn owner
+  assertCell owner "plan keeps all setup refusals admitting no command or watcher"
+    "not (planPassed refusedReport) && case (planStarts refusedPlan, planWatcher refusedPlan, planState refusedReport) of { ([(\"zero\", Left (NonPositiveExpected 0)), (\"empty preparation\", Left EmptyPreparation)], Nothing, Nothing) -> True; _ -> False }"
+  void $ turn owner
     "duplicate <- startCheckPlan me (\"0123456789abcdef0123456789abcdef01234567\" :: GitOid) [zero, zero]\ncase duplicate of { Left (DuplicateCheckName \"zero\") -> True; _ -> False }"
-  check "duplicate plan names refuse before any submission" (lastOutput duplicatePlan == "True")
-  invalidCount <- turn owner
+  assertCell owner "duplicate plan refuses before submission"
+    "case duplicate of { Left (DuplicateCheckName \"zero\") -> True; _ -> False }"
+  void $ turn owner
     "bad <- startFocusedWith [\"scripts/cargo-focused-test\"] (Cmd.MiB 256) (spec { focusedExpected = 0 })\ncase bad of { Left (NonPositiveExpected 0) -> True; _ -> False }"
-  check "zero expected tests are rejected before command submission" (lastOutput invalidCount == "True")
-  emptyRunner <- turn owner
+  assertCell owner "zero expected tests refuse before submission"
+    "case bad of { Left (NonPositiveExpected 0) -> True; _ -> False }"
+  void $ turn owner
     "bad <- startFocusedWith [] (Cmd.MiB 256) spec\ncase bad of { Left EmptyRunner -> True; _ -> False }"
-  check "an empty runner is rejected before command submission" (lastOutput emptyRunner == "True")
-  literalRunner <- turn owner $ Text.unlines
+  assertCell owner "empty runner refuses before submission"
+    "case bad of { Left EmptyRunner -> True; _ -> False }"
+  void $ turn owner $ Text.unlines
     [ "let runner = [\"bash\", " <> Text.pack (show fixture) <> ", \"argv\", \"literal runner ; $(false) \\\"quotes\\\"\"]"
     , "let preparation = [\"sh\", \"-c\", \"test \\\"$1\\\" = 'literal preparation ; $(false)'\", \"focused-preparation\", \"literal preparation ; $(false)\"]"
     , "Right configured <- startFocusedAfterWith runner (Cmd.MiB 256) spec preparation"
     , "configuredResult <- collectFocused configured"
     , "(focusedPassed configuredResult, focusedPreparation configuredResult)"
     ]
-  check "configured runner and preparation argv preserve spaces, quotes and shell syntax literally"
-    ("(True,PreparationPassed)" `Text.isInfixOf` Text.filter (/= ' ') (lastOutput literalRunner))
-  invalidCheckout <- turn owner
+  assertCell owner "runner and preparation argv retain literal spaces, quotes and shell syntax"
+    "focusedPassed configuredResult && focusedPreparation configuredResult == PreparationPassed"
+  void $ turn owner
     "bad <- startFocusedInWith [\"scripts/cargo-focused-test\"] \"relative\" (Cmd.MiB 256) spec\ncase bad of { Left (NonAbsoluteCheckout \"relative\") -> True; _ -> False }"
-  check "focused run refuses a relative checkout before submission" (lastOutput invalidCheckout == "True")
-  invalid <- turn owner "invalid <- watchChecks me NotifySummary []\ncase invalid of { Left NoFocusedChecks -> True; _ -> False }"
-  check "empty watcher has a typed refusal" (lastOutput invalid == "True")
-  duplicate <- turn owner
+  assertCell owner "relative checkout refuses before submission"
+    "case bad of { Left (NonAbsoluteCheckout \"relative\") -> True; _ -> False }"
+  void $ turn owner "invalid <- watchChecks me NotifySummary []\ncase invalid of { Left NoFocusedChecks -> True; _ -> False }"
+  assertCell owner "empty watcher returns typed refusal"
+    "case invalid of { Left NoFocusedChecks -> True; _ -> False }"
+  void $ turn owner
     "duplicate <- watchChecks me NotifySummary [(\"same\", FocusedRun spec late), (\"same\", FocusedRun spec late)]\ncase duplicate of { Left (DuplicateCheckName \"same\") -> True; _ -> False }"
-  check "duplicate watcher names have a typed refusal" (lastOutput duplicate == "True")
-  void $ awaitOutput owner "Cmd.status late" (Text.isInfixOf "CommandFinished")
-  recovered <- turn owner
+  assertCell owner "duplicate watcher names return typed refusal"
+    "case duplicate of { Left (DuplicateCheckName \"same\") -> True; _ -> False }"
+  void $ turn owner "Cmd.await late"
+  void $ turn owner
     "recovered <- reopenGate me \"recovered\" (FocusedRun spec late)\ncase recovered of { GateWatching run _ -> runJob run == late; _ -> False }"
-  check "a later notebook cell reattaches the original job without submission"
-    (lastOutput recovered == "True")
-  recoveredResult <- awaitOutput owner
-    "case recovered of { GateWatching _ handle -> do { state <- readChecks handle; pure (checksSummary state) }; _ -> pure \"refused\" }"
-    (Text.isInfixOf "recovered: passed")
-  check "reopened completed job retains its terminal evidence"
-    ("recovered: passed" `Text.isInfixOf` recoveredResult)
-  direct <- turn owner
+  assertCell owner "later cell reattaches original job without resubmission"
+    "case recovered of { GateWatching run _ -> runJob run == late && runSpec run == spec; _ -> False }"
+  awaitCell owner "reopened completed job keeps its terminal evidence"
+    "case recovered of { GateWatching run handle -> do { state <- readChecks handle; pure (case checkEntries state of { [entry] -> runJob (checkRun entry) == runJob run && case checkOutcome entry of { Just outcome -> checkVerdict entry outcome == CheckPassed && checkEvidenceComplete entry outcome; _ -> False }; _ -> False }) }; _ -> pure False }"
+  void $ turn owner
     "original <- collectFocused (FocusedRun spec late)\n(focusedPassed original, Cmd.completedJob (focusedCommand original) == late, focusedPreparation original)"
-  check "direct recovery reads the original completion and its preparation state"
-    ("(True,True,NoPreparation)" `Text.isInfixOf` Text.filter (/= ' ') (lastOutput direct))
-  originalPacket <- turn owner
+  assertCell owner "direct recovery reads original completion and preparation state"
+    "focusedPassed original && Cmd.completedJob (focusedCommand original) == late && focusedPreparation original == NoPreparation"
+  void $ turn owner
     "original <- collectFocused (FocusedRun spec late)\nfocusedResultSummary (FocusedRun spec late) original"
-  check "recovered packet names the original job and both retained stream references"
-    (all (`Text.isInfixOf` lastOutput originalPacket)
-      ["original job", "requested source fixture-source", "recorded source fixture-source", "output refs Stdout", "Stderr", "executed 1 passed"])
-  unclean <- turn owner
+  assertCell owner "text: recovered packet names original job and both retained streams"
+    "all (\\part -> part `T.isInfixOf` (focusedResultSummary (FocusedRun spec late) original)) [\"original job\", \"requested source fixture-source\", \"recorded source fixture-source\", \"output refs Stdout\", \"Stderr\", \"executed 1 passed\"]"
+  void $ turn owner
     "original <- collectFocused (FocusedRun spec late)\nlet Cmd.Finished job _ output = focusedCommand original\nlet retained = original { focusedCommand = Cmd.Finished job (Cmd.CommandResult (Cmd.CommandExited 0) Cmd.CommandRetained) output }\n(focusedExecution retained, focusedPassed retained)"
-  check "a passing original check with retained cleanup is not accepted"
-    ("(ExecutionPassed1,False)" `Text.isInfixOf` Text.filter (/= ' ') (lastOutput unclean))
-  mistakenPreparation <- turn owner
+  assertCell owner "passing original check with retained cleanup cannot be accepted"
+    "focusedExecution retained == ExecutionPassed 1 && not (focusedPassed retained)"
+  void $ turn owner
     "original <- collectFocused (PreparedFocusedRun spec late)\n(focusedPreparation original, focusedPassed original)"
-  check "recovery cannot claim unrecorded preparation succeeded"
-    ("(PreparationUnknown,False)" `Text.isInfixOf` Text.filter (/= ' ') (lastOutput mistakenPreparation))
-  wrongSource <- turn owner
+  assertCell owner "recovery never claims unrecorded preparation passed"
+    "focusedPreparation original == PreparationUnknown && not (focusedPassed original)"
+  void $ turn owner
     "wrong <- collectFocused (FocusedRun (spec { focusedSource = \"other-source\" }) late)\n(focusedSourceAssurance wrong, focusedPassed wrong)"
-  check "recovered original job does not prove a different source"
-    ("(SourceDifferent(Just\"fixture-source\"),False)" `Text.isInfixOf`
-      Text.filter (/= ' ') (lastOutput wrongSource))
-  wrongPacket <- turn owner
+  assertCell owner "original job cannot prove another source"
+    "focusedSourceAssurance wrong == SourceDifferent (Just \"fixture-source\") && not (focusedPassed wrong) && Cmd.completedJob (focusedCommand wrong) == late"
+  void $ turn owner
     "wrong <- collectFocused (FocusedRun (spec { focusedSource = \"other-source\" }) late)\nfocusedResultSummary (FocusedRun (spec { focusedSource = \"other-source\" }) late) wrong"
-  check "wrong-source packet carries requested and recorded source without claiming assurance"
-    (all (`Text.isInfixOf` lastOutput wrongPacket)
-      ["requested source other-source", "recorded source fixture-source", "source different"])
+  assertCell owner "text: wrong-source packet names requested and recorded source"
+    "all (\\part -> part `T.isInfixOf` (focusedResultSummary (FocusedRun (spec { focusedSource = \"other-source\" }) late) wrong)) [\"requested source other-source\", \"recorded source fixture-source\", \"source different\"]"
   void $ turn owner
     "Right partialWatcher <- watchChecksWithRefusals me NotifySummary [(\"refused\", NonPositiveExpected 0)] [(\"late\", FocusedRun spec late)]"
-  partial <- awaitOutput owner
-    "partialState <- readChecks partialWatcher\nlet partialPlan = PlanStart [(\"refused\", Left (NonPositiveExpected 0)), (\"late\", Right (FocusedRun spec late))] (Just (Right partialWatcher))\nlet partialReport = PlanReport partialPlan (Just partialState)\n(planPassed partialReport, planSummary partialReport, length (checkNotices partialState))"
-    (Text.isInfixOf "late: passed")
-  check ("partial admission keeps the passed original but refuses whole-plan acceptance: " <> Text.take 200 partial)
-    (all (`Text.isInfixOf` partial)
-      ["False", "not all requested checks ran", "refused: start refused", "late: passed", "original job", "output refs Stdout"])
+  awaitCell owner "partial admission retains original pass while refusing whole plan"
+    "do { partialState <- readChecks partialWatcher; let { partialPlan = PlanStart [(\"refused\", Left (NonPositiveExpected 0)), (\"late\", Right (FocusedRun spec late))] (Just (Right partialWatcher)); partialReport = PlanReport partialPlan (Just partialState) }; pure (not (planPassed partialReport) && length (checkNotices partialState) == 1 && case checkEntries partialState of { [entry] -> runJob (checkRun entry) == late && case checkOutcome entry of { Just outcome -> checkVerdict entry outcome == CheckPassed && checkEvidenceComplete entry outcome; _ -> False }; _ -> False }) }"
   void $ turn owner "finishChecks partialWatcher"
   void $ turn owner "case recovered of { GateWatching _ handle -> finishChecks handle >> pure (); _ -> pure () }"
   void $ turn owner
     "failed <- Cmd.background (fixture \"fail\")\nunknown <- Cmd.background (fixture \"unknown\")\nRight watcher <- watchChecks me NotifyProblems [(\"late\", FocusedRun spec late), (\"failed\", FocusedRun spec failed), (\"unknown\", FocusedRun spec unknown)]"
-  observed <- awaitOutput owner
-    "view <- readChecks watcher\nmap (\\entry -> fmap (checkVerdict entry) (checkOutcome entry)) (checkEntries view)"
-    (\text -> Text.count "Just " text == 3)
-  check ("late completion, failed exit and missing evidence all settle: " <> observed)
-    (all (`Text.isInfixOf` observed) ["Just CheckPassed", "Just CheckFailed", "Just CheckUnknown"])
-  details <- turn owner
+  awaitCell owner "late completion, failed exit and missing evidence all settle"
+    "do { view <- readChecks watcher; pure (map (\\entry -> fmap (checkVerdict entry) (checkOutcome entry)) (checkEntries view) == [Just CheckPassed, Just CheckFailed, Just CheckUnknown]) }"
+  void $ turn owner
     "view <- readChecks watcher\n[(Exomonad.Contrib.CheckResults.checkName e, fmap (Cmd.commandCleanup . checkCompletion) (checkOutcome e), fmap (focusedEvidence . checkFocused) (checkOutcome e)) | e <- checkEntries view]"
-  check "completion keeps cleanup and parsed evidence separately"
-    (all (`Text.isInfixOf` output details) ["CommandClean", "fixture-digest", "focused runner did not report"])
-  mismatch <- turn owner
+  assertCell owner "completion keeps cleanup and parsed evidence separately"
+    "case checkEntries view of { [passed, failed, unknown] -> all (\\entry -> case checkOutcome entry of { Just outcome -> Cmd.commandCleanup (checkCompletion outcome) == Cmd.CommandClean; _ -> False }) [passed,failed,unknown] && all (\\entry -> case checkOutcome entry of { Just outcome -> case focusedEvidence (checkFocused outcome) of { Right record -> recordDigest record == \"fixture-digest\"; _ -> False }; _ -> False }) [passed,failed] && case checkOutcome unknown of { Just outcome -> case focusedEvidence (checkFocused outcome) of { Left _ -> True; _ -> False }; _ -> False }; _ -> False }"
+  void $ turn owner
     "view <- readChecks watcher\nlet [passEntry, failEntry, _] = checkEntries view\nlet Just passOutcome = checkOutcome passEntry\nlet Just failOutcome = checkOutcome failEntry\nlet invalid = passOutcome { checkCompletion = checkCompletion failOutcome }\nlet FocusedRun _ wrongJob = checkRun failEntry\nlet Cmd.Finished _ result output = focusedCommand (checkFocused passOutcome)\nlet forged = (checkFocused passOutcome) { focusedCommand = Cmd.Finished wrongJob result output }\nlet invalidJob = passOutcome { checkFocused = forged }\n(checkExecution passEntry invalid, checkSourceAssurance passEntry invalid, checkExecution passEntry invalidJob, checkSourceAssurance passEntry invalidJob)"
-  check "mismatched terminal receipt or job cannot verify execution or source"
-    ("(ExecutionUnknown,SourceUnrecorded,ExecutionUnknown,SourceUnrecorded)"
-      `Text.isInfixOf` Text.filter (/= ' ') (lastOutput mismatch))
-  complete <- turn owner
+  assertCell owner "mismatched terminal receipt or job cannot verify execution or source"
+    "all (\\outcome -> checkExecution passEntry outcome == ExecutionUnknown && checkSourceAssurance passEntry outcome == SourceUnrecorded) [invalid, invalidJob]"
+  void $ turn owner
     "view <- readChecks watcher\nlet [passEntry, failEntry, unknownEntry] = checkEntries view\nlet Just passOutcome = checkOutcome passEntry\nlet Just failOutcome = checkOutcome failEntry\nlet Just unknownOutcome = checkOutcome unknownEntry\n(checkEvidenceComplete passEntry passOutcome, checkEvidenceComplete failEntry failOutcome, checkEvidenceComplete unknownEntry unknownOutcome, checkEvidenceComplete passEntry failOutcome, checkEvidenceComplete failEntry (failOutcome { checkCompletion = checkCompletion passOutcome }))"
-  check "complete proof accepts counted success and assertion failure only for their original jobs"
-    ("(True,True,False,False,False)" `Text.isInfixOf` Text.filter (/= ' ') (lastOutput complete))
-  malformedSelection <- turn owner
+  assertCell owner "counted success and assertion failure prove only original jobs"
+    "checkEvidenceComplete passEntry passOutcome && checkEvidenceComplete failEntry failOutcome && not (checkEvidenceComplete unknownEntry unknownOutcome) && not (checkEvidenceComplete passEntry failOutcome) && not (checkEvidenceComplete failEntry (failOutcome { checkCompletion = checkCompletion passOutcome }))"
+  void $ turn owner
     "original <- collectFocused (FocusedRun spec late)\nlet Right record = focusedEvidence original\nlet changed record = original { focusedEvidence = Right record }\nlet selections = [record { recordMatched = Nothing }, record { recordMatched = Just [\"other::one\"] }, record { recordMatched = Just [\"fixture::one\", \"fixture::one\"] }]\n(map (focusedExecution . changed) selections, map (focusedPassed . changed) selections)"
-  check "observed execution counts stay distinct from missing, mismatched or duplicate selection proof"
-    ("([ExecutionPassed1,ExecutionPassed1,ExecutionPassed1],[False,False,False])"
-      `Text.isInfixOf` Text.filter (/= ' ') (lastOutput malformedSelection))
-  duplicatedSelection <- turn owner
+  assertCell owner "execution counts remain separate from malformed selection proof"
+    "map (focusedExecution . changed) selections == replicate 3 (ExecutionPassed 1) && all (not . focusedPassed . changed) selections"
+  void $ turn owner
     "original <- collectFocused (FocusedRun spec late)\nlet Right record = focusedEvidence original\nlet duplicate = original { focusedSpec = spec { focusedExpected = 2 }, focusedEvidence = Right (record { recordMatched = Just [\"fixture::one\", \"fixture::one\"], recordRunnable = Just [\"fixture::one\", \"fixture::one\"], recordSummaries = Just [[2,0,0,0,0]] }) }\n(focusedExecution duplicate, focusedEvidenceComplete duplicate, focusedPassed duplicate)"
-  check "matching duplicated names and counts cannot prove two distinct requested tests"
-    ("(ExecutionPassed2,False,False)" `Text.isInfixOf` Text.filter (/= ' ') (lastOutput duplicatedSelection))
-  incompleteFailure <- turn owner
+  assertCell owner "duplicate names and counts cannot prove two distinct requested tests"
+    "focusedExecution duplicate == ExecutionPassed 2 && not (focusedEvidenceComplete duplicate) && not (focusedPassed duplicate)"
+  void $ turn owner
     "view <- readChecks watcher\nlet [_, entry, _] = checkEntries view\nlet Just outcome = checkOutcome entry\nlet focused = checkFocused outcome\nlet Right record = focusedEvidence focused\nlet Cmd.Finished job receipt output = focusedCommand focused\nlet retainedReceipt = receipt { Cmd.commandCleanup = Cmd.CommandRetained }\nlet changed record = outcome { checkFocused = focused { focusedEvidence = Right record } }\nlet retained = outcome { checkCompletion = retainedReceipt, checkFocused = focused { focusedCommand = Cmd.Finished job retainedReceipt output } }\nlet unknownPreparation = outcome { checkFocused = focused { focusedPreparation = PreparationUnknown } }\nmap (checkEvidenceComplete entry) [changed (record { recordMatched = Just [\"other::one\"] }), changed (record { recordExitCode = Just 2 }), changed (record { recordSource = Just \"other-source\" }), changed (record { recordSummaries = Just [[0,0,0,0,0]] }), retained, unknownPreparation]"
-  check "failure proof requires selection, matching exit, exact source, counts, cleanup and preparation"
-    ("[False,False,False,False,False,False]" `Text.isInfixOf` Text.filter (/= ' ') (lastOutput incompleteFailure))
-  unavailableDiagnostic <- turn owner
+  assertCell owner "failure proof needs selection, exit, exact source, counts, cleanup and preparation"
+    "all (not . checkEvidenceComplete entry) [changed (record { recordMatched = Just [\"other::one\"] }), changed (record { recordExitCode = Just 2 }), changed (record { recordSource = Just \"other-source\" }), changed (record { recordSummaries = Just [[0,0,0,0,0]] }), retained, unknownPreparation]"
+  void $ turn owner
     "view <- readChecks watcher\nlet [_, entry, _] = checkEntries view\nlet Just outcome = checkOutcome entry\nlet focused = checkFocused outcome\nlet Cmd.Finished job receipt _ = focusedCommand focused\nlet unavailable = focused { focusedCommand = Cmd.Finished job receipt (Left (Cmd.CommandUnavailable \"fixture capture refused\")) }\ndiagnosis <- diagnoseFocused unavailable\n(diagnosisBranch diagnosis, diagnosisExcerpt diagnosis, Cmd.stderr (focusedCommand unavailable))"
-  check "unavailable command capture retains its refusal instead of an empty diagnostic"
-    (all (`Text.isInfixOf` lastOutput unavailableDiagnostic)
-      ["AssertionsFailed 0 1", "Left", "focused command output is unavailable", "OutputUnavailable", "fixture capture refused"])
-  productFailure <- turn owner
+  assertCell owner "unavailable command capture retains refusal independently of counted failure"
+    "diagnosisBranch diagnosis == AssertionsFailed 0 1 && case (diagnosisExcerpt diagnosis, Cmd.stderr (focusedCommand unavailable)) of { (Left _, Left (Cmd.OutputUnavailable refusedJob (Cmd.CommandUnavailable _))) -> refusedJob == job; _ -> False }"
+  void $ turn owner
     "view <- readChecks watcher\nlet [_, failedEntry, _] = checkEntries view\nlet Just failedOutcome = checkOutcome failedEntry\ndiagnosis <- diagnoseFocused (checkFocused failedOutcome)\n(diagnosisBranch diagnosis, diagnosisExcerpt diagnosis)"
-  check "assertion failure diagnosis retains a bounded output excerpt"
-    (all (`Text.isInfixOf` lastOutput productFailure) ["AssertionsFailed 0 1", "fixture diagnostic"])
-  notices <- turn owner "length . checkNotices <$> readChecks watcher"
-  -- The offline driver refuses delivery. These prove attempted, retained
-  -- notifications and policy selection, not successful inbox delivery.
-  check "problem policy records only failed and unknown notice attempts" (output notices == "2")
+  assertCell owner "text: assertion failure diagnosis retains bounded diagnostic excerpt"
+    "diagnosisBranch diagnosis == AssertionsFailed 0 1 && case diagnosisExcerpt diagnosis of { Right excerpt -> T.length excerpt <= 8192 && \"fixture diagnostic\" `T.isInfixOf` excerpt; _ -> False }"
+  awaitCell owner "problem policy keeps only failed and unknown notice attempts"
+    "do { view <- readChecks watcher; pure (map checkNoticeName (checkNotices view) == [Just \"failed\", Just \"unknown\"] || map checkNoticeName (checkNotices view) == [Just \"unknown\", Just \"failed\"]) }"
   void $ turn owner "finishChecks watcher"
 
   void $ turn owner
     "Right summarizer <- watchChecks me NotifySummary [(\"late\", FocusedRun spec late), (\"failed\", FocusedRun spec failed)]"
-  summary <- awaitOutput owner
-    "view <- readChecks summarizer\nif length (checkNotices view) == 1 then checksSummary view else \"pending\""
-    (Text.isInfixOf "late: passed")
-  check "aggregate policy records one named summary attempt after late completions"
-    (all (`Text.isInfixOf` summary) ["late: passed", "failed: failed", "matched 1", "runnable 1", "CommandExited 0", "CommandClean", "; artifact /"])
-  handoff <- turn owner
+  awaitCell owner "aggregate policy keeps one summary attempt after original completions"
+    "do { view <- readChecks summarizer; pure (length (checkNotices view) == 1 && map checkNoticeName (checkNotices view) == [Nothing] && map (\\entry -> fmap (checkVerdict entry) (checkOutcome entry)) (checkEntries view) == [Just CheckPassed, Just CheckFailed] && all (\\entry -> case checkOutcome entry of { Just outcome -> checkEvidenceComplete entry outcome; _ -> False }) (checkEntries view)) }"
+  void $ turn owner
     "import Project.HandoffExamples\nview <- readChecks summarizer\nhandoffProposal (Blocked \"pending handoff\" []) Nothing view []"
-  check "parent handoff includes complete original check packets"
-    (all (`Text.isInfixOf` lastOutput handoff)
-      ["Observed checks:", "late: passed", "failed: failed", "original job", "output refs Stdout", "runner counts"])
+  assertCell owner "text: parent handoff includes original check packets"
+    "all (\\part -> part `T.isInfixOf` (handoffProposal (Blocked \"pending handoff\" []) Nothing view [])) [\"Observed checks:\", \"late: passed\", \"failed: failed\", \"original job\", \"output refs Stdout\", \"runner counts\"]"
   void $ turn owner "finishChecks summarizer"
 
-  preparedFail <- turn owner
+  void $ turn owner
     "preparedFailedJob <- Cmd.background (fixture \"preparedfail\")\npreparedFailed <- collectFocused (PreparedFocusedRun spec preparedFailedJob)\n(focusedPassed preparedFailed, focusedResultSummary (PreparedFocusedRun spec preparedFailedJob) preparedFailed)"
-  check "packet separates passed preparation from failed terminal test"
-    (all (`Text.isInfixOf` lastOutput preparedFail)
-      ["False", "preparation PreparationPassed", "terminal CommandExited 1", "test phase runner reported", "executed 0 passed, 1 failed", "runner exit Just 1"])
-
+  assertCell owner "passed preparation stays separate from failed terminal test"
+    "not (focusedPassed preparedFailed) && focusedPreparation preparedFailed == PreparationPassed && focusedExecution preparedFailed == ExecutionFailed 0 1 && Cmd.commandOutcome (Cmd.commandResult (focusedCommand preparedFailed)) == Cmd.CommandExited 1 && case focusedEvidence preparedFailed of { Right record -> recordExitCode record == Just 1; _ -> False }"
   void $ turn owner
     "dirty <- Cmd.background (fixture \"dirty\")\nRight dirtyWatcher <- watchChecks me NotifyProblems [(\"dirty\", FocusedRun spec dirty)]"
-  dirty <- awaitOutput owner
-    "dirtyView <- readChecks dirtyWatcher\nchecksSummary dirtyView"
-    (Text.isInfixOf "source dirty")
-  check "executed pass remains visible when source assurance is dirty"
-    (all (`Text.isInfixOf` dirty) ["dirty: unknown", "executed 1 passed", "source dirty"])
+  awaitCell owner "executed pass stays visible when source assurance is dirty"
+    "do { view <- readChecks dirtyWatcher; pure (case checkEntries view of { [entry] -> case checkOutcome entry of { Just outcome -> checkVerdict entry outcome == CheckUnknown && checkExecution entry outcome == ExecutionPassed 1 && case checkSourceAssurance entry outcome of { SourceModified status -> not (T.null status); _ -> False }; _ -> False }; _ -> False }) }"
   void $ turn owner "finishChecks dirtyWatcher"
 
   void $ turn owner
     "missing <- Cmd.background (fixture \"missingfile\")\nRight missingWatcher <- watchChecks me NotifyProblems [(\"missing\", FocusedRun spec missing)]"
-  missing <- awaitOutput owner
-    "missingView <- readChecks missingWatcher\n[(checkVerdict e outcome, focusedEvidence (checkFocused outcome)) | e <- checkEntries missingView, Just outcome <- [checkOutcome e]]"
-    (Text.isInfixOf "did not retain its evidence record")
-  check "missing embedded evidence stays unknown without a second file read"
-    (all (`Text.isInfixOf` missing) ["CheckUnknown", "did not retain its evidence record"])
-  missingPacket <- turn owner
+  awaitCell owner "missing embedded evidence stays unknown"
+    "do { view <- readChecks missingWatcher; pure (case checkEntries view of { [entry] -> runJob (checkRun entry) == missing && case checkOutcome entry of { Just outcome -> checkVerdict entry outcome == CheckUnknown && checkExecution entry outcome == ExecutionUnknown && case focusedEvidence (checkFocused outcome) of { Left _ -> True; _ -> False }; _ -> False }; _ -> False }) }"
+  void $ turn owner
     "missingView <- readChecks missingWatcher\nchecksSummary missingView"
-  check "missing packet keeps original output references and marks counts unknown"
-    (all (`Text.isInfixOf` lastOutput missingPacket)
-      ["missing: unknown", "matched unknown", "executed unknown", "evidence unknown", "output refs Stdout"])
+  assertCell owner "text: missing packet names original stream references and unknown counts"
+    "all (\\part -> part `T.isInfixOf` (checksSummary missingView)) [\"missing: unknown\", \"matched unknown\", \"executed unknown\", \"evidence unknown\", \"output refs Stdout\"]"
   void $ turn owner "finishChecks missingWatcher"
 
-  setup <- turn owner
+  void $ turn owner
     "zeroJob <- Cmd.background (fixture \"zero\")\nzeroResult <- collectFocused (FocusedRun spec zeroJob)\nzeroDiagnosis <- diagnoseFocused zeroResult\nsetupJob <- Cmd.background (fixture \"setup\")\nsetupResult <- collectFocused (FocusedRun spec setupJob)\nsetupDiagnosis <- diagnoseFocused setupResult\nshortJob <- Cmd.background (fixture \"short\")\nshortResult <- collectFocused (FocusedRun spec shortJob)\nshortDiagnosis <- diagnoseFocused shortResult\n(diagnosisBranch zeroDiagnosis, diagnosisBranch setupDiagnosis, focusedExecution shortResult, diagnosisBranch shortDiagnosis)"
-  check "zero selection, incomplete setup, and short execution stay distinct"
-    ("(ZeroSelection,SetupIncomplete,ExecutionUnknown,SetupIncomplete)"
-      `Text.isInfixOf` Text.filter (/= ' ') (lastOutput setup))
-
+  assertCell owner "zero selection, incomplete setup and short execution stay distinct"
+    "diagnosisBranch zeroDiagnosis == ZeroSelection && diagnosisBranch setupDiagnosis == SetupIncomplete && focusedExecution shortResult == ExecutionUnknown && diagnosisBranch shortDiagnosis == SetupIncomplete"
 retainedRecovery :: Member RecipeCheck effects => Eff effects ()
 retainedRecovery = do
   owner <- root
@@ -243,23 +217,20 @@ retainedRecovery = do
     [ "let spec = FocusedSpec \"fixture check\" \"fixture-source\" \"fixture-package\" \"lib\" \"fixture::one\" 1"
     , "let fixture kind = Cmd.withMemory (Cmd.MiB 256) (Cmd.argv [\"bash\", " <> Text.pack (show fixture) <> ", kind])"
     ]
-  expired <- turn owner
+  void $ turn owner
     "expiredJob <- Cmd.background (fixture \"expired\")\nexpiredResult <- Cmd.quiet (collectFocused (FocusedRun spec expiredJob))\n(focusedExecution expiredResult, focusedPassed expiredResult, focusedEvidence expiredResult)"
-  check ("a retained job with an incomplete output page cannot prove a pass: " <> Text.take 240 (lastOutput expired))
-    (all (`Text.isInfixOf` lastOutput expired)
-      ["ExecutionUnknown", "False", "focused command output is incomplete"])
-  cancelled <- turn owner
+  assertCell owner "incomplete retained output cannot prove pass"
+    "focusedExecution expiredResult == ExecutionUnknown && not (focusedPassed expiredResult) && case focusedEvidence expiredResult of { Left _ -> case Cmd.capturedOutput (focusedCommand expiredResult) of { Right captured -> let page = Cmd.commandStderr captured in Cmd.outputStart page /= 0 || Cmd.outputEnd page /= Cmd.outputAvailableEnd page || Cmd.outputLostBytes page /= 0 || not (Cmd.outputFinished page) || Cmd.outputLossy page; _ -> False }; _ -> False }"
+  void $ turn owner
     "cancelledJob <- Cmd.background (Cmd.withMemory (Cmd.MiB 64) (Cmd.argv [\"sleep\", \"30\"]))\nCmd.cancel cancelledJob\ncancelledResult <- Cmd.quiet (collectFocused (PreparedFocusedRun spec cancelledJob))\n(focusedPreparation cancelledResult, focusedPassed cancelledResult, Cmd.commandCleanup (Cmd.commandResult (focusedCommand cancelledResult)))"
-  check "cancelled original job cannot prove preparation or whole-check acceptance"
-    (all (`Text.isInfixOf` lastOutput cancelled)
-      ["PreparationUnknown", "False"])
-
+  assertCell owner "cancelled original proves neither preparation nor whole-check pass"
+    "focusedPreparation cancelledResult == PreparationUnknown && not (focusedPassed cancelledResult) && Cmd.completedJob (focusedCommand cancelledResult) == cancelledJob && Cmd.commandOutcome (Cmd.commandResult (focusedCommand cancelledResult)) == Cmd.CommandCancelled"
 data EvidenceProbe mode = EvidenceProbe
   { probeState :: mode :- State ()
   , probeStart :: mode :- Call () (R.Reply FocusedRun)
   , probePrepared :: mode :- Call () (R.Reply (Either FocusedSetupIssue FocusedRun))
-  , probeRead :: mode :- Call Text (R.Reply Text)
-  , probeMove :: mode :- Call (Text, Text) (R.Reply Text)
+  , probeRead :: mode :- Call Text (R.Reply (Either Cmd.CommandError Cmd.CommandResult))
+  , probeMove :: mode :- Call (Text, Text) (R.Reply (Either Cmd.CommandError Cmd.CommandResult))
   } deriving Generic
 
 type EvidenceProbeEffects = LocalEffects EvidenceProbe '[Replies, Commands]
@@ -281,17 +252,17 @@ evidenceProbe spec =
     , probeRead = \path -> do
         started <- Cmd.tryStart (Cmd.withMemory (Cmd.MiB 64) (Cmd.argv ["cat", path]))
         case started of
-          Left issue -> pure ("start refused: " <> Text.pack (show issue))
+          Left issue -> pure (Left issue)
           Right job -> do
             observed <- Cmd.await job
-            pure (Text.pack (show (Cmd.commandResult observed)))
+            pure (Right (Cmd.commandResult observed))
     , probeMove = \(from, to) -> do
         started <- Cmd.tryStart (Cmd.withMemory (Cmd.MiB 64) (Cmd.argv ["mv", from, to]))
         case started of
-          Left issue -> pure ("start refused: " <> Text.pack (show issue))
+          Left issue -> pure (Left issue)
           Right job -> do
             observed <- Cmd.await job
-            pure (Text.pack (show (Cmd.commandResult observed)))
+            pure (Right (Cmd.commandResult observed))
     }
 
 -- The bound actor runs a check in an actual managed writable checkout. The
@@ -301,54 +272,51 @@ managedEvidence :: Member RecipeCheck effects => Eff effects ()
 managedEvidence = do
   owner <- root
   void $ turn owner "import Project.CheckResultsChecks"
-  created <- turn owner "Right focusedTree <- createWorktree (fromCurrentRepository \"focused-evidence-check\")\nworktreeId focusedTree"
-  check "a managed checkout is allocated for focused evidence" ("WorktreeId" `Text.isInfixOf` lastOutput created)
+  void $ turn owner "Right focusedTree <- createWorktree (fromCurrentRepository \"focused-evidence-check\")\nworktreeId focusedTree"
+  assertCell owner "managed focused evidence checkout has typed allocated identity"
+    "not (T.null (renderWorktreeId (worktreeId focusedTree)))"
   void $ turn owner $ Text.unlines
     [ "let managedSpec = FocusedSpec \"managed fixture\" \"fixture-source\" \"fixture-package\" \"lib\" \"fixture::one\" 1"
     , "boundProbe <- R.start (R.withWorktree (worktreeId focusedTree) (evidenceProbe managedSpec))"
     , "managedRun <- R.call (probeStart (R.client boundProbe)) ()"
     , "Right managedWatcher <- watchChecks me NotifyAllTerminal [(\"managed\", managedRun)]"
     ]
-  void $ awaitOutput owner
-    "view <- readChecks managedWatcher\n[fmap (checkVerdict e) (checkOutcome e) | e <- checkEntries view]"
-    (Text.isInfixOf "Just Check")
-  verified <- turn owner
+  awaitCell owner "managed watcher settles its original entry"
+    "do { view <- readChecks managedWatcher; pure (case checkEntries view of { [entry] -> case checkOutcome entry of { Just _ -> True; _ -> False }; _ -> False }) }"
+  void $ turn owner
     "view <- readChecks managedWatcher\n(checksSummary view, [(fmap (Cmd.stderr . focusedCommand . checkFocused) (checkOutcome e), fmap (focusedEvidence . checkFocused) (checkOutcome e), fmap checkCompletion (checkOutcome e)) | e <- checkEntries view])"
-  let observed = lastOutput verified
-  check ("watcher reports selected and executed facts from the original managed job: "
-      <> Text.take 1200 observed)
-    (all (`Text.isInfixOf` observed)
-      ["managed: passed", "matched 1", "runnable 1", "executed 1 passed", "fixture-source", "CommandExited 0", "CommandClean", "; artifact /"])
-  accessible <- turn owner $ Text.unlines
+  assertCell owner "watcher keeps counted proof and original managed job receipt"
+    "case checkEntries view of { [entry] -> runJob (checkRun entry) == runJob managedRun && runSpec (checkRun entry) == managedSpec && case checkOutcome entry of { Just outcome -> checkVerdict entry outcome == CheckPassed && checkExecution entry outcome == ExecutionPassed 1 && checkSourceAssurance entry outcome == SourceVerified && checkEvidenceComplete entry outcome && Cmd.commandResult (focusedCommand (checkFocused outcome)) == Cmd.CommandResult (Cmd.CommandExited 0) Cmd.CommandClean && case (focusedEvidence (checkFocused outcome), focusedEvidencePath (checkFocused outcome)) of { (Right record, Just path) -> recordMatched record == Just [\"fixture::one\"] && recordRunnable record == Just [\"fixture::one\"] && recordSource record == Just \"fixture-source\" && \"/\" `T.isPrefixOf` path; _ -> False }; _ -> False }; _ -> False }"
+  void $ turn owner $ Text.unlines
     [ "managedResult <- collectFocused managedRun"
     , "let Just managedPath = focusedEvidencePath managedResult"
-    , "R.call (probeRead (R.client boundProbe)) managedPath"
+    , "accessible <- R.call (probeRead (R.client boundProbe)) managedPath"
     ]
-  check "the artifact exists in the managed owner's writable checkout"
-    ("CommandExited 0" `Text.isInfixOf` lastOutput accessible)
-  moved <- turn owner $ Text.unlines
+  assertCell owner "artifact exists under managed owner writable authority"
+    "accessible == Right (Cmd.CommandResult (Cmd.CommandExited 0) Cmd.CommandClean)"
+  void $ turn owner $ Text.unlines
     [ "let Just managedPath = focusedEvidencePath managedResult"
-    , "R.call (probeMove (R.client boundProbe)) (managedPath, managedPath <> \".retained\")"
+    , "moved <- R.call (probeMove (R.client boundProbe)) (managedPath, managedPath <> \".retained\")"
     ]
-  check "the managed owner moves the artifact after the job retains evidence"
-    ("CommandExited 0" `Text.isInfixOf` lastOutput moved)
-  refused <- turn owner $ Text.unlines
+  assertCell owner "managed owner moves artifact after retained job evidence"
+    "moved == Right (Cmd.CommandResult (Cmd.CommandExited 0) Cmd.CommandClean)"
+  void $ turn owner $ Text.unlines
     [ "let Just managedPath = focusedEvidencePath managedResult"
     , "unboundProbe <- R.start (evidenceProbe managedSpec)"
-    , "R.call (probeMove (R.client unboundProbe)) (managedPath <> \".retained\", managedPath)"
+    , "refused <- R.call (probeMove (R.client unboundProbe)) (managedPath <> \".retained\", managedPath)"
     ]
-  check "an unbound actor cannot mutate the managed checkout artifact"
-    (any (`Text.isInfixOf` lastOutput refused) ["CommandExited 1", "CommandUnauthorized"])
-  retained <- turn owner
+  assertCell owner "unbound actor cannot mutate managed artifact"
+    "case refused of { Left (Cmd.CommandUnauthorized) -> True; Right (Cmd.CommandResult (Cmd.CommandExited 1) Cmd.CommandClean) -> True; _ -> False }"
+  void $ turn owner
     "afterMove <- collectFocused managedRun\n(focusedExecution afterMove, focusedEvidence afterMove, focusedEvidencePath afterMove)"
-  check "the original retained job still proves execution after its artifact moves"
-    (all (`Text.isInfixOf` lastOutput retained) ["ExecutionPassed 1", "fixture-digest", "Just"])
+  assertCell owner "original retained job still proves execution after artifact moves"
+    "focusedExecution afterMove == ExecutionPassed 1 && Cmd.completedJob (focusedCommand afterMove) == runJob managedRun && case (focusedEvidence afterMove, focusedEvidencePath afterMove) of { (Right record, Just path) -> recordDigest record == \"fixture-digest\" && Just path == focusedEvidencePath managedResult; _ -> False }"
   void $ turn owner "Right preparedRun <- R.call (probePrepared (R.client boundProbe)) ()\nRight preparedWatcher <- watchChecks me NotifyAllTerminal [(\"prepared\", preparedRun)]"
-  prepared <- awaitOutput owner "checksSummary <$> readChecks preparedWatcher" (Text.isInfixOf "prepared: passed")
-  check "preparation writes and test reads in the same managed checkout"
-    (all (`Text.isInfixOf` prepared) ["prepared: passed", "PreparationPassed", "executed 1 passed", "CommandClean"])
-  unknown <- turn owner "preparedResult <- collectFocused preparedRun\nfocusedPassed (preparedResult { focusedPreparation = PreparationUnknown })"
-  check "unconfirmed preparation cannot be accepted even with passing test evidence" (lastOutput unknown == "False")
+  awaitCell owner "preparation and test share managed checkout retaining counted proof"
+    "do { view <- readChecks preparedWatcher; pure (case checkEntries view of { [entry] -> runJob (checkRun entry) == runJob preparedRun && case checkOutcome entry of { Just outcome -> checkVerdict entry outcome == CheckPassed && checkEvidenceComplete entry outcome && focusedPreparation (checkFocused outcome) == PreparationPassed && checkExecution entry outcome == ExecutionPassed 1 && Cmd.commandCleanup (checkCompletion outcome) == Cmd.CommandClean; _ -> False }; _ -> False }) }"
+  void $ turn owner "preparedResult <- collectFocused preparedRun\nfocusedPassed (preparedResult { focusedPreparation = PreparationUnknown })"
+  assertCell owner "unconfirmed preparation refuses even passing test evidence"
+    "not (focusedPassed (preparedResult { focusedPreparation = PreparationUnknown }))"
   void $ turn owner "finishChecks preparedWatcher"
   void $ turn owner "finishChecks managedWatcher\nR.finish boundProbe\nR.finish unboundProbe"
 
@@ -359,7 +327,7 @@ runningCommandCleanup = do
   owner <- root
   void $ turn owner
     "live <- Cmd.background (Cmd.withMemory (Cmd.MiB 64) (Cmd.argv [\"sleep\", \"30\"]))"
-  running <- awaitOutput owner "Cmd.status live" (Text.isInfixOf "CommandRunning")
-  check "command is running before resident shutdown" ("CommandRunning" `Text.isInfixOf` running)
+  awaitCell owner "command is running before resident shutdown"
+    "do { status <- Cmd.status live; pure (case status of { Cmd.CommandRunning -> True; _ -> False }) }"
   identity <- restart
   check "live command retirement sealed its producer" (not (Text.null identity))

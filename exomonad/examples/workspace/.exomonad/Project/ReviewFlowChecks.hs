@@ -19,27 +19,24 @@ oneComponent = do
     <> "\nlet coordinatorName = \"review-flow-coordinator-first\" :: Text"
     <> "\nlet sourcePlan = RequiresSiblingCommits [sourceHead]")
   script owner "review-flow-loop"
-  pending <- turn owner "cleanup <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce\ninspectFull (show cleanup)"
-  check "cleanup refuses while the candidate is pending"
-    ("ReviewCleanupPending AwaitingCandidate" `Text.isInfixOf` output pending)
+  void $ turn owner "cleanup <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce\ninspectFull (show cleanup)"
+  assertCell owner "cleanup refuses while the candidate is pending"
+    "case cleanup of { ReviewCleanupPending AwaitingCandidate -> True; _ -> False }"
   implementer <- activation
   first <- checkpoint (checkActor implementer) "review-flow.txt" "first candidate\n" "initial candidate"
   void $ turn (checkActor implementer)
     ("respond (Produced (Candidate " <> gitOidLiteral first <> " [] [\"owner integration\"]))")
   reviewer <- activation
-  firstState <- awaitOutput owner
-    "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (show state)"
-    ("ReviewingCandidate" `Text.isInfixOf`)
-  check "candidate settlement reached review flow"
-    ("ReviewingCandidate" `Text.isInfixOf` firstState)
+  awaitCell owner "candidate settlement reached exact-source review"
+    ("do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (case flowStage state of { ReviewingCandidate candidate -> candidateCommit candidate == " <> gitOidLiteral first <> "; _ -> False }) }")
   headSeen <- git (checkActor reviewer) ["rev-parse", "HEAD"]
   check "first review starts fresh at the submitted candidate" (headSeen == first)
-  pendingReview <- turn owner "cleanup <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce\ninspectFull (show cleanup)"
-  check "cleanup refuses with a live reviewer"
-    ("ReviewCleanupPending (ReviewingCandidate" `Text.isInfixOf` output pendingReview)
-  firstInterview <- turn (checkActor reviewer) "let cleanupInterview = \"initial reviewer found a component issue\" :: Text\ncleanupInterview"
-  check "first reviewer interview is available before cleanup"
-    ("initial reviewer found a component issue" `Text.isInfixOf` output firstInterview)
+  void $ turn owner "cleanup <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce\ninspectFull (show cleanup)"
+  assertCell owner "cleanup refuses with a live reviewer"
+    "case cleanup of { ReviewCleanupPending (ReviewingCandidate _) -> True; _ -> False }"
+  void $ turn (checkActor reviewer) "let cleanupInterview = \"initial reviewer found a component issue\" :: Text\ncleanupInterview"
+  assertCell (checkActor reviewer) "text: first reviewer interview is available before cleanup"
+    "cleanupInterview == \"initial reviewer found a component issue\""
   void $ turn (checkActor reviewer)
     "let request = sessionInput :: ReviewRequest\nrespond (Produced (Repair (reviewInput request) []))"
   correction <- activation
@@ -50,9 +47,9 @@ oneComponent = do
   repairWorker <- activation
   check "repair returns directly to the retained implementer"
     (checkActor repairWorker == checkActor implementer)
-  pendingRepair <- turn owner "cleanup <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce\ninspectFull (show cleanup)"
-  check "cleanup refuses while repair is pending"
-    ("ReviewCleanupPending (AwaitingRepair" `Text.isInfixOf` output pendingRepair)
+  void $ turn owner "cleanup <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce\ninspectFull (show cleanup)"
+  assertCell owner "cleanup refuses while repair is pending"
+    "case cleanup of { ReviewCleanupPending (AwaitingRepair _) -> True; _ -> False }"
   revised <- checkpoint (checkActor repairWorker) "review-flow.txt" "repaired candidate\n" "repair candidate"
   void $ turn (checkActor repairWorker)
     ("respond (Produced (Candidate " <> gitOidLiteral revised <> " [] [\"owner integration\"]))")
@@ -60,28 +57,23 @@ oneComponent = do
   secondHead <- git (checkActor second) ["rev-parse", "HEAD"]
   check "revised source gets a new exact-source reviewer"
     (checkActor second /= checkActor reviewer && secondHead == revised)
-  interview <- turn (checkActor second) "let cleanupInterview = \"reviewer checked the repaired source\" :: Text\ncleanupInterview"
-  check "reviewer interview is retained before cleanup"
-    ("reviewer checked the repaired source" `Text.isInfixOf` output interview)
+  void $ turn (checkActor second) "let cleanupInterview = \"reviewer checked the repaired source\" :: Text\ncleanupInterview"
+  assertCell (checkActor second) "text: reviewer interview is retained before cleanup"
+    "cleanupInterview == \"reviewer checked the repaired source\""
   void $ turn (checkActor second)
     "let request = sessionInput :: ReviewRequest\nrespond (Produced (Accepted (ReviewedCandidate (reviewBasis request) (reviewInput request) [\"read exact source\"] \"accepted\")))"
-  accepted <- awaitOutput owner
-    "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (show (flowStage state, flowRepairCount state, length (flowReviewerRequests state), length (flowRepairRequests state)))"
-    ("ReviewAccepted" `Text.isInfixOf`)
-  check "one component finishes with exact reviewed evidence, correction, and one repair"
-    ("ReviewAccepted" `Text.isInfixOf` accepted
-      && revised `Text.isInfixOf` accepted
-      && "1,3,1" `Text.isInfixOf` accepted)
+  awaitCell owner "one component retains exact reviewed evidence, correction, and one repair"
+    ("do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (flowRepairCount state == 1 && length (flowReviewerRequests state) == 3 && length (flowRepairRequests state) == 1 && case flowStage state of { ReviewAccepted reviewed -> candidateCommit (reviewedCandidate reviewed) == " <> gitOidLiteral revised <> "; _ -> False }) }")
   script owner "review-flow-cleanup"
-  cleanup <- turn owner "case cleanup of { ReviewCleanupAttempted groups -> inspectFull (length groups == 2 && map (length . snd) groups == [1,1]); _ -> inspectFull False }"
-  check "coordinator records cleanup of both distinct reviewer groups"
-    (lastOutput cleanup == "True")
-  repeated <- turn owner "again <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce\nstate <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (show again == show cleanup && show (flowCleanupResult state) == show (Just cleanup))"
-  check "repeat and snapshot retain original cleanup outcomes"
-    (lastOutput repeated == "True")
-  retry <- turn owner "retry <- R.call (reviewCleanup (R.client flow)) ReviewCleanupRetryRefused\nlet refused receipts = case reverse receipts of { latest:_ -> case cleanupReceiptSteps latest of { [CleanupBlocked _] -> True; [CleanupStalePlan] -> True; _ -> False }; [] -> True }\ncase (cleanup, retry) of { (ReviewCleanupAttempted before, ReviewCleanupAttempted after) -> inspectFull (length before == length after && and [length new == length old + (if refused old then 1 else 0) | ((_,old),(_,new)) <- zip before after]); _ -> inspectFull False }"
-  check "explicit retry only reruns previously refused groups"
-    (lastOutput retry == "True")
+  void $ turn owner "case cleanup of { ReviewCleanupAttempted groups -> inspectFull (length groups == 2 && map (length . snd) groups == [1,1]); _ -> inspectFull False }"
+  assertCell owner "coordinator records cleanup of both distinct reviewer groups"
+    "case cleanup of { ReviewCleanupAttempted groups -> length groups == 2 && map (length . snd) groups == [1,1]; _ -> False }"
+  void $ turn owner "again <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce\nstate <- R.call (reviewSnapshot (R.client flow)) ()\npure ()"
+  assertCell owner "repeat and snapshot retain original cleanup outcomes"
+    "let sameReceipt left right = left == right; sameGroups left right = length left == length right && and [a == b && length old == length new && and (zipWith sameReceipt old new) | ((a,old),(b,new)) <- zip left right] in case (cleanup, again, flowCleanupResult state) of { (ReviewCleanupAttempted original, ReviewCleanupAttempted repeated, Just (ReviewCleanupAttempted retained)) -> sameGroups original repeated && sameGroups original retained; _ -> False }"
+  void $ turn owner "retry <- R.call (reviewCleanup (R.client flow)) ReviewCleanupRetryRefused\nlet refused receipts = case reverse receipts of { latest:_ -> case cleanupReceiptSteps latest of { [CleanupBlocked _] -> True; [CleanupStalePlan] -> True; _ -> False }; [] -> True }\ncase (cleanup, retry) of { (ReviewCleanupAttempted before, ReviewCleanupAttempted after) -> inspectFull (length before == length after && and [length new == length old + (if refused old then 1 else 0) | ((_,old),(_,new)) <- zip before after]); _ -> inspectFull False }"
+  assertCell owner "explicit retry only reruns previously refused groups"
+    "case (cleanup, retry) of { (ReviewCleanupAttempted before, ReviewCleanupAttempted after) -> length before == length after && and [groupOld == groupNew && length new == length old + (if refused old then 1 else 0) | ((groupOld,old),(groupNew,new)) <- zip before after]; _ -> False }"
   void $ turn owner "R.finish flow"
 
 failurePaths :: Member RecipeCheck effects => Eff effects ()
@@ -100,15 +92,11 @@ failurePaths = do
   budgetReviewer <- activation
   void $ turn (checkActor budgetReviewer)
     "let request = sessionInput :: ReviewRequest\nrespond (Produced (Repair (reviewInput request) [\"one finding\"]))"
-  budget <- awaitOutput owner2
-    "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (show (flowStage state, flowRepairCount state, length (flowRepairRequests state)))"
-    ("RepairBudgetSpent" `Text.isInfixOf`)
-  check "zero repair budget stops without dispatching another request"
-    ("RepairBudgetSpent" `Text.isInfixOf` budget
-      && "0,0)" `Text.isInfixOf` budget)
-  budgetCleanup <- turn owner2 "receipt <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce\ninspectFull (case receipt of { ReviewCleanupAttempted groups -> (length groups, map (map cleanupReceiptComplete . snd) groups); _ -> (0 :: Int, []) })"
-  check "stopped review still retains its reviewer cleanup receipt"
-    ("(1," `Text.isInfixOf` output budgetCleanup)
+  awaitCell owner2 "zero repair budget stops without dispatching another request"
+    "do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (flowRepairCount state == 0 && null (flowRepairRequests state) && case flowStage state of { ReviewStopped (RepairBudgetSpent 0 _ _) -> True; _ -> False }) }"
+  void $ turn owner2 "receipt <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce\ninspectFull (case receipt of { ReviewCleanupAttempted groups -> (length groups, map (map cleanupReceiptComplete . snd) groups); _ -> (0 :: Int, []) })"
+  assertCell owner2 "stopped review retains its reviewer cleanup receipt"
+    "case receipt of { ReviewCleanupAttempted groups -> length groups == 1 && all (not . null . snd) groups; _ -> False }"
   void $ turn owner2 "R.finish flow"
   void restart
   owner3 <- root
@@ -122,17 +110,12 @@ failurePaths = do
   actual <- checkpoint (checkActor mismatched) "review-flow.txt" "different source\n" "mismatch source"
   void $ turn (checkActor mismatched)
     ("respond (Produced (Candidate " <> gitOidLiteral base3 <> " [] []))")
-  stopped <- awaitOutput owner3
-    "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (show (flowStage state, length (flowReviewerRequests state)))"
-    ("CandidateSourceRefused" `Text.isInfixOf`)
-  check "a stale candidate claim stops before reviewer admission"
-    ("CandidateSourceRefused" `Text.isInfixOf` stopped
-      && base3 `Text.isInfixOf` stopped
-      && actual `Text.isInfixOf` stopped
-      && ",0)" `Text.isInfixOf` stopped)
-  none <- turn owner3 "cleanup <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce\ninspectFull (show cleanup)"
-  check "terminal flow without a reviewer has no reviewer group to clean"
-    ("ReviewCleanupNoReviewer" `Text.isInfixOf` output none)
+  void $ turn owner3 "import qualified Tidepool.Worktree as WT"
+  awaitCell owner3 "stale candidate stops before reviewer admission with exact receipt heads"
+    ("do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (null (flowReviewerRequests state) && case (flowStage state, flowCandidateReceipts state) of { (ReviewStopped (CandidateSourceRefused _), [Right receipt]) -> case responseValue receipt of { Produced candidate -> candidateCommit candidate == " <> gitOidLiteral base3 <> " && case responseWorktree receipt of { WorktreeObserved _ _ observation -> WT.headOid (WT.submittedHead observation) == " <> gitOidLiteral actual <> "; _ -> False }; _ -> False }; _ -> False }) }")
+  void $ turn owner3 "cleanup <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce\ninspectFull (show cleanup)"
+  assertCell owner3 "terminal flow without reviewer has no group to clean"
+    "case cleanup of { ReviewCleanupNoReviewer -> True; _ -> False }"
   void $ turn owner3 "R.finish flow"
 
 sourcePreflight :: Member RecipeCheck effects => Eff effects ()
@@ -149,14 +132,8 @@ sourcePreflight = do
   partial <- checkpoint (checkActor worker) "review-flow.txt" "component only\n" "partial component"
   void $ turn (checkActor worker)
     ("respond (Produced (Candidate " <> gitOidLiteral partial <> " [] []))")
-  missing <- awaitOutput owner
-    "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (show (flowStage state, length (flowReviewerRequests state)))"
-    ("RequiredSiblingMissing" `Text.isInfixOf`)
-  check "missing required sibling stops before product reviewer admission"
-    ("RequiredSiblingMissing" `Text.isInfixOf` missing
-      && sibling `Text.isInfixOf` missing
-      && partial `Text.isInfixOf` missing
-      && ",0)" `Text.isInfixOf` missing)
+  awaitCell owner "missing required sibling stops before product reviewer admission"
+    ("do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (null (flowReviewerRequests state) && case flowStage state of { ReviewStopped (RequiredSiblingMissing required candidate) -> required == " <> gitOidLiteral sibling <> " && candidate == " <> gitOidLiteral partial <> "; _ -> False }) }")
   void $ turn owner "R.finish flow"
   void restart
   owner2 <- root
@@ -177,11 +154,8 @@ sourcePreflight = do
     (reviewHead == partial2 && sibling2 /= partial2)
   void $ turn (checkActor reviewer)
     "let request = sessionInput :: ReviewRequest\nrespond (Produced (Accepted (ReviewedCandidate (reviewBasis request) (reviewInput request) [] \"component accepted\")))"
-  accepted <- awaitOutput owner2
-    "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (show (flowStage state))"
-    ("ReviewAccepted" `Text.isInfixOf`)
-  check "component acceptance remains scoped to its submitted candidate"
-    ("ReviewAccepted" `Text.isInfixOf` accepted && partial2 `Text.isInfixOf` accepted)
+  awaitCell owner2 "component acceptance stays scoped to submitted candidate"
+    ("do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (case flowStage state of { ReviewAccepted reviewed -> candidateCommit (reviewedCandidate reviewed) == " <> gitOidLiteral partial2 <> "; _ -> False }) }")
   void $ turn owner2 "R.finish flow"
 
 emptyFindings :: Member RecipeCheck effects => Eff effects ()
@@ -205,13 +179,8 @@ emptyFindings = do
     (checkActor correction == checkActor reviewer)
   void $ turn (checkActor correction)
     "let request = sessionInput :: ReviewRequest\nrespond (Produced (Repair (reviewInput request) []))"
-  stopped <- awaitOutput owner
-    "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (show (flowStage state, flowRepairCount state, length (flowReviewerRequests state), length (flowRepairRequests state)))"
-    ("EmptyRepairFindings" `Text.isInfixOf`)
-  check "second empty Repair stops without implementer dispatch"
-    ("EmptyRepairFindings" `Text.isInfixOf` stopped
-      && candidate `Text.isInfixOf` stopped
-      && "0,2,0)" `Text.isInfixOf` stopped)
+  awaitCell owner "second empty Repair stops without implementer dispatch"
+    ("do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (flowRepairCount state == 0 && length (flowReviewerRequests state) == 2 && null (flowRepairRequests state) && case flowStage state of { ReviewStopped (EmptyRepairFindings candidate) -> candidateCommit candidate == " <> gitOidLiteral candidate <> "; _ -> False }) }")
   void $ turn owner "R.finish flow"
 
 effectfulRouting :: Member RecipeCheck effects => Eff effects ()
@@ -229,29 +198,24 @@ effectfulRouting = do
   reviewer <- activation
   void $ turn (checkActor reviewer)
     "let request = sessionInput :: ReviewRequest\nrespond (Produced (Repair (reviewInput request) [\"repair changes the task contract\"]))"
-  routed <- awaitOutput owner
-    "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (case (flowStage state, flowReviewRoutes state) of { (ReviewStopped (ReviewEscalated reason), [(_, ReviewRouteResult (EscalateReview selected) DeterministicRoute)]) -> reason == \"owner must decide this scope change\" && selected == reason && flowRepairCount state == 0; _ -> False })"
-    ("True" `Text.isInfixOf`)
-  check "effectful route escalates a valid exact-source Repair without dispatching repair"
-    ("True" `Text.isInfixOf` routed)
-  notice <- turn owner
+  awaitCell owner "effectful route escalates valid exact-source Repair without dispatching repair"
+    "do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (case (flowStage state, flowReviewRoutes state) of { (ReviewStopped (ReviewEscalated reason), [(_, ReviewRouteResult (EscalateReview selected) DeterministicRoute)]) -> selected == reason && flowRepairCount state == 0 && null (flowRepairRequests state); _ -> False }) }"
+  void $ turn owner
     "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (length (flowNotices state))"
-  check "owner receives one escalation notice"
-    (lastOutput notice == "1")
-  missing <- turn owner
+  assertCell owner "owner receives one escalation notice"
+    "length (flowNotices state) == 1"
+  void $ turn owner
     "let selected = Candidate sourceHead [] []\nresult <- semanticReviewChoice (ReviewContext task selected (Repair selected [\"scope is unclear\"]) 0 1 [])\ninspectFull (show result)"
-  check "semantic route without escalation criteria returns typed parent escalation"
-    ("EscalateReview" `Text.isInfixOf` output missing
-      && "RouteCriteriaMissing" `Text.isInfixOf` output missing)
-  empty <- turn owner
+  assertCell owner "semantic route without criteria returns typed parent escalation"
+    "case result of { ReviewRouteResult (EscalateReview _) RouteCriteriaMissing -> True; _ -> False }"
+  void $ turn owner
     "result <- semanticReviewChoice (ReviewContext task selected (Repair selected []) 0 1 [])\ninspectFull (show result)"
-  check "empty Repair stays on the bounded same-reviewer correction path"
-    ("HonorReview" `Text.isInfixOf` output empty
-      && "DeterministicRoute" `Text.isInfixOf` output empty)
-  cleanup <- turn owner
+  assertCell owner "empty Repair stays on bounded same-reviewer correction path"
+    "case result of { ReviewRouteResult HonorReview DeterministicRoute -> True; _ -> False }"
+  void $ turn owner
     "receipt <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce\ninspectFull (show receipt)"
-  check "effectful escalation retains cleanup receipt after terminal review"
-    ("ReviewCleanupAttempted" `Text.isInfixOf` output cleanup)
+  assertCell owner "effectful escalation retains terminal cleanup receipt"
+    "case receipt of { ReviewCleanupAttempted groups -> not (null groups) && all (not . null . snd) groups; _ -> False }"
   void $ turn owner "R.finish flow"
   void restart
   owner2 <- root
@@ -268,12 +232,8 @@ effectfulRouting = do
   reviewer2 <- activation
   void $ turn (checkActor reviewer2)
     "let request = sessionInput :: ReviewRequest\nrespond (Produced (Accepted (ReviewedCandidate (reviewBasis request) (reviewInput request) [] \"checked exact source\")))"
-  accepted <- awaitOutput owner2
-    "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (show (flowStage state, map (routeEvidence . snd) (flowReviewRoutes state)))"
-    ("ReviewAccepted" `Text.isInfixOf`)
-  check "compiled semantic consumer preserves a reviewer's exact-source acceptance"
-    ("ReviewAccepted" `Text.isInfixOf` accepted
-      && "DeterministicRoute" `Text.isInfixOf` accepted)
+  awaitCell owner2 "semantic consumer preserves exact-source acceptance"
+    ("do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (case (flowStage state, flowReviewRoutes state) of { (ReviewAccepted reviewed, [(_, ReviewRouteResult HonorReview DeterministicRoute)]) -> candidateCommit (reviewedCandidate reviewed) == " <> gitOidLiteral candidate2 <> "; _ -> False }) }")
   void $ turn owner2 "R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce"
   void $ turn owner2 "R.finish flow"
 
@@ -289,9 +249,9 @@ workflowExample = do
     <> "\nlet coordinatorName = \"review-workflow-accepted-coordinator\" :: Text"
     <> "\nlet routeCriteria = [\"Escalate if acceptance or paths change.\"] :: [Text]")
   script owner "review-flow-workflow"
-  pending <- turn owner "inspectFull (show pendingCleanup)"
-  check "workflow refuses owner cleanup before the candidate settles"
-    ("ReviewCleanupPending AwaitingCandidate" `Text.isInfixOf` output pending)
+  void $ turn owner "inspectFull (show pendingCleanup)"
+  assertCell owner "workflow refuses cleanup before candidate settles"
+    "case pendingCleanup of { ReviewCleanupPending AwaitingCandidate -> True; _ -> False }"
   worker <- activation
   candidate <- checkpoint (checkActor worker) "review-flow.txt" "accepted workflow\n" "workflow candidate"
   void $ turn (checkActor worker)
@@ -299,38 +259,33 @@ workflowExample = do
   reviewer <- activation
   void $ turn (checkActor reviewer)
     "let request = sessionInput :: ReviewRequest\nrespond (Produced (Accepted (ReviewedCandidate (reviewBasis request) (reviewInput request) [\"read exact source\"] \"accepted\")))"
-  accepted <- awaitOutput owner
-    "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (show (flowStage state))"
-    ("ReviewAccepted" `Text.isInfixOf`)
-  check "workflow reads exact accepted terminal state"
-    ("ReviewAccepted" `Text.isInfixOf` accepted && candidate `Text.isInfixOf` accepted)
+  awaitCell owner "workflow reads exact accepted terminal state"
+    ("do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (case flowStage state of { ReviewAccepted reviewed -> candidateCommit (reviewedCandidate reviewed) == " <> gitOidLiteral candidate <> "; _ -> False }) }")
   script owner "review-flow-workflow-interview"
-  retention <- turn owner "inspectFull (show interviewRetention)"
-  check "workflow retains each original interview request in the actor lifetime"
-    ("[Right ()]" `Text.isInfixOf` output retention)
+  void $ turn owner "inspectFull (show interviewRetention)"
+  assertCell owner "workflow retains each original interview request in actor lifetime"
+    "length interviewRequests == 1 && interviewRetention == [Right ()]"
   script owner "review-flow-workflow-interview-result"
-  pendingInterview <- turn owner "inspectFull (show retainedInterviews)"
-  check "delivered interview request is not treated as an answer"
-    ("Nothing" `Text.isInfixOf` output pendingInterview)
-  pendingClose <- readFile owner (checkSource "review-flow-workflow-close") >>= turn owner
-  beforeAnswer <- turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (show (flowCleanupResult state))"
-  check "workflow leaves cleanup unrequested before the answer"
-    ("interview pending; cleanup not requested" `Text.isInfixOf` output pendingClose
-      && "Nothing" `Text.isInfixOf` output beforeAnswer)
+  void $ turn owner "inspectFull (show retainedInterviews)"
+  assertCell owner "delivered interview request is not an answer"
+    "case retainedInterviews of { Nothing -> True; _ -> False }"
+  void $ readFile owner (checkSource "review-flow-workflow-close") >>= turn owner
+  void $ turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (show (flowCleanupResult state))"
+  assertCell owner "workflow leaves cleanup unrequested before answer"
+    "case (retainedInterviews, flowCleanupResult state) of { (Nothing, Nothing) -> True; _ -> False }"
   interview <- activation
   check "interview request returns to the retained reviewer"
     (checkActor interview == checkActor reviewer)
   void $ turn (checkActor interview)
     "respond (\"Observed exact source and typed review; the handoff waited for owner snapshot; try one terminal evidence summary.\" :: Text)"
   script owner "review-flow-workflow-interview-result"
-  answer <- turn owner "inspectFull (show retainedInterviews)"
-  check "owner retains the reviewer answer receipt before cleanup"
-    ("Observed exact source" `Text.isInfixOf` output answer)
+  void $ turn owner "inspectFull (show retainedInterviews)"
+  assertCell owner "text: owner retains reviewer answer receipt before cleanup"
+    "case retainedInterviews of { Just [receipt] -> \"Observed exact source\" `Text.isInfixOf` responseValue receipt; _ -> False }"
   script owner "review-flow-workflow-close"
-  closed <- turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (show (flowStage state, flowCleanupResult state))"
-  check "accepted workflow retains typed owner cleanup after interview"
-    ("ReviewAccepted" `Text.isInfixOf` output closed
-      && "ReviewCleanupAttempted" `Text.isInfixOf` output closed)
+  void $ turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (show (flowStage state, flowCleanupResult state))"
+  assertCell owner "accepted workflow retains typed cleanup after interview"
+    ("case (flowStage state, flowCleanupResult state) of { (ReviewAccepted reviewed, Just (ReviewCleanupAttempted groups)) -> candidateCommit (reviewedCandidate reviewed) == " <> gitOidLiteral candidate <> " && not (null groups); _ -> False }")
   void $ turn owner "R.finish flow"
 
   void restart
@@ -348,15 +303,12 @@ workflowExample = do
   reviewer2 <- activation
   void $ turn (checkActor reviewer2)
     "let request = sessionInput :: ReviewRequest\nrespond (Produced (Repair (reviewInput request) [\"change assigned acceptance\"]))"
-  escalated <- awaitOutput owner2
-    "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (show (flowStage state, flowRepairCount state, length (flowRepairRequests state)))"
-    ("ReviewEscalated" `Text.isInfixOf`)
-  check "workflow escalates without promoting Repair or requesting implementation"
-    ("ReviewEscalated" `Text.isInfixOf` escalated && "0,0)" `Text.isInfixOf` escalated)
+  awaitCell owner2 "workflow escalates without promoting Repair or dispatching implementation"
+    "do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (flowRepairCount state == 0 && null (flowRepairRequests state) && case flowStage state of { ReviewStopped (ReviewEscalated _) -> True; _ -> False }) }"
   script owner2 "review-flow-workflow-interview"
-  retention2 <- turn owner2 "inspectFull (show interviewRetention)"
-  check "escalated workflow retains its original reviewer interview request"
-    ("[Right ()]" `Text.isInfixOf` output retention2)
+  void $ turn owner2 "inspectFull (show interviewRetention)"
+  assertCell owner2 "escalated workflow retains original reviewer interview request"
+    "length interviewRequests == 1 && interviewRetention == [Right ()]"
   interview2 <- activation
   check "escalated reviewer remains available for precleanup interview"
     (checkActor interview2 == checkActor reviewer2)
@@ -364,10 +316,9 @@ workflowExample = do
     "respond (\"Observed a scope conflict at exact source; owner decision is required; try clearer acceptance.\" :: Text)"
   script owner2 "review-flow-workflow-interview-result"
   script owner2 "review-flow-workflow-close"
-  closed2 <- turn owner2 "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (show (flowStage state, flowCleanupResult state))"
-  check "escalated workflow retains typed cleanup after interview"
-    ("ReviewEscalated" `Text.isInfixOf` output closed2
-      && "ReviewCleanupAttempted" `Text.isInfixOf` output closed2)
+  void $ turn owner2 "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (show (flowStage state, flowCleanupResult state))"
+  assertCell owner2 "escalated workflow retains typed cleanup after interview"
+    "case (flowStage state, flowCleanupResult state) of { (ReviewStopped (ReviewEscalated _), Just (ReviewCleanupAttempted groups)) -> not (null groups); _ -> False }"
   void $ turn owner2 "R.finish flow"
 
 -- The initial response may settle before any review actor subscribes.
@@ -389,9 +340,11 @@ lateCandidate = do
   check "late subscription preserves the original exact candidate" (headSeen == candidate)
   void $ turn (checkActor reviewer)
     "respond (Produced (Accepted (ReviewedCandidate (reviewBasis sessionInput) (reviewInput sessionInput) [] \"late exact source\")))"
-  void $ awaitOutput owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (flowStage state)" (Text.isInfixOf "ReviewAccepted")
-  retained <- turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (length (flowCandidateReceipts state) == 1 && length (flowReviewerReceipts state) == 1 && case flowReviewedProof state of { Just _ -> True; _ -> False })"
-  check "late attachment retains original review proof and receipts" (lastOutput retained == "True")
+  awaitCell owner "review reaches accepted terminal state"
+    "do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (case flowStage state of { ReviewAccepted _ -> True; _ -> False }) }"
+  void $ turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (length (flowCandidateReceipts state) == 1 && length (flowReviewerReceipts state) == 1 && case flowReviewedProof state of { Just _ -> True; _ -> False })"
+  assertCell owner "late attachment retains original review proof and receipts"
+    "length (flowCandidateReceipts state) == 1 && length (flowReviewerReceipts state) == 1 && case flowReviewedProof state of { Just _ -> True; _ -> False }"
   void $ turn owner "R.finish flow"
 
 -- Original dynamic sources and checkpointed state survive record replacement.
@@ -411,10 +364,13 @@ replacement = do
   void $ turn owner "before <- R.call (reviewSnapshot (R.client flow)) ()\nflow <- R.replace flow flowDefinition"
   void $ turn (checkActor reviewer)
     "let question = Question \"after-replacement\" (DesignQuestion \"plans/component.md\" (reviewBase (reviewBasis sessionInput)) \"owner decision\" [] [] [])\nreportProgress (WorkProgress [] [question])"
-  void $ awaitOutput owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (any (any ((== \"after-replacement\") . questionKey) . snd) (flowQuestions state))" (== "True")
+  awaitCell owner "replacement retains original question source"
+    "do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (any (any ((== \"after-replacement\") . questionKey) . snd) (flowQuestions state)) }"
   void $ turn (checkActor reviewer)
     "respond (Produced (Accepted (ReviewedCandidate (reviewBasis sessionInput) (reviewInput sessionInput) [] \"original request after replacement\")))"
-  void $ awaitOutput owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (flowStage state)" (Text.isInfixOf "ReviewAccepted")
-  retained <- turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (map requestId (flowReviewerRequests state) == map requestId (flowReviewerRequests before) && length (flowReviewerRequests state) == 1 && length (flowCandidateReceipts state) == 1 && length (flowAttachments state) == 1 && length (flowReviewerReceipts state) == 1 && case flowReviewedProof state of { Just _ -> True; _ -> False })"
-  check "replacement retains original sources without starting a second review" (lastOutput retained == "True")
+  awaitCell owner "review reaches accepted terminal state"
+    "do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (case flowStage state of { ReviewAccepted _ -> True; _ -> False }) }"
+  void $ turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (map requestId (flowReviewerRequests state) == map requestId (flowReviewerRequests before) && length (flowReviewerRequests state) == 1 && length (flowCandidateReceipts state) == 1 && length (flowAttachments state) == 1 && length (flowReviewerReceipts state) == 1 && case flowReviewedProof state of { Just _ -> True; _ -> False })"
+  assertCell owner "replacement retains original sources without a second review"
+    "map requestId (flowReviewerRequests state) == map requestId (flowReviewerRequests before) && length (flowReviewerRequests state) == 1 && length (flowCandidateReceipts state) == 1 && length (flowAttachments state) == 1 && length (flowReviewerReceipts state) == 1 && case flowReviewedProof state of { Just _ -> True; _ -> False }"
   void $ turn owner "R.finish flow"
