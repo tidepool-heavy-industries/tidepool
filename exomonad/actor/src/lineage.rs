@@ -1641,27 +1641,15 @@ impl ForkGroupRegistry {
         })
     }
 
-    pub fn publish_ready(&self, owner: ActorRef) -> Result<Vec<ForkGroupId>, ForkGroupError> {
-        self.publish_ready_matching(owner, ForkGroupBoundary::Any)
-    }
-
     pub(crate) fn publish_ready_in_resident(
         &self,
         owner: ActorRef,
-    ) -> Result<Vec<ForkGroupId>, ForkGroupError> {
-        self.publish_ready_matching(owner, ForkGroupBoundary::Resident)
-    }
-
-    fn publish_ready_matching(
-        &self,
-        owner: ActorRef,
-        boundary: ForkGroupBoundary<'_>,
     ) -> Result<Vec<ForkGroupId>, ForkGroupError> {
         let mut state = self.state.lock();
         let mut published = Vec::new();
         for (id, group) in &mut state.groups {
             if group.owner == owner
-                && boundary.matches(group.completion_boundary.as_ref())
+                && group.completion_boundary.is_none()
                 && *group.phase.borrow() == ForkGroupPhase::Ready
             {
                 group.publication = Some(ForkGroupPublication::Deferred);
@@ -1671,11 +1659,6 @@ impl ForkGroupRegistry {
         }
         published.sort_by_key(|id| id.0);
         Ok(published)
-    }
-
-    #[must_use]
-    pub fn has_ready(&self, owner: ActorRef) -> bool {
-        self.has_ready_matching(owner, ForkGroupBoundary::Any)
     }
 
     #[must_use]
@@ -1713,14 +1696,6 @@ impl ForkGroupRegistry {
         self.abort_pending(owner, true, None, ForkGroupBoundary::Any)
     }
 
-    pub(crate) fn abort_incomplete(
-        &self,
-        owner: ActorRef,
-        selected: Option<&[ForkGroupId]>,
-    ) -> Vec<ActorRef> {
-        self.abort_pending(owner, false, selected, ForkGroupBoundary::Any)
-    }
-
     pub(crate) fn abort_incomplete_at_boundary(
         &self,
         owner: ActorRef,
@@ -1749,10 +1724,6 @@ impl ForkGroupRegistry {
     #[must_use]
     pub(crate) fn has_incomplete_in_resident(&self, owner: ActorRef) -> bool {
         self.has_incomplete_matching(owner, ForkGroupBoundary::Resident)
-    }
-
-    pub(crate) fn has_incomplete(&self, owner: ActorRef) -> bool {
-        self.has_incomplete_matching(owner, ForkGroupBoundary::Any)
     }
 
     fn has_incomplete_matching(&self, owner: ActorRef, boundary: ForkGroupBoundary<'_>) -> bool {
@@ -2863,7 +2834,9 @@ mod tests {
             }
             ids.push(group);
         }
-        assert!(groups.abort_incomplete(owner, Some(&[ids[2]])).is_empty());
+        assert!(groups
+            .abort_incomplete_in_resident(owner, Some(&[ids[2]]))
+            .is_empty());
         assert_eq!(
             groups.abort_selected_unpublished(owner, &[ids[0], ids[2]]),
             vec![ActorRef::first(ActorId(2))]
@@ -2873,6 +2846,167 @@ mod tests {
             vec![ActorRef::first(ActorId(3))]
         );
         assert!(groups.abort_unpublished(owner).is_empty());
+    }
+
+    #[test]
+    fn fork_boundary_cleanup_keeps_hosted_direct_route_and_resident_siblings_isolated() {
+        use tidepool_runtime::session::WorkbenchExecutionId;
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let owner = ActorRef::first(ActorId(1));
+        let other_owner = ActorRef::first(ActorId(2));
+        let hosted_pending = WorkbenchForkBoundary::external(
+            "thread".into(),
+            "request-a".into(),
+            "reused-call".into(),
+        );
+        let hosted_ready = WorkbenchForkBoundary::external(
+            "thread".into(),
+            "request-b".into(),
+            "reused-call".into(),
+        );
+        let direct_pending = WorkbenchForkBoundary::Execution {
+            actor_id: owner.id.0,
+            incarnation: owner.incarnation.0,
+            execution_id: WorkbenchExecutionId::from_digest([1; 16]),
+        };
+        let direct_ready = WorkbenchForkBoundary::Execution {
+            actor_id: owner.id.0,
+            incarnation: owner.incarnation.0,
+            execution_id: WorkbenchExecutionId::from_digest([2; 16]),
+        };
+        let route = WorkbenchForkBoundary::Route {
+            actor_id: owner.id.0,
+            incarnation: owner.incarnation.0,
+            watch_id: 1,
+        };
+        let make_group = |name: &str,
+                          owner,
+                          child,
+                          boundary: Option<WorkbenchForkBoundary>,
+                          ready| {
+            let path = ActorPath::parse(&format!("root/{name}")).unwrap();
+            let (group, reservations) = match boundary {
+                Some(boundary) => {
+                    groups.begin_at_boundary(owner, path, vec![segment("child")], None, boundary)
+                }
+                None => groups.begin(owner, path, vec![segment("child")], None),
+            }
+            .unwrap();
+            groups
+                .claim(group, owner, &reservations[0].allocated)
+                .unwrap();
+            groups.attach_child(group, owner, child).unwrap();
+            groups.request_commit(group, owner).unwrap();
+            if ready {
+                groups.mark_ready(group, child).unwrap();
+            }
+            group
+        };
+        let children: Vec<_> = (10..18).map(|id| ActorRef::first(ActorId(id))).collect();
+        let hosted_a = make_group(
+            "hosted-a",
+            owner,
+            children[0],
+            Some(hosted_pending.clone()),
+            false,
+        );
+        let hosted_b = make_group(
+            "hosted-b",
+            owner,
+            children[1],
+            Some(hosted_ready.clone()),
+            true,
+        );
+        let direct_a = make_group(
+            "direct-a",
+            owner,
+            children[2],
+            Some(direct_pending.clone()),
+            false,
+        );
+        let direct_b = make_group(
+            "direct-b",
+            owner,
+            children[3],
+            Some(direct_ready.clone()),
+            true,
+        );
+        let route_group = make_group("route", owner, children[4], Some(route.clone()), false);
+        let resident_pending = make_group("resident-pending", owner, children[5], None, false);
+        let resident_ready = make_group("resident-ready", owner, children[6], None, true);
+        make_group(
+            "other-owner",
+            other_owner,
+            children[7],
+            Some(hosted_pending.clone()),
+            false,
+        );
+
+        groups.mark_failed(direct_a, children[2]).unwrap();
+
+        assert!(!groups.has_ready_at_boundary(owner, &hosted_pending));
+        assert!(groups.has_incomplete_at_boundary(owner, &hosted_pending));
+        assert!(groups.has_ready_at_boundary(owner, &hosted_ready));
+        assert!(!groups.has_incomplete_at_boundary(owner, &hosted_ready));
+        assert!(!groups.has_ready_at_boundary(owner, &direct_pending));
+        assert!(groups.has_incomplete_at_boundary(owner, &direct_pending));
+        assert!(groups.has_ready_at_boundary(owner, &direct_ready));
+        assert!(!groups.has_incomplete_at_boundary(owner, &direct_ready));
+        assert!(!groups.has_ready_at_boundary(owner, &route));
+        assert!(groups.has_incomplete_at_boundary(owner, &route));
+        assert!(groups.has_ready_in_resident(owner));
+        assert!(groups.has_incomplete_in_resident(owner));
+
+        assert_eq!(
+            groups.publish_ready_in_resident(owner).unwrap(),
+            vec![resident_ready]
+        );
+        assert!(!groups.has_ready_in_resident(owner));
+        assert!(groups.has_ready_at_boundary(owner, &hosted_ready));
+        assert!(groups.has_ready_at_boundary(owner, &direct_ready));
+        assert_eq!(
+            groups.abort_incomplete_in_resident(
+                owner,
+                Some(&[resident_pending, hosted_a, direct_a, route_group])
+            ),
+            vec![children[5]]
+        );
+        assert!(!groups.has_incomplete_in_resident(owner));
+        assert!(groups.has_incomplete_at_boundary(owner, &hosted_pending));
+        assert!(groups.has_incomplete_at_boundary(owner, &direct_pending));
+        assert!(groups.has_incomplete_at_boundary(owner, &route));
+
+        assert_eq!(
+            groups.abort_incomplete_at_boundary(owner, &hosted_pending),
+            vec![children[0]]
+        );
+        assert!(!groups.has_incomplete_at_boundary(owner, &hosted_pending));
+        assert!(groups.has_incomplete_at_boundary(other_owner, &hosted_pending));
+        assert_eq!(
+            groups.ready_groups_at_boundary(owner, &hosted_ready),
+            vec![(hosted_b, vec![children[1]])]
+        );
+        assert_eq!(
+            groups.abort_incomplete_at_boundary(owner, &direct_pending),
+            vec![children[2]]
+        );
+        assert_eq!(
+            groups.ready_groups_at_boundary(owner, &direct_ready),
+            vec![(direct_b, vec![children[3]])]
+        );
+        assert_eq!(
+            groups.abort_incomplete_at_boundary(owner, &route),
+            vec![children[4]]
+        );
+        assert!(groups
+            .abort_incomplete_at_boundary(owner, &hosted_pending)
+            .is_empty());
+        groups.publish_groups(&[hosted_b, direct_b], owner).unwrap();
+        assert!(groups.abort_unpublished(owner).is_empty());
+        assert_eq!(
+            groups.abort_incomplete_at_boundary(other_owner, &hosted_pending),
+            vec![children[7]]
+        );
     }
 
     #[test]
@@ -3028,7 +3162,10 @@ mod tests {
             .unwrap();
         phase.changed().await.unwrap();
         assert_eq!(*phase.borrow(), ForkGroupPhase::Ready);
-        assert_eq!(groups.publish_ready(owner).unwrap(), vec![group]);
+        assert_eq!(
+            groups.publish_ready_in_resident(owner).unwrap(),
+            vec![group]
+        );
         phase.changed().await.unwrap();
         assert_eq!(*phase.borrow(), ForkGroupPhase::Committed);
         assert!(matches!(
@@ -3171,7 +3308,7 @@ mod tests {
         groups.attach_child(group, root, child).unwrap();
         let _phase = groups.request_commit(group, root).unwrap();
         groups.gate(group, child).unwrap().mark_ready().unwrap();
-        groups.publish_ready(root).unwrap();
+        groups.publish_ready_in_resident(root).unwrap();
         assert!(matches!(
             groups.begin_cleanup(group, root, &[]),
             Err(ForkGroupError::CleanupScopeChanged(_))
@@ -3229,7 +3366,7 @@ mod tests {
         groups.attach_child(outer, root, scaffold).unwrap();
         let _phase = groups.request_commit(outer, root).unwrap();
         groups.gate(outer, scaffold).unwrap().mark_ready().unwrap();
-        groups.publish_ready(root).unwrap();
+        groups.publish_ready_in_resident(root).unwrap();
 
         let (inner, inner_reservations) = groups
             .begin(
@@ -3245,7 +3382,7 @@ mod tests {
         groups.attach_child(inner, scaffold, leaf).unwrap();
         let _inner_phase = groups.request_commit(inner, scaffold).unwrap();
         groups.gate(inner, leaf).unwrap().mark_ready().unwrap();
-        groups.publish_ready(scaffold).unwrap();
+        groups.publish_ready_in_resident(scaffold).unwrap();
 
         // A separate admission can have a misleadingly nested display path.
         // Exact group inspection and cleanup must still exclude it.
@@ -3264,7 +3401,7 @@ mod tests {
         groups.attach_child(other, root, unrelated).unwrap();
         let _other_phase = groups.request_commit(other, root).unwrap();
         groups.gate(other, unrelated).unwrap().mark_ready().unwrap();
-        groups.publish_ready(root).unwrap();
+        groups.publish_ready_in_resident(root).unwrap();
         assert!(groups.members(outer, scaffold).is_err());
 
         assert_eq!(
