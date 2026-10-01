@@ -1660,6 +1660,16 @@ impl<'code> PreparedMachine<'code> {
                 .check_prepared_descriptor_space()
                 .map_err(|cause| runtime_error(&self.machine, cause))?;
         }
+        // Filter the shared descriptor vector once for the settled retirement
+        // batch. Deferred programs still own every header they need.
+        let retired_headers: HashSet<_> = releasing
+            .iter()
+            .flat_map(|id| self.programs[id].owned_headers.iter().copied())
+            .collect();
+        if !retired_headers.is_empty() {
+            self.descriptors
+                .retain(|descriptor| !retired_headers.contains(&descriptor.initial_header_word()));
+        }
         // 2-8. Nothing below can fail.
         for id in releasing {
             receipt.block_words += self.release_metadata(id);
@@ -1833,10 +1843,7 @@ impl<'code> PreparedMachine<'code> {
             .retire_prepared_entries(&installed.owned_headers);
         // 3. Descriptor rows and the descriptor space: only what this program
         //    owned; interned constructors stay shared.
-        let owned: HashSet<usize> = installed.owned_headers.iter().copied().collect();
-        self.descriptors
-            .retain(|descriptor| !owned.contains(&descriptor.initial_header_word()));
-        for header in &owned {
+        for header in &installed.owned_headers {
             self.descriptor_registry.remove(header);
             self.header_owners.remove(header);
         }
@@ -9110,6 +9117,51 @@ mod tests {
             &MachineImports::default(),
         )
         .expect("unit thunk fixture links")
+    }
+
+    #[test]
+    fn shared_image_retirement_batch_preserves_a_retained_instance() {
+        let image = Arc::new(caf_program(0, false, UpdatePolicy::Memoize));
+        let weak = Arc::downgrade(&image);
+        let (mut machine, first) = PreparedMachine::new_shared(
+            Arc::clone(&image),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .unwrap();
+        let survivor = machine
+            .install_shared(Arc::clone(&image), ImportBindings::new())
+            .unwrap();
+        let last = machine
+            .install_shared(image, ImportBindings::new())
+            .unwrap();
+        let capture = machine.retain_top(survivor, ValueId(0)).unwrap();
+        let call = PreparedCallOptions {
+            observation_budget: 100,
+            collect_before_observation: false,
+        };
+        for program in [first, last] {
+            machine
+                .run_entry(program, ValueId(0), &[], call, RealmId::ROOT)
+                .unwrap();
+        }
+        let receipt = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(receipt.programs, vec![first, last]);
+        assert!(receipt.deferred.is_empty());
+        assert_eq!(machine.residency().programs, 1);
+        let result = machine
+            .run_entry(survivor, ValueId(0), &[], call, RealmId::ROOT)
+            .unwrap();
+        assert!(matches!(result.values.as_slice(),
+            [HaskellValue::Con(id, fields)] if *id == DataConId(900) && fields.is_empty()));
+        assert!(weak.upgrade().is_some());
+        assert!(machine.release(capture));
+        let receipt = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(receipt.programs, vec![survivor]);
+        assert_eq!(machine.residency().programs, 0);
+        assert!(weak.upgrade().is_none());
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 
     /// Bounded residency (lifetime contract, first slice): install a program
