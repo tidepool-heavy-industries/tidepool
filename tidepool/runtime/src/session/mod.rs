@@ -609,6 +609,30 @@ impl PublicManifestBase {
     }
 }
 
+fn certified_native_dependencies(
+    context: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
+    roots: &[tidepool_toolchain::artifact_inventory::ArtifactId],
+) -> Result<Vec<recovery::RecoveryLiveDependency>, SessionError> {
+    Ok(context
+        .artifact_view()
+        .native_binding_requirements_from_roots(roots)?
+        .into_iter()
+        .map(
+            |requirement| recovery::RecoveryLiveDependency::NativeBinding {
+                artifact_id: requirement.artifact_id,
+                binding: recovery::RecoverySourceIdentity {
+                    unit: requirement.identity.unit,
+                    module: requirement.identity.module,
+                    namespace: requirement.identity.namespace,
+                    occurrence: requirement.identity.occurrence,
+                    record_parent: requirement.identity.record_parent,
+                },
+                generation: requirement.generation,
+            },
+        )
+        .collect())
+}
+
 fn authored_identity(
     identity: &tidepool_toolchain::declaration_join::ExportIdentity,
 ) -> Option<recovery::RecoverySymbolIdentity> {
@@ -2051,21 +2075,18 @@ impl SessionLib {
             .iter()
             .map(recovery::RecoveryArtifactClosure::artifact_id)
             .collect();
-        let mut live_dependencies = staged
-            .turn
-            .parent
-            .and_then(|parent| graph.nodes.iter().find(|node| node.id == parent))
-            .map(|node| node.live_dependencies.clone())
-            .unwrap_or_default();
-        live_dependencies.extend(staged.visible_values.iter().map(|(id, _)| {
-            recovery::RecoveryLiveDependency::Binding {
-                binding: recovery::RecoveryBindingId {
-                    session: self.id.0,
-                    variable: id.raw(),
-                },
-                name: id.raw().to_string(),
-            }
-        }));
+        let authored_root = artifacts
+            .iter()
+            .find_map(|artifact| match artifact {
+                recovery::RecoveryArtifactClosure::Home(reference)
+                    if reference.unit == own.unit && reference.module == own.module =>
+                {
+                    Some(artifact.artifact_id())
+                }
+                _ => None,
+            })
+            .ok_or_else(|| invalid("authored native root is absent from its artifact closure"))?;
+        let live_dependencies = certified_native_dependencies(context, &[authored_root])?;
         graph.nodes.push(recovery::RecoveryNode {
             id: staged.generation,
             parent: staged.turn.parent,

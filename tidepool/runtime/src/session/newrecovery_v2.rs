@@ -251,9 +251,10 @@ pub(crate) struct RecoveryInstanceInventory {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "dependency", rename_all = "snake_case")]
 pub(crate) enum RecoveryLiveDependency {
-    Binding {
-        binding: RecoveryBindingId,
-        name: String,
+    NativeBinding {
+        artifact_id: ArtifactId,
+        binding: RecoverySourceIdentity,
+        generation: u64,
     },
     Instance {
         dfun: RecoverySymbolIdentity,
@@ -1191,6 +1192,33 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
                     "recovery node {} has multiple artifacts for one module owner",
                     node.id.0
                 )));
+            }
+        }
+        for dependency in &node.live_dependencies {
+            let RecoveryLiveDependency::NativeBinding {
+                artifact_id,
+                binding,
+                generation,
+            } = dependency
+            else {
+                continue;
+            };
+            let artifact = artifacts
+                .get(artifact_id)
+                .filter(|_| node_artifacts.contains(artifact_id))
+                .ok_or_else(|| {
+                    error("native binding dependency has no retained exact interface")
+                })?;
+            let owner = artifact.owner();
+            if owner.unit != binding.unit || owner.module != binding.module
+                || !graph.artifact_dependencies.iter().any(|edge| {
+                    edge.target == *artifact_id && node_artifacts.contains(&edge.source)
+                        && matches!(&edge.dependency, ArtifactDependency::NativeBinding {
+                            generation: required_generation, namespace, occurrence, record_parent, ..
+                        } if required_generation == generation && namespace == &binding.namespace
+                            && occurrence == &binding.occurrence && record_parent == &binding.record_parent)
+                }) {
+                return Err(error("native binding dependency differs from its certified original identity"));
             }
         }
         for id in &node_artifacts {
