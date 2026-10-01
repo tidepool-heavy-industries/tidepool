@@ -85,15 +85,15 @@ GHC="$(exe toolchains//:ghc)"
 cp -a "$PWD/$(location //bridge/facade:exomonad)" "$OUTPUT/bin/exomonad"
 cp -a "$PWD/$(location //tidepool/extract-cmd:tidepool-extract)" "$OUTPUT/bin/tidepool-extract"
 cp -a "$PWD/$(location //bridge/haskell:tidepool_extract_bin)" "$OUTPUT/bin/tidepool-extract-bin"
-TIDEPOOL_EXTRACT_WORKER="$OUTPUT/bin/tidepool-extract-bin" \
-  TIDEPOOL_GHC_LIBDIR="$(cat "$OUTPUT/share/exomonad/ghc-libdir.txt")" \
-  "$OUTPUT/bin/tidepool-extract" --compiler-deployment-manifest \
-    "$OUTPUT/share/exomonad/compiler-deployment.json"
 RUNTIME_LIBRARIES="$PWD/$(location :tidepool_extract_runtime_libraries)"
 for library in "$RUNTIME_LIBRARIES"/*; do
     test -e "$library"
     cp -L "$library" "$OUTPUT/bin/__tidepool_extract_bin__shared_libs_symlink_tree/"
 done
+TIDEPOOL_EXTRACT_WORKER="$OUTPUT/bin/tidepool-extract-bin" \
+  TIDEPOOL_GHC_LIBDIR="$(cat "$OUTPUT/share/exomonad/ghc-libdir.txt")" \
+  "$OUTPUT/bin/tidepool-extract" --compiler-deployment-manifest \
+    "$OUTPUT/share/exomonad/compiler-deployment.json"
 WEB="$PWD/$(location //web:dist)"
 cp -a "$WEB/web/." "$OUTPUT/share/exomonad/web/"
 cp -a "$PWD/$(location :embedded_web_provenance)" "$OUTPUT/share/exomonad/harness-source-revision.txt"
