@@ -385,6 +385,24 @@ exit 9
         self.assertEqual(len(list(artifact_root.glob("*/.successful-run"))), 5)
         self.assertEqual((failure / "nextest.log").read_text(), "failure evidence")
 
+    def test_compiler_json_trace_survives_owned_daemon_cleanup(self):
+        logs = self.root / "owned daemon logs"
+        logs.mkdir()
+        daemon = logs / "daemon.log"
+        daemon.write_text("daemon diagnostic")
+        (logs / "compiler.log").write_text("readable compiler diagnostic")
+        trace = logs / "compiler.jsonl"
+        payload = '{"fields":{"message":"retained daemon trace"}}\n'
+        trace.write_text(payload)
+        artifact_root = self.root / "retained evidence"
+        self.run_shell('prepare_battery_artifacts fixture true\n'
+                       'finalize_battery_artifacts 1\n',
+                       TIDEPOOL_EXTRACT_DAEMON_LOG=str(daemon),
+                       TIDEPOOL_TEST_ARTIFACT_ROOT=str(artifact_root))
+        trace.unlink()
+        self.assertEqual(len(list(artifact_root.glob("*/compiler.jsonl"))), 1)
+        self.assertEqual(next(artifact_root.glob("*/compiler.jsonl")).read_text(), payload)
+
     def test_successful_tests_preserve_daemon_failure_artifacts(self):
         (self.root / "scripts").mkdir()
         doctor = self.root / "scripts/toolchain-doctor.sh"
