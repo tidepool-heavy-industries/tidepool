@@ -235,14 +235,6 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
             }
             collect(root, &path, out);
         } else if path.extension().is_some_and(|e| e == "hs") {
-            // This module exists only to probe a GHC representation detail;
-            // other `Internal` modules are production library dependencies.
-            if path
-                .file_name()
-                .is_some_and(|name| name == "DataTextProbe.hs")
-            {
-                continue;
-            }
             #[allow(clippy::expect_used, reason = "under root")]
             let rel = path
                 .strip_prefix(root)

@@ -289,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_stdlib_contains_production_internal_modules_only() {
+    fn embedded_stdlib_retains_production_internal_modules() {
         if EMBEDDED_STDLIB.is_empty() {
             // TIDEPOOL_EMBED_HASKELL is unset for this build: build.rs emits
             // an empty bundle by design (see its doc comment), so there is no
@@ -300,9 +300,6 @@ mod tests {
         assert!(EMBEDDED_STDLIB
             .iter()
             .any(|(path, _)| *path == "Tidepool/Internal/ExitCell.hs"));
-        assert!(!EMBEDDED_STDLIB
-            .iter()
-            .any(|(path, _)| *path == "Tidepool/Internal/DataTextProbe.hs"));
     }
 
     #[test]

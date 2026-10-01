@@ -345,7 +345,7 @@ filegroup(
     name = "facade_embedded_sources",
     srcs = {source: source for source in glob(
         ["lib/**/*.hs", "actors/**/*.hs"],
-        exclude = ["lib/**/Prelude_cbor/**", "lib/**/DataTextProbe.hs"],
+        exclude = ["lib/**/Prelude_cbor/**"],
     )},
     visibility = ["PUBLIC"],
 )
