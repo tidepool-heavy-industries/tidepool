@@ -3265,7 +3265,7 @@ where
         &self,
         context: crate::ActorSessionContext,
         install: u64,
-    ) -> Result<Option<ResidentWorkbenchTools>, ResidentActorWorkbenchError> {
+    ) -> Result<ResidentWorkbenchTools, ResidentActorWorkbenchError> {
         let resolved = self.resolve_spec(&context);
         let revision = resolved.source_revision();
         let entry = resolved
@@ -3423,14 +3423,14 @@ where
                         "tool installer did not finish after publication".into(),
                     ));
                 }
-                Ok(Some(ResidentWorkbenchTools {
+                Ok(ResidentWorkbenchTools {
                     declarations,
                     dispatch: Arc::new(dispatch),
                     slots,
                     resolved: publication_resolved,
                     install,
                     revision,
-                }))
+                })
             })
             .await;
         if publication.is_ok() {

@@ -6051,15 +6051,7 @@ where
             "agent spec preparation"
         );
         let candidate = match candidate {
-            Ok(Some(candidate)) => candidate,
-            Ok(None) => {
-                receipt.push(
-                    "spec: the resolved entry named nothing to install; the previous record is \
-                     still active."
-                        .into(),
-                );
-                return reload_receipt("nothing to install", started, receipt);
-            }
+            Ok(candidate) => candidate,
             Err(error) => {
                 receipt.push(format!(
                     "spec: the install fragment did not compile against the new revision, so the \
@@ -6132,16 +6124,13 @@ where
             success = compiled_tools.is_ok(),
             "agent spec preparation"
         );
-        let compiled_tools = compiled_tools?.map(Arc::new);
-        let declarations = compiled_tools
-            .as_ref()
-            .map(|tools| tools.declarations.clone())
-            .unwrap_or_default();
+        let compiled_tools = Arc::new(compiled_tools?);
+        let declarations = compiled_tools.declarations.clone();
         let source = self.freeze_installed_source(context.actor)?;
         self.installed_tools.publish(crate::InstalledToolLease::new(
             context.actor,
             source,
-            compiled_tools,
+            Some(compiled_tools),
         ));
         let policy: Arc<dyn ResidentToolEndpoint> =
             Arc::new(crate::ResidentInteractivePolicy::local_with_installation(
