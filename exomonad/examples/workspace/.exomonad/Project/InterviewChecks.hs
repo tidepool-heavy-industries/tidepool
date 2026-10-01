@@ -22,6 +22,6 @@ collectAnswers = do
     "respond (Decision \"choose one source\" [\"inspected exact input\"] :: DesignAnswer)"
   void $ turn owner "answered <- collectInterview interviewItems"
   assertCell owner "terminal typed answer appears in one summary" "interviewComplete answered && case interviewFindings answered of { [Answered _ receipt] -> responseValue receipt == Decision \"choose one source\" [\"inspected exact input\"]; _ -> False }"
-  assertCell owner "text: interview summary includes the terminal answer" "\"choose one source\" `Text.isInfixOf` interviewSummary answered"
+  assertCell owner "text: interview summary includes the terminal answer" "\"choose one source\" `T.isInfixOf` interviewSummary answered"
   void $ turn owner "let prior = case interviewFindings answered of { [Answered q receipt] -> [KnownAnswer q receipt]; _ -> [] }\nreused <- collectInterview prior"
   assertCell owner "earlier answer is reused with its receipt" "interviewComplete reused && case (interviewFindings answered, interviewFindings reused) of { ([Answered originalQuestion originalReceipt], [Answered question receipt]) -> question == originalQuestion && receipt == originalReceipt; _ -> False }"
