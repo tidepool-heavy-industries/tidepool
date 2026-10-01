@@ -180,7 +180,7 @@ impl CapturedHostTransport {
                     }
                     vec![harness::item::Item(json!({
                         "type":"custom_tool_call", "call_id":format!("captured-child-{path}"),
-                        "name":"haskell", "input":"respond getX"
+                        "name":"haskell", "input":"respond capturedGetter"
                     }))]
                 }
                 2 if self.scenario == CapturedScenario::FailureAfterReplies && ordinal < 2 => {
@@ -190,7 +190,7 @@ impl CapturedHostTransport {
                     }
                     vec![harness::item::Item(json!({
                         "type":"custom_tool_call", "call_id":format!("captured-child-after-failure-{path}"),
-                        "name":"haskell", "input":"(x, getX)"
+                        "name":"haskell", "input":"(capturedValue, capturedGetter)"
                     }))]
                 }
                 3 if self.scenario == CapturedScenario::FailureAfterReplies && ordinal < 2 => {
@@ -531,6 +531,8 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                 failure.contains("intentional captured parent Haskell execution failure"),
                 "{failure}"
             );
+            assert!(campaign.actor.terminal().get().is_none(),
+                "the fixture fails the parent cell while ParentOwned children retain a live supervisor");
             eprintln!(
                 "[captured-engine] actual parent execution failed after both typed child replies"
             );

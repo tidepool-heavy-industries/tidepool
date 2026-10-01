@@ -1,3 +1,5 @@
+capturedValue <- pure (x :: Int)
+let capturedGetter = capturedValue + 1
 do
   inheritedRefusal <- attemptUnfoldCaptured (batch ("embedded-captured" :: CampaignLabel)
     ("inherited-refusal" :: ForkGroupLabel))
