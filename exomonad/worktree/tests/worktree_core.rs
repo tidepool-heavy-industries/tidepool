@@ -65,6 +65,62 @@ fn assert_untouched(before: &SourceState, after: &SourceState) {
 }
 
 #[test]
+fn caller_labels_with_invalid_ref_syntax_create_valid_branches() {
+    let repo = TestRepo::init().expect("init");
+    repo.writer()
+        .commit_file("a.txt", "one", "first")
+        .expect("commit");
+    let base = tempfile::TempDir::new().expect("tempdir");
+    let manager = manager_over(&repo, base.path());
+    let git = GitCli::new();
+    let before = capture_state(&git, repo.path());
+
+    for (label, expected) in [
+        ("a..b", "a-b"),
+        ("a...b", "a-b"),
+        ("a-..-b", "a-b"),
+        ("a/.b", "a/b"),
+        ("a/../b", "a/worktree/b"),
+        ("a/.../b", "a/worktree/b"),
+        ("a.lock/b", "a-lock/b"),
+        ("a/.lock/b", "a/lock/b"),
+        ("a.lock.lock/b", "a.lock-lock/b"),
+        ("a.lock", "a.lock"),
+        ("a/b.lock", "a/b.lock"),
+        ("a./b", "a./b"),
+        ("a/b", "a/b"),
+        ("a.b.c", "a.b.c"),
+    ] {
+        let handle = manager
+            .create(&WorktreeSpec::from_current_repository(label))
+            .unwrap_or_else(|error| panic!("create with label {label:?}: {error}"));
+        assert_eq!(
+            handle.branch().as_str(),
+            format!("exomonad/worktree/{expected}-{}", handle.id().as_str()),
+            "{label:?}"
+        );
+        git.try_run(
+            repo.path(),
+            &[
+                "check-ref-format",
+                &format!("refs/heads/{}", handle.branch().as_str()),
+            ],
+        )
+        .expect("generated branch is a valid Git ref");
+        assert_eq!(handle.receipt().status, WorktreeRecordStatus::Finalized);
+        assert_eq!(
+            manager
+                .lookup(handle.id())
+                .expect("lookup")
+                .expect("registered worktree")
+                .receipt(),
+            handle.receipt()
+        );
+        assert_untouched(&before, &capture_state(&git, repo.path()));
+    }
+}
+
+#[test]
 fn clean_creation_from_current_repository_leaves_source_untouched() {
     let repo = TestRepo::init().expect("init");
     let w = repo.writer();

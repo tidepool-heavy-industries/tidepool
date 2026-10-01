@@ -14,8 +14,46 @@ pub fn sanitize_agent_label(raw: &str) -> String {
 /// else becomes `-`, runs of `-`/`/` collapse together, and the ends are
 /// trimmed of `-`/`/`/`.`. An all-punctuation label falls back to
 /// `"worktree"` rather than a branch name ending in the bare prefix.
+/// Components lose leading dots, interior dot runs become `-`, and
+/// intermediate `.lock` suffixes become `-lock` so the generated Git ref is
+/// valid. A final `.lock` remains valid before the generated `-<id>` suffix.
 pub fn sanitize_branch_label(raw: &str) -> String {
-    sanitize(raw, true, "worktree")
+    let label = sanitize(raw, true, "worktree");
+    let mut components = label.split('/').peekable();
+    let mut out = String::with_capacity(label.len());
+    while let Some(component) = components.next() {
+        if !out.is_empty() {
+            out.push('/');
+        }
+        let component = component.trim_start_matches('.');
+        if component.is_empty() {
+            out.push_str("worktree");
+            continue;
+        }
+
+        let mut normalized = String::with_capacity(component.len());
+        let mut chars = component.chars().peekable();
+        while let Some(mut c) = chars.next() {
+            if c == '.' && chars.peek() == Some(&'.') {
+                while chars.peek() == Some(&'.') {
+                    chars.next();
+                }
+                c = '-';
+            }
+            if c != '-' || !normalized.ends_with('-') {
+                normalized.push(c);
+            }
+        }
+        if components.peek().is_some() {
+            if let Some(stem) = normalized.strip_suffix(".lock") {
+                out.push_str(stem);
+                out.push_str("-lock");
+                continue;
+            }
+        }
+        out.push_str(&normalized);
+    }
+    out
 }
 
 /// Shared implementation for the two slash policies.
@@ -119,6 +157,27 @@ mod tests {
                 *expected,
                 "sanitize_branch_label({input:?})"
             );
+        }
+    }
+
+    #[test]
+    fn branch_labels_repair_invalid_git_ref_components() {
+        for (input, agent_expected, branch_expected) in [
+            ("a..b", "a..b", "a-b"),
+            ("a...b", "a...b", "a-b"),
+            ("a-..-b", "a-..-b", "a-b"),
+            ("a/.b", "a-.b", "a/b"),
+            ("a/../b", "a-..-b", "a/worktree/b"),
+            ("a/.../b", "a-...-b", "a/worktree/b"),
+            ("a.lock/b", "a.lock-b", "a-lock/b"),
+            ("a/.lock/b", "a-.lock-b", "a/lock/b"),
+            ("a.lock.lock/b", "a.lock.lock-b", "a.lock-lock/b"),
+            ("a.lock", "a.lock", "a.lock"),
+            ("a/b.lock", "a-b.lock", "a/b.lock"),
+            ("a./b", "a.-b", "a./b"),
+        ] {
+            assert_eq!(sanitize_agent_label(input), agent_expected, "{input:?}");
+            assert_eq!(sanitize_branch_label(input), branch_expected, "{input:?}");
         }
     }
 
