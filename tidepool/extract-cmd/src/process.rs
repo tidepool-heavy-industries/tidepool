@@ -13,6 +13,8 @@ use std::process::Command;
 const PR_SET_PDEATHSIG: std::os::raw::c_int = 1;
 #[cfg(target_os = "linux")]
 const SIGKILL: std::os::raw::c_int = 9;
+#[cfg(target_os = "linux")]
+const EINTR: std::os::raw::c_int = 4;
 
 #[cfg(target_os = "linux")]
 unsafe extern "C" {
@@ -62,8 +64,11 @@ pub(crate) fn kill_process(pid: u32) -> io::Result<()> {
 pub(crate) fn current_process_dies_with_parent() -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        set_parent_death_signal()?;
-        reject_already_orphaned()
+        // A live launcher can be PID 1 inside a build's PID namespace.
+        // Capture its identity rather than treating that PID as an orphan.
+        // SAFETY: getppid takes no arguments or pointers.
+        let parent = unsafe { getppid() };
+        arm_for_parent(parent)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -77,14 +82,12 @@ pub(crate) fn child_dies_with_parent(command: &mut Command) {
     {
         use std::os::unix::process::CommandExt;
 
+        let parent = std::process::id() as std::os::raw::c_int;
         // SAFETY: the closure runs after fork and before exec and calls only
         // async-signal-safe kernel/libc entry points. It allocates no memory
         // and touches no shared Rust state.
         unsafe {
-            command.pre_exec(|| {
-                set_parent_death_signal()?;
-                reject_already_orphaned()
-            });
+            command.pre_exec(move || arm_for_parent(parent));
         }
     }
 }
@@ -102,16 +105,14 @@ fn set_parent_death_signal() -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn reject_already_orphaned() -> io::Result<()> {
-    // There is an unavoidable interval between `fork` and `prctl`. If the
-    // parent died inside it, no signal was delivered; observing init as the
-    // parent closes that race by refusing to continue into `exec`.
+fn arm_for_parent(parent: std::os::raw::c_int) -> io::Result<()> {
+    set_parent_death_signal()?;
+    // Parent death before prctl delivers no signal. Refuse a changed parent
+    // after arming, including reparenting to a subreaper other than init.
     // SAFETY: `getppid` takes no arguments and has no memory-safety contract.
-    if unsafe { getppid() } == 1 {
-        Err(io::Error::new(
-            io::ErrorKind::Interrupted,
-            "extractor parent exited before child initialization",
-        ))
+    if unsafe { getppid() } != parent {
+        // Avoid allocating in the child hook after fork.
+        Err(io::Error::from_raw_os_error(EINTR))
     } else {
         Ok(())
     }
@@ -120,11 +121,149 @@ fn reject_already_orphaned() -> io::Result<()> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    use std::io::Read;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 
     const HELPER_ENV: &str = "TIDEPOOL_PARENT_DEATH_HELPER";
     const PID_FILE_ENV: &str = "TIDEPOOL_PARENT_DEATH_PID_FILE";
+    const TRANSITION_ENV: &str = "TIDEPOOL_PARENT_TRANSITION_DIRECTORY";
+    const EXPECTED_PARENT_ENV: &str = "TIDEPOOL_EXPECTED_PARENT";
+    const NAMESPACE_ENV: &str = "TIDEPOOL_PARENT_NAMESPACE_HELPER";
+
+    #[test]
+    fn parent_exit_before_signal_setup_refuses_the_child() {
+        let work = tempfile::tempdir().unwrap();
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test: isolated parent-transition fixture"
+        )]
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "process::tests::parent_transition_helper",
+                "--exact",
+                "--nocapture",
+            ])
+            .env(TRANSITION_ENV, work.path())
+            .stdin(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let result = work.path().join("result");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !result.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(std::fs::read_to_string(result).unwrap(), "refused");
+    }
+
+    #[test]
+    #[allow(
+        clippy::zombie_processes,
+        reason = "fixture exits before child signal setup to exercise reparenting"
+    )]
+    fn parent_transition_helper() {
+        let Some(work) = std::env::var_os(TRANSITION_ENV) else {
+            return;
+        };
+        let work = std::path::PathBuf::from(work);
+        if let Some(parent) = std::env::var_os(EXPECTED_PARENT_ENV) {
+            let parent = parent.to_str().unwrap().parse().unwrap();
+            std::fs::write(work.join("ready"), b"ready").unwrap();
+            // EOF follows fixture-parent exit, before this child arms its signal.
+            std::io::stdin().read_to_end(&mut Vec::new()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while unsafe { getppid() } == parent && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_ne!(unsafe { getppid() }, parent);
+            assert_eq!(
+                arm_for_parent(parent).unwrap_err().kind(),
+                io::ErrorKind::Interrupted
+            );
+            std::fs::write(work.join("result"), b"refused").unwrap();
+            return;
+        }
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test: simulate the fork-to-prctl interval without an armed signal"
+        )]
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "process::tests::parent_transition_helper",
+                "--exact",
+                "--nocapture",
+            ])
+            .env(TRANSITION_ENV, &work)
+            .env(EXPECTED_PARENT_ENV, std::process::id().to_string())
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !work.join("ready").exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !work.join("ready").exists() {
+            drop(input);
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("parent-transition child did not become ready");
+        }
+        // Exit closes the pipe and reparents the child before it arms the signal.
+        std::process::exit(0);
+    }
+
+    #[test]
+    #[ignore = "requires unshare and unprivileged PID namespaces"]
+    fn live_namespace_pid_one_can_own_frontend_and_child() {
+        let executable = std::env::current_exe().unwrap();
+        for through_shell in [false, true] {
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test: launch a fresh PID namespace"
+            )]
+            let mut namespace = Command::new("unshare");
+            namespace
+                .args([
+                    "--user",
+                    "--map-root-user",
+                    "--pid",
+                    "--fork",
+                    "--mount-proc",
+                ])
+                .env(NAMESPACE_ENV, "1");
+            if through_shell {
+                namespace.args(["sh", "-c", "\"$1\" process::tests::namespace_parent_helper --exact --nocapture; result=$?; exit \"$result\"", "sh"])
+                    .arg(&executable);
+            } else {
+                namespace.arg(&executable).args([
+                    "process::tests::namespace_parent_helper",
+                    "--exact",
+                    "--nocapture",
+                ]);
+            }
+            assert!(namespace.status().unwrap().success());
+        }
+    }
+
+    #[test]
+    fn namespace_parent_helper() {
+        if std::env::var_os(NAMESPACE_ENV).is_none() {
+            return;
+        }
+        let parent = unsafe { getppid() };
+        assert_eq!(parent, if std::process::id() == 1 { 0 } else { 1 });
+        eprintln!("namespace process={} parent={parent}", std::process::id());
+        current_process_dies_with_parent().unwrap();
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test: exercise the owned child hook in the PID namespace"
+        )]
+        let mut child = Command::new("true");
+        child_dies_with_parent(&mut child);
+        assert!(child.status().unwrap().success());
+    }
 
     #[test]
     fn configured_child_dies_when_its_parent_exits() {
