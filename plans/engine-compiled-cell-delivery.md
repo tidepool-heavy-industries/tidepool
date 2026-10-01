@@ -78,6 +78,25 @@ workers may be used for meaningful independent work, not duplicated ownership.
 Root works the integration lane while coordinating. Broad acceptance runs only on
 joined candidates; compile every changed target and execute focused owner tests.
 
+### Completion policy
+
+The user selected completion followed by measurement-led performance work.
+Finish the in-flight repairs and known correctness defects, freeze the joined
+engine/harness revision, and execute functional acceptance and the specified
+latency gates. Performance failures remain delivery defects; do not waive a
+missed target or replace measurements with counts of passing unit tests. Record
+further unmeasured optimization ideas for follow-up instead of continually
+expanding the acceptance candidate.
+
+Component owners proceed through routine implementation, focused checks and
+repairs without asking for permission again. Escalate shared API/authority
+decisions and actual blockers. Reuse each component's checkout and private Cargo
+target for compatible checks; never share a mutable Cargo target across checkouts.
+Use the pinned direct-tool environment for extractor-free tests. Batch reviewed
+component commits, compile their combined production consumers before distributing
+the next baseline, and repair a failing join once at its owner. A running acceptance
+check keeps its recorded source and binaries when unrelated integration advances.
+
 First vertical compiler gate: native bind -> declaration importing that value ->
 expression yielding 42. Preserve original module/binding identities. A bad final
 item must execute zero effects. Keep reviewed parser/reservation/publication

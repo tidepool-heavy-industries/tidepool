@@ -93,6 +93,46 @@ graph/Val-lifetime repairs, persistent recovery snapshots or immutable Prelude
 package work. Prefer bounded owner changes and existing failure tests. Record
 actual counts and distinguish removed operations from measured latency savings.
 
-The source audit is complete. Suggested repairs and any additional experiments
-still require implementation, independent review and appropriate verification;
-none closes the engine, M1, M2 or production performance gates.
+## Repair and acceptance checkpoint
+
+The initial findings above describe the audited revision. At integration commit
+`611b32438a8c668043c0c593e489cd5d90906ef3`, the following repairs are joined:
+
+- Shared immutable native definition facts, one descriptor filter per retirement
+  batch, and indexed static parcel ownership.
+- Reused captured source digests, read-only source observation, complete shipped
+  source fingerprints, and checking-only reload validation against the current
+  published source graph.
+- Explicit production/test source ownership, isolated Cargo targets, and bounded
+  successful trace copies. Complete benchmark traces publish only after copying
+  succeeds; file hashing streams its input.
+- One closure/index for exact-context validation and identity, shared compile-view
+  metadata, a shared admitted native-owner baseline with private deltas, and direct
+  consumption of refreshed injection inventories.
+- Live-entry-owned admission queues with epoch fencing, and child machine
+  preparation on the existing blocking pool before registration.
+
+The most recent combined Buck check before the final metadata/scheduling/view
+batch passed on `4a9971818b7d6a7f9dedbcc06ba8f287355d5c8d`: six production crate
+targets, 47 local actions, 23.628 seconds, zero tests executed. Evidence is under
+`target/completion-evidence/compiled-cell/buck-joined-reloads/4a9971818b/`.
+This is a compile result, not a matched latency comparison. Component evidence
+includes 32 metadata tests, six registry tests, two child-preparation tests,
+31 initial view/admission tests and nine follow-up tests; these are separate
+candidate checks, not a single final acceptance run.
+
+Later source audits found three ownership defects: a borrowed binding exposed as
+consumable root custody, portable images failing to admit reused literal addresses
+on a fresh machine, and separately passed pending snapshots/compiled images whose
+pairing depended on caller convention. Their bounded owner repairs are in flight.
+Harness repairs also retain terminal outcome separately from rendered tool output,
+so cancellation, failure and error-shaped success survive replay unambiguously.
+The immutable package producer, annealing integration and final actor/harness
+composition remain delivery gates.
+
+The cold-original acceptance candidate is frozen at
+`1b874b9896b93c286a07afd87a9eaac58d9c1c2e`; its matched build passed, with the actual
+test still running at this checkpoint. Other focused successes do not close the
+engine, M1, M2 or production performance gates. Per the user's completion decision,
+finish current repairs and execute joined acceptance and timing measurements before
+starting additional speculative optimization work.
