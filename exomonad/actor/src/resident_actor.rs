@@ -285,6 +285,7 @@ enum RootPublicOwnerPosture {
     Ready,
 }
 
+#[derive(Clone)]
 enum ActorPublicOwnerPlane {
     Ephemeral(Arc<WorkbenchPublicOwner>),
     DurablePending(tidepool_runtime::session::RecoveryPublicOwner),
