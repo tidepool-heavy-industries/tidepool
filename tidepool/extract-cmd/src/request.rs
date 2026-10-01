@@ -476,7 +476,9 @@ impl ExtractRequest {
     }
 
     pub fn is_check_source(&self) -> bool {
-        self.fields.iter().any(|field| matches!(field, Field::CheckSource))
+        self.fields
+            .iter()
+            .any(|field| matches!(field, Field::CheckSource))
     }
 
     pub(crate) fn cell_plan(&mut self) {

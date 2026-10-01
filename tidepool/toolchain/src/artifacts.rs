@@ -54,14 +54,18 @@ pub fn check_source(request: &SourceCheckRequest<'_>) -> Result<(), CompileError
     let input = directory.path().join(format!("{module}.hs"));
     std::fs::write(&input, request.source)?;
     let mut command = ExtractCmd::new().map_err(|error| CompileError::Io(error.into()))?;
-    command.input(&input).check_source().includes(request.include);
+    command
+        .input(&input)
+        .check_source()
+        .includes(request.include);
     let bound = command
         .bind()
         .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))?;
     let endpoint = crate::toolchain::AdmittedCompilerEndpoint::from_bound(bound)
         .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     crate::paths::apply_admitted_build_products_dir(&mut command, &endpoint);
-    let offer = ModuleCandidateOffer::select_admitted(&endpoint, request.include, directory.path());
+    let offer =
+        ModuleCandidateOffer::select_admitted(&endpoint, request.include, directory.path())?;
     if let Some(manifest) = offer.manifest_path() {
         command.module_candidates(manifest);
     }

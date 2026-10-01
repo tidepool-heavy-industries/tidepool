@@ -311,6 +311,11 @@ checkingSourceRequestRoundTrip = do
   case workerRequestFromArgv ["--worker-request-v16", last (workerArgv fields)] of
     Left _ -> pure ()
     other -> fail ("retired request protocol accepted: " ++ show other)
+  let payload = last (workerArgv fields)
+      retiredPayload = take 14 payload ++ "36" ++ drop 16 payload
+  case workerRequestFromArgv [head (workerArgv fields), retiredPayload] of
+    Left _ -> pure ()
+    other -> fail ("retired request bytes accepted: " ++ show other)
 
 certificationRequestValidation :: IO ()
 certificationRequestValidation = do
