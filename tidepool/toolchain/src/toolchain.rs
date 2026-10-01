@@ -257,10 +257,6 @@ pub enum ToolchainError {
         path: PathBuf,
         source: std::io::Error,
     },
-
-    /// The running process selected a different configured compiler input.
-    #[error("compiler deployment selected a different {component}")]
-    DeploymentSelection { component: &'static str },
 }
 
 /// `Debug` renders the variant name plus the operator-facing `Display` text,
@@ -281,7 +277,6 @@ impl std::fmt::Debug for ToolchainError {
             Self::Stamp { .. } => "Stamp",
             Self::DeploymentAuthority(_) => "DeploymentAuthority",
             Self::DeploymentManifest { .. } => "DeploymentManifest",
-            Self::DeploymentSelection { .. } => "DeploymentSelection",
         };
         write!(f, "{tag}: {self}")
     }
@@ -371,9 +366,15 @@ pub fn locate_extract() -> Result<ExtractLocation, ToolchainError> {
 }
 
 /// Bind the producer selected by the canonical extract resolution policy.
-/// The returned endpoint is the authority for deploy and cache identity; the
-/// location is informational only.
+/// Configured deployment authority admits the observed producer and exact
+/// consumed worker before this endpoint can authorize compilation.
 pub fn bind_extract_endpoint(
+) -> Result<(tidepool_extract_cmd::CompilerEndpoint, ExtractLocation), ToolchainError> {
+    let (endpoint, location, _) =
+        bind_admitted_extract_endpoint(&CompilerDeploymentConfiguration::from_env()?)?;
+    Ok((endpoint, location))
+}
+fn bind_unadmitted_extract_endpoint(
 ) -> Result<(tidepool_extract_cmd::CompilerEndpoint, ExtractLocation), ToolchainError> {
     let location = locate_extract()?;
     let cmd = tidepool_extract_cmd::ExtractCmd::with_bin(
@@ -391,6 +392,7 @@ pub fn bind_extract_endpoint(
 /// from the configured package/deployment manifest; they must never be filled
 /// from an endpoint observation and then treated as authority.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompilerDeploymentAuthority {
     /// Schema version of this explicit deployment manifest.
     pub schema: u32,
@@ -398,11 +400,11 @@ pub struct CompilerDeploymentAuthority {
     pub producer_identity: [u8; 32],
     /// BLAKE3 digest of the exact compiler worker executable admitted into it.
     pub consumed_worker_identity: [u8; 32],
-    /// Approved frontend path selected for this deployment.
+    /// Frontend path retained as configured build provenance.
     pub frontend_path: PathBuf,
-    /// Approved worker path selected for this deployment.
+    /// Worker selection path hashed into the configured producer identity.
     pub worker_path: PathBuf,
-    /// Approved GHC library directory selected for this deployment.
+    /// GHC library directory hashed into the configured producer identity.
     pub ghc_libdir: PathBuf,
 }
 
@@ -433,8 +435,8 @@ pub enum DeploymentAdmissionError {
     Schema(u32),
     #[error("configured deployment manifest has empty producer or worker identity")]
     EmptyIdentity,
-    #[error("configured deployment manifest has an empty frontend, worker, or GHC path")]
-    EmptyPath,
+    #[error("configured deployment manifest requires absolute frontend, worker, and GHC paths")]
+    InvalidPath,
     #[error("bound producer differs from configured deployment")]
     ProducerMismatch,
     #[error("consumed worker differs from configured deployment")]
@@ -455,11 +457,11 @@ impl CompilerDeploymentConfiguration {
                 Err(DeploymentAdmissionError::EmptyIdentity)
             }
             Self::Configured(authority)
-                if authority.frontend_path.as_os_str().is_empty()
-                    || authority.worker_path.as_os_str().is_empty()
-                    || authority.ghc_libdir.as_os_str().is_empty() =>
+                if !authority.frontend_path.is_absolute()
+                    || !authority.worker_path.is_absolute()
+                    || !authority.ghc_libdir.is_absolute() =>
             {
-                Err(DeploymentAdmissionError::EmptyPath)
+                Err(DeploymentAdmissionError::InvalidPath)
             }
             Self::Configured(_) => Ok(()),
         }
@@ -512,32 +514,6 @@ impl CompilerDeploymentConfiguration {
             }
         }
     }
-
-    fn verify_selection(
-        &self,
-        frontend: &Path,
-        worker: &Path,
-        ghc_libdir: &Path,
-    ) -> Result<(), ToolchainError> {
-        self.validate()?;
-        let Self::Configured(authority) = self else {
-            return Err(DeploymentAdmissionError::Unknown.into());
-        };
-        for (component, configured, selected) in [
-            ("frontend path", authority.frontend_path.as_path(), frontend),
-            ("worker path", authority.worker_path.as_path(), worker),
-            (
-                "GHC library directory",
-                authority.ghc_libdir.as_path(),
-                ghc_libdir,
-            ),
-        ] {
-            if configured != selected {
-                return Err(ToolchainError::DeploymentSelection { component });
-            }
-        }
-        Ok(())
-    }
 }
 
 /// Bind and admit a compiler endpoint under an explicit configured deployment.
@@ -554,13 +530,7 @@ pub fn bind_admitted_extract_endpoint(
     ToolchainError,
 > {
     configuration.validate()?;
-    let location = locate_extract()?;
-    let worker_path = std::env::var_os(ENV_EXTRACT_WORKER)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| location.path.with_file_name("tidepool-extract-bin"));
-    let ghc_libdir = selected_ghc_libdir()?;
-    configuration.verify_selection(&location.path, &worker_path, &ghc_libdir)?;
-    let (endpoint, location) = bind_extract_endpoint()?;
+    let (endpoint, location) = bind_unadmitted_extract_endpoint()?;
     let admitted = configuration.admit(
         *endpoint.identity().producer_bytes(),
         *endpoint.identity().consumed_worker_bytes(),
@@ -568,31 +538,17 @@ pub fn bind_admitted_extract_endpoint(
     Ok((endpoint, location, admitted))
 }
 
-fn selected_ghc_libdir() -> Result<PathBuf, ToolchainError> {
-    if let Some(path) = std::env::var_os("TIDEPOOL_GHC_LIBDIR") {
-        return Ok(PathBuf::from(path));
-    }
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "short synchronous probe, matching the frontend's GHC libdir resolution"
-    )]
-    let output = Command::new("ghc")
-        .arg("--print-libdir")
-        .output()
-        .map_err(|_| ToolchainError::DeploymentSelection {
-            component: "GHC library directory",
-        })?;
-    if !output.status.success() {
-        return Err(ToolchainError::DeploymentSelection {
-            component: "GHC library directory",
-        });
-    }
-    let libdir = std::str::from_utf8(&output.stdout)
-        .map_err(|_| ToolchainError::DeploymentSelection {
-            component: "GHC library directory",
-        })?
-        .trim();
-    Ok(PathBuf::from(libdir))
+/// Admit an already-bound exact endpoint at the toolchain's compile entry
+/// points. Observation never supplies missing configured deployment evidence.
+pub fn admit_bound_endpoint(
+    endpoint: &tidepool_extract_cmd::CompilerEndpoint,
+) -> Result<AdmittedCompilerDeployment, ToolchainError> {
+    CompilerDeploymentConfiguration::from_env()?
+        .admit(
+            *endpoint.identity().producer_bytes(),
+            *endpoint.identity().consumed_worker_bytes(),
+        )
+        .map_err(Into::into)
 }
 
 // ---------------------------------------------------------------------------

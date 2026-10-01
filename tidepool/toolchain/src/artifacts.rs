@@ -1649,6 +1649,8 @@ fn compile_invocation_inner(
         let endpoint = cmd
             .bind()
             .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))?;
+        crate::toolchain::admit_bound_endpoint(&endpoint)
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
         let request = context.prepare_compilation(
             &temp_dir.path().join("exact-scope"),
             endpoint.identity().producer_bytes(),
@@ -1692,7 +1694,9 @@ fn compile_invocation_inner(
     let attempt = retry_bounded(
         || {
             let mut cmd = base_cmd.clone();
-            let endpoint = cmd.bind()?;
+            let endpoint = cmd.bind().map_err(CompileAttemptError::Endpoint)?;
+            crate::toolchain::admit_bound_endpoint(&endpoint)
+                .map_err(CompileAttemptError::Deployment)?;
             crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
 
             let inv_key = {
@@ -1759,10 +1763,11 @@ fn compile_invocation_inner(
             endpoint
                 .execute(&cmd)
                 .map(|run| CompileAttempt::Executed((cmd, run, inv_key, producer, candidate_set)))
+                .map_err(CompileAttemptError::Endpoint)
         },
-        |error| error.permits_rebind(),
+        |error| matches!(error,CompileAttemptError::Endpoint(error) if error.permits_rebind()),
     )
-    .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))?;
+    .map_err(CompileAttemptError::into_compile_error)?;
     let (cmd, run, inv_key, producer, candidate_set) = match attempt {
         CompileAttempt::Cached(artifacts) => return Ok(*artifacts),
         CompileAttempt::Executed(executed) => executed,
@@ -2201,6 +2206,19 @@ fn retain_exact_compile_receipts(source: &Path, destination: &Path) -> std::io::
         }
     }
     Ok(())
+}
+
+enum CompileAttemptError {
+    Endpoint(tidepool_extract_cmd::SpawnError),
+    Deployment(crate::toolchain::ToolchainError),
+}
+impl CompileAttemptError {
+    fn into_compile_error(self) -> CompileError {
+        match self {
+            Self::Endpoint(error) => CompileError::Io(extract_spawn_error(error.source)),
+            Self::Deployment(error) => CompileError::ExtractFailed(error.to_string()),
+        }
+    }
 }
 
 enum CompileAttempt<T> {
@@ -2822,6 +2840,67 @@ mod typed_site_tests {
 
     #[test]
     #[serial_test::serial]
+    fn observed_compiler_cannot_compile_without_configured_deployment() {
+        use std::os::unix::fs::PermissionsExt;
+        struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (name, value) in &self.0 {
+                    match value {
+                        Some(value) => unsafe { std::env::set_var(name, value) },
+                        None => unsafe { std::env::remove_var(name) },
+                    }
+                }
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let frontend = directory.path().join("frontend");
+        let executed = directory.path().join("executed");
+        std::fs::write(
+            &frontend,
+            format!(
+                "#!/bin/sh\nprintf 'TPCID002{}{}'\nif IFS= read -r row; then touch '{}'; fi\n",
+                "a".repeat(32),
+                "b".repeat(32),
+                executed.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&frontend, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _restore = Restore(
+            [
+                crate::toolchain::ENV_EXTRACT,
+                crate::toolchain::ENV_COMPILER_DEPLOYMENT,
+                tidepool_extract_cmd::DAEMON_SOCKET_ENV,
+            ]
+            .into_iter()
+            .map(|name| (name, std::env::var_os(name)))
+            .collect(),
+        );
+        unsafe {
+            std::env::set_var(crate::toolchain::ENV_EXTRACT, &frontend);
+            std::env::remove_var(crate::toolchain::ENV_COMPILER_DEPLOYMENT);
+            std::env::remove_var(tidepool_extract_cmd::DAEMON_SOCKET_ENV);
+        }
+        let error = compile_targets(
+            "result = 1",
+            &["result"],
+            &[directory.path().into()],
+            |_, _, _| {},
+        )
+        .err()
+        .expect("unconfigured observed endpoint must be refused");
+        assert!(
+            matches!(error,CompileError::ExtractFailed(ref message) if message.contains("no configured deployment authority"))
+        );
+        assert!(
+            !executed.exists(),
+            "an observed endpoint executed unauthorised compiler work"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn safe_refusal_rederives_cache_and_build_products_identity() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -2854,7 +2933,7 @@ mod typed_site_tests {
             let identity = String::from_utf8(vec![identity_byte; 32]).unwrap();
             std::fs::write(
                 path,
-                format!("#!/bin/sh\nprintf 'TPCID001{identity}'\ncat >/dev/null\n"),
+                format!("#!/bin/sh\nprintf 'TPCID002{identity}{identity}'\ncat >/dev/null\n"),
             )
             .unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();

@@ -1151,7 +1151,6 @@ fn service_transaction(
 
 pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u8, FrontendError> {
     let producer = prepared.producer_identity()?;
-    let consumed_worker = prepared.consumed_worker_identity();
     let epoch = boot_epoch()?;
     if let Some(parent) = config.socket.parent() {
         fs::create_dir_all(parent).map_err(FrontendError::Io)?;
@@ -1382,6 +1381,7 @@ fn serve_workers(
     rss_ceiling_mb: u64,
     request_deadline: Duration,
 ) -> Result<u8, FrontendError> {
+    let consumed_worker = prepared.consumed_worker_identity();
     listener.set_nonblocking(true).map_err(FrontendError::Io)?;
     // A single ordinary worker owns at most one accepted job. Persistent
     // mode admits one pending job beyond its occupied worker slots.
@@ -1604,7 +1604,7 @@ fn serve_workers(
                 let mut response = Vec::with_capacity(104);
                 response.extend_from_slice(PREFLIGHT_RESPONSE);
                 response.extend_from_slice(producer);
-                response.extend_from_slice(consumed_worker);
+                response.extend_from_slice(&consumed_worker);
                 response.extend_from_slice(epoch);
                 log_send_failure(
                     run_id,

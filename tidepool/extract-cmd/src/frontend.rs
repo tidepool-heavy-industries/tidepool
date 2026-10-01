@@ -1,18 +1,16 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as FmtWrite;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Read, Seek, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::request::{PRINT_WORKER_REQUEST_FLAG, WORKER_REQUEST_FLAG};
 use crate::{daemon, ExtractRequest};
 
 const WORKER_ENV: &str = "TIDEPOOL_EXTRACT_WORKER";
 const USAGE: &str = "Usage: tidepool-extract [OPTIONS] <file.hs> ...";
-static MANIFEST_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
     crate::process::current_process_dies_with_parent().map_err(FrontendError::Io)?;
@@ -347,49 +345,7 @@ fn json_string(text: &str) -> String {
 }
 
 fn atomic_write_manifest(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let file_name = path.file_name().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "manifest path has no filename")
-    })?;
-    let mut temporary = None;
-    for _ in 0..16 {
-        let sequence = MANIFEST_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-        let mut name = OsString::from(".");
-        name.push(file_name);
-        name.push(format!(".tmp-{}-{sequence}", std::process::id()));
-        let candidate = parent.join(name);
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
-            Ok(mut file) => {
-                let result = file.write_all(bytes).and_then(|()| file.sync_all());
-                if let Err(error) = result {
-                    std::fs::remove_file(&candidate).ok();
-                    return Err(error);
-                }
-                temporary = Some(candidate);
-                break;
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    let temporary = temporary.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "could not allocate a unique deployment manifest temporary path",
-        )
-    })?;
-    if let Err(error) = std::fs::rename(&temporary, path) {
-        std::fs::remove_file(&temporary).ok();
-        return Err(error);
-    }
-    File::open(parent)?.sync_all()
+    tidepool_atomic_write::write_durable(path, bytes).map_err(Into::into)
 }
 
 fn prepare_worker() -> Result<PreparedWorker, FrontendError> {

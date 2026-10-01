@@ -1260,6 +1260,8 @@ fn execute_declaration_operation(
     let endpoint = command
         .bind()
         .map_err(|error| CompileError::Io(crate::extract_spawn_error(error.source)))?;
+    crate::toolchain::admit_bound_endpoint(&endpoint)
+        .map_err(|error| contract(error.to_string()))?;
     let producer: [u8; 32] = Sha256::digest(endpoint.identity().producer_bytes()).into();
     if expected_producer.is_some_and(|expected| expected != producer) {
         return Err(contract(
