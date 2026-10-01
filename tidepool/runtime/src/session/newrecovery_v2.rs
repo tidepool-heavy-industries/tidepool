@@ -12,10 +12,8 @@ use tidepool_toolchain::recovery_artifacts::{
     RecoveryJoinRef,
 };
 
-const VERSION: u32 = 3;
-const V2_VERSION: u32 = 2;
-const V2_PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v2";
-const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v3";
+const VERSION: u32 = 4;
+const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v4";
 const MAX_MANIFEST_BYTES: usize = 64 << 20;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -128,60 +126,6 @@ pub(crate) struct RecoveryNode {
     pub instances: RecoveryInstanceInventory,
     pub live_dependencies: Vec<RecoveryLiveDependency>,
     pub state: RecoveryNodeState,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RecoveryGraphV2 {
-    version: u32,
-    public_schema: String,
-    source_session: u64,
-    lineage: u64,
-    #[serde(with = "generation_serde")]
-    high_water: Generation,
-    public_surfaces: Vec<RecoveryPublicSurface>,
-    nodes: Vec<RecoveryNodeV2>,
-    artifacts: Vec<RecoveryArtifactClosure>,
-    checksum: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RecoveryNodeV2 {
-    #[serde(with = "generation_serde")]
-    id: Generation,
-    #[serde(with = "option_generation_serde")]
-    parent: Option<Generation>,
-    kind: RecoveryNodeKind,
-    #[serde(with = "generation_vec_serde")]
-    implementation_refs: Vec<Generation>,
-    artifact_refs: Vec<String>,
-    exports: Vec<RecoveryExport>,
-    retracts: Vec<RecoverySymbolIdentity>,
-    workbench_imports: Vec<String>,
-    instances: RecoveryInstanceInventory,
-    live_dependencies: Vec<RecoveryLiveDependency>,
-    state: RecoveryNodeState,
-}
-
-impl From<RecoveryNodeV2> for RecoveryNode {
-    fn from(node: RecoveryNodeV2) -> Self {
-        Self {
-            id: node.id,
-            parent: node.parent,
-            kind: node.kind,
-            implementation_refs: node.implementation_refs,
-            lexical_roots: Vec::new(),
-            lexical: Vec::new(),
-            artifact_refs: node.artifact_refs,
-            exports: node.exports,
-            retracts: node.retracts,
-            workbench_imports: node.workbench_imports,
-            instances: node.instances,
-            live_dependencies: node.live_dependencies,
-            state: node.state,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -362,6 +306,13 @@ pub(crate) enum RecoveryHead {
 pub(crate) struct RecoveryError {
     pub path: Option<PathBuf>,
     pub detail: String,
+    pub refusal: Option<RecoveryRefusal>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RecoveryRefusal {
+    UnsupportedOldFormat { version: u64 },
+    UnsupportedFutureFormat { version: u64 },
 }
 
 pub(crate) struct StagedRecoveryManifest {
@@ -464,6 +415,29 @@ pub(crate) fn stage_high_water_v2(
     stage_metadata_v2(path, &candidate)
 }
 
+/// Reserve one contiguous identity range through the metadata writer.
+pub(crate) fn stage_high_water_range_v2(
+    path: &Path,
+    graph: &RecoveryGraph,
+    count: u64,
+) -> Result<StagedRecoveryManifest, RecoveryError> {
+    graph.validate()?;
+    if count == 0 {
+        return Err(error("recovery reservation range must be nonempty"));
+    }
+    let next = Generation(
+        graph
+            .high_water
+            .0
+            .checked_add(count)
+            .ok_or_else(|| error("recovery generation space exhausted"))?,
+    );
+    let mut candidate = graph.clone();
+    candidate.high_water = next;
+    candidate.seal()?;
+    stage_metadata_v2(path, &candidate)
+}
+
 /// Stage a binding/source-only public visibility change without allocating a
 /// synthetic declaration node. The caller supplies the already checked final
 /// winners; the manifest, rather than a process-local machine id, is the
@@ -537,8 +511,7 @@ fn high_water_candidate(
     Ok(candidate)
 }
 
-/// Read the current graph and migrate only a certified-empty v2 public surface.
-/// Version 1 remains under its explicit source-only migration path.
+/// Read the current graph. Unsupported formats are refused without rewriting them.
 pub(crate) fn read_v2(
     path: &Path,
     recovery_root: &Path,
@@ -571,83 +544,38 @@ pub(crate) fn read_v2_bytes(
         .get("version")
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| at(path, "recovery manifest has no integer version"))?;
-    match version {
-        1 => Ok(None),
-        2 => {
-            if value
-                .get("public_schema")
-                .and_then(serde_json::Value::as_str)
-                != Some(V2_PAIRED_PUBLIC_SCHEMA)
-            {
-                return Err(at(
-                    path,
-                    "v2 recovery graph lacks the supported paired-public-v2 schema",
-                ));
-            }
-            let old: RecoveryGraphV2 = serde_json::from_value(value)
-                .map_err(|e| at(path, format!("invalid v2 recovery graph: {e}")))?;
-            let expected_checksum = checksum_v2(&old).map_err(|e| at(path, e.detail))?;
-            if old.version != V2_VERSION || old.checksum != expected_checksum {
-                return Err(at(path, "v2 recovery graph checksum mismatch"));
-            }
-            if old.public_surfaces.iter().any(|surface| {
-                surface.declaration_root.is_some()
-                    || !surface.bindings.is_empty()
-                    || !surface.source_instances.is_empty()
-            }) {
-                return Err(at(
-                    path,
-                    "nonempty v2 public surface lacks certified lexical authority; refusing attachment",
-                ));
-            }
-            let mut graph = RecoveryGraph {
-                version: VERSION,
-                public_schema: PAIRED_PUBLIC_SCHEMA.into(),
-                source_session: old.source_session,
-                lineage: old.lineage,
-                high_water: old.high_water,
-                public_surfaces: old.public_surfaces,
-                nodes: old.nodes.into_iter().map(RecoveryNode::from).collect(),
-                artifacts: old.artifacts,
-                checksum: String::new(),
-            };
-            graph.seal().map_err(|e| at(path, e.detail))?;
-            graph.validate().map_err(|e| at(path, e.detail))?;
-            let artifact_losses = graph
-                .validate_artifact_files(recovery_root)
-                .map_err(|e| at(path, e.detail))?;
-            Ok(Some(RecoveryV2Read {
-                graph,
-                artifact_losses,
-            }))
-        }
-        3 => {
-            if value
-                .get("public_schema")
-                .and_then(serde_json::Value::as_str)
-                != Some(PAIRED_PUBLIC_SCHEMA)
-            {
-                return Err(at(
-                    path,
-                    "v3 recovery graph lacks the supported paired-public-v3 schema",
-                ));
-            }
-            let graph: RecoveryGraph = serde_json::from_value(value)
-                .map_err(|e| at(path, format!("invalid v3 recovery graph: {e}")))?;
-            graph.validate().map_err(|e| at(path, e.detail))?;
-            let artifact_losses = graph
-                .validate_artifact_files(recovery_root)
-                .map_err(|e| at(path, e.detail))?;
-            Ok(Some(RecoveryV2Read {
-                graph,
-                artifact_losses,
-            }))
-        }
-        other => Err(at(
+    if version < u64::from(VERSION) {
+        return Err(refusal_at(
             path,
-            format!("unsupported recovery manifest version {other}"),
-        )),
+            RecoveryRefusal::UnsupportedOldFormat { version },
+        ));
     }
+    if version > u64::from(VERSION) {
+        return Err(refusal_at(
+            path,
+            RecoveryRefusal::UnsupportedFutureFormat { version },
+        ));
+    }
+    if value
+        .get("public_schema")
+        .and_then(serde_json::Value::as_str)
+        != Some(PAIRED_PUBLIC_SCHEMA)
+    {
+        return Err(at(
+            path,
+            "v4 recovery graph lacks the supported paired-public-v4 schema",
+        ));
+    }
+    let graph: RecoveryGraph = serde_json::from_value(value)
+        .map_err(|e| at(path, format!("invalid v4 recovery graph: {e}")))?;
+    graph.validate().map_err(|e| at(path, e.detail))?;
+    let artifact_losses = graph
+        .validate_artifact_files(recovery_root)
+        .map_err(|e| at(path, e.detail))?;
+    Ok(Some(RecoveryV2Read {
+        graph,
+        artifact_losses,
+    }))
 }
 
 impl std::fmt::Display for RecoveryError {
@@ -1218,17 +1146,7 @@ fn checksum(graph: &RecoveryGraph) -> Result<String, RecoveryError> {
     unsigned.checksum.clear();
     let bytes = serde_json::to_vec(&unsigned)
         .map_err(|e| error(format!("could not encode recovery graph: {e}")))?;
-    let mut domain = b"tidepool-recovery-graph-v3\0".to_vec();
-    domain.extend_from_slice(&bytes);
-    Ok(blake3::hash(&domain).to_hex().to_string())
-}
-
-fn checksum_v2(graph: &RecoveryGraphV2) -> Result<String, RecoveryError> {
-    let mut unsigned = graph.clone();
-    unsigned.checksum.clear();
-    let bytes = serde_json::to_vec(&unsigned)
-        .map_err(|e| error(format!("could not encode v2 recovery graph: {e}")))?;
-    let mut domain = b"tidepool-recovery-graph-v2\0".to_vec();
+    let mut domain = b"tidepool-recovery-graph-v4\0".to_vec();
     domain.extend_from_slice(&bytes);
     Ok(blake3::hash(&domain).to_hex().to_string())
 }
@@ -1402,12 +1320,30 @@ fn error(detail: impl Into<String>) -> RecoveryError {
     RecoveryError {
         path: None,
         detail: detail.into(),
+        refusal: None,
     }
 }
 fn at(path: &Path, detail: impl Into<String>) -> RecoveryError {
     RecoveryError {
         path: Some(path.to_path_buf()),
         detail: detail.into(),
+        refusal: None,
+    }
+}
+
+fn refusal_at(path: &Path, refusal: RecoveryRefusal) -> RecoveryError {
+    let detail = match refusal {
+        RecoveryRefusal::UnsupportedOldFormat { version } => {
+            format!("unsupported old recovery manifest version {version}")
+        }
+        RecoveryRefusal::UnsupportedFutureFormat { version } => {
+            format!("unsupported future recovery manifest version {version}")
+        }
+    };
+    RecoveryError {
+        path: Some(path.to_path_buf()),
+        detail,
+        refusal: Some(refusal),
     }
 }
 
@@ -1613,38 +1549,6 @@ mod tests {
         };
         graph.seal().unwrap();
         graph
-    }
-
-    fn v2_graph(graph: RecoveryGraph) -> RecoveryGraphV2 {
-        let mut old = RecoveryGraphV2 {
-            version: V2_VERSION,
-            public_schema: V2_PAIRED_PUBLIC_SCHEMA.into(),
-            source_session: graph.source_session,
-            lineage: graph.lineage,
-            high_water: graph.high_water,
-            public_surfaces: graph.public_surfaces,
-            nodes: graph
-                .nodes
-                .into_iter()
-                .map(|node| RecoveryNodeV2 {
-                    id: node.id,
-                    parent: node.parent,
-                    kind: node.kind,
-                    implementation_refs: node.implementation_refs,
-                    artifact_refs: node.artifact_refs,
-                    exports: node.exports,
-                    retracts: node.retracts,
-                    workbench_imports: node.workbench_imports,
-                    instances: node.instances,
-                    live_dependencies: node.live_dependencies,
-                    state: node.state,
-                })
-                .collect(),
-            artifacts: graph.artifacts,
-            checksum: String::new(),
-        };
-        old.checksum = checksum_v2(&old).unwrap();
-        old
     }
 
     #[test]
@@ -1941,69 +1845,39 @@ mod tests {
     }
 
     #[test]
-    fn v2_empty_public_surface_migrates_in_memory_and_preserves_high_water() {
+    fn old_recovery_formats_are_refused_without_rewriting_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("declarations.json");
-        let mut graph = fixture(dir.path());
-        graph.high_water = Generation(7);
-        graph.public_surfaces[0].declaration_root = None;
-        graph.public_surfaces[0].bindings.clear();
-        graph.public_surfaces[0].source_instances.clear();
-        graph.seal().unwrap();
-        let bytes = serde_json::to_vec(&v2_graph(graph)).unwrap();
+        for version in 1..u64::from(VERSION) {
+            let bytes =
+                format!("{{ \"version\" : {version}, \"retained\" : [1, 2, 3] }}\n").into_bytes();
+            fs::write(&manifest, &bytes).unwrap();
+
+            let error = read_v2(&manifest, dir.path()).err().unwrap();
+
+            assert_eq!(
+                error.refusal,
+                Some(RecoveryRefusal::UnsupportedOldFormat { version })
+            );
+            assert_eq!(fs::read(&manifest).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn future_recovery_format_is_distinctly_refused_without_rewriting_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("declarations.json");
+        let version = u64::MAX;
+        let bytes = format!("{{\"version\":{version},\"future\":true}}\n").into_bytes();
         fs::write(&manifest, &bytes).unwrap();
 
-        let restored = read_v2(&manifest, dir.path()).unwrap().unwrap().graph;
+        let error = read_v2(&manifest, dir.path()).err().unwrap();
 
-        assert_eq!(restored.version, VERSION);
-        assert_eq!(restored.public_schema, PAIRED_PUBLIC_SCHEMA);
-        assert_eq!(restored.high_water, Generation(7));
-        assert!(restored.nodes.iter().all(|node| node.lexical.is_empty()));
         assert_eq!(
-            fs::read(&manifest).unwrap(),
-            bytes,
-            "read migration is non-mutating"
+            error.refusal,
+            Some(RecoveryRefusal::UnsupportedFutureFormat { version })
         );
-    }
-
-    #[test]
-    fn v2_nonempty_public_surface_refuses_attachment_without_rewriting_manifest() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("declarations.json");
-        let bytes = serde_json::to_vec(&v2_graph(fixture(dir.path()))).unwrap();
-        fs::write(&manifest, &bytes).unwrap();
-
-        let error = read_v2(&manifest, dir.path()).err().unwrap();
-
-        assert!(error.detail.contains("nonempty v2 public surface"));
         assert_eq!(fs::read(&manifest).unwrap(), bytes);
-    }
-
-    #[test]
-    fn v2_decode_rejects_v3_lexical_fields_instead_of_ignoring_them() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("declarations.json");
-        let mut value = serde_json::to_value(v2_graph(fixture(dir.path()))).unwrap();
-        value["nodes"][0]["lexical_roots"] = serde_json::json!([]);
-        fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
-
-        let error = read_v2(&manifest, dir.path()).err().unwrap();
-
-        assert!(error.detail.contains("invalid v2 recovery graph"));
-        assert!(error.detail.contains("unknown field"));
-    }
-
-    #[test]
-    fn v2_without_the_exact_public_schema_is_explicitly_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("declarations.json");
-        fs::write(
-            &manifest,
-            br#"{"version":2,"public_schema":"paired-public-v1"}"#,
-        )
-        .unwrap();
-        let error = read_v2(&manifest, dir.path()).err().unwrap();
-        assert!(error.detail.contains("supported paired-public-v2 schema"));
     }
 
     #[test]
@@ -2060,17 +1934,6 @@ mod tests {
     }
 
     #[test]
-    fn prior_paired_schema_cannot_be_read_as_node_level_instance_evidence() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("declarations.json");
-        let mut value = serde_json::to_value(v2_graph(fixture(dir.path()))).unwrap();
-        value["public_schema"] = serde_json::json!("paired-public-v1");
-        fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
-        let error = read_v2(&manifest, dir.path()).err().unwrap();
-        assert!(error.detail.contains("supported paired-public-v2 schema"));
-    }
-
-    #[test]
     fn lexical_graph_requires_closed_reachable_artifact_owned_identities() {
         let dir = tempfile::tempdir().unwrap();
         let valid = module("main", "Lib");
@@ -2119,7 +1982,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_checksum_covers_lexical_roots_and_edges() {
+    fn v4_checksum_covers_lexical_roots_and_edges() {
         let dir = tempfile::tempdir().unwrap();
         let root = module("main", "Lib");
         let other = module("main", "Other");
