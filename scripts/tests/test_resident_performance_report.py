@@ -3,6 +3,7 @@ from pathlib import Path
 import unittest
 import tempfile
 import hashlib
+import json
 
 SPEC = importlib.util.spec_from_file_location(
     "resident_performance", Path(__file__).parents[1] / "resident-performance-report.py"
@@ -135,6 +136,26 @@ class ResidentPerformanceReport(unittest.TestCase):
         self.assertEqual(report["compiler_counts"], {"exact_iface_decode_reads.Session.Val.G1": 2})
         self.assertIsNone(report["worker_peak_observed_rss_mb"])
         self.assertTrue(report["accepted"])
+
+    def test_durable_evidence_is_independent_and_requires_retained_manifest(self):
+        self.assertEqual(REPORT.analyze_durable([])["status"], "unmeasured")
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "declarations.json"
+            content = json.dumps({"checksum": "retained-checksum", "public_schema": "paired-public-v4"}).encode()
+            path.write_bytes(content)
+            row = {
+                "schema": 1, "composition": "durable-publication", "completed": True,
+                "cell": "sample", "elapsed_ns": 100, "certification_ns": None,
+                "metadata_stage_file_sync_ns": 10, "publication_rename_directory_sync_ns": 20,
+                "manifest_path": str(path), "manifest_bytes": len(content),
+                "manifest_checksum": "retained-checksum", "public_schema": "paired-public-v4",
+                "manifest_write_bytes": None,
+            }
+            result = REPORT.analyze_durable([row])
+            self.assertEqual(result["status"], "measured")
+            self.assertIsNone(result["samples"][0]["manifest_write_bytes"])
+            path.unlink()
+            self.assertEqual(REPORT.analyze_durable([row])["status"], "invalid")
 
     def test_nearest_rank_and_empty_evidence(self):
         self.assertEqual(REPORT.percentile(list(range(1, 51)), 0.95), 48)

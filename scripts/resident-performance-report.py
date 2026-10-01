@@ -195,16 +195,59 @@ def analyze(samples, events, manifest):
     }
 
 
+def analyze_durable(rows):
+    """Attribute real durable publication independently of product acceptance."""
+    if not rows:
+        return {"status": "unmeasured", "count": 0, "evidence_problems": []}
+    problems = []
+    phases = {}
+    for row in rows:
+        if row.get("schema") != 1 or row.get("composition") != "durable-publication" or row.get("completed") is not True:
+            problems.append("unsupported or incomplete durable publication sample")
+            continue
+        for phase in ("elapsed_ns", "certification_ns", "metadata_stage_file_sync_ns", "publication_rename_directory_sync_ns"):
+            value = row.get(phase)
+            if value is None and phase == "certification_ns":
+                continue
+            if type(value) is not int or value < 0:
+                problems.append(f"durable {row.get('cell')} has invalid {phase}")
+            else:
+                phases.setdefault(phase, []).append(value / 1_000_000)
+        try:
+            path = Path(row["manifest_path"])
+            content = path.read_bytes()
+            document = json.loads(content)
+            if not path.is_absolute() or len(content) != row.get("manifest_bytes"):
+                problems.append("durable manifest size/path differs from retained snapshot")
+            if document.get("checksum") != row.get("manifest_checksum") or not row.get("manifest_checksum"):
+                problems.append("durable manifest checksum differs from retained snapshot")
+            if document.get("public_schema") != "paired-public-v4" or row.get("public_schema") != "paired-public-v4":
+                problems.append("durable sample is not the complete artifact graph format")
+        except (KeyError, TypeError, OSError, ValueError):
+            problems.append("durable sample has no readable retained manifest")
+    return {
+        "status": "invalid" if problems else "measured", "count": len(rows),
+        "phases_ms": {name: {"count": len(values), "p50_ms": percentile(values, 0.5), "p95_ms": percentile(values, 0.95)} for name, values in phases.items()},
+        "samples": rows, "evidence_problems": sorted(set(problems)),
+        "byte_counter_note": "manifest_bytes is retained file size; uninstrumented encode/hash/write byte counts remain unknown",
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--samples", type=Path, required=True)
     parser.add_argument("--compiler-trace", type=Path, action="append", required=True)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--durable-samples", type=Path, help="independent durable-performance rows; never count toward product acceptance")
     args = parser.parse_args()
     samples = [json.loads(line.split(PREFIX, 1)[1]) for line in args.samples.read_text().splitlines() if PREFIX in line]
     events = [json.loads(line) for path in args.compiler_trace for line in path.read_text().splitlines() if line.strip()]
     report = analyze(samples, events, json.loads(args.manifest.read_text()))
+    durable = []
+    if args.durable_samples:
+        durable = [json.loads(line.split("durable-performance ", 1)[1]) for line in args.durable_samples.read_text().splitlines() if "durable-performance " in line]
+    report["durable_publication"] = analyze_durable(durable)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({"accepted": report["accepted"], "samples": report["samples"], "evidence_problems": report["evidence_problems"]}, indent=2))
     return 0 if report["accepted"] else 1
