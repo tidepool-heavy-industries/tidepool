@@ -1599,7 +1599,7 @@ dependencies = [
 [[package]]
 name = "harness"
 version = "0.1.0"
-source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=5ab7ee3ee4b288c05b5f73239fec4b99236858a7#5ab7ee3ee4b288c05b5f73239fec4b99236858a7"
+source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=2443fd04880a22993423dac6aaf4ac013a1637b3#2443fd04880a22993423dac6aaf4ac013a1637b3"
 dependencies = [
  "async-trait",
  "axum",
