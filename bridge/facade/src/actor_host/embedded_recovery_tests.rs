@@ -120,6 +120,7 @@ fn configuration(root: &Path) -> ActorHostConfig {
         embedded: Some(crate::exomonad::EmbeddedLaunchConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
             public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Http,
+            public_origin: None,
             asset_root: root.join("assets"),
             browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
             session_secret_file: Some(root.join("secret")),

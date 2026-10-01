@@ -122,6 +122,10 @@ impl EmbeddedService {
             .with_history_store(runtime.store())
             .with_public_origin_scheme(settings.public_origin_scheme.as_str())
             .map_err(str::to_owned)?;
+        let server_config = match &settings.public_origin {
+            Some(origin) => server_config.with_public_origin(origin.clone()).map_err(str::to_owned)?,
+            None => server_config,
+        };
         let server_config = match &settings.browser_auth {
             EmbeddedBrowserAuth::Secret => {
                 let path = settings.session_secret_file.as_deref().ok_or_else(|| {

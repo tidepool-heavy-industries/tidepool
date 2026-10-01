@@ -358,6 +358,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
     let settings = crate::exomonad::EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
+        public_origin: None,
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret_file),
@@ -572,10 +573,8 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                 failure.contains("intentional captured parent Haskell execution failure"),
                 "{failure}"
             );
-            assert!(
-                campaign.actor.terminal().get().is_none(),
-                "the fixture fails a cell while its parent actor remains live"
-            );
+            assert!(campaign.actor.terminal().get().is_none(),
+                "the fixture fails a cell while its parent actor remains live");
             eprintln!(
                 "[captured-engine] actual parent execution failed after both typed child replies"
             );

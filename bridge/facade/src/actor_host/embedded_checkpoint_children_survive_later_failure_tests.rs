@@ -209,6 +209,7 @@ async fn embedded_checkpoint_children_survive_a_later_parent_cell_failure() {
     let settings = crate::exomonad::EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
+        public_origin: None,
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret_file),

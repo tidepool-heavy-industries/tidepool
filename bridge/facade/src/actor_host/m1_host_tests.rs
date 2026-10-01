@@ -247,6 +247,7 @@ async fn production_host_retains_http_haskell_commands_and_reconnects_without_re
     let settings = EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
+        public_origin: None,
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret_file),
@@ -505,6 +506,7 @@ async fn host_cancellation_stops_a_real_running_haskell_cell() {
     let settings = EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
+        public_origin: None,
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret_file),
@@ -671,6 +673,7 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
     let settings = EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
+        public_origin: None,
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret_file),

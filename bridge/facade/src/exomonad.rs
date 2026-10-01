@@ -345,6 +345,7 @@ pub struct EmbeddedLaunchConfig {
     pub(crate) listen: std::net::SocketAddr,
     #[serde(default)]
     pub(crate) public_origin_scheme: EmbeddedPublicOriginScheme,
+    pub(crate) public_origin: Option<String>,
     #[serde(default = "default_embedded_asset_root")]
     pub(crate) asset_root: PathBuf,
     #[serde(default)]
@@ -444,6 +445,17 @@ impl EmbeddedLaunchConfig {
             return Err(runtime_error(
                 "embedded Tailscale authentication requires a listener assigned to tailscale0",
             ));
+        }
+        if matches!(self.browser_auth, EmbeddedBrowserAuth::Tailscale { .. })
+            && self.public_origin.is_none()
+        {
+            return Err(runtime_error(
+                "embedded Tailscale authentication requires an exact public_origin",
+            ));
+        }
+        if let Some(origin) = &self.public_origin {
+            harness::server::ServerConfig::new(self.asset_root.clone())
+                .with_public_origin(origin.clone()).map_err(runtime_error)?;
         }
         if !self.listen.ip().is_loopback()
             && !exomonad_node::network::tailnet_address_is_local(self.listen.ip())?
@@ -2674,10 +2686,12 @@ mod tests {
         let run = directory.path().join("run");
         let selected = super::retain_run_executable(&run, "runner", &source).unwrap();
         std::fs::remove_dir_all(target).unwrap();
-        assert!(std::process::Command::new(selected)
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            std::process::Command::new(selected)
+                .status()
+                .unwrap()
+                .success()
+        );
         assert!(run.join("bin/runner.blake3").is_file());
     }
 
@@ -2689,12 +2703,14 @@ mod tests {
             HostBackendOptions::from_parts(ExomonadBackend::Embedded, None, None).unwrap(),
             HostBackendOptions::Embedded
         ));
-        assert!(HostBackendOptions::from_parts(
-            ExomonadBackend::Embedded,
-            Some(PathBuf::from("/unused/codex")),
-            Some("unused".into()),
-        )
-        .is_err());
+        assert!(
+            HostBackendOptions::from_parts(
+                ExomonadBackend::Embedded,
+                Some(PathBuf::from("/unused/codex")),
+                Some("unused".into()),
+            )
+            .is_err()
+        );
     }
 
     #[cfg(not(feature = "codex-compat"))]
@@ -2703,9 +2719,11 @@ mod tests {
         let error = HostBackendOptions::from_parts(ExomonadBackend::Codex, None, None)
             .err()
             .expect("Codex request must be rejected without codex-compat");
-        assert!(error
-            .to_string()
-            .contains("does not include the codex-compat feature"));
+        assert!(
+            error
+                .to_string()
+                .contains("does not include the codex-compat feature")
+        );
     }
 
     #[test]
@@ -2804,10 +2822,12 @@ mod tests {
         let direct: EmbeddedLaunchConfig =
             toml::from_str(&format!("{config}public_origin_scheme = 'http'\n")).unwrap();
         assert_eq!(direct.public_origin_scheme.as_str(), "http");
-        assert!(toml::from_str::<EmbeddedLaunchConfig>(&format!(
-            "{config}public_origin_scheme = 'ftp'\n"
-        ))
-        .is_err());
+        assert!(
+            toml::from_str::<EmbeddedLaunchConfig>(&format!(
+                "{config}public_origin_scheme = 'ftp'\n"
+            ))
+            .is_err()
+        );
     }
 
     #[test]
@@ -2817,11 +2837,13 @@ mod tests {
                 "listen = '{listen}'\nasset_root = '/tmp/assets'\nsession_secret_file = '/tmp/secret'\ncodex_auth_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n"
             ))
             .unwrap();
-            assert!(config
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("tailscale0"));
+            assert!(
+                config
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("tailscale0")
+            );
         }
     }
 
@@ -2863,10 +2885,12 @@ mod tests {
             .unwrap();
             assert_eq!(config.defaults.effort, effort);
         }
-        assert!(toml::from_str::<ExomonadConfig>(
-            "[defaults]\nmodel = \"test\"\neffort = \"invalid\"\n"
-        )
-        .is_err());
+        assert!(
+            toml::from_str::<ExomonadConfig>(
+                "[defaults]\nmodel = \"test\"\neffort = \"invalid\"\n"
+            )
+            .is_err()
+        );
     }
 
     /// A lock step that produces what `nix flake lock` would, so scaffolding
@@ -3401,10 +3425,12 @@ mod tests {
             "depth = 3",
         ] {
             std::fs::write(&path, format!("{base}\n[research]\n{invalid}\n")).unwrap();
-            assert!(read_project_config(workspace.path())
-                .unwrap_err()
-                .to_string()
-                .contains("invalid Exomonad configuration"));
+            assert!(
+                read_project_config(workspace.path())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("invalid Exomonad configuration")
+            );
         }
     }
 
@@ -3426,10 +3452,12 @@ mod tests {
             .unwrap();
         };
         write_config("tracked");
-        assert!(read_project_config(repo.path())
-            .unwrap_err()
-            .to_string()
-            .contains("contains tracked source"));
+        assert!(
+            read_project_config(repo.path())
+                .unwrap_err()
+                .to_string()
+                .contains("contains tracked source")
+        );
         write_config("scratch");
         assert_eq!(
             read_project_config(repo.path())
@@ -3751,10 +3779,12 @@ mod tests {
             "session": "exomonad-work",
             "phase": {"state": "awaiting_input", "root_actor": root_actor},
         });
-        assert!(decode_run_status(&serde_json::to_vec(&old).unwrap())
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported Exomonad run status version 3"));
+        assert!(
+            decode_run_status(&serde_json::to_vec(&old).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported Exomonad run status version 3")
+        );
     }
 
     #[test]
@@ -3927,23 +3957,31 @@ mod tests {
             log_path,
             &configured.compiler,
         );
-        assert!(configured_launch
-            .args
-            .windows(2)
-            .any(|pair| pair == ["--workers", "2"]));
-        assert!(configured_launch
-            .args
-            .windows(2)
-            .any(|pair| pair == ["--rss-ceiling-mb", "10240"]));
+        assert!(
+            configured_launch
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--workers", "2"])
+        );
+        assert!(
+            configured_launch
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--rss-ceiling-mb", "10240"])
+        );
         for setting in ["workers = 0", "rss_ceiling_mb = 0", "unknown = 2"] {
-            assert!(toml::from_str::<ExomonadConfig>(&format!(
-                "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"
-            ))
-            .is_err());
+            assert!(
+                toml::from_str::<ExomonadConfig>(&format!(
+                    "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"
+                ))
+                .is_err()
+            );
         }
-        assert!(!launch
-            .environment
-            .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV));
+        assert!(
+            !launch
+                .environment
+                .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
+        );
         assert_eq!(
             host_environment(socket)
                 .get(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
@@ -4052,9 +4090,11 @@ mod tests {
         let error = resolve_root_launch_mode(true, &missing)
             .await
             .expect_err("resume must not silently become fresh");
-        assert!(error
-            .to_string()
-            .contains("cannot resume the requested root conversation"));
+        assert!(
+            error
+                .to_string()
+                .contains("cannot resume the requested root conversation")
+        );
         assert_eq!(
             resolve_root_launch_mode(false, &missing).await.unwrap(),
             InteractiveLaunchMode::Fresh
@@ -4172,9 +4212,11 @@ mod tests {
         let error = validate_recreate_continuity(&root_binding_path)
             .await
             .expect_err("a present but corrupt binding must still fail closed");
-        assert!(error
-            .to_string()
-            .contains("cannot resume the requested root conversation"));
+        assert!(
+            error
+                .to_string()
+                .contains("cannot resume the requested root conversation")
+        );
     }
 
     #[cfg(unix)]

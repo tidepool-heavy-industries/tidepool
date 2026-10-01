@@ -151,16 +151,21 @@ use loopback or a local Tailscale address. File paths must be absolute;
 `asset_root` must contain the browser's `index.html`, or be supplied by the
 package through `EXOMONAD_EMBEDDED_ASSET_ROOT`. The Codex credential file supplies
 read-only provider authentication, independently of browser access.
-For automatic browser access from your Tailscale devices, configure an explicit
-numeric Tailscale user allowlist:
+For automatic browser access from your Tailscale devices, pin the browser URL
+and configure an explicit numeric Tailscale user allowlist:
 
 ```toml
+[launch.embedded]
+public_origin = "http://swarm-01:8080"
+
 [launch.embedded.browser_auth]
 mode = "tailscale"
 allowed_user_ids = [123456789]
 ```
 
-Replace the example ID with your Tailscale user ID. This mode requires a listener
+Replace the URL with your listener's browser URL and the ID with your Tailscale
+user ID. The pinned URL prevents another website from using browser access
+through DNS rebinding. This mode requires a listener
 address assigned to `tailscale0`, verifies the actual remote device through the
 local Tailscale daemon, and rejects tagged, shared, and local-self peers. It does
 not use `session_secret_file`. Access is rechecked during live browser streams.
