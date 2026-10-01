@@ -63,9 +63,8 @@ do
   pure (inspectFull (if advances then "page-contiguous" else "bad-page-offset", result, output))
 :}
 -- fixture-step
-import GHC.Generics (Generic)
 import qualified Tidepool.Actor as Actor
-data Completed mode = Completed { completedCount :: mode :- State Int, completedJob :: mode :- Event Cmd.CommandResult, readCompleted :: mode :- Call () (R.Reply Int) } deriving Generic
+data Completed mode = Completed { completedCount :: mode :- State Int, completedJob :: mode :- Event Cmd.CommandResult, readCompleted :: mode :- Call () (R.Reply Int) }
 let collector = R.definition "completed-command" Actor.ReadOnly Completed { completedCount = 0, completedJob = R.on (Cmd.completion noisy) (\_ -> modify' (+1)), readCompleted = \() -> get }
 :{
 do
