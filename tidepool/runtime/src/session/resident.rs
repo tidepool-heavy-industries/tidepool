@@ -6941,7 +6941,15 @@ mod authored_publication_tests {
             .prepare_startup_entry_installed(startup_code(false), StartupCompileIdentity::Fixture)
             .unwrap();
         session.state.advance_public_visibility(ScopeId::ROOT);
-        session.state.invalidate_execution_admissions_after_owner_transfer(1);
+        session
+            .state
+            .invalidate_execution_admissions_after_owner_transfer(1);
+        session
+            .state
+            .require_prepared()
+            .unwrap()
+            .quiesce_and_collect_now()
+            .unwrap();
         assert!(matches!(
             session.run_startup_entry(entry),
             Ok(ResidentOutcome::Completed { .. })
@@ -7030,6 +7038,7 @@ mod authored_publication_tests {
         let entry = session
             .prepare_startup_entry_installed(startup_code(false), StartupCompileIdentity::Fixture)
             .unwrap();
+        assert_eq!(session.outstanding_custody(), 1);
         let program = entry.program.unwrap();
         drop(entry);
         assert_eq!(session.settle_dropped_custody(), 1);
