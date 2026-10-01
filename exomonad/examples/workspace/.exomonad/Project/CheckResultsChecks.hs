@@ -271,7 +271,7 @@ evidenceProbe spec =
 managedEvidence :: Member RecipeCheck effects => Eff effects ()
 managedEvidence = do
   owner <- root
-  void $ turn owner "import Project.CheckResultsChecks"
+  void $ turn owner "import Project.CheckResultsChecks\nimport Tidepool.Worktree (renderWorktreeId)"
   void $ turn owner "Right focusedTree <- createWorktree (fromCurrentRepository \"focused-evidence-check\")\nworktreeId focusedTree"
   assertCell owner "managed focused evidence checkout has typed allocated identity"
     "not (T.null (renderWorktreeId (worktreeId focusedTree)))"
