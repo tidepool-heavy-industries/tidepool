@@ -351,10 +351,14 @@ fn immutable_candidates_in_context(
     producer: &[u8],
     include: &[PathBuf],
     scratch: &Path,
-) -> Option<module_candidates::CandidateSet> {
-    empty_exact_context(context)
-        .then(|| module_candidates::select(producer, include, scratch))
-        .flatten()
+) -> Result<Option<module_candidates::CandidateSet>, CompileError> {
+    if empty_exact_context(context) {
+        Ok(module_candidates::select_configured(
+            producer, include, scratch,
+        )?)
+    } else {
+        Ok(None)
+    }
 }
 
 impl ModuleCandidateOffer {
@@ -364,7 +368,7 @@ impl ModuleCandidateOffer {
         endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
         include: &[PathBuf],
         scratch: &Path,
-    ) -> Self {
+    ) -> Result<Self, CompileError> {
         Self::select(endpoint.identity().producer_bytes(), include, scratch)
     }
 
@@ -475,9 +479,13 @@ impl ModuleCandidateOffer {
         ))
     }
 
-    pub fn select(producer: &[u8], include: &[PathBuf], scratch: &Path) -> Self {
-        Self {
-            selected: module_candidates::select(producer, include, scratch),
+    pub fn select(
+        producer: &[u8],
+        include: &[PathBuf],
+        scratch: &Path,
+    ) -> Result<Self, CompileError> {
+        Ok(Self {
+            selected: module_candidates::select_configured(producer, include, scratch)?,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: None,
@@ -486,7 +494,7 @@ impl ModuleCandidateOffer {
             checked_values: None,
             checked_item: None,
             checked_display: None,
-        }
+        })
     }
 
     pub fn select_in_context(
@@ -540,7 +548,7 @@ impl ModuleCandidateOffer {
             checked_search_authorization(CheckedPurpose::Cell, authorization, include)?;
         let context = checked_offer_context(context)?;
         Ok(Self {
-            selected: immutable_candidates_in_context(&context, producer, include, scratch),
+            selected: immutable_candidates_in_context(&context, producer, include, scratch)?,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation_with_authorization(
@@ -598,7 +606,7 @@ impl ModuleCandidateOffer {
         ));
         let context = checked_offer_context(context)?;
         Ok(Self {
-            selected: immutable_candidates_in_context(&context, producer, include, scratch),
+            selected: immutable_candidates_in_context(&context, producer, include, scratch)?,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation_with_authorization(
@@ -652,7 +660,7 @@ impl ModuleCandidateOffer {
             include,
         )?;
         Ok(Self {
-            selected: immutable_candidates_in_context(&context, producer, include, scratch),
+            selected: immutable_candidates_in_context(&context, producer, include, scratch)?,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation_with_authorization(
@@ -709,7 +717,7 @@ impl ModuleCandidateOffer {
             include,
         )?;
         Ok(Self {
-            selected: immutable_candidates_in_context(&context, producer, include, scratch),
+            selected: immutable_candidates_in_context(&context, producer, include, scratch)?,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation_with_authorization(
@@ -1721,6 +1729,7 @@ fn seal_turn_outputs_inner(
     let package_interfaces =
         certified_products::certify_target_package_interfaces(prepared, &package_closure)
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    module_candidates::record_deployment_acceptance(offer.selected.as_ref(), &receipt);
     if offer
         .exact
         .as_ref()
@@ -1867,7 +1876,7 @@ pub fn compile_invocation(
     inv: &CompileInvocation<'_>,
     mut on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
-    compile_invocation_inner(inv, &mut on_stage, true, None, None)
+    compile_invocation_inner(inv, &mut on_stage, true, None, None, None)
 }
 
 /// Compile fresh source against immutable declaration owners through the same
@@ -1878,7 +1887,7 @@ pub fn compile_invocation_in_context(
     context: Arc<crate::declaration_join::ExactDeclarationContext>,
     mut on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
-    compile_invocation_inner(inv, &mut on_stage, false, None, Some(context))
+    compile_invocation_inner(inv, &mut on_stage, false, None, Some(context), None)
 }
 
 /// Compile a declaration probe in full-home-product mode, which produces
@@ -1898,7 +1907,50 @@ pub(crate) fn compile_authored_products(
         include,
         fallback_module_name: AUTHORED_PRODUCT_PROBE_MODULE,
     };
-    compile_invocation_inner(&inv, &mut |_, _, _| {}, false, Some(session_root), context)
+    compile_invocation_inner(
+        &inv,
+        &mut |_, _, _| {},
+        false,
+        Some(session_root),
+        context,
+        None,
+    )
+}
+
+/// Build an immutable source cohort at its final deployment path. The compile
+/// bypasses candidate input and memo and exports only authenticated originals.
+pub fn build_deployment_module_package(
+    source_root: &Path,
+    output_root: &Path,
+) -> Result<crate::toolchain::DeploymentModulePackage, CompileError> {
+    module_candidates::deployment::prepare_build_roots(source_root, output_root)?;
+    let source_root = source_root.to_owned();
+    let configuration = crate::toolchain::CompilerDeploymentConfiguration::from_env()
+        .map_err(|e| CompileError::ExtractFailed(e.to_string()))?;
+    let crate::toolchain::CompilerDeploymentConfiguration::Configured(authority) = configuration
+    else {
+        return Err(crate::toolchain::ModulePackageError::UnknownCompiler.into());
+    };
+    let source = include_str!("../tests/fixtures/deployment-module-package/PreludePackage.hs");
+    let roots = [source_root.clone()];
+    let invocation = CompileInvocation {
+        source,
+        targets: &["packageSentinel"],
+        include: &roots,
+        fallback_module_name: "TidepoolPreludePackage",
+    };
+    compile_invocation_inner(
+        &invocation,
+        &mut |_, _, _| {},
+        false,
+        None,
+        None,
+        Some((output_root, &source_root)),
+    )?;
+    Ok(crate::toolchain::DeploymentModulePackage::load(
+        &output_root.join("catalog.json"),
+        &authority,
+    )?)
 }
 
 pub(crate) const AUTHORED_PRODUCT_PROBE_MODULE: &str = "TidepoolAuthoredProductProbe";
@@ -1909,6 +1961,7 @@ fn compile_invocation_inner(
     allow_candidates: bool,
     session_root: Option<&Path>,
     exact_context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+    deployment_export: Option<(&Path, &Path)>,
 ) -> Result<CompiledArtifacts, CompileError> {
     assert!(
         !inv.targets.is_empty(),
@@ -1932,6 +1985,9 @@ fn compile_invocation_inner(
         .includes(inv.include);
     if let Some(root) = session_root {
         cmd.session_root(root).certify_home_products();
+    }
+    if deployment_export.is_some() {
+        cmd.certify_home_products();
     }
     let exact_request = if let Some(context) = exact_context.as_ref() {
         let endpoint = cmd
@@ -1983,9 +2039,20 @@ fn compile_invocation_inner(
         || {
             let mut cmd = base_cmd.clone();
             let endpoint = cmd.bind().map_err(CompileAttemptError::Endpoint)?;
-            crate::toolchain::admit_bound_endpoint(&endpoint)
+            let deployment = crate::toolchain::admit_bound_endpoint(&endpoint)
                 .map_err(CompileAttemptError::Deployment)?;
             crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
+
+            let candidate_set = if allow_candidates {
+                module_candidates::select_configured(
+                    endpoint.identity().producer_bytes(),
+                    inv.include,
+                    temp_dir.path(),
+                )
+                .map_err(CompileAttemptError::ModulePackage)?
+            } else {
+                None
+            };
 
             let inv_key = {
                 let argv = cmd.argv();
@@ -2034,15 +2101,6 @@ fn compile_invocation_inner(
                 key
             };
 
-            let candidate_set = allow_candidates
-                .then(|| {
-                    module_candidates::select(
-                        endpoint.identity().producer_bytes(),
-                        inv.include,
-                        temp_dir.path(),
-                    )
-                })
-                .flatten();
             if let Some(selected) = &candidate_set {
                 cmd.module_candidates(&selected.manifest_path);
             }
@@ -2050,13 +2108,22 @@ fn compile_invocation_inner(
 
             endpoint
                 .execute(&cmd)
-                .map(|run| CompileAttempt::Executed((cmd, run, inv_key, producer, candidate_set)))
+                .map(|run| {
+                    CompileAttempt::Executed((
+                        cmd,
+                        run,
+                        inv_key,
+                        producer,
+                        candidate_set,
+                        deployment,
+                    ))
+                })
                 .map_err(CompileAttemptError::Endpoint)
         },
         |error| matches!(error,CompileAttemptError::Endpoint(error) if error.permits_rebind()),
     )
     .map_err(CompileAttemptError::into_compile_error)?;
-    let (cmd, run, inv_key, producer, candidate_set) = match attempt {
+    let (cmd, run, inv_key, producer, candidate_set, deployment) = match attempt {
         CompileAttempt::Cached(artifacts) => return Ok(*artifacts),
         CompileAttempt::Executed(executed) => executed,
     };
@@ -2111,7 +2178,14 @@ fn compile_invocation_inner(
                     .is_some_and(|set| !set.by_owner.is_empty()) =>
         {
             tracing::warn!(%error, "candidate compile failed; retrying without candidates");
-            return compile_invocation_inner(inv, on_stage, false, session_root, exact_context);
+            return compile_invocation_inner(
+                inv,
+                on_stage,
+                false,
+                session_root,
+                exact_context,
+                deployment_export,
+            );
         }
         Err(error) => {
             return Err(retain_compiler_failure(
@@ -2308,6 +2382,24 @@ fn compile_invocation_inner(
         artifacts.producer_identity = Some(producer.as_slice().try_into().map_err(|_| {
             CompileError::ExtractFailed("bound compiler producer identity length".into())
         })?);
+        module_candidates::record_deployment_acceptance(candidate_set.as_ref(), &receipt);
+        if let Some((output_root, source_root)) = deployment_export {
+            let valid = valid_evidence.ok_or_else(|| {
+                CompileError::ModulePackage(crate::toolchain::ModulePackageError::OpenCohort)
+            })?;
+            module_candidates::deployment::export(
+                output_root,
+                source_root,
+                &producer,
+                &deployment,
+                inv.include,
+                valid,
+                &fresh_products,
+                &product_bytes,
+                &package_bundle_bytes,
+                inv.source,
+            )?;
+        }
         if let Some(evidence) = evidence.as_ref().filter(|_| exact_request.is_none()) {
             module_candidates::publish(
                 &producer,
@@ -2344,7 +2436,14 @@ fn compile_invocation_inner(
                     .is_some_and(|set| !set.by_owner.is_empty()) =>
         {
             tracing::warn!(%error, "candidate certification failed; retrying without candidates");
-            compile_invocation_inner(inv, on_stage, false, session_root, exact_context)
+            compile_invocation_inner(
+                inv,
+                on_stage,
+                false,
+                session_root,
+                exact_context,
+                deployment_export,
+            )
         }
         result => result
             .map_err(|error| retain_compiler_failure(temp_dir.path(), &compiler_stderr, error)),
@@ -2583,12 +2682,14 @@ fn retain_exact_compile_receipts(source: &Path, destination: &Path) -> std::io::
 enum CompileAttemptError {
     Endpoint(tidepool_extract_cmd::SpawnError),
     Deployment(crate::toolchain::ToolchainError),
+    ModulePackage(crate::toolchain::ModulePackageError),
 }
 impl CompileAttemptError {
     fn into_compile_error(self) -> CompileError {
         match self {
             Self::Endpoint(error) => CompileError::Io(extract_spawn_error(error.source)),
             Self::Deployment(error) => CompileError::ExtractFailed(error.to_string()),
+            Self::ModulePackage(error) => CompileError::ModulePackage(error),
         }
     }
 }

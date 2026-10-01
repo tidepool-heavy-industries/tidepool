@@ -75,6 +75,23 @@ pub const ENV_EXTRACT: &str = "TIDEPOOL_EXTRACT";
 pub const ENV_EXTRACT_WORKER: &str = "TIDEPOOL_EXTRACT_WORKER";
 /// Env var pointing at the configured producer and consumed-worker manifest.
 pub const ENV_COMPILER_DEPLOYMENT: &str = "TIDEPOOL_COMPILER_DEPLOYMENT";
+/// Optional immutable source/product catalog paired with configured compiler authority.
+pub const ENV_COMPILER_MODULES: &str = "TIDEPOOL_COMPILER_MODULES";
+pub use crate::module_candidates::deployment::{DeploymentModulePackage, ModulePackageError};
+
+/// Load explicit source provenance; this never admits an observed endpoint.
+/// Present invalid configuration refuses before compilation or source capture.
+pub fn configured_module_package() -> Result<Option<DeploymentModulePackage>, ModulePackageError> {
+    let Some(path) = std::env::var_os(ENV_COMPILER_MODULES) else {
+        return Ok(None);
+    };
+    let configuration = CompilerDeploymentConfiguration::from_env()
+        .map_err(|e| ModulePackageError::CompilerConfiguration(Box::new(e)))?;
+    let CompilerDeploymentConfiguration::Configured(authority) = configuration else {
+        return Err(ModulePackageError::UnknownCompiler);
+    };
+    DeploymentModulePackage::load(&PathBuf::from(path), &authority).map(Some)
+}
 /// Env var naming the stdlib root (step 1 of the stdlib precedence).
 pub const ENV_PRELUDE_DIR: &str = "TIDEPOOL_PRELUDE_DIR";
 /// Env var overriding [`stamp_path`].

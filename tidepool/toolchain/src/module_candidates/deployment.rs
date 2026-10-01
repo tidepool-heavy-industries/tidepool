@@ -1,0 +1,862 @@
+//! Explicit deployment inputs to the existing module-candidate owner.
+//! Original products retain their producing roots and version recipe. Current
+//! source selection and interface admission still belong to the worker.
+
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use super::{absolute, sha, version_hash, Record, CANDIDATE_LIMIT, RECORD_LIMIT};
+use crate::toolchain::CompilerDeploymentAuthority;
+
+const CATALOG_LIMIT: usize = 1 << 20;
+const TOTAL_LIMIT: usize = 128 << 20;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ModulePackageError {
+    #[error("module package {}: {source}", path.display())]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("module package format is invalid: {0}")]
+    Format(&'static str),
+    #[error("module package exceeds its declared bounds")]
+    Bounds,
+    #[error("module package differs from configured compiler deployment")]
+    CompilerMismatch,
+    #[error("module package requires configured compiler deployment authority")]
+    UnknownCompiler,
+    #[error("module package compiler configuration: {0}")]
+    CompilerConfiguration(#[source] Box<crate::toolchain::ToolchainError>),
+    #[error("module package or source root moved from its producing path")]
+    RootMoved,
+    #[error("module package requires final immutable Nix store source and product roots")]
+    MutableRoot,
+    #[error("module package source aliases another path: {}", .0.display())]
+    SourceAlias(PathBuf),
+    #[error("module package source revision changed")]
+    SourceChanged,
+    #[error("module package artifact changed: {}", .0.display())]
+    ArtifactChanged(PathBuf),
+    #[error("module package must contain a closed immutable source cohort")]
+    OpenCohort,
+}
+
+fn io(path: &Path, source: std::io::Error) -> ModulePackageError {
+    ModulePackageError::Io {
+        path: path.to_owned(),
+        source,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RootPolicy {
+    NixStore,
+    #[cfg(test)]
+    Fixture,
+}
+
+fn immutable_store_path(path: &Path) -> bool {
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return false;
+    }
+    let Ok(relative) = path.strip_prefix("/nix/store") else {
+        return false;
+    };
+    let Some(Component::Normal(output)) = relative.components().next() else {
+        return false;
+    };
+    let Some(output) = output.to_str() else {
+        return false;
+    };
+    let bytes = output.as_bytes();
+    bytes.len() > 33
+        && bytes[32] == b'-'
+        && bytes[..32]
+            .iter()
+            .all(|c| b"0123456789abcdfghijklmnpqrsvwxyz".contains(c))
+}
+
+fn require_immutable_roots(
+    policy: RootPolicy,
+    source: &Path,
+    output: &Path,
+) -> Result<(), ModulePackageError> {
+    #[cfg(test)]
+    if matches!(policy, RootPolicy::Fixture) {
+        return Ok(());
+    }
+    let _ = policy;
+    if immutable_store_path(source) && immutable_store_path(output) {
+        Ok(())
+    } else {
+        Err(ModulePackageError::MutableRoot)
+    }
+}
+
+pub(crate) fn prepare_build_roots(source: &Path, output: &Path) -> Result<(), ModulePackageError> {
+    require_immutable_roots(RootPolicy::NixStore, source, output)?;
+    if absolute(source).as_deref() != Some(source) {
+        return Err(ModulePackageError::RootMoved);
+    }
+    reject_source_aliases(source)?;
+    fs::create_dir_all(output).map_err(|e| io(output, e))?;
+    if absolute(output).as_deref() != Some(output) {
+        return Err(ModulePackageError::RootMoved);
+    }
+    if output.join("catalog.json").exists() {
+        return Err(ModulePackageError::Format("catalog already exists"));
+    }
+    Ok(())
+}
+
+fn reject_source_aliases(root: &Path) -> Result<(), ModulePackageError> {
+    let mut directories = vec![root.to_owned()];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory).map_err(|e| io(&directory, e))? {
+            let entry = entry.map_err(|e| io(&directory, e))?;
+            let path = entry.path();
+            let kind = entry.file_type().map_err(|e| io(&path, e))?;
+            if kind.is_symlink() {
+                return Err(ModulePackageError::SourceAlias(path));
+            }
+            if kind.is_dir() {
+                directories.push(path)
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read(path: &Path, limit: usize) -> Result<Vec<u8>, ModulePackageError> {
+    let length = fs::metadata(path).map_err(|e| io(path, e))?.len();
+    if length > limit as u64 {
+        return Err(ModulePackageError::Bounds);
+    }
+    let bytes = fs::read(path).map_err(|e| io(path, e))?;
+    if bytes.len() > limit {
+        return Err(ModulePackageError::Bounds);
+    }
+    Ok(bytes)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileRef {
+    path: PathBuf,
+    sha256: String,
+    length: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModuleFiles {
+    owner: FileRef,
+    products: FileRef,
+    interface: FileRef,
+    packages: FileRef,
+    evidence: FileRef,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Catalog {
+    schema: u32,
+    output_root: PathBuf,
+    source_root: PathBuf,
+    source_files: Vec<(PathBuf, String)>,
+    producer_identity: [u8; 32],
+    consumed_worker_identity: [u8; 32],
+    modules: Vec<ModuleFiles>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Owner {
+    unit: String,
+    module: String,
+    source: PathBuf,
+    source_sha256: String,
+    include: Vec<PathBuf>,
+    target_source: String,
+    module_version: [u8; 32],
+}
+
+/// Validated source provenance and file references, never native authority.
+#[derive(Debug)]
+pub struct DeploymentModulePackage {
+    catalog: Catalog,
+    catalog_identity: String,
+    source_identity: String,
+    records: Vec<Record>,
+}
+
+impl DeploymentModulePackage {
+    pub fn source_root(&self) -> &Path {
+        &self.catalog.source_root
+    }
+    pub fn source_identity(&self) -> &str {
+        &self.source_identity
+    }
+    pub fn producer_identity(&self) -> &[u8; 32] {
+        &self.catalog.producer_identity
+    }
+    pub fn catalog_identity(&self) -> &str {
+        &self.catalog_identity
+    }
+
+    pub(crate) fn load(
+        path: &Path,
+        authority: &CompilerDeploymentAuthority,
+    ) -> Result<Self, ModulePackageError> {
+        Self::load_under(path, authority, RootPolicy::NixStore)
+    }
+
+    fn load_under(
+        path: &Path,
+        authority: &CompilerDeploymentAuthority,
+        policy: RootPolicy,
+    ) -> Result<Self, ModulePackageError> {
+        let bytes = read(path, CATALOG_LIMIT)?;
+        let catalog: Catalog = serde_json::from_slice(&bytes)
+            .map_err(|_| ModulePackageError::Format("catalog JSON"))?;
+        if catalog.schema != 1 {
+            return Err(ModulePackageError::Format("catalog schema"));
+        }
+        require_immutable_roots(policy, &catalog.source_root, &catalog.output_root)?;
+        if catalog.producer_identity != authority.producer_identity
+            || catalog.consumed_worker_identity != authority.consumed_worker_identity
+            || authority.schema != 1
+            || authority.producer_identity == [0; 32]
+            || authority.consumed_worker_identity == [0; 32]
+        {
+            return Err(ModulePackageError::CompilerMismatch);
+        }
+        if !path.is_absolute()
+            || !catalog.output_root.is_absolute()
+            || !catalog.source_root.is_absolute()
+            || absolute(path).as_ref() != Some(&catalog.output_root.join("catalog.json"))
+            || absolute(&catalog.output_root).as_ref() != Some(&catalog.output_root)
+            || absolute(&catalog.source_root).as_ref() != Some(&catalog.source_root)
+        {
+            return Err(ModulePackageError::RootMoved);
+        }
+        if catalog.modules.is_empty() || catalog.modules.len() > CANDIDATE_LIMIT {
+            return Err(ModulePackageError::Bounds);
+        }
+        reject_source_aliases(&catalog.source_root)?;
+        let source_files = crate::cache::source_root_manifest(&catalog.source_root)
+            .map_err(|e| io(&e.path, e.source))?;
+        if source_files != catalog.source_files {
+            return Err(ModulePackageError::SourceChanged);
+        }
+        let source_identity = sha(&serde_json::to_vec(&source_files)
+            .map_err(|_| ModulePackageError::Format("source manifest"))?);
+        let mut package = Self {
+            catalog,
+            catalog_identity: sha(&bytes),
+            source_identity,
+            records: Vec::new(),
+        };
+        // Detect malformed or changed configured artifacts even when their
+        // current source selection will prevent candidate acceptance.
+        package.records = package.read_records(package.producer_identity())?;
+        Ok(package)
+    }
+
+    fn read_ref(
+        &self,
+        reference: &FileRef,
+        remaining: &mut usize,
+    ) -> Result<Vec<u8>, ModulePackageError> {
+        if reference.path.as_os_str().is_empty()
+            || reference
+                .path
+                .components()
+                .any(|c| !matches!(c, Component::Normal(_)))
+        {
+            return Err(ModulePackageError::Format("artifact relative path"));
+        }
+        let path = self.catalog.output_root.join(&reference.path);
+        if absolute(&path).as_ref() != Some(&path) {
+            return Err(ModulePackageError::RootMoved);
+        }
+        let bytes = read(&path, RECORD_LIMIT.min(*remaining))?;
+        *remaining = remaining
+            .checked_sub(bytes.len())
+            .ok_or(ModulePackageError::Bounds)?;
+        if bytes.len() as u64 != reference.length || sha(&bytes) != reference.sha256 {
+            return Err(ModulePackageError::ArtifactChanged(path));
+        }
+        Ok(bytes)
+    }
+
+    #[cfg(test)]
+    fn records(&self, producer: &[u8]) -> Result<Vec<Record>, ModulePackageError> {
+        if producer != self.catalog.producer_identity {
+            return Err(ModulePackageError::CompilerMismatch);
+        }
+        Ok(self.records.clone())
+    }
+
+    pub(super) fn into_candidates(
+        self,
+        producer: &[u8],
+    ) -> Result<Vec<(Record, super::CandidateOrigin)>, ModulePackageError> {
+        if producer != self.catalog.producer_identity {
+            return Err(ModulePackageError::CompilerMismatch);
+        }
+        Ok(self
+            .records
+            .into_iter()
+            .zip(self.catalog.modules)
+            .map(|(record, files)| {
+                (
+                    record,
+                    super::CandidateOrigin::Deployment {
+                        interface: self.catalog.output_root.join(files.interface.path),
+                        packages: self.catalog.output_root.join(files.packages.path),
+                    },
+                )
+            })
+            .collect())
+    }
+
+    fn read_records(&self, producer: &[u8]) -> Result<Vec<Record>, ModulePackageError> {
+        if producer != self.catalog.producer_identity {
+            return Err(ModulePackageError::CompilerMismatch);
+        }
+        let mut remaining = TOTAL_LIMIT;
+        let mut records = Vec::new();
+        let mut owners = BTreeSet::new();
+        for files in &self.catalog.modules {
+            let owner: Owner =
+                serde_json::from_slice(&self.read_ref(&files.owner, &mut remaining)?)
+                    .map_err(|_| ModulePackageError::Format("owner JSON"))?;
+            if !owners.insert((owner.unit.clone(), owner.module.clone())) {
+                return Err(ModulePackageError::Format("duplicate module owner"));
+            }
+            let record = Record {
+                tag: "TPMCAN".into(),
+                version: 6,
+                endpoint: producer.to_vec(),
+                include: owner.include,
+                unit: owner.unit,
+                module: owner.module,
+                source: owner.source,
+                source_sha256: owner.source_sha256,
+                target_source: owner.target_source,
+                products: self.read_ref(&files.products, &mut remaining)?,
+                interface: self.read_ref(&files.interface, &mut remaining)?,
+                package_imports: self.read_ref(&files.packages, &mut remaining)?,
+                evidence: serde_json::from_slice(&self.read_ref(&files.evidence, &mut remaining)?)
+                    .map_err(|_| ModulePackageError::Format("dependency evidence JSON"))?,
+            };
+            if owner.module_version != version_hash(&record)
+                || record.include != [self.catalog.source_root.clone()]
+                || !record.source.starts_with(&self.catalog.source_root)
+                || absolute(&record.source).as_ref() != Some(&record.source)
+                || !record.evidence.valid(&record.target_source)
+                || !record.evidence.selection_complete
+            {
+                return Err(ModulePackageError::OpenCohort);
+            }
+            let requirements = crate::prepared_artifact::production_requirements()
+                .map_err(|_| ModulePackageError::Format("host requirements"))?;
+            let parsed = tidepool_repr::execution_schema::parse_module_products(
+                &record.products,
+                &requirements,
+                super::product_decode_limits(),
+            )
+            .map_err(|_| ModulePackageError::Format("original module products"))?;
+            if parsed.len() != 1
+                || parsed[0].unit != record.unit
+                || parsed[0].module != record.module
+                || parsed[0].interface != record.interface
+                || record.interface.is_empty()
+                || sha(&read(&record.source, RECORD_LIMIT)?) != record.source_sha256
+                || record
+                    .evidence
+                    .modules
+                    .iter()
+                    .filter(|n| {
+                        n.unit == record.unit
+                            && n.module == record.module
+                            && !n.boot
+                            && n.source == record.source
+                            && n.product == crate::cache::ProductAvailability::Ready
+                    })
+                    .count()
+                    != 1
+                || !record
+                    .evidence
+                    .sources
+                    .iter()
+                    .any(|s| s.path == record.source && s.sha256 == record.source_sha256)
+            {
+                return Err(ModulePackageError::Format("original module owner"));
+            }
+            use sha2::Digest;
+            let iface_sha: [u8; 32] = sha2::Sha256::digest(&record.interface).into();
+            crate::recovery_artifacts::validate_package_imports(
+                &record.package_imports,
+                &record.unit,
+                &record.module,
+                &iface_sha,
+                &self.catalog.output_root,
+            )
+            .map_err(|_| ModulePackageError::Format("package imports"))?;
+            records.push(record);
+        }
+        validate_closed(&records, &self.catalog.source_root)?;
+        Ok(records)
+    }
+}
+
+fn validate_closed(records: &[Record], source_root: &Path) -> Result<(), ModulePackageError> {
+    let owners: BTreeSet<_> = records
+        .iter()
+        .map(|r| (r.unit.as_str(), r.module.as_str()))
+        .collect();
+    for record in records {
+        if record
+            .evidence
+            .sources
+            .iter()
+            .any(|s| s.path != Path::new("@generated-source") && !s.path.starts_with(source_root))
+        {
+            return Err(ModulePackageError::OpenCohort);
+        }
+        let node = record
+            .evidence
+            .modules
+            .iter()
+            .find(|n| n.unit == record.unit && n.module == record.module && !n.boot)
+            .ok_or(ModulePackageError::OpenCohort)?;
+        if node.imports.iter().any(|i| {
+            i.selected.as_ref().is_some_and(|p| {
+                !p.starts_with(source_root)
+                    || i.boot
+                    || !owners.contains(&(record.unit.as_str(), i.module.as_str()))
+            })
+        }) {
+            return Err(ModulePackageError::OpenCohort);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{package_bundle, product_bytes};
+    use super::*;
+    use crate::cache::{DependencyEvidence, ModuleEvidence, ProductAvailability, SourceEvidence};
+
+    struct Fixture {
+        _root: tempfile::TempDir,
+        source: PathBuf,
+        output: PathBuf,
+        authority: CompilerDeploymentAuthority,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("sources");
+            let output = root.path().join("products");
+            fs::create_dir(&source).unwrap();
+            fs::write(
+                source.join("Library.hs"),
+                "module Library where\nvalue = 7\n",
+            )
+            .unwrap();
+            let source = absolute(&source).unwrap();
+            let producer_identity = [3; 32];
+            let authority = CompilerDeploymentAuthority {
+                schema: 1,
+                producer_identity,
+                consumed_worker_identity: [4; 32],
+                frontend_path: "/configured/frontend".into(),
+                worker_path: "/configured/worker".into(),
+                ghc_libdir: "/configured/ghc".into(),
+            };
+            let evidence = DependencyEvidence {
+                version: 4,
+                cache_safe: true,
+                selection_complete: true,
+                sources: vec![
+                    SourceEvidence {
+                        path: "@generated-source".into(),
+                        sha256: sha(b"target"),
+                    },
+                    SourceEvidence {
+                        path: source.join("Library.hs"),
+                        sha256: sha(&fs::read(source.join("Library.hs")).unwrap()),
+                    },
+                ],
+                modules: vec![ModuleEvidence {
+                    unit: "u".into(),
+                    module: "Library".into(),
+                    boot: false,
+                    source: source.join("Library.hs"),
+                    imports: vec![],
+                    product: ProductAvailability::Ready,
+                }],
+                packages: vec![],
+                resolutions: vec![],
+            };
+            let bytes = product_bytes("u", "Library", &[0x42]);
+            let products = tidepool_repr::execution_schema::parse_module_products(
+                &bytes,
+                &crate::prepared_artifact::production_requirements().unwrap(),
+                super::super::product_decode_limits(),
+            )
+            .unwrap();
+            export_under(
+                &output,
+                &source,
+                &producer_identity,
+                &crate::toolchain::AdmittedCompilerDeployment {
+                    producer_identity,
+                    consumed_worker_identity: [4; 32],
+                },
+                &[source.clone()],
+                &evidence,
+                &products,
+                &bytes,
+                &package_bundle("u", "Library", &[0x42]),
+                "target",
+                RootPolicy::Fixture,
+            )
+            .unwrap();
+            Self {
+                _root: root,
+                source,
+                output,
+                authority,
+            }
+        }
+
+        fn load(&self) -> Result<DeploymentModulePackage, ModulePackageError> {
+            DeploymentModulePackage::load_under(
+                &self.output.join("catalog.json"),
+                &self.authority,
+                RootPolicy::Fixture,
+            )
+        }
+
+        fn catalog(&self) -> Catalog {
+            serde_json::from_slice(&fs::read(self.output.join("catalog.json")).unwrap()).unwrap()
+        }
+    }
+
+    #[test]
+    fn independent_files_preserve_original_owner_across_current_include_changes() {
+        let fixture = Fixture::new();
+        let package = fixture.load().unwrap();
+        assert_eq!(package.source_root(), fixture.source);
+        let records = package.records(&[3; 32]).unwrap();
+        let original = version_hash(&records[0]);
+        let scratch = tempfile::tempdir().unwrap();
+        let current = [scratch.path().to_path_buf(), fixture.source.clone()];
+        let selected = super::super::select_records(
+            &[3; 32],
+            &current,
+            scratch.path(),
+            package.into_candidates(&[3; 32]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(selected.by_owner.len(), 1);
+        assert_eq!(
+            selected.by_owner[&("u".into(), "Library".into())]
+                .owner
+                .module_version
+                .0,
+            original
+        );
+        let ordinary = super::super::select_records(
+            &[3; 32],
+            &current,
+            scratch.path(),
+            fixture
+                .load()
+                .unwrap()
+                .records(&[3; 32])
+                .unwrap()
+                .into_iter()
+                .map(|r| (r, super::super::CandidateOrigin::Ordinary))
+                .collect(),
+        )
+        .unwrap();
+        assert!(ordinary.by_owner.is_empty());
+        let catalog = fixture.catalog();
+        let files = &catalog.modules[0];
+        let paths = [
+            &files.owner.path,
+            &files.products.path,
+            &files.interface.path,
+            &files.packages.path,
+            &files.evidence.path,
+        ];
+        assert_eq!(paths.into_iter().collect::<BTreeSet<_>>().len(), 5);
+    }
+
+    #[test]
+    fn configured_compiler_and_worker_are_independently_checked() {
+        let fixture = Fixture::new();
+        for worker in [false, true] {
+            let mut authority = fixture.authority.clone();
+            if worker {
+                authority.consumed_worker_identity = [8; 32]
+            } else {
+                authority.producer_identity = [8; 32]
+            }
+            assert!(matches!(
+                DeploymentModulePackage::load_under(
+                    &fixture.output.join("catalog.json"),
+                    &authority,
+                    RootPolicy::Fixture
+                ),
+                Err(ModulePackageError::CompilerMismatch)
+            ));
+        }
+    }
+
+    #[test]
+    fn package_relocation_refuses_without_rewriting_original_paths() {
+        let fixture = Fixture::new();
+        let other = fixture._root.path().join("relocated");
+        fs::create_dir(&other).unwrap();
+        fs::copy(
+            fixture.output.join("catalog.json"),
+            other.join("catalog.json"),
+        )
+        .unwrap();
+        assert!(matches!(
+            DeploymentModulePackage::load_under(
+                &other.join("catalog.json"),
+                &fixture.authority,
+                RootPolicy::Fixture
+            ),
+            Err(ModulePackageError::RootMoved)
+        ));
+    }
+
+    #[test]
+    fn source_addition_edit_and_removal_refuse_frozen_provenance() {
+        let fixture = Fixture::new();
+        let source = fixture.source.join("Library.hs");
+        let original = fs::read(&source).unwrap();
+        fs::write(fixture.source.join("Added.hs"), "module Added where\n").unwrap();
+        assert!(matches!(
+            fixture.load(),
+            Err(ModulePackageError::SourceChanged)
+        ));
+        fs::remove_file(fixture.source.join("Added.hs")).unwrap();
+        fs::write(&source, "module Library where\nvalue = 9\n").unwrap();
+        assert!(matches!(
+            fixture.load(),
+            Err(ModulePackageError::SourceChanged)
+        ));
+        fs::remove_file(&source).unwrap();
+        assert!(matches!(
+            fixture.load(),
+            Err(ModulePackageError::SourceChanged)
+        ));
+        fs::write(&source, original).unwrap();
+        assert!(fixture.load().is_ok());
+    }
+
+    #[test]
+    fn independent_product_corruption_refuses_before_candidate_selection() {
+        let fixture = Fixture::new();
+        let catalog = fixture.catalog();
+        let product = fixture.output.join(&catalog.modules[0].products.path);
+        fs::write(&product, b"corrupt").unwrap();
+        assert!(
+            matches!(fixture.load(),Err(ModulePackageError::ArtifactChanged(path)) if path == product)
+        );
+    }
+
+    #[test]
+    fn mutable_author_or_dev_roots_cannot_become_deployment_roots() {
+        let fixture = Fixture::new();
+        assert!(matches!(
+            DeploymentModulePackage::load(&fixture.output.join("catalog.json"), &fixture.authority),
+            Err(ModulePackageError::MutableRoot)
+        ));
+        assert!(immutable_store_path(Path::new(
+            "/nix/store/00000000000000000000000000000000-source/lib"
+        )));
+        assert!(!immutable_store_path(Path::new(
+            "/nix/store-lookalike/00000000000000000000000000000000-source/lib"
+        )));
+        assert!(!immutable_store_path(Path::new("/nix/store/source/lib")));
+        assert!(!immutable_store_path(Path::new(
+            "/nix/store/00000000000000000000000000000000-source/../../tmp"
+        )));
+    }
+
+    #[test]
+    fn source_file_and_empty_directory_aliases_refuse_complete_frozen_root() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new();
+        let mutable = fixture._root.path().join("mutable");
+        fs::create_dir(&mutable).unwrap();
+        let alias = fixture.source.join("empty-alias");
+        symlink(&mutable, &alias).unwrap();
+        assert!(matches!(fixture.load(),Err(ModulePackageError::SourceAlias(p)) if p == alias));
+        fs::remove_file(&alias).unwrap();
+        let alias = fixture.source.join("Unselected.hs");
+        symlink(fixture.source.join("Library.hs"), &alias).unwrap();
+        assert!(matches!(fixture.load(),Err(ModulePackageError::SourceAlias(p)) if p == alias));
+    }
+}
+
+fn write_ref(root: &Path, relative: PathBuf, bytes: &[u8]) -> Result<FileRef, ModulePackageError> {
+    let path = root.join(&relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| io(parent, e))?
+    }
+    tidepool_atomic_write::write_best_effort(&path, bytes).map_err(|e| io(&path, e.into()))?;
+    Ok(FileRef {
+        path: relative,
+        sha256: sha(bytes),
+        length: bytes.len() as u64,
+    })
+}
+
+/// Export only after the shared front door has authenticated worker receipts.
+pub(crate) fn export(
+    output_root: &Path,
+    source_root: &Path,
+    producer: &[u8],
+    authority: &crate::toolchain::AdmittedCompilerDeployment,
+    include: &[PathBuf],
+    evidence: &crate::cache::DependencyEvidence,
+    products: &[tidepool_repr::execution_schema::RawModuleProduct],
+    product_bytes: &[u8],
+    package_bytes: &[u8],
+    target_source: &str,
+) -> Result<(), ModulePackageError> {
+    export_under(
+        output_root,
+        source_root,
+        producer,
+        authority,
+        include,
+        evidence,
+        products,
+        product_bytes,
+        package_bytes,
+        target_source,
+        RootPolicy::NixStore,
+    )
+}
+
+fn export_under(
+    output_root: &Path,
+    source_root: &Path,
+    producer: &[u8],
+    authority: &crate::toolchain::AdmittedCompilerDeployment,
+    include: &[PathBuf],
+    evidence: &crate::cache::DependencyEvidence,
+    products: &[tidepool_repr::execution_schema::RawModuleProduct],
+    product_bytes: &[u8],
+    package_bytes: &[u8],
+    target_source: &str,
+    policy: RootPolicy,
+) -> Result<(), ModulePackageError> {
+    require_immutable_roots(policy, source_root, output_root)?;
+    if producer != authority.producer_identity {
+        return Err(ModulePackageError::CompilerMismatch);
+    }
+    let source_root = absolute(source_root).ok_or(ModulePackageError::RootMoved)?;
+    if include != [source_root.clone()] {
+        return Err(ModulePackageError::OpenCohort);
+    }
+    if !output_root.is_absolute() {
+        return Err(ModulePackageError::RootMoved);
+    }
+    fs::create_dir_all(output_root).map_err(|e| io(output_root, e))?;
+    if absolute(output_root).as_deref() != Some(output_root) {
+        return Err(ModulePackageError::RootMoved);
+    }
+    if output_root.join("catalog.json").exists() {
+        return Err(ModulePackageError::Format("catalog already exists"));
+    }
+    let records = super::eligible_records(
+        producer,
+        include,
+        evidence,
+        products,
+        product_bytes,
+        package_bytes,
+        target_source,
+    );
+    if records.is_empty() || records.len() > CANDIDATE_LIMIT {
+        return Err(ModulePackageError::Bounds);
+    }
+    validate_closed(&records, &source_root)?;
+    let mut modules = Vec::new();
+    for record in records {
+        let directory =
+            PathBuf::from("modules")
+                .join(sha(format!("{}:{}", record.unit, record.module).as_bytes()));
+        let owner = Owner {
+            unit: record.unit.clone(),
+            module: record.module.clone(),
+            source: record.source.clone(),
+            source_sha256: record.source_sha256.clone(),
+            include: record.include.clone(),
+            target_source: record.target_source.clone(),
+            module_version: version_hash(&record),
+        };
+        modules.push(ModuleFiles {
+            owner: write_ref(
+                output_root,
+                directory.join("owner.json"),
+                &serde_json::to_vec(&owner)
+                    .map_err(|_| ModulePackageError::Format("owner encoding"))?,
+            )?,
+            products: write_ref(
+                output_root,
+                directory.join("products.cbor"),
+                &record.products,
+            )?,
+            interface: write_ref(output_root, directory.join("skinny.hi"), &record.interface)?,
+            packages: write_ref(
+                output_root,
+                directory.join("packages.cbor"),
+                &record.package_imports,
+            )?,
+            evidence: write_ref(
+                output_root,
+                directory.join("dependencies.json"),
+                &serde_json::to_vec(&record.evidence)
+                    .map_err(|_| ModulePackageError::Format("evidence encoding"))?,
+            )?,
+        });
+    }
+    let catalog = Catalog {
+        schema: 1,
+        output_root: output_root.to_owned(),
+        source_root: source_root.clone(),
+        source_files: crate::cache::source_root_manifest(&source_root)
+            .map_err(|e| io(&e.path, e.source))?,
+        producer_identity: authority.producer_identity,
+        consumed_worker_identity: authority.consumed_worker_identity,
+        modules,
+    };
+    let bytes = serde_json::to_vec_pretty(&catalog)
+        .map_err(|_| ModulePackageError::Format("catalog encoding"))?;
+    if bytes.len() > CATALOG_LIMIT {
+        return Err(ModulePackageError::Bounds);
+    }
+    write_ref(output_root, PathBuf::from("catalog.json"), &bytes)?;
+    Ok(())
+}

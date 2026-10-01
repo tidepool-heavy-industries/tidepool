@@ -3605,7 +3605,7 @@ fn run_turn_with_pin(
             settled_bindings,
         )?
     } else if req.exact_context.is_none() {
-        ModuleCandidateOffer::select_admitted(&endpoint, &include, temp.path())
+        ModuleCandidateOffer::select_admitted(&endpoint, &include, temp.path())?
     } else {
         select_module_candidate_offer(
             endpoint.identity().producer_bytes(),
@@ -3816,7 +3816,7 @@ pub(super) fn select_module_candidate_offer(
         Some(context) => {
             ModuleCandidateOffer::select_in_context(producer, include, scratch, context)
         }
-        None => Ok(ModuleCandidateOffer::select(producer, include, scratch)),
+        None => ModuleCandidateOffer::select(producer, include, scratch),
     }
 }
 
