@@ -33,6 +33,16 @@ use crate::{
 // Typed yield sites (`asks.json` on disk)
 // ---------------------------------------------------------------------------
 
+/// A complete authored module to typecheck through the admitted compiler.
+///
+/// Checking produces no prepared program, native product, or input-continuity
+/// authority. The caller owns capture freshness and publication policy.
+pub struct SourceCheckRequest<'a> {
+    pub source: &'a str,
+    pub include: &'a [PathBuf],
+    pub fallback_module_name: &'a str,
+}
+
 /// Parse the source before reserving original module and value identities.
 /// This capability contains no checked types or native authority.
 pub fn parse_cell_plan(
