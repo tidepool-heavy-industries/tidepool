@@ -210,6 +210,10 @@ impl PreparedWorker {
         ))
     }
 
+    pub(crate) fn consumed_worker_identity(&self) -> [u8; 32] {
+        *blake3::hash(&self.bytes).as_bytes()
+    }
+
     pub(crate) fn command(&self) -> Command {
         // The opened descriptor pins the selected inode. `execve` resolves
         // this path before applying close-on-exec, so an atomic replacement of
@@ -281,7 +285,9 @@ fn resolve_ghc_libdir() -> Result<OsString, FrontendError> {
 fn serve_bound_endpoint() -> Result<u8, FrontendError> {
     let prepared = prepare_worker()?;
     let identity = prepared.producer_identity()?;
-    crate::endpoint::write_identity(io::stdout().lock(), &identity).map_err(FrontendError::Io)?;
+    let consumed_worker = prepared.consumed_worker_identity();
+    crate::endpoint::write_identity(io::stdout().lock(), &identity, &consumed_worker)
+        .map_err(FrontendError::Io)?;
     let mut stdin = io::stdin().lock();
     let mut prefix = [0u8; 8];
     stdin.read_exact(&mut prefix).map_err(FrontendError::Io)?;
@@ -729,6 +735,7 @@ fn main() {{
 
         let prepared = PreparedWorker::prepare().unwrap();
         let old_identity = prepared.producer_identity().unwrap();
+        let old_worker_identity = prepared.consumed_worker_identity();
 
         compile_fake_worker(&dir.join("replacement.rs"), &replacement, "new-worker");
         std::fs::rename(&replacement, &worker).unwrap();
@@ -736,6 +743,11 @@ fn main() {{
             prepared.producer_identity().unwrap(),
             old_identity,
             "a boot-bound worker must retain immutable identity after path replacement"
+        );
+        assert_eq!(
+            prepared.consumed_worker_identity(),
+            old_worker_identity,
+            "a boot-bound worker must retain its exact consumed digest after path replacement"
         );
 
         let output = prepared
@@ -746,11 +758,13 @@ fn main() {{
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("old-worker"));
 
-        let new_identity = PreparedWorker::prepare()
-            .unwrap()
-            .producer_identity()
-            .unwrap();
+        let replacement_worker = PreparedWorker::prepare().unwrap();
+        let new_identity = replacement_worker.producer_identity().unwrap();
         assert_ne!(old_identity, new_identity);
+        assert_ne!(
+            old_worker_identity,
+            replacement_worker.consumed_worker_identity()
+        );
 
         std::env::set_var("TIDEPOOL_GHC_LIBDIR", "/ghc/lib-b");
         let ghc_identity = PreparedWorker::prepare()

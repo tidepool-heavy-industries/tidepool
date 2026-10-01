@@ -73,6 +73,8 @@ use std::process::Command;
 pub const ENV_EXTRACT: &str = "TIDEPOOL_EXTRACT";
 /// Env var naming the private compiler worker used by the Rust frontend.
 pub const ENV_EXTRACT_WORKER: &str = "TIDEPOOL_EXTRACT_WORKER";
+/// Env var pointing at the configured producer and consumed-worker manifest.
+pub const ENV_COMPILER_DEPLOYMENT: &str = "TIDEPOOL_COMPILER_DEPLOYMENT";
 /// Env var naming the stdlib root (step 1 of the stdlib precedence).
 pub const ENV_PRELUDE_DIR: &str = "TIDEPOOL_PRELUDE_DIR";
 /// Env var overriding [`stamp_path`].
@@ -243,6 +245,22 @@ pub enum ToolchainError {
         /// Underlying I/O or JSON failure.
         source: std::io::Error,
     },
+
+    /// A configured compiler deployment is absent, malformed, or does not
+    /// authorize the producer and worker observed at the endpoint.
+    #[error("compiler deployment authority rejected the bound endpoint: {0}")]
+    DeploymentAuthority(#[from] DeploymentAdmissionError),
+
+    /// Reading or parsing the configured deployment manifest failed.
+    #[error("compiler deployment manifest {}: {source}", .path.display())]
+    DeploymentManifest {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    /// The running process selected a different configured compiler input.
+    #[error("compiler deployment selected a different {component}")]
+    DeploymentSelection { component: &'static str },
 }
 
 /// `Debug` renders the variant name plus the operator-facing `Display` text,
@@ -261,6 +279,9 @@ impl std::fmt::Debug for ToolchainError {
             Self::StdlibNotFound { .. } => "StdlibNotFound",
             Self::Skew(_) => "Skew",
             Self::Stamp { .. } => "Stamp",
+            Self::DeploymentAuthority(_) => "DeploymentAuthority",
+            Self::DeploymentManifest { .. } => "DeploymentManifest",
+            Self::DeploymentSelection { .. } => "DeploymentSelection",
         };
         write!(f, "{tag}: {self}")
     }
@@ -364,6 +385,214 @@ pub fn bind_extract_endpoint(
             tried: error.to_string(),
         })?;
     Ok((endpoint, location))
+}
+
+/// Configured evidence for one compiler deployment. These digests originate
+/// from the configured package/deployment manifest; they must never be filled
+/// from an endpoint observation and then treated as authority.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CompilerDeploymentAuthority {
+    /// Schema version of this explicit deployment manifest.
+    pub schema: u32,
+    /// Exact producer identity emitted by the configured frontend artifact.
+    pub producer_identity: [u8; 32],
+    /// BLAKE3 digest of the exact compiler worker executable admitted into it.
+    pub consumed_worker_identity: [u8; 32],
+    /// Approved frontend path selected for this deployment.
+    pub frontend_path: PathBuf,
+    /// Approved worker path selected for this deployment.
+    pub worker_path: PathBuf,
+    /// Approved GHC library directory selected for this deployment.
+    pub ghc_libdir: PathBuf,
+}
+
+/// Explicitly selected deployment mode. Local callers can supply a configured
+/// test/development authority directly; an unknown or missing production
+/// authority fails closed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompilerDeploymentConfiguration {
+    Configured(CompilerDeploymentAuthority),
+    Unknown,
+}
+
+/// Evidence retained after the configured deployment has admitted an
+/// observed endpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmittedCompilerDeployment {
+    /// Producer identity validated against the configured deployment.
+    pub producer_identity: [u8; 32],
+    /// Exact worker identity validated against the configured deployment.
+    pub consumed_worker_identity: [u8; 32],
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum DeploymentAdmissionError {
+    #[error("no configured deployment authority is available")]
+    Unknown,
+    #[error("configured deployment manifest has unsupported schema {0}")]
+    Schema(u32),
+    #[error("configured deployment manifest has empty producer or worker identity")]
+    EmptyIdentity,
+    #[error("configured deployment manifest has an empty frontend, worker, or GHC path")]
+    EmptyPath,
+    #[error("bound producer differs from configured deployment")]
+    ProducerMismatch,
+    #[error("consumed worker differs from configured deployment")]
+    WorkerMismatch,
+}
+
+impl CompilerDeploymentConfiguration {
+    fn validate(&self) -> Result<(), DeploymentAdmissionError> {
+        match self {
+            Self::Unknown => Err(DeploymentAdmissionError::Unknown),
+            Self::Configured(authority) if authority.schema != 1 => {
+                Err(DeploymentAdmissionError::Schema(authority.schema))
+            }
+            Self::Configured(authority)
+                if authority.producer_identity == [0; 32]
+                    || authority.consumed_worker_identity == [0; 32] =>
+            {
+                Err(DeploymentAdmissionError::EmptyIdentity)
+            }
+            Self::Configured(authority)
+                if authority.frontend_path.as_os_str().is_empty()
+                    || authority.worker_path.as_os_str().is_empty()
+                    || authority.ghc_libdir.as_os_str().is_empty() =>
+            {
+                Err(DeploymentAdmissionError::EmptyPath)
+            }
+            Self::Configured(_) => Ok(()),
+        }
+    }
+
+    /// Load configured production authority from the manifest named by
+    /// `$TIDEPOOL_COMPILER_DEPLOYMENT`. An unset variable remains explicitly
+    /// unknown; local callers can pass an explicit test/development authority.
+    pub fn from_env() -> Result<Self, ToolchainError> {
+        let Some(path) = std::env::var_os(ENV_COMPILER_DEPLOYMENT) else {
+            return Ok(Self::Unknown);
+        };
+        let path = PathBuf::from(path);
+        let bytes = std::fs::read(&path).map_err(|source| ToolchainError::DeploymentManifest {
+            path: path.clone(),
+            source,
+        })?;
+        let authority: CompilerDeploymentAuthority =
+            serde_json::from_slice(&bytes).map_err(|e| ToolchainError::DeploymentManifest {
+                path: path.clone(),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+            })?;
+        let configuration = Self::Configured(authority);
+        configuration.validate()?;
+        Ok(configuration)
+    }
+
+    /// Admit the exact identity reported by the bound endpoint. Producer and
+    /// worker are checked independently so changing the consumed worker cannot
+    /// hide behind an unchanged configured frontend identity.
+    pub fn admit(
+        &self,
+        producer_identity: [u8; 32],
+        consumed_worker_identity: [u8; 32],
+    ) -> Result<AdmittedCompilerDeployment, DeploymentAdmissionError> {
+        self.validate()?;
+        match self {
+            Self::Unknown => Err(DeploymentAdmissionError::Unknown),
+            Self::Configured(authority) => {
+                if producer_identity != authority.producer_identity {
+                    return Err(DeploymentAdmissionError::ProducerMismatch);
+                }
+                if consumed_worker_identity != authority.consumed_worker_identity {
+                    return Err(DeploymentAdmissionError::WorkerMismatch);
+                }
+                Ok(AdmittedCompilerDeployment {
+                    producer_identity,
+                    consumed_worker_identity,
+                })
+            }
+        }
+    }
+
+    fn verify_selection(
+        &self,
+        frontend: &Path,
+        worker: &Path,
+        ghc_libdir: &Path,
+    ) -> Result<(), ToolchainError> {
+        self.validate()?;
+        let Self::Configured(authority) = self else {
+            return Err(DeploymentAdmissionError::Unknown.into());
+        };
+        for (component, configured, selected) in [
+            ("frontend path", authority.frontend_path.as_path(), frontend),
+            ("worker path", authority.worker_path.as_path(), worker),
+            (
+                "GHC library directory",
+                authority.ghc_libdir.as_path(),
+                ghc_libdir,
+            ),
+        ] {
+            if configured != selected {
+                return Err(ToolchainError::DeploymentSelection { component });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Bind and admit a compiler endpoint under an explicit configured deployment.
+/// Production callers should pass `CompilerDeploymentConfiguration::from_env()`
+/// and handle `Unknown` as refusal.
+pub fn bind_admitted_extract_endpoint(
+    configuration: &CompilerDeploymentConfiguration,
+) -> Result<
+    (
+        tidepool_extract_cmd::CompilerEndpoint,
+        ExtractLocation,
+        AdmittedCompilerDeployment,
+    ),
+    ToolchainError,
+> {
+    configuration.validate()?;
+    let location = locate_extract()?;
+    let worker_path = std::env::var_os(ENV_EXTRACT_WORKER)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| location.path.with_file_name("tidepool-extract-bin"));
+    let ghc_libdir = selected_ghc_libdir()?;
+    configuration.verify_selection(&location.path, &worker_path, &ghc_libdir)?;
+    let (endpoint, location) = bind_extract_endpoint()?;
+    let admitted = configuration.admit(
+        *endpoint.identity().producer_bytes(),
+        *endpoint.identity().consumed_worker_bytes(),
+    )?;
+    Ok((endpoint, location, admitted))
+}
+
+fn selected_ghc_libdir() -> Result<PathBuf, ToolchainError> {
+    if let Some(path) = std::env::var_os("TIDEPOOL_GHC_LIBDIR") {
+        return Ok(PathBuf::from(path));
+    }
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "short synchronous probe, matching the frontend's GHC libdir resolution"
+    )]
+    let output = Command::new("ghc")
+        .arg("--print-libdir")
+        .output()
+        .map_err(|_| ToolchainError::DeploymentSelection {
+            component: "GHC library directory",
+        })?;
+    if !output.status.success() {
+        return Err(ToolchainError::DeploymentSelection {
+            component: "GHC library directory",
+        });
+    }
+    let libdir = std::str::from_utf8(&output.stdout)
+        .map_err(|_| ToolchainError::DeploymentSelection {
+            component: "GHC library directory",
+        })?
+        .trim();
+    Ok(PathBuf::from(libdir))
 }
 
 // ---------------------------------------------------------------------------
@@ -905,6 +1134,48 @@ fn enforce_handshake_identity(
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    fn configured_deployment() -> CompilerDeploymentConfiguration {
+        CompilerDeploymentConfiguration::Configured(CompilerDeploymentAuthority {
+            schema: 1,
+            producer_identity: [3; 32],
+            consumed_worker_identity: [4; 32],
+            frontend_path: PathBuf::from("/configured/frontend"),
+            worker_path: PathBuf::from("/configured/worker"),
+            ghc_libdir: PathBuf::from("/configured/ghc/lib"),
+        })
+    }
+
+    #[test]
+    fn deployment_admission_rejects_unknown_authority() {
+        assert_eq!(
+            CompilerDeploymentConfiguration::Unknown.admit([3; 32], [4; 32]),
+            Err(DeploymentAdmissionError::Unknown)
+        );
+    }
+
+    #[test]
+    fn deployment_admission_rejects_a_producer_outside_configured_deployment() {
+        assert_eq!(
+            configured_deployment().admit([8; 32], [4; 32]),
+            Err(DeploymentAdmissionError::ProducerMismatch)
+        );
+    }
+
+    #[test]
+    fn deployment_admission_rejects_a_changed_consumed_worker() {
+        assert_eq!(
+            configured_deployment().admit([3; 32], [9; 32]),
+            Err(DeploymentAdmissionError::WorkerMismatch)
+        );
+    }
+
+    #[test]
+    fn configured_admission_preserves_both_original_and_consumed_identity() {
+        let accepted = configured_deployment().admit([3; 32], [4; 32]).unwrap();
+        assert_eq!(accepted.producer_identity, [3; 32]);
+        assert_eq!(accepted.consumed_worker_identity, [4; 32]);
+    }
 
     #[test]
     fn extractor_roles_are_not_interchangeable() {

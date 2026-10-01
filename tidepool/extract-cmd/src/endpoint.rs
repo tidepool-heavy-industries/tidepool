@@ -14,29 +14,32 @@ use std::time::Instant;
 use crate::{daemon, process, ExtractCmd, ExtractRun, SpawnError};
 
 pub(crate) const BOUND_ENDPOINT_FLAG: &str = "--compiler-endpoint-v1";
-pub(crate) const IDENTITY_MAGIC: &[u8; 8] = b"TPCID001";
+pub(crate) const IDENTITY_MAGIC: &[u8; 8] = b"TPCID002";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompilerIdentity {
     producer: [u8; 32],
+    consumed_worker: [u8; 32],
     endpoint: [u8; 32],
 }
 
 impl CompilerIdentity {
-    pub(crate) fn direct(producer: [u8; 32]) -> Self {
+    pub(crate) fn direct(producer: [u8; 32], consumed_worker: [u8; 32]) -> Self {
         Self {
             producer,
+            consumed_worker,
             endpoint: producer,
         }
     }
 
-    pub(crate) fn daemon(producer: [u8; 32], epoch: [u8; 32]) -> Self {
+    pub(crate) fn daemon(producer: [u8; 32], consumed_worker: [u8; 32], epoch: [u8; 32]) -> Self {
         let mut hasher = blake3::Hasher::new();
         frame(&mut hasher, b"tidepool-daemon-endpoint-v1");
         frame(&mut hasher, &producer);
         frame(&mut hasher, &epoch);
         Self {
             producer,
+            consumed_worker,
             endpoint: *hasher.finalize().as_bytes(),
         }
     }
@@ -49,6 +52,11 @@ impl CompilerIdentity {
     /// Stable producer identity used by the deploy handshake.
     pub fn producer_bytes(&self) -> &[u8; 32] {
         &self.producer
+    }
+
+    /// Digest of the exact worker executable bytes pinned by this endpoint.
+    pub fn consumed_worker_bytes(&self) -> &[u8; 32] {
+        &self.consumed_worker
     }
 
     pub fn to_hex(&self) -> String {
@@ -357,7 +365,11 @@ impl CompilerEndpoint {
             let socket = PathBuf::from(socket);
             if let Ok(binding) = daemon::preflight(&socket) {
                 return Ok(Self {
-                    identity: CompilerIdentity::daemon(binding.producer, binding.epoch),
+                    identity: CompilerIdentity::daemon(
+                        binding.producer,
+                        binding.consumed_worker,
+                        binding.epoch,
+                    ),
                     transport: Transport::Daemon {
                         socket,
                         epoch: binding.epoch,
@@ -411,6 +423,7 @@ impl CompilerEndpoint {
         };
         let mut magic = [0u8; 8];
         let mut producer = [0u8; 32];
+        let mut consumed_worker = [0u8; 32];
         direct
             .stdout_mut()?
             .read_exact(&mut magic)
@@ -428,8 +441,12 @@ impl CompilerEndpoint {
             .stdout_mut()?
             .read_exact(&mut producer)
             .map_err(|source| SpawnError::not_submitted(spec.program.clone(), source))?;
+        direct
+            .stdout_mut()?
+            .read_exact(&mut consumed_worker)
+            .map_err(|source| SpawnError::not_submitted(spec.program.clone(), source))?;
         Ok(Self {
-            identity: CompilerIdentity::direct(producer),
+            identity: CompilerIdentity::direct(producer, consumed_worker),
             transport: Transport::Direct(direct),
         })
     }
@@ -865,9 +882,14 @@ impl Drop for CompilerTransaction {
     }
 }
 
-pub(crate) fn write_identity(mut writer: impl Write, producer: &[u8; 32]) -> io::Result<()> {
+pub(crate) fn write_identity(
+    mut writer: impl Write,
+    producer: &[u8; 32],
+    consumed_worker: &[u8; 32],
+) -> io::Result<()> {
     writer.write_all(IDENTITY_MAGIC)?;
     writer.write_all(producer)?;
+    writer.write_all(consumed_worker)?;
     writer.flush()
 }
 
@@ -882,7 +904,7 @@ mod tests {
         let (stream, peer) = UnixStream::pair().unwrap();
         drop(peer);
         let mut transaction = CompilerTransaction {
-            identity: CompilerIdentity::direct([1; 32]),
+            identity: CompilerIdentity::direct([1; 32], [2; 32]),
             transport: Some(TransactionTransport::Daemon {
                 stream,
                 socket: "/tmp/compiler.sock".into(),
