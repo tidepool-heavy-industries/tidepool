@@ -2135,16 +2135,18 @@ impl PreparedEngine {
         &mut self,
         linked: tidepool_repr::execution_schema::LinkedProgram,
         imports: ImportBindings,
-    ) -> Result<ProgramId, PreparedRuntimeError> {
+    ) -> Result<(ProgramId, Arc<DefinitionFacts>), PreparedRuntimeError> {
         let Some(registry) = self.registry.clone() else {
             let compiled = self
                 .machine
                 .compile_for_install(&linked)
                 .map_err(PreparedRuntimeError::Compile)?;
-            return self
+            let definitions = Arc::clone(compiled.definition_facts());
+            let program = self
                 .machine
                 .install_program(compiled, imports)
-                .map_err(PreparedRuntimeError::Install);
+                .map_err(PreparedRuntimeError::Install)?;
+            return Ok((program, definitions));
         };
         let image = match registry.lookup(&linked) {
             Some(image) => image,
@@ -2156,9 +2158,12 @@ impl PreparedEngine {
                 registry.insert(linked, Arc::new(compiled))
             }
         };
-        self.machine
+        let definitions = Arc::clone(image.definition_facts());
+        let program = self
+            .machine
             .install_shared(image, imports)
-            .map_err(PreparedRuntimeError::Install)
+            .map_err(PreparedRuntimeError::Install)?;
+        Ok((program, definitions))
     }
 
     /// Create the session's machine from its first turn's program and
@@ -2602,7 +2607,7 @@ impl PreparedEngine {
         let resolve_imports_ms = lap();
         let import_count = imports.len();
         let exports = exportable_code_tops(&prepared);
-        let facts = ProgramFacts::of(&prepared);
+        let mut facts = ProgramFacts::of(&prepared);
         // Site evidence is checked before anything is compiled or published:
         // a conflicting duplicate leaves the machine, its programs and the
         // site index exactly as they were.
@@ -2614,7 +2619,8 @@ impl PreparedEngine {
         // has one) before compiling: a hit installs the already-compiled
         // image through `install_shared` and compiles nothing, so
         // `compile_ms` below also covers a registry lookup on the hit path.
-        let program = self.compile_and_install(linked, imports)?;
+        let (program, definitions) = self.compile_and_install(linked, imports)?;
+        facts.definitions = definitions;
         let compile_install_ms = lap();
         tracing::info!(
             target: "tidepool_runtime::prepared_install",
@@ -3487,7 +3493,7 @@ impl PreparedEngine {
     /// pins exactly as [`Self::install`] does.
     pub(crate) fn revalidate_and_install(
         &mut self,
-        snapshot: InstallSnapshot,
+        mut snapshot: InstallSnapshot,
         compiled: Arc<CompiledProgram>,
         bindings: &BindingTable,
         index: &BindingIndex,
@@ -3500,10 +3506,12 @@ impl PreparedEngine {
             return Ok(None);
         }
         let import_count = snapshot.imports.len();
+        let definitions = Arc::clone(compiled.definition_facts());
         let program = self
             .machine
             .install_shared(compiled, snapshot.imports)
             .map_err(PreparedRuntimeError::Install)?;
+        snapshot.facts.definitions = definitions;
         tracing::info!(
             target: "tidepool_runtime::prepared_install",
             imports = import_count,
@@ -6968,7 +6976,7 @@ pub(super) mod tests {
             imports.insert(producer_identity(), foreign_handle);
             let linked = link_program(prepared, &values).unwrap();
             let before = engine.residency();
-            let error = engine.compile_and_install(linked, imports).unwrap_err();
+            let error = engine.compile_and_install(linked, imports).err().unwrap();
             assert!(matches!(
                 error,
                 PreparedRuntimeError::Install(ExecutionError::UnknownPreparedHandle)
@@ -7021,10 +7029,15 @@ pub(super) mod tests {
         let mut snapshot = snapshot;
         let compiled = PreparedEngine::compile_off_checkout(&mut snapshot)
             .expect("off-checkout compile of the linked program succeeds");
+        let definitions = Arc::clone(compiled.definition_facts());
         let split_program = split
             .revalidate_and_install(snapshot, compiled, &bindings, &index)
             .expect("revalidation runs")
             .expect("nothing changed the import between snapshot and revalidation");
+        assert!(Arc::ptr_eq(
+            &split.programs[&split_program].definitions,
+            &definitions,
+        ));
         let split_read = read_consumer_import(&mut split, split_program);
 
         // Both engines were bootstrapped and bound identically, so the split
@@ -8216,6 +8229,12 @@ pub(super) mod tests {
             .expect("imports remain current")
             .expect("same code does not stale an installation");
         assert_ne!(first, second, "each installation owns a separate instance");
+        for program in [first, second] {
+            assert!(Arc::ptr_eq(
+                &engine.programs[&program].definitions,
+                shared.definition_facts(),
+            ));
+        }
         assert!(Arc::ptr_eq(
             &shared,
             &registry
