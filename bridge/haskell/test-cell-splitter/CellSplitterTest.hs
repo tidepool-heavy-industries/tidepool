@@ -64,6 +64,7 @@ main = do
       noStandaloneDerivingLeavesCellUntouched flags
       danglingOperatorCells flags
       multilineLetPlacement flags
+  orderedInferenceSegments
   interfaceMeasurementDiagnostics
   multilineLetCompilation
   renderNameErrorTeachesGroupPaths
@@ -80,6 +81,43 @@ main = do
     ["--memo-lifecycle"] -> memoLifecycleCompilation
     ["--structural-display", effectsRoot] -> structuralDisplayCompilation effectsRoot
     _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, --pin-imports, --path-insensitive-witness, --memo-lifecycle, or --structural-display EFFECTS_INCLUDE"
+
+orderedInferenceSegments :: IO ()
+orderedInferenceSegments = do
+  plan <- analyzeOrderedCell template source >>= either (fail . renderCellSplitError) pure
+  let segments = cellInferenceSegments plan
+      kinds = map (map (sbKind . cellAnalysisVerdict) . cellPlanItems) segments
+      ordinals = map (map cellAnalysisSourceOrdinal . concatMap cellAnalysisSourceItems . cellPlanItems) segments
+  assertEqual "ordered declaration and executable runs" [[KBind], [KDecl], [KBind, KBind], [KDecl], [KExpr]] kinds
+  assertEqual "ordered segments retain source ordinals" [[0], [1], [2, 3], [4], [5]] ordinals
+  case segments of
+    [_, firstDeclaration, _, secondDeclaration, _] -> do
+      assertEqual "first declaration owns its generated Generic" ["First"]
+        (map genericDeclarationTarget (cellPlanGenericDeclarations firstDeclaration))
+      assertEqual "second declaration owns its generated Generic" ["Second"]
+        (map genericDeclarationTarget (cellPlanGenericDeclarations secondDeclaration))
+      let firstSource = concatMap cellAnalysisSource (cellPlanItems firstDeclaration)
+          secondSource = concatMap cellAnalysisSource (cellPlanItems secondDeclaration)
+      assertEqual "first declaration excludes later source" False ("Second" `isInfixOf` firstSource)
+      assertEqual "second declaration excludes earlier source" False ("First" `isInfixOf` secondSource)
+    _ -> fail "unexpected ordered segment count"
+  where
+    source = unlines
+      [ "first <- pure (0 :: Int)"
+      , "data First = First"
+      , "middle <- pure first"
+      , "middleAgain <- pure middle"
+      , "data Second = Second"
+      , "middleAgain"
+      ]
+    template = unlines
+      [ "{-# LANGUAGE DeriveGeneric, StandaloneDeriving #-}"
+      , "{{CELL_PRAGMAS}}"
+      , "module CellCheck where"
+      , "{{CELL_IMPORTS}}"
+      , "{{CELL_DECLS}}"
+      , "__tidepool_cell_check = do { {{CELL_BODY}} } :: Maybe ()"
+      ]
 
 certificationRequestValidation :: IO ()
 certificationRequestValidation = do

@@ -34,6 +34,7 @@ module Tidepool.Binders
   , CellDisplayTarget(..)
   , CellGenericDeclaration(..)
   , installCellDisplayDeclarations
+  , cellInferenceSegments
   , omitCellGenericDeclarations
   , omitCellDisplayDeclarations
   , declarationSourceWithTemplate
@@ -43,6 +44,7 @@ module Tidepool.Binders
   , CellAnalysisSourceItem(..)
   , analyzeCellWithFlags
   , analyzeCell
+  , analyzeOrderedCell
   , renderCellCheckSource
   , CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..)
   , CheckedBinderPin(..)
@@ -322,9 +324,63 @@ installCellDisplayDeclarations generated plan = plan
   where
     replaceDeclaration item
       | sbKind (cellAnalysisVerdict item) == KDecl = item
-          { cellAnalysisSource = cellPlanDeclarationBase plan
-              ++ concatMap genericDeclarationSource (cellPlanGenericDeclarations plan) ++ generated }
+          { cellAnalysisSource = declarationItemSource item plan ++ generated }
       | otherwise = item
+
+    declarationItemSource item current =
+      let sourceItems = cellAnalysisSourceItems item
+          ownDeclarations = case
+            [ authored | authored <- cellPlanItems current
+                       , sbKind (cellAnalysisVerdict authored) == KDecl ] of
+            [_] -> cellPlanDeclarationBase current
+            _ -> concat
+              [ cellAnalysisSource authored
+              | authored <- cellPlanItems current
+              , sbKind (cellAnalysisVerdict authored) == KDecl
+              , any (`elem` sourceItems) (cellAnalysisSourceItems authored)
+              ]
+          ownTypes = [name | EType name _ <- sbDeclItems (cellAnalysisVerdict item)]
+          ownGeneric = concatMap genericDeclarationSource
+            (filter ((`elem` ownTypes) . genericDeclarationTarget) (cellPlanGenericDeclarations current))
+       in ownDeclarations ++ ownGeneric
+
+-- | Preserve source order while separating each declaration run from each
+-- executable run. Executable runs stay together so their statements receive
+-- ordinary whole-do inference in one check.
+cellInferenceSegments :: CellSourcePlan -> [CellSourcePlan]
+cellInferenceSegments plan = map makeSegment (runs (cellPlanItems plan))
+  where
+    runs [] = []
+    runs (item : rest) =
+      let isDecl = sbKind (cellAnalysisVerdict item) == KDecl
+          (same, remaining) = span ((== isDecl) . isDeclaration) rest
+       in (isDecl, item : same) : runs remaining
+    isDeclaration = (== KDecl) . sbKind . cellAnalysisVerdict
+
+    makeSegment (declarations, items) =
+      let declarationItems = if declarations then items else []
+          ownTypes = nub
+            [ name
+            | item <- declarationItems
+            , EType name _ <- sbDeclItems (cellAnalysisVerdict item)
+            ]
+          ownSource = concatMap cellAnalysisSource declarationItems
+          ownGeneric = filter ((`elem` ownTypes) . genericDeclarationTarget)
+            (cellPlanGenericDeclarations plan)
+          ownTargets = filter ((`elem` ownTypes) . displayTargetName)
+            (cellPlanDisplayTargets plan)
+          generatedSource = concatMap genericDeclarationSource ownGeneric
+          opaqueDisplays = concatMap (opaqueDisplayInstance (cellPlanDisplayAlias plan)) ownTargets
+          segmentedItems = if declarations
+            then map (\item -> item { cellAnalysisSource = ownSource ++ generatedSource ++ opaqueDisplays }) items
+            else items
+       in plan
+          { cellPlanItems = segmentedItems
+          , cellPlanDisplayTargets = ownTargets
+          , cellPlanGenericDeclarations = ownGeneric
+          , cellPlanDeclarationBase = ownSource
+          , cellPlanDisplayDeclarations = opaqueDisplays
+          }
 
 omitCellGenericDeclarations :: [String] -> CellSourcePlan -> CellSourcePlan
 omitCellGenericDeclarations targets plan =
@@ -510,7 +566,11 @@ analyzeCellWithFlags
   -> String
   -> String
   -> IO (Either CellSplitError CellSourcePlan)
-analyzeCellWithFlags dflags template source = do
+analyzeCellWithFlags = analyzeCellWithGrouping False
+
+analyzeCellWithGrouping
+  :: Bool -> DynFlags -> String -> String -> IO (Either CellSplitError CellSourcePlan)
+analyzeCellWithGrouping ordered dflags template source = do
   flags <- cellEffectiveFlags dflags template source
   pure $ do
     effective <- flags
@@ -544,7 +604,8 @@ analyzeCellWithFlags dflags template source = do
           , cellPlanGenericDeclarations = generated
           , cellPlanDisplayDeclarations = ""
           }
-    pure (installCellDisplayDeclarations (concatMap (opaqueDisplayInstance displayAlias) targets) plan)
+    pure (if ordered then plan
+      else installCellDisplayDeclarations (concatMap (opaqueDisplayInstance displayAlias) targets) plan)
   where
     freshAlias candidate authoredSource
       | candidate `isInfixOf` authoredSource = freshAlias (candidate ++ "X") authoredSource
@@ -576,9 +637,18 @@ analyzeCellWithFlags dflags template source = do
               , cellAnalysisPrologueOnly = False
               }
     groupDeclarations headerItems classified generated =
-      case partition isDeclaration classified of
-        ([], executable) | null headerItems -> executable
-        (declarations, executable) -> declarationGroup headerItems declarations generated : executable
+      if ordered
+        then (if null headerItems then [] else [declarationGroup headerItems [] ""])
+          ++ orderedRuns classified
+        else case partition isDeclaration classified of
+          ([], executable) | null headerItems -> executable
+          (declarations, executable) -> declarationGroup headerItems declarations generated : executable
+    orderedRuns [] = []
+    orderedRuns remaining@(item : rest)
+      | isDeclaration item =
+          let (declarations, tailItems) = span isDeclaration remaining
+           in declarationGroup [] declarations "" : orderedRuns tailItems
+      | otherwise = item : orderedRuns rest
     isDeclaration =
       (== KDecl) . sbKind . cellAnalysisVerdict
     declarationGroup headerItems declarations generated =
@@ -695,10 +765,17 @@ eligibleConstructor constructor = case unLoc constructor of
 
 analyzeCell :: String -> String -> IO (Either CellSplitError CellSourcePlan)
 analyzeCell template source = do
+  analyzeCellUsing False template source
+
+analyzeOrderedCell :: String -> String -> IO (Either CellSplitError CellSourcePlan)
+analyzeOrderedCell = analyzeCellUsing True
+
+analyzeCellUsing :: Bool -> String -> String -> IO (Either CellSplitError CellSourcePlan)
+analyzeCellUsing ordered template source = do
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     dflags <- getSessionDynFlags
-    liftIO (analyzeCellWithFlags dflags template source)
+    liftIO (analyzeCellWithGrouping ordered dflags template source)
 
 -- | Extract the same located header for a declaration turn without
 -- reclassifying the already-checked declaration body.
