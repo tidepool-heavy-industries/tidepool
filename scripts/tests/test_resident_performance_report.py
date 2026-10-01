@@ -154,6 +154,20 @@ class ResidentPerformanceReport(unittest.TestCase):
             result = REPORT.analyze_durable([row])
             self.assertEqual(result["status"], "measured")
             self.assertIsNone(result["samples"][0]["manifest_write_bytes"])
+            # Current v5 timing is also accepted, but the record and actual
+            # retained document must agree on the migration format.
+            document = {"checksum": "retained-checksum", "public_schema": "paired-public-v5"}
+            content = json.dumps(document).encode()
+            path.write_bytes(content)
+            row["manifest_bytes"] = len(content)
+            self.assertEqual(REPORT.analyze_durable([row])["status"], "invalid")
+            row["public_schema"] = "paired-public-v5"
+            self.assertEqual(REPORT.analyze_durable([row])["status"], "measured")
+            document["public_schema"] = "paired-public-v6"
+            content = json.dumps(document).encode()
+            path.write_bytes(content)
+            row.update(manifest_bytes=len(content), public_schema="paired-public-v6")
+            self.assertEqual(REPORT.analyze_durable([row])["status"], "invalid")
             path.unlink()
             self.assertEqual(REPORT.analyze_durable([row])["status"], "invalid")
 

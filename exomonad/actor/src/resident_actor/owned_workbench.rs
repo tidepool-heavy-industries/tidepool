@@ -7,7 +7,8 @@ use crate::{OwnedWorkbenchCompletion, OwnedWorkbenchTask, WorkbenchAdvance, Work
 /// recipe observations are added by the workbench's original snapshot owner.
 pub(crate) struct WorkbenchCompilationAuthority {
     source: crate::CheckpointSourceLayer,
-    installed_tools: Option<crate::InstalledToolLease>,
+    // Keep the admitted implementation alive until this execution releases it.
+    _installed_tools: Option<crate::InstalledToolLease>,
     authority_digest: [u8; 32],
 }
 
@@ -73,7 +74,7 @@ impl WorkbenchCompilationAuthority {
             context,
             Arc::new(Self {
                 source,
-                installed_tools,
+                _installed_tools: installed_tools,
                 authority_digest: *digest.finalize().as_bytes(),
             }),
         ))
@@ -83,8 +84,9 @@ impl WorkbenchCompilationAuthority {
         &self.source
     }
 
-    pub(crate) fn installed_tools(&self) -> Option<&crate::InstalledToolLease> {
-        self.installed_tools.as_ref()
+    #[cfg(test)]
+    fn installed_tools(&self) -> Option<&crate::InstalledToolLease> {
+        self._installed_tools.as_ref()
     }
 
     pub(crate) fn authority_digest(&self) -> [u8; 32] {

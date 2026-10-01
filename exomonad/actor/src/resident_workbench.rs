@@ -3412,7 +3412,7 @@ where
         let mut roots = context.source_layer.to_vec();
         roots.extend(self.access.source.base_include.iter().cloned());
         crate::agent_spec::resolve(
-            &roots,
+            roots,
             self.access.source.spec.as_deref(),
             self.access.source.tools.as_deref(),
         )
@@ -3434,7 +3434,7 @@ where
     ) -> Result<Option<ResidentWorkbenchTools>, ResidentActorWorkbenchError> {
         let resolved = self.resolve_spec(&context);
         let revision = resolved.source_revision();
-        let Some(entry) = resolved.entry.clone() else {
+        let Some(entry) = resolved.entry.as_deref() else {
             return Ok(None);
         };
         let mut source = self.access.source.clone();
@@ -3468,7 +3468,6 @@ where
             | crate::agent_spec::SpecRule::BuiltinDefault => "installTools",
         };
         let authored_effects = context.haskell_effects_alias.clone();
-        let publication_resolved = resolved.clone();
         let mut compile_context = context.clone();
         compile_context.haskell_effects_alias = "HostedToolEffects".into();
         let block = ParsedBlock {
@@ -3483,6 +3482,7 @@ where
             binders: Vec::new(),
             items: Vec::new(),
         };
+        let publication_resolved = resolved;
         // Compile with the resident machine checked out only for the
         // snapshot and the install-and-run step (`begin_fragment_split`),
         // released for the GHC compile in between. The suspension this

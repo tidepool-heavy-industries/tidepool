@@ -49,11 +49,18 @@ set +e
 status=${PIPESTATUS[0]}
 set -e
 python3 - "$evidence/manifest.json" "$status" <<'PY'
-import hashlib, json, pathlib, sys
+import hashlib, json, pathlib, re, sys
 path = pathlib.Path(sys.argv[1])
 manifest = json.loads(path.read_text())
 manifest['battery_exit_code'] = int(sys.argv[2])
 manifest['exit_code'] = manifest['battery_exit_code']
+text = re.sub(r'\x1b\[[0-9;]*m', '', (path.parent / 'baseline.log').read_text())
+summaries = re.findall(r'^.*Summary[^\n]*\b(\d+) tests run:', text, re.MULTILINE)
+manifest['expected_test_count'] = 2
+manifest['executed_test_count'] = int(summaries[-1]) if summaries else None
+manifest['test_count_matches'] = manifest['executed_test_count'] == manifest['expected_test_count']
+if not manifest['test_count_matches']:
+    manifest['exit_code'] = 1
 manifest['selected_files_unchanged'] = all(hashlib.sha256(pathlib.Path(row['path']).read_bytes()).hexdigest() == row['sha256'] for row in manifest['selected_files'].values())
 try:
     cgroup = next(line.split(':', 2)[2] for line in pathlib.Path('/proc/self/cgroup').read_text().splitlines() if line.startswith('0::'))
@@ -66,5 +73,7 @@ if not manifest['selected_files_unchanged']:
 path.write_text(json.dumps(manifest, indent=2) + '\n')
 if not manifest['selected_files_unchanged']:
     raise SystemExit('frozen compiler files changed during baseline')
+if not manifest['test_count_matches']:
+    raise SystemExit('resident baseline must execute exactly two tests')
 PY
 exit "$status"

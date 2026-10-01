@@ -5,7 +5,7 @@
 //! the single driver between those boundaries; it does not recreate registry
 //! turn leases, parked-obligation maps, or a host-side scheduler.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 mod after_tool_wait;
 mod background_command_wait;
@@ -1125,6 +1125,7 @@ pub struct ResidentKernelBehavior<H, O> {
     checkpoint: Option<StateCheckpoint>,
     admitted_checkpoint: Option<(crate::CheckpointLease, Option<HostedCheckpointAttachment>)>,
     child_scope_lease: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
+    child_release: child_initialization::ForkChildReleaseState,
     pending_child_initialization: Option<child_initialization::PublishedChildInitialization>,
     pending_checkpoint: Option<StateCheckpoint>,
     active_input: Option<RetainedActorInput>,
@@ -1686,7 +1687,9 @@ struct PendingForkChildRelease {
     child: ActorRef,
     session: tidepool_repr::SessionId,
     scope: tidepool_codegen::scope::ScopeId,
-    lexical: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
+    // Retained publication clones share the first runtime-issued grant so an
+    // interrupted finalizer retries the exact capsule, without reminting it.
+    lexical: Arc<OnceLock<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>>,
 }
 
 #[derive(Clone)]
@@ -1857,6 +1860,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             checkpoint: None,
             admitted_checkpoint: None,
             child_scope_lease: None,
+            child_release: Default::default(),
             pending_child_initialization: None,
             pending_checkpoint: None,
             active_input: None,
@@ -5984,7 +5988,15 @@ where
             actor: kernel.identity(),
             detail: detail.into(),
         };
-        if !release.matches(kernel.identity(), &self.descriptor) {
+        if self.child_release.matches_replay(
+            &release,
+            kernel.identity(),
+            &self.descriptor,
+            self.child_scope_lease.as_ref(),
+        ) {
+            return Ok(crate::ActorAdvance::Complete(KernelStep::Continue(())));
+        }
+        if !release.matches(kernel.identity(), &self.descriptor) || self.boot.is_none() {
             return Err(refuse(
                 "child allocation changed before release application",
             ));
@@ -6027,6 +6039,7 @@ where
             .boot
             .take()
             .ok_or_else(|| refuse("deferred fork was already released"))?;
+        let accepted_release = child_initialization::ForkChildReleaseState::released(&release);
         let lexical = release.into_lexical();
         self.descriptor.set_lexical_scope(lexical.scope());
         self.child_scope_lease = Some(Arc::clone(&lexical));
@@ -6054,6 +6067,7 @@ where
         } else {
             return Err(refuse("released child has no registered allocation"));
         };
+        self.child_release = accepted_release;
         let frame = child_initialization::ChildInitializationFrame {
             context,
             boot,
@@ -9731,7 +9745,7 @@ where
                         child,
                         session: actors[&child].descriptor.placement().session,
                         scope,
-                        lexical: None,
+                        lexical: Arc::new(OnceLock::new()),
                     })
                     .collect()
             };
@@ -9757,6 +9771,16 @@ where
         kernel: &KernelContext,
         release: ForkChildRelease,
     ) -> Result<crate::OwnedActorTask<Self, ()>, KernelBehaviorError> {
+        if self.child_release.matches_replay(
+            &release,
+            kernel.identity(),
+            &self.descriptor,
+            self.child_scope_lease.as_ref(),
+        ) {
+            return Ok(crate::OwnedActorTask::new(Box::pin(async {
+                crate::OwnedActorCompletion::new(|_| Ok(KernelStep::Continue(())))
+            })));
+        }
         if !release.matches(kernel.identity(), &self.descriptor) || self.boot.is_none() {
             return Err(Self::failure(
                 "fork release does not match this child's pending allocation",

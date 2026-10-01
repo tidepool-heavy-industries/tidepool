@@ -82,7 +82,7 @@ pub fn certify_recovered_declaration_tip_with_value_interfaces(
             std::mem::take(&mut selection.lexical),
         )?,
     );
-    certify_tip_in_context(context, selection, includes)
+    certify_recovered_declaration_tip_in_context(context, selection, includes)
 }
 
 pub fn certify_recovered_declaration_tip_with_inventory(
@@ -108,9 +108,12 @@ pub fn certify_recovered_declaration_tip_with_inventory(
         dependencies,
         std::mem::take(&mut selection.lexical),
     )?);
-    certify_tip_in_context(context, selection, includes)
+    certify_recovered_declaration_tip_in_context(context, selection, includes)
 }
-fn certify_tip_in_context(
+/// Certify durable selectors against an already authenticated scoped inventory.
+/// The context retains original type evidence and exact native requirements;
+/// this inspection grants no recovered live value or binding lease.
+pub fn certify_recovered_declaration_tip_in_context(
     context: Arc<ExactDeclarationContext>,
     selection: RecoveryDeclarationSelection,
     includes: &[PathBuf],

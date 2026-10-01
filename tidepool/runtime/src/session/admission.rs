@@ -1787,6 +1787,7 @@ impl PersistentSession {
             &state.path,
             state.path.parent().expect("canonical manifest parent"),
             &bytes,
+            super::recovery::RecoveryReadPurpose::Metadata,
         )
         .map_err(|error| SessionError::RecoveryManifest {
             path: state.path.clone(),

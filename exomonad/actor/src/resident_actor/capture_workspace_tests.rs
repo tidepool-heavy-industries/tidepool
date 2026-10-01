@@ -121,7 +121,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
         "Tidepool.Agent.Contract",
     );
     let preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Effects.Core as Core");
-    let preamble = format!("{preamble}\ndata CaptureTools mode = CaptureTools {{ ping :: mode :- Call () Int }} deriving Generic\n");
+    let preamble = format!("{preamble}\ndata CaptureTools mode = CaptureTools {{ ping :: mode :- Call StructuralValue Int }} deriving Generic\n");
     let root = tempfile::tempdir().expect("session root");
     let session = tidepool_repr::SessionId(std::process::id() as u64 * 10_000 + 184);
     let lib = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
@@ -361,7 +361,7 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         "Tidepool.Agent.Contract",
     );
     let preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Effects.Core as Core");
-    let preamble = format!("{preamble}\ndata CaptureTools mode = CaptureTools {{ ping :: mode :- Call () Int }} deriving Generic\n");
+    let preamble = format!("{preamble}\ndata CaptureTools mode = CaptureTools {{ ping :: mode :- Call StructuralValue Int }} deriving Generic\n");
     let root = tempfile::tempdir().expect("session root");
     let session = tidepool_repr::SessionId(std::process::id() as u64 * 10_000 + 185);
     let lib = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
@@ -604,7 +604,7 @@ async fn assert_captured_reader(child: &LocalResidentInstallation) {
         child.policy.dispatch_boxed(ToolInvocation {
             context: None,
             name: "ping".into(),
-            arguments: ToolArguments::Structured(serde_json::Value::Null),
+            arguments: ToolArguments::Structured(serde_json::json!({})),
         }),
     )
     .await

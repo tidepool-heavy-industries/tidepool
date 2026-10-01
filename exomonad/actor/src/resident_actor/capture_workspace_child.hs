@@ -3,7 +3,7 @@ do
       childEntry _ = do
         send Core.ActorReadyWith
         serveToolsWith () $ \_ -> CaptureTools
-          { ping = tool "Keep the child workbench available." $ \() -> pure (0 :: Int) }
+          { ping = tool "Keep the child workbench available." $ \_ -> pure (capturedValue + 1) }
   started <- send (Core.ForksStartWith
     "CHILD_PATH" childEntry Nothing GROUP_ID
     Core.ActorResearchRole Core.ActorReadOnlyProfile []

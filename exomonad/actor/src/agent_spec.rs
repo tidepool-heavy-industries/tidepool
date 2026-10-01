@@ -112,12 +112,13 @@ impl ResolvedSpec {
 /// `layer` is the exact include graph this actor compiles against, private
 /// helper roots first and shared run roots after them. Helper roots may only
 /// contain `SessionHelpers`, so a discovered `AgentSpec` comes from the run.
-pub fn resolve(layer: &[PathBuf], spec: Option<&str>, tools: Option<&str>) -> ResolvedSpec {
-    let searched: Vec<PathBuf> = layer.to_vec();
-    if let Some(file) = layer.iter().find_map(|root| {
+pub fn resolve(layer: Vec<PathBuf>, spec: Option<&str>, tools: Option<&str>) -> ResolvedSpec {
+    let file = layer.iter().find_map(|root| {
         let candidate = root.join(format!("{SPEC_MODULE}.hs"));
         candidate.is_file().then_some(candidate)
-    }) {
+    });
+    let searched = layer;
+    if let Some(file) = file {
         return ResolvedSpec {
             rule: SpecRule::RunModule,
             entry: Some(format!("{SPEC_MODULE}.{SPEC_VALUE}")),
@@ -250,7 +251,7 @@ agentSpec = defaultSpec { specTools = Tools.tools }
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("AgentSpec.hs"), "module AgentSpec where\n").unwrap();
         let resolved = resolve(
-            &[root.path().to_path_buf()],
+            vec![root.path().to_path_buf()],
             Some("Project.Spec.agentSpec"),
             Some("Project.Tools.tools"),
         );
@@ -265,20 +266,20 @@ agentSpec = defaultSpec { specTools = Tools.tools }
     #[test]
     fn a_run_without_a_spec_file_falls_through_in_order() {
         let root = tempfile::tempdir().unwrap();
-        let layer = [root.path().to_path_buf()];
+        let layer = vec![root.path().to_path_buf()];
         let with_spec = resolve(
-            &layer,
+            layer.clone(),
             Some("Project.Spec.agentSpec"),
             Some("P.Tools.tools"),
         );
         assert_eq!(with_spec.rule, SpecRule::WorkspaceSpec);
         assert_eq!(with_spec.entry.as_deref(), Some("Project.Spec.agentSpec"));
 
-        let tools_only = resolve(&layer, None, Some("P.Tools.tools"));
+        let tools_only = resolve(layer.clone(), None, Some("P.Tools.tools"));
         assert_eq!(tools_only.rule, SpecRule::WorkspaceTools);
         assert_eq!(tools_only.entry.as_deref(), Some("P.Tools.tools"));
 
-        let nothing = resolve(&layer, None, None);
+        let nothing = resolve(layer, None, None);
         assert_eq!(nothing.rule, SpecRule::BuiltinDefault);
         assert_eq!(nothing.entry, None);
         assert_eq!(nothing.checked_module(), None);
@@ -287,7 +288,7 @@ agentSpec = defaultSpec { specTools = Tools.tools }
     /// With no include roots, configured keys still determine the rule.
     #[test]
     fn an_actor_without_a_layer_reports_the_configured_rule() {
-        let resolved = resolve(&[], None, Some("Tidepool.Command.Tools.tools"));
+        let resolved = resolve(Vec::new(), None, Some("Tidepool.Command.Tools.tools"));
         assert_eq!(resolved.rule, SpecRule::WorkspaceTools);
         assert!(resolved.searched.is_empty());
         assert!(resolved.describe().contains("workspace tools key"));
@@ -306,7 +307,7 @@ agentSpec = defaultSpec { specTools = Tools.tools }
         .unwrap();
         std::os::unix::fs::symlink("revisions/revision-one", root.path().join("active")).unwrap();
         let resolved = resolve(
-            &[root.path().join("active/0")],
+            vec![root.path().join("active/0")],
             None,
             Some("Project.Tools.tools"),
         );

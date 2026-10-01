@@ -4,6 +4,43 @@ The delivery targets in `engine-compiled-cell-delivery.md` require the packaged
 host/Engine/Store route. A direct worker, the historical NO_DAEMON scaling
 fixture, and a private-session benchmark do not establish these targets.
 
+Prioritize removing unnecessary work before tuning or caching it. A candidate
+must identify the production consumer, the work that disappears, and the
+authority or ownership checks that remain. Report structural reductions
+separately from measured latency improvements.
+
+## Current structural reductions
+
+- Recovery publication: the retained v4 foundation snapshot at
+  `baseline-488cf013c1-run2/workspaces/durable-workspace-9HdfEn/`
+  is 12,663,202 bytes. Most graph rows repeat native dependency facts already
+  present in sealed artifacts. The v5 candidate persists interface selection
+  and derives native requirements from verified artifacts, preserving exact
+  lost-binding refusal. Its validation and byte comparison remain pending.
+  Compact JSON is already joined; it removes formatting bytes, not graph work.
+- Startup compilation: the admitted execution seals its output privately,
+  then the runtime reads and certifies the same bundle again. The candidate
+  hands off the original immutable decoded bundle, eliminating the second
+  certification and cache publication. Mutating a public runtime bundle must
+  still fail its compiler-issued proof check. Current startup acceptance tests
+  remain frozen on the prior implementation while this change is prepared.
+- Recovery hydration: the v5 candidate shares a verified artifact inventory
+  between manifest admission and hydration instead of discarding and decoding
+  it again. Separate later filesystem admissions must still detect tampering.
+- Scheduler tests: joined retirement checks use an existing empty binding
+  lease instead of compiling Haskell to exercise ownership alone. Native root
+  retention remains covered by separate native tests.
+- AgentSpec setup: a small candidate moves the resolved source-root inventory
+  into its owner rather than cloning it through resolution and publication.
+  Skipping reload compilation is not yet justified: an unchanged run module
+  does not establish unchanged helper sources or resident compilation inputs.
+
+These observations do not establish the production latency targets. The
+retained baseline above completed foundation publication but failed a later
+cell; it is diagnostic evidence, not a passing warm benchmark.
+
+## Production measurement
+
 Use the existing Exomonad production launcher with this workspace configuration:
 
 ```toml
@@ -121,6 +158,10 @@ failure, not a completed timing row.
 
 Pass this retained log as `--durable-samples` to the reporter. This section is
 `unmeasured` when omitted and never contributes to the Engine/Store gate.
+Retained v4 samples remain historical timing evidence; the current runtime
+requires v5 for recovery. The reporter accepts those two known recorded formats
+only when the sample agrees with the retained document, and refuses unknown
+formats. Reporter validation does not admit a graph to the runtime.
 `metadata_stage_file_sync_ns` includes the owning stage operation (metadata
 encoding, integrity checks, staged file write and sync); the separate publication
 phase includes rename and directory sync. Certification is separate and absent
@@ -136,7 +177,8 @@ existing battery owner. Enter the pinned dev shell and admitted resource scope,
 set `CARGO_TARGET_DIR`, `TIDEPOOL_EXTRACT`, `TIDEPOOL_EXTRACT_WORKER`, and
 `TIDEPOOL_COMPILER_DEPLOYMENT` to the frozen matching pair and manifest. The
 runner records exact source OID, dirty paths, command argv, file SHA256 values,
-exit code and scope memory peak. It uses two workers with 10240 MiB ceilings,
+exit code, exactly two executed tests, and scope memory peak. A missing summary
+or a different execution count refuses the baseline. It uses two workers with 10240 MiB ceilings,
 retains compiler/test logs, and verifies the selected files did not change.
 It makes no packaged-product latency claim. The later durable scaling tests
 `resident_durable_growing_prefix_10_baseline_0` and

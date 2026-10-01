@@ -179,7 +179,7 @@ impl ArtifactEntry {
         }
     }
 }
-pub(crate) fn restore_recovery_dependencies(
+pub(crate) fn restore_recovery_interface_dependencies(
     entries: &mut [ArtifactEntry],
     descriptors: &[ArtifactDescriptor],
     dependencies: &[(ArtifactId, ArtifactId, ArtifactDependency)],
@@ -193,15 +193,14 @@ pub(crate) fn restore_recovery_dependencies(
         .iter()
         .map(|descriptor| (descriptor.id, descriptor.clone()))
         .collect::<BTreeMap<_, _>>();
-    if supplied.len() != descriptors.len() || supplied != expected {
+    if expected.len() != entries.len()
+        || supplied.len() != descriptors.len()
+        || supplied != expected
+    {
         return Err(failure(
             "recovered artifact descriptor closure differs from certified bytes",
         ));
     }
-    let owners = descriptors
-        .iter()
-        .map(|descriptor| (descriptor.owner.clone(), descriptor.id))
-        .collect::<BTreeMap<_, _>>();
     let edges = dependencies.iter().cloned().collect::<BTreeSet<_>>();
     if edges.len() != dependencies.len()
         || edges
@@ -210,28 +209,12 @@ pub(crate) fn restore_recovery_dependencies(
     {
         return Err(failure("invalid recovered dependency endpoints"));
     }
-    let expected_native = entries
+    if edges
         .iter()
-        .flat_map(|entry| {
-            entry.native_requirements.iter().map(|(owner, dependency)| {
-                Ok((
-                    entry.descriptor.id,
-                    *owners
-                        .get(owner)
-                        .ok_or_else(|| failure("native dependency artifact is missing"))?,
-                    dependency.clone(),
-                ))
-            })
-        })
-        .collect::<Result<BTreeSet<_>, CompileError>>()?;
-    let actual_native = edges
-        .iter()
-        .filter(|(_, _, dependency)| !matches!(dependency, ArtifactDependency::Interface))
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    if expected_native != actual_native {
+        .any(|(_, _, dependency)| !matches!(dependency, ArtifactDependency::Interface))
+    {
         return Err(failure(
-            "recovered native dependencies differ from original certification",
+            "native recovery dependencies must derive from original certification",
         ));
     }
     for entry in entries.iter_mut() {
@@ -343,6 +326,25 @@ impl ArtifactInventory {
         parent: &ArtifactView,
         entries: Vec<ArtifactEntry>,
     ) -> Result<ArtifactView, CompileError> {
+        let entries = entries
+            .into_iter()
+            .map(|mut entry| {
+                entry.requirements.sort();
+                entry.requirements.dedup();
+                entry.native_requirements.sort();
+                entry.native_requirements.dedup();
+                Arc::new(entry)
+            })
+            .collect();
+        self.admit_shared(parent, entries)
+    }
+
+    /// The recovery owner supplies already normalized immutable entries.
+    pub(crate) fn admit_shared(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+    ) -> Result<ArtifactView, CompileError> {
         if !Arc::ptr_eq(&self.0, &parent.0.inventory.0) {
             return Err(failure("view belongs to another inventory"));
         }
@@ -352,19 +354,10 @@ impl ArtifactInventory {
         let mut state = self.0.lock().expect("inventory lock");
         let mut additions = BTreeMap::new();
         let mut roots = BTreeSet::new();
-        for mut entry in entries {
-            entry.requirements.sort();
-            entry.requirements.dedup();
-            entry.native_requirements.sort();
-            entry.native_requirements.dedup();
+        for entry in entries {
             let id = entry.descriptor.id;
             roots.insert(id);
-            if let Some(previous) = state
-                .payloads
-                .get(&id)
-                .map(Arc::as_ref)
-                .or_else(|| additions.get(&id))
-            {
+            if let Some(previous) = state.payloads.get(&id).or_else(|| additions.get(&id)) {
                 if previous != &entry {
                     return Err(failure("one artifact has differing metadata"));
                 }
@@ -437,7 +430,7 @@ impl ArtifactInventory {
             state
                 .modules
                 .insert(entry.descriptor.owner.module.clone(), id);
-            state.payloads.insert(id, Arc::new(entry));
+            state.payloads.insert(id, entry);
         }
         // Root registration occurs under the same lock as admission, so another
         // view's release cannot reclaim the newly admitted nodes.
@@ -567,6 +560,21 @@ impl ArtifactView {
         for id in &ids {
             for edge in state.graph.edges(state.indices[id]) {
                 edges.push((*id, state.graph[edge.target()].id, edge.weight().clone()));
+            }
+        }
+        edges.sort();
+        edges
+    }
+
+    /// Durable recovery retains direct interface requirements. Native rows
+    /// stay in the inventory and derive again from authenticated Home seals.
+    pub fn interface_dependencies(&self) -> Vec<(ArtifactId, ArtifactId, ArtifactDependency)> {
+        let state = self.0.inventory.0.lock().expect("inventory lock");
+        let ids = closure(&state, self.roots().into_iter());
+        let mut edges = Vec::new();
+        for id in ids {
+            for owner in &state.payloads[&id].requirements {
+                edges.push((id, state.owners[owner], ArtifactDependency::Interface));
             }
         }
         edges.sort();
@@ -1020,10 +1028,17 @@ mod tests {
                 required_ordinal: 7
             }
         )));
+        assert_eq!(
+            view.interface_dependencies(),
+            dependencies
+                .into_iter()
+                .filter(|(_, _, dependency)| matches!(dependency, ArtifactDependency::Interface))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
-    fn recovery_restores_exact_interface_edges_and_refuses_native_or_id_forgery() {
+    fn recovery_restores_interface_edges_and_keeps_certified_native_facts() {
         let original = entry("Original", &[]);
         let mut consumer = entry("Consumer", &[]);
         consumer.native_requirements.push((
@@ -1034,36 +1049,55 @@ mod tests {
             },
         ));
         let descriptors = vec![original.descriptor.clone(), consumer.descriptor.clone()];
-        let edges = vec![
-            (
-                consumer.descriptor.id,
-                original.descriptor.id,
-                ArtifactDependency::Interface,
-            ),
-            (
-                consumer.descriptor.id,
-                original.descriptor.id,
-                ArtifactDependency::NativeGroup {
-                    dependent_ordinal: 2,
-                    required_ordinal: 7,
-                },
-            ),
-        ];
+        let edges = vec![(
+            consumer.descriptor.id,
+            original.descriptor.id,
+            ArtifactDependency::Interface,
+        )];
         let mut entries = vec![original.clone(), consumer.clone()];
-        restore_recovery_dependencies(&mut entries, &descriptors, &edges).unwrap();
+        restore_recovery_interface_dependencies(&mut entries, &descriptors, &edges).unwrap();
         assert_eq!(entries[1].requirements, vec![module("Original")]);
-        assert!(restore_recovery_dependencies(&mut entries, &descriptors, &edges[..1]).is_err());
+        assert_eq!(entries[1].native_requirements, consumer.native_requirements);
+        let inventory = ArtifactInventory::default();
+        let view = inventory
+            .admit(&inventory.empty_view(), entries.clone())
+            .unwrap();
+        assert!(view.dependencies().iter().any(|(_, _, edge)| matches!(
+            edge,
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal: 2,
+                required_ordinal: 7
+            }
+        )));
+        let mut supplied_native = edges.clone();
+        supplied_native.push((
+            consumer.descriptor.id,
+            original.descriptor.id,
+            consumer.native_requirements[0].1.clone(),
+        ));
+        assert!(restore_recovery_interface_dependencies(
+            &mut entries,
+            &descriptors,
+            &supplied_native
+        )
+        .is_err());
         let mut forged = descriptors.clone();
         forged[0].producer_sha256 = [99; 32];
-        assert!(restore_recovery_dependencies(&mut entries, &forged, &edges).is_err());
+        assert!(restore_recovery_interface_dependencies(&mut entries, &forged, &edges).is_err());
         let mut duplicated = edges.clone();
         duplicated.push(edges[0].clone());
-        assert!(restore_recovery_dependencies(&mut entries, &descriptors, &duplicated).is_err());
-        let mut wrong_endpoint = edges.clone();
-        wrong_endpoint[0].1 = ArtifactId([99; 32]);
         assert!(
-            restore_recovery_dependencies(&mut entries, &descriptors, &wrong_endpoint).is_err()
+            restore_recovery_interface_dependencies(&mut entries, &descriptors, &duplicated)
+                .is_err()
         );
+        let mut wrong_endpoint = edges;
+        wrong_endpoint[0].1 = ArtifactId([99; 32]);
+        assert!(restore_recovery_interface_dependencies(
+            &mut entries,
+            &descriptors,
+            &wrong_endpoint
+        )
+        .is_err());
     }
 
     #[test]

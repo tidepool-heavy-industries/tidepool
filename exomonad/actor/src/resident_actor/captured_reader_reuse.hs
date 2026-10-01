@@ -3,7 +3,7 @@ do
       childEntry _ = do
         send Core.ActorReadyWith
         serveToolsWith () $ \_ -> CaptureTools
-          { ping = tool "Read the completed private capture after parent cell failure." $ \() -> pure (capturedValue + 1) }
+          { ping = tool "Read the completed private capture after parent cell failure." $ \_ -> pure (capturedValue + 1) }
   begun <- send (Core.ForksBeginWith False "captured/reused" ["reader"])
   case begun of
     Right (group, _, [path]) -> do
