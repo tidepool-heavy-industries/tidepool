@@ -89,8 +89,8 @@ updateDecision response = updateRequest response . decisionContext
 
 -- Model placement: the "luna" alias is the cheap, fast tier and the default
 -- for bounded implementation, recursive component ownership and review.
--- Selected Task context crosses model tiers; same-model descendants can use
--- inherited context. Sol is available for consequential design uncertainty.
+-- Selected Task context makes immediate admission explicit across model tiers.
+-- Sol is available for consequential design uncertainty.
 -- Effort remains an explicit choice at each branch.
 lunaTask :: Label -> ForkEffort -> Task -> Branch CodingEffects Task result
 lunaTask label effort = lunaTaskFrom label effort currentCheckout
@@ -130,7 +130,7 @@ lunaTaskInputFrom label effort source context input = withInstructions (projectP
 
 solTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result
 solTaskFrom label effort source task = withInstructions (projectPrompt "task") $
-  withContext inherited $ withModel "executor" $ withEffort effort $
+  withContext (selected taskContext) $ withModel "executor" $ withEffort effort $
   coding source (assignment label task)
 
 -- implement exposes no effort parameter of its own; Medium is chosen here
@@ -156,7 +156,7 @@ reviewContext :: ReviewRequest -> Text
 reviewContext request = Text.unlines
   [ basisContext
   , "Candidate: " <> renderGitOid (candidateCommit (reviewInput request))
-  , "Claimed checks: " <> Text.intercalate "; " (checkedCommands (reviewInput request))
+  , "Claimed checks: " <> Text.intercalate "; " (reportedChecks (reviewInput request))
   , "Remaining product gates: " <> Text.intercalate "; " (remainingGates (reviewInput request))
   , ownerContext
   ]
@@ -205,12 +205,8 @@ reviewCommit reviewLabel base commit accept owned = requestReview reviewLabel $
 -- retains it with ordinary progress and decides whether to notify its owner.
 
 -- Ownership gate: which paths a candidate range actually touched outside its
--- declared ownership. Same numstat parsing as Project.Evidence's pure
--- ownershipCheck, but this runs the diff itself and returns the exact stray
--- paths, for a caller that wants to act on the list rather than read a
--- CheckResult's rendered detail string. A git failure here is a defect in
--- the evidence, the same stance Project.Review's own gitText takes -- never
--- read as an empty, passing diff.
+-- declared ownership. A command failure is unavailable evidence, never an
+-- empty passing diff.
 unownedPaths
   :: Member Commands effects
   => GitOid -> GitOid -> [Text] -> Eff effects [Text]
@@ -252,7 +248,7 @@ repair label request candidate findings = case reviewBasis request of
   ExactScope _ _ _ -> pure (Left (Repair candidate findings))
   AssignedTask task -> case repairOwner request of
     OwnerRepairs -> pure (Left (Repair candidate findings))
-    RetainedImplementer actor -> Right <$> requestWith actor
+    RetainedImplementer actor -> Right <$> request actor
       ((assignment label (RepairTask task candidate findings))
         { guidance = Just (projectPrompt "repair") })
 
@@ -261,7 +257,7 @@ repair label request candidate findings = case reviewBasis request of
 requestIncorporation
   :: Member Replies effects
   => AgentRef -> Label -> Task -> PlanAmendment -> Eff effects (Response Incorporation)
-requestIncorporation recipient label task amendment = requestWith recipient $
+requestIncorporation recipient label task amendment = request recipient $
   (assignment label (IncorporationTask task amendment))
     { guidance = Just (projectPrompt "incorporate") }
 
@@ -272,7 +268,7 @@ designQuestion task candidate finding = DesignQuestion
   { questionPlan = planPath task
   , questionSource = candidateCommit candidate
   , questionFinding = finding
-  , questionEvidence = checkedCommands candidate
+  , questionEvidence = reportedChecks candidate
   , questionAlternatives = []
   , questionUnblocks = [obligation task]
   }

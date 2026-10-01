@@ -5,16 +5,17 @@ module Project.Types
   ( Task (..), labelCampaign, task, AcceptedDecision (..)
   , Candidate (..), RepairOwner (..), ReviewBasis (..), reviewBase, reviewOwnedPaths, reviewAcceptance
   , ReviewRequest (..), ReviewedCandidate (..), ReviewDecision (..), RepairTask (..)
-  , Outcome (..), CheckedDelivery (..), Delivery, DesignQuestion (..), DesignAnswer (..)
+  , Outcome (..), ReportedDelivery (..), Delivery, DesignQuestion (..), DesignAnswer (..)
   , PlanAmendment (..), IncorporationTask (..), Incorporation (..), DesignSlot (..)
   , ReviewedCheckpoint, checkpointBasis, checkpointCandidate, checkpointReceipt
   , ReviewEvidenceIssue (..), admitReviewedCheckpoint, candidateAtSubmission
   , reviewCandidateAtSubmission, cleanReviewCheckout
-  , WorkProgress, pattern WorkProgress, workEvidence, workQuestions, workReviewed, withReviewedCheckpoint
+  , WorkProgress, pattern WorkProgress, workEvidence, workQuestions, workReviewed, withReviewedCheckpoint, mergeWorkProgress
   , Question (..), Attention
   ) where
 
 import Control.Monad.Freer (Eff, Member)
+import Data.List (nub, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Agent.Reply
@@ -97,9 +98,11 @@ data AcceptedDecision = AcceptedDecision
   , decisionEvidence :: [Text]
   } deriving (Show, Eq)
 
+-- Authored check summaries are claims. Executed checks retain their original
+-- command handles, counted evidence and terminal receipts separately.
 data Candidate = Candidate
   { candidateCommit :: GitOid
-  , checkedCommands :: [Text]
+  , reportedChecks :: [Text]
   , remainingGates :: [Text]
   } deriving (Show, Eq)
 
@@ -107,7 +110,7 @@ instance Display Candidate where
   displayTree = displayTreePrec 0
   displayTreePrec p c = displayRecord p "Candidate"
     [ ("candidateCommit", displayTree (candidateCommit c))
-    , ("checkedCommands", displayTree (checkedCommands c))
+    , ("reportedChecks", displayTree (reportedChecks c))
     , ("remainingGates", displayTree (remainingGates c))
     ]
 
@@ -141,10 +144,12 @@ data ReviewRequest = ReviewRequest
   , repairOwner :: RepairOwner
   } deriving (Show)
 
+-- A reviewer reports inspection notes; only ReviewedCheckpoint proves its
+-- original typed response and exact source, independently of executed checks.
 data ReviewedCandidate = ReviewedCandidate
   { reviewedBasis :: ReviewBasis
   , reviewedCandidate :: Candidate
-  , reviewChecks :: [Text]
+  , reviewNotes :: [Text]
   , reviewRationale :: Text
   } deriving (Show, Eq)
 
@@ -266,10 +271,12 @@ instance Display value => Display (Outcome value) where
   displayTreePrec p (Blocked reason evidence) =
     application p "Blocked" [displayTreePrec 11 reason, displayTreePrec 11 evidence]
 
-data CheckedDelivery = Delivered ReviewedCandidate GitOid [Text]
+-- An authored integration report, not observed incorporation or a check proof.
+-- The observed integration head and command receipt live in MergeResult.
+data ReportedDelivery = Delivered ReviewedCandidate GitOid [Text]
   deriving (Show, Eq)
 
-type Delivery = Outcome CheckedDelivery
+type Delivery = Outcome ReportedDelivery
 
 data DesignQuestion = DesignQuestion
   { questionPlan :: Text
@@ -343,6 +350,13 @@ withReviewedCheckpoint checkpoint progress = WorkProgressData
   where
     before = workReviewed progress
     appended = if checkpoint `elem` before then before else before ++ [checkpoint]
+
+-- Each publication replaces attention; candidate and review evidence accumulate.
+mergeWorkProgress :: WorkProgress -> WorkProgress -> WorkProgress
+mergeWorkProgress previous current = WorkProgressData
+  (nub (workEvidence previous ++ workEvidence current))
+  (nub (sort (workQuestions current)))
+  (nub (workReviewed previous ++ workReviewed current))
 
 instance Display WorkProgress where
   displayTree = displayTreePrec 0

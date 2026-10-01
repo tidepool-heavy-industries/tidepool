@@ -8,7 +8,7 @@ let task = Task (batch campaign "component") "plans/component.md" sourceHead
       ["review-flow.txt"] "Read exact committed source" []
 (worker, _updates) <- unfold (taskGroup task)
   (childWithProgress @WorkProgress @(Outcome Candidate)
-    (coding (atRef (GitRef (renderGitOid sourceHead))) (assignment [label|implement|] task)))
+    (withLifetime ActorOwned $ withContext (selected taskContext) $ coding (atRef (GitRef (renderGitOid sourceHead))) (assignment [label|implement|] task)))
 Right coordinatorTree <- createWorktree
   (fromRef (GitRef (renderGitOid sourceHead)) coordinatorName)
 let policy = defaultReviewFlowPolicy
@@ -16,7 +16,6 @@ let policy = defaultReviewFlowPolicy
       , flowEscalationCriteria = routeCriteria }
 flow <- R.start (R.withWorktree (worktreeId coordinatorTree)
   (reviewFlowWith me task policy worker semanticReviewChoice))
-initialRoute <- R.forwardResult worker (firstCandidate (R.client flow))
 initialSnapshot <- R.call (reviewSnapshot (R.client flow)) ()
 pendingCleanup <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce
 inspectFull (show (flowStage initialSnapshot, pendingCleanup))

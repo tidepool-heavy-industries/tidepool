@@ -58,17 +58,17 @@ reviewSummary (Produced (Repair candidate findings)) =
   "repair " <> renderGitOid (candidateCommit candidate) <> ": " <> Text.intercalate "; " findings
 reviewSummary (Produced (Accepted accepted)) =
   "accepted " <> candidateRef (reviewedCandidate accepted)
-    <> "; review checks " <> shown (length (reviewChecks accepted))
+    <> "; review notes " <> shown (length (reviewNotes accepted))
 
 deliverySummary :: Delivery -> Text
 deliverySummary (Blocked reason evidence) = blockedSummary reason evidence
 deliverySummary (Produced (Delivered accepted head checks)) =
   renderGitOid head <> "; reviewed " <> candidateRef (reviewedCandidate accepted)
-    <> "; integration checks " <> shown (length checks)
+    <> "; reported integration checks " <> shown (length checks)
 
 candidateRef :: Candidate -> Text
 candidateRef candidate = renderGitOid (candidateCommit candidate)
-  <> "; checks " <> shown (length (checkedCommands candidate))
+  <> "; reported checks " <> shown (length (reportedChecks candidate))
   <> (if null (remainingGates candidate) then ""
       else "; gates " <> Text.intercalate "; " (remainingGates candidate))
 
