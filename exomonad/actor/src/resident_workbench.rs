@@ -13008,11 +13008,11 @@ mod request_tests {
             .expect("installed display scope");
         assert!(public.bindings.contains(&(
             page_name.clone(),
-            tidepool_runtime::session::SessionVarId::from_extract(original_page_id),
+            tidepool_repr::SessionVarId::from_extract(original_page_id),
         )));
         assert!(public.bindings.contains(&(
             "cellDisplay".into(),
-            tidepool_runtime::session::SessionVarId::from_extract(original_alias_id),
+            tidepool_repr::SessionVarId::from_extract(original_alias_id),
         )));
         assert!(!public
             .bindings
