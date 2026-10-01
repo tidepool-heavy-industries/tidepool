@@ -492,25 +492,77 @@ fn execute_cell(
     elapsed
 }
 
-fn growing_prefix(prefix: usize, baseline: usize) {
+fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool) {
     tidepool_testing::eval_harness::require_extract();
-    assert_eq!(
-        std::env::var("TIDEPOOL_EXTRACT_NO_DAEMON").as_deref(),
-        Ok("1"),
-        "the measurement must use isolated compiler submissions"
-    );
+    let no_daemon = std::env::var("TIDEPOOL_EXTRACT_NO_DAEMON");
+    if durable {
+        assert_ne!(
+            no_daemon.as_deref(),
+            Ok("1"),
+            "durable scaling requires the resident compiler"
+        );
+        let socket = PathBuf::from(
+            std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
+                .expect("resident scaling socket"),
+        );
+        tidepool_extract_cmd::preflight_compiler_daemon(&socket).unwrap();
+    } else {
+        assert_eq!(
+            no_daemon.as_deref(),
+            Ok("1"),
+            "the historical comparison uses isolated compiler submissions"
+        );
+    }
     let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().to_path_buf();
+    let root_guard = if durable {
+        eprintln!("durable-workspace retained={}", root.keep().display());
+        None
+    } else {
+        Some(root)
+    };
     let effects = TestEffectSurface::minimal(&[]).unwrap();
     let images = Arc::new(ImageRegistry::new());
-    let lib = SessionLib::open(SessionId(999), root.path(), ModuleEnv::standalone_default())
+    let mut lib = SessionLib::open(SessionId(999), &root_path, ModuleEnv::standalone_default())
         .unwrap()
         .with_validation_include(effects.include_paths().to_vec());
+    let publication = if durable {
+        let manifest = root_path.join("declarations.json");
+        lib.attach_recovery_graph_v2(&manifest).unwrap();
+        ScalePublication::Durable {
+            owner: RecoveryPublicOwner::new(
+                &tidepool_repr::ActorPath::parse("root/performance").unwrap(),
+                1,
+            )
+            .unwrap(),
+            manifest,
+        }
+    } else {
+        ScalePublication::Ephemeral
+    };
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
     let scenario = (prefix, baseline);
+    if let ScalePublication::Durable { owner, .. } = &publication {
+        measured(
+            &mut resident,
+            &images,
+            scenario,
+            "durable_initialization",
+            None,
+            |resident| {
+                assert_eq!(
+                    resident
+                        .initialize_durable_public_scope(owner.clone(), public)
+                        .unwrap(),
+                    PublicManifestCommit::Durable
+                );
+            },
+        );
+    }
     execute_cell(
         &mut resident,
         public,
@@ -521,7 +573,7 @@ fn growing_prefix(prefix: usize, baseline: usize) {
         include_str!("fixtures/protected-scale-foundation.hs"),
         1,
         None,
-        &ScalePublication::Ephemeral,
+        &publication,
     );
     let original = resident
         .compile_view_in(public)
@@ -560,7 +612,7 @@ fn growing_prefix(prefix: usize, baseline: usize) {
             &source,
             0,
             None,
-            &ScalePublication::Ephemeral,
+            &publication,
         );
     }
     let mut source = String::new();
@@ -595,7 +647,7 @@ fn growing_prefix(prefix: usize, baseline: usize) {
         &source,
         0,
         Some(&prefix.to_string()),
-        &ScalePublication::Ephemeral,
+        &publication,
     );
     let visible = resident.binding_names_in(public);
     assert_eq!(
@@ -623,6 +675,24 @@ fn growing_prefix(prefix: usize, baseline: usize) {
             "the compiled original product changed during settlement"
         );
     }
+    drop(resident);
+    drop(root_guard);
+}
+
+fn growing_prefix(prefix: usize, baseline: usize) {
+    growing_prefix_with_publication(prefix, baseline, false);
+}
+
+#[test]
+#[ignore = "resident durable scaling attribution; run after the two-cell baseline"]
+fn resident_durable_growing_prefix_10_baseline_0() {
+    growing_prefix_with_publication(10, 0, true);
+}
+
+#[test]
+#[ignore = "resident durable scaling attribution; run after the two-cell baseline"]
+fn resident_durable_growing_prefix_10_baseline_100() {
+    growing_prefix_with_publication(10, 100, true);
 }
 
 #[test]
