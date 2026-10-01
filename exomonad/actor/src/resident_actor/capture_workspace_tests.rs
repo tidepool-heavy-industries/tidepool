@@ -321,25 +321,13 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
         original_interface.display(),
         std::fs::read(&original_interface).map(|bytes| (bytes.len(), blake3::hash(&bytes)))
     );
-    let mut children = Vec::new();
-    while children.len() < 2 {
-        let event = tokio::time::timeout(std::time::Duration::from_secs(30), deployments.recv())
-            .await
-            .expect("child policy startup is bounded")
-            .expect("deployment observer");
-        match event {
-            LocalResidentDeployment::PolicyInstalled(installation) => children.push(installation),
-            LocalResidentDeployment::Retired { actor, terminal }
-                if actor != issuer.identity() && terminal.kind == ActorExitKind::Failed =>
-            {
-                panic!("child policy startup retired {actor:?}: {terminal:?}");
-            }
-            LocalResidentDeployment::ChildExited { notice } => {
-                panic!("child exited before both policies installed: {notice:?}");
-            }
-            _ => {}
-        }
-    }
+    let children = await_capture_reader_policies(
+        &forest,
+        &mut deployments,
+        &admitted_paths,
+        "remint-after-issuer-loss",
+    )
+    .await;
     eprintln!("checkpoint workspace fixture: both actual child policies installed");
     assert_ne!(children[0].actor.identity(), children[1].actor.identity());
     for child in &children {
@@ -645,6 +633,76 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
             .parked,
         Some(0)
     );
+}
+
+async fn await_capture_reader_policies(
+    forest: &ResidentForest<frunk::HNil, tidepool_mcp::CapturedOutput>,
+    deployments: &mut mpsc::Receiver<LocalResidentDeployment>,
+    paths: &[String],
+    stage: &str,
+) -> Vec<Box<LocalResidentInstallation>> {
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(240));
+    tokio::pin!(deadline);
+    let mut observe = tokio::time::interval(std::time::Duration::from_secs(5));
+    let mut children = Vec::new();
+    let mut observed = Vec::new();
+    while children.len() < paths.len() {
+        let records = forest
+            .environment
+            .actors
+            .lock()
+            .iter()
+            .filter(|(_, record)| {
+                record
+                    .descriptor
+                    .actor_path()
+                    .is_some_and(|path| paths.contains(&path.to_string()))
+            })
+            .map(|(actor, record)| {
+                (
+                    *actor,
+                    record.terminal.clone(),
+                    record.interactive_policy_installed,
+                )
+            })
+            .collect::<Vec<_>>();
+        for (actor, terminal, _) in &records {
+            let terminal = terminal.clone().or_else(|| {
+                forest
+                    .directory
+                    .resolve(*actor)
+                    .and_then(|child| child.terminal().get())
+            });
+            assert!(terminal.is_none(), "capture readiness stage={stage} actor={actor:?} ended before all policies installed: {terminal:?}; events={observed:?}");
+        }
+        tokio::select! {
+            event = deployments.recv() => {
+                let event = event.expect("capture deployment observer");
+                observed.push(event.kind());
+                match event {
+                    LocalResidentDeployment::PolicyInstalled(child) => {
+                        let actor = child.actor.identity();
+                        assert!(records.iter().any(|(expected, _, _)| *expected == actor),
+                            "unrelated policy installed during capture readiness: {actor:?}");
+                        assert!(!children.iter().any(|installed: &Box<LocalResidentInstallation>| installed.actor.identity() == actor), "duplicate policy installation");
+                        children.push(child);
+                    }
+                    LocalResidentDeployment::ChildExited { notice }
+                        if records.iter().any(|(actor, _, _)| *actor == notice.child.identity()) => {
+                        panic!("capture readiness stage={stage} child exited: {notice:?}; events={observed:?}");
+                    }
+                    LocalResidentDeployment::Retired { actor, terminal }
+                        if records.iter().any(|(expected, _, _)| *expected == actor) => {
+                        panic!("capture readiness stage={stage} child retired {actor:?}: {terminal:?}; events={observed:?}");
+                    }
+                    _ => {}
+                }
+            }
+            _ = observe.tick() => eprintln!("capture readiness stage={stage} records={records:?}; installed={}; events={observed:?}", children.len()),
+            _ = &mut deadline => panic!("capture readiness stage={stage} did not complete: records={records:?}; events={observed:?}; graph={:?}", forest.inspect_host_graph()),
+        }
+    }
+    children
 }
 
 async fn await_capture_reader_policy(

@@ -661,7 +661,15 @@ impl ModuleCandidateOffer {
                         producer,
                         Some(authorization),
                     )?
-                    .with_checked_value_imports(checked_values.import_authority()),
+                    .with_checked_value_imports(checked_values.import_authority())
+                    .with_generated_scaffold_imports(
+                        std::iter::once(specification.template_source.as_str()).chain(
+                            specification
+                                .turn_templates
+                                .iter()
+                                .map(|(_, source)| source.as_str()),
+                        ),
+                    ),
             ),
             checked_cell: Some(specification),
             planned_cell: None,
@@ -729,7 +737,15 @@ impl ModuleCandidateOffer {
                         producer,
                         Some(authorization),
                     )?
-                    .with_checked_value_imports(inputs.import_authority()),
+                    .with_checked_value_imports(inputs.import_authority())
+                    .with_generated_scaffold_imports(
+                        std::iter::once(specification.template_source.as_str()).chain(
+                            specification
+                                .turn_templates
+                                .iter()
+                                .map(|(_, source)| source.as_str()),
+                        ),
+                    ),
             ),
             checked_cell: Some(specification),
             planned_cell: Some(planned),
@@ -809,7 +825,17 @@ impl ModuleCandidateOffer {
             selected,
             producer: producer.to_vec(),
             include: include.to_vec(),
-            exact: Some(exact.with_checked_value_imports(checked_item.prefix.import_authority()?)),
+            exact: Some(
+                exact
+                    .with_checked_value_imports(checked_item.prefix.import_authority()?)
+                    .with_generated_scaffold_imports(
+                        checked_item
+                            .item
+                            .turn_templates()
+                            .iter()
+                            .map(|(_, source)| source.as_str()),
+                    ),
+            ),
             checked_cell: None,
             planned_cell: None,
             checked_values: None,
@@ -892,7 +918,18 @@ impl ModuleCandidateOffer {
             selected,
             producer: producer.to_vec(),
             include: include.to_vec(),
-            exact: Some(exact.with_checked_value_imports(display.prefix.import_authority()?)),
+            exact: Some(
+                exact
+                    .with_checked_value_imports(display.prefix.import_authority()?)
+                    .with_generated_scaffold_imports(
+                        display
+                            .capture
+                            .item()
+                            .turn_templates()
+                            .iter()
+                            .map(|(_, source)| source.as_str()),
+                    ),
+            ),
             checked_cell: None,
             planned_cell: None,
             checked_values: None,

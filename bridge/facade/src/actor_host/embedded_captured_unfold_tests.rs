@@ -544,23 +544,39 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         "[captured-engine] two child provider branches ready while exact parent claim is pending"
     );
     transport.reply_children.send_replace(true);
+    // Observe each admitted child's terminal reply before waiting for the parent:
+    // a rejected child cell cannot deliver the typed response the parent awaits.
+    let mut replied = std::collections::HashSet::new();
+    tokio::time::timeout(TYPED_CHILD_REPLY_SETTLEMENT_BUDGET, async {
+        while replied.len() < sessions.len() {
+            let operation = parent_settlements
+                .recv()
+                .await
+                .expect("child settlement observer");
+            if sessions.contains(&operation.origin)
+                && operation.call.0 == format!("captured-child-{}", operation.origin.actor().0)
+            {
+                let reply =
+                    embedded_operation(&runtime, &operation, TYPED_CHILD_REPLY_SETTLEMENT_BUDGET)
+                        .await
+                        .unwrap_or_else(|cause| {
+                            panic!(
+                        "captured child cell rejected before typed reply: {operation:?}: {cause}"
+                    )
+                        });
+                assert_eq!(reply["status"], "replied", "{reply}");
+                assert!(replied.insert(operation.origin));
+            }
+        }
+    })
+    .await
+    .expect("both captured child operations settle");
     let result = embedded_operation(
         &runtime,
         &transport.operation(&root_origin, PENDING_CALL),
         COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
     )
     .await;
-    for origin in &sessions {
-        let call = format!("captured-child-{}", origin.actor().0);
-        let reply = embedded_operation(
-            &runtime,
-            &transport.operation(origin, &call),
-            TYPED_CHILD_REPLY_SETTLEMENT_BUDGET,
-        )
-        .await
-        .unwrap();
-        assert_eq!(reply["status"], "replied", "{reply}");
-    }
     match scenario {
         CapturedScenario::Success => assert_committed_haskell_value(&result.unwrap(), "True"),
         CapturedScenario::FailureAfterReplies => {

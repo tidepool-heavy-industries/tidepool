@@ -499,6 +499,54 @@ pub(crate) struct ExactCompilationRequest {
     // Only current-program source-selected support can add these roots.
     program_support: Option<ArtifactView>,
     checked_value_imports: crate::checked_cell::CheckedValueImportAuthority,
+    generated_scaffold_imports: Option<GeneratedScaffoldImportAuthority>,
+}
+
+/// The compiler-only import belongs to a hash-sealed checked template and one
+/// original native/interface owner. It never grants authored lexical visibility.
+#[derive(Clone)]
+struct GeneratedScaffoldImportAuthority {
+    owner: tidepool_repr::execution_schema::CachedHomeOwner,
+    import_lines: BTreeSet<usize>,
+}
+
+const GENERATED_RESUME_IMPORT: &str = "import qualified Tidepool.Internal.Resume as TidepoolResume";
+
+impl GeneratedScaffoldImportAuthority {
+    fn permits(
+        &self,
+        context: &ExactDeclarationContext,
+        source: &str,
+        target: &Path,
+        module_source: &Path,
+        unit: &str,
+        module: &str,
+        qualifier: &str,
+        boot: bool,
+    ) -> bool {
+        if target != module_source
+            || boot
+            || qualifier != "none"
+            || unit != self.owner.unit
+            || module != self.owner.module
+        {
+            return false;
+        }
+        let lines = source
+            .lines()
+            .enumerate()
+            .filter_map(|(line, text)| (text == GENERATED_RESUME_IMPORT).then_some(line + 1))
+            .collect::<Vec<_>>();
+        if lines.len() != 1 || !self.import_lines.contains(&lines[0]) {
+            return false;
+        }
+        context.artifact_view().entries().iter().any(|entry| {
+            matches!(&entry.payload, ArtifactPayload::Original(product)
+                if product.owner() == &self.owner
+                    && product.execution_source().is_some_and(|graph|
+                        graph.eligible_execution_root(&self.owner)))
+        })
+    }
 }
 
 /// A successful compiler transaction's actual generated source, bound to its
@@ -627,6 +675,49 @@ impl ExactCompilationRequest {
         self.checked_value_imports = authority;
         self
     }
+    pub(crate) fn with_generated_scaffold_imports<'a>(
+        mut self,
+        templates: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
+        let import_lines = templates
+            .into_iter()
+            .filter_map(|template| {
+                let lines = template
+                    .lines()
+                    .enumerate()
+                    .filter_map(|(line, text)| {
+                        (text == GENERATED_RESUME_IMPORT).then_some(line + 1)
+                    })
+                    .collect::<Vec<_>>();
+                (lines.len() == 1).then(|| lines[0])
+            })
+            .collect::<BTreeSet<_>>();
+        if !import_lines.is_empty() {
+            let originals = self.context.artifact_view().entries();
+            let owners = originals
+                .iter()
+                .filter_map(|entry| match &entry.payload {
+                    ArtifactPayload::Original(product)
+                        if product.owner().unit == "main"
+                            && product.owner().module == "Tidepool.Internal.Resume"
+                            && product.execution_source().is_some_and(|graph| {
+                                graph.eligible_execution_root(product.owner())
+                            }) =>
+                    {
+                        Some(product.owner())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if let [owner] = owners.as_slice() {
+                self.generated_scaffold_imports = Some(GeneratedScaffoldImportAuthority {
+                    owner: (*owner).clone(),
+                    import_lines,
+                });
+            }
+        }
+        self
+    }
     pub(crate) fn in_program_context(
         &self,
         root: &Path,
@@ -729,6 +820,7 @@ impl ExactCompilationRequest {
             groups: groups.into(),
             program_support: self.program_support.clone(),
             checked_value_imports: self.checked_value_imports.clone(),
+            generated_scaffold_imports: self.generated_scaffold_imports.clone(),
         })
     }
 
@@ -1022,8 +1114,33 @@ impl ExactCompilationRequest {
                 let name = string(&edge[1])?;
                 let boot = boolean(&edge[2])?;
                 let unit = string(&edge[3])?;
+                let scaffold_import =
+                    self.generated_scaffold_imports
+                        .as_ref()
+                        .is_some_and(|authority| {
+                            evidence
+                                .modules
+                                .iter()
+                                .find(|module| {
+                                    module.unit == owner.0
+                                        && module.module == owner.1
+                                        && module.boot == owner.2
+                                })
+                                .is_some_and(|module| {
+                                    authority.permits(
+                                        context,
+                                        source,
+                                        &source_path,
+                                        &module.source,
+                                        unit,
+                                        name,
+                                        qualifier,
+                                        boot,
+                                    )
+                                })
+                        });
                 if boot
-                    || !selected.contains(&(unit, name))
+                    || !(selected.contains(&(unit, name)) || scaffold_import)
                     || (qualifier != "none" && qualifier != format!("this:{unit}"))
                     || !imported.insert((qualifier, name, boot, unit))
                 {
@@ -1944,6 +2061,7 @@ impl ExactDeclarationContext {
             groups: groups.into(),
             program_support: None,
             checked_value_imports: Default::default(),
+            generated_scaffold_imports: None,
         })
     }
 }
@@ -2455,6 +2573,7 @@ mod tests {
             groups: Arc::from([]),
             program_support: None,
             checked_value_imports: Default::default(),
+            generated_scaffold_imports: None,
         }
     }
 
@@ -2578,7 +2697,8 @@ mod tests {
         std::fs::write(&receipt, collision).unwrap();
         assert!(request
             .validate_receipt(&receipt, None, &context)
-            .unwrap_err()
+            .err()
+            .expect("source owner collision must fail")
             .to_string()
             .contains("fresh module replaced an admitted exact owner"));
         for (unit, module, qualifier, boot) in [
@@ -3001,6 +3121,7 @@ mod tests {
             groups: Arc::from([]),
             program_support: None,
             checked_value_imports: Default::default(),
+            generated_scaffold_imports: None,
         };
         let root = directory.path().join("program-inputs");
         assert!(!root.exists());
@@ -3067,6 +3188,7 @@ mod tests {
             groups: Arc::from([]),
             program_support: None,
             checked_value_imports: Default::default(),
+            generated_scaffold_imports: None,
         };
         let materialization_root = directory.path().join("program-inputs");
         let effective = request
@@ -3180,6 +3302,112 @@ mod tests {
         .with_execution_source_with_validation(graph, &mut validation)
         .unwrap();
         Arc::new(ArtifactEntry::original([7; 32], product, vec![]).unwrap())
+    }
+
+    #[test]
+    fn generated_scaffold_authority_preserves_target_and_original_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let (graph, owners) = crate::execution_source::test_graph(directory.path());
+        let inventory = ArtifactInventory::default();
+        let context = ExactDeclarationContext {
+            producer: [7; 32],
+            inventory: inventory
+                .admit_shared(
+                    &inventory.empty_view(),
+                    vec![execution_entry(owners[0].clone(), graph)],
+                )
+                .unwrap(),
+            lexical: vec![],
+        };
+        let authority = GeneratedScaffoldImportAuthority {
+            owner: owners[0].clone(),
+            import_lines: BTreeSet::from([2]),
+        };
+        let target = directory.path().join("Expr.hs");
+        let source = format!("module Expr where\n{GENERATED_RESUME_IMPORT}\n");
+        let permits = |source: &str,
+                       module_source: &Path,
+                       unit: &str,
+                       module: &str,
+                       qualifier: &str,
+                       boot| {
+            authority.permits(
+                &context,
+                source,
+                &target,
+                module_source,
+                unit,
+                module,
+                qualifier,
+                boot,
+            )
+        };
+        assert!(permits(
+            &source,
+            &target,
+            &owners[0].unit,
+            &owners[0].module,
+            "none",
+            false
+        ));
+        assert!(context.lexical_graph().is_empty());
+        assert!(!permits(
+            &source,
+            &directory.path().join("Authored.hs"),
+            &owners[0].unit,
+            &owners[0].module,
+            "none",
+            false
+        ));
+        for (unit, module, qualifier, boot) in [
+            ("foreign", owners[0].module.as_str(), "none", false),
+            (
+                owners[0].unit.as_str(),
+                owners[1].module.as_str(),
+                "none",
+                false,
+            ),
+            (
+                owners[0].unit.as_str(),
+                owners[0].module.as_str(),
+                "this:fixture",
+                false,
+            ),
+            (
+                owners[0].unit.as_str(),
+                owners[0].module.as_str(),
+                "none",
+                true,
+            ),
+        ] {
+            assert!(!permits(&source, &target, unit, module, qualifier, boot));
+        }
+        for changed in [
+            format!("\n{source}"),
+            format!("{source}{GENERATED_RESUME_IMPORT}\n"),
+            source.replace(" as TidepoolResume", " as Other"),
+        ] {
+            assert!(!permits(
+                &changed,
+                &target,
+                &owners[0].unit,
+                &owners[0].module,
+                "none",
+                false
+            ));
+        }
+        let mut changed = authority.clone();
+        changed.owner.module_version = ModuleVersion([99; 32]);
+        assert!(!changed.permits(
+            &context,
+            &source,
+            &target,
+            &target,
+            &owners[0].unit,
+            &owners[0].module,
+            "none",
+            false
+        ));
     }
 
     #[test]
