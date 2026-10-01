@@ -1157,7 +1157,7 @@ fn checked_display_plan(
         .checked_display_admission()
         .is_none_or(|owned| !Arc::ptr_eq(owned, &admission))
         || certification.checked_execution().is_some()
-        || proof.admission_digest() != admission.digest()
+        || !admission.matches_compiled_display(proof)
         || proof.generation() != generation.0
         || generation != admission.generation()
         || !Arc::ptr_eq(proof.capture(), admission.execution())
@@ -1305,6 +1305,19 @@ impl PendingDisplayInstall {
 }
 
 /// A display bundle's three binders come from one compiler value module.
+fn checked_display_input(
+    checked: Option<&CheckedDisplayPlan>,
+) -> Result<Option<(i64, Vec<String>)>, ResidentError> {
+    let Some(plan) = checked.filter(|plan| plan.admission.prefix().cell_program().is_some()) else {
+        return Ok(None);
+    };
+    let budget =
+        i64::try_from(plan.admission.budget()).map_err(|_| PreparedRuntimeError::HostMount {
+            detail: "display budget exceeds the worker Int range".into(),
+        })?;
+    Ok(Some((budget, plan.admission.presented().to_vec())))
+}
+
 fn check_display_bundle_binders(
     page: &BoundBinder,
     metadata: &BoundBinder,
@@ -2307,6 +2320,34 @@ where
         first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
     ) -> Result<Arc<super::RuntimeCheckedPrefix>, SessionError> {
         self.state.begin_checked_prefix(admission, first_item)
+    }
+
+    pub fn begin_cell_program(
+        &self,
+        admission: Arc<super::RuntimeCellAdmission>,
+        program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
+    ) -> Result<Option<Arc<super::RuntimeCheckedPrefix>>, SessionError> {
+        self.state.begin_cell_program(admission, program)
+    }
+
+    pub fn admit_planned_cell_for_execution(
+        &mut self,
+        execution: Arc<super::PrivateExecutionAdmission>,
+        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
+        specification: Arc<dyn std::any::Any + Send + Sync>,
+        specification_digest: [u8; 32],
+        authority_digest: [u8; 32],
+        include_paths: Vec<PathBuf>,
+    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
+        self.settle_dropped_custody();
+        self.state.admit_planned_cell_for_execution(
+            execution,
+            plan,
+            specification,
+            specification_digest,
+            authority_digest,
+            include_paths,
+        )
     }
 
     pub fn admit_cell_for_execution(
@@ -4257,19 +4298,10 @@ where
             })
     }
 
-    /// Source-only declaration recovery facts for this machine incarnation.
-    /// Live values and handles are intentionally absent because they cannot
-    /// survive machine replacement.
+    /// Exact restored declaration tips and unavailable prior-machine bindings.
     #[must_use]
-    pub fn declaration_recovery_report(&self) -> Option<&super::DeclarationRecoveryReport> {
+    pub fn declaration_recovery_report(&self) -> Option<super::DeclarationRecoveryReport> {
         self.state.lib().declaration_recovery_report()
-    }
-
-    /// A manifest publication failure that happened after a successful
-    /// declaration commit, if durability has not recovered since.
-    #[must_use]
-    pub fn recovery_manifest_warning(&self) -> Option<&str> {
-        self.state.lib().recovery_manifest_warning()
     }
 
     /// How many names `scope`'s OWN frame binds (accounting class 3, per
@@ -5087,6 +5119,7 @@ where
                 page,
                 alias,
                 generation,
+                checked_display_input(checked.as_ref())?,
             )
         })();
         if let Some(plan) = checked {
@@ -5295,6 +5328,7 @@ where
                 page,
                 alias,
                 generation,
+                checked_display_input(checked.as_ref())?,
             )
             .map(Some)
         })();
@@ -5320,6 +5354,7 @@ where
         page: &BoundBinder,
         alias: &BoundBinder,
         generation: Generation,
+        presentation: Option<(i64, Vec<String>)>,
     ) -> Result<ResidentDisplayBundle, ResidentError> {
         let realm = self.run_context.resource_scope;
         let lexical_scope = self.run_context.lexical_scope;
@@ -5330,17 +5365,29 @@ where
         };
         let run_exec_started = std::time::Instant::now();
         let ran = self.on_eval_thread(move |engine, table, handlers, captured| {
-            Ok(settle_prepared(
+            let argument = match presentation
+                .as_ref()
+                .map(|input| engine.build_host_value(realm, input, table))
+                .transpose()
+            {
+                Ok(argument) => argument,
+                Err(error) => return Ok(Err(error)),
+            };
+            let outcome = settle_prepared(
                 engine,
                 program,
                 realm,
-                None,
+                argument,
                 SettlePlan::Display(page.tier),
                 park,
                 table,
                 handlers,
                 captured,
-            ))
+            );
+            if let Some(argument) = argument {
+                engine.release(argument);
+            }
+            Ok(outcome)
         });
         timing::record_stage(
             timing::NO_NODE,

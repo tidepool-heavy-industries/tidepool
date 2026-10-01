@@ -98,7 +98,7 @@ pub(super) fn admit_authored_artifact_closure(
                 .and_then(|context| {
                     context
                         .interface_owners()
-                        .iter()
+                        .into_iter()
                         .find(|entry| entry.owner == identity)
                 })
                 .ok_or_else(|| {
@@ -393,17 +393,22 @@ pub(crate) fn certify_same_offer_planned_declaration(
         })
         .collect::<Vec<_>>();
     inventory.validate(&original_owner, &interfaces)?;
+    let artifacts = crate::declaration_context::certified_artifact_view(
+        toolchain_identity_sha256,
+        &products,
+        &interfaces,
+        &joined_interfaces,
+        baseline.map(Arc::as_ref),
+    )?;
     Ok(CertifiedAuthoredDeclaration {
         product: selected.clone(),
-        recovery_products: products,
+        artifacts,
         lexical_exports: inventory.selection.exports.clone(),
         introduced_exports: inventory.selection.exports,
         instances: inventory.selection.instances,
         family_closure: inventory.selection.family_closure,
         source_sha256,
         toolchain_identity_sha256,
-        interfaces,
-        joined_interfaces,
         original_imports,
     })
 }

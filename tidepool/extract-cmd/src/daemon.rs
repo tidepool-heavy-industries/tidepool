@@ -8,7 +8,7 @@
 //! ```text
 //! frame     ::= u32-LE length, then that many raw bytes (UTF-8 text)
 //! preflight ::= "TPDPF001"
-//! identity  ::= "TPDPI001" producer[32] boot_epoch[32]
+//! identity  ::= "TPDPI002" producer[32] consumed_worker[32] boot_epoch[32]
 //! request   ::= "TPDRQ001" expected_epoch[32]
 //!               frame(cwd) u32-LE(argc) frame(argv[0]) .. frame(argv[n-1])
 //! transaction ::= "TPDTR001" expected_epoch[32]
@@ -63,7 +63,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const MAX_REQUEST_FRAME_BYTES: u32 = 16 * 1024 * 1024;
 const MAX_REQUEST_ARGS: u32 = 4096;
 const PREFLIGHT: &[u8; 8] = b"TPDPF001";
-const PREFLIGHT_RESPONSE: &[u8; 8] = b"TPDPI001";
+const PREFLIGHT_RESPONSE: &[u8; 8] = b"TPDPI002";
 const REQUEST: &[u8; 8] = b"TPDRQ001";
 /// A graceful-stop request: no epoch, no body. The daemon acks with a single
 /// byte while accepted requests continue, then retires its socket exactly as
@@ -481,6 +481,7 @@ pub(crate) fn init_tracing(
 
 pub(crate) struct DaemonBinding {
     pub(crate) producer: [u8; 32],
+    pub(crate) consumed_worker: [u8; 32],
     pub(crate) epoch: [u8; 32],
 }
 
@@ -841,6 +842,9 @@ pub(crate) fn preflight(socket_path: &Path) -> Result<DaemonBinding, DaemonError
     let producer: [u8; 32] = read_exact_or_crash(&mut stream, 32)?
         .try_into()
         .map_err(|_| DaemonError::Crashed)?;
+    let consumed_worker: [u8; 32] = read_exact_or_crash(&mut stream, 32)?
+        .try_into()
+        .map_err(|_| DaemonError::Crashed)?;
     let epoch: [u8; 32] = read_exact_or_crash(&mut stream, 32)?
         .try_into()
         .map_err(|_| DaemonError::Crashed)?;
@@ -849,7 +853,11 @@ pub(crate) fn preflight(socket_path: &Path) -> Result<DaemonBinding, DaemonError
         elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         "compiler phase finished"
     );
-    Ok(DaemonBinding { producer, epoch })
+    Ok(DaemonBinding {
+        producer,
+        consumed_worker,
+        epoch,
+    })
 }
 
 /// Bound on the STOP round trip. The daemon writes its ack immediately,
@@ -1373,6 +1381,7 @@ fn serve_workers(
     rss_ceiling_mb: u64,
     request_deadline: Duration,
 ) -> Result<u8, FrontendError> {
+    let consumed_worker = prepared.consumed_worker_identity();
     listener.set_nonblocking(true).map_err(FrontendError::Io)?;
     // A single ordinary worker owns at most one accepted job. Persistent
     // mode admits one pending job beyond its occupied worker slots.
@@ -1592,9 +1601,10 @@ fn serve_workers(
                     Ok(true) => break 'accept Ok(()),
                     Err(error) => break 'accept Err(error),
                 }
-                let mut response = Vec::with_capacity(72);
+                let mut response = Vec::with_capacity(104);
                 response.extend_from_slice(PREFLIGHT_RESPONSE);
                 response.extend_from_slice(producer);
+                response.extend_from_slice(&consumed_worker);
                 response.extend_from_slice(epoch);
                 log_send_failure(
                     run_id,
@@ -3103,11 +3113,13 @@ tidepool-target phase=desugar module=Execute\n",
             assert_eq!(&request, PREFLIGHT);
             connection.write_all(PREFLIGHT_RESPONSE).unwrap();
             connection.write_all(&[7; 32]).unwrap();
+            connection.write_all(&[8; 32]).unwrap();
             connection.write_all(&[9; 32]).unwrap();
         });
         let binding = preflight(&socket).unwrap();
         server.join().unwrap();
         assert_eq!(binding.producer, [7; 32]);
+        assert_eq!(binding.consumed_worker, [8; 32]);
         assert_eq!(binding.epoch, [9; 32]);
         std::fs::remove_file(socket).ok();
     }
@@ -4507,8 +4519,8 @@ fn main() {{
 
     #[test]
     fn daemon_boot_epoch_contributes_to_endpoint_identity() {
-        let a = crate::CompilerIdentity::daemon([3; 32], [4; 32]);
-        let b = crate::CompilerIdentity::daemon([3; 32], [5; 32]);
+        let a = crate::CompilerIdentity::daemon([3; 32], [2; 32], [4; 32]);
+        let b = crate::CompilerIdentity::daemon([3; 32], [2; 32], [5; 32]);
         assert_eq!(a.producer_bytes(), b.producer_bytes());
         assert_ne!(a.as_bytes(), b.as_bytes());
     }

@@ -4,8 +4,9 @@ use super::*;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tidepool_toolchain::declaration_join::{
-    certify_recovered_declaration_tip, ClassInstanceEvidence, DeclarationExport, DeclarationKind,
-    ExportIdentity, ExportNamespace, InstanceInventory, RecoveryDeclarationSelection,
+    certify_recovered_declaration_tip_with_inventory, ClassInstanceEvidence, DeclarationExport,
+    DeclarationKind, ExportIdentity, ExportNamespace, InstanceInventory,
+    RecoveryDeclarationSelection,
 };
 
 /// Configured native composition backed by the lifetime run lock. This trait
@@ -130,7 +131,7 @@ impl SessionLib {
                 .expect("attached canonical manifest parent"),
             &bytes,
         )
-        .map_err(|error| invalid(error.to_string()))?
+        .map_err(|error| recovery::graph_error(&state.path, error))?
         .ok_or(SessionError::WrongPublicManifestTicket)?;
         if !read.artifact_losses.is_empty()
             || read.graph.checksum != state.graph.checksum
@@ -182,10 +183,7 @@ impl SessionLib {
                 "recovery manifest must be the actual canonical run-owned file".into(),
             ));
         }
-        if self.log.generation() != Generation(0)
-            || self.recovery_manifest_path.is_some()
-            || self.durable_graph.is_some()
-        {
+        if self.log.generation() != Generation(0) || self.durable_graph.is_some() {
             return Err(invalid(
                 "recovery must attach before declarations are admitted".into(),
             ));
@@ -223,7 +221,7 @@ impl SessionLib {
             .as_ref()
             .map(|bytes| recovery::read_v2_bytes(&path, &root, bytes))
             .transpose()
-            .map_err(|error| invalid(error.to_string()))?
+            .map_err(|error| recovery::graph_error(&path, error))?
             .flatten()
         {
             Some(read) if read.artifact_losses.is_empty() => read.graph,
@@ -234,7 +232,7 @@ impl SessionLib {
             }
             None if bytes.is_some() => {
                 return Err(invalid(
-                    "legacy recovery manifest requires explicit v1 migration".into(),
+                    "existing recovery manifest did not yield an exact graph".into(),
                 ))
             }
             None => recovery::RecoveryGraph::empty(self.id.0, self.id.0)
@@ -328,10 +326,11 @@ impl SessionLib {
             let selected = graph
                 .artifacts
                 .iter()
-                .filter(|artifact| node.artifact_refs.contains(&artifact.key()))
+                .filter(|artifact| node.artifact_refs.contains(&artifact.artifact_id()))
                 .collect::<Vec<_>>();
             let mut products = Vec::new();
             let mut joins = Vec::new();
+            let mut values = Vec::new();
             for artifact in selected {
                 match artifact {
                     recovery::RecoveryArtifactClosure::Home(reference) => {
@@ -340,8 +339,26 @@ impl SessionLib {
                     recovery::RecoveryArtifactClosure::Join(reference) => {
                         joins.push(reference.clone())
                     }
+                    recovery::RecoveryArtifactClosure::ValueInterface(reference) => {
+                        values.push(reference.clone())
+                    }
                 }
             }
+            let artifact_ids = node.artifact_refs.iter().copied().collect::<BTreeSet<_>>();
+            let descriptors = graph
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact_ids.contains(&artifact.artifact_id()))
+                .map(|artifact| artifact.descriptor())
+                .collect::<Vec<_>>();
+            let dependencies = graph
+                .artifact_dependencies
+                .iter()
+                .filter(|edge| {
+                    artifact_ids.contains(&edge.source) && artifact_ids.contains(&edge.target)
+                })
+                .map(|edge| (edge.source, edge.target, edge.dependency.clone()))
+                .collect::<Vec<_>>();
             let instances = recovered_instances(&node.instances)
                 .ok_or_else(|| invalid("unsupported durable instance identity".into()))?;
             let family_closure = node
@@ -351,10 +368,13 @@ impl SessionLib {
                 .map(recovered_identity)
                 .collect::<Option<Vec<_>>>()
                 .ok_or_else(|| invalid("unsupported durable family closure identity".into()))?;
-            let evidence = Arc::new(certify_recovered_declaration_tip(
+            let evidence = Arc::new(certify_recovered_declaration_tip_with_inventory(
                 recovery_root,
                 &products,
                 &joins,
+                &values,
+                &descriptors,
+                &dependencies,
                 RecoveryDeclarationSelection {
                     root: root.clone(),
                     lexical: node.lexical.clone(),

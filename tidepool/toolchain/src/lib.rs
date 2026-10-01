@@ -15,7 +15,9 @@ use thiserror::Error;
 use tidepool_repr::serial::ReadError;
 
 pub mod artifacts;
+pub mod artifact_inventory;
 pub mod cache;
+pub mod cell_plan;
 pub mod certified_products;
 pub mod checked_cell;
 mod declaration_context;

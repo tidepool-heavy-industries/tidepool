@@ -66,6 +66,7 @@ enum Field {
     Classify,
     ClassifyOut(OsString),
     Cell,
+    CellPlan,
     CellTemplate(PathBuf),
     CellOut(OsString),
     TurnPin(String),
@@ -156,6 +157,7 @@ impl ExtractRequest {
                 Some("--classify") => request.classify(),
                 Some("--classify-out") => request.classify_out(value(&mut args, "--classify-out")?),
                 Some("--cell") => request.cell(),
+                Some("--cell-plan") => request.cell_plan(),
                 Some("--cell-template") => {
                     request.cell_template(Path::new(value(&mut args, "--cell-template")?))
                 }
@@ -283,6 +285,7 @@ impl ExtractRequest {
                 30 => Field::InspectBrowseExpanded(decoder.string()?),
                 43 => Field::InspectScopeBrowse,
                 31 => Field::Cell,
+                51 => Field::CellPlan,
                 32 => Field::CellTemplate(PathBuf::from(decoder.os_string()?)),
                 33 => Field::CellOut(decoder.os_string()?),
                 34 => Field::TurnPin(decoder.string()?),
@@ -415,6 +418,10 @@ impl ExtractRequest {
 
     pub(crate) fn cell(&mut self) {
         self.fields.push(Field::Cell);
+    }
+
+    pub(crate) fn cell_plan(&mut self) {
+        self.fields.push(Field::CellPlan);
     }
 
     pub(crate) fn cell_template(&mut self, value: &Path) {
@@ -556,6 +563,7 @@ impl ExtractRequest {
                 Field::Classify => flags.push("--classify".into()),
                 Field::ClassifyOut(value) => flag(&mut flags, "--classify-out", value),
                 Field::Cell => flags.push("--cell".into()),
+                Field::CellPlan => flags.push("--cell-plan".into()),
                 Field::CellTemplate(value) => {
                     flag(&mut flags, "--cell-template", value.as_os_str())
                 }
@@ -911,6 +919,7 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         Field::Classify => out.push(20),
         Field::ClassifyOut(value) => tagged_frame(out, 21, value),
         Field::Cell => out.push(31),
+        Field::CellPlan => out.push(51),
         Field::CellTemplate(value) => tagged_frame(out, 32, value.as_os_str()),
         Field::CellOut(value) => tagged_frame(out, 33, value),
         Field::TurnPin(value) => tagged_frame(out, 34, OsStr::new(value)),
@@ -1417,6 +1426,26 @@ mod tests {
         let request = ExtractRequest::from_cli(&args).unwrap();
         let decoded = ExtractRequest::decode(&request.encode()).unwrap();
         assert_eq!(decoded.cli_argv(), request.cli_argv());
+    }
+
+    #[test]
+    fn parser_only_cell_mode_round_trips_and_redirects_its_output() {
+        let args = [
+            "cell.txt".into(),
+            "--cell-plan".into(),
+            "--cell-template".into(),
+            "/tmp/template.hs".into(),
+            "--cell-out".into(),
+            "/tmp/plan.cbor".into(),
+        ];
+        let request = ExtractRequest::from_cli(&args).unwrap();
+        let mut decoded = ExtractRequest::decode(&request.encode()).unwrap();
+        assert_eq!(decoded.cli_argv(), request.cli_argv());
+        decoded.redirect_outputs_for_warm_up(Path::new("/tmp/warm"));
+        assert!(decoded
+            .cli_argv()
+            .contains(&OsString::from("/tmp/warm/cell-out")));
+        assert!(decoded.cli_argv().contains(&OsString::from("--cell-plan")));
     }
 
     #[test]

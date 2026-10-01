@@ -134,7 +134,7 @@ import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteC
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts)
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.PlannedDeclaration
-  ( PlannedDeclarationInventory, transformPlannedDeclarationImports, transformPlannedDeclarationImportsWithCompleted, hydratePlannedDeclarationInventory )
+  ( PlannedDeclarationInventory, transformPlannedDeclarationImports, transformPlannedDeclarationImportsWithCompleted, transformProgramDeclarationImports, hydratePlannedDeclarationInventory )
 import Tidepool.CheckedPrefixImports
   ( CompletedValueImport(..), CompletedValueImports, hydrateCompletedValueImportsWithDependencies, transformCompletedValueImports )
 import Tidepool.FamilyConsistency (validateCompilationFamilies)
@@ -679,7 +679,9 @@ data PipelineVariant = PipelineVariant
 
 data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile | OriginalDeclarationCompile
   | CheckedItemCompile [(String,CheckedSignature)] (Maybe ((String,String),String)) [CompletedValueImport]
+  | ProgramItemCompile Bool [(String,CheckedSignature)] [((String,String),String)] [CompletedValueImport]
   | PlannedDeclarationCheck PlannedDeclarationInventory ExactScope
+  | CellProgramCompile CompilePurpose ExactScope
   deriving (Eq, Show)
 
 transformFor :: CompilePurpose -> ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
@@ -698,13 +700,21 @@ transformFor (CheckedItemCompile annotations original _) target env summary
           inventory <- hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure
           transformPlannedDeclarationImports inventory env annotated
   | otherwise = pure
+transformFor (ProgramItemCompile _ annotations originals _) target env summary
+  | ms_mod_name summary == target = \parsed -> do
+      annotated <- rewriteCheckedAnnotations env annotations parsed
+      inventories <- mapM (\(owner,fingerprint) -> hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure) originals
+      transformProgramDeclarationImports inventories Nothing env annotated
+  | otherwise = pure
 transformFor (PlannedDeclarationCheck inventory _) target env summary
   | ms_mod_name summary == target = transformPlannedDeclarationImports inventory env
   | otherwise = pure
+transformFor (CellProgramCompile purpose _) target env summary = transformFor purpose target env summary
 
 transformWithCompletedValues :: Maybe CompletedValueImports -> CompilePurpose -> ModuleName
   -> HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
 transformWithCompletedValues captured purpose target env summary = case purpose of
+  CellProgramCompile inner _ -> transformWithCompletedValues captured inner target env summary
   CheckedItemCompile annotations original requested
     | ms_mod_name summary == target && not (null requested) -> \parsed -> do
         values <- maybe (fail "completed value interfaces were not installed in this request") pure captured
@@ -714,6 +724,13 @@ transformWithCompletedValues captured purpose target env summary = case purpose 
           Just (owner, fingerprint) -> do
             inventory <- hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure
             transformPlannedDeclarationImportsWithCompleted inventory values env annotated
+  ProgramItemCompile _ annotations originals requested
+    | ms_mod_name summary == target -> \parsed -> do
+        values <- if null requested then pure Nothing else
+          Just <$> maybe (fail "program completed interfaces were not installed") pure captured
+        annotated <- rewriteCheckedAnnotations env annotations parsed
+        inventories <- mapM (\(owner,fingerprint) -> hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure) originals
+        transformProgramDeclarationImports inventories values env annotated
   _ -> transformFor purpose target env summary
 
 -- | The seam values for one run, derived from the downsweep graph.
@@ -3127,13 +3144,18 @@ sessionVariant :: CompilePurpose -> SessionScope -> FilePath -> IO PipelineVaria
 sessionVariant purpose scope path = do
   targetModName' <- targetModuleNameFor path
   completedValuesRef <- newIORef Nothing
-  let completedValues = case purpose of
+  let effectivePurpose = case purpose of
+        CellProgramCompile inner _ -> inner
+        _ -> purpose
+      completedValues = case effectivePurpose of
         CheckedItemCompile _ _ values -> values
+        ProgramItemCompile _ _ _ values -> values
         _ -> []
   capturedExact <- traverse (\manifest -> readExactScope manifest >>= either (ioError . userError) pure)
     (ssExactScope scope)
   let exact = case purpose of
         PlannedDeclarationCheck _ admitted -> Just admitted
+        CellProgramCompile _ admitted -> Just admitted
         _ -> capturedExact
   forM_ exact $ \admitted -> case capturedExact of
     Just original | scopeRequestSha256 original == scopeRequestSha256 admitted -> pure ()
@@ -3238,7 +3260,9 @@ sessionVariant purpose scope path = do
           -- ('isSessionScopeActive'); every such turn's wrapper compiles a
           -- target literally named @__result@ (scaffold-reserved, never
           -- @result@).
-        , cpKeepPrivateResult = purpose == OriginalDeclarationCompile
+        , cpKeepPrivateResult = case effectivePurpose of
+            ProgramItemCompile original _ _ _ -> original
+            _ -> effectivePurpose == OriginalDeclarationCompile
         , cpResultBinders = [scaffoldTargetName, scaffoldOutputBase]
         , cpBeforeModule = \modSum ->
             when (ms_mod_name modSum `Set.member` deferredMods) $ do

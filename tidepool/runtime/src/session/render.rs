@@ -315,7 +315,56 @@ pub(crate) struct AdmittedDeclarationSurface {
     pub lexical: Vec<tidepool_toolchain::declaration_join::ExactLexicalNode>,
 }
 
+/// Prepared reserved slots contain only the newly admitted range. The existing
+/// declaration graph stays in its sole owner until the manifest becomes visible.
+pub(crate) struct PreparedDeclarationReservations {
+    previous_high_water: Generation,
+    previous_revision: u64,
+    high_water: Generation,
+    revision: u64,
+    slots: BTreeMap<Generation, DeclarationSlot>,
+    generations: Vec<Generation>,
+}
+
 impl DeclLog {
+    pub(crate) fn prepare_reservations(
+        &self,
+        count: usize,
+    ) -> Option<PreparedDeclarationReservations> {
+        let count_u64 = u64::try_from(count).ok()?;
+        let high_water = Generation(self.high_water.0.checked_add(count_u64)?);
+        let revision = self.publication_revision()?.checked_add(count_u64)?;
+        let mut generations = Vec::new();
+        generations.try_reserve_exact(count).ok()?;
+        let mut slots = BTreeMap::new();
+        for offset in 0..count_u64 {
+            let generation = Generation(self.high_water.0 + offset + 1);
+            generations.push(generation);
+            slots.insert(generation, DeclarationSlot::Reserved);
+        }
+        Some(PreparedDeclarationReservations {
+            previous_high_water: self.high_water,
+            previous_revision: self.revision,
+            high_water,
+            revision,
+            slots,
+            generations,
+        })
+    }
+
+    pub(crate) fn commit_reservations(
+        &mut self,
+        reservations: PreparedDeclarationReservations,
+    ) -> Vec<Generation> {
+        assert_eq!(self.high_water, reservations.previous_high_water);
+        assert_eq!(self.revision, reservations.previous_revision);
+        for (generation, slot) in reservations.slots {
+            assert!(self.turns.insert(generation, slot).is_none());
+        }
+        self.high_water = reservations.high_water;
+        self.revision = reservations.revision;
+        reservations.generations
+    }
     /// An empty log (`Generation(0)`, no turns).
     #[must_use]
     pub fn new() -> DeclLog {

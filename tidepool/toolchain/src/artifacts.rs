@@ -31,6 +31,15 @@ use crate::{
 // Typed yield sites (`asks.json` on disk)
 // ---------------------------------------------------------------------------
 
+/// Parse the source before reserving original module and value identities.
+/// This capability contains no checked types or native authority.
+pub fn parse_cell_plan(
+    specification: Arc<crate::checked_cell::CheckedCellSpecification>,
+    include_paths: &[PathBuf],
+) -> Result<Arc<crate::cell_plan::ParsedCellPlan>, CompileError> {
+    crate::cell_plan::parse(specification, include_paths)
+}
+
 /// One compiler sidecar entry: a typed suspension-site id, its rendered answer
 /// type, any live input types, and the defining modules needed to resolve each
 /// type by name —
@@ -263,6 +272,7 @@ pub struct ModuleCandidateOffer {
     include: Vec<PathBuf>,
     exact: Option<crate::declaration_context::ExactCompilationRequest>,
     checked_cell: Option<crate::checked_cell::CheckedCellSpecification>,
+    planned_cell: Option<crate::checked_cell::CheckedPlannedCellSpecification>,
     checked_values: Option<Arc<crate::checked_cell::CheckedValueInputs>>,
     checked_item: Option<crate::checked_cell::CheckedItemOffer>,
     checked_display: Option<crate::checked_cell::CheckedDisplayOffer>,
@@ -353,6 +363,7 @@ impl ModuleCandidateOffer {
             include: include.to_vec(),
             exact: None,
             checked_cell: None,
+            planned_cell: None,
             checked_values: None,
             checked_item: None,
             checked_display: None,
@@ -371,6 +382,7 @@ impl ModuleCandidateOffer {
             include: include.to_vec(),
             exact: Some(context.prepare_compilation(&scratch.join("exact-scope"), producer)?),
             checked_cell: None,
+            planned_cell: None,
             checked_values: None,
             checked_item: None,
             checked_display: None,
@@ -418,7 +430,66 @@ impl ModuleCandidateOffer {
                 Some(authorization),
             )?),
             checked_cell: Some(specification),
+            planned_cell: None,
             checked_values: Some(checked_values),
+            checked_item: None,
+            checked_display: None,
+        })
+    }
+
+    /// Reserve the complete original identity inventory before compilation.
+    pub fn select_cell_program(
+        endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
+        include: &[PathBuf],
+        scratch: &Path,
+        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        specification: crate::checked_cell::CheckedCellSpecification,
+        values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
+        planned: crate::checked_cell::CheckedPlannedCellSpecification,
+    ) -> Result<Self, CompileError> {
+        let producer = endpoint.identity().producer_bytes();
+        let expected = specification
+            .injected_modules
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let actual = values
+            .iter()
+            .map(|(module, _)| module.module_name())
+            .collect::<BTreeSet<_>>();
+        if actual.len() != values.len() || actual != expected {
+            return Err(CompileError::ExtractFailed(
+                "compiled initial interface inventory differs from injected owners".into(),
+            ));
+        }
+        let extension = planned.authorization(&specification, producer, include, scratch)?;
+        let mut authorization = specification.manifest_value()?;
+        let inputs = crate::checked_cell::CheckedValueInputs::capture(values)?;
+        let Value::Array(fields) = &mut authorization else {
+            unreachable!("closed authorization")
+        };
+        fields[0] = Value::Text("cell-program1".into());
+        fields.push(inputs.baseline_authorization());
+        fields.extend(extension);
+        fields.push(Value::Array(
+            include
+                .iter()
+                .map(|path| Value::Text(path.to_string_lossy().into_owned()))
+                .collect(),
+        ));
+        let context = checked_offer_context(context)?;
+        Ok(Self {
+            selected: immutable_candidates_in_context(&context, producer, include, scratch),
+            producer: producer.to_vec(),
+            include: include.to_vec(),
+            exact: Some(context.prepare_compilation_with_authorization(
+                &scratch.join("exact-scope"),
+                producer,
+                Some(authorization),
+            )?),
+            checked_cell: Some(specification),
+            planned_cell: Some(planned),
+            checked_values: Some(inputs),
             checked_item: None,
             checked_display: None,
         })
@@ -451,6 +522,7 @@ impl ModuleCandidateOffer {
             generation,
             observation_name: observation_name.map(str::to_owned),
             is_fold: false,
+            is_program: false,
             settled_values,
         };
         checked_item.validate_templates(templates)?;
@@ -470,6 +542,7 @@ impl ModuleCandidateOffer {
                 Some(authorization),
             )?),
             checked_cell: None,
+            planned_cell: None,
             checked_values: None,
             checked_item: Some(checked_item),
             checked_display: None,
@@ -509,6 +582,7 @@ impl ModuleCandidateOffer {
             budget,
             presented,
             settled_values,
+            is_program: false,
         };
         let authorization = checked_search_authorization(
             CheckedPurpose::Display,
@@ -525,6 +599,7 @@ impl ModuleCandidateOffer {
                 Some(authorization),
             )?),
             checked_cell: None,
+            planned_cell: None,
             checked_values: None,
             checked_item: None,
             checked_display: Some(display),
@@ -609,7 +684,471 @@ impl ModuleCandidateOffer {
             self.checked_values.clone().ok_or_else(|| {
                 CompileError::ExtractFailed("checked values owner is absent".into())
             })?,
+            BTreeMap::new(),
+            None,
         )
+    }
+
+    /// Admit every prepared segment and target before issuing execution data.
+    /// The runtime can consume this immutable result without compiling a prefix.
+    pub fn admit_cell_program(
+        &self,
+        root: &Path,
+    ) -> Result<Arc<crate::checked_cell::CellProgram>, CompileError> {
+        use crate::cell_plan::ParsedCellPlanKind;
+        use crate::checked_cell::{
+            self, CellProgram, CellProgramItem, CellProgramObservations, CheckedItemKind,
+            CheckedPlannedCellSlot,
+        };
+        let specification = self.checked_cell.as_ref().ok_or_else(|| {
+            CompileError::ExtractFailed("program has no source specification".into())
+        })?;
+        let planned = self.planned_cell.as_ref().ok_or_else(|| {
+            CompileError::ExtractFailed("ordinary checking cannot issue a complete program".into())
+        })?;
+        let initial = self.exact.as_ref().ok_or_else(|| {
+            CompileError::ExtractFailed("program has no exact compiler offer".into())
+        })?;
+        let values = self
+            .checked_values
+            .as_ref()
+            .ok_or_else(|| CompileError::ExtractFailed("program has no interface owner".into()))?;
+        let mut context = initial.context.clone();
+        let mut program_request = initial.clone();
+        let mut declarations = BTreeMap::new();
+        let mut admissions = Vec::new();
+        let mut outputs = BTreeMap::new();
+        let mut display_outputs = BTreeMap::new();
+        let mut segment = 0usize;
+        let mut index = 0usize;
+        while index < planned.parsed_plan.items().len() {
+            let item = &planned.parsed_plan.items()[index];
+            let declaration = matches!(
+                item.kind(),
+                ParsedCellPlanKind::Declaration | ParsedCellPlanKind::Prologue
+            );
+            let segment_root = root.join(format!("segment-{segment}"));
+            if declaration {
+                let generation = match planned.slots[index] {
+                    CheckedPlannedCellSlot::Prologue { declaration }
+                    | CheckedPlannedCellSlot::Declaration { declaration } => declaration,
+                    _ => {
+                        return Err(CompileError::ExtractFailed(
+                            "declaration has another reserved slot".into(),
+                        ))
+                    }
+                };
+                program_request = program_request
+                    .in_program_context(&root.join("program-inputs"), context.clone())?;
+                let effective = self.program_offer(program_request.clone());
+                let mut source_spec = specification.clone();
+                source_spec.reserved_declaration_modules =
+                    vec![
+                        tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation))
+                            .module_name(),
+                    ];
+                let original = effective
+                    .admit_planned_declaration(
+                        &segment_root,
+                        effective.exact.as_ref().expect("exact program offer"),
+                        &source_spec,
+                    )?
+                    .ok_or_else(|| {
+                        CompileError::ExtractFailed(
+                            "program original declaration output is absent".into(),
+                        )
+                    })?;
+                let mut lexical = context
+                    .lexical_graph()
+                    .iter()
+                    .map(|node| (node.owner.clone(), node.imports.clone()))
+                    .collect::<BTreeMap<_, _>>();
+                for (owner, imports) in original.certificate.original_home_imports() {
+                    if lexical
+                        .insert(owner.clone(), imports.to_vec())
+                        .is_some_and(|old| old != imports)
+                    {
+                        return Err(CompileError::ExtractFailed(
+                            "program changed an admitted original import".into(),
+                        ));
+                    }
+                }
+                context = Arc::new(
+                    (*context).clone().extend(
+                        std::slice::from_ref(&original.certificate),
+                        &[],
+                        lexical
+                            .into_iter()
+                            .map(
+                                |(owner, imports)| crate::declaration_join::ExactLexicalNode {
+                                    owner,
+                                    imports,
+                                },
+                            )
+                            .collect(),
+                    )?,
+                );
+                declarations.insert(index, original);
+                index += 1;
+            } else {
+                let end = planned.parsed_plan.items()[index..]
+                    .iter()
+                    .position(|item| {
+                        matches!(
+                            item.kind(),
+                            ParsedCellPlanKind::Declaration | ParsedCellPlanKind::Prologue
+                        )
+                    })
+                    .map_or(planned.parsed_plan.items().len(), |offset| index + offset);
+                admissions.extend(initial.validate_outputs_in_context(&segment_root, &context)?);
+                while index < end {
+                    program_request = program_request
+                        .in_program_context(&root.join("program-inputs"), context.clone())?;
+                    let effective = self.program_offer(program_request.clone());
+                    let directory = root.join(format!("item-{index}"));
+                    let output = effective.read_program_output(&directory)?;
+                    let source_admissions = effective
+                        .exact
+                        .as_ref()
+                        .expect("exact program offer")
+                        .validate_outputs(&directory)?;
+                    context = self.admit_program_support(
+                        context,
+                        &output,
+                        &source_admissions,
+                        initial.producer_sha256,
+                    )?;
+                    admissions.extend(source_admissions);
+                    let generation = match &planned.slots[index] {
+                        CheckedPlannedCellSlot::Bind { value } => *value,
+                        CheckedPlannedCellSlot::Expression { capture, .. } => *capture,
+                        _ => {
+                            return Err(CompileError::ExtractFailed(
+                                "native item has another reserved slot".into(),
+                            ))
+                        }
+                    };
+                    context =
+                        self.admit_program_value(context, values.root(), generation, &output.turn)?;
+                    outputs.insert(index, output);
+                    if let CheckedPlannedCellSlot::Expression { display, .. } =
+                        &planned.slots[index]
+                    {
+                        program_request = program_request
+                            .in_program_context(&root.join("program-inputs"), context.clone())?;
+                        let effective = self.program_offer(program_request.clone());
+                        let directory = root.join(format!("display-{index}"));
+                        let output = effective.read_program_output(&directory)?;
+                        let source_admissions = effective
+                            .exact
+                            .as_ref()
+                            .expect("exact program offer")
+                            .validate_outputs(&directory)?;
+                        context = self.admit_program_support(
+                            context,
+                            &output,
+                            &source_admissions,
+                            initial.producer_sha256,
+                        )?;
+                        admissions.extend(source_admissions);
+                        context = self.admit_program_value(
+                            context,
+                            values.root(),
+                            *display,
+                            &output.turn,
+                        )?;
+                        display_outputs.insert(index, output);
+                    }
+                    index += 1;
+                }
+            }
+            segment += 1;
+        }
+        let cell = checked_cell::admit_checked_cell(
+            root,
+            &self.producer,
+            initial.semantic_sha256,
+            initial.context.clone(),
+            &initial.request_sha256,
+            specification,
+            admissions,
+            &self.include,
+            None,
+            values.clone(),
+            declarations,
+            Some(planned),
+        )?;
+        let mut prefix = if cell.item_count() == 0 {
+            None
+        } else {
+            Some(cell.item(0)?.initial_prefix()?)
+        };
+        let mut items = Vec::with_capacity(cell.item_count());
+        for index in 0..cell.item_count() {
+            let item = cell.item(index)?;
+            let completed = prefix.as_ref().expect("nonempty program prefix");
+            if item.kind() == CheckedItemKind::Declaration {
+                prefix = Some(completed.append_declaration(item.clone())?);
+                items.push(CellProgramItem {
+                    checked: item,
+                    native: None,
+                    display: None,
+                    native_observations: None,
+                    display_observations: None,
+                });
+                continue;
+            }
+            let output = outputs.remove(&index).ok_or_else(|| {
+                CompileError::ExtractFailed("program native target is missing".into())
+            })?;
+            let (generation, observation) = match &planned.slots[index] {
+                CheckedPlannedCellSlot::Bind { value } => (*value, None),
+                CheckedPlannedCellSlot::Expression {
+                    capture,
+                    observation_name,
+                    ..
+                } => (*capture, Some(observation_name.clone())),
+                _ => {
+                    return Err(CompileError::ExtractFailed(
+                        "program native slot differs".into(),
+                    ))
+                }
+            };
+            let native = checked_cell::CheckedItemOffer {
+                item: item.clone(),
+                prefix: completed.clone(),
+                runtime_prefix_digest: cell.admission_digest(),
+                generation,
+                observation_name: observation,
+                is_fold: false,
+                is_program: true,
+                settled_values: completed.prepared_value_selection()?,
+            }
+            .seal(
+                &output.directory,
+                &initial.request_sha256,
+                &output.source,
+                &output.target,
+            )?;
+            let mut next = completed.append(native.clone())?;
+            let display =
+                if let CheckedPlannedCellSlot::Expression { display, .. } = planned.slots[index] {
+                    let output = display_outputs.get(&index).ok_or_else(|| {
+                        CompileError::ExtractFailed("program presentation target is missing".into())
+                    })?;
+                    let proof = checked_cell::CheckedDisplayOffer {
+                        capture: native.clone(),
+                        prefix: next.clone(),
+                        generation: display,
+                        admission_digest: cell.admission_digest(),
+                        budget: 0,
+                        presented: Vec::new(),
+                        settled_values: next.prepared_value_selection()?,
+                        is_program: true,
+                    }
+                    .seal(
+                        &output.directory,
+                        &initial.request_sha256,
+                        &output.source,
+                        &output.target,
+                    )?;
+                    next = next.append_display(proof.clone())?;
+                    Some(proof)
+                } else {
+                    None
+                };
+            let observation = CellProgramObservations {
+                turn: output.turn,
+                metadata: output.metadata,
+                products: output.products,
+            };
+            let display_observations =
+                display_outputs
+                    .remove(&index)
+                    .map(|output| CellProgramObservations {
+                        turn: output.turn,
+                        metadata: output.metadata,
+                        products: output.products,
+                    });
+            items.push(CellProgramItem {
+                checked: item,
+                native: Some(native),
+                display,
+                native_observations: Some(observation),
+                display_observations,
+            });
+            prefix = Some(next);
+        }
+        if !outputs.is_empty() || !display_outputs.is_empty() {
+            return Err(CompileError::ExtractFailed(
+                "program contains unowned prepared targets".into(),
+            ));
+        }
+        Ok(Arc::new(CellProgram {
+            checked: cell,
+            parsed: planned.parsed_plan.clone(),
+            slots: planned.slots.clone(),
+            items,
+        }))
+    }
+
+    fn program_offer(&self, exact: crate::declaration_context::ExactCompilationRequest) -> Self {
+        Self {
+            selected: None,
+            producer: self.producer.clone(),
+            include: self.include.clone(),
+            exact: Some(exact),
+            checked_cell: None,
+            planned_cell: None,
+            checked_values: None,
+            checked_item: None,
+            checked_display: None,
+        }
+    }
+
+    fn read_program_output(&self, directory: &Path) -> Result<ProgramNativeOutput, CompileError> {
+        let turn: Arc<[u8]> =
+            crate::checked_cell::read(directory.join("turn.cbor"), 32 << 20)?.into();
+        let value = crate::checked_cell::decode(&turn)?;
+        let record = crate::checked_cell::row(&value, 2)?;
+        if crate::checked_cell::string(&record[0])? != "Bind" {
+            return Err(CompileError::ExtractFailed(
+                "program output is not a bind".into(),
+            ));
+        }
+        let source =
+            crate::checked_cell::string(&crate::checked_cell::row(&record[1], 5)?[4])?.to_owned();
+        let module = extract_module_name(&source).ok_or_else(|| {
+            CompileError::ExtractFailed("program native source has no module owner".into())
+        })?;
+        let target = Arc::new(tidepool_repr::execution_schema::parse_program(
+            &crate::checked_cell::read(directory.join("__prepared.prepared.cbor"), 128 << 20)?,
+            &crate::prepared_artifact::production_requirements()?,
+            DecodeLimits::default(),
+        )?);
+        let metadata: Arc<[u8]> =
+            crate::checked_cell::read(directory.join("meta.cbor"), 32 << 20)?.into();
+        let products = Arc::new(
+            seal_turn_outputs(
+                self,
+                directory,
+                &directory.join(format!("{module}.hs")),
+                &source,
+                &target,
+                "__prepared",
+            )?
+            .ok_or_else(|| {
+                CompileError::ExtractFailed("program native products are not sealed".into())
+            })?,
+        );
+        Ok(ProgramNativeOutput {
+            directory: directory.to_owned(),
+            target,
+            turn,
+            metadata,
+            products,
+            source,
+        })
+    }
+
+    fn admit_program_support(
+        &self,
+        context: Arc<crate::declaration_join::ExactDeclarationContext>,
+        output: &ProgramNativeOutput,
+        admissions: &[crate::declaration_context::ExactSourceAdmission],
+        producer: [u8; 32],
+    ) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
+        let module = extract_module_name(&output.source).ok_or_else(|| {
+            CompileError::ExtractFailed("program support output has no target owner".into())
+        })?;
+        let support = output
+            .products
+            .recovery_products
+            .iter()
+            .filter(|product| product.owner().module != module)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut imports = BTreeMap::new();
+        for admission in admissions {
+            for (owner, requirements) in &admission.exact_imports {
+                if imports
+                    .insert(owner.clone(), requirements.clone())
+                    .is_some_and(|old| old != *requirements)
+                {
+                    return Err(CompileError::ExtractFailed(
+                        "program support original changed exact imports".into(),
+                    ));
+                }
+            }
+        }
+        Ok(Arc::new(
+            (*context)
+                .clone()
+                .extend_checked_original_products(producer, &support, &imports)?,
+        ))
+    }
+
+    fn admit_program_value(
+        &self,
+        context: Arc<crate::declaration_join::ExactDeclarationContext>,
+        root: &Path,
+        generation: u64,
+        turn: &[u8],
+    ) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
+        let value = crate::checked_cell::decode(turn)?;
+        let record = crate::checked_cell::row(&value, 2)?;
+        let fields = crate::checked_cell::row(&record[1], 5)?;
+        if matches!(&fields[2], Value::Array(rows) if rows.is_empty()) {
+            return Ok(context);
+        }
+        let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation));
+        let path = root.join(owner.relative_hi_path());
+        let requirements = crate::checked_cell::decode(&crate::checked_cell::read(
+            path.with_extension("hi.requirements"),
+            4 << 20,
+        )?)?;
+        let Value::Array(requirements) = requirements else {
+            return Err(CompileError::ExtractFailed(
+                "value interface requirements are not rows".into(),
+            ));
+        };
+        let requirements = requirements
+            .iter()
+            .map(|value| {
+                let fields = crate::checked_cell::row(value, 2)?;
+                Ok(crate::declaration_join::ExactModuleIdentity {
+                    unit: crate::checked_cell::string(&fields[0])?.to_owned(),
+                    module: crate::checked_cell::string(&fields[1])?.to_owned(),
+                })
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?;
+        let identity = crate::declaration_join::ExactModuleIdentity {
+            unit: "main".into(),
+            module: owner.module_name(),
+        };
+        let interface = Arc::new(
+            crate::recovery_artifacts::CertifiedValueInterface::from_checked_compilation(
+                {
+                    use sha2::Digest;
+                    sha2::Sha256::digest(&self.producer).into()
+                },
+                identity.clone(),
+                crate::checked_cell::read(&path, 32 << 20)?,
+                crate::checked_cell::read(path.with_extension("hi.packages"), 4 << 20)?,
+                requirements.clone(),
+            )
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?,
+        );
+        let mut lexical = context.lexical_graph().to_vec();
+        lexical.push(crate::declaration_join::ExactLexicalNode {
+            owner: identity,
+            imports: requirements,
+        });
+        Ok(Arc::new(
+            (*context)
+                .clone()
+                .extend_with_value_interfaces(&[interface], lexical)?,
+        ))
     }
 
     fn admit_planned_declaration(
@@ -789,8 +1328,18 @@ impl ModuleCandidateOffer {
     }
 }
 
+struct ProgramNativeOutput {
+    directory: PathBuf,
+    target: Arc<PreparedProgram>,
+    turn: Arc<[u8]>,
+    metadata: Arc<[u8]>,
+    products: Arc<SealedTurnProducts>,
+    source: String,
+}
+
+#[derive(Debug)]
 pub struct SealedTurnProducts {
-    pub certified_groups: Vec<certified_products::PendingCertifiedGroup>,
+    pub certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
     pub pending_imports: Vec<certified_products::PendingImportOwner>,
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
     pub package_interfaces: certified_products::CertifiedTargetPackageInterfaces,
@@ -1002,7 +1551,7 @@ pub fn seal_turn_outputs(
                 )
             })
             .transpose()?,
-        certified_groups: certified.groups,
+        certified_groups: certified.groups.into(),
         pending_imports,
         recovery_products: certified.recovery_products,
         package_interfaces,
@@ -1016,7 +1565,7 @@ fn merge_package_closure(
     let mut selected = packages.clone();
     if let Some(request) = exact {
         let inherited =
-            certified_products::inherited_package_witnesses(request.context.recovery_products())
+            certified_products::inherited_package_witnesses(&request.context.recovery_products())
                 .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
         for (owner, witness) in inherited {
             if selected
@@ -1148,6 +1697,8 @@ fn compile_invocation_inner(
         let endpoint = cmd
             .bind()
             .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))?;
+        crate::toolchain::admit_bound_endpoint(&endpoint)
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
         let request = context.prepare_compilation(
             &temp_dir.path().join("exact-scope"),
             endpoint.identity().producer_bytes(),
@@ -1191,7 +1742,9 @@ fn compile_invocation_inner(
     let attempt = retry_bounded(
         || {
             let mut cmd = base_cmd.clone();
-            let endpoint = cmd.bind()?;
+            let endpoint = cmd.bind().map_err(CompileAttemptError::Endpoint)?;
+            crate::toolchain::admit_bound_endpoint(&endpoint)
+                .map_err(CompileAttemptError::Deployment)?;
             crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
 
             let inv_key = {
@@ -1258,10 +1811,11 @@ fn compile_invocation_inner(
             endpoint
                 .execute(&cmd)
                 .map(|run| CompileAttempt::Executed((cmd, run, inv_key, producer, candidate_set)))
+                .map_err(CompileAttemptError::Endpoint)
         },
-        |error| error.permits_rebind(),
+        |error| matches!(error,CompileAttemptError::Endpoint(error) if error.permits_rebind()),
     )
-    .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))?;
+    .map_err(CompileAttemptError::into_compile_error)?;
     let (cmd, run, inv_key, producer, candidate_set) = match attempt {
         CompileAttempt::Cached(artifacts) => return Ok(*artifacts),
         CompileAttempt::Executed(executed) => executed,
@@ -1455,7 +2009,7 @@ fn compile_invocation_inner(
                 recovery_products: Vec::new(),
             }
         };
-        let mut extra_products: Vec<_> = cached_receipts
+        let extra_products: Vec<_> = cached_receipts
             .iter()
             .map(|module| {
                 candidate_set
@@ -1471,15 +2025,6 @@ fn compile_invocation_inner(
                     })
             })
             .collect::<Result<_, _>>()?;
-        if let Some(request) = exact_request.as_ref() {
-            for product in request.context.recovery_products() {
-                extra_products.extend(tidepool_repr::execution_schema::parse_module_products(
-                    product.product_bytes(),
-                    &crate::prepared_artifact::production_requirements()?,
-                    module_candidates::product_decode_limits(),
-                )?);
-            }
-        }
         let mut artifacts = assemble_with_products(
             &meta_bytes,
             &raw,
@@ -1700,6 +2245,19 @@ fn retain_exact_compile_receipts(source: &Path, destination: &Path) -> std::io::
         }
     }
     Ok(())
+}
+
+enum CompileAttemptError {
+    Endpoint(tidepool_extract_cmd::SpawnError),
+    Deployment(crate::toolchain::ToolchainError),
+}
+impl CompileAttemptError {
+    fn into_compile_error(self) -> CompileError {
+        match self {
+            Self::Endpoint(error) => CompileError::Io(extract_spawn_error(error.source)),
+            Self::Deployment(error) => CompileError::ExtractFailed(error.to_string()),
+        }
+    }
 }
 
 enum CompileAttempt<T> {
@@ -2059,16 +2617,13 @@ fn assemble_with_products(
             .flat_map(|request| request.context.recovery_products())
             .map(|product| {
                 (
-                    (
-                        product.owner().unit.as_str(),
-                        product.owner().module.as_str(),
-                    ),
+                    (product.owner().unit.clone(), product.owner().module.clone()),
                     product,
                 )
             })
             .collect();
         let mut protected_groups = BTreeMap::<_, BTreeMap<_, _>>::new();
-        for group in exact.into_iter().flat_map(|request| &request.groups) {
+        for group in exact.into_iter().flat_map(|request| request.groups.iter()) {
             protected_groups
                 .entry((group.owner().unit.as_str(), group.owner().module.as_str()))
                 .or_default()
@@ -2077,7 +2632,9 @@ fn assemble_with_products(
         let mut emitted = std::collections::HashSet::new();
         for product in &artifacts.module_products {
             let key = (product.unit.as_str(), product.module.as_str());
-            let admitted = if let Some(original) = protected.get(&key) {
+            let admitted = if let Some(original) =
+                protected.get(&(product.unit.clone(), product.module.clone()))
+            {
                 let expected = protected_groups.get(&key);
                 product.interface == original.interface_bytes()
                     && product.groups.len() == expected.map_or(0, BTreeMap::len)
@@ -2322,6 +2879,67 @@ mod typed_site_tests {
 
     #[test]
     #[serial_test::serial]
+    fn observed_compiler_cannot_compile_without_configured_deployment() {
+        use std::os::unix::fs::PermissionsExt;
+        struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (name, value) in &self.0 {
+                    match value {
+                        Some(value) => unsafe { std::env::set_var(name, value) },
+                        None => unsafe { std::env::remove_var(name) },
+                    }
+                }
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let frontend = directory.path().join("frontend");
+        let executed = directory.path().join("executed");
+        std::fs::write(
+            &frontend,
+            format!(
+                "#!/bin/sh\nprintf 'TPCID002{}{}'\nif IFS= read -r row; then touch '{}'; fi\n",
+                "a".repeat(32),
+                "b".repeat(32),
+                executed.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&frontend, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _restore = Restore(
+            [
+                crate::toolchain::ENV_EXTRACT,
+                crate::toolchain::ENV_COMPILER_DEPLOYMENT,
+                tidepool_extract_cmd::DAEMON_SOCKET_ENV,
+            ]
+            .into_iter()
+            .map(|name| (name, std::env::var_os(name)))
+            .collect(),
+        );
+        unsafe {
+            std::env::set_var(crate::toolchain::ENV_EXTRACT, &frontend);
+            std::env::remove_var(crate::toolchain::ENV_COMPILER_DEPLOYMENT);
+            std::env::remove_var(tidepool_extract_cmd::DAEMON_SOCKET_ENV);
+        }
+        let error = compile_targets(
+            "result = 1",
+            &["result"],
+            &[directory.path().into()],
+            |_, _, _| {},
+        )
+        .err()
+        .expect("unconfigured observed endpoint must be refused");
+        assert!(
+            matches!(error,CompileError::ExtractFailed(ref message) if message.contains("no configured deployment authority"))
+        );
+        assert!(
+            !executed.exists(),
+            "an observed endpoint executed unauthorised compiler work"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn safe_refusal_rederives_cache_and_build_products_identity() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -2354,7 +2972,7 @@ mod typed_site_tests {
             let identity = String::from_utf8(vec![identity_byte; 32]).unwrap();
             std::fs::write(
                 path,
-                format!("#!/bin/sh\nprintf 'TPCID001{identity}'\ncat >/dev/null\n"),
+                format!("#!/bin/sh\nprintf 'TPCID002{identity}{identity}'\ncat >/dev/null\n"),
             )
             .unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();

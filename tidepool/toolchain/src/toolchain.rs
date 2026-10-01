@@ -73,6 +73,8 @@ use std::process::Command;
 pub const ENV_EXTRACT: &str = "TIDEPOOL_EXTRACT";
 /// Env var naming the private compiler worker used by the Rust frontend.
 pub const ENV_EXTRACT_WORKER: &str = "TIDEPOOL_EXTRACT_WORKER";
+/// Env var pointing at the configured producer and consumed-worker manifest.
+pub const ENV_COMPILER_DEPLOYMENT: &str = "TIDEPOOL_COMPILER_DEPLOYMENT";
 /// Env var naming the stdlib root (step 1 of the stdlib precedence).
 pub const ENV_PRELUDE_DIR: &str = "TIDEPOOL_PRELUDE_DIR";
 /// Env var overriding [`stamp_path`].
@@ -243,6 +245,18 @@ pub enum ToolchainError {
         /// Underlying I/O or JSON failure.
         source: std::io::Error,
     },
+
+    /// A configured compiler deployment is absent, malformed, or does not
+    /// authorize the producer and worker observed at the endpoint.
+    #[error("compiler deployment authority rejected the bound endpoint: {0}")]
+    DeploymentAuthority(#[from] DeploymentAdmissionError),
+
+    /// Reading or parsing the configured deployment manifest failed.
+    #[error("compiler deployment manifest {}: {source}", .path.display())]
+    DeploymentManifest {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 /// `Debug` renders the variant name plus the operator-facing `Display` text,
@@ -261,6 +275,8 @@ impl std::fmt::Debug for ToolchainError {
             Self::StdlibNotFound { .. } => "StdlibNotFound",
             Self::Skew(_) => "Skew",
             Self::Stamp { .. } => "Stamp",
+            Self::DeploymentAuthority(_) => "DeploymentAuthority",
+            Self::DeploymentManifest { .. } => "DeploymentManifest",
         };
         write!(f, "{tag}: {self}")
     }
@@ -350,9 +366,15 @@ pub fn locate_extract() -> Result<ExtractLocation, ToolchainError> {
 }
 
 /// Bind the producer selected by the canonical extract resolution policy.
-/// The returned endpoint is the authority for deploy and cache identity; the
-/// location is informational only.
+/// Configured deployment authority admits the observed producer and exact
+/// consumed worker before this endpoint can authorize compilation.
 pub fn bind_extract_endpoint(
+) -> Result<(tidepool_extract_cmd::CompilerEndpoint, ExtractLocation), ToolchainError> {
+    let (endpoint, location, _) =
+        bind_admitted_extract_endpoint(&CompilerDeploymentConfiguration::from_env()?)?;
+    Ok((endpoint, location))
+}
+fn bind_unadmitted_extract_endpoint(
 ) -> Result<(tidepool_extract_cmd::CompilerEndpoint, ExtractLocation), ToolchainError> {
     let location = locate_extract()?;
     let cmd = tidepool_extract_cmd::ExtractCmd::with_bin(
@@ -364,6 +386,206 @@ pub fn bind_extract_endpoint(
             tried: error.to_string(),
         })?;
     Ok((endpoint, location))
+}
+
+/// Configured evidence for one compiler deployment. These digests originate
+/// from the configured package/deployment manifest; they must never be filled
+/// from an endpoint observation and then treated as authority.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompilerDeploymentAuthority {
+    /// Schema version of this explicit deployment manifest.
+    pub schema: u32,
+    /// Exact producer identity emitted by the configured frontend artifact.
+    pub producer_identity: [u8; 32],
+    /// BLAKE3 digest of the exact compiler worker executable admitted into it.
+    pub consumed_worker_identity: [u8; 32],
+    /// Frontend path retained as configured build provenance.
+    pub frontend_path: PathBuf,
+    /// Worker selection path hashed into the configured producer identity.
+    pub worker_path: PathBuf,
+    /// GHC library directory hashed into the configured producer identity.
+    pub ghc_libdir: PathBuf,
+}
+
+/// Explicitly selected deployment mode. Local callers can supply a configured
+/// test/development authority directly; an unknown or missing production
+/// authority fails closed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompilerDeploymentConfiguration {
+    Configured(CompilerDeploymentAuthority),
+    Unknown,
+}
+
+/// Evidence retained after the configured deployment has admitted an
+/// observed endpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmittedCompilerDeployment {
+    /// Producer identity validated against the configured deployment.
+    pub producer_identity: [u8; 32],
+    /// Exact worker identity validated against the configured deployment.
+    pub consumed_worker_identity: [u8; 32],
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum DeploymentAdmissionError {
+    #[error("no configured deployment authority is available")]
+    Unknown,
+    #[error("configured deployment manifest has unsupported schema {0}")]
+    Schema(u32),
+    #[error("configured deployment manifest has empty producer or worker identity")]
+    EmptyIdentity,
+    #[error("configured deployment manifest requires absolute frontend, worker, and GHC paths")]
+    InvalidPath,
+    #[error("bound producer differs from configured deployment")]
+    ProducerMismatch,
+    #[error("consumed worker differs from configured deployment")]
+    WorkerMismatch,
+}
+
+impl CompilerDeploymentConfiguration {
+    fn validate(&self) -> Result<(), DeploymentAdmissionError> {
+        match self {
+            Self::Unknown => Err(DeploymentAdmissionError::Unknown),
+            Self::Configured(authority) if authority.schema != 1 => {
+                Err(DeploymentAdmissionError::Schema(authority.schema))
+            }
+            Self::Configured(authority)
+                if authority.producer_identity == [0; 32]
+                    || authority.consumed_worker_identity == [0; 32] =>
+            {
+                Err(DeploymentAdmissionError::EmptyIdentity)
+            }
+            Self::Configured(authority)
+                if !authority.frontend_path.is_absolute()
+                    || !authority.worker_path.is_absolute()
+                    || !authority.ghc_libdir.is_absolute() =>
+            {
+                Err(DeploymentAdmissionError::InvalidPath)
+            }
+            Self::Configured(_) => Ok(()),
+        }
+    }
+
+    /// Load configured production authority from the manifest named by
+    /// `$TIDEPOOL_COMPILER_DEPLOYMENT`. An unset variable remains explicitly
+    /// unknown; local callers can pass an explicit test/development authority.
+    pub fn from_env() -> Result<Self, ToolchainError> {
+        let Some(path) = std::env::var_os(ENV_COMPILER_DEPLOYMENT) else {
+            return Ok(Self::Unknown);
+        };
+        let path = PathBuf::from(path);
+        let bytes = std::fs::read(&path).map_err(|source| ToolchainError::DeploymentManifest {
+            path: path.clone(),
+            source,
+        })?;
+        let authority: CompilerDeploymentAuthority =
+            serde_json::from_slice(&bytes).map_err(|e| ToolchainError::DeploymentManifest {
+                path: path.clone(),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+            })?;
+        let configuration = Self::Configured(authority);
+        configuration.validate()?;
+        Ok(configuration)
+    }
+
+    /// Admit the exact identity reported by the bound endpoint. Producer and
+    /// worker are checked independently so changing the consumed worker cannot
+    /// hide behind an unchanged configured frontend identity.
+    pub fn admit(
+        &self,
+        producer_identity: [u8; 32],
+        consumed_worker_identity: [u8; 32],
+    ) -> Result<AdmittedCompilerDeployment, DeploymentAdmissionError> {
+        self.validate()?;
+        match self {
+            Self::Unknown => Err(DeploymentAdmissionError::Unknown),
+            Self::Configured(authority) => {
+                if producer_identity != authority.producer_identity {
+                    return Err(DeploymentAdmissionError::ProducerMismatch);
+                }
+                if consumed_worker_identity != authority.consumed_worker_identity {
+                    return Err(DeploymentAdmissionError::WorkerMismatch);
+                }
+                Ok(AdmittedCompilerDeployment {
+                    producer_identity,
+                    consumed_worker_identity,
+                })
+            }
+        }
+    }
+}
+
+/// Bind and admit a compiler endpoint under an explicit configured deployment.
+/// Production callers should pass `CompilerDeploymentConfiguration::from_env()`
+/// and handle `Unknown` as refusal.
+pub fn bind_admitted_extract_endpoint(
+    configuration: &CompilerDeploymentConfiguration,
+) -> Result<
+    (
+        tidepool_extract_cmd::CompilerEndpoint,
+        ExtractLocation,
+        AdmittedCompilerDeployment,
+    ),
+    ToolchainError,
+> {
+    configuration.validate()?;
+    let (endpoint, location) = bind_unadmitted_extract_endpoint()?;
+    let admitted = configuration.admit(
+        *endpoint.identity().producer_bytes(),
+        *endpoint.identity().consumed_worker_bytes(),
+    )?;
+    Ok((endpoint, location, admitted))
+}
+
+/// An exact transport endpoint admitted by the configured deployment. Raw
+/// observation cannot construct a complete-cell producer capability.
+#[derive(Debug)]
+pub struct AdmittedCompilerEndpoint {
+    endpoint: tidepool_extract_cmd::CompilerEndpoint,
+    deployment: AdmittedCompilerDeployment,
+}
+
+impl AdmittedCompilerEndpoint {
+    pub fn from_bound(
+        endpoint: tidepool_extract_cmd::CompilerEndpoint,
+    ) -> Result<Self, ToolchainError> {
+        let deployment = admit_bound_endpoint(&endpoint)?;
+        Ok(Self {
+            endpoint,
+            deployment,
+        })
+    }
+    pub fn identity(&self) -> &tidepool_extract_cmd::CompilerIdentity {
+        self.endpoint.identity()
+    }
+    pub fn deployment(&self) -> &AdmittedCompilerDeployment {
+        &self.deployment
+    }
+    pub fn execute(
+        self,
+        command: &tidepool_extract_cmd::ExtractCmd,
+    ) -> Result<tidepool_extract_cmd::ExtractRun, tidepool_extract_cmd::SpawnError> {
+        self.endpoint.execute(command)
+    }
+    pub fn transaction(
+        self,
+    ) -> Result<tidepool_extract_cmd::CompilerTransaction, tidepool_extract_cmd::SpawnError> {
+        self.endpoint.transaction()
+    }
+}
+
+/// Admit an already-bound exact endpoint at the toolchain's compile entry
+/// points. Observation never supplies missing configured deployment evidence.
+pub fn admit_bound_endpoint(
+    endpoint: &tidepool_extract_cmd::CompilerEndpoint,
+) -> Result<AdmittedCompilerDeployment, ToolchainError> {
+    CompilerDeploymentConfiguration::from_env()?
+        .admit(
+            *endpoint.identity().producer_bytes(),
+            *endpoint.identity().consumed_worker_bytes(),
+        )
+        .map_err(Into::into)
 }
 
 // ---------------------------------------------------------------------------
@@ -905,6 +1127,48 @@ fn enforce_handshake_identity(
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    fn configured_deployment() -> CompilerDeploymentConfiguration {
+        CompilerDeploymentConfiguration::Configured(CompilerDeploymentAuthority {
+            schema: 1,
+            producer_identity: [3; 32],
+            consumed_worker_identity: [4; 32],
+            frontend_path: PathBuf::from("/configured/frontend"),
+            worker_path: PathBuf::from("/configured/worker"),
+            ghc_libdir: PathBuf::from("/configured/ghc/lib"),
+        })
+    }
+
+    #[test]
+    fn deployment_admission_rejects_unknown_authority() {
+        assert_eq!(
+            CompilerDeploymentConfiguration::Unknown.admit([3; 32], [4; 32]),
+            Err(DeploymentAdmissionError::Unknown)
+        );
+    }
+
+    #[test]
+    fn deployment_admission_rejects_a_producer_outside_configured_deployment() {
+        assert_eq!(
+            configured_deployment().admit([8; 32], [4; 32]),
+            Err(DeploymentAdmissionError::ProducerMismatch)
+        );
+    }
+
+    #[test]
+    fn deployment_admission_rejects_a_changed_consumed_worker() {
+        assert_eq!(
+            configured_deployment().admit([3; 32], [9; 32]),
+            Err(DeploymentAdmissionError::WorkerMismatch)
+        );
+    }
+
+    #[test]
+    fn configured_admission_preserves_both_original_and_consumed_identity() {
+        let accepted = configured_deployment().admit([3; 32], [4; 32]).unwrap();
+        assert_eq!(accepted.producer_identity, [3; 32]);
+        assert_eq!(accepted.consumed_worker_identity, [4; 32]);
+    }
 
     #[test]
     fn extractor_roles_are_not_interchangeable() {
