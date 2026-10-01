@@ -21,6 +21,7 @@ pub mod cell_plan;
 pub mod certified_products;
 pub mod checked_cell;
 mod compile_input;
+pub use compile_input::CompileInputError;
 mod declaration_context;
 pub mod declaration_join;
 pub mod diag;
@@ -61,6 +62,8 @@ pub enum CompileError {
     ExtractFailed(String),
     #[error("artifact inventory: {0}")]
     ArtifactInventory(#[from] crate::artifact_inventory::ArtifactInventoryError),
+    #[error("compiler input proof: {0}")]
+    CompileInput(#[from] CompileInputError),
     /// Compiler request inputs were refused before GHC source checking.
     #[error("compiler input rejected ({} diagnostic(s))", .0.len())]
     InputRejected(Vec<crate::diag::ExtractDiag>),

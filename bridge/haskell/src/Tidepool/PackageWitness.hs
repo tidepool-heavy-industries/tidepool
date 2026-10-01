@@ -1,18 +1,25 @@
 -- | Exact package selections shared by authored compiler evidence and joins.
 module Tidepool.PackageWitness
   ( PackageImportRoot(..), packageImportRoot, validatePackageImportRoot
-  , sealPackageImports, readPackageImports, encodePackageImports ) where
+  , sealPackageImports, readPackageImports, encodePackageImports
+  , packageInputClosure ) where
 
 import Codec.CBOR.Decoding
 import Codec.CBOR.Encoding
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (IOException, try, bracket)
-import Control.Monad (replicateM, unless, when)
+import Control.Monad (replicateM, unless, when, foldM)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Text qualified as T
+import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
+import GHC.Builtin.Names (gHC_PRIM)
+import GHC.Unit.Module.ModIface (mi_module, mi_usages, mi_deps)
+import GHC.Unit.Module.Deps (Usage(..), Dependencies(..))
+import Tidepool.FatIface (readExactInterface)
 import GHC.Driver.Config.Finder (initFinderOpts)
 import GHC.Driver.Env (HscEnv(..), hsc_HUG, hsc_units, hsc_home_unit_maybe, hsc_home_unit)
 import GHC.Unit.Env (HomeUnitEnv(..))
@@ -20,7 +27,7 @@ import GHC.Unit.Home (isHomeUnit)
 import GHC.Unit.Finder (InstalledFindResult(..), findExactModule)
 import GHC.Unit.Module (Module, moduleUnit, moduleName, moduleNameString, mkModule, mkModuleName)
 import GHC.Unit.Module.Location (ml_hi_file)
-import GHC.Unit.Types (unitString, stringToUnit, toUnitId)
+import GHC.Unit.Types (unitString, unitIdString, stringToUnit, toUnitId, GenWithIsBoot(..))
 import Numeric (showHex)
 import System.Directory (getFileSize, removeFile)
 import System.FilePath (isAbsolute, takeDirectory)
@@ -134,3 +141,65 @@ decodeRoots = do
 digest :: BS.ByteString -> String
 digest = concatMap (\byte -> let digits = showHex byte "" in replicate (2 - length digits) '0' ++ digits)
   . BS.unpack . SHA.hash
+
+-- | Inputs follow the exact installed interface graph, independently of which
+-- home bodies were projected. Warm EPS contents are not input authority.
+packageInputClosure :: HscEnv -> [PackageImportRoot]
+  -> IO (Either String [PackageImportRoot])
+packageInputClosure env roots = do
+  selected <- foldM addRoot (Right Map.empty) roots
+  case selected of
+    Left reason -> pure (Left reason)
+    Right required -> visit Map.empty required
+  where
+    key root = (packageUnit root, packageModule root)
+    addRoot (Left reason) _ = pure (Left reason)
+    addRoot (Right selected) root = pure $ case Map.lookup (key root) selected of
+      Just old | old /= root -> Left "conflicting checked package interface selection"
+      _ -> Right (Map.insert (key root) root selected)
+    visit done pending
+      | Map.null pending = pure (Right (Map.elems done))
+      | Map.size done + Map.size pending > 16384 = pure (Left "package input closure exceeds bound")
+      | otherwise = do
+          let ((ownerKey, expected), rest) = Map.deleteFindMin pending
+              owner = mkModule (stringToUnit (packageUnit expected)) (mkModuleName (packageModule expected))
+          before <- validatePackageImportRoot env expected
+          iface <- readExactInterface env owner
+          case (before, iface) of
+            (Right (), Right (interface, _)) | mi_module interface == owner -> do
+              after <- validatePackageImportRoot env expected
+              case after of
+                Left reason -> pure (Left reason)
+                Right () -> do
+                  let dependencies = Set.toAscList $ Set.fromList $
+                        concatMap usage (mi_usages interface)
+                        ++ [mkModule (stringToUnit (unitIdString unit)) (gwib_mod name)
+                           | (unit, name) <- Set.toList (dep_direct_mods (mi_deps interface))]
+                        ++ dep_orphs (mi_deps interface) ++ dep_finsts (mi_deps interface)
+                      known = Map.insert ownerKey expected done
+                  resolved <- foldM (dependency known) (Right rest) dependencies
+                  case resolved of
+                    Left reason -> pure (Left reason)
+                    Right next -> visit known next
+            _ -> pure (Left "exact package input interface is unavailable or changed")
+    dependency _ (Left reason) _ = pure (Left reason)
+    dependency known (Right pending) owner
+      | owner == gHC_PRIM = pure (Right pending)
+      | isHomeUnit (hsc_home_unit env) (moduleUnit owner) =
+          pure (Left "installed package input depends on an authored home owner")
+      | otherwise = case Map.lookup (unitString (moduleUnit owner), moduleNameString (moduleName owner)) known of
+          Just _ -> pure (Right pending)
+          Nothing -> do
+            root <- packageImportRoot env owner
+            case root of
+              Left reason -> pure (Left reason)
+              Right selected -> addRoot (Right pending) selected
+    usage UsagePackageModule{usg_mod = owner} = [owner]
+    usage UsageHomeModule{usg_mod_name = name, usg_unit_id = unit} =
+      [mkModule (stringToUnit (unitIdString unit)) name]
+    usage UsageHomeModuleInterface{usg_mod_name = name, usg_unit_id = unit} =
+      [mkModule (stringToUnit (unitIdString unit)) name]
+    usage UsageMergedRequirement{usg_mod = owner} = [owner]
+    -- Installed package inputs consume the resulting .hi, not the source
+    -- files used to build that package. Their fingerprints remain in its bytes.
+    usage UsageFile{} = []

@@ -133,6 +133,7 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         // malformed extractor artifact or impossible internal request shape.
         CompileError::ExtractFailed(_)
         | CompileError::ArtifactInventory(_)
+        | CompileError::CompileInput(_)
         | CompileError::ModulePackage(_) => {
             FailureEnvelope::new(FailureClass::VersionSkew, Phase::Compile, err.to_string())
         }

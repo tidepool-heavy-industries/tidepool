@@ -69,6 +69,274 @@ fn same_sites(left: &[YieldSite], right: &[YieldSite]) -> bool {
     left == right
 }
 
+/// Failure to authenticate the compiler's complete consumed package inputs.
+#[derive(Debug, thiserror::Error)]
+pub enum CompileInputError {
+    #[error("compiler input proof unavailable: {}", path.display())]
+    Unavailable { path: PathBuf },
+    #[error("malformed or oversized compiler input proof")]
+    Malformed,
+    #[error("unsupported compiler input proof version {found}; expected 1")]
+    UnsupportedVersion { found: u64 },
+    #[error("compiler input proof belongs to different dependency evidence")]
+    DependencyMismatch,
+    #[error("compiler input proof lacks exact checked module coverage")]
+    OwnerCoverage,
+    #[error("compiler input proof source differs for {unit}:{module}")]
+    SourceMismatch { unit: String, module: String },
+    #[error("compiler input proof does not support SOURCE boot owner {unit}:{module}")]
+    UnsupportedBoot { unit: String, module: String },
+    #[error("compiler input proof omits package import {imported} of {unit}:{module}")]
+    MissingPackageImport {
+        unit: String,
+        module: String,
+        imported: String,
+    },
+    #[error("compiler input proof has conflicting package selection for {unit}:{module}")]
+    PackageConflict { unit: String, module: String },
+    #[error("compiler input closure omits a checked package root")]
+    IncompleteClosure,
+    #[error("compiler input package interface changed: {}", path.display())]
+    InterfaceChanged { path: PathBuf },
+}
+
+#[derive(Debug)]
+pub(crate) struct ValidatedInputPackages {
+    interfaces: BTreeMap<(String, String), PackageInterfaceWitness>,
+    direct: Vec<((String, String), Vec<(String, String)>)>,
+}
+
+impl ValidatedInputPackages {
+    #[cfg(test)]
+    pub(crate) fn fixture(interfaces: BTreeMap<(String, String), PackageInterfaceWitness>) -> Self {
+        Self {
+            interfaces,
+            direct: Vec::new(),
+        }
+    }
+
+    pub(crate) fn read(
+        path: &Path,
+        evidence_bytes: &[u8],
+        evidence: &DependencyEvidence,
+    ) -> Result<Self, CompileInputError> {
+        use std::io::Read;
+        let file = std::fs::File::open(path)
+            .map_err(|_| CompileInputError::Unavailable { path: path.into() })?;
+        let mut bytes = Vec::new();
+        file.take((4 << 20) + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| CompileInputError::Unavailable { path: path.into() })?;
+        Self::decode(&bytes, evidence_bytes, evidence)
+    }
+
+    fn decode(
+        bytes: &[u8],
+        evidence_bytes: &[u8],
+        evidence: &DependencyEvidence,
+    ) -> Result<Self, CompileInputError> {
+        use ciborium::value::Value;
+        if bytes.len() > 4 << 20 {
+            return Err(CompileInputError::Malformed);
+        }
+        let mut cursor = std::io::Cursor::new(bytes);
+        let value: Value = ciborium::de::from_reader_with_recursion_limit(&mut cursor, 16)
+            .map_err(|_| CompileInputError::Malformed)?;
+        if cursor.position() != bytes.len() as u64 {
+            return Err(CompileInputError::Malformed);
+        }
+        let header = proof_row(&value, 4)?;
+        if proof_string(&header[0])? != "TPCINPUT" {
+            return Err(CompileInputError::Malformed);
+        }
+        let version: u64 = header[1]
+            .as_integer()
+            .and_then(|n| n.try_into().ok())
+            .ok_or(CompileInputError::Malformed)?;
+        if version != 1 {
+            return Err(CompileInputError::UnsupportedVersion { found: version });
+        }
+        if proof_hash(&header[2])? != <[u8; 32]>::from(Sha256::digest(evidence_bytes)) {
+            return Err(CompileInputError::DependencyMismatch);
+        }
+        let body = header[3].as_array().ok_or(CompileInputError::Malformed)?;
+        if body.first().and_then(Value::as_text) == Some("unsupported-boot") {
+            let owners = proof_row(&header[3], 2)?[1]
+                .as_array()
+                .ok_or(CompileInputError::Malformed)?;
+            let first = owners.first().ok_or(CompileInputError::Malformed)?;
+            let owner = proof_owner(first)?;
+            return Err(CompileInputError::UnsupportedBoot {
+                unit: owner.0,
+                module: owner.1,
+            });
+        }
+        let body = proof_row(&header[3], 3)?;
+        if proof_string(&body[0])? != "checked" {
+            return Err(CompileInputError::Malformed);
+        }
+        let rows = body[1].as_array().ok_or(CompileInputError::Malformed)?;
+        if rows.len() > 4096 {
+            return Err(CompileInputError::Malformed);
+        }
+        let sources: BTreeMap<_, _> = evidence
+            .sources
+            .iter()
+            .map(|source| (&source.path, &source.sha256))
+            .collect();
+        let mut expected = BTreeMap::new();
+        for module in &evidence.modules {
+            if module.boot {
+                return Err(CompileInputError::UnsupportedBoot {
+                    unit: module.unit.clone(),
+                    module: module.module.clone(),
+                });
+            }
+            if expected
+                .insert((module.unit.clone(), module.module.clone()), module)
+                .is_some()
+            {
+                return Err(CompileInputError::OwnerCoverage);
+            }
+        }
+        let interfaces = proof_packages(&body[2])?;
+        let mut direct = BTreeMap::new();
+        for row in rows {
+            let row = proof_row(row, 3)?;
+            let owner = proof_owner(&row[0])?;
+            let module = expected
+                .get(&owner)
+                .ok_or(CompileInputError::OwnerCoverage)?;
+            if sources.get(&module.source).copied().map(String::as_str)
+                != Some(proof_string(&row[1])?)
+            {
+                return Err(CompileInputError::SourceMismatch {
+                    unit: owner.0,
+                    module: owner.1,
+                });
+            }
+            let roots = proof_packages(&row[2])?;
+            for (package, witness) in &roots {
+                if interfaces.get(package) != Some(witness) {
+                    return Err(CompileInputError::IncompleteClosure);
+                }
+            }
+            for imported in module
+                .imports
+                .iter()
+                .filter(|imported| imported.selected.is_none())
+            {
+                let matches = roots.keys().any(|(unit, name)| {
+                    name == &imported.module
+                        && match &imported.qualifier {
+                            crate::cache::ImportQualifier::Unqualified => true,
+                            crate::cache::ImportQualifier::ThisUnit(required)
+                            | crate::cache::ImportQualifier::OtherUnit(required) => {
+                                unit == required
+                            }
+                        }
+                });
+                if !matches {
+                    return Err(CompileInputError::MissingPackageImport {
+                        unit: owner.0.clone(),
+                        module: owner.1.clone(),
+                        imported: imported.module.clone(),
+                    });
+                }
+            }
+            if direct
+                .insert(owner, roots.into_keys().collect::<Vec<_>>())
+                .is_some()
+            {
+                return Err(CompileInputError::OwnerCoverage);
+            }
+        }
+        if direct.keys().ne(expected.keys()) {
+            return Err(CompileInputError::OwnerCoverage);
+        }
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        for witness in interfaces.values() {
+            validation
+                .verify(&witness.selected_path, &witness.sha256)
+                .map_err(|_| CompileInputError::InterfaceChanged {
+                    path: witness.selected_path.clone(),
+                })?;
+        }
+        Ok(Self {
+            interfaces,
+            direct: direct.into_iter().collect(),
+        })
+    }
+}
+
+fn proof_row(
+    value: &ciborium::value::Value,
+    len: usize,
+) -> Result<&[ciborium::value::Value], CompileInputError> {
+    value
+        .as_array()
+        .filter(|row| row.len() == len)
+        .map(Vec::as_slice)
+        .ok_or(CompileInputError::Malformed)
+}
+fn proof_string(value: &ciborium::value::Value) -> Result<&str, CompileInputError> {
+    value
+        .as_text()
+        .filter(|s| !s.is_empty())
+        .ok_or(CompileInputError::Malformed)
+}
+fn proof_owner(value: &ciborium::value::Value) -> Result<(String, String), CompileInputError> {
+    let row = proof_row(value, 2)?;
+    Ok((proof_string(&row[0])?.into(), proof_string(&row[1])?.into()))
+}
+fn proof_hash(value: &ciborium::value::Value) -> Result<[u8; 32], CompileInputError> {
+    let text = proof_string(value)?;
+    if text.len() != 64
+        || !text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(CompileInputError::Malformed);
+    }
+    let mut hash = [0; 32];
+    for (i, byte) in hash.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16)
+            .map_err(|_| CompileInputError::Malformed)?;
+    }
+    Ok(hash)
+}
+fn proof_packages(
+    value: &ciborium::value::Value,
+) -> Result<BTreeMap<(String, String), PackageInterfaceWitness>, CompileInputError> {
+    let rows = value
+        .as_array()
+        .filter(|rows| rows.len() <= 16384)
+        .ok_or(CompileInputError::Malformed)?;
+    let mut packages = BTreeMap::new();
+    for row in rows {
+        let row = proof_row(row, 4)?;
+        let owner = (
+            proof_string(&row[0])?.to_owned(),
+            proof_string(&row[1])?.to_owned(),
+        );
+        let path = PathBuf::from(proof_string(&row[2])?);
+        if !path.is_absolute() {
+            return Err(CompileInputError::Malformed);
+        }
+        let witness = PackageInterfaceWitness {
+            selected_path: path,
+            sha256: proof_hash(&row[3])?,
+        };
+        if packages.insert(owner.clone(), witness).is_some() {
+            return Err(CompileInputError::PackageConflict {
+                unit: owner.0,
+                module: owner.1,
+            });
+        }
+    }
+    Ok(packages)
+}
+
 #[derive(Serialize)]
 struct InputRecipe<'a> {
     version: &'static str,
@@ -80,6 +348,7 @@ struct InputRecipe<'a> {
     modules: Vec<ModuleInput<'a>>,
     resolutions: Vec<&'a ResolutionEvidence>,
     packages: Vec<&'a str>,
+    package_roots: &'a [((String, String), Vec<(String, String)>)],
     package_interfaces: Vec<(&'a (String, String), &'a Path, [u8; 32])>,
 }
 
@@ -102,7 +371,7 @@ fn input_identity(
     producer: &[u8],
     include: &[PathBuf],
     evidence: &DependencyEvidence,
-    packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    packages: &ValidatedInputPackages,
     source: &str,
     target: &str,
 ) -> Result<String, CompileError> {
@@ -112,7 +381,7 @@ fn input_identity(
     // Map tuple keys cannot be serialized as a JSON object. Preserve the full
     // authenticated closure, including instance/family-only package imports.
     let recipe = InputRecipe {
-        version: "tidepool-compile-input-v1",
+        version: "tidepool-compile-input-v2",
         producer,
         source,
         target,
@@ -133,7 +402,9 @@ fn input_identity(
         ),
         resolutions: canonical_rows(evidence.resolutions.iter().collect()),
         packages: package_units,
+        package_roots: &packages.direct,
         package_interfaces: packages
+            .interfaces
             .iter()
             .map(|(owner, witness)| (owner, witness.selected_path.as_path(), witness.sha256))
             .collect(),
@@ -141,7 +412,7 @@ fn input_identity(
     let bytes = serde_json::to_vec(&recipe)
         .map_err(|error| CompileError::ExtractFailed(format!("compile input recipe: {error}")))?;
     Ok(format!(
-        "tidepool-compile-input-v1:{:x}",
+        "tidepool-compile-input-v2:{:x}",
         Sha256::digest(bytes)
     ))
 }
@@ -151,7 +422,7 @@ pub(crate) fn seal(
     producer: &[u8],
     include: &[PathBuf],
     evidence: &DependencyEvidence,
-    packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    packages: &ValidatedInputPackages,
     source: &str,
     target: &str,
     prepared: &Arc<PreparedProgram>,
@@ -212,6 +483,27 @@ pub(crate) fn seal(
 mod tests {
     use super::*;
     use crate::cache::{ImportQualifier, ModuleEvidence, ProductAvailability, SourceEvidence};
+
+    fn identity(
+        producer: &[u8],
+        include: &[PathBuf],
+        evidence: &DependencyEvidence,
+        packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+        source: &str,
+        target: &str,
+    ) -> Result<String, CompileError> {
+        input_identity(
+            producer,
+            include,
+            evidence,
+            &ValidatedInputPackages {
+                interfaces: packages.clone(),
+                direct: Vec::new(),
+            },
+            source,
+            target,
+        )
+    }
 
     fn evidence() -> DependencyEvidence {
         DependencyEvidence {
@@ -285,8 +577,8 @@ mod tests {
         let first = input_at(first.path());
         let second = input_at(second.path());
         assert_eq!(
-            input_identity(b"producer", &[], &first, &BTreeMap::new(), source, "root").unwrap(),
-            input_identity(b"producer", &[], &second, &BTreeMap::new(), source, "root").unwrap()
+            identity(b"producer", &[], &first, &BTreeMap::new(), source, "root").unwrap(),
+            identity(b"producer", &[], &second, &BTreeMap::new(), source, "root").unwrap()
         );
     }
 
@@ -305,7 +597,7 @@ mod tests {
                         include: &[PathBuf],
                         producer: &[u8],
                         packages: &BTreeMap<_, _>| {
-            input_identity(
+            identity(
                 producer,
                 include,
                 evidence,
@@ -352,5 +644,192 @@ mod tests {
             expected,
             identity(&evidence, &include, b"producer", &changed_packages)
         );
+    }
+    fn package_packet(
+        evidence: &DependencyEvidence,
+        raw: &[u8],
+        packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    ) -> ciborium::value::Value {
+        use ciborium::value::Value;
+        let text = |s: String| Value::Text(s);
+        let package_rows = || {
+            Value::Array(
+                packages
+                    .iter()
+                    .map(|((unit, module), witness)| {
+                        Value::Array(vec![
+                            text(unit.clone()),
+                            text(module.clone()),
+                            text(witness.selected_path.to_string_lossy().into()),
+                            text(format!(
+                                "{:x}",
+                                Sha256::digest(std::fs::read(&witness.selected_path).unwrap())
+                            )),
+                        ])
+                    })
+                    .collect(),
+            )
+        };
+        let rows = evidence
+            .modules
+            .iter()
+            .map(|module| {
+                Value::Array(vec![
+                    Value::Array(vec![text(module.unit.clone()), text(module.module.clone())]),
+                    text(
+                        evidence
+                            .sources
+                            .iter()
+                            .find(|source| source.path == module.source)
+                            .unwrap()
+                            .sha256
+                            .clone(),
+                    ),
+                    package_rows(),
+                ])
+            })
+            .collect();
+        Value::Array(vec![
+            text("TPCINPUT".into()),
+            Value::Integer(1.into()),
+            text(format!("{:x}", Sha256::digest(raw))),
+            Value::Array(vec![
+                text("checked".into()),
+                Value::Array(rows),
+                package_rows(),
+            ]),
+        ])
+    }
+    fn packet_bytes(value: &ciborium::value::Value) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(value, &mut bytes).unwrap();
+        bytes
+    }
+    fn packet_fixture(
+        root: &Path,
+    ) -> (
+        DependencyEvidence,
+        BTreeMap<(String, String), PackageInterfaceWitness>,
+    ) {
+        let mut evidence = evidence();
+        evidence.modules[0].imports.clear();
+        evidence.resolutions.clear();
+        evidence.modules[0].imports.push(ModuleImportEvidence {
+            qualifier: ImportQualifier::OtherUnit("package".into()),
+            module: "Facade".into(),
+            boot: false,
+            selected: None,
+        });
+        let packages = ["Facade", "Orphan", "Family"]
+            .into_iter()
+            .map(|module| {
+                let path = root.join(format!("{module}.hi"));
+                std::fs::write(&path, module).unwrap();
+                (
+                    ("package".into(), module.into()),
+                    PackageInterfaceWitness {
+                        selected_path: path,
+                        sha256: Sha256::digest(module).into(),
+                    },
+                )
+            })
+            .collect();
+        (evidence, packages)
+    }
+    #[test]
+    fn compile_input_packet_binds_output_but_ignores_optional_product_availability() {
+        let root = tempfile::tempdir().unwrap();
+        let (cold, packages) = packet_fixture(root.path());
+        let mut warm = cold.clone();
+        warm.modules[0].product = ProductAvailability::InterfaceOnly;
+        let cold_raw = serde_json::to_vec(&cold).unwrap();
+        let warm_raw = serde_json::to_vec(&warm).unwrap();
+        let cold_packet = packet_bytes(&package_packet(&cold, &cold_raw, &packages));
+        let warm_packet = packet_bytes(&package_packet(&warm, &warm_raw, &packages));
+        assert_ne!(cold_packet, warm_packet);
+        let cold_proof = ValidatedInputPackages::decode(&cold_packet, &cold_raw, &cold).unwrap();
+        let warm_proof = ValidatedInputPackages::decode(&warm_packet, &warm_raw, &warm).unwrap();
+        assert_eq!(
+            input_identity(b"producer", &[], &cold, &cold_proof, "same source", "root").unwrap(),
+            input_identity(b"producer", &[], &warm, &warm_proof, "same source", "root").unwrap()
+        );
+        assert!(matches!(
+            ValidatedInputPackages::decode(&cold_packet, &warm_raw, &warm),
+            Err(CompileInputError::DependencyMismatch)
+        ));
+        let mut changed = warm.clone();
+        changed.modules[0].imports[0].qualifier =
+            ImportQualifier::OtherUnit("other-package".into());
+        assert_ne!(
+            input_identity(b"producer", &[], &cold, &cold_proof, "same source", "root").unwrap(),
+            input_identity(
+                b"producer",
+                &[],
+                &changed,
+                &warm_proof,
+                "same source",
+                "root"
+            )
+            .unwrap()
+        );
+    }
+    #[test]
+    fn compile_input_packet_refuses_missing_owners_roots_and_versions() {
+        use ciborium::value::Value;
+        let root = tempfile::tempdir().unwrap();
+        let (evidence, packages) = packet_fixture(root.path());
+        let raw = serde_json::to_vec(&evidence).unwrap();
+        let value = package_packet(&evidence, &raw, &packages);
+        let mut missing = value.clone();
+        missing.as_array_mut().unwrap()[3].as_array_mut().unwrap()[1] = Value::Array(vec![]);
+        assert!(matches!(
+            ValidatedInputPackages::decode(&packet_bytes(&missing), &raw, &evidence),
+            Err(CompileInputError::OwnerCoverage)
+        ));
+        let mut missing = value.clone();
+        missing.as_array_mut().unwrap()[3].as_array_mut().unwrap()[1]
+            .as_array_mut()
+            .unwrap()[0]
+            .as_array_mut()
+            .unwrap()[2] = Value::Array(vec![]);
+        assert!(matches!(
+            ValidatedInputPackages::decode(&packet_bytes(&missing), &raw, &evidence),
+            Err(CompileInputError::MissingPackageImport { .. })
+        ));
+        let mut missing = value.clone();
+        missing.as_array_mut().unwrap()[3].as_array_mut().unwrap()[2] = Value::Array(vec![]);
+        assert!(matches!(
+            ValidatedInputPackages::decode(&packet_bytes(&missing), &raw, &evidence),
+            Err(CompileInputError::IncompleteClosure)
+        ));
+        let mut version = value.clone();
+        version.as_array_mut().unwrap()[1] = Value::Integer(2.into());
+        assert!(matches!(
+            ValidatedInputPackages::decode(&packet_bytes(&version), &raw, &evidence),
+            Err(CompileInputError::UnsupportedVersion { found: 2 })
+        ));
+        assert!(matches!(
+            ValidatedInputPackages::decode(b"not cbor", &raw, &evidence),
+            Err(CompileInputError::Malformed)
+        ));
+        assert!(matches!(
+            ValidatedInputPackages::read(&root.path().join("missing"), &raw, &evidence),
+            Err(CompileInputError::Unavailable { .. })
+        ));
+    }
+    #[test]
+    fn compile_input_packet_checks_transitive_orphan_and_family_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let (evidence, packages) = packet_fixture(root.path());
+        let raw = serde_json::to_vec(&evidence).unwrap();
+        let bytes = packet_bytes(&package_packet(&evidence, &raw, &packages));
+        for module in ["Orphan", "Family"] {
+            let path = root.path().join(format!("{module}.hi"));
+            std::fs::write(&path, "changed").unwrap();
+            assert!(
+                matches!(ValidatedInputPackages::decode(&bytes,&raw,&evidence),Err(CompileInputError::InterfaceChanged{path:p}) if p==path)
+            );
+            std::fs::write(&path, module).unwrap();
+        }
     }
 }

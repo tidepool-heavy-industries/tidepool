@@ -85,7 +85,7 @@ import GHC.Core.Class (className)
 import GHC.Core.InstEnv (is_cls, is_tys)
 import GHC.Core.FamInstEnv (fi_fam, fi_tys)
 import GHC.Core.Predicate (mkClassPred, getClassPredTys_maybe)
-import GHC.Builtin.Names (fUNTyConKey, unrestrictedFunTyConKey, genClassKey, repTyConKey)
+import GHC.Builtin.Names (gHC_PRIM, fUNTyConKey, unrestrictedFunTyConKey, genClassKey, repTyConKey)
 import GHC.Builtin.Types (zonkAnyTyCon)
 import GHC.Core.DataCon (dataConOrigArgTys, dataConName)
 import GHC.Types.FieldLabel (flLabel)
@@ -1234,20 +1234,20 @@ data GutsMemoEntry = GutsMemoEntry
 data ModuleObservation
   = CachedObservation ModSummary GutsMemoEntry
   | FreshObservation ModuleFront
-  | HydratedObservation ModSummary HomeModInfo
+  | HydratedObservation ModSummary HomeModInfo [PackageImportRoot]
 
 observationSummary :: ModuleObservation -> ModSummary
 observationSummary (CachedObservation summary _) = summary
 observationSummary (FreshObservation front) = mfSummary front
-observationSummary (HydratedObservation summary _) = summary
+observationSummary (HydratedObservation summary _ _) = summary
 
 observationFacts :: ModuleObservation -> IO ModuleFacts
 observationFacts (CachedObservation _ entry) = pure (payloadFacts (gmePayload entry))
 observationFacts (FreshObservation front) = frontFacts front
-observationFacts (HydratedObservation _ hmi) = pure ModuleFacts
+observationFacts (HydratedObservation _ hmi roots) = pure ModuleFacts
   { moduleFactTyCons = typeEnvTyCons (md_types (hm_details hmi))
   , moduleFactReferences = Set.empty
-  , moduleFactPackageRoots = []
+  , moduleFactPackageRoots = roots
   , moduleFactHasDependentFiles = False
   , moduleFactQuasiQuoteOrigins = NoQuasiQuotes
   }
@@ -1258,7 +1258,7 @@ observationLacksBody (CachedObservation _ entry) = case gmePayload entry of
   ValidationOnly _ -> True
   ExecutableProduct _ -> False
 observationLacksBody (FreshObservation _) = True
-observationLacksBody (HydratedObservation _ _) = False
+observationLacksBody (HydratedObservation _ _ _) = False
 
 payloadFacts :: MemoPayload -> ModuleFacts
 payloadFacts (ValidationOnly facts) = facts
@@ -1287,7 +1287,7 @@ requireProduct _ _ Nothing _ = liftIO $ ioError $ userError
 observationFront :: ModuleObservation -> Maybe ModuleFront
 observationFront (CachedObservation _ _) = Nothing
 observationFront (FreshObservation front) = Just front
-observationFront (HydratedObservation _ _) = Nothing
+observationFront (HydratedObservation _ _ _) = Nothing
 
 -- Resolved direct imports include unused, instance-only and compiler-inserted
 -- package imports; interface dependencies alone do not retain that boundary.
@@ -1296,7 +1296,7 @@ directPackageImportRoots env tcg = do
   let imported = Map.keys (imp_mods (tcg_imports tcg))
       selected = [owner | owner <- imported
         , not (isHomeUnit (hsc_home_unit env) (moduleUnit owner))
-        , moduleNameString (moduleName owner) /= "GHC.Prim"]
+        , owner /= gHC_PRIM]
   roots <- forM selected $ \owner -> do
     witness <- packageImportRoot env owner
     either (ioError . userError . ("direct package import unavailable: " ++)) pure witness
@@ -1964,7 +1964,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 cpBeforeModule plan modSum
                 let mn = ms_mod_name modSum
                 case Map.lookup mn acceptedCandidates of
-                  Just _ -> do
+                  Just (_, roots) -> do
                     hmi <- case lookupHpt (hsc_HPT certifiedEnv) mn of
                       Just value -> pure value
                       Nothing -> liftIO $ ioError $ userError
@@ -1973,7 +1973,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                     recordExecutableValidity modSum True
                     when captureProducts $ liftIO $
                       modifyIORef' productInterfacesRef (Map.insert mn (hm_iface hmi))
-                    pure (HydratedObservation modSum hmi, Nothing, Nothing)
+                    pure (HydratedObservation modSum hmi roots, Nothing, Nothing)
                   Nothing -> do
                     cached <- lookupValidMemo modSum
                     case cached of
@@ -2156,7 +2156,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                       memoMissTrace modSum reason (Just entry)
                       compileReachable interfaceUse modSum moduleFacts
                     FreshObservation _ -> compileReachable interfaceUse modSum moduleFacts
-                    HydratedObservation _ _ -> compileReachable interfaceUse modSum moduleFacts
+                    HydratedObservation _ _ _ -> compileReachable interfaceUse modSum moduleFacts
                   -- Not reachable, resident memo active: complete the entry with
                   -- a body and its interface anyway, and return nothing to this
                   -- request's output. The session tier ('OptimizeEveryModule')
@@ -2174,7 +2174,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                         CachedObservation _ entry ->
                           not (interfaceReady interfaceUse modSum entry)
                         FreshObservation _ -> True
-                        HydratedObservation _ _ -> True) then do
+                        HydratedObservation _ _ _ -> True) then do
                     (attempt, ms) <- timeSection $ reifyGhc $ \session ->
                       try (reflectGhc (compileReachable interfaceUse modSum moduleFacts) session)
                         :: IO (Either SomeException [(ModuleOutput, Maybe PreparedModule)])
@@ -2196,7 +2196,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                       pure []
                     -- Without a memo, only dependency and type facts are needed.
                     FreshObservation _ -> validationOnly modSum moduleFacts >> pure []
-                    HydratedObservation _ _ -> validationOnly modSum moduleFacts >> pure []
+                    HydratedObservation _ _ _ -> validationOnly modSum moduleFacts >> pure []
               (completed, completedMs) <- liftIO (readIORef completionRef)
               -- Nested under lowering (which already counts this work), so
               -- flat-sum readers do not double count it.
@@ -2306,8 +2306,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           productInterfaces <- liftIO (readIORef productInterfacesRef)
           let packageRoots = Map.fromList
                 [(ms_mod_name (observationSummary observation), moduleFactPackageRoots facts)
-                | (observation, facts) <- zip observations moduleFacts
-                , case observation of HydratedObservation _ _ -> False; _ -> True]
+                | (observation, facts) <- zip observations moduleFacts]
           pure (pipelineResult, preparedModules, dependencies, productInterfaces, packageRoots)
     let compileChecked :: Ghc CheckedEnvironmentResult
         compileChecked = do
@@ -2330,7 +2329,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 && (isNothing (pvExactScope variant) || ms_mod_name summary `Map.member` acceptedCandidates)
               then do
                 forM_ loaded $ \hmi -> do
-                  facts <- liftIO (observationFacts (HydratedObservation summary hmi))
+                  facts <- liftIO (observationFacts (HydratedObservation summary hmi (maybe [] snd (Map.lookup (ms_mod_name summary) acceptedCandidates))))
                   liftIO (modifyIORef' checkedFactsRef ((ms_mod_name summary, facts) :))
                 pure Nothing
               else do
@@ -2384,7 +2383,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           case [(tcg, probes) | Just (tcg, probes) <- checked] of
             [(tcg, probes)] -> do
               env <- getSession
-              valid <- liftIO (revalidateAcceptedCandidates (Map.elems acceptedCandidates))
+              valid <- liftIO (revalidateAcceptedCandidates (map fst (Map.elems acceptedCandidates)))
               unless valid $ liftIO $ ioError $ userError
                 "accepted metadata candidate changed before checked receipt"
               forM_ exactCompilation $ \compilation -> do
@@ -2418,7 +2417,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           }
       PreparedProducts _ -> do
         (result, modules, dependencies, productInterfaces, packageRoots) <- compileExecutable
-        valid <- liftIO $ revalidateAcceptedCandidates (Map.elems acceptedCandidates)
+        valid <- liftIO $ revalidateAcceptedCandidates (map fst (Map.elems acceptedCandidates))
         when (not valid) $ liftIO $ ioError $ userError
           "accepted module candidate changed before artifact publication"
         pure PreparedPipelineResult
@@ -2427,7 +2426,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           , pprDependencies = dependencies
           , pprProductInterfaces = productInterfaces
           , pprPackageRoots = packageRoots
-          , pprAcceptedCandidates = Map.elems acceptedCandidates
+          , pprAcceptedCandidates = map fst (Map.elems acceptedCandidates)
           , pprExactCompilation = exactCompilation
           }
       CheckedEnvironment -> compileChecked
@@ -2460,7 +2459,7 @@ captureDependencySources graph = do
 -- and every interface in a closed home dependency set must agree in this
 -- transaction before any source module can be skipped.
 certifyModuleCandidates
-  :: FilePath -> ModuleGraph -> FilePath -> Ghc (Map.Map ModuleName ModuleCandidate)
+  :: FilePath -> ModuleGraph -> FilePath -> Ghc (Map.Map ModuleName (ModuleCandidate, [PackageImportRoot]))
 certifyModuleCandidates manifest graph targetPath = do
   decoded <- liftIO (readModuleCandidates manifest)
   case decoded of
@@ -2531,19 +2530,19 @@ certifyModuleCandidates manifest graph targetPath = do
                           case resolved of
                             Found _ owner
                               | isHomeUnit (hsc_home_unit env) (moduleUnit owner)
-                                || moduleNameString (moduleName owner) == "GHC.Prim" ->
+                                || owner == gHC_PRIM ->
                                   pure (Right Nothing)
                               | otherwise -> fmap Just <$> packageImportRoot env owner
                             _ -> pure (Left "direct import does not resolve")
                         pure $ recorded && case sequence selectedImports of
                           Left _ -> False
                           Right selected -> all (`elem` roots) (catMaybes selected)
-                    pure $ case inspected of
-                      Right (evidence, fingerprint)
+                    pure $ case (inspected, packageWitness) of
+                      (Right (evidence, fingerprint), Right roots)
                         | dependencySourceSha256 evidence == candidateSourceSha256 candidate
                         , fingerprint == ms_hs_hash summary
                         , packageSelected ->
-                            Just (ms_mod_name summary, (candidate, summary, node))
+                            Just (ms_mod_name summary, (candidate, summary, node, roots))
                       _ -> Nothing
           _ -> pure Nothing
       let initial = Map.fromList preflight
@@ -2560,14 +2559,14 @@ certifyModuleCandidates manifest graph targetPath = do
               Just node -> all (`Map.member` selected) (requiredHome node)
                 && all (`Map.member` bootSummaries) (requiredBoot node)
               Nothing -> False
-          shrink selected = Map.filterWithKey (\name (_, _, node) ->
+          shrink selected = Map.filterWithKey (\name (_, _, node, _) ->
             all (`Map.member` selected) (requiredHome node)
               && all (bootClosed selected) (requiredBoot node)
               && (not (Map.member name bootSummaries) || bootClosed selected name)) selected
           closed selected = let smaller = shrink selected in
             if Map.keysSet smaller == Map.keysSet selected then smaller else closed smaller
           admitted = closed initial
-          artifact (candidate, _, node) = ExactIfaceArtifact
+          artifact (candidate, _, node, _) = ExactIfaceArtifact
             (candidateUnit candidate) (candidateModule candidate)
             (candidateInterface candidate) (candidateInterfaceSha256 candidate)
             [ (candidateUnit candidate, moduleNameString requirement)
@@ -2587,12 +2586,12 @@ certifyModuleCandidates manifest graph targetPath = do
                   let canonicalLoadGraph = mapMG (\summary -> summary
                         { ms_hspp_opts = canonicalizeRepresentationFlags (ms_hspp_opts summary) }) graph
                   hydratedResult <- hydrateCandidateHomeProducts env canonicalLoadGraph interfaces
-                    [summary | (_,summary,_) <- Map.elems admitted] selectedBoots
+                    [summary | (_,summary,_,_) <- Map.elems admitted] selectedBoots
                   case hydratedResult of
                     Left _ -> pure Map.empty
                     Right hydrated -> do
                       setSession hydrated
-                      pure (Map.map (\(candidate, _, _) -> candidate) admitted)
+                      pure (Map.map (\(candidate, _, _, roots) -> (candidate, roots)) admitted)
 
 revalidateAcceptedCandidates :: [ModuleCandidate] -> IO Bool
 revalidateAcceptedCandidates candidates = and <$> forM candidates (\candidate -> do

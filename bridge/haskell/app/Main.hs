@@ -77,6 +77,7 @@ import Tidepool.PreparedStg
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots )
 import Tidepool.ModuleCandidates (ModuleCandidate(..))
+import Tidepool.CompileInput (writeCompileInputProof)
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
@@ -1135,6 +1136,10 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
     originalProducts <- timePhase timing "module_products" $
       writeCertifiedProductsKeeping outDir hscEnv prepared productContext preparedArtifacts
+    when (not (requestCell args) && not (requestActivationPreview args)
+        && null (requestInjectVals args) && not (isJust (requestSessionArtifacts args))
+        && Map.null (requestRetainedGenerations args)) $
+      writeCompileInputProof outDir hscEnv (pprDependencies prepared) (pprPackageRoots prepared)
     -- Mutable turns never enter the artifact cache, but publication must
     -- still reject source changes observed during this compilation.
     validateDependencyEvidence (pprDependencies prepared)

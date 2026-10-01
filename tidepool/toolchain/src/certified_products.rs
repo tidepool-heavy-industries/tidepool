@@ -3166,7 +3166,7 @@ mod tests {
             b"admitted-producer",
             &[],
             &evidence(source),
-            &packages,
+            &crate::compile_input::ValidatedInputPackages::fixture(packages.clone()),
             source,
             "root",
             &target,
