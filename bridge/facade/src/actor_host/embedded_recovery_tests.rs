@@ -428,12 +428,7 @@ async fn production_startup_and_cold_successor_preserve_bound_conversation_witho
         std::fs::read_to_string(root.join("first.calls")).unwrap(),
         old_calls
     );
-    input(
-        second_ready["address"].as_str().unwrap(),
-        &new,
-        None,
-    )
-    .await;
+    input(second_ready["address"].as_str().unwrap(), &new, None).await;
     wait_calls(root, "second").await;
     assert_eq!(
         std::fs::read_to_string(root.join("second.calls")).unwrap(),
@@ -825,7 +820,7 @@ async fn production_cold_successor_executes_retained_original_declaration_in_fre
     let initial_actor: ActorRef = serde_json::from_value(initial["actor"].clone()).unwrap();
     let initial_identity =
         embedded_recovery::host_identity(&root.join("run"), "/root", initial_actor);
-    let cookie = input(
+    input(
         initial["address"].as_str().unwrap(),
         &initial_identity,
         None,
@@ -931,7 +926,7 @@ async fn production_cold_successor_executes_retained_original_declaration_in_fre
     input(
         current["address"].as_str().unwrap(),
         &current_identity,
-        Some(&cookie),
+        None,
     )
     .await;
     cell_settled(root, "execute-original", &mut recovered).await;
