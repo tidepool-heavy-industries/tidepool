@@ -37,7 +37,7 @@ pub struct SourceLiteral {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(super) struct SourceLiteralOwner {
+pub(crate) struct SourceLiteralOwner {
     pub owner: CachedHomeOwner,
     pub original_ordinal: u32,
     pub binder: SourceBinder,
