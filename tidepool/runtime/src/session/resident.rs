@@ -7247,7 +7247,6 @@ mod authored_publication_tests {
         drop(compiled);
         drop(checked);
         drop(first);
-        drop(snapshot);
         drop(reservation);
         drop(prefix);
         drop(execution);

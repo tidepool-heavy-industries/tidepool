@@ -507,7 +507,7 @@ pub(crate) struct ExactCompilationRequest {
 #[derive(Clone)]
 struct GeneratedScaffoldImportAuthority {
     owner: tidepool_repr::execution_schema::CachedHomeOwner,
-    import_lines: BTreeSet<usize>,
+    protected_templates: Arc<[String]>,
 }
 
 const GENERATED_RESUME_IMPORT: &str = "import qualified Tidepool.Internal.Resume as TidepoolResume";
@@ -537,7 +537,18 @@ impl GeneratedScaffoldImportAuthority {
             .enumerate()
             .filter_map(|(line, text)| (text == GENERATED_RESUME_IMPORT).then_some(line + 1))
             .collect::<Vec<_>>();
-        if lines.len() != 1 || !self.import_lines.contains(&lines[0]) {
+        // GHC inserts admitted pragmas/imports before rendering the protected
+        // recipe. Its captured occurrence is therefore derived from rendered
+        // bytes, while both protected and rendered inputs must contain it once.
+        if lines.len() != 1
+            || !self.protected_templates.iter().any(|template| {
+                template
+                    .lines()
+                    .filter(|line| *line == GENERATED_RESUME_IMPORT)
+                    .count()
+                    == 1
+            })
+        {
             return false;
         }
         context.artifact_view().entries().iter().any(|entry| {
@@ -677,20 +688,18 @@ impl ExactCompilationRequest {
         mut self,
         templates: impl IntoIterator<Item = &'a str>,
     ) -> Self {
-        let import_lines = templates
+        let protected_templates = templates
             .into_iter()
-            .filter_map(|template| {
-                let lines = template
+            .filter(|template| {
+                template
                     .lines()
-                    .enumerate()
-                    .filter_map(|(line, text)| {
-                        (text == GENERATED_RESUME_IMPORT).then_some(line + 1)
-                    })
-                    .collect::<Vec<_>>();
-                (lines.len() == 1).then(|| lines[0])
+                    .filter(|line| *line == GENERATED_RESUME_IMPORT)
+                    .count()
+                    == 1
             })
-            .collect::<BTreeSet<_>>();
-        if !import_lines.is_empty() {
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if !protected_templates.is_empty() {
             let originals = self.context.artifact_view().entries();
             let owners = originals
                 .iter()
@@ -707,7 +716,7 @@ impl ExactCompilationRequest {
             if let [owner] = owners.as_slice() {
                 self.generated_scaffold_imports = Some(GeneratedScaffoldImportAuthority {
                     owner: (*owner).clone(),
-                    import_lines,
+                    protected_templates: protected_templates.into(),
                 });
             }
         }
@@ -3316,7 +3325,9 @@ mod tests {
         };
         let authority = GeneratedScaffoldImportAuthority {
             owner: owners[0].clone(),
-            import_lines: BTreeSet::from([2]),
+            protected_templates: Arc::from([format!(
+                "module Expr where\n{GENERATED_RESUME_IMPORT}\n"
+            )]),
         };
         let target = directory.path().join("Expr.hs");
         let source = format!("module Expr where\n{GENERATED_RESUME_IMPORT}\n");
@@ -3377,8 +3388,15 @@ mod tests {
         ] {
             assert!(!permits(&source, &target, unit, module, qualifier, boot));
         }
+        assert!(permits(
+            &format!("{{-# LANGUAGE GADTs #-}}\n{source}"),
+            &target,
+            &owners[0].unit,
+            &owners[0].module,
+            "none",
+            false
+        ));
         for changed in [
-            format!("\n{source}"),
             format!("{source}{GENERATED_RESUME_IMPORT}\n"),
             source.replace(" as TidepoolResume", " as Other"),
         ] {
