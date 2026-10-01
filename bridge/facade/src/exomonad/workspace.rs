@@ -40,6 +40,43 @@ pub(super) struct PromptConfig {
     pub files: BTreeMap<String, PathBuf>,
 }
 
+/// A deployed standard library keeps its final immutable source location.
+/// The catalog identity authenticates its compiler and original module products;
+/// this record pins the run's selection and grants no native value authority.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DeploymentSourceRoot {
+    version: u32,
+    root: PathBuf,
+    source_pin: String,
+    producer_identity: String,
+    catalog_identity: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RuntimeStdlib {
+    Captured { root: PathBuf },
+    Deployment { selection: DeploymentSourceRoot },
+}
+
+impl Default for RuntimeStdlib {
+    fn default() -> Self {
+        Self::Captured {
+            root: PathBuf::new(),
+        }
+    }
+}
+
+impl RuntimeStdlib {
+    fn root(&self) -> &Path {
+        match self {
+            Self::Captured { root } => root,
+            Self::Deployment { selection } => &selection.root,
+        }
+    }
+}
+
 /// Captured workspace inputs. Actor launch and compilation use only this run's
 /// materialized paths and bytes, never the mutable workspace configuration.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -65,7 +102,7 @@ pub struct FrozenWorkspace {
     #[serde(default)]
     core_identity: String,
     #[serde(default)]
-    runtime_stdlib: PathBuf,
+    runtime_stdlib: RuntimeStdlib,
     #[serde(default)]
     runtime_actors: PathBuf,
     /// Detect added Haskell modules as well as edits to recorded files.
@@ -79,7 +116,7 @@ impl FrozenWorkspace {
         let manifest = directory.join("selection.json");
         if manifest.exists() {
             let frozen: Self = serde_json::from_slice(&std::fs::read(&manifest)?)?;
-            if frozen.version != 2 {
+            if frozen.version != 3 {
                 return Err("unsupported frozen workspace format; start a new swarm".into());
             }
             if frozen.library_identity != crate::haskell_sources::source_identity()? {
@@ -95,8 +132,8 @@ impl FrozenWorkspace {
             }
             let capture_root = directory.canonicalize()?;
             for (root, sentinel) in [
-                (&frozen.runtime_stdlib, "Tidepool/Prelude.hs"),
-                (&frozen.runtime_actors, "Tidepool/Check.hs"),
+                (frozen.runtime_stdlib.root(), "Tidepool/Prelude.hs"),
+                (frozen.runtime_actors.as_path(), "Tidepool/Check.hs"),
             ] {
                 if !root.canonicalize()?.starts_with(&capture_root)
                     || !root.join(sentinel).is_file()
@@ -106,7 +143,10 @@ impl FrozenWorkspace {
             }
             let captured_identity = tidepool_toolchain::cache::source_roots_identity(
                 crate::haskell_sources::DEV_SOURCE_DOMAIN,
-                &[frozen.runtime_stdlib.clone(), frozen.runtime_actors.clone()],
+                &[
+                    frozen.runtime_stdlib.root().to_path_buf(),
+                    frozen.runtime_actors.clone(),
+                ],
             )?;
             if captured_identity != frozen.runtime_capture_identity {
                 return Err("frozen runtime library source changed".into());
@@ -261,7 +301,7 @@ impl FrozenWorkspace {
         );
         include.push(directory.join("resources"));
         let frozen = Self {
-            version: 2,
+            version: 3,
             identity,
             include,
             modules: config.haskell.modules,
@@ -274,7 +314,9 @@ impl FrozenWorkspace {
             config: config_text,
             library_identity,
             core_identity,
-            runtime_stdlib: captured[0].clone(),
+            runtime_stdlib: RuntimeStdlib::Captured {
+                root: captured[0].clone(),
+            },
             runtime_actors: captured[1].clone(),
             runtime_capture_identity: runtime_identity,
         };
@@ -287,7 +329,7 @@ impl FrozenWorkspace {
     }
 
     pub(crate) fn runtime_stdlib(&self) -> &Path {
-        &self.runtime_stdlib
+        self.runtime_stdlib.root()
     }
 
     pub(crate) fn runtime_actors(&self) -> &Path {
