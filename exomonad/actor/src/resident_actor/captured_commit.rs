@@ -10,6 +10,7 @@ struct Continuation {
     continuation: ResidentHole,
     group: crate::ForkGroupId,
     owns_group: bool,
+    committed_authority: Option<Arc<crate::lineage::CommittedForkGroups>>,
 }
 
 pub(super) struct PreparedCapturedCommit {
@@ -104,6 +105,7 @@ where
             continuation,
             group,
             owns_group,
+            committed_authority: None,
         },
         readiness,
     }
@@ -175,7 +177,10 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    let ReadyCapturedCommit { frame, readiness } = ready;
+    let ReadyCapturedCommit {
+        mut frame,
+        readiness,
+    } = ready;
     let release = match readiness {
         Readiness::Interrupted => Release::Interrupted,
         Readiness::Rejected(detail) => Release::Rejected(detail),
@@ -199,26 +204,40 @@ where
                     &descriptors,
                 ) {
                     Err(error) => Release::Rejected(error.to_string()),
-                    Ok(authority) => Release::Published(PendingForkPublication {
-                        boundary: frame.publication.boundary().cloned(),
-                        phase: PendingForkPublicationPhase::Committed(Arc::new(authority)),
-                        releases: descriptors
-                            .into_iter()
-                            .map(|(child, descriptor)| {
-                                (
-                                    child,
-                                    descriptor.placement().session,
-                                    descriptor.placement().lexical_scope,
-                                )
-                            })
-                            .collect(),
-                        unused_scopes: Vec::new(),
-                    }),
+                    Ok(authority) => {
+                        let authority = Arc::new(authority);
+                        frame.committed_authority = Some(Arc::clone(&authority));
+                        Release::Published(PendingForkPublication {
+                            boundary: frame.publication.boundary().cloned(),
+                            phase: PendingForkPublicationPhase::Committed(authority),
+                            releases: descriptors
+                                .into_iter()
+                                .map(|(child, descriptor)| {
+                                    (
+                                        child,
+                                        descriptor.placement().session,
+                                        descriptor.placement().lexical_scope,
+                                    )
+                                })
+                                .collect(),
+                            unused_scopes: Vec::new(),
+                        })
+                    }
                 }
             }
         }
     };
     CapturedCommitRelease { frame, release }
+}
+
+/// Retain original committed custody before any external release can be abandoned.
+pub(super) fn retain_release(
+    pending: &mut Vec<PendingForkPublication>,
+    release: &CapturedCommitRelease,
+) {
+    if let Release::Published(publication) = &release.release {
+        pending.push(publication.clone());
+    }
 }
 
 pub(super) async fn await_release<H, O>(
@@ -251,6 +270,11 @@ pub(super) fn retain_completed(
     completed: CompletedCapturedCommit,
 ) -> CapturedCommitResume {
     let CompletedCapturedCommit { frame, completed } = completed;
+    if let Some(original) = &frame.committed_authority {
+        pending.retain(|publication| {
+            !matches!(&publication.phase, PendingForkPublicationPhase::Committed(authority) if Arc::ptr_eq(authority, original))
+        });
+    }
     let outcome = match completed {
         Completion::Interrupted => Resume::Interrupted,
         Completion::Rejected(detail) => Resume::Rejected(detail),

@@ -1643,6 +1643,7 @@ impl ForkPublication {
     }
 }
 
+#[derive(Clone)]
 struct PendingForkPublication {
     boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
     phase: PendingForkPublicationPhase,
@@ -1654,6 +1655,7 @@ struct PendingForkPublication {
     unused_scopes: Vec<(tidepool_repr::SessionId, tidepool_codegen::scope::ScopeId)>,
 }
 
+#[derive(Clone)]
 enum PendingForkPublicationPhase {
     Prepared(Vec<crate::ForkGroupId>),
     Committed(Arc<crate::lineage::CommittedForkGroups>),
@@ -8883,7 +8885,10 @@ where
         kernel: &KernelContext,
         ready: captured_commit::ReadyCapturedCommit,
     ) -> captured_commit::CapturedCommitRelease {
-        captured_commit::apply_ready(&self.environment, kernel, &self.descriptor, ready)
+        let release =
+            captured_commit::apply_ready(&self.environment, kernel, &self.descriptor, ready);
+        captured_commit::retain_release(&mut self.pending_fork_publications, &release);
+        release
     }
 
     fn settle_captured_commit(
