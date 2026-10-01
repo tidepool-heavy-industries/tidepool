@@ -55,9 +55,8 @@ redPreserved = do
     , "integrationProbe <- R.start (R.withWorktree (worktreeId integration) Fixture.mergeProbe)"
     ]
   void $ turn owner $ Text.unlines
-    [ "import qualified Tidepool.Effects.Core as Core"
-    , "let commandAt :: Member Core.Actor effects => R.ActorHandle Fixture.MergeProbe -> [Text] -> Eff effects Cmd.RunResult; commandAt probe args = R.call (Fixture.probeCommand (R.client probe)) args"
-    , "let gitAt :: Member Core.Actor effects => R.ActorHandle Fixture.MergeProbe -> [Text] -> Eff effects Cmd.RunResult; gitAt probe args = commandAt probe ([\"git\"] ++ args)"
+    [ "let commandAt :: R.ActorHandle Fixture.MergeProbe -> [Text] -> Eff RootEffects Cmd.RunResult; commandAt probe args = R.call (Fixture.probeCommand (R.client probe)) args"
+    , "let gitAt :: R.ActorHandle Fixture.MergeProbe -> [Text] -> Eff RootEffects Cmd.RunResult; gitAt probe args = commandAt probe ([\"git\"] ++ args)"
     , "reflogBefore <- gitAt integrationProbe [\"reflog\", \"--format=%gs\"]"
     , "sourceEdit <- commandAt sourceProbe [\"sh\", \"-c\", \"printf 'candidate\\n' > red-preserved.txt\"]"
     , "sourceAdded <- gitAt sourceProbe [\"add\", \"--\", \"red-preserved.txt\"]"
