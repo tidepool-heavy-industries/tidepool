@@ -3860,6 +3860,100 @@ mod module_product_tests {
     #[test]
     #[ignore = "requires matched Haskell worker and frontend"]
     #[serial_test::serial]
+    fn real_deployment_package_reuses_cohort_and_invalidates_source_shadow() {
+        let package = crate::toolchain::configured_module_package()
+            .unwrap()
+            .expect("requires the Nix-built runtime-stdlib-products catalog");
+        let source_root = package.source_root().to_owned();
+        let catalog: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(std::env::var_os(crate::toolchain::ENV_COMPILER_MODULES).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        let cohort: std::collections::BTreeSet<_> = catalog["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|module| {
+                let root = Path::new(catalog["output_root"].as_str().unwrap());
+                let owner: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(root.join(module["owner"]["path"].as_str().unwrap())).unwrap(),
+                )
+                .unwrap();
+                owner["module"].as_str().unwrap().to_owned()
+            })
+            .collect();
+        assert!(cohort.contains("Tidepool.Prelude"));
+        assert!(cohort.contains("Tidepool.FilePath"));
+        for variable in ["TIDEPOOL_COMPILE_CACHE_DIR", "TIDEPOOL_BUILD_PRODUCTS_DIR"] {
+            let directory =
+                PathBuf::from(std::env::var_os(variable).expect("isolated empty cache"));
+            assert_eq!(std::fs::read_dir(directory).unwrap().count(), 0);
+        }
+        let source = include_str!("../tests/fixtures/deployment-module-package/Consumer.hs");
+        let original = compile_targets(source, &["result"], &[source_root.clone()], |_, _, _| {})
+            .expect("fresh-process packaged cohort reuse");
+        let cached: std::collections::BTreeSet<_> = original
+            .certified_groups
+            .iter()
+            .filter(|group| group.origin() == ProductOrigin::Cached)
+            .map(|group| group.owner().module.clone())
+            .collect();
+        assert!(cached.contains("Tidepool.Prelude"));
+        assert!(cached.contains("Tidepool.FilePath"));
+        assert!(original
+            .certified_groups
+            .iter()
+            .all(|group| !cohort.contains(&group.owner().module)
+                || group.origin() == ProductOrigin::Cached));
+        let owners: std::collections::BTreeMap<_, _> = original
+            .certified_groups
+            .iter()
+            .filter(|group| cohort.contains(&group.owner().module))
+            .map(|group| (group.owner().module.clone(), group.owner().clone()))
+            .collect();
+        let shadow = tempfile::tempdir().unwrap();
+        std::fs::create_dir(shadow.path().join("Tidepool")).unwrap();
+        let mut changed = std::fs::read(source_root.join("Tidepool/FilePath.hs")).unwrap();
+        changed.extend_from_slice(b"\n-- higher-priority source witness\n");
+        std::fs::write(shadow.path().join("Tidepool/FilePath.hs"), changed).unwrap();
+        let shadowed = compile_targets(
+            source,
+            &["result"],
+            &[shadow.path().to_owned(), source_root],
+            |_, _, _| {},
+        )
+        .unwrap();
+        for module in ["Tidepool.FilePath", "Tidepool.Prelude"] {
+            assert!(
+                shadowed
+                    .certified_groups
+                    .iter()
+                    .any(|group| group.owner().module == module
+                        && group.origin() == ProductOrigin::Fresh),
+                "{module} and its importer must be rebuilt"
+            );
+            assert!(!shadowed
+                .certified_groups
+                .iter()
+                .any(|group| group.owner().module == module
+                    && group.origin() == ProductOrigin::Cached));
+        }
+        assert!(
+            shadowed
+                .certified_groups
+                .iter()
+                .any(|group| group.origin() == ProductOrigin::Cached
+                    && owners.get(&group.owner().module) == Some(group.owner())),
+            "an unaffected original owner survives source shadowing"
+        );
+        eprintln!("deployment catalog {}: {} packaged modules, {} cached owners; shadowed FilePath and Prelude rebuilt",
+            package.catalog_identity(), cohort.len(), cached.len());
+    }
+
+    #[test]
+    #[ignore = "requires matched Haskell worker and frontend"]
+    #[serial_test::serial]
     fn real_worker_reuses_dependency_after_consumer_changes() {
         let cache = tempfile::tempdir().unwrap();
         let old_cache = std::env::var_os("TIDEPOOL_COMPILE_CACHE_DIR");
