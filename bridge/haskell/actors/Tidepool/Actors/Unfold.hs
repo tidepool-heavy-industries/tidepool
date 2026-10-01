@@ -832,11 +832,8 @@ spawnWatched label path planned = do
 -- inspection-only workspace, and a descendant budget of zero), and it is
 -- started invocation-owned, so unfinished work ends with the invocation.
 --
--- Deliberately NOT 'unfold'. A question needs no fork group, no source
--- checkpoint, no @git worktree add@, and no wait for the enclosing cell to
--- return before the child may start; @plans\/jev-lab\/child-startup-costs.md@
--- is what each of those costs. Use 'unfold' when the child must inherit this
--- conversation or own a checkout. Use 'errand' to ask.
+-- The direct launch uses a fresh context and the caller's checkout. Use
+-- 'unfold' when the child needs an explicit capture or a managed checkout.
 --
 -- The reply is prose, not a record: read it off the returned watch with
 -- @pollWatch@, then @settledValue@ on the settlement. That is the whole of
