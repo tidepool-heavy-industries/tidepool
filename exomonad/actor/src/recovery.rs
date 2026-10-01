@@ -239,13 +239,45 @@ pub struct RootStartupManifestPin {
     pub checksum: String,
     pub high_water: u64,
     pub content_blake3: String,
+    pub public_content_blake3: String,
+    pub public_owner: tidepool_runtime::session::RecoveryPublicOwner,
 }
 
 impl RootStartupManifestPin {
-    pub fn capture(path: &Path) -> std::io::Result<Self> {
+    pub fn capture_for_owner(
+        path: &Path,
+        owner: &tidepool_runtime::session::RecoveryPublicOwner,
+    ) -> std::io::Result<Self> {
         let bytes = std::fs::read(path)?;
         let value: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
+        let mut public_content = value.clone();
+        let owner_value = serde_json::to_value(owner).map_err(std::io::Error::other)?;
+        let surfaces = public_content
+            .get_mut("public_surfaces")
+            .and_then(serde_json::Value::as_array_mut)
+            .ok_or_else(|| std::io::Error::other("manifest public surfaces are absent"))?;
+        let mut matched = 0;
+        for surface in surfaces {
+            if surface.get("owner") == Some(&owner_value) {
+                matched += 1;
+                let surface = surface
+                    .as_object_mut()
+                    .ok_or_else(|| std::io::Error::other("invalid public surface"))?;
+                surface.remove("owner");
+                surface.remove("epoch");
+            }
+        }
+        if matched != 1 {
+            return Err(std::io::Error::other(
+                "manifest requires exactly one pinned public owner",
+            ));
+        }
+        public_content
+            .as_object_mut()
+            .ok_or_else(|| std::io::Error::other("invalid manifest"))?
+            .remove("checksum");
+        let public_content = serde_json::to_vec(&public_content).map_err(std::io::Error::other)?;
         Ok(Self {
             path: path.canonicalize()?,
             checksum: value
@@ -258,6 +290,8 @@ impl RootStartupManifestPin {
                 .and_then(serde_json::Value::as_u64)
                 .ok_or_else(|| std::io::Error::other("manifest high water is absent"))?,
             content_blake3: blake3::hash(&bytes).to_hex().to_string(),
+            public_content_blake3: blake3::hash(&public_content).to_hex().to_string(),
+            public_owner: owner.clone(),
         })
     }
 
@@ -265,7 +299,7 @@ impl RootStartupManifestPin {
         if self.path.canonicalize()?.parent() != Some(run_root.canonicalize()?.as_path()) {
             return Ok(false);
         }
-        Ok(&Self::capture(&self.path)? == self)
+        Ok(&Self::capture_for_owner(&self.path, &self.public_owner)? == self)
     }
 }
 
@@ -274,6 +308,7 @@ impl RootStartupManifestPin {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RootStartupIntent {
+    pub bootstrap_identity: String,
     pub predecessor: Option<ActorRef>,
     pub manifest_predecessor: Option<ActorRef>,
     pub manifest: Option<RootStartupManifestPin>,
@@ -818,6 +853,11 @@ fn validate_startup(
     let Some(startup) = startup else {
         return Ok(());
     };
+    if startup.bootstrap_identity.is_empty() {
+        return Err(std::io::Error::other(
+            "startup requires its exact compiled bootstrap identity",
+        ));
+    }
     if startup.manifest_predecessor.is_some() != startup.manifest.is_some() {
         return Err(std::io::Error::other(
             "startup manifest predecessor and exact revision pin must be paired",
@@ -841,7 +881,10 @@ fn validate_startup(
         if previous == admission.actor
             || prior.admission.actor_path != admission.actor_path
             || prior.admission.role != "root"
-            || prior.startup.is_none()
+            || prior
+                .startup
+                .as_ref()
+                .is_none_or(|intent| intent.bootstrap_identity != startup.bootstrap_identity)
             || records.values().any(|record| {
                 record
                     .startup
@@ -857,6 +900,21 @@ fn validate_startup(
             .application
             .as_ref()
             .ok_or_else(|| std::io::Error::other("startup predecessor application is absent"))?;
+        if prior_application.conversation.is_none() {
+            if let Some(original) = prior
+                .startup
+                .as_ref()
+                .and_then(|intent| intent.manifest.as_ref())
+            {
+                if startup.manifest.as_ref().is_none_or(|manifest| {
+                    manifest.public_content_blake3 != original.public_content_blake3
+                }) {
+                    return Err(std::io::Error::other(
+                        "unactivated startup rollforward changed original public content",
+                    ));
+                }
+            }
+        }
         if prior_application.binding_path != startup.binding_path
             || prior_application.accepted_source != startup.accepted_source
         {
@@ -865,6 +923,19 @@ fn validate_startup(
             ));
         }
         for owner in startup.manifest_predecessor {
+            if records
+                .get(&owner)
+                .and_then(|record| owner_for_admission(&record.admission))
+                .as_ref()
+                != startup
+                    .manifest
+                    .as_ref()
+                    .map(|manifest| &manifest.public_owner)
+            {
+                return Err(std::io::Error::other(
+                    "startup manifest pin owner differs from admitted predecessor",
+                ));
+            }
             if !startup_chain_contains(records, previous, owner) {
                 return Err(std::io::Error::other(
                     "manifest owner is outside the exact startup chain",
@@ -1444,6 +1515,17 @@ mod tests {
         drop(ActorRecoveryJournal::open(&initialized).unwrap());
         ActorRecoveryJournal::open_existing(&initialized).unwrap();
     }
+    fn write_manifest(
+        path: &Path,
+        owner: &tidepool_runtime::session::RecoveryPublicOwner,
+        checksum: &str,
+        high_water: u64,
+    ) {
+        let value = serde_json::json!({ "checksum": checksum, "high_water": high_water,
+            "public_surfaces": [{ "owner": owner, "epoch": 1, "declaration_root": null, "bindings": [], "source_instances": [] }] });
+        std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+
     fn startup_intent(
         actor: ActorRef,
         binding: &Path,
@@ -1453,6 +1535,7 @@ mod tests {
         store_predecessor: Option<ApplicationConversation>,
     ) -> RootStartupIntent {
         RootStartupIntent {
+            bootstrap_identity: "compiled-bootstrap".into(),
             predecessor,
             manifest_predecessor,
             manifest,
@@ -1544,12 +1627,14 @@ mod tests {
         journal
             .bind_application_conversation(old, initial.conversation.clone())
             .unwrap();
+        let old_owner = tidepool_runtime::session::RecoveryPublicOwner::new(&path, 1).unwrap();
+        write_manifest(&manifest, &old_owner, "exact-revision", 7);
         let successor = startup_intent(
             next,
             &binding,
             Some(old),
             Some(old),
-            Some(RootStartupManifestPin::capture(&manifest).unwrap()),
+            Some(RootStartupManifestPin::capture_for_owner(&manifest, &old_owner).unwrap()),
             Some(initial.conversation.clone()),
         );
         journal
@@ -1558,7 +1643,6 @@ mod tests {
         let proof = journal
             .certify_root_successor(old, placement.clone(), Some("source"), &binding)
             .unwrap();
-        let old_owner = tidepool_runtime::session::RecoveryPublicOwner::new(&path, 1).unwrap();
         assert!(proof
             .validate_successor(
                 run.path(),
@@ -1603,7 +1687,7 @@ mod tests {
         assert!(journal
             .certify_root_successor(old, placement.clone(), Some("different-source"), &binding)
             .is_err());
-        std::fs::write(&manifest, br#"{"checksum":"changed","high_water":7}"#).unwrap();
+        write_manifest(&manifest, &old_owner, "changed", 7);
         assert!(!proof
             .validate_successor(
                 run.path(),
@@ -1621,15 +1705,29 @@ mod tests {
         let journal = ActorRecoveryJournal::open(run.path().join("actors.jsonl")).unwrap();
         let binding = run.path().join("binding.json");
         let manifest = run.path().join("root-declarations.json");
-        std::fs::write(&manifest, br#"{"checksum":"revision","high_water":0}"#).unwrap();
-        let pin = RootStartupManifestPin::capture(&manifest).unwrap();
+        let old_owner = tidepool_runtime::session::RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root").unwrap(),
+            1,
+        )
+        .unwrap();
+        write_manifest(&manifest, &old_owner, "revision", 0);
+        let pin = RootStartupManifestPin::capture_for_owner(&manifest, &old_owner).unwrap();
         let root = descriptor("root")
             .with_effective_role(EffectiveRole::root())
             .with_actor_path(tidepool_repr::ActorPath::parse("root").unwrap());
         let a = ActorRef::first(ActorId(1));
-        let b = ActorRef::first(ActorId(5));
-        let c = ActorRef::first(ActorId(9));
-        let d = ActorRef::first(ActorId(11));
+        let b = ActorRef {
+            id: ActorId(5),
+            incarnation: Incarnation(4),
+        };
+        let c = ActorRef {
+            id: ActorId(9),
+            incarnation: Incarnation(12),
+        };
+        let d = ActorRef {
+            id: ActorId(11),
+            incarnation: Incarnation(28),
+        };
         let initial = startup_intent(a, &binding, None, None, None, None);
         journal
             .admit_with_startup(a, &root, &[], Some(initial.clone()))
@@ -1692,6 +1790,13 @@ mod tests {
                 ))
             )
             .is_err());
+        let c_owner = tidepool_runtime::session::RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root").unwrap(),
+            12,
+        )
+        .unwrap();
+        write_manifest(&manifest, &c_owner, "new-owner-revision", 0);
+        let c_pin = RootStartupManifestPin::capture_for_owner(&manifest, &c_owner).unwrap();
         assert!(journal
             .admit_with_startup(
                 d,
@@ -1702,7 +1807,7 @@ mod tests {
                     &binding,
                     Some(c),
                     Some(c),
-                    Some(pin),
+                    Some(c_pin),
                     Some(third.conversation)
                 ))
             )
