@@ -56,4 +56,7 @@ main = do
   unless (fmap invocationIdentity (modelReceipt result) == Just "i") (error "missing receipt")
   unless (jsonSchema (Proxy @(Maybe Int)) == object [("anyOf", Array [jsonSchema (Proxy @Int), object [("type", String "null")]])]) (error "Maybe schema omits null")
   unless (jsonSchema (Proxy @[Maybe Int]) == object [("type", String "array"), ("items", jsonSchema (Proxy @(Maybe Int)))]) (error "array optional schema drift")
+  unless (jsonSchema (Proxy @Reply) == object
+    [("type", String "object"), ("properties", object [("count", jsonSchema (Proxy @Int)), ("optional", jsonSchema (Proxy @(Maybe Text)))]), ("required", Array [String "count"]), ("additionalProperties", Bool False)])
+    (error "record optional field omits null or becomes required")
   putStrLn "model DSL: callbacks, caller effects, retained hook, typed result, nullable schemas passed"

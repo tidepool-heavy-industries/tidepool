@@ -6,7 +6,7 @@ use harness::{
         InvocationOptions, Limits, Step,
     },
     item::Item,
-    model::{AgentPath, Effort},
+    model::{AgentPath, Effort, OperationId},
     store::Store,
     transport::Auth,
     turn::JobScheduler,
@@ -64,7 +64,7 @@ enum Pending {
 struct Entry {
     invocation: Invocation,
     pending: Option<Pending>,
-    calls: HashMap<String, (String, Value)>,
+    calls: HashMap<OperationId, (String, Value)>,
     closing: Arc<AtomicBool>,
 }
 struct Registered {
@@ -206,9 +206,11 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelService<A, C> 
                         .map_err(|_| transport_error("callback continuation closed"))?;
                     return self.next(token, entry);
                 }
-                let value = json!({"kind":"callback","invocation":token,"call_id":callback.call_id,"name":callback.name,"arguments":callback.arguments});
+                let call_id = serde_json::to_string(&callback.operation)
+                    .map_err(|error| transport_error(error.to_string()))?;
+                let value = json!({"kind":"callback","invocation":token,"call_id":call_id,"name":callback.name,"arguments":callback.arguments});
                 entry.calls.insert(
-                    callback.call_id.clone(),
+                    callback.operation.clone(),
                     (callback.name.clone(), callback.arguments.clone()),
                 );
                 entry.pending = Some(Pending::Callback(callback));
@@ -220,7 +222,7 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelService<A, C> 
                         .map_err(|_| transport_error("hook continuation closed"))?;
                     return self.next(token, entry);
                 }
-                let Some((name, arguments)) = entry.calls.get(&hook.operation.call.0) else {
+                let Some((name, arguments)) = entry.calls.get(&hook.operation) else {
                     entry.invocation.close();
                     self.registry.lock().unwrap().remove(token);
                     return Err(transport_error("hook has no admitted callback"));
@@ -275,9 +277,12 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
             seconds: request.limits.seconds.unwrap_or(self.policy.limits.seconds),
         };
         for tool in &request.tools {
-            if tool.kind == exomonad_tool::ToolKind::Raw {
+            if !matches!(
+                tool.kind,
+                exomonad_tool::ToolKind::Call | exomonad_tool::ToolKind::Notify
+            ) {
                 return Err(rejected(
-                    "raw tools are not supported by bounded model calls",
+                    "bounded model calls support only Call and Notify tools",
                 ));
             }
             if tool.input_schema["type"] != "object" {
@@ -355,7 +360,9 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
     ) -> Result<Value, ModelBoundaryError> {
         let entry = self.entry(caller, token)?;
         let mut entry = entry.lock().unwrap();
-        if !matches!(&entry.pending, Some(Pending::Callback(callback)) if callback.call_id == call_id)
+        let operation: OperationId =
+            serde_json::from_str(call_id).map_err(|error| rejected(error.to_string()))?;
+        if !matches!(&entry.pending, Some(Pending::Callback(callback)) if callback.operation == operation)
         {
             return Err(rejected(
                 "callback identity does not match pending continuation",
@@ -541,8 +548,10 @@ mod tests {
         assert!(service.budget.get().is_none());
         assert!(service.registry.lock().unwrap().is_empty());
         let mut invalid = request(false);
-        invalid["tools"][0]["kind"] = json!("raw");
-        assert!(service.start(caller, invalid).is_err());
+        for kind in ["raw", "update", "finish"] {
+            invalid["tools"][0]["kind"] = json!(kind);
+            assert!(service.start(caller, invalid.clone()).is_err());
+        }
         let mut invalid = request(false);
         invalid["tools"][0]["inputSchema"] = json!({"type":"string"});
         assert!(service.start(caller, invalid).is_err());
@@ -574,14 +583,73 @@ mod tests {
         let nested = service.start(caller, request(false)).unwrap();
         assert_eq!(nested["receipt"]["outcome"]["kind"], "text");
         let finished = service
-            .resume(caller, token, "call-1", json!("nested result"))
+            .resume(
+                caller,
+                token,
+                first["call_id"].as_str().unwrap(),
+                json!("nested result"),
+            )
             .unwrap();
         assert_eq!(finished["receipt"]["parent_cell"], "retained-cell");
         assert_eq!(finished["receipt"]["outcome"]["kind"], "exhausted");
         assert!(finished["receipt"].get("transcript").is_none());
         assert!(service
-            .resume(caller, token, "call-1", json!("duplicate"))
+            .resume(
+                caller,
+                token,
+                first["call_id"].as_str().unwrap(),
+                json!("duplicate")
+            )
             .is_err());
+    }
+    #[test]
+    fn reused_provider_call_ids_cannot_resume_a_later_operation() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let service = service(
+            &runtime,
+            vec![vec![callback(), callback(), final_turn()]],
+            Limits::default(),
+        );
+        let caller = PrincipalId::new(1, 2);
+        let first = service.start(caller, request(true)).unwrap();
+        let token = first["invocation"].as_str().unwrap();
+        let first_id = first["call_id"].as_str().unwrap();
+        let first_hook = service
+            .resume(caller, token, first_id, json!("first"))
+            .unwrap();
+        let second = service
+            .annotate(
+                caller,
+                token,
+                first_hook["operation"].as_str().unwrap(),
+                json!({"kind":"none"}),
+            )
+            .unwrap();
+        let second_id = second["call_id"].as_str().unwrap();
+        assert_ne!(first_id, second_id);
+        let first_operation: OperationId = serde_json::from_str(first_id).unwrap();
+        let second_operation: OperationId = serde_json::from_str(second_id).unwrap();
+        assert_eq!(first_operation.call, second_operation.call);
+        assert_ne!(first_operation.request, second_operation.request);
+        assert!(service
+            .resume(caller, token, first_id, json!("late duplicate"))
+            .is_err());
+        assert!(service
+            .resume(caller, token, "call-1", json!("unqualified"))
+            .is_err());
+        let second_hook = service
+            .resume(caller, token, second_id, json!("second"))
+            .unwrap();
+        assert_eq!(second_hook["operation"], second["call_id"]);
+        let finished = service
+            .annotate(
+                caller,
+                token,
+                second_hook["operation"].as_str().unwrap(),
+                json!({"kind":"none"}),
+            )
+            .unwrap();
+        assert_eq!(finished["receipt"]["outcome"]["kind"], "text");
     }
     #[test]
     fn pruning_requires_the_exact_retained_handle() {
@@ -595,7 +663,12 @@ mod tests {
         let first = service.start(caller, request(true)).unwrap();
         let token = first["invocation"].as_str().unwrap();
         let hook = service
-            .resume(caller, token, "call-1", json!("original"))
+            .resume(
+                caller,
+                token,
+                first["call_id"].as_str().unwrap(),
+                json!("original"),
+            )
             .unwrap();
         assert_eq!(hook["kind"], "hook");
         let operation = hook["operation"].as_str().unwrap();
@@ -642,7 +715,12 @@ mod tests {
         service.cancel();
         assert!(service.start(caller, request(false)).is_err());
         let finished = service
-            .resume(caller, token, "call-1", json!("completed after close"))
+            .resume(
+                caller,
+                token,
+                first["call_id"].as_str().unwrap(),
+                json!("completed after close"),
+            )
             .unwrap();
         assert_eq!(finished["receipt"]["outcome"]["kind"], "cancelled");
     }
@@ -658,7 +736,12 @@ mod tests {
         let first = service.start(caller, request(true)).unwrap();
         let token = first["invocation"].as_str().unwrap();
         let hook = service
-            .resume(caller, token, "call-1", json!("result"))
+            .resume(
+                caller,
+                token,
+                first["call_id"].as_str().unwrap(),
+                json!("result"),
+            )
             .unwrap();
         service
             .annotate(
@@ -690,7 +773,12 @@ mod tests {
         let first = service.start(caller, request(true)).unwrap();
         let token = first["invocation"].as_str().unwrap();
         let hook = service
-            .resume(caller, token, "call-1", json!("original"))
+            .resume(
+                caller,
+                token,
+                first["call_id"].as_str().unwrap(),
+                json!("original"),
+            )
             .unwrap();
         assert!(service
             .annotate(
