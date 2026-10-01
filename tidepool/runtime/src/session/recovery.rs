@@ -12,8 +12,18 @@ use super::SessionError;
 
 #[path = "newrecovery_v2.rs"]
 mod newrecovery_v2;
-pub use newrecovery_v2::RecoveryPublicOwner;
 pub(crate) use newrecovery_v2::*;
+pub use newrecovery_v2::{RecoveryPublicOwner, RecoveryRefusal as RecoveryFormatRefusal};
+
+pub(crate) fn graph_error(path: &Path, error: RecoveryError) -> SessionError {
+    match error.refusal {
+        Some(refusal) => SessionError::RecoveryFormatRefused {
+            path: path.to_path_buf(),
+            refusal,
+        },
+        None => manifest_error(path, error.to_string()),
+    }
+}
 
 const FLOOR: u32 = 1;
 const CURRENT: u32 = 1;

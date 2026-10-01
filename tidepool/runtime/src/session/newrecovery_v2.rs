@@ -310,7 +310,7 @@ pub(crate) struct RecoveryError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RecoveryRefusal {
+pub enum RecoveryRefusal {
     UnsupportedOldFormat { version: u64 },
     UnsupportedFutureFormat { version: u64 },
 }

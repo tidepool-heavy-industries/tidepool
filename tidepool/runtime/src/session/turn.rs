@@ -1897,7 +1897,7 @@ impl TurnCertification {
         if !display.matches_target(target)
             || generation != display.generation()
             || generation != admission.generation().0
-            || display.admission_digest() != admission.digest()
+            || !admission.matches_compiled_display(display)
             || !Arc::ptr_eq(display.capture(), admission.execution())
         {
             return Err(CompileError::ExtractFailed(
@@ -5492,7 +5492,8 @@ mod tests {
         assert!(state
             .begin_checked_prefix(admission.clone(), alternate)
             .is_err());
-        let (_legitimate_artifacts, legitimate) = compile_public_checked_offer(&admission, specification);
+        let (_legitimate_artifacts, legitimate) =
+            compile_public_checked_offer(&admission, specification);
         assert_eq!(
             legitimate.specification_digest(),
             admission.specification_digest()

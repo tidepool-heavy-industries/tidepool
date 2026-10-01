@@ -27,6 +27,7 @@ pub mod inspection;
 pub mod kernel;
 mod paired_publication;
 pub mod persistent;
+mod planned_cell;
 pub mod prepared;
 mod publication;
 mod recovery;
@@ -67,6 +68,10 @@ pub use paired_publication::{
     AcceptedDeclarationPublication, CertifiedDeclarationPublication, DeclarationPublicationBase,
     DeclarationPublicationRejection, ExecutionPublication, RejectedDeclarationPublication,
 };
+pub use planned_cell::{
+    RuntimeCellPlanReservation, RuntimePlannedCellItem, RuntimePlannedCellItemKind,
+    RuntimePlannedCellSlot,
+};
 pub use prepared::{
     CancelHandle, PreparedEngine, PreparedFailureKind, PreparedFailureStage, PreparedRuntimeError,
     PreparedSettlement, RealmId, SiteTypeEvidence,
@@ -79,7 +84,8 @@ pub use publication::{PublicationCancellation, PublicationDecision, PublicationP
 pub use tidepool_codegen::prepared_program::{ImageRegistry, Parcel};
 
 pub use recovery::{
-    DeclarationRecoveryReport, LostDeclaration, RecoveryPublicOwner, ReplayedDeclaration,
+    DeclarationRecoveryReport, LostDeclaration, RecoveryFormatRefusal, RecoveryPublicOwner,
+    ReplayedDeclaration,
 };
 
 pub use registry::{
@@ -349,6 +355,11 @@ pub enum SessionError {
     /// may be replayed without repeating effects.
     #[error("declaration recovery manifest {}: {detail}", path.display())]
     RecoveryManifest { path: PathBuf, detail: String },
+    #[error("recovery manifest {} has unsupported format: {refusal:?}", path.display())]
+    RecoveryFormatRefused {
+        path: PathBuf,
+        refusal: RecoveryFormatRefusal,
+    },
     /// The declaration and binding visibility swap has completed. Retry only
     /// [`SessionLib::confirm_recovery_durability`], never this declaration.
     #[error("declaration was published; recovery durability is unconfirmed at {}: {detail}", path.display())]
@@ -1120,12 +1131,25 @@ impl SessionLib {
     /// A failure before rename leaves the allocator untouched. After rename,
     /// the identity stays burned even if directory durability is uncertain.
     pub fn reserve_declaration_generation_durable(&mut self) -> Result<Generation, SessionError> {
+        Ok(self.reserve_declaration_generations_durable(1)?[0])
+    }
+
+    /// Burn every original declaration identity in one manifest publication.
+    /// Only the new reserved slots are prepared; existing graph payloads stay
+    /// shared. A visible but unconfirmed rename burns the entire range.
+    pub fn reserve_declaration_generations_durable(
+        &mut self,
+        count: usize,
+    ) -> Result<Vec<Generation>, SessionError> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
         let state = self
             .durable_graph
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| SessionError::RecoveryManifest {
                 path: self.root.clone(),
-                detail: "v2 recovery graph is not attached".into(),
+                detail: "exact recovery graph is not attached".into(),
             })?;
         if state.unconfirmed.is_some() {
             return Err(SessionError::RecoveryManifest {
@@ -1133,26 +1157,30 @@ impl SessionLib {
                 detail: "previous recovery publication still needs durability confirmation".into(),
             });
         }
-        let next = Generation(state.graph.high_water.0.checked_add(1).ok_or_else(|| {
-            SessionError::RecoveryManifest {
-                path: state.path.clone(),
-                detail: "declaration generation space exhausted".into(),
-            }
-        })?);
         if self.log.generation() != state.graph.high_water {
             return Err(SessionError::RecoveryManifest {
                 path: state.path.clone(),
                 detail: "declaration allocator and durable high-water diverged".into(),
             });
         }
-        let staged =
-            recovery::stage_high_water_v2(&state.path, &state.graph, next).map_err(|error| {
-                SessionError::RecoveryManifest {
+        let prepared =
+            self.log
+                .prepare_reservations(count)
+                .ok_or_else(|| SessionError::RecoveryManifest {
                     path: state.path.clone(),
-                    detail: error.to_string(),
-                }
+                    detail: "could not prepare declaration reservation range".into(),
+                })?;
+        let count_u64 = u64::try_from(count).expect("prepared range count fits u64");
+        let staged = recovery::stage_high_water_range_v2(&state.path, &state.graph, count_u64)
+            .map_err(|error| SessionError::RecoveryManifest {
+                path: state.path.clone(),
+                detail: error.to_string(),
             })?;
-        let outcome = staged.publish();
+        let outcome = self.publish_recovery_manifest(staged);
+        let state = self
+            .durable_graph
+            .as_mut()
+            .expect("attached graph preflighted");
         match outcome {
             recovery::RecoveryPublishOutcome::BeforeRename { detail, .. } => {
                 Err(SessionError::RecoveryManifest {
@@ -1162,8 +1190,7 @@ impl SessionLib {
             }
             recovery::RecoveryPublishOutcome::Durable { graph, .. } => {
                 state.graph = graph;
-                assert_eq!(self.log.reserve(), next);
-                Ok(next)
+                Ok(self.log.commit_reservations(prepared))
             }
             recovery::RecoveryPublishOutcome::PublishedDurabilityUnconfirmed {
                 graph,
@@ -1171,7 +1198,7 @@ impl SessionLib {
                 detail,
             } => {
                 state.graph = graph;
-                assert_eq!(self.log.reserve(), next);
+                self.log.commit_reservations(prepared);
                 state.unconfirmed = Some(publication);
                 Err(SessionError::RecoveryManifest {
                     path: state.path.clone(),
@@ -2996,6 +3023,88 @@ mod tests {
         assert!(lib.retract("DirectFlag").is_err());
         assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(1));
         assert_eq!(lib.generation(), Generation(1));
+    }
+
+    #[test]
+    fn durable_reservation_range_preserves_burned_holes_after_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("declarations.json");
+        let open = || {
+            SessionLib::open(SessionId(994), root.path(), ModuleEnv::standalone_default()).unwrap()
+        };
+        let mut lib = open();
+        lib.attach_recovery_graph_v2(&manifest).unwrap();
+        assert_eq!(
+            lib.reserve_declaration_generations_durable(4).unwrap(),
+            vec![Generation(1), Generation(2), Generation(3), Generation(4)]
+        );
+        for id in 1..=4 {
+            assert!(lib.log.is_reserved(Generation(id)));
+            assert!(lib.log.turn(Generation(id)).is_none());
+        }
+        assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
+        let graph = recovery::read_v2(&manifest, root.path())
+            .unwrap()
+            .unwrap()
+            .graph;
+        assert_eq!(graph.high_water, Generation(4));
+        assert!(graph.nodes.is_empty());
+        assert!(graph.public_surfaces.is_empty());
+        let bytes = std::fs::read(&manifest).unwrap();
+        assert!(lib
+            .reserve_declaration_generations_durable(0)
+            .unwrap()
+            .is_empty());
+        assert_eq!(std::fs::read(&manifest).unwrap(), bytes);
+        drop(lib);
+        let mut restarted = open();
+        restarted.attach_recovery_graph_v2(&manifest).unwrap();
+        assert_eq!(
+            restarted
+                .reserve_declaration_generations_durable(2)
+                .unwrap(),
+            vec![Generation(5), Generation(6)]
+        );
+    }
+
+    #[test]
+    fn durable_reservation_range_failure_is_atomic_and_uncertainty_burns_all_slots() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("declarations.json");
+        let mut lib =
+            SessionLib::open(SessionId(995), root.path(), ModuleEnv::standalone_default()).unwrap();
+        lib.attach_recovery_graph_v2(&manifest).unwrap();
+        std::fs::create_dir(&manifest).unwrap();
+        let revision = lib.log.publication_revision();
+        assert!(lib.reserve_declaration_generations_durable(3).is_err());
+        assert_eq!(lib.generation(), Generation(0));
+        assert_eq!(lib.log.publication_revision(), revision);
+        assert!(!lib.log.is_reserved(Generation(1)));
+        std::fs::remove_dir(&manifest).unwrap();
+        assert!(lib
+            .reserve_declaration_generations_durable(usize::MAX)
+            .is_err());
+        assert_eq!(lib.generation(), Generation(0));
+        assert!(!manifest.exists());
+
+        lib.fail_recovery_durability_once = true;
+        assert!(lib.reserve_declaration_generations_durable(3).is_err());
+        assert_eq!(lib.generation(), Generation(3));
+        assert!(lib.durable_graph.as_ref().unwrap().unconfirmed.is_some());
+        for id in 1..=3 {
+            assert!(lib.log.is_reserved(Generation(id)));
+        }
+        let bytes = std::fs::read(&manifest).unwrap();
+        assert!(lib.reserve_declaration_generations_durable(2).is_err());
+        assert_eq!(lib.generation(), Generation(3));
+        assert_eq!(std::fs::read(&manifest).unwrap(), bytes);
+        lib.confirm_recovery_durability().unwrap();
+        lib.confirm_recovery_durability().unwrap();
+        assert_eq!(std::fs::read(&manifest).unwrap(), bytes);
+        assert_eq!(
+            lib.reserve_declaration_generations_durable(2).unwrap(),
+            vec![Generation(4), Generation(5)]
+        );
     }
 
     #[test]

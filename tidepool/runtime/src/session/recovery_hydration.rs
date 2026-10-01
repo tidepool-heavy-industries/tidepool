@@ -130,7 +130,7 @@ impl SessionLib {
                 .expect("attached canonical manifest parent"),
             &bytes,
         )
-        .map_err(|error| invalid(error.to_string()))?
+        .map_err(|error| recovery::graph_error(&state.path, error))?
         .ok_or(SessionError::WrongPublicManifestTicket)?;
         if !read.artifact_losses.is_empty()
             || read.graph.checksum != state.graph.checksum
@@ -223,7 +223,7 @@ impl SessionLib {
             .as_ref()
             .map(|bytes| recovery::read_v2_bytes(&path, &root, bytes))
             .transpose()
-            .map_err(|error| invalid(error.to_string()))?
+            .map_err(|error| recovery::graph_error(&path, error))?
             .flatten()
         {
             Some(read) if read.artifact_losses.is_empty() => read.graph,
@@ -234,7 +234,7 @@ impl SessionLib {
             }
             None if bytes.is_some() => {
                 return Err(invalid(
-                    "legacy recovery manifest requires explicit v1 migration".into(),
+                    "existing recovery manifest did not yield an exact graph".into(),
                 ))
             }
             None => recovery::RecoveryGraph::empty(self.id.0, self.id.0)

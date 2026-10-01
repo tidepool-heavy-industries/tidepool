@@ -1157,7 +1157,7 @@ fn checked_display_plan(
         .checked_display_admission()
         .is_none_or(|owned| !Arc::ptr_eq(owned, &admission))
         || certification.checked_execution().is_some()
-        || proof.admission_digest() != admission.digest()
+        || !admission.matches_compiled_display(proof)
         || proof.generation() != generation.0
         || generation != admission.generation()
         || !Arc::ptr_eq(proof.capture(), admission.execution())
@@ -1305,6 +1305,19 @@ impl PendingDisplayInstall {
 }
 
 /// A display bundle's three binders come from one compiler value module.
+fn checked_display_input(
+    checked: Option<&CheckedDisplayPlan>,
+) -> Result<Option<(i64, Vec<String>)>, ResidentError> {
+    let Some(plan) = checked.filter(|plan| plan.admission.prefix().cell_program().is_some()) else {
+        return Ok(None);
+    };
+    let budget =
+        i64::try_from(plan.admission.budget()).map_err(|_| PreparedRuntimeError::HostMount {
+            detail: "display budget exceeds the worker Int range".into(),
+        })?;
+    Ok(Some((budget, plan.admission.presented().to_vec())))
+}
+
 fn check_display_bundle_binders(
     page: &BoundBinder,
     metadata: &BoundBinder,
@@ -5070,6 +5083,7 @@ where
                 page,
                 alias,
                 generation,
+                checked_display_input(checked.as_ref())?,
             )
         })();
         if let Some(plan) = checked {
@@ -5278,6 +5292,7 @@ where
                 page,
                 alias,
                 generation,
+                checked_display_input(checked.as_ref())?,
             )
             .map(Some)
         })();
@@ -5303,6 +5318,7 @@ where
         page: &BoundBinder,
         alias: &BoundBinder,
         generation: Generation,
+        presentation: Option<(i64, Vec<String>)>,
     ) -> Result<ResidentDisplayBundle, ResidentError> {
         let realm = self.run_context.resource_scope;
         let lexical_scope = self.run_context.lexical_scope;
@@ -5313,17 +5329,25 @@ where
         };
         let run_exec_started = std::time::Instant::now();
         let ran = self.on_eval_thread(move |engine, table, handlers, captured| {
-            Ok(settle_prepared(
+            let argument = presentation
+                .as_ref()
+                .map(|input| engine.build_host_value(realm, input, table))
+                .transpose()?;
+            let outcome = settle_prepared(
                 engine,
                 program,
                 realm,
-                None,
+                argument,
                 SettlePlan::Display(page.tier),
                 park,
                 table,
                 handlers,
                 captured,
-            ))
+            );
+            if let Some(argument) = argument {
+                engine.release(argument);
+            }
+            Ok(outcome)
         });
         timing::record_stage(
             timing::NO_NODE,
