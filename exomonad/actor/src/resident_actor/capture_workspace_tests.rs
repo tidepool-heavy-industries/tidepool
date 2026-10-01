@@ -512,9 +512,12 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         .await
         .expect("failed parent call settles")
         .expect("caller task");
-    if let Ok(reply) = parent_reply {
-        assert_ne!(reply["status"], "committed", "{reply:?}");
-    }
+    let failure =
+        parent_reply.expect_err("the continued parent cell raises the controlled launch refusal");
+    assert!(
+        format!("{failure:?}").contains("controlled parent continuation failure"),
+        "{failure:?}"
+    );
     assert!(
         parent.terminal().get().is_none(),
         "this gate fails the parent cell while its supervising actor remains live"
