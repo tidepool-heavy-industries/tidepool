@@ -10,6 +10,7 @@ pub(super) struct PreparedChildLaunch {
 pub(super) struct ChildLaunchContinuation {
     pub context: ActorSessionContext,
     pub parent_descriptor: ActorDescriptor,
+    pub control: Option<Arc<crate::WorkbenchExecutionControl>>,
     pub parent_hole: ResidentHole,
     pub fork_group: Option<crate::ForkGroupId>,
     pub original_placement: crate::ActorPlacement,
@@ -305,7 +306,12 @@ where
     let original = &continuation.parent_descriptor;
     let failed_child = result.as_ref().ok().map(|started| started.actor.clone());
     let result = result.and_then(|started| {
-        if !matches_parent(kernel, descriptor, original, context.actor) {
+        if continuation
+            .control
+            .as_ref()
+            .is_some_and(|control| control.cancellation_requested())
+            || !matches_parent(kernel, descriptor, original, context.actor)
+        {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
                 "child launch parent admission changed during startup".into(),
             ));
