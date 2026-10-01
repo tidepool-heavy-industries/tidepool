@@ -1,4 +1,5 @@
 import qualified Tidepool.Actor as Actor
+import Tidepool.Inspection (print)
 let command = Cmd.withEnvironment [("A", "new")] $ Cmd.withEnvironment [("A", "old"), ("B", "kept")] $ Cmd.withArguments ["a b;$HOME\n'quoted'"] $ withMemory (GiB 8) [bash|printf '%s' "$1"|]
 job <- Cmd.start command
 Cmd.detach job
