@@ -1124,7 +1124,7 @@ async fn inherited_command_helpers_start_fresh_jobs_in_each_callers_checkout() {
         .await;
 
     let launches =
-        "freshJob <- launchFresh ()\nrelativeJob <- launchRelative ()\nfixedJob <- launchFixed ()";
+        "freshJob <- launchFresh ()\nCmd.detach freshJob\nrelativeJob <- launchRelative ()\nCmd.detach relativeJob\nfixedJob <- launchFixed ()\nCmd.detach fixedJob";
     let awaits = "Cmd.await freshJob\nCmd.await relativeJob\nCmd.await fixedJob";
     for (policy, owner) in [
         (
@@ -1248,8 +1248,11 @@ async fn extracted_effectful_closure_starts_work_in_receiver_after_response_rele
         "{released}"
     );
 
-    let started =
-        dispatch_haskell_script(observer.policy.as_ref(), "createdJob <- freshClosure ()").await;
+    let started = dispatch_haskell_script(
+        observer.policy.as_ref(),
+        "createdJob <- freshClosure ()\nCmd.detach createdJob",
+    )
+    .await;
     assert_eq!(started["status"], "committed", "{started}");
     let backend = TestCommands::completed("receiver checkout");
     let request = backend_request(&mut campaign).await;
@@ -1270,7 +1273,11 @@ async fn extracted_effectful_closure_starts_work_in_receiver_after_response_rele
 #[tokio::test]
 async fn command_output_ux_preserves_large_values_and_decodes_complete_stdout() {
     let mut campaign = TestCampaign::start().await;
-    committed(&campaign, "job <- Cmd.start [bash|printf result|]").await;
+    committed(
+        &campaign,
+        "job <- Cmd.start [bash|printf result|]\nCmd.detach job",
+    )
+    .await;
     let backend = TestCommands::new();
     backend.finish.send_replace(true);
     backend_request(&mut campaign).await.supply(Ok(backend));
@@ -1305,7 +1312,7 @@ async fn command_output_ux_preserves_large_values_and_decodes_complete_stdout() 
 #[tokio::test]
 async fn read_command_captures_both_streams_of_a_failed_command() {
     let mut campaign = TestCampaign::start().await;
-    committed(&campaign, "job <- Cmd.start [bash|exit 3|]").await;
+    committed(&campaign, "job <- Cmd.start [bash|exit 3|]\nCmd.detach job").await;
     let backend = TestCommands::new();
     *backend.stdout.lock() = "standard out".into();
     *backend.stderr.lock() = "boom: file not found".into();
@@ -1436,7 +1443,11 @@ async fn oom_command_result_names_the_applied_limit_and_a_rerun_hint() {
 #[tokio::test]
 async fn cancelled_command_result_projects_and_later_cells_still_run() {
     let mut campaign = TestCampaign::start().await;
-    committed(&campaign, "job <- Cmd.start [bash|sleep 30|]").await;
+    committed(
+        &campaign,
+        "job <- Cmd.start [bash|sleep 30|]\nCmd.detach job",
+    )
+    .await;
     let backend = TestCommands::new();
     backend_request(&mut campaign)
         .await
@@ -1461,7 +1472,11 @@ async fn cancelled_command_result_projects_and_later_cells_still_run() {
 #[tokio::test]
 async fn failed_command_display_retains_result_without_reexecution() {
     let mut campaign = TestCampaign::start().await;
-    committed(&campaign, "job <- Cmd.start [bash|printf result|]").await;
+    committed(
+        &campaign,
+        "job <- Cmd.start [bash|printf result|]\nCmd.detach job",
+    )
+    .await;
     let backend = TestCommands::new();
     backend.finish.send_replace(true);
     backend_request(&mut campaign)
@@ -2059,7 +2074,7 @@ async fn command_output_failure_preserves_the_existing_authored_job() {
     let mut campaign = TestCampaign::start().await;
     committed(
         &campaign,
-        "retainedBeforeFailure <- Cmd.start [bash|printf preserved|]",
+        "retainedBeforeFailure <- Cmd.start [bash|printf preserved|]\nCmd.detach retainedBeforeFailure",
     )
     .await;
     let backend = TestCommands::new();
@@ -2095,7 +2110,11 @@ async fn command_output_failure_preserves_the_existing_authored_job() {
 #[tokio::test]
 async fn completed_command_output_survives_a_later_failure_in_the_same_computation() {
     let mut campaign = TestCampaign::start().await;
-    committed(&campaign, "job <- Cmd.start [bash|printf result|]").await;
+    committed(
+        &campaign,
+        "job <- Cmd.start [bash|printf result|]\nCmd.detach job",
+    )
+    .await;
     let backend = TestCommands::new();
     backend.finish.send_replace(true);
     backend_request(&mut campaign)
@@ -2134,7 +2153,11 @@ pub(crate) async fn result_presentation_cases() -> Vec<(
     let mut cases = Vec::new();
 
     let mut campaign = TestCampaign::start().await;
-    committed(&campaign, "job <- Cmd.start [bash|printf result|]").await;
+    committed(
+        &campaign,
+        "job <- Cmd.start [bash|printf result|]\nCmd.detach job",
+    )
+    .await;
     let backend = TestCommands::completed("result");
     backend_request(&mut campaign)
         .await
@@ -2192,7 +2215,7 @@ pub(crate) async fn result_presentation_cases() -> Vec<(
     let mut campaign = TestCampaign::start().await;
     committed(
         &campaign,
-        "retainedBeforeFailure <- Cmd.start [bash|printf preserved|]",
+        "retainedBeforeFailure <- Cmd.start [bash|printf preserved|]\nCmd.detach retainedBeforeFailure",
     )
     .await;
     let backend = TestCommands::completed("preserved");
@@ -2368,7 +2391,11 @@ async fn resident_print_preserves_order_and_output_before_same_unit_failure() {
     )
     .await;
     assert!(plain.to_string().contains("λ line"), "{plain}");
-    committed(&campaign, "job <- Cmd.start [bash|printf result|]").await;
+    committed(
+        &campaign,
+        "job <- Cmd.start [bash|printf result|]\nCmd.detach job",
+    )
+    .await;
     let backend = TestCommands::completed("command-middle");
     backend_request(&mut campaign).await.supply(Ok(backend));
     let result = super::tests::dispatch_haskell_script_result(
@@ -2734,7 +2761,11 @@ async fn structured_bash_default_waits_until_terminal_without_completion_notice(
 #[tokio::test]
 async fn sibling_actor_progresses_during_foreground_command_wait() {
     let mut campaign = TestCampaign::start().await;
-    committed(&campaign, "job <- Cmd.start [bash|long-running|]").await;
+    committed(
+        &campaign,
+        "job <- Cmd.start [bash|long-running|]\nCmd.detach job",
+    )
+    .await;
     let backend = TestCommands::new();
     backend_request(&mut campaign)
         .await
@@ -2961,7 +2992,7 @@ async fn watched_command_jobs_wake_once_with_a_typed_report() {
     let mut campaign = TestCampaign::start().await;
     committed(
         &campaign,
-        "check <- Cmd.background [bash|cargo test|]\nquick <- Cmd.start [bash|true|]\nchecked <- watch \"check-done\" ((,) <$> Cmd.awaitFinished check <*> Cmd.awaitFinished quick)",
+        "check <- Cmd.background [bash|cargo test|]\nquick <- Cmd.start [bash|true|]\nCmd.detach quick\nchecked <- watch \"check-done\" ((,) <$> Cmd.awaitFinished check <*> Cmd.awaitFinished quick)",
     )
     .await;
     let commit = "89abcdef0123456789abcdef0123456789abcdef";

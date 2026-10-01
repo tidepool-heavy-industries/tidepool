@@ -5,8 +5,10 @@ while [ ! -e release-holder ]; do
 done
 printf holder-done
 |]
+Cmd.detach holder
 -- fixture-step
 queued <- Cmd.start $ withMemory (MiB 512) [bash|printf admitted-after-release|]
+Cmd.detach queued
 Cmd.status queued
 -- fixture-step
 :{
@@ -42,6 +44,7 @@ do
 :}
 -- fixture-step
 cancelJob <- Cmd.start [bash|touch cancel-started; exec sleep infinity|]
+Cmd.detach cancelJob
 -- fixture-step
 :{
 do
@@ -73,6 +76,7 @@ do
 :}
 -- fixture-step
 terminal <- Cmd.start $ Cmd.withTerminal [bash|stty size > terminal-size; touch terminal-started; IFS= read -r line; printf 'terminal:%s\n' "$line"|]
+Cmd.detach terminal
 -- fixture-step
 :{
 do
