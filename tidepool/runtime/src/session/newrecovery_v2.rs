@@ -451,7 +451,7 @@ fn stage_metadata_v2(
     graph: ValidatedRecoveryGraph,
 ) -> Result<StagedRecoveryManifest, RecoveryError> {
     let ValidatedRecoveryGraph(graph) = graph;
-    let bytes = serde_json::to_vec_pretty(&graph)
+    let bytes = serde_json::to_vec(&graph)
         .map_err(|e| error(format!("could not encode recovery graph: {e}")))?;
     if bytes.len() > MAX_MANIFEST_BYTES {
         return Err(error("recovery manifest exceeds the bounded size"));
