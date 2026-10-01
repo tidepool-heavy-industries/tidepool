@@ -102,6 +102,7 @@ rust_filegroup(
         "src/toolchain.rs": "tidepool/toolchain/src/toolchain.rs",
         "src/turn_observations.rs": "tidepool/toolchain/src/turn_observations.rs",
         "tests/fixtures/deployment-module-package/PreludePackage.hs": "tidepool/toolchain/tests/fixtures/deployment-module-package/PreludePackage.hs",
+        "tests/fixtures/materialization-fault.c": "tidepool/toolchain/tests/fixtures/materialization-fault.c",
         "tests/fixtures/owned-declaration/ExactConsumer.hs": "tidepool/toolchain/tests/fixtures/owned-declaration/ExactConsumer.hs",
         "tests/fixtures/owned-declaration/G1.hs": "tidepool/toolchain/tests/fixtures/owned-declaration/G1.hs",
         "tests/fixtures/owned-declaration/G3.hs": "tidepool/toolchain/tests/fixtures/owned-declaration/G3.hs",

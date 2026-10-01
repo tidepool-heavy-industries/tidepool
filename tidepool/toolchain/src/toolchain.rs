@@ -392,14 +392,14 @@ pub fn locate_extract() -> Result<ExtractLocation, ToolchainError> {
 /// Bind the producer selected by the canonical extract resolution policy.
 /// Configured deployment authority admits the observed producer and exact
 /// consumed worker before this endpoint can authorize compilation.
-pub fn bind_extract_endpoint(
-) -> Result<(tidepool_extract_cmd::CompilerEndpoint, ExtractLocation), ToolchainError> {
+pub fn bind_extract_endpoint()
+-> Result<(tidepool_extract_cmd::CompilerEndpoint, ExtractLocation), ToolchainError> {
     let (endpoint, location, _) =
         bind_admitted_extract_endpoint(&CompilerDeploymentConfiguration::from_env()?)?;
     Ok((endpoint, location))
 }
-fn bind_unadmitted_extract_endpoint(
-) -> Result<(tidepool_extract_cmd::CompilerEndpoint, ExtractLocation), ToolchainError> {
+fn bind_unadmitted_extract_endpoint()
+-> Result<(tidepool_extract_cmd::CompilerEndpoint, ExtractLocation), ToolchainError> {
     let location = locate_extract()?;
     let cmd = tidepool_extract_cmd::ExtractCmd::with_bin(
         tidepool_extract_cmd::ResolvedExtractBin::assume_resolved(&location.path),
@@ -827,7 +827,7 @@ pub fn read_stamp(path: &Path) -> Result<Option<ToolchainStamp>, ToolchainError>
             return Err(ToolchainError::Stamp {
                 path: path.to_path_buf(),
                 source,
-            })
+            });
         }
     };
     match serde_json::from_str::<ToolchainStamp>(&text) {
@@ -1476,9 +1476,11 @@ mod tests {
     fn unreadable_stamp_is_refused_and_missing_stamp_is_absent() {
         let directory = tempfile::TempDir::new().unwrap();
         assert!(read_stamp(directory.path()).is_err());
-        assert!(read_stamp(&directory.path().join("absent.json"))
-            .unwrap()
-            .is_none());
+        assert!(
+            read_stamp(&directory.path().join("absent.json"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

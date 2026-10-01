@@ -46,6 +46,7 @@ TEST_ONLY_SOURCES = {
         'tidepool/runtime/src/session/turn_scaling_tests.rs',
     }),
     'tidepool-toolchain': frozenset({
+        'tidepool/toolchain/tests/fixtures/materialization-fault.c',
         'tidepool/toolchain/tests/fixtures/owned-declaration/ExactConsumer.hs',
         'tidepool/toolchain/tests/fixtures/owned-declaration/G1.hs',
         'tidepool/toolchain/tests/fixtures/owned-declaration/G3.hs',
