@@ -6250,6 +6250,138 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn recovered_independent_group_runs_without_unused_retained_package_lease() {
+        use tidepool_codegen::prepared_program::GroupInventory;
+        use tidepool_repr::execution_schema::{CertifiedGroup, ModuleVersion};
+        let package = testing::identity("Fixture", "entry");
+        let (historical, _) = certified_package_export_fixture([9; 32]);
+        let former_owner = historical
+            .retained_package_code_export_owner(&package, 0, &[9; 32])
+            .unwrap();
+        let owner = CachedHomeOwner {
+            unit: HOME_UNIT.into(),
+            module: "Original".into(),
+            module_version: ModuleVersion([1; 32]),
+            skinny_iface_sha256: [2; 32],
+            product_sha256: [3; 32],
+        };
+        let symbol = |name: &str| SymbolIdentity {
+            unit: owner.unit.clone(),
+            module: owner.module.clone(),
+            ..testing::identity("Original", name)
+        };
+        let independent = symbol("independent");
+        let dependent = symbol("dependent");
+        let group = |identity: SymbolIdentity, ordinal, requires_package: bool| {
+            let mut wire = testing::wire_program();
+            let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+                unreachable!()
+            };
+            top.identity = identity;
+            let imports = if requires_package {
+                wire.expressions.nodes[0] = ExprFrame::Call {
+                    callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+                    signature: SignatureId(0),
+                    arguments: vec![],
+                };
+                wire.globals.push(GlobalDecl {
+                    identity: package.clone(),
+                    rep: RuntimeRep::LiftedRef,
+                    entry_signature: Some(SignatureId(0)),
+                    required_evaluated: true,
+                    required_generation: Some(0),
+                });
+                vec![former_owner.clone()]
+            } else {
+                vec![]
+            };
+            CertifiedGroup::admit(
+                owner.clone(),
+                testing::projected_group(wire, ordinal).unwrap(),
+                imports,
+            )
+            .unwrap()
+        };
+        // Recovered originals retain both native groups and the dependent
+        // group's package obligation, independently of selected execution.
+        let groups = [
+            group(independent.clone(), 0, false),
+            group(dependent.clone(), 1, true),
+        ];
+        drop(historical);
+        let registry = ImageRegistry::new();
+        let evidence = certified_source_evidence(&groups);
+        let mut engine = PreparedEngine::empty_certified(64 * 1024, None).unwrap();
+        let stage = |engine: &mut PreparedEngine, binder: &SymbolIdentity| {
+            let mut wire = testing::wire_program();
+            let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+                unreachable!()
+            };
+            top.identity.unit = HOME_UNIT.into();
+            top.identity.module = "Consumer".into();
+            wire.expressions.nodes[0] = ExprFrame::Call {
+                callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+                signature: SignatureId(0),
+                arguments: vec![],
+            };
+            wire.globals.push(GlobalDecl {
+                identity: binder.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: Some(SignatureId(0)),
+                required_evaluated: true,
+                required_generation: None,
+            });
+            let demand = GroupInventory::new(&groups)
+                .unwrap()
+                .seal([SourceBinder {
+                    version: owner.module_version.clone(),
+                    binder: binder.clone(),
+                }])
+                .unwrap()
+                .compile(&registry)
+                .unwrap();
+            engine.install_certified_turn(
+                CertifiedTargetImage::compile(testing::prepare(wire).unwrap(), &registry).unwrap(),
+                &[ImportOwner::Source {
+                    version: owner.module_version.clone(),
+                    binder: binder.clone(),
+                }],
+                &evidence,
+                demand,
+                &[],
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &BindingTable::new(),
+            )
+        };
+        let mut installed = stage(&mut engine, &independent).unwrap();
+        let leases = std::mem::take(&mut installed.leases);
+        let program = engine.commit_certified_turn(installed);
+        let result = engine
+            .machine
+            .run_entry_retained(
+                program,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 0,
+                    collect_before_observation: true,
+                },
+                RealmId::ROOT,
+            )
+            .unwrap();
+        assert_eq!(result.values, vec![PreparedResult::Scalar(42)]);
+        let before = engine.residency();
+        assert!(matches!(stage(&mut engine, &dependent),
+            Err(PreparedRuntimeError::MissingCertifiedOwner(actual)) if actual == former_owner));
+        assert_eq!(engine.residency(), before);
+        for lease in leases {
+            assert!(engine.release(lease.handle()));
+        }
+        assert!(engine.unpin(program));
+    }
+
+    #[test]
     fn export_staging_rolls_back_prior_roots_on_required_absence() {
         let prepared = testing::prepare(testing::wire_program()).unwrap();
         let image = Arc::new(CompiledProgram::compile_prepared_definitions(&prepared).unwrap());

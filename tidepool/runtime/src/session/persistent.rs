@@ -1537,22 +1537,6 @@ impl PersistentSession {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
-        if let Some(certificate) = &staged.certified_authored {
-            let view = certificate.artifact_view();
-            let owner = certificate.product().owner();
-            let root = view
-                .descriptors()
-                .into_iter()
-                .find(|entry| {
-                    entry.kind
-                        == tidepool_toolchain::artifact_inventory::ArtifactKind::OriginalModule
-                        && entry.owner.unit == owner.unit
-                        && entry.owner.module == owner.module
-                })
-                .ok_or(SessionError::StaleStagedDeclaration)?
-                .id;
-            self.validate_native_package_requirements(view, &[root])?;
-        }
         let next_epoch = self.prepare_public_visibility_advance(scope)?;
         let replaced_names = staged.replaced_value_names();
         let mut evicted_values: Vec<String> = self
@@ -1594,30 +1578,6 @@ impl PersistentSession {
                 }
             })
             .into_result()
-    }
-
-    fn validate_native_package_requirements(
-        &self,
-        view: &tidepool_toolchain::artifact_inventory::ArtifactView,
-        roots: &[tidepool_toolchain::artifact_inventory::ArtifactId],
-    ) -> Result<(), SessionError> {
-        for requirement in view.native_requirements_from_roots(roots)?.packages {
-            if self
-                .machine
-                .as_ref()
-                .and_then(|engine| {
-                    engine.retained_package_code_export_owner(
-                        &requirement.identity,
-                        requirement.generation,
-                        &requirement.interface_digest,
-                    )
-                })
-                .is_none()
-            {
-                return Err(SessionError::StaleStagedDeclaration);
-            }
-        }
-        Ok(())
     }
 
     pub fn discard_staged_declaration(&self, staged: &super::StagedDeclaration) {
@@ -2582,33 +2542,6 @@ impl PersistentSession {
                 .publication_views_are_current(&ticket.expected_public, &ticket.expected_private)
         {
             return Ok(PublicManifestCommit::Stale);
-        }
-        if let Some(declaration) = &ticket.declaration {
-            let native_owners = declaration
-                .joined
-                .evidence
-                .exports()
-                .iter()
-                .flat_map(|export| std::iter::once(&export.head).chain(export.children.iter()))
-                .map(
-                    |identity| tidepool_toolchain::declaration_join::ExactModuleIdentity {
-                        unit: identity.unit.clone(),
-                        module: identity.module.clone(),
-                    },
-                )
-                .collect::<std::collections::BTreeSet<_>>();
-            let view = declaration.joined.context.artifact_view();
-            let roots = view
-                .descriptors()
-                .into_iter()
-                .filter(|entry| {
-                    entry.kind
-                        == tidepool_toolchain::artifact_inventory::ArtifactKind::OriginalModule
-                        && native_owners.contains(&entry.owner)
-                })
-                .map(|entry| entry.id)
-                .collect::<Vec<_>>();
-            self.validate_native_package_requirements(view, &roots)?;
         }
         let next_epoch = self.prepare_public_visibility_advance(ticket.public_scope)?;
         let prepared = self
