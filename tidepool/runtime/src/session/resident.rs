@@ -430,6 +430,8 @@ impl Drop for RootCustody {
         if let Some(handle) = self.handle.take() {
             if !self.shared {
                 self.cleanup.enqueue(handle);
+            } else {
+                self.cleanup.notify_cleanup();
             }
         }
     }
@@ -477,19 +479,42 @@ impl Drop for BindingLease {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct CustodyCleanup {
     abandoned: Mutex<Vec<ValueHandle>>,
     binding_leases: Mutex<Vec<Vec<SessionVarId>>>,
+    notify: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl CustodyCleanup {
     fn enqueue(&self, handle: ValueHandle) {
         self.abandoned.lock().push(handle);
+        self.notify_cleanup();
+    }
+
+    fn notify_cleanup(&self) {
+        let notify = self.notify.lock().clone();
+        if let Some(notify) = notify {
+            notify();
+        }
+    }
+
+    fn set_notifier(&self, notify: Arc<dyn Fn() + Send + Sync>) {
+        *self.notify.lock() = Some(notify);
     }
 
     fn take_all(&self) -> Vec<ValueHandle> {
         std::mem::take(&mut *self.abandoned.lock())
+    }
+}
+
+impl std::fmt::Debug for CustodyCleanup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CustodyCleanup")
+            .field("abandoned", &self.abandoned.lock().len())
+            .field("binding_leases", &self.binding_leases.lock().len())
+            .field("has_notifier", &self.notify.lock().is_some())
+            .finish()
     }
 }
 
@@ -6067,6 +6092,14 @@ where
             }
         }
         count + binding_count
+    }
+
+    /// Install the signal an owning lifecycle manager uses to resume cleanup
+    /// after a root is dropped while this session is checked in. The callback
+    /// is invoked after the dropped handle has been queued, with no session or
+    /// cleanup lock held.
+    pub fn set_custody_cleanup_notifier(&mut self, notify: Arc<dyn Fn() + Send + Sync>) {
+        self.custody_cleanup.set_notifier(notify);
     }
 
     /// How many [`RootCustody`] tokens for THIS session are alive right now,
