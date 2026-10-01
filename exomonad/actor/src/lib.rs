@@ -90,7 +90,7 @@ pub use interactive_session::{
 };
 pub use kernel::{
     ActorAdmissionLease, ActorWorkbenchInvocation, CallAncestry, KernelCallFailure,
-    KernelCallReply, KernelInvocationFailure, KernelInvocationReply, KernelMessage,
+    KernelCallReply, KernelInvocationFailure, KernelInvocationReply, KernelMessage, KernelResume,
     KernelWorkbenchFailure, KernelWorkbenchReply, LocalActorRef, WorkbenchStepKey,
 };
 pub use lineage::{
