@@ -1,11 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Tidepool.Command.Types
-  ( Command (..), Job (..), Memory (..), bashCommand, argv, describe
+  ( Command (..), Job (..), Memory (..), bashCommand, argv, describe, withSource
   , withMemory, inDirectory, withEnvironment, withArguments, withStdin, withTerminal
   ) where
 
 import Data.Text (Text)
-import Tidepool.Effects.Core (CommandSpec (..), CommandInput (..))
+import Tidepool.Effects.Core (CommandSpec (..), CommandInput (..), CommandSourceCapture (..))
 
 -- Internal constructors; Tidepool.Command exposes descriptions and opaque jobs.
 newtype Command = Command CommandSpec deriving (Eq, Show)
@@ -13,10 +13,16 @@ data Job = Job !Text deriving (Eq, Show)
 data Memory = MiB Int | GiB Int deriving (Eq, Show)
 
 argv :: [Text] -> Command
-argv args = Command (CommandSpec args Nothing [] (256 * 1024 * 1024) ClosedInput)
+argv args = Command (CommandSpec args Nothing [] (256 * 1024 * 1024) ClosedInput NoCapture)
 
 describe :: Command -> CommandSpec
 describe (Command spec) = spec
+
+-- | Capture the command's working directory, Git head, and dirty state before
+-- its process starts. This costs a separate admitted command, so request it
+-- only when the resulting report needs source evidence.
+withSource :: Command -> Command
+withSource (Command spec) = Command spec { commandSourceCapture = CaptureBeforeStart }
 
 bashCommand :: Text -> Command
 bashCommand script = argv ["bash", "--noprofile", "--norc", "-c", script, "exomonad-bash"]

@@ -57,6 +57,18 @@ use crate::request_effect::{
 };
 use crate::{ActorCompileViewError, ResponseExpectation};
 
+pub(crate) fn log_startup_future_size(name: &str, bytes: usize) {
+    use std::io::Write;
+
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/tidepool-annealing-future-sizes.log")
+    {
+        let _ = writeln!(file, "{name} bytes={bytes}");
+    }
+}
+
 tokio::task_local! {
     static SLOT_CONTINUATION_OWNER: ParkedHoleAbortRegistration;
     static INVOCATION_CANCEL: Arc<std::sync::atomic::AtomicBool>;
@@ -3467,182 +3479,195 @@ where
     /// one module against one include list, so a schema can never advertise a
     /// handler from another revision, and a slot can never be a revision ahead
     /// of the tools beside it.
-    pub(crate) async fn prepare_tools(
-        &self,
+    pub(crate) fn prepare_tools<'a>(
+        &'a self,
         context: crate::ActorSessionContext,
         install: u64,
-    ) -> Result<ResidentWorkbenchTools, ResidentActorWorkbenchError> {
-        let resolved = self.resolve_spec(&context);
-        let revision = resolved.source_revision();
-        let entry = resolved
-            .entry
-            .clone()
-            .unwrap_or_else(|| "Tidepool.Agent.Contract.defaultSpec".into());
-        let mut source = self.access.source.clone();
-        // A spec found by convention is named by no configured key, so its
-        // module is not in the shared workbench vocabulary; the fragment that
-        // installs it brings its own qualified import.
-        if let Some((module, _)) = entry.rsplit_once('.') {
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
+    > {
+        Box::pin(async move {
+            let resolved = self.resolve_spec(&context);
+            let revision = resolved.source_revision();
+            let entry = resolved
+                .entry
+                .clone()
+                .unwrap_or_else(|| "Tidepool.Agent.Contract.defaultSpec".into());
+            let mut source = self.access.source.clone();
+            // A spec found by convention is named by no configured key, so its
+            // module is not in the shared workbench vocabulary; the fragment that
+            // installs it brings its own qualified import.
+            if let Some((module, _)) = entry.rsplit_once('.') {
+                source
+                    .workbench_imports
+                    .extend_text(&format!("qualified {module}"));
+            }
             source
                 .workbench_imports
-                .extend_text(&format!("qualified {module}"));
-        }
-        source
-            .workbench_imports
-            .extend_text("qualified Tidepool.Agent.Contract");
-        source.preamble =
-            insert_preamble_imports(&source.preamble, "qualified Tidepool.Effects.Core").into();
-        source.preamble = format!(
-            "{}\ntype HostedToolEffects = Tidepool.Effects.Core.AgentTools ': {}\n",
-            source.preamble, context.haskell_effects_alias
-        )
-        .into();
-        let authored_effects = context.haskell_effects_alias.clone();
-        let mut compile_context = context.clone();
-        compile_context.haskell_effects_alias = "HostedToolEffects".into();
-        let block = ParsedBlock {
-            ordinal: 1,
-            total: 1,
-            source: format!(
-                "_ <- Tidepool.Agent.Contract.installSpec @({authored_effects}) {entry}"
-            ),
-        };
-        let verdict = TurnClassification {
-            kind: TurnKind::Bind,
-            binders: Vec::new(),
-            items: Vec::new(),
-        };
-        let publication_resolved = resolved;
-        // Compile with the resident machine checked out only for the
-        // snapshot and the install-and-run step (`begin_fragment_split`),
-        // released for the GHC compile in between. The suspension this
-        // fragment produces is plain session-held data, so reading it back
-        // out below is an ordinary later checkout, the same shape every
-        // `resume_*` method already uses against a held hole.
-        let step = self
-            .begin_fragment_split(
+                .extend_text("qualified Tidepool.Agent.Contract");
+            source.preamble =
+                insert_preamble_imports(&source.preamble, "qualified Tidepool.Effects.Core").into();
+            source.preamble = format!(
+                "{}\ntype HostedToolEffects = Tidepool.Effects.Core.AgentTools ': {}\n",
+                source.preamble, context.haskell_effects_alias
+            )
+            .into();
+            let authored_effects = context.haskell_effects_alias.clone();
+            let mut compile_context = context.clone();
+            compile_context.haskell_effects_alias = "HostedToolEffects".into();
+            let block = ParsedBlock {
+                ordinal: 1,
+                total: 1,
+                source: format!(
+                    "_ <- Tidepool.Agent.Contract.installSpec @({authored_effects}) {entry}"
+                ),
+            };
+            let verdict = TurnClassification {
+                kind: TurnKind::Bind,
+                binders: Vec::new(),
+                items: Vec::new(),
+            };
+            let publication_resolved = resolved;
+            // Compile with the resident machine checked out only for the
+            // snapshot and the install-and-run step (`begin_fragment_split`),
+            // released for the GHC compile in between. The suspension this
+            // fragment produces is plain session-held data, so reading it back
+            // out below is an ordinary later checkout, the same shape every
+            // `resume_*` method already uses against a held hole.
+            let fragment = self.begin_fragment_split(
                 compile_context.clone(),
                 source,
                 Vec::new(),
                 block,
                 Some(verdict),
-            )
-            .await?;
-        let ResidentWorkbenchStep::Running { outcome, .. } = step else {
-            let detail = match step {
-                ResidentWorkbenchStep::Rejected(detail) => detail.output,
-                _ => "installer completed without publishing its handler".into(),
-            };
-            return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                "tool installation: {detail}"
-            )));
-        };
-        let ResidentOutcome::Suspended { hole, request, .. } = *outcome else {
-            unreachable!("running fragment has a suspension")
-        };
-        // `hole` is plain session-held data held across the checkout below
-        // being acquired; if this future is dropped while still awaiting
-        // that checkout, nothing else resumes or aborts the continuation it
-        // parked. `ParkedHoleAbortGuard` covers that gap the same way
-        // `HostInputRetirement` covers the split cell's mounted input:
-        // Drop can't await, so it spawns one more checkout in the
-        // background to abort the hole there. Disarmed the moment the
-        // checkout below is actually in hand, since everything past that
-        // point settles the hole synchronously inside it.
-        let abort_guard = ParkedHoleAbortGuard::new(
-            &self.access,
-            compile_context.clone(),
-            hole.cont_id().to_string(),
-            "tool installer's parked hole was abandoned before its resuming checkout".into(),
-        );
-        let registration = abort_guard.registration();
-        let publication = self
-            .access
-            .with_machine(compile_context, move |session, context, _| {
-                let publication = (|| {
-                    let ResidentRequest::AgentTools(
-                        crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallWith(
-                            declarations,
-                            _,
-                        ),
-                    ) = ResidentRequest::decode(&request, session.data_con_table())?
-                    else {
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(
-                            "tool installer crossed an unexpected effect boundary".into(),
-                        ));
-                    };
-                    let installation =
-                        tidepool_runtime::value_to_json(&declarations, session.data_con_table(), 0);
-                    let SpecInstallation { tools, slots } = decode_installation(installation)?;
-                    let declarations =
-                        crate::resident_interactive::project_tools(tools).map_err(|error| {
-                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                        })?;
-                    let dispatch = session
-                        .live_payload_handle_owned_by(
-                            hole.cont_id(),
-                            context.placement.resource_scope,
-                        )?
-                        .ok_or_else(|| {
-                            ResidentActorWorkbenchError::ActorProtocol(
-                                "tool installer did not retain its dispatcher".into(),
-                            )
-                        })?;
-                    Ok((declarations, slots, dispatch))
-                })();
-                let (declarations, slots, dispatch) = match publication {
-                    Ok(publication) => publication,
-                    Err(error) => {
-                        match session.abort(hole.cont_id(), "tool publication rejected".into()) {
-                            Ok(outcome) => registration.replace_in_checkout(session, &outcome),
-                            Err(abort_error) => tracing::warn!(
-                                hole = hole.cont_id(),
-                                %abort_error,
-                                "failed to abort parked hole after tool publication rejection"
-                            ),
-                        }
-                        return Err(error);
-                    }
+            );
+            log_startup_future_size(
+                "prepare_tools.begin_fragment_split",
+                std::mem::size_of_val(&fragment),
+            );
+            let step = fragment.await?;
+            let ResidentWorkbenchStep::Running { outcome, .. } = step else {
+                let detail = match step {
+                    ResidentWorkbenchStep::Rejected(detail) => detail.output,
+                    _ => "installer completed without publishing its handler".into(),
                 };
-                let settled = session
-                    .resume_classified(hole, ())
-                    .map_err(classify_resumption)?;
-                registration.replace_in_checkout(session, &settled);
-                if !matches!(
-                    settled,
-                    ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. }
-                ) {
-                    if let ResidentOutcome::Suspended { hole, .. } = settled {
-                        match session.abort(
-                            hole.cont_id(),
-                            "tool installer must finish after publication".into(),
-                        ) {
-                            Ok(outcome) => registration.replace_in_checkout(session, &outcome),
-                            Err(abort_error) => tracing::warn!(
-                                hole = hole.cont_id(),
-                                %abort_error,
-                                "failed to abort parked hole after tool installer overrun"
+                return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                    "tool installation: {detail}"
+                )));
+            };
+            let ResidentOutcome::Suspended { hole, request, .. } = *outcome else {
+                unreachable!("running fragment has a suspension")
+            };
+            // `hole` is plain session-held data held across the checkout below
+            // being acquired; if this future is dropped while still awaiting
+            // that checkout, nothing else resumes or aborts the continuation it
+            // parked. `ParkedHoleAbortGuard` covers that gap the same way
+            // `HostInputRetirement` covers the split cell's mounted input:
+            // Drop can't await, so it spawns one more checkout in the
+            // background to abort the hole there. Disarmed the moment the
+            // checkout below is actually in hand, since everything past that
+            // point settles the hole synchronously inside it.
+            let abort_guard = ParkedHoleAbortGuard::new(
+                &self.access,
+                compile_context.clone(),
+                hole.cont_id().to_string(),
+                "tool installer's parked hole was abandoned before its resuming checkout".into(),
+            );
+            let registration = abort_guard.registration();
+            let publication = self
+                .access
+                .with_machine(compile_context, move |session, context, _| {
+                    let publication = (|| {
+                        let ResidentRequest::AgentTools(
+                            crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallWith(
+                                declarations,
+                                _,
                             ),
+                        ) = ResidentRequest::decode(&request, session.data_con_table())?
+                        else {
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                "tool installer crossed an unexpected effect boundary".into(),
+                            ));
+                        };
+                        let installation = tidepool_runtime::value_to_json(
+                            &declarations,
+                            session.data_con_table(),
+                            0,
+                        );
+                        let SpecInstallation { tools, slots } = decode_installation(installation)?;
+                        let declarations = crate::resident_interactive::project_tools(tools)
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                            })?;
+                        let dispatch = session
+                            .live_payload_handle_owned_by(
+                                hole.cont_id(),
+                                context.placement.resource_scope,
+                            )?
+                            .ok_or_else(|| {
+                                ResidentActorWorkbenchError::ActorProtocol(
+                                    "tool installer did not retain its dispatcher".into(),
+                                )
+                            })?;
+                        Ok((declarations, slots, dispatch))
+                    })();
+                    let (declarations, slots, dispatch) = match publication {
+                        Ok(publication) => publication,
+                        Err(error) => {
+                            match session.abort(hole.cont_id(), "tool publication rejected".into())
+                            {
+                                Ok(outcome) => registration.replace_in_checkout(session, &outcome),
+                                Err(abort_error) => tracing::warn!(
+                                    hole = hole.cont_id(),
+                                    %abort_error,
+                                    "failed to abort parked hole after tool publication rejection"
+                                ),
+                            }
+                            return Err(error);
                         }
+                    };
+                    let settled = session
+                        .resume_classified(hole, ())
+                        .map_err(classify_resumption)?;
+                    registration.replace_in_checkout(session, &settled);
+                    if !matches!(
+                        settled,
+                        ResidentOutcome::Completed { .. }
+                            | ResidentOutcome::BindingsCommitted { .. }
+                    ) {
+                        if let ResidentOutcome::Suspended { hole, .. } = settled {
+                            match session.abort(
+                                hole.cont_id(),
+                                "tool installer must finish after publication".into(),
+                            ) {
+                                Ok(outcome) => registration.replace_in_checkout(session, &outcome),
+                                Err(abort_error) => tracing::warn!(
+                                    hole = hole.cont_id(),
+                                    %abort_error,
+                                    "failed to abort parked hole after tool installer overrun"
+                                ),
+                            }
+                        }
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "tool installer did not finish after publication".into(),
+                        ));
                     }
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "tool installer did not finish after publication".into(),
-                    ));
-                }
-                Ok(ResidentWorkbenchTools {
-                    declarations,
-                    dispatch: Arc::new(dispatch),
-                    slots,
-                    resolved: publication_resolved,
-                    install,
-                    revision,
+                    Ok(ResidentWorkbenchTools {
+                        declarations,
+                        dispatch: Arc::new(dispatch),
+                        slots,
+                        resolved: publication_resolved,
+                        install,
+                        revision,
+                    })
                 })
-            })
-            .await;
-        if publication.is_ok() {
-            abort_guard.disarm();
-        }
-        publication
+                .await;
+            if publication.is_ok() {
+                abort_guard.disarm();
+            }
+            publication
+        })
     }
 
     /// Apply the retained handler with invocation data. No source compiler is involved.
@@ -5263,8 +5288,12 @@ where
                 install_block,
                 ready,
                 8192,
-            )
-            .await?;
+            );
+            log_startup_future_size(
+                "begin_fragment_split.begin_ready_block_split",
+                std::mem::size_of_val(&step),
+            );
+            let step = step.await?;
             cancel_on_drop.0 = None;
             return Ok(step);
         };
@@ -6386,8 +6415,12 @@ where
         block,
         compiled,
         display_budget,
-    )
-    .await?;
+    );
+    log_startup_future_size(
+        "begin_ready_block_split.run_ready_block_split",
+        std::mem::size_of_val(&step),
+    );
+    let step = step.await?;
     settle_deferred_display(access, context, step).await
 }
 
@@ -6467,17 +6500,20 @@ where
         tracing::info!(target: "exomonad_actor::workbench_phase", install_attempt, phase = "native_item_snapshot_started", "workbench phase");
         let code = cloned_turn_code(&compiled_turn);
         let mode = pending_mode_for(&bound, generation, &observation);
-        let attempt = access
-            .with_machine(context.clone(), move |session, _, _| {
-                if !session.prepared_machine_ready() {
-                    return Ok(PreparedSnapshotAttempt::Bootstrap);
-                }
-                session
-                    .snapshot_run_prepared(code, mode, None)
-                    .map(|pending| PreparedSnapshotAttempt::Ready(Box::new(pending)))
-                    .map_err(ResidentActorWorkbenchError::Resident)
-            })
-            .await?;
+        let attempt_future = access.with_machine(context.clone(), move |session, _, _| {
+            if !session.prepared_machine_ready() {
+                return Ok(PreparedSnapshotAttempt::Bootstrap);
+            }
+            session
+                .snapshot_run_prepared(code, mode, None)
+                .map(|pending| PreparedSnapshotAttempt::Ready(Box::new(pending)))
+                .map_err(ResidentActorWorkbenchError::Resident)
+        });
+        log_startup_future_size(
+            "run_ready_block_split.snapshot_checkout",
+            std::mem::size_of_val(&attempt_future),
+        );
+        let attempt = attempt_future.await?;
         let pending = match attempt {
             PreparedSnapshotAttempt::Bootstrap => break 'split,
             PreparedSnapshotAttempt::Ready(pending) => pending,
@@ -6506,8 +6542,7 @@ where
         let finish_type_modules = type_modules.clone();
         let finish_block = block.clone();
         let finish_source = turn_source.clone();
-        let step = access
-            .with_machine(context.clone(), move |session, context, _| {
+        let install_future = access.with_machine(context.clone(), move |session, context, _| {
                 tracing::info!(target: "exomonad_actor::workbench_phase", install_attempt, phase = "native_item_run_started", "workbench phase");
                 match session.revalidate_and_run_prepared(*pending, compiled_program) {
                     Ok(Some(outcome)) => finish_bind_step(
@@ -6527,8 +6562,12 @@ where
                     Ok(None) => Ok(None),
                     Err(error) => Err(ResidentActorWorkbenchError::Resident(error)),
                 }
-            })
-            .await?;
+            });
+        log_startup_future_size(
+            "run_ready_block_split.install_checkout",
+            std::mem::size_of_val(&install_future),
+        );
+        let step = install_future.await?;
         tracing::info!(target: "exomonad_actor::workbench_phase", install_attempt, phase = "native_item_run_completed", "workbench phase");
         if let Some(step) = step {
             return Ok(step);

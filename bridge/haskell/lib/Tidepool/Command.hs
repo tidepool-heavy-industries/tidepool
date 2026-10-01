@@ -19,6 +19,7 @@ module Tidepool.Command
     argv,
     describe,
     withMemory,
+    withSource,
     inDirectory,
     withEnvironment,
     withArguments,

@@ -99,7 +99,10 @@ pub(super) fn render_source_drift_section(drift: &crate::ActorSourceDriftObserva
     });
     let checkout = render_source_observation("checkout", &drift.checkout, |checkout| {
         if checkout.dirty_files.is_empty() {
-            format!("head={} (checked, clean); binary_build_revision=unavailable (not recorded by this build)", checkout.head)
+            format!(
+                "head={} (checked, clean); binary_build_revision=unavailable (not recorded by this build)",
+                checkout.head
+            )
         } else {
             let mut dirty = checkout.dirty_files.clone();
             dirty.sort();
@@ -998,7 +1001,9 @@ mod tests {
     fn status_assignment_base_reads_task_source_from_the_rendered_input() {
         let oid = "c427057e0123456789abcdef0123456789abcdef";
         for rendered in [
-            format!("Task {{ taskGroup = \"work\", planPath = \"p\", taskSource = GitOid \"{oid}\", obligation = \"x\" }}"),
+            format!(
+                "Task {{ taskGroup = \"work\", planPath = \"p\", taskSource = GitOid \"{oid}\", obligation = \"x\" }}"
+            ),
             format!("Task {{taskSource = GitOid {{unGitOid = \"{oid}\"}}}}"),
             format!("{{\"taskSource\":\"{oid}\"}}"),
         ] {

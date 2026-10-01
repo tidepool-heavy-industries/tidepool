@@ -218,6 +218,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
         "Commands",
         &[
             "CommandInput",
+            "CommandSourceCapture",
             "CommandSpec",
             "CommandOutcome",
             "CommandCleanup",

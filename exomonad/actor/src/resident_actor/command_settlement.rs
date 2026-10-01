@@ -18,7 +18,7 @@ use crate::request_effect::WatchSubject;
 use crate::RequestId;
 use tidepool_bridge_effects::{
     CommandCleanup, CommandError, CommandInput, CommandOutcome, CommandPage, CommandPosition,
-    CommandReport, CommandResult, CommandSource, CommandSpec, CommandStream,
+    CommandReport, CommandResult, CommandSource, CommandSourceCapture, CommandSpec, CommandStream,
 };
 
 /// How long a running source probe may take before the command is released
@@ -98,6 +98,7 @@ fn probe_spec(spec: &CommandSpec) -> CommandSpec {
         environment,
         memory: 256 * 1024 * 1024,
         input: CommandInput::ClosedInput,
+        source_capture: CommandSourceCapture::NoCapture,
     }
 }
 
@@ -125,9 +126,8 @@ impl CommandSettlements {
         }
     }
 
-    /// Capture the starting source before releasing the command. Every start
-    /// retains the same report; only explicit background presentation requests
-    /// an owner notice, unless a watch takes that wake over.
+    /// Capture source only when the authored command requests it. The source
+    /// probe is an admitted native command, so ordinary runs avoid that work.
     pub(super) async fn start(
         &self,
         kernel: &KernelContext,
@@ -135,22 +135,27 @@ impl CommandSettlements {
         notify_owner: bool,
         invocation: Option<&super::invocation_work::InvocationWork>,
     ) -> Result<String, CommandError> {
-        let probe = probe_spec(&spec);
+        let capture_source = spec.source_capture == CommandSourceCapture::CaptureBeforeStart;
+        let source_probe_spec = capture_source.then(|| probe_spec(&spec));
         let (job, command) = self.jobs.start(kernel, spec, invocation).await?;
-        let probe = match self
-            .jobs
-            .start_source_probe(kernel, probe, invocation)
-            .await
-        {
-            Ok((probe, request)) => {
-                self.jobs.set_source_probe(&job, probe.clone())?;
-                dispatch_backend(&self.deployments, request);
-                Some(probe)
+        let probe = if let Some(probe_spec) = source_probe_spec {
+            match self
+                .jobs
+                .start_source_probe(kernel, probe_spec, invocation)
+                .await
+            {
+                Ok((probe, request)) => {
+                    self.jobs.set_source_probe(&job, probe.clone())?;
+                    dispatch_backend(&self.deployments, request);
+                    Some(probe)
+                }
+                Err(error) => {
+                    tracing::warn!(?error, %job, "command source probe not started");
+                    None
+                }
             }
-            Err(error) => {
-                tracing::warn!(?error, %job, "command source probe not started");
-                None
-            }
+        } else {
+            None
         };
         let start = CommandStart { probe, command };
         match self.arm(&job, notify_owner, Some(start)) {
@@ -345,8 +350,14 @@ impl CommandSettlements {
             }
             None => None,
         };
-        let result = match self.jobs.finished(&job).await {
-            Ok(result) => result,
+        let result = match self.jobs.owner(&job) {
+            Ok(owner) => match self.jobs.finished(owner, &job).await {
+                Ok(result) => result,
+                Err(error) => CommandResult {
+                    outcome: CommandOutcome::CommandUnconfirmed(format!("{error:?}")),
+                    cleanup: CommandCleanup::CommandCleanupUnknown(format!("{error:?}")),
+                },
+            },
             Err(error) => CommandResult {
                 outcome: CommandOutcome::CommandUnconfirmed(format!("{error:?}")),
                 cleanup: CommandCleanup::CommandCleanupUnknown(format!("{error:?}")),
@@ -375,7 +386,7 @@ impl CommandSettlements {
                 .await
                 .ok()?
                 .ok()?;
-            tokio::time::timeout(SOURCE_PROBE_TIMEOUT, self.jobs.finished(probe))
+            tokio::time::timeout(SOURCE_PROBE_TIMEOUT, self.jobs.finished(owner, probe))
                 .await
                 .ok()?
                 .ok()
@@ -445,7 +456,7 @@ impl CommandSettlements {
                 return StreamEvidence {
                     complete: Err(format!("output unavailable: {error:?}")),
                     tail: String::new(),
-                }
+                };
             }
         };
         let tail = match self
@@ -458,7 +469,7 @@ impl CommandSettlements {
                 return StreamEvidence {
                     complete: Err(format!("output unavailable: {error:?}")),
                     tail: String::new(),
-                }
+                };
             }
         };
         let complete = if !tail.finished {
@@ -705,6 +716,7 @@ mod tests {
             ],
             memory: 8 * 1024 * 1024 * 1024,
             input: CommandInput::PipeInput,
+            source_capture: CommandSourceCapture::CaptureBeforeStart,
         };
         let probe = probe_spec(&spec);
         assert_eq!(probe.directory, spec.directory);
@@ -716,5 +728,6 @@ mod tests {
             ]
         );
         assert_eq!(probe.input, CommandInput::ClosedInput);
+        assert_eq!(probe.source_capture, CommandSourceCapture::NoCapture);
     }
 }

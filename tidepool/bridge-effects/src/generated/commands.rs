@@ -17,6 +17,16 @@ pub enum CommandInput {
 #[derive(
     ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
 )]
+pub enum CommandSourceCapture {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    NoCapture,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    CaptureBeforeStart,
+}
+
+#[derive(
+    ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
 #[haskell(module = "Tidepool.Effects.Core")]
 pub struct CommandSpec {
     pub argv: Vec<String>,
@@ -24,6 +34,7 @@ pub struct CommandSpec {
     pub environment: Vec<(String, String)>,
     pub memory: i64,
     pub input: CommandInput,
+    pub source_capture: CommandSourceCapture,
 }
 
 #[derive(

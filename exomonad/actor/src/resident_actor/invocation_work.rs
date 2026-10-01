@@ -32,6 +32,7 @@ pub(super) struct InvocationCleanup {
     workers: Vec<InvocationWorkerCleanup>,
     requests: Vec<InvocationRequestCleanup>,
     failures: Vec<String>,
+    settlement_notifications_pending: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -58,6 +59,9 @@ struct InvocationRequestCleanup {
 impl InvocationCleanup {
     pub(super) fn uncertainty(&self) -> Option<String> {
         let mut details = self.failures.clone();
+        if self.settlement_notifications_pending {
+            details.push("settlement notices remain queued for publication".into());
+        }
         for command in &self.commands {
             if let Some(error) = &command.failure {
                 details.push(format!("command {} cancellation: {error:?}", command.job));
@@ -427,8 +431,20 @@ impl InvocationWork {
                 }
             }
         }
-        publish_request_notifications(&environment.requests, &environment.deployments, Vec::new())
-            .await;
+        if tokio::time::timeout(
+            RELEASE_WAIT,
+            publish_request_notifications(
+                &environment.requests,
+                &environment.deployments,
+                Vec::new(),
+            ),
+        )
+        .await
+        .is_err()
+        {
+            cleanup.settlement_notifications_pending =
+                environment.requests.has_settlement_notifications();
+        }
         for group in groups {
             match environment.fork_groups.abort(group, self.owner) {
                 Ok(children) => self.retain_aborted_children(kernel, &children),
@@ -610,12 +626,14 @@ impl crate::local_actor::WorkerStartupAdmission for InvocationWork {
     }
 }
 
-pub(super) fn ensure_workbench_execution_id(request: WorkbenchRequest) -> WorkbenchRequest {
+pub(super) fn ensure_workbench_execution_id(
+    request: WorkbenchRequest,
+) -> (WorkbenchRequest, WorkbenchExecutionId) {
     let execution = request
         .execution_id()
         .cloned()
         .unwrap_or_else(|| WorkbenchExecutionId::from_digest(*uuid::Uuid::new_v4().as_bytes()));
-    request.with_execution_id(execution)
+    (request.with_execution_id(execution.clone()), execution)
 }
 
 pub(super) fn retain_invocation_cleanup_summary(

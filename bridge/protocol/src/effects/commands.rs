@@ -111,6 +111,10 @@ pub fn commands() -> Effect {
                     ("TerminalInput", vec![]),
                 ],
             ),
+            sum(
+                "CommandSourceCapture",
+                vec![("NoCapture", vec![]), ("CaptureBeforeStart", vec![])],
+            ),
             record(
                 "CommandSpec",
                 vec![
@@ -123,6 +127,11 @@ pub fn commands() -> Effect {
                     ),
                     ("commandMemory", "memory", HsType::Int),
                     ("commandInput", "input", named("CommandInput")),
+                    (
+                        "commandSourceCapture",
+                        "source_capture",
+                        named("CommandSourceCapture"),
+                    ),
                 ],
             ),
             sum(

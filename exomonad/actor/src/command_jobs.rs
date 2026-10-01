@@ -6,6 +6,8 @@ use ractor::{Actor, ActorProcessingErr, ActorRef as RactorRef};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(test)]
+use tidepool_bridge_effects::CommandSourceCapture;
 use tidepool_bridge_effects::{
     CommandCleanup, CommandError, CommandInput, CommandOutcome, CommandOutput, CommandPage,
     CommandPosition, CommandReport, CommandResult, CommandSpec, CommandStatus, CommandStream,
@@ -632,11 +634,17 @@ impl CommandJobs {
     /// Wait for the job to finish and return its result, confirming cleanup
     /// with the backend as the job's owner would. A job whose execution ended
     /// without a terminal status reports an unconfirmed outcome.
-    pub(crate) async fn finished(&self, id: &str) -> Result<CommandResult, CommandError> {
+    pub(crate) async fn finished(
+        &self,
+        caller: ActorRef,
+        id: &str,
+    ) -> Result<CommandResult, CommandError> {
         let shared = self.shared(id)?;
-        let owner = shared.owner();
-        self.wait(owner, id, -1).await?;
-        match shared.status(owner, id).await {
+        if shared.owner() != caller {
+            return Err(CommandError::CommandUnauthorized);
+        }
+        self.wait(caller, id, -1).await?;
+        match shared.status(caller, id).await {
             CommandStatus::CommandFinished(result) => Ok(result),
             other => Ok(unconfirmed(format!(
                 "job ended without a terminal status: {other:?}"
@@ -1227,6 +1235,7 @@ mod validation_tests {
             environment: vec![("EMPTY".into(), "".into())],
             memory: 256 * 1024 * 1024,
             input: CommandInput::ClosedInput,
+            source_capture: CommandSourceCapture::NoCapture,
         };
         assert!(validate_spec(&valid).is_ok());
         let cases = [

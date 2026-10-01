@@ -152,6 +152,10 @@ observation never detaches. Default starts are invocation-owned. Use
 `Cmd.background` for an actor-owned start with completion notice, or `Cmd.detach`
 to transfer an existing owned job explicitly. Reads never rerun commands;
 outcome, output completeness and cleanup remain separate facts.
+Reports omit source provenance unless requested. Wrap a command in
+`Cmd.withSource` when its report needs the starting directory, Git revision and
+dirty state; this runs a separate admitted source probe before the command.
+Ordinary `Cmd.run`, `Cmd.start` and `Cmd.background` avoid that extra process.
 
 For retained command-evidence composition see the compiled
 `.exomonad/workspace/checks/background-command-example.hs`. Record-actor handlers

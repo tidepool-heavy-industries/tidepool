@@ -279,7 +279,7 @@ where
             _ => {
                 return Err(reject(
                     "replacement requires a paused or receiving stateful actor",
-                ))
+                ));
             }
         };
         let crate::start::CapturedChildLaunch {

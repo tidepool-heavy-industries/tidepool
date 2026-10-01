@@ -286,10 +286,7 @@ agentSpec = defaultSpec { specTools = Tools.tools }
         )
         .unwrap();
         std::os::unix::fs::symlink("revisions/revision-one", root.path().join("active")).unwrap();
-        let resolved = resolve(
-            vec![root.path().join("active/0")],
-            None,
-        );
+        let resolved = resolve(vec![root.path().join("active/0")], None);
         assert_eq!(resolved.source_revision().as_deref(), Some("revision-one"));
     }
 }

@@ -242,6 +242,7 @@ impl Fixture {
                     environment: Vec::new(),
                     memory: 64 * 1024 * 1024,
                     input: CommandInput::ClosedInput,
+                    source_capture: tidepool_bridge_effects::CommandSourceCapture::NoCapture,
                 },
                 None,
             )
@@ -468,13 +469,118 @@ async fn owned_command_detach_survives_cleanup_and_borrowed_detach_is_unauthoriz
     ));
     backend.finish.add_permits(1);
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(1), jobs.finished(&job))
+        tokio::time::timeout(Duration::from_secs(1), jobs.finished(owner, &job))
             .await
             .unwrap()
             .unwrap()
             .cleanup,
         CommandCleanup::CommandClean
     );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn foreign_actor_cannot_wait_for_command_cleanup() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let jobs = &fixture.environment.commands;
+    let (job, backend) = fixture.pending_command().await;
+    let foreign = ActorRef {
+        incarnation: crate::Incarnation(owner.incarnation.0 + 1),
+        ..owner
+    };
+
+    assert_eq!(
+        jobs.finished(foreign, &job).await.unwrap_err(),
+        CommandError::CommandUnauthorized
+    );
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 0);
+    assert!(!matches!(
+        jobs.status(owner, &job).await.unwrap(),
+        CommandStatus::CommandFinished(_)
+    ));
+
+    backend.finish.add_permits(1);
+    assert_eq!(
+        jobs.finished(owner, &job).await.unwrap().cleanup,
+        CommandCleanup::CommandClean
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn blocked_settlement_notice_does_not_prevent_invocation_cancellation() {
+    let mut fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let (job, backend) = fixture.pending_command().await;
+    let work = InvocationWork::new(owner, reservation());
+    work.register_command(job.clone()).unwrap();
+
+    let notice = fixture.environment.requests.reserve_command_settlement(
+        owner,
+        "retained-report".into(),
+        true,
+    );
+    fixture
+        .environment
+        .requests
+        .settle_command(notice, "completed".into(), None);
+    assert!(fixture.environment.requests.has_settlement_notifications());
+
+    for index in 0..DEPLOYMENT_CHANNEL_CAPACITY {
+        fixture
+            .environment
+            .deployments
+            .try_send(LocalResidentDeployment::Retired {
+                actor: ActorRef::first(crate::ActorId(10_000 + index as u64)),
+                terminal: ActorTerminal {
+                    kind: ActorExitKind::Cancelled,
+                    summary: "test channel filler".into(),
+                },
+            })
+            .unwrap();
+    }
+
+    let first = {
+        let cleanup = work.cleanup(&fixture.environment, &fixture.kernel);
+        tokio::pin!(cleanup);
+        assert!(futures_util::poll!(cleanup.as_mut()).is_pending());
+        let mut completed = None;
+        for _ in 0..4 {
+            tokio::time::advance(RELEASE_WAIT).await;
+            if let std::task::Poll::Ready(result) = futures_util::poll!(cleanup.as_mut()) {
+                completed = Some(result);
+                break;
+            }
+            if backend.cancel_entered.available_permits() > 0 {
+                break;
+            }
+        }
+        backend
+            .cancel_entered
+            .try_acquire()
+            .expect("a blocked notice flush must not delay command cancellation")
+            .forget();
+        assert_eq!(backend.cancellations.load(Ordering::Relaxed), 1);
+        assert!(fixture.environment.requests.has_settlement_notifications());
+
+        if let Some(completed) = completed {
+            completed
+        } else {
+            backend.finish.add_permits(1);
+            tokio::time::advance(RELEASE_WAIT * 2).await;
+            tokio::time::timeout(Duration::from_secs(1), &mut cleanup)
+                .await
+                .unwrap()
+        }
+    };
+    assert!(first.settlement_notifications_pending);
+    assert!(fixture.environment.requests.has_settlement_notifications());
+
+    while fixture.deployments.try_recv().is_ok() {}
+    let retried = work.cleanup(&fixture.environment, &fixture.kernel).await;
+    assert!(!retried.settlement_notifications_pending);
+    assert!(!fixture.environment.requests.has_settlement_notifications());
     fixture.finish().await;
 }
 
@@ -500,7 +606,7 @@ async fn sibling_invocation_cannot_detach_same_actor_command() {
     fixture.cleanup(&sibling).await;
     assert_eq!(backend.cancellations.load(Ordering::Relaxed), 0);
     backend.finish.add_permits(1);
-    tokio::time::timeout(Duration::from_secs(1), jobs.finished(&job))
+    tokio::time::timeout(Duration::from_secs(1), jobs.finished(owner, &job))
         .await
         .unwrap()
         .unwrap();
@@ -921,7 +1027,7 @@ async fn command_detach_preserves_linked_source_probe_after_invocation_cleanup()
             CommandStatus::CommandFinished(_)
         ));
         backend.finish.add_permits(1);
-        tokio::time::timeout(Duration::from_secs(1), jobs.finished(id))
+        tokio::time::timeout(Duration::from_secs(1), jobs.finished(owner, id))
             .await
             .unwrap()
             .unwrap();
@@ -1272,6 +1378,7 @@ async fn interrupted_automatic_group_abort_retains_worker_for_invocation_cleanup
     let mut abort = Box::pin(behavior.abort_incomplete_groups(
         &fixture.kernel,
         owner,
+        None,
         "reply interrupted group admission",
         Some(work.as_ref()),
     ));

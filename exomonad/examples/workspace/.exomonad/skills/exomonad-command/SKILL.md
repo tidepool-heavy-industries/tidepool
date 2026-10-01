@@ -148,6 +148,11 @@ handle does not change its lifetime. Borrowed handles permit observation while
 available; cancelling a borrowed waiter releases that wait and cannot cancel
 the owner's command.
 
+Command reports omit source provenance unless requested. Wrap a command in
+`Cmd.withSource` when its report needs the starting directory, Git revision and
+dirty state; this runs a separate admitted source probe before the command.
+Ordinary commands avoid that extra process.
+
 Commands are reusable values. Quotations preserve literal Bash, including
 multiline scripts, heredocs and indentation. Haskell does not interpolate shell
 variables or backticks. Bash retains ordinary exit/pipeline semantics; choose

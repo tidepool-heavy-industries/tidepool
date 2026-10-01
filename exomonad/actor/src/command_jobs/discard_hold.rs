@@ -186,6 +186,7 @@ mod tests {
                 .collect(),
             memory: 1,
             input: CommandInput::ClosedInput,
+            source_capture: tidepool_bridge_effects::CommandSourceCapture::NoCapture,
         }
     }
 

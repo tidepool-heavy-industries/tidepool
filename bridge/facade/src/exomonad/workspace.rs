@@ -275,10 +275,9 @@ impl FrozenWorkspace {
             &prompts,
         );
         let resources_path = PathBuf::from("resources/Exomonad/Workspace.hs");
-        if include.iter().any(|root| root.join("Exomonad").is_dir()) {
+        if include.iter().any(|root| generates_workspace_module(root)) {
             return Err(
-                "the Exomonad.* module prefix is reserved for generated workspace interfaces"
-                    .into(),
+                "Exomonad.Workspace is reserved for the generated workspace interface".into(),
             );
         }
         std::fs::create_dir_all(directory.join("resources/Exomonad"))?;
@@ -361,6 +360,16 @@ impl FrozenWorkspace {
         config.launch.validate()?;
         Ok(config)
     }
+}
+
+/// The generated interface is appended as the last source root. An authored
+/// file at its exact module path would either shadow that interface or make
+/// the same module name resolve differently across source roots. Other
+/// `Exomonad.*` modules are ordinary workspace source.
+fn generates_workspace_module(root: &Path) -> bool {
+    ["hs", "lhs", "hs-boot", "lhs-boot"]
+        .into_iter()
+        .any(|suffix| root.join(format!("Exomonad/Workspace.{suffix}")).is_file())
 }
 
 fn generated_core_identity() -> Result<String> {
@@ -1013,6 +1022,53 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("frozen workspace input changed"));
+    }
+
+    #[test]
+    fn canonical_workspace_contrib_sources_are_captured() {
+        let project = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        let authored = project.path().join(".exomonad");
+        let contrib = authored.join("Exomonad/Contrib");
+        std::fs::create_dir_all(&contrib).unwrap();
+        std::fs::write(
+            authored.join("config.toml"),
+            "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\n",
+        )
+        .unwrap();
+        let canonical_module = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../exomonad/examples/workspace/.exomonad/Exomonad/Contrib/Types.hs");
+        std::fs::copy(&canonical_module, contrib.join("Types.hs")).unwrap();
+
+        let selected = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+
+        let captured = selected.include[0].join("Exomonad/Contrib/Types.hs");
+        assert_eq!(
+            std::fs::read(captured).unwrap(),
+            std::fs::read(canonical_module).unwrap()
+        );
+    }
+
+    #[test]
+    fn generated_workspace_module_path_is_reserved_for_each_source_suffix() {
+        for suffix in ["hs", "lhs", "hs-boot", "lhs-boot"] {
+            let project = tempfile::tempdir().unwrap();
+            let run = tempfile::tempdir().unwrap();
+            let authored = project.path().join(".exomonad");
+            let collision = authored.join(format!("Exomonad/Workspace.{suffix}"));
+            std::fs::create_dir_all(collision.parent().unwrap()).unwrap();
+            std::fs::write(&collision, "").unwrap();
+            std::fs::write(
+                authored.join("config.toml"),
+                "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\n",
+            )
+            .unwrap();
+
+            let error = FrozenWorkspace::load(project.path(), run.path())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("Exomonad.Workspace is reserved"), "{error}");
+        }
     }
 
     #[test]

@@ -26,7 +26,8 @@ pub fn commands_decl() -> crate::EffectDecl {
         ],
         type_defs: &[
             "data CommandInput = ClosedInput | PipeInput | TerminalInput deriving (Show, Eq)",
-            "data CommandSpec = CommandSpec { commandArgv :: [Text], commandDirectory :: Maybe Text, commandEnvironment :: [(Text, Text)], commandMemory :: Int, commandInput :: CommandInput } deriving (Show, Eq)",
+            "data CommandSourceCapture = NoCapture | CaptureBeforeStart deriving (Show, Eq)",
+            "data CommandSpec = CommandSpec { commandArgv :: [Text], commandDirectory :: Maybe Text, commandEnvironment :: [(Text, Text)], commandMemory :: Int, commandInput :: CommandInput, commandSourceCapture :: CommandSourceCapture } deriving (Show, Eq)",
             "data CommandOutcome = CommandExited Int | CommandSignalled Int | CommandOutOfMemory Int | CommandCancelled | CommandFailed Text | CommandUnconfirmed Text deriving (Show, Eq)",
             "data CommandCleanup = CommandClean | CommandRetained | CommandCleanupUnknown Text deriving (Show, Eq)",
             "data CommandResult = CommandResult { commandOutcome :: CommandOutcome, commandCleanup :: CommandCleanup } deriving (Show, Eq)",

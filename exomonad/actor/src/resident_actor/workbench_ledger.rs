@@ -219,7 +219,7 @@ impl WorkbenchExecutions {
             }
             match &record.state {
                 WorkbenchExecutionState::Unconfirmed => {
-                    return Some(WorkbenchBoundaryRecord::Unconfirmed)
+                    return Some(WorkbenchBoundaryRecord::Unconfirmed);
                 }
                 WorkbenchExecutionState::Terminal { reply, .. } => {
                     // Several local invocations may share an original model call.

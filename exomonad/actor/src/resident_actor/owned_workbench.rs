@@ -207,7 +207,7 @@ impl WorkbenchPublicOwner {
             _ => {
                 return Err(refuse(
                     "publication plane differs from requested persistence",
-                ))
+                ));
             }
         }
         Ok(Arc::new(Self {
@@ -350,7 +350,7 @@ where
             return runner
                 .resume_reply_rejection(context, continuation, error)
                 .await
-                .map(WorkbenchFragmentAdvance::Resumed)
+                .map(WorkbenchFragmentAdvance::Resumed);
         }
     };
     match step {
@@ -555,7 +555,7 @@ where
         let admitted = match self.preflight_workbench(kernel.identity(), invocation, control) {
             Ok(WorkbenchPreflight::Admitted(admitted)) => admitted,
             Ok(WorkbenchPreflight::Retained(reply)) => {
-                return terminal_task(reply.map(KernelStep::Continue))
+                return terminal_task(reply.map(KernelStep::Continue));
             }
             Err(error) => return terminal_task(Err(error)),
         };
@@ -734,7 +734,7 @@ where
                         return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
                             owned,
                             Err(workbench_failure(&[], 0, 1, error)),
-                        )))
+                        )));
                     }
                 };
                 if let Some(cell) = cell {
@@ -747,13 +747,13 @@ where
                             return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
                                 owned,
                                 Ok(step),
-                            )))
+                            )));
                         }
                         Err(error) => {
                             return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
                                 owned,
                                 Err(error),
-                            )))
+                            )));
                         }
                         Ok(None) => {}
                     }
@@ -922,9 +922,6 @@ where
                         }
                         Ok(WorkbenchRunAdvance::ParkAfterToolFinish) => {
                             behavior.finish_owned_after_tool_task(owned, kernel.clone())
-                        }
-                        Ok(WorkbenchRunAdvance::ParkBackground(presentation)) => {
-                            behavior.owned_background_command_task(owned, presentation)
                         }
                         result => {
                             let result = result.map(|advance| match advance {

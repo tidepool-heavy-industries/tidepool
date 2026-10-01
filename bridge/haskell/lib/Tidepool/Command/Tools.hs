@@ -195,6 +195,7 @@ executeWith presenter
     case executeOptions memory terminal pipe wait limit of
       Left rejection -> pure (renderOptionError rejection)
       Right (memoryMiB, options) -> do
+        let inBackground = fromMaybe False detached
         let command =
               maybe id Cmd.inDirectory directory $
                 Cmd.withEnvironment (maybe [] Map.toList env) $
@@ -204,8 +205,8 @@ executeWith presenter
               if fromMaybe False terminal
                 then Cmd.withTerminal
                 else if fromMaybe False pipe then Cmd.withStdin else id
-        let inBackground = fromMaybe False detached
-        started <- if inBackground then Cmd.tryBackground command else Cmd.tryStart command
+            reportedCommand = if inBackground then Cmd.withSource command else command
+        started <- if inBackground then Cmd.tryBackground reportedCommand else Cmd.tryStart command
         case started of
           Left Cmd.CommandUnauthorized ->
             pure "Rejected · command not started · this actor has no command authority"

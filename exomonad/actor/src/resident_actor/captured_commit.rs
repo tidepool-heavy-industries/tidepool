@@ -139,15 +139,15 @@ where
                                 &environment,
                                 frame.context.actor,
                                 frame.group,
-                            )
+                            );
                         }
                         crate::ForkGroupPhase::Committed => {
-                            return Err("captured fork group was already published".into())
+                            return Err("captured fork group was already published".into());
                         }
                         crate::ForkGroupPhase::Aborted => {
                             return Err(
                                 "captured fork group was aborted while awaiting readiness".into()
-                            )
+                            );
                         }
                         crate::ForkGroupPhase::Staging => {}
                     }
@@ -385,24 +385,37 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?
     };
-    descriptors.into_iter().map(|(child, descriptor)| {
+    descriptors
+        .into_iter()
+        .map(|(child, descriptor)| {
             if descriptor.fork_group() != Some(group) {
-                return Err(format!("captured fork child {child:?} belongs to a different group"));
+                return Err(format!(
+                    "captured fork child {child:?} belongs to a different group"
+                ));
             }
             if descriptor.checkpoint_token().is_some() {
-                let admission = environment.fork_groups.checkpoint_admission(group, owner, child)
+                let admission = environment
+                    .fork_groups
+                    .checkpoint_admission(group, owner, child)
                     .map_err(|error| error.to_string())?
-                    .ok_or_else(|| format!("captured fork child {child:?} has no admitted checkpoint"))?;
+                    .ok_or_else(|| {
+                        format!("captured fork child {child:?} has no admitted checkpoint")
+                    })?;
                 if !admission.matches(&descriptor)
                     || admission.context != crate::HostedCheckpointContext::Captured
                 {
-                    return Err(format!("captured fork child {child:?} has no independently usable captured context"));
+                    return Err(format!(
+                        "captured fork child {child:?} has no independently usable captured context"
+                    ));
                 }
             } else if descriptor.context_parent().is_some() {
-                return Err(format!("captured fork child {child:?} requires a checkpoint or selected context"));
+                return Err(format!(
+                    "captured fork child {child:?} requires a checkpoint or selected context"
+                ));
             }
             Ok((child, descriptor))
-        }).collect()
+        })
+        .collect()
 }
 
 pub(super) async fn release_pending<H, O>(
@@ -488,7 +501,7 @@ where
                                 )
                             }
                             Err(error) => {
-                                return Err(ResidentKernelBehavior::<H, O>::failure(error))
+                                return Err(ResidentKernelBehavior::<H, O>::failure(error));
                             }
                         },
                     };

@@ -159,7 +159,7 @@ where
                 }
             }),
             CommandsReq::CommandWaitWith(id) => answer!({
-                let result = observe!(jobs.finished(&id));
+                let result = observe!(jobs.finished(owner, &id));
                 match result {
                     Ok(result) => Ok(tidepool_bridge_effects::CommandObservation {
                         result,

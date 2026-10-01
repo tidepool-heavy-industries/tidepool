@@ -368,6 +368,27 @@ pub(super) async fn raw_backend_request(
 }
 
 #[tokio::test]
+async fn ordinary_command_report_skips_unrequested_source_probe() {
+    let mut campaign = TestCampaign::start_with_shell().await;
+    let policy = campaign.root_installation.policy.clone();
+    let running = tokio::spawn(async move {
+        dispatch_haskell_script(
+            policy.as_ref(),
+            "job <- Cmd.background [bash|printf ordinary|]\nreport <- waitFor (Cmd.awaitFinished job)\nfmap Cmd.reportSource report",
+        )
+        .await
+    });
+    let command = raw_backend_request(&mut campaign).await;
+    assert_eq!(command.purpose, CommandBackendPurpose::Command);
+    command.supply(Ok(TestCommands::completed("ordinary")));
+    let result = running.await.unwrap();
+    assert_eq!(result["status"], "committed", "{result}");
+    assert!(result.to_string().contains("Nothing"), "{result}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn structured_bash_uses_compiled_handler_and_shared_command_owner() {
     let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
@@ -653,6 +674,7 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
             environment: vec![("EXAMPLE".into(), "value".into())],
             memory: 64 * 1024 * 1024,
             input: CommandInput::PipeInput,
+            source_capture: CommandSourceCapture::NoCapture,
         }]
     );
     campaign.forest.shutdown().await;
@@ -1508,7 +1530,7 @@ async fn command_jobs_cancel_before_backend_cannot_start_later() {
             context: None,
             name: "bash".into(),
             arguments: ToolArguments::Structured(
-                serde_json::json!({"cmd":"never-execute","yield_time_ms":0}),
+                serde_json::json!({"cmd":"never-execute","background":true}),
             ),
         })
         .await
@@ -2992,7 +3014,7 @@ async fn watched_command_jobs_wake_once_with_a_typed_report() {
     let mut campaign = TestCampaign::start().await;
     committed(
         &campaign,
-        "check <- Cmd.background [bash|cargo test|]\nquick <- Cmd.start [bash|true|]\nCmd.detach quick\nchecked <- watch \"check-done\" ((,) <$> Cmd.awaitFinished check <*> Cmd.awaitFinished quick)",
+        "check <- Cmd.background (Cmd.withSource [bash|cargo test|])\nquick <- Cmd.start (Cmd.withSource [bash|true|])\nCmd.detach quick\nchecked <- watch \"check-done\" ((,) <$> Cmd.awaitFinished check <*> Cmd.awaitFinished quick)",
     )
     .await;
     let commit = "89abcdef0123456789abcdef0123456789abcdef";

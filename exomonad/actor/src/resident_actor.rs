@@ -3140,6 +3140,7 @@ where
         let crate::ResidentActorStart { parent_hole, child } = start;
         let fork_group = child.descriptor.fork_group();
         let original_placement = child.descriptor.placement();
+        let invocation_work = effect_owner.invocation_work();
         let admission = (|| {
             let crate::start::CapturedChildLaunch {
                 lifetime,
@@ -3157,7 +3158,6 @@ where
                     .runner
                     .child_session_startup_lease(descriptor.placement().session)
             });
-            let invocation_work = effect_owner.invocation_work();
             let checkpoint_admission = descriptor
                 .checkpoint_token()
                 .map(|token| {
@@ -3808,7 +3808,7 @@ where
                         let current = *phase.borrow();
                         match current {
                             crate::ForkGroupPhase::Ready | crate::ForkGroupPhase::Committed => {
-                                break
+                                break;
                             }
                             crate::ForkGroupPhase::Aborted => {
                                 let children = environment
@@ -5891,9 +5891,11 @@ where
                 ),
                 false,
             ),
-            crate::SourceLayerReload::Unchanged { revision } => {
-                ("unchanged", format!("helpers: unchanged at {revision}."), true)
-            }
+            crate::SourceLayerReload::Unchanged { revision } => (
+                "unchanged",
+                format!("helpers: unchanged at {revision}."),
+                true,
+            ),
             crate::SourceLayerReload::Published {
                 previous,
                 revision,
@@ -6108,12 +6110,13 @@ where
         })?;
         self.spec_installs = 1;
         let prepare_started = std::time::Instant::now();
-        let compiled_tools = self
-            .environment
-            .runner
-            .application_workbench()
-            .prepare_tools(context.clone(), self.spec_installs)
-            .await;
+        let application_workbench = self.environment.runner.application_workbench();
+        let preparation = application_workbench.prepare_tools(context.clone(), self.spec_installs);
+        super::resident_workbench::log_startup_future_size(
+            "install_interactive_policy.prepare_tools",
+            std::mem::size_of_val(&preparation),
+        );
+        let compiled_tools = preparation.await;
         tracing::info!(
             actor = %context.actor,
             phase = "startup",
@@ -6233,7 +6236,7 @@ where
                 (Some(_), Some(_)) => {
                     return Err(refuse(
                         "child has both prepared and installed workspace custody",
-                    ))
+                    ));
                 }
             };
         let boot = self
@@ -6262,7 +6265,7 @@ where
                 _ => {
                     return Err(refuse(
                         "child release requires its original pending public owner",
-                    ))
+                    ));
                 }
             }
         } else {
@@ -6584,8 +6587,12 @@ where
                 )?;
                 Ok(crate::ActorAdvance::Complete(KernelStep::Stop {
                     output: (),
-                    terminal: ActorTerminal { kind: ActorExitKind::Failed,
-                        summary: format!("child durability confirmation unavailable after bounded retries: {error}") },
+                    terminal: ActorTerminal {
+                        kind: ActorExitKind::Failed,
+                        summary: format!(
+                            "child durability confirmation unavailable after bounded retries: {error}"
+                        ),
+                    },
                 }))
             }
         }
@@ -7708,7 +7715,7 @@ where
                     }
                 }
                 owned_workbench::WorkbenchFragmentAdvance::Settled(step) => {
-                    return Ok(FragmentAdvance::Settled(step))
+                    return Ok(FragmentAdvance::Settled(step));
                 }
             }
         }
@@ -8406,10 +8413,10 @@ where
                             .await
                         {
                             Ok(FragmentAdvance::ParkEffect) => {
-                                return Ok(WorkbenchRunAdvance::ParkEffect)
+                                return Ok(WorkbenchRunAdvance::ParkEffect);
                             }
                             Ok(FragmentAdvance::ParkNative) => {
-                                return Ok(WorkbenchRunAdvance::ParkNative)
+                                return Ok(WorkbenchRunAdvance::ParkNative);
                             }
                             Ok(FragmentAdvance::Settled(step)) => settled = Some(Ok(step)),
                             Err(error) => settled = Some(Err(error)),
@@ -8597,10 +8604,10 @@ where
                         {
                             Ok(FragmentAdvance::Settled(step)) => step,
                             Ok(FragmentAdvance::ParkEffect) => {
-                                return Ok(WorkbenchRunAdvance::ParkEffect)
+                                return Ok(WorkbenchRunAdvance::ParkEffect);
                             }
                             Ok(FragmentAdvance::ParkNative) => {
-                                return Ok(WorkbenchRunAdvance::ParkNative)
+                                return Ok(WorkbenchRunAdvance::ParkNative);
                             }
                             Err(source) => {
                                 self.abort_incomplete_groups(
@@ -10072,8 +10079,12 @@ where
                 }
                 Err(failure) => {
                     let detail = match failure {
-                        WorkbenchReplayFailure::DifferentInput => "one hosted tool identity was retried with different input",
-                        WorkbenchReplayFailure::Unconfirmed => "the original tool outcome is unconfirmed; replay cannot repeat its effects",
+                        WorkbenchReplayFailure::DifferentInput => {
+                            "one hosted tool identity was retried with different input"
+                        }
+                        WorkbenchReplayFailure::Unconfirmed => {
+                            "the original tool outcome is unconfirmed; replay cannot repeat its effects"
+                        }
                     };
                     return crate::OwnedActorTask::new(Box::pin(async move {
                         crate::OwnedActorCompletion::new(move |_| {
@@ -10180,8 +10191,7 @@ where
                 }
             };
             if !awaiting.declarations.iter().any(|tool| {
-                tool.name == invocation.name
-                    && tool.accepts_arguments(&invocation.arguments)
+                tool.name == invocation.name && tool.accepts_arguments(&invocation.arguments)
             }) {
                 self.set_standing(context.actor, ResidentStanding::Tools(awaiting));
                 return Err(KernelInvocationFailure::Rejected {
@@ -10620,12 +10630,12 @@ where
             let mut state = latch.lock();
             match *state {
                 RootStartupState::Pending => {
-                    return Err(Self::failure("root startup has not been durably released"))
+                    return Err(Self::failure("root startup has not been durably released"));
                 }
                 RootStartupState::Activated => {
                     return Ok(crate::OwnedActorTask::new(Box::pin(async {
                         crate::OwnedActorCompletion::new(|_| Ok(KernelStep::Continue(())))
-                    })))
+                    })));
                 }
                 RootStartupState::Released => *state = RootStartupState::Activated,
             }
@@ -11464,12 +11474,12 @@ where
         let placement = self.root_recovery_placement(actor)?;
         match self.root_public_owner_posture(&placement)? {
             RootPublicOwnerPosture::Ready => {
-                return Ok(tidepool_runtime::session::PublicManifestCommit::Durable)
+                return Ok(tidepool_runtime::session::PublicManifestCommit::Durable);
             }
             RootPublicOwnerPosture::Pending => {
                 return Err(ResidentActorWorkbenchError::ActorProtocol(
                     "root has no visible original manifest to confirm".into(),
-                ))
+                ));
             }
             RootPublicOwnerPosture::PublishedUnconfirmed => {}
         }
@@ -11493,10 +11503,10 @@ where
         self.validate_root_startup_public_operation(&placement, None)?;
         match self.root_public_owner_posture(&placement)? {
             RootPublicOwnerPosture::Ready => {
-                return Ok(tidepool_runtime::session::PublicManifestCommit::Durable)
+                return Ok(tidepool_runtime::session::PublicManifestCommit::Durable);
             }
             RootPublicOwnerPosture::PublishedUnconfirmed => {
-                return self.confirm_durable_root_public_owner(actor).await
+                return self.confirm_durable_root_public_owner(actor).await;
             }
             RootPublicOwnerPosture::Pending => {}
         }
@@ -11522,10 +11532,10 @@ where
         self.validate_root_startup_public_operation(&placement, Some(predecessor))?;
         match self.root_public_owner_posture(&placement)? {
             RootPublicOwnerPosture::Ready => {
-                return Ok(tidepool_runtime::session::PublicManifestCommit::Durable)
+                return Ok(tidepool_runtime::session::PublicManifestCommit::Durable);
             }
             RootPublicOwnerPosture::PublishedUnconfirmed => {
-                return self.confirm_durable_root_public_owner(actor).await
+                return self.confirm_durable_root_public_owner(actor).await;
             }
             RootPublicOwnerPosture::Pending => {}
         }
