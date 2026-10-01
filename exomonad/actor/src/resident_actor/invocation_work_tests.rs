@@ -143,6 +143,29 @@ impl crate::KernelBehavior for Owner {
         })
     }
 
+    fn shutdown_components<'a>(
+        &'a mut self,
+        context: &'a KernelContext,
+        terminal: &'a ActorTerminal,
+        _: tokio::time::Instant,
+    ) -> BoxFuture<
+        'a,
+        (
+            crate::CleanupComponentOutcome,
+            crate::CleanupComponentOutcome,
+        ),
+    > {
+        Box::pin(async move {
+            let hook = match self.shutdown(context, terminal).await {
+                Ok(()) => crate::CleanupComponentOutcome::Confirmed,
+                Err(error) => crate::CleanupComponentOutcome::Unconfirmed(error.to_string()),
+            };
+            // This fixture owns no resident machine, resource scope, or host
+            // resources. Its real shutdown gate still controls hook evidence.
+            (hook, crate::CleanupComponentOutcome::Confirmed)
+        })
+    }
+
     fn stopped<'a>(&'a mut self, _: &'a KernelContext, _: &'a ActorTerminal) -> BoxFuture<'a, ()> {
         Box::pin(async {})
     }
@@ -1282,5 +1305,106 @@ async fn interrupted_automatic_group_abort_retains_worker_for_invocation_cleanup
     );
     assert_eq!(gate.calls.load(Ordering::Relaxed), 1);
     drop(behavior);
+    fixture.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn interrupted_unsubmitted_rollback_notice_retries_original_watch_transition_once() {
+    let mut fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let target = ActorRef::first(crate::ActorId(owner.id.0 + 100));
+    let work = InvocationWork::new(owner, reservation());
+    let requests = &fixture.environment.requests;
+    let request = requests.reserve_for_operation(
+        owner,
+        target,
+        "unsubmitted request".into(),
+        false,
+        Some(work.reservation.clone()),
+    );
+    let (watch, _) = requests.register_watch(owner, vec![request]).unwrap();
+    let subscription = requests.subscribe_watch(owner, watch).unwrap();
+    let filler = LocalResidentDeployment::Retired {
+        actor: owner,
+        terminal: ActorTerminal {
+            kind: ActorExitKind::Completed,
+            summary: "channel filler".into(),
+        },
+    };
+    for _ in 0..DEPLOYMENT_CHANNEL_CAPACITY {
+        assert!(fixture
+            .environment
+            .deployments
+            .try_send(filler.clone())
+            .is_ok());
+    }
+    let mut first_cleanup = Box::pin(work.cleanup(&fixture.environment, &fixture.kernel));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), &mut first_cleanup)
+            .await
+            .is_err(),
+        "full rollback notice admission must wait"
+    );
+    assert_eq!(
+        requests.observe_response(owner, request),
+        Err(crate::ReplyError::Stale)
+    );
+    let pending = {
+        let state = work.state.lock();
+        assert_eq!(state.pending_watch_notifications.len(), 1);
+        state.pending_watch_notifications[0].clone()
+    };
+    assert_eq!(pending.owner, owner);
+    assert_eq!(pending.watch, watch);
+    assert_eq!(
+        pending.transition,
+        crate::request::WatchTransition::Unavailable {
+            request,
+            failure: crate::ResponseFailure::Released,
+        }
+    );
+    assert!(work.cleanup_observation().is_none());
+    assert_eq!(
+        subscription.wait().await,
+        Ok(crate::request::WatchObservation::Unavailable {
+            request,
+            failure: crate::ResponseFailure::Released,
+        })
+    );
+    drop(first_cleanup);
+    for _ in 0..DEPLOYMENT_CHANNEL_CAPACITY {
+        let LocalResidentDeployment::Retired { actor, .. } =
+            fixture.deployments.try_recv().unwrap()
+        else {
+            panic!("only filler events were admitted")
+        };
+        assert_eq!(actor, owner);
+    }
+
+    fixture.cleanup(&work).await;
+
+    let LocalResidentDeployment::WatchChanged { notification } =
+        fixture.deployments.try_recv().unwrap()
+    else {
+        panic!("retry must deliver the original rollback notice")
+    };
+    assert_eq!(
+        notification, pending,
+        "retry retains exact sequence, watermark, timestamp and correlation"
+    );
+    assert!(work.state.lock().pending_watch_notifications.is_empty());
+    assert!(work.cleanup_observation().unwrap().requests.is_empty());
+    assert!(
+        matches!(
+            fixture.deployments.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ),
+        "no duplicate watch notice or never-published request cancellation is queued"
+    );
+    fixture.cleanup(&work).await;
+    assert!(matches!(
+        fixture.deployments.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
     fixture.finish().await;
 }

@@ -20,6 +20,7 @@ struct InvocationWorkState {
     unresolved_workers: Vec<ActorRef>,
     pending_workers: Vec<ActorRef>,
     pending_cancellations: Vec<crate::RequestCancellationNotification>,
+    pending_watch_notifications: Vec<crate::request::WatchNotification>,
     groups: Vec<crate::ForkGroupId>,
     watches: Vec<crate::WatchId>,
     cleanup: Option<InvocationCleanup>,
@@ -296,12 +297,48 @@ impl InvocationWork {
         let (_, notifications) = environment
             .requests
             .abort_unsubmitted(self.owner, &self.reservation);
-        publish_request_notifications(
-            &environment.requests,
-            &environment.deployments,
-            notifications,
-        )
-        .await;
+        {
+            let mut state = self.state.lock();
+            for notification in notifications {
+                if !state.pending_watch_notifications.contains(&notification) {
+                    state.pending_watch_notifications.push(notification);
+                }
+            }
+        }
+        let pending_watch_notifications = self.state.lock().pending_watch_notifications.clone();
+        for notification in pending_watch_notifications {
+            let owner = notification.owner;
+            let watch = notification.watch;
+            let delivered = if !environment.requests.retains_watch(owner, watch) {
+                true
+            } else {
+                match tokio::time::timeout(
+                    RELEASE_WAIT,
+                    environment
+                        .deployments
+                        .send(LocalResidentDeployment::WatchChanged {
+                            notification: notification.clone(),
+                        }),
+                )
+                .await
+                {
+                    Ok(Ok(())) => true,
+                    outcome => {
+                        cleanup.failures.push(format!(
+                            "watch {} rollback notice delivery remains unconfirmed: {outcome:?}",
+                            watch.0
+                        ));
+                        false
+                    }
+                }
+            };
+            if delivered {
+                self.state
+                    .lock()
+                    .pending_watch_notifications
+                    .retain(|pending| pending != &notification);
+            }
+        }
         {
             let mut state = self.state.lock();
             let pending = std::mem::take(&mut state.pending_workers);
