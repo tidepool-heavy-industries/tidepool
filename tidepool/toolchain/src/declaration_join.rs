@@ -559,7 +559,6 @@ pub struct MaterializedDeclarationJoin {
     pub products: Vec<crate::recovery_artifacts::RecoveryArtifactRef>,
     pub anchors: Vec<crate::recovery_artifacts::RecoveryJoinRef>,
     pub value_interfaces: Vec<crate::recovery_artifacts::RecoveryValueInterfaceRef>,
-    pub artifact_descriptors: Vec<crate::artifact_inventory::ArtifactDescriptor>,
     /// Durable Interface edges; native edges remain in the certified original graph.
     pub artifact_dependencies: Vec<(
         crate::artifact_inventory::ArtifactId,
@@ -633,25 +632,24 @@ impl AcceptedJoin {
             .map(|value| value.materialize(root))
             .collect::<Result<Vec<_>, _>>()?;
         let join = self.interface.materialize(root)?;
-        let mut artifact_descriptors = self.context.artifact_view().descriptors();
         let descriptor = crate::artifact_inventory::ArtifactDescriptor::from_recovery_join(&join);
         let mut artifact_dependencies = self.context.artifact_view().interface_dependencies();
-        artifact_dependencies.extend(artifact_descriptors.iter().map(|entry| {
-            (
-                descriptor.id,
-                entry.id,
-                crate::artifact_inventory::ArtifactDependency::Interface,
-            )
-        }));
+        artifact_dependencies.extend(self.context.artifact_view().artifact_ids().into_iter().map(
+            |id| {
+                (
+                    descriptor.id,
+                    id,
+                    crate::artifact_inventory::ArtifactDependency::Interface,
+                )
+            },
+        ));
         artifact_dependencies.sort();
         artifact_dependencies.dedup();
-        artifact_descriptors.push(descriptor);
         Ok(MaterializedDeclarationJoin {
             join,
             products,
             anchors,
             value_interfaces,
-            artifact_descriptors,
             artifact_dependencies,
         })
     }
