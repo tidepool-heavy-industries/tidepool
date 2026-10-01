@@ -11,4 +11,8 @@ do
     Core.InheritedContext (Just "CHECKPOINT_TOKEN") Nothing Core.ParentOwned)
   case started of
     Left failure -> error (tshow failure) >> pure True
-    Right _ -> pure True
+    Right _ -> do
+      committed <- send (Core.ForksCommitWith GROUP_ID)
+      case committed of
+        Right () -> pure True
+        Left failure -> error (tshow failure) >> pure False

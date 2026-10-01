@@ -2,6 +2,12 @@
 
 use super::*;
 
+mod deferred;
+pub(super) use deferred::{
+    apply_ready_deferred, apply_scopes, await_ready_deferred, await_scopes, prepare_deferred,
+    FinalizedDeferredCommit, PreparedDeferredCommit, PreparedDeferredScopes, ReadyDeferredCommit,
+};
+
 struct Continuation {
     context: ActorSessionContext,
     parent_descriptor: ActorDescriptor,
@@ -212,12 +218,11 @@ where
                             phase: PendingForkPublicationPhase::Committed(authority),
                             releases: descriptors
                                 .into_iter()
-                                .map(|(child, descriptor)| {
-                                    (
-                                        child,
-                                        descriptor.placement().session,
-                                        descriptor.placement().lexical_scope,
-                                    )
+                                .map(|(child, descriptor)| PendingForkChildRelease {
+                                    child,
+                                    session: descriptor.placement().session,
+                                    scope: descriptor.placement().lexical_scope,
+                                    lexical: None,
                                 })
                                 .collect(),
                             unused_scopes: Vec::new(),
@@ -436,9 +441,9 @@ where
         }
         let valid = {
             let actors = environment.actors.lock();
-            pending.releases.iter().all(|(child, session, _)| {
-                actors.get(child).is_none_or(|record| {
-                    record.descriptor.placement().session == *session
+            pending.releases.iter().all(|release| {
+                actors.get(&release.child).is_none_or(|record| {
+                    record.descriptor.placement().session == release.session
                         && record
                             .descriptor
                             .fork_group()
@@ -452,7 +457,13 @@ where
             });
         }
         let authority = Arc::clone(authority);
-        while let Some((child, session, scope)) = pending.releases.front().copied() {
+        while let Some(prepared) = pending.releases.front().cloned() {
+            let PendingForkChildRelease {
+                child,
+                session,
+                scope,
+                lexical: prepared_lexical,
+            } = prepared;
             let admitted = environment
                 .actors
                 .lock()
@@ -461,15 +472,18 @@ where
                 .map(|record| record.descriptor.clone());
             if let (Some(admitted), Some(target)) = (admitted, kernel.resolve(child)) {
                 if target.terminal().get().is_none() {
-                    let lexical = match environment
-                        .runner
-                        .retain_fork_release_scope(session, scope)
-                        .await
-                    {
-                        Ok(lexical) => lexical,
-                        Err(error) => {
-                            return Err(ResidentKernelBehavior::<H, O>::failure(error));
-                        }
+                    let lexical = match prepared_lexical {
+                        Some(lexical) => lexical,
+                        None => match environment
+                            .runner
+                            .retain_fork_release_scope(session, scope)
+                            .await
+                        {
+                            Ok(lexical) => lexical,
+                            Err(error) => {
+                                return Err(ResidentKernelBehavior::<H, O>::failure(error))
+                            }
+                        },
                     };
                     let release = match ForkChildRelease::issue(
                         child,
