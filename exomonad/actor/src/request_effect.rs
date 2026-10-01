@@ -100,6 +100,7 @@ pub(crate) enum RepliesReq {
     ObserveResponseWith(i64),
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     CancelRequestWith(i64),
+    DetachRequestWith(i64),
     AbandonResponseWith(i64),
     ForgetResponseWith(i64),
     ObserveReplyWith(i64),

@@ -1,6 +1,8 @@
+mod invocation;
 pub(crate) mod routes;
 pub(crate) mod sources;
 mod updates;
+pub(crate) use invocation::RequestCleanupState;
 pub use updates::{
     LateUpdateEvidence, RequestUpdateCorrelation, RequestUpdateDelivery, RequestUpdateId,
     RequestUpdatePresentation, RequestUpdateReconciler, RequestUpdateState,
@@ -319,6 +321,8 @@ struct RequestRecord {
     updates: Vec<updates::UpdateRecord>,
     owner: ActorRef,
     reservation_owner: Option<RequestReservationOwner>,
+    /// Detachment changes lifetime, never the original reservation rollback fence.
+    invocation_detached: bool,
     target: ActorRef,
     label: String,
     target_state: TargetState,
@@ -1239,6 +1243,7 @@ impl RequestRegistry {
                 updates: Vec::new(),
                 owner,
                 reservation_owner,
+                invocation_detached: false,
                 target,
                 label,
                 target_state: TargetState::Reserved,
@@ -1287,6 +1292,7 @@ impl RequestRegistry {
                 updates: Vec::new(),
                 owner,
                 reservation_owner: None,
+                invocation_detached: false,
                 target: owner,
                 label: format!("job {job}"),
                 target_state: TargetState::Presented,
@@ -1602,7 +1608,10 @@ impl RequestRegistry {
         let mut state = self.state.lock();
         let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
         authorize_owner(record, owner)?;
-        if is_owner_terminal(&record.owner_state) || record.target_state == TargetState::Closed {
+        // Releasing the requester's wait does not settle the target. An
+        // abandoned response still needs cancellation and a deadline may
+        // already have requested it without receiving acknowledgment.
+        if record.target_state == TargetState::Closed {
             return Ok((CancelRequestOutcome::AlreadyTerminal, None));
         }
         if matches!(

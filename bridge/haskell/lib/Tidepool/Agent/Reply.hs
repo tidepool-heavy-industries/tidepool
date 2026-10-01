@@ -37,6 +37,7 @@ module Tidepool.Agent.Reply
   , reply
   , pollResponse
   , cancelRequest
+  , detachRequest
   , abandonResponse
   , forgetResponse
   , pollReply
@@ -76,6 +77,7 @@ import Tidepool.Agent.Reply.Internal
   , attemptReply
   , pollResponse
   , cancelRequest
+  , detachRequest
   , abandonResponse
   , forgetResponse
   , pollReply
