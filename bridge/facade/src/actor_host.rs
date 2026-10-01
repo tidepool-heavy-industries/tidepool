@@ -3896,7 +3896,7 @@ fn find_module_source(roots: &[PathBuf], entry: &str) -> Option<String> {
         .find_map(|root| std::fs::read_to_string(root.join(&relative)).ok())
 }
 
-/// Compile the driver against a CANDIDATE source revision. This is the whole
+/// Typecheck the driver against a CANDIDATE source revision. This is the whole
 /// reload check: GHC's own module graph, rooted at the driver and every
 /// configured workspace module, decides whether the candidate's
 /// reverse-dependency closure typechecks. Nothing is published unless it does.
@@ -3912,28 +3912,38 @@ pub(crate) fn typecheck_candidate_revision(
     replaces_run_layer: bool,
     extra_modules: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // A scratch session root, never the live swarm's. The check compiles a
-    // driver turn, and a turn writes generated modules under its session root;
-    // pointing that at the running session would let a rejected candidate
-    // disturb the very graph this check exists to protect.
-    let scratch = run_root
-        .join("reload-checks")
-        .join(uuid::Uuid::new_v4().to_string());
-    std::fs::create_dir_all(&scratch)?;
-    let checked = compile_driver(
+    let DriverSources { preamble, include } = driver_sources(
         haskell_root,
         Some(inputs),
-        &scratch,
+        run_root,
         Some(CandidateSources {
             include: candidate,
             replaces_run_layer,
             extra_modules,
         }),
+    )?;
+    // rootDriver has the fixed type Eff RootEffects (), so its ordinary
+    // driver turn uses the first effectful expression template. Keep that
+    // exact module and graph while requesting only GHC typechecking.
+    let templates = resident_workbench_templates(&preamble, DRIVER_EFFECTS, "");
+    let template = templates
+        .iter()
+        .find(|template| template.kind == tidepool_runtime::session::TemplateSelector::Expr)
+        .ok_or_else(|| runtime_error("resident driver has no expression template"))?;
+    let source = tidepool_runtime::session::render_template(&template.source, DRIVER_ENTRY, &[]);
+    let checked = tidepool_toolchain::artifacts::check_source(
+        &tidepool_toolchain::artifacts::SourceCheckRequest {
+            source: &source,
+            include: &include,
+            fallback_module_name: "Expr",
+        },
     );
-    // best-effort: cleanup of a scratch check directory; a leftover directory
-    // does not affect correctness, only disk usage.
-    std::fs::remove_dir_all(&scratch).ok();
-    checked?;
+    checked.map_err(|error| {
+        render_root_compile_failure(tidepool_runtime::session::TurnFailure {
+            error,
+            attempted_source: Some(source),
+        })
+    })?;
     Ok(())
 }
 

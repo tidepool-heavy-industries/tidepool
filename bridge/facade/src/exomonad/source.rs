@@ -2492,7 +2492,9 @@ mod tests {
             "module SessionHelpers where\nvalue = (\n",
         )
         .unwrap();
-        exomonad_actor::ActorSourceLayers::bind(&reload, PrincipalId::SYSTEM, &[]);
+        let helper_actor = PrincipalId::new(1, 1);
+        exomonad_actor::ActorSourceLayers::bind(&reload, helper_actor, &[]);
+        exomonad_actor::ActorSourceLayers::layer_include(&reload, &[]).unwrap();
         assert!(reload
             .helper_layer("run")
             .read_active()
@@ -2500,14 +2502,31 @@ mod tests {
             .unwrap()
             .modules
             .is_empty());
+        // A helper checks against the published run layer, including source
+        // introduced after the frozen workspace was captured.
+        std::fs::write(
+            project.path().join(".exomonad/Project/Work.hs"),
+            "module Project.Work where\nfreshWork :: Int\nfreshWork = 2\n",
+        )
+        .unwrap();
+        let updated =
+            tidepool_handlers::SourceReloadService::reload(&reload, PrincipalId::SYSTEM, &[], None)
+                .unwrap();
+        assert!(
+            matches!(
+                updated,
+                tidepool_bridge_effects::SrReloadOutcome::ReloadPublished(..)
+            ),
+            "{updated:?}"
+        );
         std::fs::write(
             draft.join("SessionHelpers.hs"),
-            "module SessionHelpers where\nvalue :: Int\nvalue = 2\n",
+            "module SessionHelpers where\nimport Project.Work\nvalue :: Int\nvalue = freshWork\n",
         )
         .unwrap();
 
         let published =
-            exomonad_actor::ActorSourceLayers::reload_helpers(&reload, PrincipalId::SYSTEM, &[]);
+            exomonad_actor::ActorSourceLayers::reload_helpers(&reload, helper_actor, &[]);
         let exomonad_actor::SourceLayerReload::Published { revision, .. } = published else {
             panic!("valid helper source should publish: {published:?}");
         };
@@ -2520,16 +2539,71 @@ mod tests {
         )
         .unwrap();
         let rejected =
-            exomonad_actor::ActorSourceLayers::reload_helpers(&reload, PrincipalId::SYSTEM, &[]);
+            exomonad_actor::ActorSourceLayers::reload_helpers(&reload, helper_actor, &[]);
         assert!(matches!(
             rejected,
             exomonad_actor::SourceLayerReload::Rejected { .. }
         ));
         assert_eq!(layer.read_active().unwrap().unwrap().identity, revision);
+        assert!(
+            !run.path().join("reload-checks").exists(),
+            "checking must not build a scratch driver session"
+        );
         assert_eq!(
             git.try_run(project.path(), &["rev-parse", "HEAD"]).unwrap(),
             head_before
         );
+    }
+
+    #[test]
+    fn reload_check_preserves_spec_and_also_check_graph_before_publication() {
+        let (project, run) = workspace_with("module Project.Work where\nwork :: Int\nwork = 1\n");
+        let authored = project.path().join(".exomonad");
+        let spec = authored.join("AgentSpec.hs");
+        std::fs::write(&spec, "module AgentSpec where\nanswer :: Int\nanswer = 1\n").unwrap();
+        let extra = authored.join("Project/Extra.hs");
+        let valid_extra = "module Project.Extra where\nanswer :: Int\nanswer = 1\n";
+        std::fs::write(&extra, valid_extra).unwrap();
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let reload = ExomonadSourceReload::new(
+            frozen,
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+        );
+        let before = reload.layer.ensure_active(&reload.frozen).unwrap();
+        for (path, source, also_check, diagnostic) in [
+            (
+                &extra,
+                "module Project.Extra where\nanswer :: Int\nanswer = True\n",
+                vec!["Project.Extra".to_owned()],
+                "Extra.hs",
+            ),
+            (
+                &spec,
+                "module AgentSpec where\nanswer :: Int\nanswer = True\n",
+                vec![],
+                "AgentSpec.hs",
+            ),
+        ] {
+            std::fs::write(&extra, valid_extra).unwrap();
+            std::fs::write(path, source).unwrap();
+            let outcome = tidepool_handlers::SourceReloadService::reload(
+                &reload,
+                PrincipalId::SYSTEM,
+                &also_check,
+                None,
+            )
+            .unwrap();
+            let tidepool_bridge_effects::SrReloadOutcome::ReloadRejected(_, _, diagnostics) =
+                outcome
+            else {
+                panic!("invalid checked module must reject the whole candidate: {outcome:?}");
+            };
+            assert!(diagnostics.contains(diagnostic), "{diagnostics}");
+            assert_eq!(reload.layer.read_active().unwrap().unwrap(), before);
+        }
+        assert!(!run.path().join("reload-checks").exists());
     }
 
     #[test]
