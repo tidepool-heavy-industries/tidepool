@@ -982,12 +982,25 @@ impl<'code> PreparedMachine<'code> {
         self.header_owners.get(&header).copied()
     }
 
-    /// The program whose static region holds `address`, if any.
-    pub(super) fn owner_of_static(&self, address: usize) -> Option<ProgramId> {
-        self.programs
-            .iter()
-            .find(|(_, installed)| installed.statics.address_range().contains(&address))
-            .map(|(&id, _)| id)
+    /// Resolve an exported static object through the existing catalog and
+    /// reverse owner map. Export has already validated its original tag.
+    pub(super) fn owner_of_static(
+        &self,
+        address: usize,
+        metrics: &tidepool_heap::static_region::StaticLookupMetrics,
+    ) -> Result<Option<ProgramId>, ExecutionError> {
+        let Some(catalog) = &self.static_catalog else {
+            return Ok(None);
+        };
+        let catalog = catalog.borrow();
+        let region = catalog
+            .admit(address, metrics)
+            .map_err(ExecutionError::Evacuation)?;
+        Ok(region.and_then(|region| {
+            self.region_owners
+                .get(&region.address_range().start)
+                .copied()
+        }))
     }
 
     /// The shareable image of an installed program, with the current value

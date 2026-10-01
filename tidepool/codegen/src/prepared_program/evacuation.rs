@@ -156,6 +156,8 @@ impl PreparedMachine<'_> {
             // is live, and the machine is quiescent.
             unsafe { entry.slot.current() }
         } as usize;
+        let static_metrics =
+            tidepool_heap::static_region::StaticLookupMetrics::new("parcel-export");
         let mut roots = vec![value];
         let mut images: Vec<(
             ProgramId,
@@ -215,7 +217,7 @@ impl PreparedMachine<'_> {
                 .static_references()
                 .map_err(ExecutionError::Evacuation)?
             {
-                if let Some(id) = self.owner_of_static(address) {
+                if let Some(id) = self.owner_of_static(address, &static_metrics)? {
                     if !owners.contains(&id) {
                         owners.push(id);
                     }
