@@ -73,6 +73,13 @@ bash scripts/dev-shell.sh scripts/buck2-reindeer.sh
 Add `--check` to either command to verify generated inputs without retaining
 regenerated output.
 
+For an unpublished review join, `buck2-reindeer.sh --local-harness-source
+--harness-source-override /nix/store/...-source` accepts an exported immutable
+source only when its NAR hash matches the canonical `harnessWeb` lock. The
+configured `matched_harness_source` must still equal the existing Nix producer's
+output for those bytes. This override leaves canonical dependency URLs and the
+default Git-fetch generation unchanged; it does not publish the reviewed commit.
+
 The initial accepted native test slice covers `tidepool-atomic-write`,
 `tidepool-repr`, and `tidepool-heap`:
 

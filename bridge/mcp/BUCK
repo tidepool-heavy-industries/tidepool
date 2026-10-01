@@ -34,6 +34,7 @@ rust_filegroup(
         "src/generated/journal.rs": "bridge/mcp/src/generated/journal.rs",
         "src/generated/lookup.rs": "bridge/mcp/src/generated/lookup.rs",
         "src/generated/mod.rs": "bridge/mcp/src/generated/mod.rs",
+        "src/generated/model_call.rs": "bridge/mcp/src/generated/model_call.rs",
         "src/generated/notifications.rs": "bridge/mcp/src/generated/notifications.rs",
         "src/generated/read_state.rs": "bridge/mcp/src/generated/read_state.rs",
         "src/generated/recipe_check.rs": "bridge/mcp/src/generated/recipe_check.rs",

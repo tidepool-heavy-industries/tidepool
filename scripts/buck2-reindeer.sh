@@ -6,6 +6,7 @@ if [[ ${TIDEPOOL_REINDEER_SHELL:-} != ready ]]; then
 fi
 checking=0
 local_harness_source=0
+harness_source_override=""
 dependency_args=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -25,6 +26,14 @@ while [[ $# -gt 0 ]]; do
       local_harness_source=1
       shift
       ;;
+    --harness-source-override)
+      if [[ $# -lt 2 || -z ${2:-} || -n $harness_source_override ]]; then
+        echo "--harness-source-override requires one immutable Nix source path" >&2
+        exit 2
+      fi
+      harness_source_override=$2
+      shift 2
+      ;;
     --no-default-features|--features)
       if [[ $# -lt 2 ]]; then
         echo "missing value for $1" >&2
@@ -34,12 +43,16 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     *)
-      echo "usage: $0 [--check] [--local-harness-source] [--no-default-features PACKAGE] [--features PACKAGE=FEATURE[,FEATURE...]]" >&2
+      echo "usage: $0 [--check] [--local-harness-source [--harness-source-override STORE_PATH]] [--no-default-features PACKAGE] [--features PACKAGE=FEATURE[,FEATURE...]]" >&2
       exit 2
       ;;
   esac
 done
-python3 - "$checking" "$local_harness_source" "${dependency_args[@]}" <<'PY'
+if [[ -n $harness_source_override && $local_harness_source != 1 ]]; then
+  echo "--harness-source-override requires --local-harness-source" >&2
+  exit 2
+fi
+python3 - "$checking" "$local_harness_source" "$harness_source_override" "${dependency_args[@]}" <<'PY'
 from pathlib import Path
 import configparser
 import json
@@ -56,7 +69,8 @@ dest = root / 'third-party/rust'
 outputs = ['Cargo.toml', 'Cargo.lock', 'BUCK']
 checking = sys.argv[1] == '1'
 local_harness_source = sys.argv[2] == '1'
-dependency_args = sys.argv[3:]
+harness_source_override = sys.argv[3]
+dependency_args = sys.argv[4:]
 HARNESS_REPO = 'https://github.com/tidepool-heavy-industries/exomonad-harness.git'
 
 def current_harness_source_output():
@@ -91,8 +105,23 @@ def current_harness_source_output():
         ['nix', 'eval', '--raw', '--impure', '--expr', 'builtins.currentSystem'],
         cwd=root, check=True, capture_output=True, text=True,
     ).stdout.strip()
+    evaluation = ['nix', 'eval', '--raw', f'{flake}#packages.{system}.buck-matched-harness-source.outPath']
+    if harness_source_override:
+        if not re.fullmatch(r'/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+._?=-]+', harness_source_override):
+            raise SystemExit('Cannot select matched harness source: override must be an immutable Nix store path')
+        subprocess.run(['nix', 'path-info', harness_source_override], cwd=root, check=True, capture_output=True)
+        actual_hash = subprocess.run(
+            ['nix', 'hash', 'path', '--sri', harness_source_override],
+            cwd=root, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        expected_hash = json.loads((root / 'flake.lock').read_text())['nodes']['harnessWeb']['locked'].get('narHash')
+        if actual_hash != expected_hash:
+            raise SystemExit('Cannot select matched harness source: override hash differs from the canonical locked narHash')
+        # An unpublished join can use its exported bytes without choosing a
+        # different version. The canonical lock still supplies source authority.
+        evaluation.extend(['--override-input', 'harnessWeb', harness_source_override, '--no-write-lock-file'])
     return subprocess.run(
-        ['nix', 'eval', '--raw', f'{flake}#packages.{system}.buck-matched-harness-source.outPath'],
+        evaluation,
         cwd=root, check=True, capture_output=True, text=True,
     ).stdout.strip()
 
