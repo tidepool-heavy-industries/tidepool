@@ -59,6 +59,29 @@ use crate::{ActorCompileViewError, ResponseExpectation};
 
 tokio::task_local! {
     static SLOT_CONTINUATION_OWNER: ParkedHoleAbortRegistration;
+    static INVOCATION_CANCEL: Arc<std::sync::atomic::AtomicBool>;
+    static EXECUTION_CONTROL: Arc<crate::WorkbenchExecutionControl>;
+}
+
+pub(crate) async fn with_invocation_cancellation<T>(
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    operation: impl std::future::Future<Output = T>,
+) -> T {
+    INVOCATION_CANCEL.scope(cancel, operation).await
+}
+
+pub(crate) async fn with_execution_control<T>(
+    control: Arc<crate::WorkbenchExecutionControl>,
+    operation: impl std::future::Future<Output = T>,
+) -> T {
+    let cancel = control.native_cancel();
+    EXECUTION_CONTROL
+        .scope(control, with_invocation_cancellation(cancel, operation))
+        .await
+}
+
+pub(crate) fn execution_control() -> Option<Arc<crate::WorkbenchExecutionControl>> {
+    EXECUTION_CONTROL.try_with(Arc::clone).ok()
 }
 
 impl ResponseExpectation {
@@ -2965,6 +2988,7 @@ where
         );
         self.log_include_roots_if_changed(context.placement.session, &context.source_layer);
         let slot_owner = SLOT_CONTINUATION_OWNER.try_with(Clone::clone).ok();
+        let invocation_cancel = INVOCATION_CANCEL.try_with(Arc::clone).ok();
         self.with_host_machine(
             context.actor.to_string(),
             context.placement.session,
@@ -2977,22 +3001,28 @@ where
                         context.live_payload,
                     )
                     .map_err(ResidentActorWorkbenchError::Resident)?;
-                if let Some(owner) = slot_owner {
-                    let authority = owner.0.retained_authority.clone();
-                    let observer: Arc<dyn Fn(ResidentContinuationEvent) + Send + Sync> =
-                        Arc::new(move |event| owner.observe(event));
-                    let observed = |session: &mut ResidentSession<H, O>| {
-                        session.with_continuation_observer(observer, |session| {
-                            operation(session, &context, source)
-                        })
-                    };
-                    if let Some(authority) = authority {
-                        session.with_continuation_resource_owner(authority, observed)
+                let admitted = |session: &mut ResidentSession<H, O>| {
+                    if let Some(owner) = slot_owner {
+                        let authority = owner.0.retained_authority.clone();
+                        let observer: Arc<dyn Fn(ResidentContinuationEvent) + Send + Sync> =
+                            Arc::new(move |event| owner.observe(event));
+                        let observed = |session: &mut ResidentSession<H, O>| {
+                            session.with_continuation_observer(observer, |session| {
+                                operation(session, &context, source)
+                            })
+                        };
+                        if let Some(authority) = authority {
+                            session.with_continuation_resource_owner(authority, observed)
+                        } else {
+                            observed(session)
+                        }
                     } else {
-                        observed(session)
+                        operation(session, &context, source)
                     }
-                } else {
-                    operation(session, &context, source)
+                };
+                match invocation_cancel {
+                    Some(cancel) => session.with_invocation_cancel(cancel, admitted),
+                    None => admitted(session),
                 }
             },
         )

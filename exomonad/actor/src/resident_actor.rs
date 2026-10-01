@@ -1109,7 +1109,7 @@ pub struct ResidentKernelBehavior<H, O> {
 }
 
 /// One admitted call owns its authority and cursor until final settlement.
-/// Dispatch remains sequential; this record is never cloned into another call.
+/// The actor prepares each fenced step; private execution state is never cloned.
 struct WorkbenchExecutionState {
     effects: WorkbenchEffectState,
     request: WorkbenchRequest,
@@ -1399,6 +1399,12 @@ struct ParkedWorkbenchEffect {
 }
 
 enum OwnedWorkbenchWait {
+    Prepared(
+        futures_util::future::BoxFuture<
+            'static,
+            Result<ResidentOutcome, ResidentActorWorkbenchError>,
+        >,
+    ),
     Watch(crate::request_effect::WatchPoll),
     Drain {
         continuation: ResidentHole,
@@ -1499,6 +1505,7 @@ enum CurrentEffectOwner<'a> {
     Actor {
         publication: ForkPublication,
         reservation_owner: Option<RequestReservationOwner>,
+        control: Option<Arc<crate::WorkbenchExecutionControl>>,
     },
 }
 
@@ -1513,7 +1520,7 @@ impl CurrentEffectOwner<'_> {
     fn control(&self) -> Option<Arc<crate::WorkbenchExecutionControl>> {
         match self {
             Self::Workbench(execution) => execution.control.clone(),
-            Self::Actor { .. } => None,
+            Self::Actor { control, .. } => control.clone(),
         }
     }
 
@@ -1933,10 +1940,15 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         }))
     }
 
-    fn actor_effect_owner(&self) -> CurrentEffectOwner<'static> {
+    fn actor_effect_owner(&self, actor: ActorRef) -> CurrentEffectOwner<'static> {
+        let control = crate::resident_workbench::execution_control();
         CurrentEffectOwner::Actor {
             publication: self.fork_publication.clone(),
-            reservation_owner: self.active_route_reservation_owner.clone(),
+            reservation_owner: control
+                .as_ref()
+                .and_then(|control| control.reservation_owner(actor))
+                .or_else(|| self.active_route_reservation_owner.clone()),
+            control,
         }
     }
 
@@ -3745,6 +3757,367 @@ where
         Ok(())
     }
 
+    /// Admit actor-owned decisions before transferring the native or service wait.
+    fn prepare_independent_effect(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        boundary: ResidentActorBoundary,
+    ) -> Result<
+        futures_util::future::BoxFuture<
+            'static,
+            Result<ResidentOutcome, ResidentActorWorkbenchError>,
+        >,
+        ResidentActorBoundary,
+    > {
+        let environment = self.environment.clone();
+        let kernel = kernel.clone();
+        let context = context.clone();
+        let input_origin = self.input_origin.clone();
+        let descriptor = self.descriptor.clone();
+        let bound_worktree = self.launch_worktrees.first().cloned();
+        let observation = self.runtime_observation.snapshot();
+        let workbench = self
+            .active_workbench()
+            .unwrap_or_else(|| environment.runner.application_workbench());
+        let operation: futures_util::future::BoxFuture<
+            'static,
+            Result<ResidentOutcome, ResidentActorWorkbenchError>,
+        > = match boundary {
+            ResidentActorBoundary::Console { continuation, text } => Box::pin(async move {
+                tracing::debug!(actor = ?context.actor, output = %crate::workbench_display::bounded_output(&text, 8192), "actor console");
+                environment
+                    .runner
+                    .resume_unit(context.clone(), continuation)
+                    .await
+            }),
+            ResidentActorBoundary::ActorLocalContext(continuation) => Box::pin(async move {
+                environment
+                    .runner
+                    .resume_value(
+                        context.clone(),
+                        continuation,
+                        (actor_address(context.actor), input_origin),
+                    )
+                    .await
+            }),
+            ResidentActorBoundary::AttachSource {
+                continuation,
+                owner,
+                source,
+            } => {
+                let result = self.attach_source(&kernel, &context, owner, source);
+                Box::pin(async move {
+                    environment
+                        .runner
+                        .resume_value(context, continuation, result)
+                        .await
+                })
+            }
+            ResidentActorBoundary::ActorContext(continuation) => Box::pin(async move {
+                environment
+                    .runner
+                    .resume_actor_context(
+                        context.clone(),
+                        continuation,
+                        descriptor,
+                        bound_worktree,
+                        observation,
+                    )
+                    .await
+            }),
+            ResidentActorBoundary::AgentInspect(inspection) => Box::pin(async move {
+                let records = environment.actors.lock().clone();
+                let observation = records.get(&inspection.target).and_then(|record| {
+                    actor_can_observe(context.actor, inspection.target, &records).then(|| {
+                        crate::resident_workbench::AgentRosterProjection {
+                            received: environment.requests.received_counts(inspection.target),
+                            requests: environment.requests.work_for_target(inspection.target),
+                            actor: inspection.target,
+                            descriptor: record.descriptor.clone(),
+                            bound_worktree: record.bound_worktree.clone(),
+                            terminal: record.terminal.clone().or_else(|| {
+                                kernel
+                                    .resolve(inspection.target)
+                                    .and_then(|actor| actor.terminal().get())
+                            }),
+                            runtime: record.runtime_observation.snapshot(),
+                        }
+                    })
+                });
+                environment
+                    .runner
+                    .resume_agent_observation(context.clone(), inspection.continuation, observation)
+                    .await
+            }),
+            ResidentActorBoundary::Lookup {
+                continuation,
+                request,
+            } => Box::pin(async move {
+                // Use the same selection as workbench cell execution: a
+                // lookup issued while a typed request is outstanding must
+                // see `respond`/`sessionReply`/`sessionInput`/
+                // `reportProgress` as bound, not report them missing.
+                workbench
+                    .resume_lookup(
+                        context.clone(),
+                        continuation,
+                        request,
+                        environment.usage_pointers.clone(),
+                    )
+                    .await
+            }),
+            ResidentActorBoundary::Introspection {
+                continuation,
+                query,
+                kind,
+            } => Box::pin(async move {
+                environment
+                    .runner
+                    .application_workbench()
+                    .resume_structured_introspection(context.clone(), continuation, query, kind)
+                    .await
+            }),
+            ResidentActorBoundary::ReflectConversation {
+                continuation,
+                count,
+            } => Box::pin(async move {
+                // The reader is called with the executing actor and nothing
+                // else, so a caller cannot reach another conversation.
+                let outcome = match environment.conversation_reader.clone() {
+                    Some(reader) => {
+                        reader(context.actor, crate::conversation::requested(count)).await
+                    }
+                    None => Err(crate::ConversationUnavailable::Unbound),
+                };
+                environment
+                    .runner
+                    .resume_value(
+                        context.clone(),
+                        continuation,
+                        crate::conversation::reflection(outcome),
+                    )
+                    .await
+            }),
+            ResidentActorBoundary::AgentList(continuation) => Box::pin(async move {
+                let records = environment.actors.lock().clone();
+                let mut roster = records
+                    .iter()
+                    .filter(|(actor, _)| actor_can_observe(context.actor, **actor, &records))
+                    .map(
+                        |(actor, record)| crate::resident_workbench::AgentRosterProjection {
+                            received: environment.requests.received_counts(*actor),
+                            requests: environment.requests.work_for_target(*actor),
+                            actor: *actor,
+                            descriptor: record.descriptor.clone(),
+                            bound_worktree: record.bound_worktree.clone(),
+                            terminal: record.terminal.clone().or_else(|| {
+                                kernel
+                                    .resolve(*actor)
+                                    .and_then(|actor| actor.terminal().get())
+                            }),
+                            runtime: record.runtime_observation.snapshot(),
+                        },
+                    )
+                    .collect::<Vec<_>>();
+                roster.sort_by_key(|entry| (entry.actor.id, entry.actor.incarnation));
+                environment
+                    .runner
+                    .resume_agent_roster(context.clone(), continuation, roster)
+                    .await
+            }),
+            ResidentActorBoundary::AgentShareObservation {
+                continuation,
+                recipient,
+                scope,
+            } => Box::pin(async move {
+                let outcome = {
+                    let mut records = environment.actors.lock();
+                    if records
+                        .get(&recipient)
+                        .is_none_or(|record| record.terminal.is_some())
+                        || kernel
+                            .resolve(recipient)
+                            .is_none_or(|actor| actor.terminal().get().is_some())
+                    {
+                        ObservationShareResult::RecipientUnavailable
+                    } else if !records.contains_key(&scope) {
+                        ObservationShareResult::ScopeUnavailable
+                    } else if !actor_can_observe(context.actor, scope, &records) {
+                        ObservationShareResult::Unauthorized
+                    } else {
+                        #[allow(
+                            clippy::expect_used,
+                            reason = "the RecipientUnavailable branch above already \
+                                      returned unless records.get(&recipient) is Some, \
+                                      and `records` is the same lock held throughout"
+                        )]
+                        records
+                            .get_mut(&recipient)
+                            .expect("checked exact recipient")
+                            .observation_roots
+                            .insert(scope);
+                        ObservationShareResult::Shared
+                    }
+                };
+                environment
+                    .runner
+                    .resume_value(context.clone(), continuation, outcome)
+                    .await
+            }),
+            ResidentActorBoundary::ResponsePoll(poll) => Box::pin(async move {
+                let observation = environment
+                    .requests
+                    .observe_response(context.actor, poll.request)
+                    .map(|observation| {
+                        starting_observation(&environment, poll.request, observation)
+                    });
+                environment
+                    .runner
+                    .resume_response_observation(context.clone(), poll.continuation, observation)
+                    .await
+            }),
+            ResidentActorBoundary::ProgressPoll(poll) => Box::pin(async move {
+                let observation = environment
+                    .requests
+                    .observe_progress(context.actor, poll.request);
+                environment
+                    .runner
+                    .resume_progress_observation(context.clone(), poll.continuation, observation)
+                    .await
+            }),
+            ResidentActorBoundary::RequestUpdate {
+                continuation,
+                request,
+                message,
+            } => Box::pin(async move {
+                let outcome = environment
+                    .requests
+                    .update_request(context.actor, request, message)
+                    .map(|(update, delivery)| {
+                        if let Err(error) = environment
+                            .deployments
+                            .try_send(LocalResidentDeployment::RequestUpdate { delivery })
+                        {
+                            // A full channel and a closed one both mean the
+                            // deployment owner cannot observe this update
+                            // right now; treat them alike rather than
+                            // silently keeping the update queued unseen.
+                            if let LocalResidentDeployment::RequestUpdate { delivery } =
+                                error.into_inner()
+                            {
+                                if let Some(presentation) = delivery.begin() {
+                                    presentation
+                                        .not_presented("deployment owner unavailable".into());
+                                }
+                            }
+                        }
+                        update.sequence as i64
+                    });
+                environment
+                    .runner
+                    .resume_request_update(context.clone(), continuation, outcome)
+                    .await
+            }),
+            ResidentActorBoundary::RequestUpdatePoll {
+                continuation,
+                update,
+            } => Box::pin(async move {
+                let outcome = environment.requests.observe_update(context.actor, update);
+                environment
+                    .runner
+                    .resume_request_update(context.clone(), continuation, outcome)
+                    .await
+            }),
+            ResidentActorBoundary::ReplyPoll(poll) => Box::pin(async move {
+                let observation = environment
+                    .requests
+                    .observe_reply(context.actor, poll.request);
+                environment
+                    .runner
+                    .resume_reply_observation(context.clone(), poll.continuation, observation)
+                    .await
+            }),
+            ResidentActorBoundary::RouteList(continuation) => Box::pin(async move {
+                let routes = environment
+                    .requests
+                    .list_routes(context.actor)
+                    .into_iter()
+                    .map(|id| {
+                        i64::try_from(id.0).map_err(|_| {
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "runtime route identity exceeds Haskell Int".into(),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                environment
+                    .runner
+                    .resume_value(context.clone(), continuation, routes)
+                    .await
+            }),
+            ResidentActorBoundary::RoutePoll(poll) => Box::pin(async move {
+                let state = environment
+                    .requests
+                    .observe_route(context.actor, poll.watch);
+                environment
+                    .runner
+                    .resume_route_state(context.clone(), poll.continuation, state)
+                    .await
+            }),
+            ResidentActorBoundary::WatchPoll(poll) => Box::pin(async move {
+                let observation = environment
+                    .requests
+                    .observe_watch(context.actor, poll.watch)
+                    .map(|observation| {
+                        watch_pending_observation(&environment, poll.watch, observation)
+                    });
+                environment
+                    .runner
+                    .resume_watch_observation(context.clone(), poll.continuation, observation)
+                    .await
+            }),
+            ResidentActorBoundary::WatchProgressPoll {
+                continuation,
+                watch,
+                request,
+                after,
+            } => Box::pin(async move {
+                let observation = environment.requests.observe_watch_progress(
+                    context.actor,
+                    watch,
+                    request,
+                    after,
+                );
+                environment
+                    .runner
+                    .resume_progress_observation(context.clone(), continuation, observation)
+                    .await
+            }),
+            ResidentActorBoundary::CommandReportPoll { continuation, job } => {
+                Box::pin(async move {
+                    let report =
+                        command_settlement::CommandSettlements::new(&environment).report(&job);
+                    environment
+                        .runner
+                        .resume_value(context.clone(), continuation, report)
+                        .await
+                })
+            }
+            ResidentActorBoundary::WatchForget(forget) => Box::pin(async move {
+                let outcome = environment
+                    .requests
+                    .forget_watch(context.actor, forget.watch);
+                environment
+                    .runner
+                    .resume_watch_forget(context.clone(), forget.continuation, outcome)
+                    .await
+            }),
+            other => return Err(other),
+        };
+        Ok(operation)
+    }
+
     async fn resolve_effect(
         &mut self,
         kernel: &KernelContext,
@@ -3753,6 +4126,10 @@ where
         ancestry: &crate::CallAncestry,
         boundary: ResidentActorBoundary,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        let boundary = match self.prepare_independent_effect(kernel, context, boundary) {
+            Ok(operation) => return operation.await,
+            Err(boundary) => boundary,
+        };
         // Keep each interpreter branch in its own future. A child can execute
         // an effect during Ractor startup on the caller's poll stack; embedding
         // every branch here makes that ordinary nesting exhaust a debug stack.
@@ -3765,17 +4142,11 @@ where
                     self.environment.clone(),
                     kernel.clone(),
                     context.clone(),
+                    effect_owner.control(),
                     continuation,
                     work,
                 )
                 .await
-            }),
-            ResidentActorBoundary::Console { continuation, text } => Box::pin(async move {
-                tracing::debug!(actor = ?context.actor, output = %crate::workbench_display::bounded_output(&text, 8192), "actor console");
-                self.environment
-                    .runner
-                    .resume_unit(context.clone(), continuation)
-                    .await
             }),
             ResidentActorBoundary::Jev {
                 continuation,
@@ -3785,6 +4156,7 @@ where
                     self.environment.clone(),
                     kernel.clone(),
                     context.clone(),
+                    effect_owner.control(),
                     continuation,
                     request,
                 )
@@ -3818,179 +4190,6 @@ where
                     .await;
                 crate::call_timing::add_exec_ms(started.elapsed().as_millis());
                 resolution.outcome
-            }),
-            ResidentActorBoundary::ActorLocalContext(continuation) => Box::pin(async move {
-                self.environment
-                    .runner
-                    .resume_value(
-                        context.clone(),
-                        continuation,
-                        (actor_address(context.actor), self.input_origin.clone()),
-                    )
-                    .await
-            }),
-            ResidentActorBoundary::AttachSource {
-                continuation,
-                owner,
-                source,
-            } => Box::pin(async move {
-                let result = self.attach_source(kernel, context, owner, source);
-                self.environment
-                    .runner
-                    .resume_value(context.clone(), continuation, result)
-                    .await
-            }),
-            ResidentActorBoundary::ActorContext(continuation) => Box::pin(async move {
-                self.environment
-                    .runner
-                    .resume_actor_context(
-                        context.clone(),
-                        continuation,
-                        self.descriptor.clone(),
-                        self.launch_worktrees.first().cloned(),
-                        self.runtime_observation.snapshot(),
-                    )
-                    .await
-            }),
-            ResidentActorBoundary::AgentInspect(inspection) => Box::pin(async move {
-                let records = self.environment.actors.lock().clone();
-                let observation = records.get(&inspection.target).and_then(|record| {
-                    actor_can_observe(context.actor, inspection.target, &records).then(|| {
-                        crate::resident_workbench::AgentRosterProjection {
-                            received: self.environment.requests.received_counts(inspection.target),
-                            requests: self.environment.requests.work_for_target(inspection.target),
-                            actor: inspection.target,
-                            descriptor: record.descriptor.clone(),
-                            bound_worktree: record.bound_worktree.clone(),
-                            terminal: record.terminal.clone().or_else(|| {
-                                kernel
-                                    .resolve(inspection.target)
-                                    .and_then(|actor| actor.terminal().get())
-                            }),
-                            runtime: record.runtime_observation.snapshot(),
-                        }
-                    })
-                });
-                self.environment
-                    .runner
-                    .resume_agent_observation(context.clone(), inspection.continuation, observation)
-                    .await
-            }),
-            ResidentActorBoundary::Lookup {
-                continuation,
-                request,
-            } => Box::pin(async move {
-                // Use the same selection as workbench cell execution: a
-                // lookup issued while a typed request is outstanding must
-                // see `respond`/`sessionReply`/`sessionInput`/
-                // `reportProgress` as bound, not report them missing.
-                self.active_workbench()
-                    .unwrap_or_else(|| self.environment.runner.application_workbench())
-                    .resume_lookup(
-                        context.clone(),
-                        continuation,
-                        request,
-                        self.environment.usage_pointers.clone(),
-                    )
-                    .await
-            }),
-            ResidentActorBoundary::Introspection {
-                continuation,
-                query,
-                kind,
-            } => Box::pin(async move {
-                self.environment
-                    .runner
-                    .application_workbench()
-                    .resume_structured_introspection(context.clone(), continuation, query, kind)
-                    .await
-            }),
-            ResidentActorBoundary::ReflectConversation {
-                continuation,
-                count,
-            } => Box::pin(async move {
-                // The reader is called with the executing actor and nothing
-                // else, so a caller cannot reach another conversation.
-                let outcome = match self.environment.conversation_reader.clone() {
-                    Some(reader) => {
-                        reader(context.actor, crate::conversation::requested(count)).await
-                    }
-                    None => Err(crate::ConversationUnavailable::Unbound),
-                };
-                self.environment
-                    .runner
-                    .resume_value(
-                        context.clone(),
-                        continuation,
-                        crate::conversation::reflection(outcome),
-                    )
-                    .await
-            }),
-            ResidentActorBoundary::AgentList(continuation) => Box::pin(async move {
-                let records = self.environment.actors.lock().clone();
-                let mut roster = records
-                    .iter()
-                    .filter(|(actor, _)| actor_can_observe(context.actor, **actor, &records))
-                    .map(
-                        |(actor, record)| crate::resident_workbench::AgentRosterProjection {
-                            received: self.environment.requests.received_counts(*actor),
-                            requests: self.environment.requests.work_for_target(*actor),
-                            actor: *actor,
-                            descriptor: record.descriptor.clone(),
-                            bound_worktree: record.bound_worktree.clone(),
-                            terminal: record.terminal.clone().or_else(|| {
-                                kernel
-                                    .resolve(*actor)
-                                    .and_then(|actor| actor.terminal().get())
-                            }),
-                            runtime: record.runtime_observation.snapshot(),
-                        },
-                    )
-                    .collect::<Vec<_>>();
-                roster.sort_by_key(|entry| (entry.actor.id, entry.actor.incarnation));
-                self.environment
-                    .runner
-                    .resume_agent_roster(context.clone(), continuation, roster)
-                    .await
-            }),
-            ResidentActorBoundary::AgentShareObservation {
-                continuation,
-                recipient,
-                scope,
-            } => Box::pin(async move {
-                let outcome = {
-                    let mut records = self.environment.actors.lock();
-                    if records
-                        .get(&recipient)
-                        .is_none_or(|record| record.terminal.is_some())
-                        || kernel
-                            .resolve(recipient)
-                            .is_none_or(|actor| actor.terminal().get().is_some())
-                    {
-                        ObservationShareResult::RecipientUnavailable
-                    } else if !records.contains_key(&scope) {
-                        ObservationShareResult::ScopeUnavailable
-                    } else if !actor_can_observe(context.actor, scope, &records) {
-                        ObservationShareResult::Unauthorized
-                    } else {
-                        #[allow(
-                            clippy::expect_used,
-                            reason = "the RecipientUnavailable branch above already \
-                                      returned unless records.get(&recipient) is Some, \
-                                      and `records` is the same lock held throughout"
-                        )]
-                        records
-                            .get_mut(&recipient)
-                            .expect("checked exact recipient")
-                            .observation_roots
-                            .insert(scope);
-                        ObservationShareResult::Shared
-                    }
-                };
-                self.environment
-                    .runner
-                    .resume_value(context.clone(), continuation, outcome)
-                    .await
             }),
             ResidentActorBoundary::AgentGroupList {
                 continuation,
@@ -5141,19 +5340,6 @@ where
                     outcome
                 }
             }),
-            ResidentActorBoundary::ResponsePoll(poll) => Box::pin(async move {
-                let observation = self
-                    .environment
-                    .requests
-                    .observe_response(context.actor, poll.request)
-                    .map(|observation| {
-                        starting_observation(&self.environment, poll.request, observation)
-                    });
-                self.environment
-                    .runner
-                    .resume_response_observation(context.clone(), poll.continuation, observation)
-                    .await
-            }),
             ResidentActorBoundary::ProgressPublication {
                 continuation,
                 request,
@@ -5175,64 +5361,6 @@ where
                 self.environment
                     .runner
                     .resume_progress_publication(context.clone(), continuation, outcome)
-                    .await
-            }),
-            ResidentActorBoundary::ProgressPoll(poll) => Box::pin(async move {
-                let observation = self
-                    .environment
-                    .requests
-                    .observe_progress(context.actor, poll.request);
-                self.environment
-                    .runner
-                    .resume_progress_observation(context.clone(), poll.continuation, observation)
-                    .await
-            }),
-            ResidentActorBoundary::RequestUpdate {
-                continuation,
-                request,
-                message,
-            } => Box::pin(async move {
-                let outcome = self
-                    .environment
-                    .requests
-                    .update_request(context.actor, request, message)
-                    .map(|(update, delivery)| {
-                        if let Err(error) = self
-                            .environment
-                            .deployments
-                            .try_send(LocalResidentDeployment::RequestUpdate { delivery })
-                        {
-                            // A full channel and a closed one both mean the
-                            // deployment owner cannot observe this update
-                            // right now; treat them alike rather than
-                            // silently keeping the update queued unseen.
-                            if let LocalResidentDeployment::RequestUpdate { delivery } =
-                                error.into_inner()
-                            {
-                                if let Some(presentation) = delivery.begin() {
-                                    presentation
-                                        .not_presented("deployment owner unavailable".into());
-                                }
-                            }
-                        }
-                        update.sequence as i64
-                    });
-                self.environment
-                    .runner
-                    .resume_request_update(context.clone(), continuation, outcome)
-                    .await
-            }),
-            ResidentActorBoundary::RequestUpdatePoll {
-                continuation,
-                update,
-            } => Box::pin(async move {
-                let outcome = self
-                    .environment
-                    .requests
-                    .observe_update(context.actor, update);
-                self.environment
-                    .runner
-                    .resume_request_update(context.clone(), continuation, outcome)
                     .await
             }),
             ResidentActorBoundary::RequestCancellation(cancellation) => Box::pin(async move {
@@ -5287,16 +5415,6 @@ where
                     .resume_response_forget(context.clone(), forget.continuation, outcome)
                     .await
             }),
-            ResidentActorBoundary::ReplyPoll(poll) => Box::pin(async move {
-                let observation = self
-                    .environment
-                    .requests
-                    .observe_reply(context.actor, poll.request);
-                self.environment
-                    .runner
-                    .resume_reply_observation(context.clone(), poll.continuation, observation)
-                    .await
-            }),
             ResidentActorBoundary::RouteRegistration {
                 registration,
                 entry,
@@ -5327,35 +5445,6 @@ where
                     .resume_int(context.clone(), registration.continuation, watch.0)
                     .await
             }),
-            ResidentActorBoundary::RouteList(continuation) => Box::pin(async move {
-                let routes = self
-                    .environment
-                    .requests
-                    .list_routes(context.actor)
-                    .into_iter()
-                    .map(|id| {
-                        i64::try_from(id.0).map_err(|_| {
-                            ResidentActorWorkbenchError::ActorProtocol(
-                                "runtime route identity exceeds Haskell Int".into(),
-                            )
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                self.environment
-                    .runner
-                    .resume_value(context.clone(), continuation, routes)
-                    .await
-            }),
-            ResidentActorBoundary::RoutePoll(poll) => Box::pin(async move {
-                let state = self
-                    .environment
-                    .requests
-                    .observe_route(context.actor, poll.watch);
-                self.environment
-                    .runner
-                    .resume_route_state(context.clone(), poll.continuation, state)
-                    .await
-            }),
             ResidentActorBoundary::WatchRegistration(registration) => Box::pin(async move {
                 crate::ActorPathSegment::new(&registration.label).map_err(|error| {
                     ResidentActorWorkbenchError::ActorProtocol(format!(
@@ -5384,19 +5473,6 @@ where
                     .resume_int(context.clone(), registration.continuation, watch.0)
                     .await
             }),
-            ResidentActorBoundary::WatchPoll(poll) => Box::pin(async move {
-                let observation = self
-                    .environment
-                    .requests
-                    .observe_watch(context.actor, poll.watch)
-                    .map(|observation| {
-                        watch_pending_observation(&self.environment, poll.watch, observation)
-                    });
-                self.environment
-                    .runner
-                    .resume_watch_observation(context.clone(), poll.continuation, observation)
-                    .await
-            }),
             ResidentActorBoundary::WatchAwait(poll) => {
                 let control = effect_owner
                     .control()
@@ -5410,43 +5486,6 @@ where
                     poll,
                 ))
             }
-            ResidentActorBoundary::WatchProgressPoll {
-                continuation,
-                watch,
-                request,
-                after,
-            } => Box::pin(async move {
-                let observation = self.environment.requests.observe_watch_progress(
-                    context.actor,
-                    watch,
-                    request,
-                    after,
-                );
-                self.environment
-                    .runner
-                    .resume_progress_observation(context.clone(), continuation, observation)
-                    .await
-            }),
-            ResidentActorBoundary::CommandReportPoll { continuation, job } => {
-                Box::pin(async move {
-                    let report =
-                        command_settlement::CommandSettlements::new(&self.environment).report(&job);
-                    self.environment
-                        .runner
-                        .resume_value(context.clone(), continuation, report)
-                        .await
-                })
-            }
-            ResidentActorBoundary::WatchForget(forget) => Box::pin(async move {
-                let outcome = self
-                    .environment
-                    .requests
-                    .forget_watch(context.actor, forget.watch);
-                self.environment
-                    .runner
-                    .resume_watch_forget(context.clone(), forget.continuation, outcome)
-                    .await
-            }),
             other => Box::pin(async move {
                 Err(ResidentActorWorkbenchError::ActorProtocol(format!(
                     "`{}` is not an active actor effect",
@@ -5615,7 +5654,7 @@ where
                         .resolve_effect(
                             kernel,
                             context,
-                            self.actor_effect_owner(),
+                            self.actor_effect_owner(context.actor),
                             ancestry,
                             boundary,
                         )
@@ -6532,7 +6571,7 @@ where
                     .resolve_effect(
                         kernel,
                         context,
-                        self.actor_effect_owner(),
+                        self.actor_effect_owner(context.actor),
                         ancestry,
                         boundary,
                     )
@@ -6761,7 +6800,7 @@ where
                         .resolve_effect(
                             kernel,
                             context,
-                            self.actor_effect_owner(),
+                            self.actor_effect_owner(context.actor),
                             ancestry,
                             boundary,
                         )
@@ -6867,6 +6906,17 @@ where
                         effect = %effect,
                         "effect boundary captured"
                     );
+                    if let ResidentActorBoundary::Console { text, .. } = &boundary {
+                        let rendered = crate::workbench_display::bounded_output(
+                            text,
+                            (*unit.display_remaining).min(32768),
+                        );
+                        let rendered =
+                            next_fragment.present_output(&rendered, unit.display_remaining);
+                        if !rendered.is_empty() {
+                            unit.command_output.push(rendered);
+                        }
+                    }
                     let boundary = if execution_state.park_effects {
                         let captured = match boundary {
                             ResidentActorBoundary::Drain {
@@ -6898,7 +6948,12 @@ where
                                     terminal,
                                 })
                             }
-                            boundary => OwnedWorkbenchWait::capture(boundary),
+                            boundary => {
+                                match self.prepare_independent_effect(kernel, context, boundary) {
+                                    Ok(operation) => Ok(OwnedWorkbenchWait::Prepared(operation)),
+                                    Err(boundary) => OwnedWorkbenchWait::capture(boundary),
+                                }
+                            }
                         };
                         match captured {
                             Ok(wait) => {
@@ -7097,17 +7152,6 @@ where
                             }
                         }
                         boundary => {
-                            if let ResidentActorBoundary::Console { text, .. } = &boundary {
-                                let rendered = crate::workbench_display::bounded_output(
-                                    text,
-                                    (*unit.display_remaining).min(32768),
-                                );
-                                let rendered =
-                                    next_fragment.present_output(&rendered, unit.display_remaining);
-                                if !rendered.is_empty() {
-                                    unit.command_output.push(rendered);
-                                }
-                            }
                             let presentation = match &boundary {
                                 ResidentActorBoundary::Command {
                                     request:
@@ -8613,7 +8657,6 @@ where
     ) -> WorkbenchFinalization {
         let context = execution_state.effects.context.clone();
         let checkpoint_boundary = execution_state.request.fork_boundary().cloned();
-        self.fork_publication = ForkPublication::Resident;
         match &result {
             Ok(KernelStep::Continue(_)) => self
                 .runtime_observation
@@ -9814,7 +9857,7 @@ where
                             .resolve_effect(
                                 kernel,
                                 &context,
-                                self.actor_effect_owner(),
+                                self.actor_effect_owner(context.actor),
                                 &crate::CallAncestry::begin(context.actor),
                                 boundary,
                             )
@@ -9824,6 +9867,10 @@ where
                 }
             }
         })
+    }
+
+    fn allows_independent_workbench_admission(&self) -> bool {
+        true
     }
 
     fn dispatch_workbench(
@@ -10068,7 +10115,7 @@ where
                         .resolve_effect(
                             kernel,
                             &context,
-                            self.actor_effect_owner(),
+                            self.actor_effect_owner(context.actor),
                             &crate::CallAncestry::begin(context.actor),
                             boundary,
                         )

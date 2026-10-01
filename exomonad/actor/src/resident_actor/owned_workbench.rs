@@ -239,6 +239,7 @@ struct OwnedExecution<H, O> {
     cleanup: crate::resident_workbench::ParkedHoleAbortGuard,
     resources: Arc<ExecutionResourceOwners>,
     observation: crate::ActorRuntimeObservationHandle,
+    retirement: crate::RetainedActorExit,
 }
 
 pub(super) struct WorkbenchUnitStart {
@@ -455,7 +456,23 @@ where
             let observation = owned.observation.clone();
             let index = owned.state.cursor.index;
             let total = owned.state.request.items.len();
-            let operation = async {
+            let retirement = owned.retirement.clone();
+            let control = owned
+                .state
+                .effects
+                .control
+                .as_ref()
+                .expect("execution retains its cancellation owner")
+                .clone();
+            let cancel = owned
+                .state
+                .effects
+                .control
+                .as_ref()
+                .expect("execution retains its cancellation owner")
+                .native_cancel();
+            let completed = {
+                let operation = async {
                     match deadline {
                         Some((deadline, entered)) => {
                             let operation = run(&mut owned);
@@ -481,7 +498,19 @@ where
                         None => Some(run(&mut owned).await),
                     }
                 }.instrument(span.clone());
-            let completed = timing.scope(cleanup.scope(operation)).await;
+                let running = crate::resident_workbench::with_invocation_cancellation(
+                    cancel,
+                    timing.scope(cleanup.scope(operation)),
+                );
+                tokio::pin!(running);
+                tokio::select! {
+                    completed = &mut running => completed,
+                    _ = retirement.wait_requested_shutdown() => {
+                        control.request_cancellation();
+                        running.await
+                    }
+                }
+            };
             OwnedWorkbenchCompletion::advance(move |behavior: &mut Self, kernel| {
                 let (timing, cleanup) = owned.scopes();
                 timing.sync_scope(|| {
@@ -594,6 +623,7 @@ where
         );
         let owned = OwnedExecution {
             observation: self.runtime_observation.clone(),
+            retirement: kernel.retained_exit(),
             state: WorkbenchExecutionState {
                 effects: WorkbenchEffectState {
                     park_effects: true,
@@ -826,120 +856,76 @@ where
     /// The existing serial driver keeps all unconverted handlers and terminal
     /// cleanup. It resumes this same cursor and yields its captured effect wait.
     fn continue_owned_task(mut owned: OwnedExecution<H, O>) -> OwnedWorkbenchTask<Self> {
-        OwnedWorkbenchTask::serial(move |mut behavior: Self, kernel| {
-            Box::pin(async move {
-                let (timing, cleanup) = owned.scopes();
-                let deadline = owned
-                    .state
-                    .cursor
-                    .after_tool
-                    .as_ref()
-                    .filter(|slot| slot.enforce_deadline)
-                    .map(|slot| slot.frame.deadline());
-                let result = {
-                    let advance = timing.scope(cleanup.scope(behavior.execute_workbench(
-                        &kernel,
-                        &mut owned.state,
-                        owned.workbench.as_ref(),
-                    )));
-                    tokio::pin!(advance);
-                    match deadline {
-                        Some(deadline) => tokio::select! {
-                            biased;
-                            result = &mut advance => Some(result),
-                            () = tokio::time::sleep_until(deadline) => None,
-                        },
-                        None => Some(advance.await),
-                    }
-                };
-                let Some(result) = result else {
-                    let completion =
-                        OwnedWorkbenchCompletion::advance(move |behavior: &mut Self, kernel| {
-                            let (timing, cleanup) = owned.scopes();
-                            timing.sync_scope(|| {
-                                cleanup.sync_scope(|| {
-                                    owned.expire_after_tool();
-                                    Ok(WorkbenchAdvance::Park(
-                                        behavior
-                                            .finish_owned_after_tool_task(owned, kernel.clone()),
-                                    ))
-                                })
-                            })
-                        });
-                    return (behavior, completion);
-                };
-                match result {
-                    Ok(
-                        park @ (WorkbenchRunAdvance::ParkEffect
-                        | WorkbenchRunAdvance::ParkUnit
-                        | WorkbenchRunAdvance::ParkNative
-                        | WorkbenchRunAdvance::ParkAfterToolStart
-                        | WorkbenchRunAdvance::ParkAfterToolFinish
-                        | WorkbenchRunAdvance::ParkBackground(_)),
-                    ) => {
-                        tracing::debug!(actor = ?owned.state.effects.context.actor,
-                        input_unit_index = owned.state.cursor.index, "serial cursor yielded its captured unit or effect");
-                        let completion = OwnedWorkbenchCompletion::advance(
-                            move |behavior: &mut Self, kernel| {
-                                let (timing, cleanup) = owned.scopes();
-                                timing.sync_scope(|| {
-                                    cleanup.sync_scope(|| {
-                                        Ok(WorkbenchAdvance::Park(match park {
-                                            WorkbenchRunAdvance::ParkEffect => {
-                                                behavior.owned_effect_task(owned, kernel.clone())
-                                            }
-                                            WorkbenchRunAdvance::ParkUnit => {
-                                                Self::owned_unit_task(owned)
-                                            }
-                                            WorkbenchRunAdvance::ParkNative => {
-                                                behavior.owned_fragment_task(owned)
-                                            }
-                                            WorkbenchRunAdvance::ParkAfterToolStart => {
-                                                Self::begin_owned_after_tool_task(owned)
-                                            }
-                                            WorkbenchRunAdvance::ParkAfterToolFinish => behavior
-                                                .finish_owned_after_tool_task(
-                                                    owned,
-                                                    kernel.clone(),
-                                                ),
-                                            WorkbenchRunAdvance::ParkBackground(presentation) => {
-                                                behavior.owned_background_command_task(
-                                                    owned,
-                                                    presentation,
-                                                )
-                                            }
-                                            WorkbenchRunAdvance::Complete(_) => {
-                                                unreachable!("captured execution parks")
-                                            }
-                                        }))
-                                    })
-                                })
-                            },
+        OwnedWorkbenchTask::new(Box::pin(async move {
+            OwnedWorkbenchCompletion::advance_async(move |behavior: &mut Self, kernel| {
+                Box::pin(async move {
+                    let (timing, cleanup) = owned.scopes();
+                    let deadline = owned
+                        .state
+                        .cursor
+                        .after_tool
+                        .as_ref()
+                        .filter(|slot| slot.enforce_deadline)
+                        .map(|slot| slot.frame.deadline());
+                    let result = {
+                        let cancel = owned
+                            .state
+                            .effects
+                            .control
+                            .as_ref()
+                            .expect("execution retains its cancellation owner")
+                            .native_cancel();
+                        let advance = crate::resident_workbench::with_invocation_cancellation(
+                            cancel,
+                            timing.scope(cleanup.scope(behavior.execute_workbench(
+                                kernel,
+                                &mut owned.state,
+                                owned.workbench.as_ref(),
+                            ))),
                         );
-                        (behavior, completion)
-                    }
-                    result => {
-                        let result = result.map(|advance| match advance {
-                            WorkbenchRunAdvance::Complete(step) => step,
-                            WorkbenchRunAdvance::ParkEffect
-                            | WorkbenchRunAdvance::ParkUnit
-                            | WorkbenchRunAdvance::ParkNative
-                            | WorkbenchRunAdvance::ParkAfterToolStart
-                            | WorkbenchRunAdvance::ParkAfterToolFinish
-                            | WorkbenchRunAdvance::ParkBackground(_) => {
-                                unreachable!("effect wait handled above")
-                            }
-                        });
-                        let completion = OwnedWorkbenchCompletion::advance(
-                            move |behavior: &mut Self, kernel| {
-                                Self::begin_owned_finalization(behavior, kernel, owned, result)
+                        tokio::pin!(advance);
+                        match deadline {
+                            Some(deadline) => tokio::select! {
+                                biased;
+                                result = &mut advance => Some(result),
+                                () = tokio::time::sleep_until(deadline) => None,
                             },
-                        );
-                        (behavior, completion)
-                    }
-                }
+                            None => Some(advance.await),
+                        }
+                    };
+                    let Some(result) = result else {
+                        owned.expire_after_tool();
+                        return Ok(WorkbenchAdvance::Park(
+                            behavior.finish_owned_after_tool_task(owned, kernel.clone()),
+                        ));
+                    };
+                    let task = match result {
+                        Ok(WorkbenchRunAdvance::ParkEffect) => {
+                            behavior.owned_effect_task(owned, kernel.clone())
+                        }
+                        Ok(WorkbenchRunAdvance::ParkUnit) => Self::owned_unit_task(owned),
+                        Ok(WorkbenchRunAdvance::ParkNative) => behavior.owned_fragment_task(owned),
+                        Ok(WorkbenchRunAdvance::ParkAfterToolStart) => {
+                            Self::begin_owned_after_tool_task(owned)
+                        }
+                        Ok(WorkbenchRunAdvance::ParkAfterToolFinish) => {
+                            behavior.finish_owned_after_tool_task(owned, kernel.clone())
+                        }
+                        Ok(WorkbenchRunAdvance::ParkBackground(presentation)) => {
+                            behavior.owned_background_command_task(owned, presentation)
+                        }
+                        result => {
+                            let result = result.map(|advance| match advance {
+                                WorkbenchRunAdvance::Complete(step) => step,
+                                _ => unreachable!("owned execution yielded above"),
+                            });
+                            return Self::begin_owned_finalization(behavior, kernel, owned, result);
+                        }
+                    };
+                    Ok(WorkbenchAdvance::Park(task))
+                })
             })
-        })
+        }))
     }
 
     fn owned_unit_task(mut owned: OwnedExecution<H, O>) -> OwnedWorkbenchTask<Self> {
@@ -1352,8 +1338,16 @@ where
                 .contains(&crate::ActorEffectKey::Commands);
             return OwnedWorkbenchTask::new(Box::pin(async move {
                 let (timing, cleanup) = owned.scopes();
-                let prepared = timing
-                    .scope(
+                let cancel = owned
+                    .state
+                    .effects
+                    .control
+                    .as_ref()
+                    .expect("original cancellation owner")
+                    .native_cancel();
+                let prepared = crate::resident_workbench::with_invocation_cancellation(
+                    cancel,
+                    timing.scope(
                         cleanup.scope(command_presentation::prepare(
                             &environment.commands,
                             &owned.state.effects.context,
@@ -1364,8 +1358,9 @@ where
                             request,
                             permitted,
                         )),
-                    )
-                    .await;
+                    ),
+                )
+                .await;
                 OwnedWorkbenchCompletion::advance(move |behavior: &mut Self, _kernel| {
                     let (timing, cleanup) = owned.scopes();
                     timing.sync_scope(|| {
@@ -1687,7 +1682,49 @@ where
     ) -> OwnedWorkbenchTask<Self> {
         Self::owned_step_task(
             owned,
-            move |_| Box::pin(settle_workbench_finalization(environment, finalization)),
+            move |owned| {
+                Box::pin(async move {
+                    if owned
+                        .state
+                        .effects
+                        .control
+                        .as_ref()
+                        .is_some_and(|control| control.cancellation_requested())
+                    {
+                        let cleanup = owned
+                            .workbench
+                            .as_ref()
+                            .expect("cancelled execution retains its native cleanup owner")
+                            .abort_owned_continuations(
+                                owned.state.effects.context.clone(),
+                                owned.cleanup.registration(),
+                                "execution cancelled before settlement".into(),
+                            )
+                            .await;
+                        if let Err(error) = cleanup {
+                            owned
+                                .state
+                                .effects
+                                .control
+                                .as_ref()
+                                .expect("original cancellation owner")
+                                .mark_unconfirmed();
+                            return Err(KernelInvocationFailure::Failed {
+                                actor: owned.state.effects.context.actor,
+                                detail: format!("cancelled execution cleanup unconfirmed: {error}"),
+                            });
+                        }
+                        owned
+                            .state
+                            .effects
+                            .control
+                            .as_ref()
+                            .expect("original cancellation owner")
+                            .acknowledge_cancellation();
+                    }
+                    settle_workbench_finalization(environment, finalization).await
+                })
+            },
             |behavior, _kernel, mut owned, result| {
                 let result = behavior.complete_workbench_finalization(&mut owned.state, result);
                 let outcome = match &result {
@@ -1768,6 +1805,7 @@ where
     O: OutputSink + Sync + 'static,
 {
     let result = match wait {
+        OwnedWorkbenchWait::Prepared(operation) => operation.await,
         OwnedWorkbenchWait::Drain {
             continuation,
             target,
@@ -1824,12 +1862,30 @@ where
             .await
         }
         OwnedWorkbenchWait::External { continuation, work } => {
-            await_external(environment, kernel, context, continuation, work).await
+            await_external(
+                environment,
+                kernel,
+                context,
+                Some(control),
+                continuation,
+                work,
+            )
+            .await
         }
         OwnedWorkbenchWait::Jev {
             continuation,
             request,
-        } => ask_jev(environment, kernel, context, continuation, request).await,
+        } => {
+            ask_jev(
+                environment,
+                kernel,
+                context,
+                Some(control),
+                continuation,
+                request,
+            )
+            .await
+        }
         OwnedWorkbenchWait::Command {
             continuation,
             request,
@@ -1865,6 +1921,7 @@ pub(super) async fn await_external<H, O>(
     environment: ResidentEnvironment<H, O>,
     kernel: KernelContext,
     context: ActorSessionContext,
+    control: Option<Arc<crate::WorkbenchExecutionControl>>,
     continuation: ResidentHole,
     work: tidepool_effect::DeferredEffect,
 ) -> Result<ResidentOutcome, ResidentActorWorkbenchError>
@@ -1877,25 +1934,31 @@ where
         .runner
         .run_external(context.clone(), continuation, work);
     tokio::pin!(running);
-    if let Some(cancellation) = cancellation {
-        tokio::select! {
-            outcome = &mut running => outcome,
-            _ = kernel.wait_requested_shutdown() => {
-                cancellation.request();
-                // Requesting retirement does not prove that external
-                // work stopped. Its owner must observe and settle it.
-                running.await
+    tokio::select! {
+        outcome = &mut running => outcome,
+        _ = async {
+            match &control {
+                Some(control) => control.wait_for_cancellation().await,
+                None => std::future::pending().await,
             }
+        } => {
+            if let Some(cancellation) = cancellation { cancellation.request(); }
+            // Cancellation requests do not prove owner settlement.
+            running.await
         }
-    } else {
-        running.await
+        _ = kernel.wait_requested_shutdown() => {
+            if let Some(control) = &control { control.request_cancellation(); }
+            if let Some(cancellation) = cancellation { cancellation.request(); }
+            running.await
+        }
     }
 }
 
 pub(super) async fn ask_jev<H, O>(
     environment: ResidentEnvironment<H, O>,
-    _kernel: KernelContext,
+    kernel: KernelContext,
     context: ActorSessionContext,
+    control: Option<Arc<crate::WorkbenchExecutionControl>>,
     continuation: ResidentHole,
     request: String,
 ) -> Result<ResidentOutcome, ResidentActorWorkbenchError>
@@ -1914,7 +1977,21 @@ where
         "jev call packet"
     );
     let started = std::time::Instant::now();
-    let answer = backend.ask(request).await;
+    let asking = backend.ask(request);
+    tokio::pin!(asking);
+    let answer = tokio::select! {
+        answer = &mut asking => answer,
+        _ = kernel.wait_requested_shutdown() => {
+            if let Some(control) = &control { control.request_cancellation(); }
+            asking.await
+        }
+        _ = async {
+            match &control {
+                Some(control) => control.wait_for_cancellation().await,
+                None => std::future::pending().await,
+            }
+        } => asking.await,
+    };
     let elapsed_ms = started.elapsed().as_millis();
     crate::call_timing::add_jev_ms(elapsed_ms);
     match &answer {
