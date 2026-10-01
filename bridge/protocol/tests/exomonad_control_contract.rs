@@ -210,3 +210,15 @@ fn notifications_have_one_way_admission_and_owner_receipt_observation() {
     );
     assert!(!format!("{effect:?}").contains("Reply "));
 }
+
+#[test]
+fn command_observation_preserves_independent_output_failure_in_both_wire_languages() {
+    let commands = tidepool_protocol::effects::commands::commands();
+    let wire = tidepool_protocol::gen::wire_rs::file(&commands).contents;
+    assert!(wire.contains("pub result: CommandResult,"));
+    assert!(wire.contains("pub output: Result<CommandOutput, CommandError>,"));
+    assert!(!wire.contains("pub output: Result<CommandError, CommandOutput>,"));
+    let haskell = tidepool_protocol::gen::decl_rs::file(&commands).contents;
+    assert!(haskell.contains("observedCommandResult :: CommandResult"));
+    assert!(haskell.contains("observedCommandOutput :: Either CommandError CommandOutput"));
+}

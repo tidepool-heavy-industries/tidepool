@@ -144,7 +144,8 @@ fn used_bridge_derives(e: &Effect) -> Vec<&'static str> {
 
 /// The Rust type a `RecordField`/`SumVariant` field's `HsType` renders as on
 /// the wire. Closed over exactly the shapes the wire-record language uses
-/// today; anything else is a generation-time failure, same spirit as
+/// today, including Either projected through the bridge's Result convention.
+/// Anything else is a generation-time failure, same spirit as
 /// [`Effect::wire_rust_of`]'s panic.
 fn rust_type(e: &Effect, ty: &HsType) -> String {
     match ty {
@@ -158,6 +159,11 @@ fn rust_type(e: &Effect, ty: &HsType) -> String {
         HsType::Value => "serde_json::Value".to_string(),
         HsType::List(inner) => format!("Vec<{}>", rust_type(e, inner)),
         HsType::Maybe(inner) => format!("Option<{}>", rust_type(e, inner)),
+        // The bridge represents Haskell Left as Err and Right as Ok, so the
+        // Rust Result arguments have the reverse order of Haskell Either.
+        HsType::Either(left, right) => {
+            format!("Result<{}, {}>", rust_type(e, right), rust_type(e, left))
+        }
         // `[(GitOid, GitOid)]` (`HeadChangeKind::Rewritten`) is the only tuple
         // seen in a wire record today; a Haskell list-of-tuple is a Rust
         // `Vec<(..)>`, same as every other `HsType::List` — the tuple itself
@@ -169,7 +175,7 @@ fn rust_type(e: &Effect, ty: &HsType) -> String {
         HsType::Named(n) => e.wire_rust_of(n).to_string(),
         other => panic!(
             "{}: wire_rs cannot render {other:?} as a wire record field type — \
-             only Text/Int/Bool/Value/[T]/Maybe T/(T, ..)/Named(n) are representable here",
+             only Text/Int/Bool/Value/[T]/Maybe T/Either L R/(T, ..)/Named(n) are representable here",
             e.name
         ),
     }

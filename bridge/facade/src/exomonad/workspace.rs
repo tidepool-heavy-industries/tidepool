@@ -7,8 +7,7 @@ use serde::{Deserialize, Serialize};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub(super) struct HaskellConfig {
     pub source_roots: Vec<PathBuf>,
     /// Haskell source directories inside the project's flake inputs, keyed by
@@ -21,11 +20,42 @@ pub(super) struct HaskellConfig {
     pub flake_overrides: BTreeMap<String, PathBuf>,
     pub modules: Vec<String>,
     pub checks: Vec<String>,
-    pub tools: Option<String>,
     /// The workspace's agent spec, for a workspace that wants a name other
     /// than the `AgentSpec.agentSpec` an actor's own checkout supplies. Rule
-    /// two of spec discovery; `tools` remains rule three.
+    /// two of spec discovery.
     pub spec: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for HaskellConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Default, Deserialize)]
+        #[serde(default, deny_unknown_fields)]
+        struct Fields {
+            source_roots: Vec<PathBuf>,
+            flake_sources: BTreeMap<String, Vec<PathBuf>>,
+            flake_overrides: BTreeMap<String, PathBuf>,
+            modules: Vec<String>,
+            checks: Vec<String>,
+            spec: Option<String>,
+            tools: Option<serde::de::IgnoredAny>,
+        }
+        let fields = Fields::deserialize(deserializer)?;
+        if fields.tools.is_some() {
+            return Err(serde::de::Error::custom(
+                "[haskell] tools is obsolete; replace it with spec = 'Module.agentSpec' and define agentSpec = defaultSpec { specTools = yourTools } in that module",
+            ));
+        }
+        Ok(Self {
+            source_roots: fields.source_roots,
+            flake_sources: fields.flake_sources,
+            flake_overrides: fields.flake_overrides,
+            modules: fields.modules,
+            checks: fields.checks,
+            spec: fields.spec,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -53,8 +83,6 @@ pub struct FrozenWorkspace {
     #[serde(default)]
     pub(crate) checks: Vec<String>,
     #[serde(default)]
-    pub(crate) tools: Option<String>,
-    #[serde(default)]
     pub(crate) spec: Option<String>,
     pub(crate) prompts: BTreeMap<String, String>,
     #[serde(default)]
@@ -78,9 +106,13 @@ impl FrozenWorkspace {
         let directory = run_root.join("workspace");
         let manifest = directory.join("selection.json");
         if manifest.exists() {
-            let frozen: Self = serde_json::from_slice(&std::fs::read(&manifest)?)?;
+            let selection: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest)?)?;
+            if selection.get("tools").is_some_and(|tools| !tools.is_null()) {
+                return Err("frozen workspace uses obsolete [haskell] tools; migrate to spec = 'Module.agentSpec' with agentSpec = defaultSpec { specTools = yourTools }, then start a new run".into());
+            }
+            let frozen: Self = serde_json::from_value(selection)?;
             if frozen.version != 2 {
-                return Err("unsupported frozen workspace format; start a new swarm".into());
+                return Err("unsupported frozen workspace format; start a new run".into());
             }
             if frozen.library_identity != crate::haskell_sources::source_identity()? {
                 return Err(
@@ -153,7 +185,6 @@ impl FrozenWorkspace {
             .haskell
             .checks
             .iter()
-            .chain(config.haskell.tools.iter())
             .chain(config.haskell.spec.iter())
         {
             let Some((module, function)) = entry.rsplit_once('.') else {
@@ -266,7 +297,6 @@ impl FrozenWorkspace {
             include,
             modules: config.haskell.modules,
             checks: config.haskell.checks,
-            tools: config.haskell.tools,
             spec: config.haskell.spec,
             prompts,
             models: config.models,
@@ -854,6 +884,38 @@ mod tests {
     }
 
     #[test]
+    fn frozen_v2_spec_selection_accepts_null_tools_and_rejects_obsolete_tools() {
+        let project = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".exomonad")).unwrap();
+        std::fs::write(
+            project.path().join(".exomonad/config.toml"),
+            "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nspec = 'Project.Spec.agentSpec'\n",
+        )
+        .unwrap();
+        let selected = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let manifest = run.path().join("workspace/selection.json");
+        let mut selection: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        assert_eq!(selection["version"], 2);
+        selection["tools"] = serde_json::Value::Null;
+        std::fs::write(&manifest, serde_json::to_vec(&selection).unwrap()).unwrap();
+        let retained = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        assert_eq!(retained.spec, selected.spec);
+        assert_eq!(retained.identity, selected.identity);
+        selection["tools"] = serde_json::json!("Project.Tools.tools");
+        std::fs::write(&manifest, serde_json::to_vec(&selection).unwrap()).unwrap();
+        let error = FrozenWorkspace::load(project.path(), run.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("frozen workspace uses obsolete [haskell] tools"),
+            "{error}"
+        );
+        assert!(error.contains("then start a new run"), "{error}");
+    }
+
+    #[test]
     fn pre_capture_selection_requires_explicit_new_run() {
         let project = tempfile::tempdir().unwrap();
         let run = tempfile::tempdir().unwrap();
@@ -972,7 +1034,19 @@ mod tests {
     }
 
     #[test]
-    fn tool_selection_is_qualified_and_frozen_with_the_package() {
+    fn obsolete_tools_key_explains_the_spec_migration() {
+        for tools in ["'Project.Tools.tools'", "17", "[]"] {
+            let config = format!("tools = {tools}\nspec = 'Project.Spec.agentSpec'\n");
+            let error = toml::from_str::<HaskellConfig>(&config)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("[haskell] tools is obsolete"), "{error}");
+            assert!(error.contains("specTools = yourTools"), "{error}");
+        }
+    }
+
+    #[test]
+    fn spec_selection_is_qualified_and_frozen_with_the_package() {
         let project = tempfile::tempdir().unwrap();
         let authored = project.path().join(".exomonad");
         std::fs::create_dir(&authored).unwrap();
@@ -980,36 +1054,33 @@ mod tests {
             std::fs::write(
                 authored.join("config.toml"),
                 format!(
-                    "[defaults]\nmodel='gpt-6-sol'\n[haskell]\ntools={}\n",
+                    "[defaults]\nmodel='gpt-6-sol'\n[haskell]\nspec={}\n",
                     serde_json::to_string(entry).unwrap(),
                 ),
             )
             .unwrap()
         };
         for entry in [
-            "tools",
-            "Project.Tools.tools\nimport Bad",
-            "Project.Tools.Tools",
-            "Project.Tools.tools ()",
+            "agentSpec",
+            "Project.Spec.agentSpec\nimport Bad",
+            "Project.Spec.AgentSpec",
+            "Project.Spec.agentSpec ()",
         ] {
             write(entry);
             assert!(
                 FrozenWorkspace::load(project.path(), tempfile::tempdir().unwrap().path()).is_err()
             );
         }
-        write("Tidepool.Command.Tools.tools");
+        write("Project.Spec.agentSpec");
         let run = tempfile::tempdir().unwrap();
         let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
-        assert_eq!(
-            frozen.tools.as_deref(),
-            Some("Tidepool.Command.Tools.tools")
-        );
-        write("Project.Next.tools");
+        assert_eq!(frozen.spec.as_deref(), Some("Project.Spec.agentSpec"));
+        write("Project.Next.agentSpec");
         let same_run = FrozenWorkspace::load(project.path(), run.path()).unwrap();
-        assert_eq!(same_run.tools, frozen.tools);
+        assert_eq!(same_run.spec, frozen.spec);
         let next =
             FrozenWorkspace::load(project.path(), tempfile::tempdir().unwrap().path()).unwrap();
-        assert_eq!(next.tools.as_deref(), Some("Project.Next.tools"));
+        assert_eq!(next.spec.as_deref(), Some("Project.Next.agentSpec"));
         assert_ne!(next.identity, frozen.identity);
     }
 

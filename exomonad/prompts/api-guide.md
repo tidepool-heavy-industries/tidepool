@@ -8,57 +8,58 @@ Cells enable the usual extensions, including `TypeApplications`, `DataKinds`,
 
 ## Choose the workflow
 
-Use a pure function for a deterministic transform, Haskell effects for a known
-sequence of commands and evidence reads, Jev for a bounded semantic judgment,
+Use a pure function for a deterministic transform, an ordinary Haskell `do`
+program for commands, suspended waits and dependent evidence reads, Jev for a bounded semantic judgment,
 and a record actor for ongoing sources or stateful joins that do not need a
 model round. Use a model actor when open-ended investigation or adaptation
 needs model reasoning. These choices compose: code gathers authoritative facts;
 Jev judges supplied evidence and never grants resource authority.
 
-When the workflow is uncertain, try it in small notebook cells and retain the
-values. Once the repeated sequence is proven and a real consumer needs it,
-compose it into a named function or authored module. Keep full evidence or a
-recoverable reference, show a compact typed projection, and page omitted display
-with `cellDisplay.more`. Display truncation is not evidence selection and does
-not justify replaying a command.
+Try uncertain workflows in small cells; compose repeated sequences when a real
+consumer needs them. Retain complete evidence, project compact typed views and
+page `cellDisplay.more` without replaying effects.
 
 ## Delegate and inspect
 
-The standard execution cycle is scaffold, admit the ready parallel frontier,
-integrate checked results, then admit a later batch. Luna component owners repeat
-it down to justified microtask leaves. The installed project's `unfoldWork`
-composes admission with a persistent `Project.Routing` collector;
-`lunaLead` returns Delivery and `lunaTask` supports the requested result type.
-Use the compiled `RECURSIVE-WORK.md` procedure. The primitives below explain that
-composition and support custom typed work; they do not prescribe a second workflow.
+Scaffold, admit ready parallel work and integrate checked results. Recursive
+owners use `Project.Work` policy and `Exomonad.Contrib.Routing`; see
+`RECURSIVE-WORK.md`. These primitives also support custom typed compositions.
 
 ```haskell
 let task = "Remove the stale path and report the focused check." :: Text
 (worker, ready) <- spawnWatched "implementation-ready" (batch "cleanup" "implementation") $
-  child @Text $
+  child @Text $ withLifetime ActorOwned $ withContext (selected id) $
     coding projectHead $
       assignment [label|remove-stale-path|] task
 ready
 ```
 
-`spawnWatched` composes `unfold` and `watch (awaitSettled response)`. A wave is
-one `unfold` with `<$>` and `<*>` over every independent child; dependent work
-waits for a later cell:
+`spawnWatched` composes immediate `unfold` and a named settlement watch. The
+explicit `ActorOwned` branch survives this cell. Default `InvocationOwned` branches
+must settle within its creating invocation; returning handles does not extend it.
+A wave composes independent children with `<$>` and `<*>`. Capture an exact
+checkpoint to reuse your current reasoning:
 
 ```haskell
 let parserTask = "Implement the parser." :: Text
 let consumerTask = "Update its consumer." :: Text
 let reviewTask = "Review the interface." :: Text
+Right captured <- checkpoint "feature-scaffold"
 (parser, consumer, review) <- unfold (batch "feature" "wave-1") $ (,,)
-  <$> child @Text (coding currentCheckout (assignment [label|parser|] parserTask))
-  <*> child @Text (coding currentCheckout (assignment [label|consumer|] consumerTask))
-  <*> child @Text (researching currentCheckout (assignment [label|contract-review|] reviewTask))
+  <$> child @Text (withLifetime ActorOwned (withContext (fromCheckpoint captured) (coding currentCheckout (assignment [label|parser|] parserTask))))
+  <*> child @Text (withLifetime ActorOwned (withContext (fromCheckpoint captured) (coding currentCheckout (assignment [label|consumer|] consumerTask))))
+  <*> child @Text (withLifetime ActorOwned (withContext (fromCheckpoint captured) (researching currentCheckout (assignment [label|contract-review|] reviewTask))))
 ```
 A later wave from the same actor uses `subgroup "wave-2"`: it nests under
 your own path, so you pass only the new segment, never your full path.
 
-End the admission cell; continue independent work or end the turn while waiting.
-Each child's settlement notice wakes you with its reply; read
+Immediate children can be awaited in their admission cell with
+`waitFor ((,) <$> awaitSettled parser <*> awaitSettled consumer)`, preserving the
+continuation. For work spanning model turns, use explicit `ActorOwned` branches
+as above and let settlement notices or a named watch wake you. `unfoldDeferred`
+requires persistent lifetime and returns before children can start; never await
+its children in that invocation. It records the real enclosing result, without
+fabricating a completed transcript. Read
 the full value with `pollResponse` only when the notice's preview is not
 enough. A `watch` joins several responses into one wake:
 
@@ -70,18 +71,18 @@ settled <- watch "wave-1-settled" (awaitAnySettled [parser, consumer, review])
 the watch on an unavailable dependency. `pollResponse` distinguishes pending,
 cancellation pending, ready, and unavailable. Progress uses `childWithProgress`
 and `pollProgress`; snapshots are not replies. Record actors (`R.*`) collect
-and route events without model inference.
+and route events without model inference. `R.start` creates persistent services.
 
-Seed children from your executing checkout with `currentCheckout`: the root
-project checkout or a child's bound checkout. Use `projectHead` to select the
-project source explicitly, or `atRef` for an explicit commit. Live-source
-admission checkpoints eligible edits on the source branch without hooks or
-checks; inspect omission/fallback receipts.
-Commit useful units without mistaking checkpoints for accepted delivery.
+`currentCheckout` seeds the executing actor's checkout; `projectHead` selects
+the project source and `atRef` an explicit commit. Live-source admission checkpoints
+eligible edits without checks; inspect omission receipts before using that source.
 
 `withModel "luna"` selects a workspace alias; `withModel (Literal "provider-model")`
 selects an explicit model (`luna`: cheap tier; `executor`: Sol tier). `withEffort Medium` sets effort. `previewBranch` shows resolved policy.
-`withContext (selected render)` selects fresh context. Use `[label|orbit-motif|]`
+`withContext (selected render)` selects fresh context; `fromCheckpoint` uses an
+exact retained capture. Immediate admission refuses unresolved `inherited`
+context before allocation; use `unfoldDeferred` with explicit `ActorOwned` for
+the enclosing call's completed context. Use `[label|orbit-motif|]`
 for compile-checked static assignment labels; use `labelFromText` for dynamic
 labels and handle its `Either`.
 
@@ -91,7 +92,8 @@ omitted detail. `respond`, `sessionReply` and `sessionInput` exist only while
 a request is pending; `lookup` shows them then. A root has none of them: use
 the project's task and review constructors instead of recipes written for a
 child. `request @Report (responseActor worker) (assignment [label|revision|] input)`
-assigns follow-up work to a retained child. `pollRequestUpdate` inspects an accepted update handle.
+assigns invocation-owned follow-up work. Await it before returning or explicitly
+`detachRequest` for a request spanning turns. `pollRequestUpdate` inspects updates.
 Requests notify their owner unless a watch/route takes over; record actor
 settlement sources require `report = Silent`.
 
@@ -129,6 +131,7 @@ spawnWatched :: WatchLabel -> ForkGroupPath -> Unfold effects (Response result)
              -> Eff effects (Response result, Watch (Settlement result))
 awaitSettled :: Response result -> Await (Settlement result)
 awaitAnySettled :: [Response result] -> Await [Maybe (Settlement result)]
+waitFor :: Member Watches effects => Await result -> Eff effects (Either WatchFailure result)
 watch :: Member Watches effects => WatchLabel -> Await result -> Eff effects (Watch result)
 pollWatch :: Member Watches effects => Watch result -> Eff effects (WatchState result)
 pollResponse :: Member Replies effects => Response result -> Eff effects (ResponseState result)
@@ -143,17 +146,19 @@ stderr. `J.ask` batches semantic questions over supplied evidence; load
 `parentAgent` is your supervising actor, which receives `sendMessage` and
 settles your request, or `Nothing` for a root.
 
-Start a long command once and retain its `Cmd.Job`. The compiled example
-`.exomonad/workspace/checks/background-command-example.hs` starts a job, attaches
-an actor to completion, reads compact or full retained evidence, and finishes the
-observer. Reads never rerun the command; failed execution and unavailable output
-stay distinct. The example adds no model wake route: use your assignment's
-completion route or continue useful work and inspect later, without repeated polling.
+`Cmd.run command = Cmd.start command >>= Cmd.await` preserves the continuation until terminal
+completion, including nonzero exits. `Cmd.observe` returns bounded status normally;
+observation never detaches. Default starts are invocation-owned. Use
+`Cmd.background` for an actor-owned start with completion notice, or `Cmd.detach`
+to transfer an existing owned job explicitly. Reads never rerun commands;
+outcome, output completeness and cleanup remain separate facts.
 
-For later-discovered operations, `R.attach` connects their completion source to
-an Event sink from the handler's `R.self`. Declare that Event with `R.on mempty`.
-Handle refusal; attachment does not cancel the operation. See `exomonad-define-actors`
-for authority, partial admission, replacement and cleanup.
+For retained command-evidence composition see the compiled
+`.exomonad/workspace/checks/background-command-example.hs`. Record-actor handlers
+remain serialized while suspended: never await their own mailbox's next handler.
+
+`R.attach` connects a later operation to an Event sink from `R.self`.
+Handle refusal and retain cleanup; see `exomonad-define-actors`.
 
 ## Discover missing information
 
@@ -166,15 +171,9 @@ exports/source where needed. `status` offers `summary`, `detailed`, `watches`,
 `recovery`, `lineage`, `trace`, and `bindings` for runtime uncertainty without
 compiling a cell.
 
-A direct successful lookup may include one complete registered example in a
-batch. Identity is the resolved module, declaration, and namespace; an
-alias can resolve to that same identity. Ambiguous results, unavailable
-declarations, and live bindings have no example. A complete example may be
-omitted when the complete UTF-8 block exceeds 2 KiB; follow its exact locator
-and requirements rather than treating cut code as executable. Registration
-points to a tested fixture and prerequisite paths; it does not prove the
-current workspace was compiled. Related declarations and Jev selection retain
-their existing behavior, and original lookup failures remain failures.
+Lookup examples name tested fixtures and prerequisites, not proof of the current
+workspace's compilation. Ambiguous, unavailable and live bindings have no example.
+Follow the exact locator for an omitted example; never execute truncated code.
 
 Before hand-building a review, merge, or triage loop, `lookup`/`doc` installed
 modules and skills: an existing actor is often four calls away, reimplementing

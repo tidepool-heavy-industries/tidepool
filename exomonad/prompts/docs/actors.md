@@ -1,7 +1,10 @@
 A record actor keeps coordination in Haskell so routine events do not wake a
 model. One record describes private state, public calls, and fixed event
 handlers; the same record supplies both the definition and the typed client.
-`R` is `Tidepool.Actor.Record`.
+`R` is `Tidepool.Actor.Record`. `R.start` creates an explicit persistent service
+with actor lifetime. It survives the creating invocation; ordinary command,
+provider-worker and request defaults remain scoped to a hosted invocation.
+Handlers without such an invocation use actor ownership for their work.
 
 Find out whether this workspace already authors one that fits. `doc topics` ends
 by naming its compiled modules and `lookup` on one of those names browses their
@@ -13,12 +16,11 @@ The minimal shape is a record with one `State`, one `Call`, and one `Event` over
 the settlements you want collected:
 
 ```haskell
-import GHC.Generics (Generic)
 data Results mode = Results
   { resultState :: mode :- State [Either ResponseFailure (ResponseResult (Outcome Candidate))]
   , arrived :: mode :- Event (Either ResponseFailure (ResponseResult (Outcome Candidate)))
   , resultCount :: mode :- Call () (R.Reply Int)
-  } deriving Generic
+  }
 let resultDefinition = coordinationActor "candidate-results" Results
       { resultState = []
       , arrived = R.on (R.settlement worker) (\result -> modify' (++ [result]))
@@ -38,7 +40,9 @@ so passing one endpoint grants exactly that route.
 failure and execution evidence; `R.progress p` publishes progress; and
 `Cmd.completion job` publishes one retained command result. Attachment starts
 from retained current source state, not a replay of earlier history, and
-publications accepted while a handler is busy stay ordered.
+publications accepted while a handler is busy stay ordered. Handlers remain
+serialized while suspended; never await an event requiring another handler on
+that same mailbox to run.
 
 `R.withWorktree tree spec` starts the actor holding a worktree the parent
 created and did not bind. Worktree ownership is exclusive and integrate
@@ -54,14 +58,14 @@ Route results, including their cleanup evidence, rather than waking a model to
 poll. Actor-to-actor payloads are typed values or compact deltas, not narrated
 snapshots; query only what the next engineering decision needs.
 
-`coordinationActor` above is not shipped: it is a one-line wrapper that
-`exomonad/examples/workspace` wrote in its own `.exomonad/Project/Actors.hs`, as
-`R.definition name (Actor.Selected knownEffects)` over
-`LocalEffects api '[Replies, Actor, Notifications]`. `Outcome` and `Candidate`
-are that workspace's types too. In a fresh project, write the same wrapper into
-your own `.exomonad/Project`, or call `R.definition` directly and pin the row with
-`:: ActorSpec MyActor MyEffects` — `knownEffects` is polymorphic in the row and
-ambiguous without it. `Jev` and `Commands` are effect types from
+`coordinationActor` is the shared `Exomonad.Contrib.Actors` wrapper around
+`R.definition name (Actor.Selected knownEffects)`. `Outcome` and `Candidate`
+come from `Exomonad.Contrib.Types`. Import configured contrib modules when they
+are not already in scope; project-specific task and model policy stays in `Project.Work`.
+
+A direct `R.definition` needs a pinned row, for example
+`:: ActorSpec MyActor MyEffects`: `knownEffects` is polymorphic and otherwise
+ambiguous. `Jev` and `Commands` are effect types from
 `Tidepool.Effects.Core` and need an import before a row can name them.
 
 For execution coordination, use the installed recursive-work procedure:

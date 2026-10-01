@@ -53,6 +53,7 @@ module Tidepool.Agent.Reply.Internal
   , reply
   , pollResponse
   , cancelRequest
+  , detachRequest
   , abandonResponse
   , forgetResponse
   , pollReply
@@ -320,6 +321,7 @@ data Replies a where
   ReplyWith :: Int -> result -> Text -> Replies Void
   ObserveResponseWith :: Int -> Replies RawResponseObservation
   CancelRequestWith :: Int -> Replies CancelRequestOutcome
+  DetachRequestWith :: Int -> Replies (Either ReplyError ())
   AbandonResponseWith :: Int -> Replies AbandonOutcome
   ForgetResponseWith :: Int -> Replies ForgetResponseOutcome
   ObserveReplyWith :: Int -> Replies RawReplyObservation
@@ -443,6 +445,14 @@ cancelRequest
   => Response result
   -> Eff effs CancelRequestOutcome
 cancelRequest (Response (RequestId request) _ _ _) = send (CancelRequestWith request)
+
+-- | Keep this invocation's request alive under the actor after the cell ends.
+-- Detachment preserves the response and does not alter the target's lifetime.
+detachRequest
+  :: Member Replies effs
+  => Response result
+  -> Eff effs (Either ReplyError ())
+detachRequest (Response (RequestId request) _ _ _) = send (DetachRequestWith request)
 
 abandonResponse
   :: Member Replies effs

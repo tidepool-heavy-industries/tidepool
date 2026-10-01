@@ -13,7 +13,7 @@ module Tidepool.Command.Tools
     ReadOutput (..),
     CancelCommand (..),
     Stream (..),
-    WaitMode (..),
+    CommandOptionError (..),
     ObservationPresenter,
     tools,
     toolsWith,
@@ -74,9 +74,13 @@ data CancelCommand = CancelCommand
 data Stream = Stdout | Stderr
   deriving (Generic, FromJSON, JsonSchema)
 
--- | Ordinary Bash owns a bounded foreground wait and a completion notice.
--- Explicit yield and input-control observations remain deliberate snapshots.
-data WaitMode = CompletionOrNotify | ObserveOnce
+data CommandOptionError
+  = InvalidMemoryMiB Int
+  | ConflictingInputOptions
+  | InvalidYieldTime Int
+  | InvalidOutputBytes Int
+  | InvalidOutputOffset Int
+  deriving (Eq, Show)
 
 data ReadOutput = ReadOutput
   { session_id :: Text,
@@ -99,7 +103,7 @@ data ShellTools mode = ShellTools
 -- | A composable policy for one command observation.  The shared shell owns
 -- validation, process/input handling and retained jobs; a workspace may only
 -- replace how a successful observation is prepared for display.
-type ObservationPresenter effects = WaitMode -> Maybe Text -> Maybe Text -> Maybe Text -> Cmd.Observation -> Cmd.Job -> Eff effects Text
+type ObservationPresenter effects = Maybe Text -> Maybe Text -> Maybe Text -> Cmd.Observation -> Cmd.Job -> Eff effects Text
 
 tools :: (Member Cmd.Commands effects) => ShellTools (AsServerT (Eff effects))
 tools = toolsWith defaultPresenter
@@ -109,7 +113,7 @@ toolsWith presenter =
   ShellTools
     { bash =
         tool
-          "Execute Bash once; no shell profiles. Optional workdir/environment, memory_mib (default 1024), tty or piped stdin. By default await completion for up to 60000ms, then retain the same running job and send one completion notice; keep working instead of polling. Explicit yield_time_ms (0..300000) requests a deliberate observation without automatic notice. max_output_bytes clamps to 1024..32768 (default 32768). Returns session_id and a retained Cmd.Job. Use focus when output may be large or is a failing build/test: say what you are looking for (\"the failing test and its assertion\") and the result keeps the relevant sections and names what was omitted. Without focus, output is head/tail truncated; read_output pages retained output by byte range without rerunning. background: true returns at once (focus, yield_time_ms, max_output_bytes ignored); a notice with exit status, output tail and starting commit wakes you when it finishes. intent gives the command's purpose to its presenter."
+          "Execute Bash once; no shell profiles. Optional workdir/environment, memory_mib (positive, default 1024), tty or piped stdin (mutually exclusive). By default the invocation owns the command until terminal completion, then presents output once. yield_time_ms (0..300000) opts into bounded observation and actor ownership if still running; no automatic notice. max_output_bytes clamps to 1024..32768 (default 32768). Returns session_id and a retained Cmd.Job. Use focus when output may be large or is a failing build/test: say what you are looking for (\"the failing test and its assertion\") and the result keeps the relevant sections and names what was omitted. Without focus, output is head/tail truncated; read_output pages retained output by byte range without rerunning. background: true returns at once (focus, yield_time_ms, max_output_bytes ignored); a notice with exit status, output tail and starting commit wakes you when it finishes. intent gives the command's purpose to its presenter."
           (executeWith presenter),
       writeStdin =
         tool
@@ -117,7 +121,7 @@ toolsWith presenter =
           (writeInputWith presenter),
       readOutput =
         tool
-          "Read retained output; no execution, waiting, or consumption. Defaults: Stdout, byte offset 0, 8192 bytes; max_output_bytes clamps to 1024..32768 including metadata (any positive value is accepted). Contiguous pages report next_offset, EOF/current end, and retention gaps. Use Stderr for diagnostics."
+          "Read retained output; no execution, waiting, or consumption. Defaults: Stdout, nonnegative byte offset 0, 8192 bytes; max_output_bytes clamps to 1024..32768 including metadata (any positive value is accepted). Contiguous pages report next_offset, EOF/current end, and retention gaps. Use Stderr for diagnostics."
           readRetained,
       cancelCommand =
         tool
@@ -126,20 +130,49 @@ toolsWith presenter =
     }
 
 -- Validate observation options before starting a process or sending input.
--- An invalid option is reported as text; nothing is started or sent.
+-- Tools render typed rejections only at their Text result boundary.
 -- max_output_bytes is clamped into the supported range rather than rejected:
 -- any positive request is honored, just at whatever budget the range allows,
 -- and the presented output already carries a recovery hint when it is cut
 -- short by that budget.
-observation :: Int -> Maybe Int -> Maybe Int -> Either Text Cmd.Observation
+observation :: Int -> Maybe Int -> Maybe Int -> Either CommandOptionError Cmd.Observation
 observation defaultWait wait limit
-  | milliseconds < 0 || milliseconds > 300000 = Left "Rejected · nothing started or sent · yield_time_ms must be 0..300000"
-  | requested <= 0 = Left "Rejected · nothing started or sent · max_output_bytes must be positive"
+  | milliseconds < 0 || milliseconds > 300000 = Left (InvalidYieldTime milliseconds)
+  | requested <= 0 = Left (InvalidOutputBytes requested)
   | otherwise = Right (Cmd.Observation milliseconds bytes)
   where
     milliseconds = fromMaybe defaultWait wait
     requested = fromMaybe 32768 limit
     bytes = max 1024 (min 32768 requested)
+
+executeOptions :: Maybe Int -> Maybe Bool -> Maybe Bool -> Maybe Int -> Maybe Int -> Either CommandOptionError (Int, Cmd.Observation)
+executeOptions memory terminal pipe wait limit = do
+  options <- observation 0 wait limit
+  let memoryMiB = fromMaybe 1024 memory
+  if memoryMiB <= 0 || memoryMiB > maxBound `div` (1024 * 1024)
+    then Left (InvalidMemoryMiB memoryMiB)
+    else
+      if fromMaybe False terminal && fromMaybe False pipe
+        then Left ConflictingInputOptions
+        else Right (memoryMiB, options)
+
+readOptions :: Maybe Int -> Maybe Int -> Either CommandOptionError (Int, Cmd.Observation)
+readOptions position limit = do
+  options <- observation 0 (Just 0) (Just (fromMaybe 8192 limit))
+  let offset = fromMaybe 0 position
+  if offset < 0
+    then Left (InvalidOutputOffset offset)
+    else Right (offset, options)
+
+renderOptionError :: CommandOptionError -> Text
+renderOptionError issue = "Rejected · nothing started or sent · " <> detail
+  where
+    detail = case issue of
+      InvalidMemoryMiB _ -> "memory_mib must be positive and fit Int bytes"
+      ConflictingInputOptions -> "tty and stdin cannot both be true"
+      InvalidYieldTime _ -> "yield_time_ms must be 0..300000"
+      InvalidOutputBytes _ -> "max_output_bytes must be positive"
+      InvalidOutputOffset _ -> "offset must be nonnegative"
 
 execute :: (Member Cmd.Commands effects) => Execute -> Eff effects Text
 execute = executeWith defaultPresenter
@@ -159,13 +192,13 @@ executeWith presenter
       focus = focus,
       background = detached
     } =
-    case observation 60000 wait limit of
-      Left rejection -> pure rejection
-      Right options -> do
+    case executeOptions memory terminal pipe wait limit of
+      Left rejection -> pure (renderOptionError rejection)
+      Right (memoryMiB, options) -> do
         let command =
               maybe id Cmd.inDirectory directory $
                 Cmd.withEnvironment (maybe [] Map.toList env) $
-                  Cmd.withMemory (Cmd.MiB (fromMaybe 1024 memory)) $
+                  Cmd.withMemory (Cmd.MiB memoryMiB) $
                     input (Cmd.bashCommand script)
             input =
               if fromMaybe False terminal
@@ -183,7 +216,16 @@ executeWith presenter
                 -- names the retained binding beside this line.
                 send (CommandPresentWith key (CommandVisible ("session_id: " <> key <> "\nrunning in background; its completion notice will wake you. Keep working; do not poll. read_output reads its output so far; cancel_command stops it. focus, yield_time_ms and max_output_bytes do not apply here. A host restart loses a running job.") 512))
                 pure ""
-            | otherwise -> presenter (maybe CompletionOrNotify (const ObserveOnce) wait) (Just script) purpose focus options retained
+            | otherwise -> case wait of
+                Nothing -> do
+                  _ <- Cmd.await retained
+                  presenter (Just script) purpose focus options retained
+                Just _ -> do
+                  shown <- presenter (Just script) purpose focus options retained
+                  current <- Cmd.status retained
+                  case current of
+                    Cmd.CommandFinished _ -> pure shown
+                    _ -> Cmd.detach retained >> pure shown
 
 writeInput :: (Member Cmd.Commands effects) => WriteInput -> Eff effects Text
 writeInput = writeInputWith defaultPresenter
@@ -191,7 +233,7 @@ writeInput = writeInputWith defaultPresenter
 writeInputWith :: (Member Cmd.Commands effects) => ObservationPresenter effects -> WriteInput -> Eff effects Text
 writeInputWith presenter WriteInput {session_id = key, chars = input, close_stdin = close, yield_time_ms = wait, max_output_bytes = limit} =
   case observation 250 wait limit of
-    Left rejection -> pure rejection
+    Left rejection -> pure (renderOptionError rejection)
     Right options -> do
       let text = fromMaybe "" input
           eof = fromMaybe False close
@@ -221,12 +263,12 @@ writeInputWith presenter WriteInput {session_id = key, chars = input, close_stdi
                 then pure $ T.intercalate "\n" (filter (not . T.null) [receipt, closed])
                 -- Empty input is an observation poll and keeps the configured
                 -- presenter behavior.
-                else presenter ObserveOnce Nothing Nothing Nothing options (Job key)
+                else presenter Nothing Nothing Nothing options (Job key)
 
 cancelRetained :: (Member Cmd.Commands effects) => CancelCommand -> Eff effects Text
 cancelRetained CancelCommand {session_id = key, yield_time_ms = wait, max_output_bytes = limit} =
   case observation 250 wait limit of
-    Left rejection -> pure rejection
+    Left rejection -> pure (renderOptionError rejection)
     Right options -> do
       receipt <- send (CommandCancelWith key)
       case receipt of
@@ -239,13 +281,12 @@ cancelRetained CancelCommand {session_id = key, yield_time_ms = wait, max_output
 
 readRetained :: (Member Cmd.Commands effects) => ReadOutput -> Eff effects Text
 readRetained ReadOutput {session_id = key, stream = selected, offset = position, max_output_bytes = limit} =
-  case observation 0 (Just 0) (Just (fromMaybe 8192 limit)) of
-    Left rejection -> pure rejection
-    Right Cmd.Observation {outputBytes = budget} -> do
+  case readOptions position limit of
+    Left rejection -> pure (renderOptionError rejection)
+    Right (offset, Cmd.Observation {outputBytes = budget}) -> do
       let selectedStream = case selected of
             Just Stderr -> Cmd.Stderr
             _ -> Cmd.Stdout
-          offset = fromMaybe 0 position
           contentBudget = budget - 512
           read bytes = send (CommandReadWith key selectedStream (Cmd.OutputSlice offset bytes))
       first <- read contentBudget
@@ -276,8 +317,6 @@ utf8Bytes = T.foldl' (\n c -> n + width c) 0
       | otherwise = 4
 
 defaultPresenter :: (Member Cmd.Commands effects) => ObservationPresenter effects
-defaultPresenter mode _ _ _ options retained = do
-  _ <- case mode of
-    CompletionOrNotify -> Cmd.observeCompletion options retained
-    ObserveOnce -> Cmd.observe options retained
+defaultPresenter _ _ _ options retained = do
+  _ <- Cmd.observe options retained
   pure ""

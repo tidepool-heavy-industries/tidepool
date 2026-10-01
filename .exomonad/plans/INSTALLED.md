@@ -21,7 +21,7 @@ candidate's exact checkout. Pending review questions need the question-only
 collector shown in the review skill. Accepted review, incorporation, post-merge
 verification and resource release remain separate facts.
 
-`Project.Merge` owns checked publication. A failed integration/check retains its
+`Exomonad.Contrib.Merge` owns checked publication. A failed integration/check retains its
 source and evidence for the owner; it does not silently roll back. Bounded
 `DecisionAnswers` actors relay supplied original owner decisions and escalate
 new, stale, conflicting or uncertain cases. The default AgentSpec installs the
@@ -32,11 +32,10 @@ typed tool records without a blanket watchdog.
 The shipped base/API guide and role prompts describe the standing workflow.
 Project role instructions come from the configured `prompts.files` mapping.
 Use targeted `lookup` for public signatures, and the skills under `.agents/skills`
-for executable examples. They link to the shipped template in this checkout.
+for executable examples. They link to the pinned shared workspace in this checkout.
 
-Shared modules and checks are edited in the pinned workspace repository and
-synced to `exomonad/examples/workspace/.exomonad`; the facade scaffolder pins the
-same source. This guide does not certify all recipes green. Exact executed gates
+The pinned shared workspace and `exomonad/examples/workspace/.exomonad` carry
+the same release source; the facade scaffolder selects that exact revision. This guide does not certify all recipes green. Exact executed gates
 and remaining limitations are recorded in the current implementation report and
 run launch record. Older `.exomonad/plans/examples` are retained reference
 experiments, not the canonical execution procedure.

@@ -13,7 +13,7 @@ import qualified Jev.Operators as J
 import Project.AssumptionWatch (watchIncorporatedBaseline)
 import Project.ParallelInvestigate
 import Project.SlowCommandWatch (SlowHandler, SlowObservation (..))
-import Project.Types (Incorporation)
+import Exomonad.Contrib.Types (Incorporation)
 import Tidepool.Actors.Exomonad (Actor, AgentRef, GitOid, Response)
 import qualified Tidepool.Command as Cmd
 import Tidepool.Effects.Core (Commands, Jev)

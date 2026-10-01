@@ -3,6 +3,47 @@
 use super::*;
 use crate::request::{ReplyError, RequestRegistry, WatchId, WatchObservation};
 
+/// A dropped or cancelled direct wait releases its subscription, never the
+/// producing request. Ready capture transfers release to the invocation and
+/// Haskell's forget operation because progress still reads this snapshot.
+struct TransientWatchLease {
+    requests: Arc<RequestRegistry>,
+    actor: crate::ActorRef,
+    watch: WatchId,
+    armed: bool,
+    deployments: Option<mpsc::Sender<LocalResidentDeployment>>,
+}
+
+impl TransientWatchLease {
+    fn new(requests: &Arc<RequestRegistry>, actor: crate::ActorRef, watch: WatchId) -> Self {
+        Self {
+            requests: Arc::clone(requests),
+            actor,
+            watch,
+            armed: requests.is_transient_watch(actor, watch),
+            deployments: None,
+        }
+    }
+}
+
+impl Drop for TransientWatchLease {
+    fn drop(&mut self) {
+        if self.armed
+            && self
+                .requests
+                .release_transient_watch(self.actor, self.watch)
+                .is_ok()
+        {
+            if let Some(deployments) = self.deployments.clone() {
+                let requests = Arc::clone(&self.requests);
+                tokio::spawn(async move {
+                    publish_request_notifications(&requests, &deployments, Vec::new()).await;
+                });
+            }
+        }
+    }
+}
+
 enum WatchWaitEvent {
     Resume(Result<WatchObservation, ReplyError>),
     Cancelled,
@@ -27,7 +68,15 @@ async fn wait_watch_event(
         observation = &mut waiting => {
             tracing::debug!(?actor, ?watch, ?observation, "owned watch received settlement");
             match retirement.claim_before_shutdown(|| control.claim_expiry()) {
-                Ok(true) => WatchWaitEvent::Resume(observation),
+                Ok(true) => {
+                    let observation = observation.and_then(|observation| {
+                        if requests.is_transient_watch(actor, watch) {
+                            requests.claim_transient_watch_wake(actor, watch)?;
+                        }
+                        Ok(observation)
+                    });
+                    WatchWaitEvent::Resume(observation)
+                }
                 Ok(false) => WatchWaitEvent::Cancelled,
                 Err(terminal) => WatchWaitEvent::Retired(terminal),
             }
@@ -47,6 +96,8 @@ where
     O: OutputSink + Sync + 'static,
 {
     tracing::debug!(actor = ?context.actor, watch = ?poll.watch, "owned watch awaiting settlement");
+    let mut transient = TransientWatchLease::new(&environment.requests, context.actor, poll.watch);
+    transient.deployments = Some(environment.deployments.clone());
     match wait_watch_event(
         &environment.requests,
         context.actor,
@@ -57,6 +108,7 @@ where
     .await
     {
         WatchWaitEvent::Resume(observation) => {
+            transient.armed = false;
             let observation = observation.map(|observation| {
                 watch_pending_observation(&environment, poll.watch, observation)
             });

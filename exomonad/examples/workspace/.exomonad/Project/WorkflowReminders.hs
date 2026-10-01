@@ -32,7 +32,7 @@ import qualified Tidepool.Actor.Record as R
 import Tidepool.Actors.Exomonad
 import Tidepool.Effects.Core (Actor, Jev, Notifications)
 import Tidepool.Effects.Row (knownEffects)
-import Project.Routing (WorkEvent, WorkSink (..))
+import Exomonad.Contrib.Routing (WorkEvent, WorkSink, observeWork)
 
 data ReminderPolicy = ReminderPolicy
   { reminderContext :: Text
@@ -194,14 +194,9 @@ startRemindersUsing delivery choose recipient policy
 bounded :: Int -> Text -> Bool
 bounded limit value = not (Text.null (Text.strip value)) && Text.length value <= limit
 
--- | Decorate the existing sink. Its notification is attempted first, but a
--- failed reminder enqueue can still fail the routing actor before it records
--- the sink receipt. Do not use this for a failure-isolated shadow trial.
+-- | Optional observer admission is retained separately from the ordinary
+-- notification receipt. It does not wait for the reminder handler or fail
+-- the collector when that mailbox is closed or replaced.
 withReminders :: ActorHandle Reminders -> (WorkEvent value -> Maybe ReminderEpisode)
   -> WorkSink value -> WorkSink value
-withReminders reminders project (WorkSink sink) = WorkSink $ \event -> do
-  receipt <- sink event
-  case project event of
-    Nothing -> pure ()
-    Just episode -> R.send (reminderSubmit (R.client reminders)) episode
-  pure receipt
+withReminders reminders = observeWork "workflow-reminders" (reminderSubmit (R.client reminders))

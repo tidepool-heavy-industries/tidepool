@@ -28,5 +28,6 @@ pub enum AgentLaunchReq {
         crate::ActorLaunchRoleWire,
         crate::ActorEffectProfileWire,
         Vec<String>,
+        crate::WorkerLifetime,
     ),
 }

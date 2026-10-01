@@ -1329,7 +1329,6 @@ fn pinned_jev_agent_spec_workspace(config: &mut ActorHostConfig) {
             "[defaults]\nmodel = 'test-model'\n\n\
              [haskell]\nsource_roots = ['.', '{}']\n\
              modules = ['Project.Tools', 'AgentSpec']\n\
-             tools = 'Project.Tools.tools'\n\
              spec = 'AgentSpec.agentSpec'\n\n\
              [haskell.flake_sources]\njev-dsl = ['core']\n",
             package.join(".exomonad").display()
@@ -1578,7 +1577,6 @@ fn pinned_watchdog_workspace(config: &mut ActorHostConfig) {
             "[defaults]\nmodel = 'test-model'\n\n\
              [haskell]\nsource_roots = ['.', '{}']\n\
              modules = ['Project.Tools', 'AgentSpec']\n\
-             tools = 'Project.Tools.tools'\n\
              spec = 'AgentSpec.agentSpec'\n\n\
              [haskell.flake_sources]\njev-dsl = ['core']\n",
             package.join(".exomonad").display()
@@ -1604,7 +1602,7 @@ fn watchdog_child_script(label: &str) -> String {
         "let campaign = \"watchdog\" :: CampaignLabel\n\
          let group = \"children\" :: ForkGroupLabel\n\
          let leaf = [label|{label}|]\n\
-         worker <- unfold (batch campaign group) (child (coding @Text projectHead (assignment leaf ())))\n"
+         worker <- unfoldDeferred (batch campaign group) (child (withLifetime ActorOwned (coding @Text projectHead (assignment leaf ()))))\n"
     )
 }
 

@@ -1,13 +1,16 @@
 ---
 name: exomonad-define-actors
-description: Define typed Haskell actors in a resident Exomonad session for custom joins, stateful routing and automatic continuations. Load when Project.Routing's existing collectors do not express the required coordination.
+description: Define typed Haskell actors in a resident Exomonad session for custom joins, stateful routing and automatic continuations. Load when Exomonad.Contrib.Routing's existing collectors do not express the required coordination.
 ---
 
 One record describes private state, public calls and fixed source handlers. The
 same record supplies its definition and typed client. `R` is already imported as
 `Tidepool.Actor.Record`; nonconflicting actor names are in the default scope.
 Keep project policy in Haskell. The existing runtime owns ordering, authority,
-request admission and lifetime.
+request admission and lifetime. `R.start` creates an explicit persistent record
+service with actor lifetime, surviving its creating invocation. A handler without
+a hosted invocation uses actor ownership for its commands and requests; it still
+processes one accepted call or event at a time.
 
 Availability of the names below:
 
@@ -17,12 +20,10 @@ Availability of the names below:
   `R.forwardResult`, `requestWithProgressInto`, `LocalEffects`, `ActorSpec`,
   `Handler`, `Actor.Selected`, `knownEffects`, `Replies`, `Actor`,
   `Notifications`.
-- **Example-only** — defined in `.exomonad/workspace/Project`, and
-  **not in scope in a fresh project**: `coordinationActor` and
-  `CoordinationEffects` (`Project.Actors`), `Outcome` and `Candidate`
-  (`Project.Types`). The examples here use them because this workspace ships
-  them; the last section writes the same actor without them, and a project
-  writes its own wrapper the same way in its own `.exomonad`.
+- **Shared contrib** — available through configured package imports: `coordinationActor` and
+  `CoordinationEffects` (`Exomonad.Contrib.Actors`), `Outcome` and `Candidate`
+  (`Exomonad.Contrib.Types`). The last section shows the lower-level shipped API when contrib imports
+  are absent.
 
 Confirm a name with `lookup` before depending on it. A skill's example is
 evidence of a pattern, not proof that the name is installed for you.
@@ -31,8 +32,7 @@ This executable example joins two differently typed inputs. No mailbox GADT or
 manual result casting is needed:
 
 ```haskell
-import GHC.Generics (Generic)
-data Join mode = Join { joinState :: mode :- State (Maybe Text, Maybe Int), sourceReady :: mode :- Call Text NoReply, checksReady :: mode :- Call Int NoReply, joined :: mode :- Call () (R.Reply (Maybe (Text, Int))) } deriving Generic
+data Join mode = Join { joinState :: mode :- State (Maybe Text, Maybe Int), sourceReady :: mode :- Call Text NoReply, checksReady :: mode :- Call Int NoReply, joined :: mode :- Call () (R.Reply (Maybe (Text, Int))) }
 let joinDefinition = coordinationActor "integration-join" Join
       { joinState = (Nothing, Nothing)
       , sourceReady = \commit -> modify' (\(_, checks) -> (Just commit, checks))
@@ -57,7 +57,7 @@ For fixed subscriptions, declare `mode :- Event input`, and supply
 `R.on source handler`. Source values identify the actual request or actor:
 
 ```haskell
-data Results mode = Results { resultState :: mode :- State [Either ResponseFailure (ResponseResult (Outcome Candidate))], arrived :: mode :- Event (Either ResponseFailure (ResponseResult (Outcome Candidate))), resultCount :: mode :- Call () (R.Reply Int) } deriving Generic
+data Results mode = Results { resultState :: mode :- State [Either ResponseFailure (ResponseResult (Outcome Candidate))], arrived :: mode :- Event (Either ResponseFailure (ResponseResult (Outcome Candidate))), resultCount :: mode :- Call () (R.Reply Int) }
 let resultDefinition = coordinationActor "candidate-results" Results
       { resultState = []
       , arrived = R.on (R.settlement worker) (\result -> modify' (++ [result]))
@@ -75,7 +75,9 @@ creator. It retains completion for a late collector. Route the result, including
 its cleanup evidence, rather than waking a model to poll command status.
 Sources compose with `fmap` and `(<>)`: tag independent sources with shared project
 constructors or names. Each handler receives one event. Publications accepted
-while it is busy remain ordered; no cursor rearming is required. Attachment starts
+while it is busy remain ordered; handlers remain serialized even during
+a suspended wait. Never await an event requiring another handler on that same
+mailbox to run; no cursor rearming is required. Attachment starts
 from retained current source state, not a replay of unavailable earlier history.
 
 Within a handler, `R.self @Join` supplies send-only endpoints for return messages.
@@ -104,7 +106,7 @@ to a route on `Self`; that route can create a collector using its receiving
 incarnation's endpoints. `checks/review-continuation.hs` is a low-level regression
 fixture for this retention boundary; its retained reviewer requires explicit
 checkout preparation. Routine review uses `startReviewFlow`, described in
-`plans/continuation.md`, which owns exact-source admission. Do not reconstruct
+`WORKBENCH.md`, which owns exact-source admission. Do not reconstruct
 response handles from labels or repeat submission after uncertain failure.
 
 Keep the integration actor alive through useful repairs. When done:
@@ -122,7 +124,7 @@ what the next engineering decision needs.
 
 ## Without the example workspace
 
-`coordinationActor` is one line this workspace wrote for itself:
+`Exomonad.Contrib.Actors.coordinationActor` composes these two definitions:
 
 ```
 coordinationActor name = R.definition name (Actor.Selected knownEffects)
@@ -139,8 +141,7 @@ record for a binding that sits outside it. A signature and its equation go in
 the **same** cell item; a signature alone installs nothing.
 
 ```haskell
-import GHC.Generics (Generic)
-data Tally mode = Tally { tallyState :: mode :- State [Text], noted :: mode :- Call Text NoReply, noteCount :: mode :- Call () (R.Reply Int) } deriving Generic
+data Tally mode = Tally { tallyState :: mode :- State [Text], noted :: mode :- Call Text NoReply, noteCount :: mode :- Call () (R.Reply Int) }
 type TallyEffects = LocalEffects Tally '[Replies, Actor, Notifications]
 recordNote :: Text -> Handler [Text] TallyEffects ()
 recordNote note = modify' (++ [note])
@@ -174,5 +175,5 @@ re-exported by the workbench surface — a cell naming them needs
 checked against the launching actor's ceiling, so asking for more than the
 creator holds is refused at start, not silently granted. When the loop this
 record carries is implement → review → repair → merge, load `exomonad-review`
-for the owner-map and repair-policy shape and `Project.Merge` for the
+for the owner-map and repair-policy shape and `Exomonad.Contrib.Merge` for the
 integrator actor.

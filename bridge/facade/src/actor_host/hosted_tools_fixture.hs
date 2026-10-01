@@ -40,3 +40,6 @@ tools =
       followProcess = tool "Continue the retained command." Shell.writeInput,
       readLog = tool "Read retained diagnostics." Shell.readRetained
     }
+
+agentSpec :: Member Cmd.Commands effects => AgentSpec TestTools effects
+agentSpec = defaultSpec {specTools = tools}

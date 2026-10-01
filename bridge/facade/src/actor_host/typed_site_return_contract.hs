@@ -25,9 +25,6 @@ receiveProbe = Actor.receive handler
 requestProbe :: AgentRef -> Assignment Text -> Eff '[Replies] (Response Int)
 requestProbe target input = Agent.request @Int target input
 
-requestWithProbe :: AgentRef -> Assignment Text -> Eff '[Replies] (Response Int)
-requestWithProbe target input = Agent.requestWith @Int target input
-
 progressProbe :: AgentRef -> Assignment Text -> Eff '[Replies] (Response Int, Progress Text)
 progressProbe target input = Agent.requestWithProgress @Text @Int target input
 

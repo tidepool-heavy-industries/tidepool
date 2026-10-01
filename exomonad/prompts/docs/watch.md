@@ -1,3 +1,10 @@
+Use `waitFor awaiting` for an ordinary suspended Haskell continuation. It returns
+`Either WatchFailure result` through the existing readiness owner; no named
+subscription is needed. `Await` composes typed dependencies applicatively.
+A named watch is useful for inspection, recovery or a later model wake.
+Neither waiting nor watch registration extends an invocation-owned resource;
+await that work before returning or explicitly choose actor-owned lifetime.
+
 A labeled `Watch a` retains a finite applicative join. Register your own watch
 for an inherited response; it cannot run the owner's callback or take the
 owner's notification. Registering a watch for your own response before
@@ -25,7 +32,7 @@ reactivates the actor. `pollWatch joined` returns its retained typed observation
 
 For ongoing progress, use a persistent Haskell actor with `progressSource`.
 It captures current state and then receives every publication and closure in
-order. The curated `Project.Routing.followWork` collects named progress/response pairs, retains
+order. The curated `Exomonad.Contrib.Routing.followWork` collects named progress/response pairs, retains
 evidence, per-source questions and terminal receipts, and invokes an authored sink
 on meaningful changes. The sink chooses meaningful messages; no model rearms watches or relays
 routine progress. Source completion does not terminate the collector.
@@ -85,7 +92,10 @@ findings (`[Text]`) and a final `Text` reply:
 
 ```haskell
 let progressOptions = assignment [label|lead-findings|] ("Publish cumulative findings; then return your final report." :: Text)
-(leadResponse, leadProgress) <- requestWithProgress @[Text] @Text lead progressOptions
+(leadResponse, leadProgress) <- do
+  handles@(response, _) <- requestWithProgress @[Text] @Text lead progressOptions
+  Right () <- detachRequest response
+  pure handles
 let findingsLabel = "lead-findings-ready" :: WatchLabel
 findingsReady <- watch findingsLabel (awaitProgressAfter leadProgress (ProgressCursor 0))
 let reportLabel = "lead-report-ready" :: WatchLabel

@@ -530,6 +530,7 @@ fullMain = do
         , ("runLLMTurnFanout", DeliverHostAnswer, InvocationAnswers)
         , ("forkCata", DeliverHostAnswer, ListAnswer)
         , ("serve", DeliverLiveReentry, SelectedAnswer)
+        , ("request", DeliverExitCellFill, ResponseResultEvidence)
         , ("requestWithProgress", DeliverExitCellFill, ResponseResultEvidence)
         , ("finalize", DeliverTerminalCapture, SelectedAnswer)
         ]
@@ -540,6 +541,8 @@ fullMain = do
         ]
   assert (sort actualSites == sort expectedSites)
     ("prepared delivery strategy drift: " ++ show actualSites)
+  assert (all ((/= "requestWith") . vsName) sitedVerbs)
+    "obsolete requestWith remains in the typed-site registry"
   let normalized = stripNospecSpine
         (Var nospecId, [Type boolTy, Var nospecId, Type boolTy])
   assert (case normalized of

@@ -4,6 +4,7 @@ use super::*;
 struct WorkbenchExecutionRecord {
     request: WorkbenchRequest,
     state: WorkbenchExecutionState,
+    invocation_work: Option<Arc<InvocationWork>>,
 }
 
 #[derive(Clone)]
@@ -50,6 +51,53 @@ pub(super) enum WorkbenchBoundaryRecord {
 }
 
 impl WorkbenchExecutions {
+    pub(super) fn retain_invocation_work(
+        &mut self,
+        work: Arc<InvocationWork>,
+        execution: Option<&WorkbenchExecutionId>,
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
+    ) {
+        let execution = execution.expect("every admitted invocation has an execution identity");
+        let record = self
+            .0
+            .get_mut(&WorkbenchReplayKey::new(execution, invocation))
+            .expect("invocation follows its original journal fence");
+        assert!(
+            record.invocation_work.is_none(),
+            "invocation membership is admitted once"
+        );
+        record.invocation_work = Some(work);
+    }
+
+    pub(super) fn cleanup_warnings(&self) -> Vec<String> {
+        self.0
+            .values()
+            .filter_map(|record| {
+                let work = record.invocation_work.as_ref()?;
+                if !work.is_closed() {
+                    return None;
+                }
+                let uncertainty = match work.cleanup_observation() {
+                    Some(cleanup) => cleanup.uncertainty()?,
+                    None => {
+                        "cleanup has not been observed; cancellation remains unconfirmed".into()
+                    }
+                };
+                Some(format!(
+                    "  {}: {uncertainty}",
+                    record.request.execution_id()?
+                ))
+            })
+            .collect()
+    }
+
+    pub(super) fn invocation_work(&self) -> Vec<Arc<InvocationWork>> {
+        self.0
+            .values()
+            .filter_map(|record| record.invocation_work.clone())
+            .collect()
+    }
+
     pub(super) fn lookup(
         &self,
         execution: &WorkbenchExecutionId,
@@ -92,6 +140,7 @@ impl WorkbenchExecutions {
             WorkbenchExecutionRecord {
                 request,
                 state: WorkbenchExecutionState::Unconfirmed,
+                invocation_work: None,
             },
         );
     }
@@ -104,14 +153,20 @@ impl WorkbenchExecutions {
         cancellation: crate::WorkbenchCancellationOutcome,
         invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
     ) {
+        let key = WorkbenchReplayKey::new(&execution, invocation);
+        let invocation_work = self
+            .0
+            .get(&key)
+            .and_then(|record| record.invocation_work.clone());
         self.0.insert(
-            WorkbenchReplayKey::new(&execution, invocation),
+            key,
             WorkbenchExecutionRecord {
                 request,
                 state: WorkbenchExecutionState::Terminal {
                     reply,
                     cancellation,
                 },
+                invocation_work,
             },
         );
     }

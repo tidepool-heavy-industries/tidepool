@@ -28,6 +28,7 @@ module Tidepool.Agent.Watch
   , forgetRoute
   , pollWatch
   , awaitWatch
+  , waitFor
   , ForgetWatchOutcome (..)
   , forgetWatch
   ) where
@@ -51,6 +52,7 @@ import Tidepool.Agent.Watch.Internal
   , awaitAnySettled
   , pollWatch
   , awaitWatch
+  , waitFor
   , ForgetWatchOutcome (..)
   , forgetWatch
   , watch

@@ -34,6 +34,7 @@ module Tidepool.Agent.Watch.Internal
   , forgetRoute
   , pollWatch
   , awaitWatch
+  , waitFor
   , ForgetWatchOutcome (..)
   , forgetWatch
   ) where
@@ -150,6 +151,7 @@ data RawWatchObservation
 data Watches a where
   RegisterWatchWith :: Text -> [AwaitDependency] -> Watches Int
   RegisterWatchGroupsWith :: Text -> [[AwaitDependency]] -> Watches Int
+  RegisterAwaitWith :: [[AwaitDependency]] -> Watches (Either ReplyError Int)
   RegisterRouteWith :: Text -> (Int -> Eff effs ()) -> [AwaitDependency] -> Watches Int
   RegisterRouteGroupsWith :: Text -> (Int -> Eff effs ()) -> [[AwaitDependency]] -> Watches Int
   ObserveRouteWith :: Int -> Watches RouteState
@@ -260,6 +262,23 @@ awaitWatch (Watch (WatchId watchId) (Await _ observe)) = loop
         WatchPending _ -> loop
         WatchReady result -> pure (Right result)
         WatchUnavailable failure -> pure (Left failure)
+
+-- | Suspend directly on typed readiness. The runtime owns this transient
+-- subscription until it is captured or the invocation exits; named watches
+-- remain useful for inspection and independent notifications.
+waitFor
+  :: Member Watches effs
+  => Await result
+  -> Eff effs (Either WatchFailure result)
+waitFor awaiting@(Await groups _) = do
+  registered <- send (RegisterAwaitWith groups)
+  case registered of
+    Left failure -> pure (Left (WatchRejected failure))
+    Right watchId -> do
+      let subscription = Watch (WatchId watchId) awaiting
+      result <- awaitWatch subscription
+      _ <- forgetWatch subscription
+      pure result
 
 captureWatchObservation
   :: Member Watches effs

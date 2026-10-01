@@ -129,6 +129,7 @@ import Tidepool.Agent.Contract
   , compileTools
   , declarationsToJson
   , renderToolCompileError
+  , renderToolDispatchError
   )
 import Tidepool.Worktree (renderWorktreeError)
 import Tidepool.Aeson.FromJSON (FromJSON, fromJSON, resultToEither)
@@ -335,9 +336,8 @@ cancelAgent (AgentHandle cyc) = agentCancelRaw cyc
 -- REFUSALS (the child reads the text and finishes its turn) rather than
 -- silence or an abort:
 --
--- * a tool name not in @declarations@ — @dispatch@'s own fallthrough
---   @error@s, and an @error@ inside a dispatch would abort the whole eval with
---   the child's turn still parked, so the membership check is load-bearing;
+-- * an unknown tool name or malformed tool input — typed dispatch refusals
+--   leave the child able to correct its call;
 -- * a call past the 'ToolRounds' cap, refused with text naming the cap;
 -- * (before any of that) a tools record that does not compile — a
 --   'ToolCompileError' is returned as
@@ -390,13 +390,9 @@ driveToolLoop rounds compiled served step = case step of
 -- | Decide what one parked call is answered with, and what that costs the
 -- round budget.
 --
--- Name membership is checked FIRST, against 'declarations' (the same
--- traversal 'dispatch' itself was built from), rather than by calling
--- 'dispatch' and hoping: an undeclared name reaching 'dispatch' hits its
--- "unknown tool" fallthrough, which @error@s — aborting the eval with the
--- child's turn still parked, which is the one outcome this loop exists to
--- prevent. Checking the name first also gives the child the more useful of the
--- two refusals when both would apply.
+-- Name membership is checked before the round budget so an unknown tool gets
+-- the more useful refusal even when the cap has been reached. Dispatch also
+-- rejects malformed input before running a handler.
 answerCall ::
   ToolRounds ->
   CompiledTools M ->
@@ -413,8 +409,10 @@ answerCall (ToolRounds cap) compiled served toolName args
         , served
         )
   | otherwise = do
-      body <- dispatch compiled toolName args
-      pure (ToolAnswered body, served + 1)
+      result <- dispatch compiled toolName args
+      pure (case result of
+        Left problem -> (ToolRefused (renderToolDispatchError problem), served)
+        Right body -> (ToolAnswered body, served + 1))
 
 -- | Project the authored 'ToolAnswer' onto the wire's @ok@ + @body@ pair and
 -- drive the turn on. A refusal crosses as the plain text the child reads, not

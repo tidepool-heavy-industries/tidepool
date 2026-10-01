@@ -17,5 +17,5 @@ seedStore <- R.start seedBox
 let campaign = "checkpoint" :: CampaignLabel
 let producerGroup = "producer" :: ForkGroupLabel
 let producerLabel = [label|producer|]
-producer <- unfold (batch campaign producerGroup)
-  (child (researching @Text projectHead (assignment producerLabel ("capture" :: Text))))
+producer <- unfoldDeferred (batch campaign producerGroup)
+  (child (withLifetime ActorOwned (researching @Text projectHead (assignment producerLabel ("capture" :: Text)))))

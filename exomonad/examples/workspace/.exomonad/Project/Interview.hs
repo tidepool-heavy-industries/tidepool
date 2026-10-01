@@ -17,7 +17,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Actors.Exomonad
 import Tidepool.Worktree (renderGitOid)
-import Project.Types
+import Exomonad.Contrib.Types
 
 data InterviewItem
   = KnownAnswer Question (ResponseResult DesignAnswer)

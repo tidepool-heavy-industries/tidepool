@@ -31,9 +31,9 @@ launchDefinition =
     , readReply = \() -> R.get
     , launchAndAwait = \() -> do
         worker <- unfold (batch "resident" "review")
-          (child (withContext (selected (\input -> input))
+          (child (withLifetime ActorOwned (withContext (selected (\input -> input))
             (researching @Text currentCheckout
-              (assignment [label|review|] ("reply once" :: Text)))))
+              (assignment [label|review|] ("reply once" :: Text))))))
         own <- R.self @Launcher
         _ <- R.forwardResult worker (saveReply own)
         pure ()

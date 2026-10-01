@@ -13,7 +13,7 @@ import qualified Data.Map.Strict as Map
 import Exomonad.Workspace (workspaceRoot)
 import Tidepool.Actors.Exomonad (GitOid, batch)
 import Project.DecisionAnswers
-import Project.Types
+import Exomonad.Contrib.Types
 import Tidepool.Check
 import Project.Checks (script)
 

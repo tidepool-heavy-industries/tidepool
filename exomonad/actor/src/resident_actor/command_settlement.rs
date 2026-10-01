@@ -2,7 +2,7 @@
 //!
 //! `CommandJobs` owns the job; `RequestRegistry` owns settlement. Joining them
 //! here lets a finished job wake its owner through the same settlement notice,
-//! watch and route paths as a child's reply. A background start also records
+//! watch and route paths as a child's reply. Every start also records
 //! the source the command started at: a short `git` probe runs through the
 //! same job owner, in the same directory, and the command itself is released
 //! to its backend only after the probe has answered or its bound expired.
@@ -33,7 +33,7 @@ const TAIL_LINES: usize = 12;
 const TAIL_BYTES: usize = 1200;
 const COMMAND_DISPLAY_BYTES: usize = 400;
 
-/// How long a background start waits, once the probe's backend exists, for
+/// How long a start waits, once the probe's backend exists, for
 /// its resource admission (memory admission can queue it behind other jobs)
 /// before releasing the command without a recorded source.
 const SOURCE_PROBE_ADMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -51,9 +51,9 @@ pub(super) struct CommandSettlements {
     deployments: mpsc::Sender<LocalResidentDeployment>,
 }
 
-/// The two jobs of one background start: the source probe (absent when it
+/// The two jobs of one start: the source probe (absent when it
 /// could not be started) and the backend request the command waits behind.
-pub(super) struct BackgroundStart {
+pub(super) struct CommandStart {
     probe: Option<String>,
     command: Arc<CommandBackendRequest>,
 }
@@ -64,6 +64,9 @@ pub(super) fn dispatch_backend(
     deployments: &mpsc::Sender<LocalResidentDeployment>,
     request: Arc<CommandBackendRequest>,
 ) {
+    if !request.pending() {
+        return;
+    }
     if deployments
         .try_send(LocalResidentDeployment::CommandBackend(request.clone()))
         .is_err()
@@ -122,29 +125,42 @@ impl CommandSettlements {
         }
     }
 
-    /// Start `spec` in the background: its source probe runs first, the
-    /// command is released after it, and its completion settles a request
-    /// that notifies the owner unless a watch takes that wake over.
+    /// Capture the starting source before releasing the command. Every start
+    /// retains the same report; only explicit background presentation requests
+    /// an owner notice, unless a watch takes that wake over.
     pub(super) async fn start(
         &self,
         kernel: &KernelContext,
         spec: CommandSpec,
+        notify_owner: bool,
+        invocation: Option<&super::invocation_work::InvocationWork>,
     ) -> Result<String, CommandError> {
         let probe = probe_spec(&spec);
-        let (job, command) = self.jobs.start(kernel, spec).await?;
-        let probe = match self.jobs.start(kernel, probe).await {
+        let (job, command) = self.jobs.start(kernel, spec, invocation).await?;
+        let probe = match self
+            .jobs
+            .start_source_probe(kernel, probe, invocation)
+            .await
+        {
             Ok((probe, request)) => {
+                self.jobs.set_source_probe(&job, probe.clone())?;
                 dispatch_backend(&self.deployments, request);
                 Some(probe)
             }
             Err(error) => {
-                tracing::warn!(?error, %job, "background command source probe not started");
+                tracing::warn!(?error, %job, "command source probe not started");
                 None
             }
         };
-        let start = BackgroundStart { probe, command };
-        if let Err(error) = self.arm(&job, true, Some(start)) {
-            tracing::warn!(?error, %job, "background command settlement not armed");
+        let start = CommandStart { probe, command };
+        match self.arm(&job, notify_owner, Some(start)) {
+            Ok(request) if !notify_owner => {
+                // Ordinary starts retain their report at the job owner, not an
+                // unused readiness hold. A later watch acquires its own hold.
+                self.requests.release_command_holds(&[request]);
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(?error, %job, "command settlement not armed"),
         }
         Ok(job)
     }
@@ -172,12 +188,12 @@ impl CommandSettlements {
     }
 
     /// The request that settles when `job` finishes, arming it on first use.
-    /// Only the call that arms it releases a background start's command.
+    /// Only the call that arms it releases a start's command.
     fn arm(
         &self,
         job: &str,
         notify_owner: bool,
-        start: Option<BackgroundStart>,
+        start: Option<CommandStart>,
     ) -> Result<RequestId, CommandError> {
         let requests = Arc::clone(&self.requests);
         let settled = self.jobs.settlement(job, |owner| {
@@ -233,7 +249,7 @@ impl CommandSettlements {
     fn rearm(
         &self,
         job: &str,
-        start: Option<BackgroundStart>,
+        start: Option<CommandStart>,
         notify_owner: bool,
     ) -> Result<RequestId, CommandError> {
         if let Some(start) = start {
@@ -267,15 +283,14 @@ impl CommandSettlements {
         Ok(request)
     }
 
-    /// Resolve command-job watch dependencies to the requests their
-    /// completions settle. A watch on a job started in the foreground arms
-    /// its settlement here, without an owner notice of its own. The records
+    /// Resolve command-job watch dependencies to their retained settlement,
+    /// rearming a released report without an owner notice of its own. The records
     /// armed here are held for the registration; a refused registration hands
     /// them to [`Self::release`].
     pub(super) fn resolve(
         &self,
         groups: Vec<Vec<(WatchSubject, crate::request::WatchRequirement)>>,
-    ) -> Result<Vec<Vec<(RequestId, crate::request::WatchRequirement)>>, ResidentActorWorkbenchError>
+    ) -> Result<Vec<Vec<(RequestId, crate::request::WatchRequirement)>>, crate::request::ReplyError>
     {
         let mut resolved = Vec::with_capacity(groups.len());
         for group in groups {
@@ -288,9 +303,12 @@ impl CommandSettlements {
                         Err(error) => {
                             resolved.push(dependencies);
                             self.release(&resolved);
-                            return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                                "watch refused: command job {job} cannot be awaited: {error:?}"
-                            )));
+                            return Err(match error {
+                                CommandError::CommandUnauthorized => {
+                                    crate::request::ReplyError::Unauthorized
+                                }
+                                _ => crate::request::ReplyError::Stale,
+                            });
                         }
                     },
                 };
@@ -315,9 +333,9 @@ impl CommandSettlements {
         self.jobs.report(job).ok().flatten()
     }
 
-    async fn settle(self, job: String, request: RequestId, start: Option<BackgroundStart>) {
+    async fn settle(self, job: String, request: RequestId, start: Option<CommandStart>) {
         let source = match start {
-            Some(BackgroundStart { probe, command }) => {
+            Some(CommandStart { probe, command }) => {
                 let source = match probe {
                     Some(probe) => self.probe(&probe).await,
                     None => None,
@@ -369,7 +387,7 @@ impl CommandSettlements {
             }) => {}
             Some(_) => return None,
             None => {
-                tracing::warn!(%probe, "background command source probe did not answer in time");
+                tracing::warn!(%probe, "command source probe did not answer in time");
                 // best-effort: the probe's outcome no longer matters.
                 drop(
                     self.jobs

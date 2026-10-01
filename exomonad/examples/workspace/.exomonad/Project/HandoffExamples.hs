@@ -6,9 +6,9 @@ module Project.HandoffExamples (handoffProposal) where
 
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Project.CheckResults (CheckState, checksSummary)
+import Exomonad.Contrib.CheckResults (CheckState, checksSummary)
 import Project.Observe (candidateOutcomeSummary, reviewSummary)
-import Project.Types (Outcome, Candidate, ReviewDecision)
+import Exomonad.Contrib.Types (Outcome, Candidate, ReviewDecision)
 
 handoffProposal
   :: Outcome Candidate

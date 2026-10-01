@@ -1,6 +1,7 @@
 do
   print ("printed-before" :: Text)
-  _ <- Cmd.await job
+  result <- Cmd.await job
+  print result
   case (Left ("printed-after" :: Text) :: Either Text ()) of
     Left issue -> print issue
     Right () -> pure ()

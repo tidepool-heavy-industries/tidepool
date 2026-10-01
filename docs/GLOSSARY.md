@@ -79,13 +79,25 @@ machine session: state genuinely stays in memory across calls);
 **`ContextRef` / frozen context snapshot** (an opaque capability reference
 to an exact retained transcript prefix).
 
-**context unfold** is the applicative construction of persistent child actor
-applications admitted during a provider tool block and launched after its real
-result is recorded, with that block's final committed Haskell binding tip.
-It shares context, narrows authority explicitly, and returns typed handles;
-results return later through replies and watches. **fold** is ordinary Haskell
-composition of those typed results and worktree evidence, not an automatic
-merge of model contexts.
+**context unfold** is the applicative admission of typed child actor applications.
+`unfold` publishes immediately from a captured checkpoint or selected fresh context;
+`unfoldDeferred` publishes after the enclosing call's real result is recorded.
+Context selection, checkout, authority and lifetime are independent choices.
+**fold** is ordinary Haskell composition of typed results and worktree evidence.
+
+**invocation-owned work** is unfinished work cancelled when its creating invocation
+exits. Await it within that invocation or explicitly transfer its lifetime. Returning
+or capturing a handle does not transfer ownership. **actor-owned work** survives
+that invocation and remains with the actor until completion or explicit cleanup.
+Borrowed handles permit observation while available, never owner cancellation.
+
+An **`Await a`** describes typed readiness. `waitFor` suspends the current Haskell
+continuation and returns either `WatchFailure` or its result. A named **`Watch a`**
+is an inspectable subscription. An **`EventSource a`** delivers retained source
+state and subsequent events to serialized record-actor handlers. `R.start`
+creates a persistent record service with actor lifetime, independently of its
+creating invocation. Handlers without a hosted invocation use actor ownership
+and remain serialized.
 
 ## Model-facing prompt rules
 

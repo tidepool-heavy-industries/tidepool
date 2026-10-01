@@ -23,7 +23,7 @@ Do not prewrite the entire future tree or create a second coordinator.
 ## Source and instruction owners
 
 The root gets the shipped base/API and root instructions. Project instructions
-come from this workspace's config. Shared Project modules, skills and recipes
+come from this workspace's config. Shared contrib helpers, project defaults, skills and recipes
 live in `.exomonad/workspace`; the in-repo template is their release copy.
 Saving source is not publication into a running actor: follow source/spec reload
 contracts and keep live selections unchanged until explicitly updated.

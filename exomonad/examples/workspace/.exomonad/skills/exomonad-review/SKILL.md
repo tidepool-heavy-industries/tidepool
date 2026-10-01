@@ -18,7 +18,7 @@ nesting under your own (root has no allocated actor path to nest under):
 
 ```haskell
 (reviewer, reviewProgress) <- reviewCommit [label|parse-fix-review|] base commit "Round-trip tests for every item kind pass" ["src/parse.rs"]
-reviewQuestions <- followWork [("review", reviewer, reviewProgress)] (notifyWork me workQuestionsMessage)
+Right reviewQuestions <- followWork [("review", reviewer, reviewProgress)] (notifyWork me workQuestionsMessage)
 ```
 
 Inside a request whose `sessionInput :: Task` describes the work, with your
@@ -27,10 +27,12 @@ committed `candidate :: Candidate`:
 ```haskell
 (reviewer, reviewProgress) <- reviewCandidate sessionInput OwnerRepairs candidate
 let reviewerRef = responseActor reviewer
-reviewQuestions <- followWork [("review", reviewer, reviewProgress)] (notifyWork me workQuestionsMessage)
+Right reviewQuestions <- followWork [("review", reviewer, reviewProgress)] (notifyWork me workQuestionsMessage)
 ```
 
-Both retain the original reviewer response and a question-only collector.
+Project review helpers choose explicit actor-owned lifetime for their unfinished
+reviewer response. Both retain that original response and a question-only collector;
+`followWork` returns typed admission refusal and leaves supplied workers untouched.
 The request owns its settlement notice; the collector surfaces questions while
 review is still pending, without a duplicate settlement notice. Read
 `readWork reviewQuestions` for full questions and delivery receipts. After the
@@ -47,14 +49,14 @@ Read for structure before bugs: does the change add a second way to do
 something that exists? Confirm `git rev-parse HEAD` is the
 candidate commit before running checks; a test filter that matched zero tests is
 "not run", never "passed". After executing the relevant review, with
-`checks :: [Text]` naming the checks that actually ran (with matched counts) and
+`checks :: [Text]` reporting inspected check evidence (with executed counts) and
 `scope :: Text` describing what those checks establish:
 
 ```haskell
 let reviewed = ReviewedCandidate
       { reviewedBasis = reviewBasis sessionInput
       , reviewedCandidate = reviewInput sessionInput
-      , reviewChecks = checks
+      , reviewNotes = checks
       , reviewRationale = scope
       }
 respond (Produced (Accepted reviewed))

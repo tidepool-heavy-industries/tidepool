@@ -22,7 +22,7 @@ pub fn forks_decl() -> crate::EffectDecl {
         type_defs: &[
             "data Model = Alias Text | Literal Text deriving (Show, Eq)",
             "data WorkerLaunchPreview = WorkerLaunchPreview { launchModel :: Maybe Text, launchEffort :: ForkEffort, launchInstructions :: Text, launchBaseFingerprint :: Text, launchWorkspaceIdentity :: Maybe Text, launchModules :: [Text] } deriving (Show, Eq)",
-            "data WorkerLifetime = ParentOwned | SwarmOwned deriving (Show, Eq)",
+            "data WorkerLifetime = InvocationOwned | ActorOwned | SwarmOwned deriving (Show, Eq)",
             "data ForkContext = InheritedContext | SelectedContext deriving (Show, Eq)",
             "data CheckpointRefusal = NoHostedBoundary | WrongSession | UnavailableCheckpoint | ReleasedCheckpoint | CaptureFailed | ProcessRestartUnsupported deriving (Show, Eq)",
             "data ForkEffort = Low | Medium | High deriving (Show, Eq)",

@@ -301,7 +301,6 @@ pub struct ActorWorkbenchSource {
     preamble: Arc<str>,
     base_include: Arc<[PathBuf]>,
     workbench_imports: SourceImports,
-    tools: Option<Arc<str>>,
     /// The workspace's `[haskell] spec` key, when it names one. Rule two of
     /// spec discovery; rule one is `AgentSpec.hs` in the run graph.
     spec: Option<Arc<str>>,
@@ -342,7 +341,6 @@ impl ActorWorkbenchSource {
                 "qualified Tidepool.Inspection as TidepoolInspection",
                 "Tidepool.Inspection (print, cellDisplay)",
             ]),
-            tools: None,
             spec: None,
             workspace_modules: Arc::from([]),
         }
@@ -384,20 +382,6 @@ impl ActorWorkbenchSource {
     #[must_use]
     pub fn with_imports(mut self, imports: &str) -> Self {
         self.workbench_imports.extend_text(imports);
-        self
-    }
-
-    /// Select the deployment-frozen, qualified Haskell tool-record value.
-    #[must_use]
-    pub fn with_tools(mut self, entry: impl Into<Arc<str>>) -> Self {
-        let entry = entry.into();
-        if let Some((module, _)) = entry.rsplit_once('.') {
-            self.workbench_imports
-                .extend_text(&format!("qualified {module}"));
-        }
-        self.workbench_imports
-            .extend_text("qualified Tidepool.Agent.Contract");
-        self.tools = Some(entry);
         self
     }
 
@@ -1379,8 +1363,8 @@ pub(crate) struct ResidentWorkbenchFragment {
     warnings: Vec<String>,
     /// Job ids returned by `Cmd.start` effects resolved while this exact
     /// item's Haskell computation was running. A single unambiguous job here
-    /// against a single command-job-typed binder in `display` is the same
-    /// name-to-job fact the automatic-binding path already knows — see
+    /// against a single command-job-typed binder in `display` identifies
+    /// the authored job binding — see
     /// `settle_fragment`'s tagging of `host_text_bindings` on completion.
     started_jobs: Vec<String>,
 }
@@ -1478,10 +1462,43 @@ fn protected_observation(
     }))
 }
 
+/// Private matched-build envelope. The authored output stays inside `Success`;
+/// refusals never become values of a tool's advertised output schema.
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(crate) enum ToolDispatchReply {
+    Success {
+        output: serde_json::Value,
+    },
+    Refused {
+        #[serde(flatten)]
+        error: ToolDispatchError,
+    },
+}
+
+#[derive(Debug, serde::Deserialize, thiserror::Error)]
+#[serde(tag = "kind", content = "error", rename_all = "snake_case")]
+pub enum ToolDispatchError {
+    #[error("{0}")]
+    UnknownTool(String),
+    #[error("{0}")]
+    InvalidInput(String),
+}
+
+impl ToolDispatchReply {
+    pub(crate) fn into_output(self) -> Result<serde_json::Value, ToolDispatchError> {
+        match self {
+            Self::Success { output } => Ok(output),
+            Self::Refused { error } => Err(error),
+        }
+    }
+}
+
 enum WorkbenchDisplay {
     Binding(Vec<BoundBinder>),
     Opaque,
     Tool,
+    ToolDispatch,
     Observation {
         name: String,
         budget: usize,
@@ -1526,11 +1543,6 @@ pub(crate) enum ResidentWorkbenchStep {
         installed_bindings: Vec<String>,
     },
     Rejected(tidepool_runtime::session::CompileRejection),
-    CommandBackgrounded {
-        job: String,
-        binding: String,
-        reason: CommandObservationStop,
-    },
     Running {
         fragment: Box<ResidentWorkbenchFragment>,
         outcome: Box<ResidentOutcome>,
@@ -1550,6 +1562,26 @@ pub(crate) enum ResidentWorkbenchStep {
 /// and later mailbox scheduling therefore cannot grow a second dispatcher.
 pub struct ResidentActorRunner<H, O> {
     access: ResidentMachineAccess<H, O>,
+}
+
+/// Preparation owns a fresh session until an exact actor takes custody. The
+/// runner's existing synchronous discard operation also covers a dropped await.
+pub(crate) struct ChildSessionStartupLease {
+    discard: Option<Box<dyn FnOnce() + Send + Sync>>,
+}
+
+impl ChildSessionStartupLease {
+    pub(crate) fn admitted(mut self) {
+        self.discard = None;
+    }
+}
+
+impl Drop for ChildSessionStartupLease {
+    fn drop(&mut self) {
+        if let Some(discard) = self.discard.take() {
+            discard();
+        }
+    }
 }
 
 pub(crate) struct ExecutionPrivateScope {
@@ -1833,6 +1865,10 @@ pub(crate) enum ResidentActorBoundary {
         continuation: ResidentHole,
         job: String,
     },
+    RequestDetachment {
+        continuation: ResidentHole,
+        request: crate::RequestId,
+    },
     RequestCancellation(RequestCancellation),
     ResponseAbandonment(ResponseAbandonment),
     ResponseForget(ResponseForget),
@@ -1982,6 +2018,7 @@ impl ResidentActorBoundary {
             Self::RequestUpdatePoll { .. } => "pollRequestUpdate",
             Self::WatchProgressPoll { .. } => "pollWatch progress",
             Self::CommandReportPoll { .. } => "pollWatch command",
+            Self::RequestDetachment { .. } => "detachRequest",
             Self::RequestCancellation(_) => "cancelRequest",
             Self::ResponseAbandonment(_) => "abandonResponse",
             Self::ResponseForget(_) => "forgetResponse",
@@ -2350,6 +2387,7 @@ impl ResidentRequest {
             Self::Replies(RepliesReq::ReplyWith(..)) => "reply",
             Self::Replies(RepliesReq::ObserveResponseWith(..)) => "pollResponse",
             Self::Replies(RepliesReq::CancelRequestWith(..)) => "cancelRequest",
+            Self::Replies(RepliesReq::DetachRequestWith(..)) => "detachRequest",
             Self::Replies(RepliesReq::AbandonResponseWith(..)) => "abandonResponse",
             Self::Replies(RepliesReq::ForgetResponseWith(..)) => "forgetResponse",
             Self::Replies(RepliesReq::ObserveReplyWith(..)) => "pollReply",
@@ -2359,6 +2397,7 @@ impl ResidentRequest {
             Self::Replies(RepliesReq::AcknowledgeCancellationWith(..)) => "acknowledgeCancellation",
             Self::Watches(WatchesReq::RegisterWatchWith(..)) => "watch",
             Self::Watches(WatchesReq::RegisterWatchGroupsWith(..)) => "watch",
+            Self::Watches(WatchesReq::RegisterAwaitWith(..)) => "waitFor",
             Self::Watches(WatchesReq::RegisterRouteWith(..)) => "route",
             Self::Watches(WatchesReq::RegisterRouteGroupsWith(..)) => "route",
             Self::Watches(WatchesReq::ObserveRouteWith(..)) => "pollRoute",
@@ -2768,6 +2807,20 @@ impl<H, O> ResidentActorRunner<H, O> {
         Ok(())
     }
 
+    pub(crate) fn child_session_startup_lease(
+        &self,
+        session_id: tidepool_repr::SessionId,
+    ) -> ChildSessionStartupLease
+    where
+        H: DispatchEffect<O> + Send + 'static,
+        O: OutputSink + Sync + 'static,
+    {
+        let runner = self.clone();
+        ChildSessionStartupLease {
+            discard: Some(Box::new(move || runner.discard_child_session(session_id))),
+        }
+    }
+
     /// Discard `session_id`'s dedicated machine immediately, unconditionally
     /// — for a `provision_child_session` that succeeded (the machine is
     /// registered) but something later in the same launch failed before any
@@ -2913,22 +2966,9 @@ impl<H, O> ResidentActorWorkbench<H, O> {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum CommandObservationStop {
-    #[error("the 30-second observation expired; the retained job may since have finished")]
-    Deadline,
-    #[error("command completed, but output observation failed: {0:?}")]
-    OutputUnavailable(tidepool_bridge_effects::CommandError),
-}
-
-#[derive(Debug, thiserror::Error)]
 pub enum ResidentActorWorkbenchError {
     #[error("actor retired before machine admission: {0:?}")]
     RetiredBeforeAdmission(crate::ActorTerminal),
-    #[error("command {job} retained: {reason}")]
-    CommandObservationStopped {
-        job: String,
-        reason: CommandObservationStop,
-    },
     #[error(transparent)]
     CompileView(#[from] ActorCompileViewError),
     #[error("resident machine checkout failed: {0}")]
@@ -2988,6 +3028,8 @@ pub enum ResidentActorWorkbenchError {
     StartCapture(#[from] crate::ActorStartCaptureError),
     #[error(transparent)]
     WaitCapture(#[from] crate::ActorWaitError),
+    #[error("tool dispatch refused: {0}")]
+    ToolDispatch(ToolDispatchError),
     #[error("invalid agent tool declaration set: {0}")]
     ToolDeclarations(serde_json::Error),
 }
@@ -3413,11 +3455,7 @@ where
         // AgentSpec, so every actor discovers the run's current spec.
         let mut roots = context.source_layer.to_vec();
         roots.extend(self.access.source.base_include.iter().cloned());
-        crate::agent_spec::resolve(
-            roots,
-            self.access.source.spec.as_deref(),
-            self.access.source.tools.as_deref(),
-        )
+        crate::agent_spec::resolve(roots, self.access.source.spec.as_deref())
     }
 
     /// Compile one spec and keep both of its products.
@@ -3433,12 +3471,13 @@ where
         &self,
         context: crate::ActorSessionContext,
         install: u64,
-    ) -> Result<Option<ResidentWorkbenchTools>, ResidentActorWorkbenchError> {
+    ) -> Result<ResidentWorkbenchTools, ResidentActorWorkbenchError> {
         let resolved = self.resolve_spec(&context);
         let revision = resolved.source_revision();
-        let Some(entry) = resolved.entry.as_deref() else {
-            return Ok(None);
-        };
+        let entry = resolved
+            .entry
+            .clone()
+            .unwrap_or_else(|| "Tidepool.Agent.Contract.defaultSpec".into());
         let mut source = self.access.source.clone();
         // A spec found by convention is named by no configured key, so its
         // module is not in the shared workbench vocabulary; the fragment that
@@ -3458,17 +3497,6 @@ where
             source.preamble, context.haskell_effects_alias
         )
         .into();
-        // Rules one and two name a spec value; rule three names the tools
-        // record `[haskell] tools` names today. `installTools` is a spec whose
-        // only field is set, so both reach one installer and one retained
-        // dispatcher shape.
-        let installer = match resolved.rule {
-            crate::agent_spec::SpecRule::RunModule | crate::agent_spec::SpecRule::WorkspaceSpec => {
-                "installSpec"
-            }
-            crate::agent_spec::SpecRule::WorkspaceTools
-            | crate::agent_spec::SpecRule::BuiltinDefault => "installTools",
-        };
         let authored_effects = context.haskell_effects_alias.clone();
         let mut compile_context = context.clone();
         compile_context.haskell_effects_alias = "HostedToolEffects".into();
@@ -3476,7 +3504,7 @@ where
             ordinal: 1,
             total: 1,
             source: format!(
-                "_ <- Tidepool.Agent.Contract.{installer} @({authored_effects}) {entry}"
+                "_ <- Tidepool.Agent.Contract.installSpec @({authored_effects}) {entry}"
             ),
         };
         let verdict = TurnClassification {
@@ -3601,14 +3629,14 @@ where
                         "tool installer did not finish after publication".into(),
                     ));
                 }
-                Ok(Some(ResidentWorkbenchTools {
+                Ok(ResidentWorkbenchTools {
                     declarations,
                     dispatch: Arc::new(dispatch),
                     slots,
                     resolved: publication_resolved,
                     install,
                     revision,
-                }))
+                })
             })
             .await;
         if publication.is_ok() {
@@ -3676,7 +3704,7 @@ where
                     1,
                     // A tool invocation has no submitted cell to point at.
                     String::new(),
-                    WorkbenchDisplay::Tool,
+                    WorkbenchDisplay::ToolDispatch,
                     Vec::new(),
                     outcome,
                 )
@@ -3760,11 +3788,9 @@ where
     /// Bind one tool result under the handle the slot was shown, so a pruned
     /// view keeps the whole of what it selected from addressable.
     ///
-    /// This is [`Self::bind_command_job`]'s mechanism, for the same reason: a
-    /// value the model may want back belongs in the lexical environment it
-    /// already computes in, not in a second handle registry beside it. The
-    /// handle is chosen before the slot runs, and defined only when the slot
-    /// actually prunes.
+    /// A value the model may want back belongs in the lexical environment it
+    /// already computes in. The handle is chosen before the slot runs, and
+    /// defined only when the slot actually prunes.
     pub(crate) async fn bind_tool_result(
         &self,
         context: crate::ActorSessionContext,
@@ -3925,9 +3951,8 @@ where
     }
 
     /// Prepare one resident cell, splitting `check_cell` (GHC) and every
-    /// per-item compile off the machine checkout — mirroring
-    /// [`Self::begin_fragment_split`]/[`Self::bind_command_job`] (Problem 1
-    /// of the compile-path design note): snapshot under a short checkout
+    /// per-item compile off the machine checkout: snapshot under a short
+    /// checkout
     /// ([`snapshot_cell_split`]), check off-checkout
     /// ([`check_cell_off_checkout`]), re-checkout to reserve generations and,
     /// for a cell with a `Decl` item, render its next declaration candidate
@@ -4947,21 +4972,6 @@ where
         .await
     }
 
-    /// Install a trusted job reference after stopping a foreground computation.
-    pub(crate) async fn bind_background_job(
-        &self,
-        context: crate::ActorSessionContext,
-        job: String,
-        reason: CommandObservationStop,
-    ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
-        let binding = self.bind_command_job(context, job.clone()).await?;
-        Ok(ResidentWorkbenchStep::CommandBackgrounded {
-            job,
-            binding,
-            reason,
-        })
-    }
-
     /// The carrier this workbench built for `kind`, from the cache if one is
     /// already there and still current for the actor's full source graph,
     /// otherwise built once, off checkout, and cached for every
@@ -4969,8 +4979,7 @@ where
     /// [`ResidentMachineAccess::sharing`]).
     ///
     /// Building takes one short checkout — to reserve a generation for the
-    /// throwaway compile below, exactly [`bind_command_job`]'s old snapshot
-    /// step — releases it, then compiles off checkout
+    /// throwaway compile below — releases it, then compiles off checkout
     /// ([`compile_host_binding_off_checkout`]) with no re-checkout: the
     /// compiled `(BoundBinder, CompiledTurn)` is generation-independent (see
     /// [`HostCarrier::from_compiled`]), so there is nothing left to install
@@ -5055,15 +5064,11 @@ where
         Ok(carrier)
     }
 
-    /// Bind a Job carrier for `job`. The first call for this workbench's
-    /// lineage builds the Job carrier ([`Self::carrier_for`], one short
-    /// checkout plus an off-checkout compile); every call after that —
-    /// including this one, once the carrier is cached — mounts through it
-    /// ([`tidepool_runtime::session::ResidentSession::mount_carrier_in`])
-    /// under a single short checkout: already-bound check, fresh name and
-    /// reserved generation, mount, then the tag/retire-on-error sequence
-    /// [`install_command_job_binder`] also uses for its own single-checkout
-    /// compile-and-install.
+    /// Retain a command job in the actor's lexical environment for named-tool
+    /// output navigation. Reuse an authored or host-mounted binder for the same
+    /// job when present; otherwise mount a fresh binder through the lineage's
+    /// cached Job carrier under one short checkout. A failed mount leaves the
+    /// command owned by its existing command owner.
     pub(crate) async fn bind_command_job(
         &self,
         context: crate::ActorSessionContext,
@@ -5092,7 +5097,7 @@ where
                     )
                     .map_err(|error| {
                         ResidentActorWorkbenchError::InputMount(format!(
-                            "command {job} remains owned, but its automatic binding failed: \
+                            "command {job} remains owned, but its retained output binding failed: \
                              {error}"
                         ))
                     })?;
@@ -5111,10 +5116,8 @@ where
     /// installer's own shape, with no request/response context — with the
     /// resident machine checked out only for the snapshot and the
     /// install-and-run step, released for the GHC compile in between. The
-    /// same split [`Self::bind_command_job`] applies to the Job carrier
-    /// compile (Problem 1 of the compile-path design note), reusing
-    /// [`split_staleness`] to detect a stale snapshot. The split is attempted
-    /// once; a stale snapshot falls straight through to the original
+    /// split uses [`split_staleness`] to detect a stale snapshot. It is
+    /// attempted once; a stale snapshot falls straight through to the original
     /// single-checkout [`begin_fragment`], for the reason
     /// [`Self::prepare_cell`] gives.
     pub(crate) async fn begin_fragment_split(
@@ -5934,9 +5937,7 @@ where
     }
 }
 
-/// A binding name for a fresh Job carrier, not already used by a workbench
-/// binding in `scope`. Shared by `bind_command_job`'s split and
-/// single-checkout fallback paths so both name bindings the same way.
+/// A fresh command output binding name among the scope's workbench bindings.
 fn fresh_job_binding_name<H, O>(
     session: &ResidentSession<H, O>,
     scope: tidepool_codegen::scope::ScopeId,
@@ -5966,7 +5967,7 @@ where
 /// prepared binding, the turn classification a bare-expression item resolves
 /// to (GHC-sourced when not already known), and — for an expression item —
 /// a fresh observation name unique among this scope's visible bindings at
-/// snapshot time. Mirrors `bind_command_job`'s `BindJobPrepare`.
+/// snapshot time.
 struct FragmentCompileSnapshot {
     view: crate::ActorCompileView,
     generation: tidepool_repr::Generation,
@@ -5977,8 +5978,7 @@ struct FragmentCompileSnapshot {
 
 /// Take the checkout-scoped snapshot a split fragment compile needs, then
 /// release the checkout. Read-only against the session except for the
-/// atomic generation reservation — mirrors `bind_command_job`'s snapshot
-/// step (Problem 1 of the compile-path design note).
+/// atomic generation reservation.
 fn snapshot_fragment_compile<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
@@ -6716,17 +6716,15 @@ where
                     binders.iter().map(|binder| binder.name.clone()).collect()
                 }
                 WorkbenchDisplay::Observation { name, .. } => vec![name.clone()],
-                WorkbenchDisplay::Opaque | WorkbenchDisplay::Tool => Vec::new(),
+                WorkbenchDisplay::Opaque
+                | WorkbenchDisplay::Tool
+                | WorkbenchDisplay::ToolDispatch => Vec::new(),
             };
             installed_bindings.append(&mut fragment.recovered_jobs);
-            // The same name-to-job fact `mount_command_job` records for a
-            // host-minted binding, but for whatever name the model itself
-            // gave the job: one command-job-typed binder, resolved against
-            // the one `Cmd.start` effect this item ran, is unambiguous.
-            // `bind_command_job` then finds this name instead of minting a
-            // fresh alias for a job the model already named. A lost race
-            // over the exact live entry is tolerated; the automatic-binding
-            // path mints a fresh alias later, same as before this existed.
+            // One command-job-typed binder resolved against the one
+            // `Cmd.start` effect this item ran identifies the authored job
+            // binding for retained named-tool output navigation. Tag only an
+            // entry that remains live at settlement.
             if let (WorkbenchDisplay::Binding(binders), [job]) =
                 (&fragment.display, fragment.started_jobs.as_slice())
             {
@@ -6754,7 +6752,7 @@ where
                         .join(", ")
                 ),
                 WorkbenchDisplay::Opaque => "<opaque value>".into(),
-                WorkbenchDisplay::Tool => {
+                WorkbenchDisplay::Tool | WorkbenchDisplay::ToolDispatch => {
                     // A bounded observation marks what it could not afford to
                     // materialize. That is a size answer, so say so instead of
                     // letting the decoder call it a type mismatch.
@@ -6765,7 +6763,25 @@ where
                                 .into(),
                         ));
                     }
-                    String::from_value(result.value(), result.table())?
+                    let text = String::from_value(result.value(), result.table())?;
+                    if matches!(&fragment.display, WorkbenchDisplay::ToolDispatch) {
+                        let reply: ToolDispatchReply =
+                            serde_json::from_str(&text).map_err(|error| {
+                                ResidentActorWorkbenchError::ActorProtocol(format!(
+                                    "invalid tool dispatch reply: {error}"
+                                ))
+                            })?;
+                        let output = reply
+                            .into_output()
+                            .map_err(ResidentActorWorkbenchError::ToolDispatch)?;
+                        serde_json::from_value::<String>(output).map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(format!(
+                                "installed tool output must be rendered Text: {error}"
+                            ))
+                        })?
+                    } else {
+                        text
+                    }
                 }
                 WorkbenchDisplay::Observation { .. } => {
                     unreachable!("a completed observation is deferred above")
@@ -6793,6 +6809,7 @@ where
                 ),
                 WorkbenchDisplay::Opaque
                 | WorkbenchDisplay::Tool
+                | WorkbenchDisplay::ToolDispatch
                 | WorkbenchDisplay::Observation { .. } => None,
             };
             let receipt = projected_binding_receipt(bound_name.as_deref(), &output)?;
@@ -6802,6 +6819,7 @@ where
                 }
                 WorkbenchDisplay::Opaque
                 | WorkbenchDisplay::Tool
+                | WorkbenchDisplay::ToolDispatch
                 | WorkbenchDisplay::Observation { .. } => Vec::new(),
             };
             fragment.output.push(receipt);
@@ -7772,6 +7790,7 @@ where
                             role,
                             profile,
                             worktrees,
+                            lifetime,
                         ),
                     ) => crate::ResidentActorStart::capture_decoded(
                         session,
@@ -7781,7 +7800,7 @@ where
                             fork_group: None, fork_workspace: None, effect_keys: None,
                             fork_effort: None, fork_budget: None, model: None, instructions: None, context: crate::ForkContext::SelectedContext,
                             checkpoint: None,
-                            lifetime: crate::start::ActorStartRequest::FRESH_LAUNCH_LIFETIME,
+                            lifetime,
                             session_id: context.placement.session, parent_actor: context.actor,
                             unbound_label,
                         },
@@ -8193,11 +8212,13 @@ where
                     ) => Ok(ResidentActorBoundary::ToolReply(
                         crate::resident_tools::ResidentToolReply {
                             continuation: hole,
-                            result: tidepool_runtime::value_to_json(
+                            result: serde_json::from_value(tidepool_runtime::value_to_json(
                                 &result,
                                 session.data_con_table(),
                                 0,
-                            ),
+                            )).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(
+                                format!("invalid actor tool dispatch reply: {error}")
+                            ))?,
                         },
                     )),
                     ResidentRequest::AgentSession(
@@ -8322,6 +8343,12 @@ where
                             update: crate::RequestUpdateId { request: crate::request_effect::request_id(request)?,
                                 sequence: u64::try_from(sequence).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid update sequence".into()))? } })
                     }
+                    ResidentRequest::Replies(RepliesReq::DetachRequestWith(request_id)) => Ok(
+                        ResidentActorBoundary::RequestDetachment {
+                            continuation: hole,
+                            request: crate::request_effect::request_id(request_id)?,
+                        },
+                    ),
                     ResidentRequest::Replies(RepliesReq::CancelRequestWith(request_id)) => Ok(
                         ResidentActorBoundary::RequestCancellation(RequestCancellation {
                             continuation: hole,
@@ -8372,7 +8399,7 @@ where
                             Ok(vec![crate::request_effect::AwaitDependency::checked(dependency)?])
                         }).collect::<Result<Vec<Vec<_>>, tidepool_bridge::BridgeError>>()?;
                         Ok(ResidentActorBoundary::RouteRegistration {
-                            registration: WatchRegistration { continuation: hole, label, dependencies }, entry,
+                            registration: WatchRegistration { transient: false, continuation: hole, label, dependencies }, entry,
                         })
                     }
                     ResidentRequest::Watches(WatchesReq::RegisterRouteGroupsWith(label, callback, groups)) => {
@@ -8381,7 +8408,7 @@ where
                             .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("route has no retained callback".into()))?;
                         let dependencies = groups.into_iter().map(|dependencies| dependencies.into_iter().map(crate::request_effect::AwaitDependency::checked).collect()).collect::<Result<Vec<Vec<_>>, _>>()?;
                         Ok(ResidentActorBoundary::RouteRegistration {
-                            registration: WatchRegistration { continuation: hole, label, dependencies }, entry,
+                            registration: WatchRegistration { transient: false, continuation: hole, label, dependencies }, entry,
                         })
                     }
                     ResidentRequest::Watches(WatchesReq::ListRoutesWith) => Ok(ResidentActorBoundary::RouteList(hole)),
@@ -8400,6 +8427,7 @@ where
                             .collect::<Result<Vec<Vec<_>>, tidepool_bridge::BridgeError>>()?;
                         Ok(ResidentActorBoundary::WatchRegistration(
                             WatchRegistration {
+                                transient: false,
                                 continuation: hole,
                                 dependencies,
                                 label,
@@ -8412,7 +8440,16 @@ where
                             .map(|dependencies| dependencies.into_iter().map(crate::request_effect::AwaitDependency::checked).collect())
                             .collect::<Result<Vec<Vec<_>>, _>>()?;
                         Ok(ResidentActorBoundary::WatchRegistration(
-                            WatchRegistration { continuation: hole, dependencies, label },
+                            WatchRegistration { transient: false, continuation: hole, dependencies, label },
+                        ))
+                    }
+                    ResidentRequest::Watches(WatchesReq::RegisterAwaitWith(groups)) => {
+                        let dependencies = groups
+                            .into_iter()
+                            .map(|dependencies| dependencies.into_iter().map(crate::request_effect::AwaitDependency::checked).collect())
+                            .collect::<Result<Vec<Vec<_>>, _>>()?;
+                        Ok(ResidentActorBoundary::WatchRegistration(
+                            WatchRegistration { transient: true, continuation: hole, dependencies, label: "wait-for".into() },
                         ))
                     }
                     ResidentRequest::Watches(WatchesReq::ObserveWatchWith(watch_id)) => {
@@ -9121,43 +9158,6 @@ where
                 session
                     .resume_classified(hole, outcome)
                     .map_err(classify_resumption)
-            })
-            .await
-    }
-
-    /// End only the suspended computation; the independent command job remains owned.
-    pub(crate) async fn stop_command_observation(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ResidentHole,
-        job: String,
-        reason: CommandObservationStop,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                let stopped = session.abort(
-                    hole.cont_id(),
-                    "foreground command observation ended".into(),
-                );
-                if session.parked_holes().contains(&hole.cont_id()) {
-                    return match stopped {
-                        Err(error) => Err(ResidentActorWorkbenchError::Resident(error)),
-                        Ok(_) => Err(ResidentActorWorkbenchError::ActorProtocol(
-                            "command observation continuation remained parked after abort".into(),
-                        )),
-                    };
-                }
-                match stopped {
-                    Err(ResidentError::Run(tidepool_runtime::RuntimeError::Jit(
-                        tidepool_effect::error::EffectError::Handler(_),
-                    ))) => {
-                        Err(ResidentActorWorkbenchError::CommandObservationStopped { job, reason })
-                    }
-                    Err(error) => Err(ResidentActorWorkbenchError::Resident(error)),
-                    Ok(_) => Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "aborted command observation unexpectedly completed".into(),
-                    )),
-                }
             })
             .await
     }
@@ -10368,9 +10368,7 @@ enum CompiledBlock {
 /// A short-checkout snapshot for [`ResidentActorWorkbench::prepare_cell`]'s
 /// split compile: the exact source-side view the whole-cell check and every
 /// item's compile target, and the declaration module this view currently
-/// imports (`None` before the first declaration ever lands). Mirrors
-/// `bind_command_job`'s `BindJobPrepare`/`begin_fragment_split`'s
-/// `FragmentCompileSnapshot`.
+/// imports (`None` before the first declaration ever lands).
 struct CellSplitSnapshot {
     view: crate::ActorCompileView,
     candidate_module: tidepool_repr::SessionModule,
@@ -11387,10 +11385,10 @@ where
 }
 
 /// The GHC-compile half of [`compile_host_binding`], run against one
-/// already-taken `view` with no session or checkout held. A split compile
-/// (see `bind_command_job`) snapshots `view` and reserves `generation` under
-/// a short checkout, calls this off-checkout, then re-checks out only to
-/// revalidate ([`crate::ActorCompileView::is_current_for`]) and install.
+/// already-taken `view` with no session or checkout held. Carrier construction
+/// snapshots `view` and reserves `generation` under a short checkout, then calls
+/// this off-checkout. The cached carrier retains the compiled shape without
+/// its throwaway binding identity.
 #[allow(clippy::too_many_arguments)]
 fn compile_host_binding_off_checkout(
     view: &crate::ActorCompileView,
@@ -11639,9 +11637,7 @@ where
         .expect("unbounded internal host binding namespace")
 }
 
-/// The Job carrier's own import set and type/anchor pair, shared by
-/// [`mount_command_job`]'s single-checkout compile path and
-/// [`HostCarrierKind::Job`]'s carrier build so the two can never drift.
+/// The Job carrier's fixed imports, nominal type and authenticated anchor.
 fn command_job_carrier_imports() -> SourceImports {
     SourceImports::from_specs([
         "qualified Tidepool.Command.Types as TidepoolHostJob",
@@ -11682,76 +11678,6 @@ fn text_binding_carrier_imports() -> SourceImports {
 
 const TEXT_BINDING_TYPE_NAME: &str = "TidepoolHostText.Text";
 const TEXT_BINDING_ANCHOR: &str = "case TidepoolHostExts.noinline (TidepoolHostText.pack \"\") of TidepoolHostTextInternal.Text bytes offset length -> TidepoolHostTextInternal.Text bytes offset length";
-
-/// The single-checkout Job carrier compile-and-install path: one GHC compile
-/// per mount, no cache. `bind_command_job` no longer calls this in
-/// production (it mounts through the cached [`HostCarrier`] instead — see
-/// [`ResidentActorWorkbench::carrier_for`]); it remains as the reference
-/// implementation `command_job_split_compile_then_install_binds_the_same_as_mount_command_job`
-/// and other tests check the carrier path's compiled artifact against.
-#[cfg(test)]
-fn mount_command_job<H, O>(
-    session: &mut ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    source: &ActorWorkbenchSource,
-    binding: &str,
-    job: &str,
-) -> Result<(), ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    let (binder, compiled, generation) = compile_host_binding(
-        session,
-        context,
-        source,
-        &[],
-        binding,
-        COMMAND_JOB_TYPE_NAME,
-        COMMAND_JOB_ANCHOR,
-        command_job_carrier_imports(),
-        true,
-    )?;
-    install_command_job_binder(session, context, binder, compiled, generation, job)
-}
-
-/// Install an already-compiled Job carrier. Split out of
-/// [`mount_command_job`] so its test-only single-checkout path and the
-/// `command_job_split_compile_then_install_binds_the_same_as_mount_command_job`
-/// test's manual split path share the exact install/tag/retire-on-error
-/// sequence, with no GHC call here.
-#[cfg(test)]
-fn install_command_job_binder<H, O>(
-    session: &mut ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    binder: BoundBinder,
-    compiled: CompiledTurn,
-    generation: tidepool_repr::Generation,
-    job: &str,
-) -> Result<(), ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    session
-        .mount_typed_binding_in(
-            context.placement.lexical_scope,
-            &binder,
-            generation,
-            compiled.into_code(),
-            tidepool_runtime::session::HostBindingType::COMMAND_JOB,
-            &HostCommandJob::Job(job.to_owned()),
-        )
-        .map_err(ResidentActorWorkbenchError::Resident)?;
-    if let Err(error) =
-        session.tag_host_text_binding_in(context.placement.lexical_scope, &binder, job.to_owned())
-    {
-        let session_root = carrier_mount_session_root(session, context.placement.lexical_scope)?;
-        session.retire_host_binding_owner(&session_root, &binder);
-        return Err(ResidentActorWorkbenchError::Resident(error));
-    }
-    Ok(())
-}
 
 fn cell_check_evidence(
     view: &crate::ActorCompileView,
@@ -11899,9 +11825,7 @@ where
 /// value generation this compile targets must already be reserved by the
 /// caller. Shared by the single-checkout item loop
 /// (`prepare_cell_in_session` via `compile_block_in_view`) and the split
-/// cell's off-checkout item loop (`compile_cell_items_off_checkout`), as
-/// `compile_host_binding_off_checkout` is shared by `mount_command_job` and
-/// `bind_command_job`.
+/// cell's off-checkout item loop (`compile_cell_items_off_checkout`).
 #[allow(clippy::too_many_arguments)]
 fn compile_block_off_checkout(
     context: &crate::ActorSessionContext,
@@ -12374,6 +12298,42 @@ mod split_probe {
 }
 
 #[cfg(test)]
+mod tool_dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_envelope_preserves_authored_output_and_decodes_typed_refusals() {
+        let output = serde_json::json!({"status": "refused", "output": [1, true, null]});
+        let reply: ToolDispatchReply = serde_json::from_value(serde_json::json!({
+            "status": "success", "output": output,
+        }))
+        .unwrap();
+        assert_eq!(reply.into_output().unwrap(), output);
+        for (kind, unknown) in [("unknown_tool", true), ("invalid_input", false)] {
+            let reply: ToolDispatchReply = serde_json::from_value(serde_json::json!({
+                "status": "refused", "kind": kind, "error": "correct the call",
+            }))
+            .unwrap();
+            let error = reply.into_output().unwrap_err();
+            assert_eq!(matches!(error, ToolDispatchError::UnknownTool(_)), unknown);
+            assert_eq!(error.to_string(), "correct the call");
+        }
+    }
+
+    #[test]
+    fn dispatch_envelope_rejects_old_payloads_and_unknown_tags() {
+        for payload in [
+            serde_json::json!("old naked output"),
+            serde_json::json!({"output": "old naked output"}),
+            serde_json::json!({"status": "success"}),
+            serde_json::json!({"status": "refused", "kind": "invented", "error": "bad"}),
+        ] {
+            assert!(serde_json::from_value::<ToolDispatchReply>(payload).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
 mod request_tests {
     use super::*;
 
@@ -12525,26 +12485,10 @@ mod request_tests {
             None,
         )
         .expect("Text carrier mounts after the JSON request executes");
-        mount_command_job(
-            &mut session,
-            &context,
-            &source,
-            "job_binding",
-            "command job",
-        )
-        .expect("strict Job carrier mounts through its authenticated constructor");
-        assert_eq!(
-            session.host_text_binding_in(context.placement.lexical_scope, "command job"),
-            Some("job_binding".into())
-        );
-
         let mut text_source = source.clone();
         text_source
             .workbench_imports
             .extend_text("qualified Data.Text as TidepoolHostText");
-        text_source
-            .workbench_imports
-            .extend_text("qualified Tidepool.Command.Types as TidepoolHostJob");
         let text_step = begin_fragment(
             &mut session,
             &context,
@@ -12557,12 +12501,12 @@ mod request_tests {
             ParsedBlock {
                 ordinal: 1,
                 total: 1,
-                source: "textSeen <- pure (\\() -> TidepoolHostText.unpack tool_result ++ \":\" ++ case job_binding of TidepoolHostJob.Job text -> TidepoolHostText.unpack text)".into(),
+                source: "textSeen <- pure (\\() -> TidepoolHostText.unpack tool_result)".into(),
             },
             None,
             None,
         )
-        .expect("mounted Text and strict Job are executable");
+        .expect("mounted Text is executable");
         assert!(matches!(text_step, ResidentWorkbenchStep::Committed { .. }));
         let text_display = render_cell_observation(
             &mut session,
@@ -12574,21 +12518,20 @@ mod request_tests {
             &[],
             ExpressionPresentation::Rendered,
         )
-        .expect("mounted Text and Job result renders");
+        .expect("mounted Text result renders");
         assert!(
-            text_display.contains("tool output:command job"),
-            "Text/Job result: {text_display}"
+            text_display.contains("tool output"),
+            "Text result: {text_display}"
         );
         session.retire_host_binding_owner(session_root.path(), &input.binder);
     }
 
-    /// Problem 1 of the compile-path design note: a split compile takes its
-    /// `ActorCompileView` snapshot, compiles off-checkout, then re-derives a
-    /// fresh view before installing. With no mutation in between, the split
-    /// path must bind exactly what `mount_command_job`'s single-checkout
-    /// path binds.
+    /// A split compile takes its `ActorCompileView` snapshot, compiles
+    /// off-checkout, then re-derives a fresh view before installing. With no
+    /// mutation in between, the split
+    /// path must publish the compiled Text binding.
     #[test]
-    fn command_job_split_compile_then_install_binds_the_same_as_mount_command_job() {
+    fn text_carrier_split_compile_then_install_publishes_the_binding() {
         let (mut session, context, source, _session_root) = host_mount_fixture();
         let scope = context.placement.lexical_scope;
 
@@ -12602,14 +12545,14 @@ mod request_tests {
             &source,
             &context.haskell_effects_alias,
             generation,
-            "job_binding",
-            COMMAND_JOB_TYPE_NAME,
-            COMMAND_JOB_ANCHOR,
-            command_job_carrier_imports(),
+            "text_binding",
+            TEXT_BINDING_TYPE_NAME,
+            TEXT_BINDING_ANCHOR,
+            text_binding_carrier_imports(),
             true,
             &retained,
         )
-        .expect("job carrier compiles off-checkout");
+        .expect("Text carrier compiles off-checkout");
 
         let fresh_view = actor_compile_view(&session, &context, &source, &[]).expect("fresh view");
         assert!(
@@ -12617,20 +12560,19 @@ mod request_tests {
             "no mutation happened between snapshot and install: views must still match"
         );
 
-        install_command_job_binder(
-            &mut session,
-            &context,
-            binder,
-            compiled,
-            generation,
-            "command job",
-        )
-        .expect("job carrier installs after revalidation");
+        session
+            .mount_text_binding_in(
+                scope,
+                &binder,
+                generation,
+                compiled.into_code(),
+                "text payload",
+            )
+            .expect("Text carrier installs after revalidation");
 
-        assert_eq!(
-            session.host_text_binding_in(scope, "command job"),
-            Some("job_binding".into())
-        );
+        assert!(session
+            .binding_names_in(scope)
+            .contains(&"text_binding".into()));
     }
 
     /// A write to the same scope between a split compile's snapshot and its
@@ -12652,14 +12594,14 @@ mod request_tests {
             &source,
             &context.haskell_effects_alias,
             generation,
-            "job_binding",
-            COMMAND_JOB_TYPE_NAME,
-            COMMAND_JOB_ANCHOR,
-            command_job_carrier_imports(),
+            "text_binding",
+            TEXT_BINDING_TYPE_NAME,
+            TEXT_BINDING_ANCHOR,
+            text_binding_carrier_imports(),
             true,
             &retained,
         )
-        .expect("job carrier compiles off-checkout");
+        .expect("Text carrier compiles off-checkout");
 
         // Stand in for another actor writing to this exact scope while this
         // compile ran off-checkout: mount an unrelated Text carrier, which
@@ -12686,7 +12628,7 @@ mod request_tests {
         assert!(session
             .workbench_bindings_in(scope)
             .into_iter()
-            .all(|binding| binding.name != "job_binding"));
+            .all(|binding| binding.name != "text_binding"));
         drop((binder, compiled, generation));
 
         // A fresh snapshot recompiles and installs cleanly.
@@ -12699,36 +12641,29 @@ mod request_tests {
             &source,
             &context.haskell_effects_alias,
             retry_generation,
-            "job_binding2",
-            COMMAND_JOB_TYPE_NAME,
-            COMMAND_JOB_ANCHOR,
-            command_job_carrier_imports(),
+            "text_binding2",
+            TEXT_BINDING_TYPE_NAME,
+            TEXT_BINDING_ANCHOR,
+            text_binding_carrier_imports(),
             true,
             &retry_retained,
         )
         .expect("recompile against the fresh snapshot succeeds");
-        install_command_job_binder(
-            &mut session,
-            &context,
-            retry_binder,
-            retry_compiled,
-            retry_generation,
-            "retry command job",
-        )
-        .expect("recompiled carrier installs");
-        assert_eq!(
-            session.host_text_binding_in(scope, "retry command job"),
-            Some("job_binding2".into())
-        );
+        session
+            .mount_text_binding_in(
+                scope,
+                &retry_binder,
+                retry_generation,
+                retry_compiled.into_code(),
+                "retry text payload",
+            )
+            .expect("recompiled carrier installs");
+        assert!(session
+            .binding_names_in(scope)
+            .contains(&"text_binding2".into()));
     }
 
-    /// The first `bind_command_job` call for a fresh workbench builds the
-    /// Job carrier ([`ResidentActorWorkbench::carrier_for`]), which is the
-    /// only extractor invocation `bind_command_job` itself makes. A second
-    /// call, for a different job, mounts through the now-cached carrier and
-    /// makes none: [`tidepool_extract_cmd::extract_spawn_count`] — the same
-    /// counter the cell-cost and documentation tests already read from —
-    /// must not move between the two.
+    /// Named-tool command output bindings reuse one cached Job carrier.
     #[tokio::test]
     async fn two_bind_command_job_calls_on_one_workbench_compile_the_job_carrier_once() {
         let (machines, context, source, _root) = actor_registry_fixture();
@@ -12757,12 +12692,64 @@ mod request_tests {
              further extractor call: first={first} second={second}"
         );
         assert_ne!(first, second);
+        let repeated = workbench
+            .bind_command_job(context.clone(), "job one".into())
+            .await
+            .expect("the same command job reuses its existing binder");
+        assert_eq!(repeated, first);
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), after_second);
+        workbench
+            .access
+            .with_machine(context, move |session, context, _| {
+                let scope = context.placement.lexical_scope;
+                assert_eq!(session.host_text_binding_in(scope, "job one"), Some(first));
+                assert_eq!(session.host_text_binding_in(scope, "job two"), Some(second));
+                Ok(())
+            })
+            .await
+            .expect("both retained command bindings identify their exact jobs");
     }
 
-    /// The same split shape as `command_job_split_compile_then_install_
-    /// binds_the_same_as_mount_command_job`, but for an ordinary workbench
-    /// fragment (`begin_fragment`/`begin_ready_block`): snapshotting via
-    /// `snapshot_fragment_compile`, compiling off-checkout via
+    /// Repeated tool-result mounts reuse the Text carrier built for this lineage.
+    #[tokio::test]
+    async fn two_tool_result_mounts_on_one_workbench_compile_the_text_carrier_once() {
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![]);
+
+        let before_first = tidepool_extract_cmd::extract_spawn_count();
+        workbench
+            .bind_tool_result(context.clone(), "tool_one".into(), "output one".into())
+            .await
+            .expect("the first tool result binds, building the Text carrier");
+        let after_first = tidepool_extract_cmd::extract_spawn_count();
+        assert!(
+            after_first > before_first,
+            "the first mount must compile the Text carrier: before={before_first} after={after_first}"
+        );
+
+        workbench
+            .bind_tool_result(context.clone(), "tool_two".into(), "output two".into())
+            .await
+            .expect("the second tool result binds through the cached carrier");
+        let after_second = tidepool_extract_cmd::extract_spawn_count();
+        assert_eq!(
+            after_second, after_first,
+            "the second mount must reuse the cached carrier without another extractor call"
+        );
+        workbench
+            .access
+            .with_machine(context, |session, context, _| {
+                let names = session.binding_names_in(context.placement.lexical_scope);
+                assert!(names.contains(&"tool_one".into()));
+                assert!(names.contains(&"tool_two".into()));
+                Ok(())
+            })
+            .await
+            .expect("both tool results remain bound");
+    }
+
+    /// For an ordinary workbench fragment (`begin_fragment`/`begin_ready_block`),
+    /// snapshotting via `snapshot_fragment_compile`, compiling off-checkout via
     /// `compile_fragment_off_checkout`, revalidating, then installing and
     /// running via `begin_ready_block` must commit the exact same output and
     /// bindings as calling the original single-checkout `begin_fragment`
@@ -13016,7 +13003,7 @@ mod request_tests {
     /// before installing the stale compile, and a fresh snapshot must still
     /// recompile and install cleanly — the same invariant
     /// `a_mutation_between_split_checkouts_invalidates_the_snapshot_and_
-    /// blocks_install` proves for the Job carrier path.
+    /// blocks_install` proves for the Text carrier path.
     #[test]
     fn a_mutation_between_split_fragment_checkouts_invalidates_the_snapshot_and_forces_a_recompile()
     {
@@ -13455,7 +13442,6 @@ mod request_tests {
             ResidentWorkbenchStep::Rejected(rejection) => {
                 format!("Rejected({})", rejection.output)
             }
-            ResidentWorkbenchStep::CommandBackgrounded { .. } => "CommandBackgrounded".into(),
             ResidentWorkbenchStep::Running { .. } => "Running".into(),
             ResidentWorkbenchStep::Replied { .. } => "Replied".into(),
             ResidentWorkbenchStep::CancellationAcknowledged { .. } => {
@@ -14849,6 +14835,131 @@ mod request_tests {
             imported_render, crossing_before,
             "the value round-trips byte-for-byte across sessions"
         );
+    }
+
+    #[tokio::test]
+    async fn cancelling_child_startup_during_custody_transfer_discards_only_the_child_session() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        tidepool_testing::eval_harness::require_extract();
+        let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[])
+            .expect("materialize minimal effect surface");
+        let parent_id = tidepool_repr::SessionId(0xD0_D0);
+        let child_id = tidepool_repr::SessionId(0xD1_D1);
+        let (mut parent, parent_root) = bare_session_at(parent_id);
+        let retained = bind_bare_value(
+            &mut parent,
+            parent_id,
+            parent_root.path(),
+            &surface,
+            1,
+            "parentValue",
+            "333 :: Int",
+        );
+        let entry = parent
+            .prepared_binding_handle("parentValue")
+            .expect("independent custody for the startup entry");
+        let before = parent
+            .render_retained_preview(&retained, 64)
+            .expect("parent custody is evaluable before startup");
+        assert!(before.contains("333"), "parent value: {before}");
+
+        let templates = resident_workbench_templates(surface.preamble(), surface.row(), "");
+        let include: Vec<_> = surface
+            .include_paths()
+            .iter()
+            .map(PathBuf::as_path)
+            .collect();
+        let bootstrap = run_turn(TurnRequest {
+            exact_context: None,
+            session_id: Some(parent_id),
+            turn_text: "startupBootstrap <- pure (0 :: Int)",
+            templates: &templates,
+            include: &include,
+            session_root: parent_root.path(),
+            inject_modules: &[],
+            gen: 2,
+            verdict: None,
+            target: None,
+            retained_imports: &[],
+        })
+        .expect("child bootstrap compiles");
+        let TurnResult::Bind { compiled, .. } = bootstrap else {
+            panic!("child bootstrap must be a bind turn");
+        };
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(parent_id, Box::new(parent));
+        let source = ActorWorkbenchSource::new(
+            surface.preamble().to_string(),
+            surface.include_paths().to_vec(),
+        );
+        let child_root = std::sync::Mutex::new(None);
+        let runner = ResidentActorRunner::new(Arc::clone(&machines), source)
+            .with_child_session_factory(Arc::new(move |id, _source_layer| {
+                let (session, root) = bare_session_at(id);
+                *child_root.lock().unwrap() = Some(root);
+                Ok(Box::new(session))
+            }))
+            .with_child_bootstrap_program(Arc::new(compiled));
+        let owner = RealmId::fresh();
+        runner
+            .provision_child_session(child_id, owner, None, &[])
+            .await
+            .expect("fresh child session provisions through its real factory");
+        assert!(runner
+            .access
+            .child_sessions
+            .lock()
+            .unwrap()
+            .contains(&child_id));
+        assert_eq!(
+            machines.kind(child_id),
+            Some(tidepool_runtime::session::SlotKind::Idle)
+        );
+
+        let parent_checkout = machines
+            .checkout_run(parent_id)
+            .expect("hold the source checkout so custody transfer must wait");
+        let lease = runner.child_session_startup_lease(child_id);
+        let mut preparation = Box::pin(async {
+            let _lease = lease;
+            runner
+                .transfer_custody(entry, parent_id, child_id, owner)
+                .await
+        });
+        let progress = std::future::poll_fn(|cx| Poll::Ready(preparation.as_mut().poll(cx))).await;
+        assert!(
+            matches!(progress, Poll::Pending),
+            "preparation must be awaiting the held source checkout"
+        );
+        drop(preparation);
+        assert_eq!(
+            machines.kind(child_id),
+            None,
+            "cancelled startup removes its child machine"
+        );
+        assert!(!runner
+            .access
+            .child_sessions
+            .lock()
+            .unwrap()
+            .contains(&child_id));
+        assert_eq!(
+            machines.kind(parent_id),
+            Some(tidepool_runtime::session::SlotKind::Running),
+            "child cleanup preserves the parent's independent checkout"
+        );
+        drop(parent_checkout);
+        let after = runner
+            .access
+            .with_host_machine("render-parent", parent_id, None, move |session, _| {
+                Ok(session.render_retained_preview(&retained, 64))
+            })
+            .await
+            .expect("parent remains registered after cancelled child startup")
+            .expect("independent parent custody remains evaluable");
+        assert_eq!(after, before);
     }
 
     /// [`ResidentActorRunner::import_shared_custody`]: the non-consuming,

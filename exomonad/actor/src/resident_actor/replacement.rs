@@ -9,6 +9,7 @@ struct StagedHandler {
     shutdown_hook: Option<RootCustody>,
     sources: Vec<crate::request::sources::SourceBinding>,
     dynamic_sources: Vec<crate::request::sources::SourceBinding>,
+    session_startup: Option<crate::resident_workbench::ChildSessionStartupLease>,
 }
 
 pub(super) struct PreparedSuccessor {
@@ -48,7 +49,7 @@ where
         kernel: &KernelContext,
         definition: crate::ActorReplacementDefinition,
     ) -> Result<LocalActorRef, ResidentActorWorkbenchError> {
-        let staged = self
+        let mut staged = self
             .stage_replacement(kernel.identity(), definition)
             .await?;
         let placement = staged.descriptor.placement();
@@ -73,12 +74,14 @@ where
             .clone()
             .with_supervisor_parent(kernel.supervisor_identity());
         let (transfer, custody) = tokio::sync::oneshot::channel();
-        let behavior = Self::with_boot(
+        let session_startup = staged.session_startup.take();
+        let mut behavior = Self::with_boot(
             descriptor,
             self.environment.clone(),
             ResidentBoot::Replacement(Box::new(PreparedSuccessor { staged, custody })),
             self.launch_worktrees.clone(),
         );
+        behavior.child_session_startup = session_startup;
         let (successor, parent_admission) = match kernel.spawn_successor(behavior).await {
             Ok(successor) => successor,
             Err(error) => {
@@ -246,19 +249,6 @@ where
         let placement = definition.child.descriptor.placement();
         let result = self.stage_replacement_inner(actor, definition).await;
         if let Err(error) = &result {
-            // If this replacement minted itself a fresh session
-            // (`child_session_eligibility`) and provisioning got as far as
-            // publishing it into the shared registry before something else
-            // failed, it is now orphaned — nothing will ever admit onto it.
-            // Discarding a session that was never provisioned in the first
-            // place (ineligible, or the host fell back to the predecessor's
-            // own session) is always safe: it is simply not a member of
-            // `child_sessions`.
-            if placement.session != self.descriptor.placement().session {
-                self.environment
-                    .runner
-                    .discard_child_session(placement.session);
-            }
             // Temporary roots drop before retiring this isolated scope.
             if let Err(cleanup) = self
                 .environment
@@ -293,12 +283,21 @@ where
             }
         };
         let crate::start::CapturedChildLaunch {
+            lifetime: _,
             mut descriptor,
             entry,
             launch_worktrees,
             fork_workspace,
             seed,
         } = definition.child;
+        let session_startup = (descriptor.placement().session
+            != self.descriptor.placement().session
+            && self.environment.runner.supports_child_sessions())
+        .then(|| {
+            self.environment
+                .runner
+                .child_session_startup_lease(descriptor.placement().session)
+        });
         if launch_worktrees != self.launch_worktrees || fork_workspace.is_some() {
             return Err(reject(
                 "replacement must preserve the actor's worktree custody",
@@ -476,6 +475,7 @@ where
             shutdown_hook,
             sources,
             dynamic_sources,
+            session_startup,
         })
     }
 }

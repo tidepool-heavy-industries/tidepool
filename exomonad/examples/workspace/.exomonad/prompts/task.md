@@ -12,7 +12,7 @@ channel and wait for the specified release condition.
 Build the owning production consumer. Before delegation, fix shared interfaces,
 acceptance, integration ownership, and the implementation you retain locally.
 Wire returned components together early. The Luna helpers select context from the Task and use the bound source. Focused
-Luna descendants should use `withContext inherited` at a useful scaffold boundary;
+Luna descendants should use `withContext (fromCheckpoint captured)` at a useful scaffold boundary;
 select focused Task context when crossing model tiers. Use fresh context for independent review.
 The initial brief names that consumer, the relevant state distinctions and an
 exact focused acceptance command with its expected matched count.
@@ -25,7 +25,7 @@ owners and continue independent work while a dependency is pending.
 
 Commit useful authored units, including partial implementations and failing tests.
 A pre-fork checkpoint proves source identity, not acceptance. Return the exact
-checked candidate: `head` is its commit, `checks` records actual commands/evidence,
+checked candidate: `head` is its commit, `reportedChecks` records authored check claims,
 and `gates` names remaining product limits. For `Outcome Candidate`:
 
 ```haskell
@@ -44,8 +44,8 @@ for named repairs.
 
 For recurring checks, begin with the project's compiled Haskell composition and
 specialize its inputs for this component. Retain one job and carry its terminal
-receipt, source and test counts into the candidate or review. Prefer completion
-routing to repeated observations. Pass the working helper name and its source to
+receipt, source and test counts into the candidate or review. Compose terminal waits and evidence reads in Haskell; use ongoing completion
+routing when independent observers need it. Pass the working helper name and its source to
 children; a menu seen by the parent does not establish discovery by a child.
 Before product review, name required sibling commits and check that the candidate
 contains them. A partial component review must say which integration gates remain.

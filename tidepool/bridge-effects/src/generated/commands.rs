@@ -137,7 +137,7 @@ pub struct CommandOutput {
 #[haskell(module = "Tidepool.Effects.Core")]
 pub struct CommandObservation {
     pub result: CommandResult,
-    pub output: CommandOutput,
+    pub output: Result<CommandOutput, CommandError>,
 }
 
 #[derive(

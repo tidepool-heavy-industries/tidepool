@@ -61,25 +61,27 @@ value for `watch`; see the routing example linked below.
 The updated workspace package includes this compiled staged background example
 at `.exomonad/workspace/checks/background-command-example.hs` (template source:
 `exomonad/examples/workspace/.exomonad/checks/background-command-example.hs`):
-start one command, attach a record actor, read a compact projection or complete
-evidence later, and finish the observer. Its owning tests also cover nonzero
-exit and unavailable capture. An unavailable read remains an explicit issue.
-The completion event does not itself wake the model; only an installed
-completion route does. Do other useful work while waiting, and return to the
-retained job when a wake or later task turn makes that useful. Do not repeatedly
-poll for completion.
+start one invocation-owned command, suspend with `awaitCommandEvidence`, and
+retain its exact completion receipt and capture. `completionProjection` supplies
+a compact view. Its owning checks cover nonzero exit and unavailable capture;
+an unavailable read remains an explicit issue. For ongoing observers use a
+record actor and an explicit actor-owned job instead. Routine waits need no
+model polling or forwarding actor.
 
 Starting with no output is ordinary progress. Readable-but-empty output has byte
 positions; an unavailable-output error is different and keeps the same job.
 
-Direct execution defaults: 1024 MiB and up to 60 seconds awaiting completion.
-If still running, the same job receives one completion notice (or its existing
-watch owns that wake). Continue useful work; no polling is needed. Explicit
-`yield_time_ms` (0..300000) requests a deliberate snapshot without automatic
-notification. `background: true` returns immediately with completion delivery.
-In Haskell, `Cmd.observeCompletion` and `Cmd.observeWithCompletion` provide the
-same bounded waiting and notification behavior for an existing job. Use completion
-events for authored continuations; waiting alone does not collect test evidence.
+Direct execution defaults to 1024 MiB and waits until terminal completion,
+preserving the invocation and presenting output once. Explicit `yield_time_ms`
+(0..300000) requests bounded observation without automatic notification; if the
+job is still live, the tool detaches it to actor-owned lifetime before returning.
+`background: true` starts actor-owned work and returns immediately with completion
+delivery; focus, yield and output-budget presentation options do not apply there.
+In Haskell, `Cmd.observe`, `Cmd.observeWith` and `Cmd.observeCompletion`
+return bounded status normally and never detach. Explicit ownership transfer is
+required before returning unfinished owned work. Use ordinary `Cmd.await` for a
+dependent continuation, or completion events for ongoing observers. Waiting alone
+does not collect test evidence.
 `max_output_bytes` is a byte budget, not a token count. Direct execution responses
 use at most 32 KiB (default 32 KiB). Output that fits `max_output_bytes` is shown
 whole. Without `focus`, output over budget is shown as a head and a tail with a
@@ -129,19 +131,22 @@ If capture is incomplete, `Cmd.readStdout (Cmd.job result)` explicitly reads
 complete retained stdout, or reports why it is unavailable. Repeated `await`
 is not a way to enlarge capture.
 
-`Cmd.run command` starts and waits up to 30 seconds; `Cmd.await job` observes an
-existing job for the same command job. Both return completed results, including
-nonzero exits. On overrun, the interactive workbench stops the current computation
-and installs a real `jobN :: Cmd.Job` binding, named in its receipt. The command
-continues. The enclosing result is not bound and subsequent statements do not
-run. Inspect `Cmd.status jobN`, read `Cmd.output jobN`, or later `Cmd.await jobN`.
-That later observation does not resume the discarded continuation. Do not rerun
-the command to recover output. Earlier committed bindings remain available.
-A Haskell actor handler instead fails normally; it has no interactive remediation
-binding. Use `Cmd.start` and completion events there for unattended long work.
-`Cmd.observe (Cmd.Observation 250 8192) job` instead returns the current status
-normally after a bounded wait, displaying available output without stopping the
-enclosing Haskell program.
+`Cmd.run command` starts and suspends until terminal completion; `Cmd.await job`
+suspends on the existing job. The same Haskell continuation resumes, including
+later statements, and both return completed results including nonzero exits.
+This contract also applies to tool bodies and record-actor handlers. A handler
+remains serialized while suspended: do not wait for its own mailbox to advance.
+`Cmd.observe (Cmd.Observation 250 8192) job` returns the current status normally
+after a bounded wait. It never detaches or cancels the job.
+
+`Cmd.start` and `Cmd.tryStart` create invocation-owned work. Scope exit cancels
+unfinished owned jobs and retains outcome and cleanup. Await them in the same
+invocation, or use `Cmd.detach job` (`tryDetach` returns typed refusal) before
+returning. `Cmd.background command` and `tryBackground` explicitly start
+actor-owned work and install completion delivery. Returning or capturing a job
+handle does not change its lifetime. Borrowed handles permit observation while
+available; cancelling a borrowed waiter releases that wait and cannot cancel
+the owner's command.
 
 Commands are reusable values. Quotations preserve literal Bash, including
 multiline scripts, heredocs and indentation. Haskell does not interpolate shell
@@ -178,12 +183,13 @@ with piped or closed input, never `TerminalInput`.
 
 Ordinary commands use 1024 MiB. Choose realistic explicit memory for builds/tests,
 e.g. `job <- Cmd.start (withMemory (GiB 8) [bash|cargo build|])`.
-`start` returns immediately; admission queues automatically. Retain the job,
-do other work, and observe it later. Memory is a hard limit and admission weight.
-`traverse Cmd.run commands` works sequentially until completion or a foreground
-stop. To start all first, retain `jobs <- traverse Cmd.start commands`, then
-collect with `traverse Cmd.await jobs`. Collection follows input order; nonzero
-exit does not cancel siblings. Interrupted observation leaves jobs available.
+`start` returns immediately; admission queues automatically. Memory is a hard
+limit and admission weight. `traverse Cmd.run commands` runs sequentially to
+terminal completion. To start all first, retain `jobs <- traverse Cmd.start commands`,
+then collect with `traverse Cmd.await jobs` in the same invocation. Collection
+follows input order; nonzero exit does not cancel siblings. For work across
+invocations use `Cmd.background` or explicit `Cmd.detach`; cancellation of an
+owned invocation stops its unfinished commands.
 `Cmd.cancel job` requests cancellation; status/await reports outcome and cleanup.
 Live handles do not promise recovery after host restart.
 

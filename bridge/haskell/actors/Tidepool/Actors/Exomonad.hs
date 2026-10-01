@@ -145,10 +145,12 @@ module Tidepool.Actors.Exomonad
   , UnfoldError (..)
   , renderUnfoldError
   , attemptUnfold
+  , attemptUnfoldDeferred
   , unfold
+  , unfoldDeferred
   , spawnWatched
   , errand
-  , AgentSpec
+  , AgentLaunchSpec
   , AgentRef
   , AgentState (..)
   , AgentObservation (..)
@@ -188,13 +190,13 @@ module Tidepool.Actors.Exomonad
   , Response
   , codingAgent
   , readonlyAgent
+  , withAgentLifetime
   , startAgent
   , request
   , Duration
   , milliseconds
   , seconds
   , minutes
-  , requestWith
   , requestWithProgress
   , requestWithProgressInto
   , Progress
@@ -223,6 +225,7 @@ module Tidepool.Actors.Exomonad
   , requestId
   , pollResponse
   , cancelRequest
+  , detachRequest
   , abandonResponse
   , forgetResponse
   , acknowledgeCancellation
@@ -245,6 +248,8 @@ module Tidepool.Actors.Exomonad
   , awaitAnySettled
   , watch
   , pollWatch
+  , awaitWatch
+  , waitFor
   , Route
   , RouteState (..)
   , route
@@ -311,7 +316,7 @@ import Tidepool.Agent.Watch
 import Tidepool.Actors.Internal.Agent
   ( AgentRef
   , AgentObservation (..)
-  , AgentSpec
+  , AgentLaunchSpec
   , AgentState (..)
   , Response
   , codingAgent
@@ -336,10 +341,10 @@ import Tidepool.Actors.Internal.Agent
   , milliseconds
   , seconds
   , minutes
-  , requestWith
   , requestWithProgress
   , requestWithProgressInto
   , StopOutcome (..)
+  , withAgentLifetime
   , startAgent
   , stopAgent
   , sendMessage

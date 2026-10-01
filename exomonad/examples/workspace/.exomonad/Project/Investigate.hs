@@ -454,10 +454,21 @@ data Investigation = Investigation
 
 -- Run a command in the repository and hand back its stdout, quietly: this is
 -- evidence gathering, not work the operator needs to watch scroll past.
+-- git grep exit 1 means no matches; complete stdout stays useful at any exit.
 readCommand :: Member Commands effs => Text -> [Text] -> Eff effs Text
 readCommand directory args = do
   result <- Cmd.quiet (Cmd.run (Cmd.inDirectory directory (Cmd.argv args)))
-  pure (Cmd.outputText (Cmd.commandStdout (Cmd.capturedOutput result)))
+  captured <- Cmd.readCommand (Cmd.job result)
+  case captured of
+    Left issue -> error ("Investigation command capture unavailable: " <> show issue)
+    Right retained -> case Cmd.capturedStdout retained of
+      Cmd.CaptureComplete text -> pure text
+      Cmd.CapturePartial page _ -> error
+        ("Investigation command stdout is incomplete for " <> show (Cmd.job result)
+          <> ": " <> show page)
+      Cmd.CaptureRefused issue _ -> error
+        ("Investigation command stdout was refused for " <> show (Cmd.job result)
+          <> ": " <> show issue)
 
 -- Qualified suffixes of a name, most specific first:
 -- `app::ActivePanel::Tags`, `ActivePanel::Tags`, `Tags`. A use site rarely

@@ -4,124 +4,102 @@ Every execution owner uses the same cycle:
 
 **scaffold → admit a ready parallel batch → integrate checked results → repeat.**
 
-The Sol root owns cross-component decisions. Luna component owners repeat the
-cycle through subcomponent owners to microtask leaves. Aim for at least three
-Luna implementation levels on average, with real parallel work at each useful
-frontier. Before substantial direct implementation, explain why the remaining
-assignment is a terminal leaf. A reviewer is not an implementation level.
+The Sol root owns cross-component choices. Luna component owners repeat the cycle
+through subcomponents to justified microtask leaves. Useful implementation depth
+requires shared boundaries and independent work; reviewers or forwarding nodes
+are not implementation levels. Explain a terminal leaf before substantial direct
+implementation.
 
-Scaffold only what the next children need: shared types, module wiring, exact
-source, owned paths, local gates and an integration owner. Reuse existing source.
-The child has its own narrower acceptance; the parent still owes the combined
-gate. Commit the shared boundary, admit independent work together, and do local
-integration work while it runs. Do not author a global graph of guessed steps.
+Scaffold only what the next children need: shared types, consumer wiring, exact
+source, owned paths, local gates and an integration owner. Commit that boundary,
+admit independent work together and continue local integration. The child owes
+its own gate; the parent still owes combined acceptance. A later batch uses its
+actual new source rather than a prewritten global graph.
 
-## Admit and observe a local batch
+## Admit and collect a local batch
 
-`lunaLead label effort task` returns a branch requesting `Delivery`, using the
-configured `lead` instructions. `lunaTask` is polymorphic: code changes can return
-`Outcome Candidate`; investigation can return `Outcome Text`; other contracts
-keep their actual type. Nothing requires a fabricated commit.
+`Project.Work.lunaLead` requests `Delivery`; `lunaTask` preserves the actual result
+type, including no-change findings. Model aliases, effort and prompt selection
+are project policy. Helpers select focused Task context; a descendant reusing a
+scaffold can choose `withContext (fromCheckpoint captured)` explicitly.
 
-`unfoldWork group branches sink` composes `unfold` and the existing work collector.
-It silences each branch's duplicate settlement notification, returns the original
-typed response/progress handles in `batchMembers`, and the collector in
-`batchRouter`. Each batch has one result type; independent batches can differ.
-Do not await new children inside their admission cell.
+`Exomonad.Contrib.Routing.unfoldWorkBatch` admits an applicative plan and returns
+`Either BatchFailure (RoutedBatch handles event)`. Its original heterogeneous
+handle product remains in `routedMembers`; results map into an authored event
+sum. `unfoldWork` is the homogeneous-list convenience returning a `WorkBatch`,
+with original response/progress handles in `batchMembers` and collector in
+`batchRouter`. Preflight checks the full plan before allocation. Optional
+observer refusal or delivery failure is retained without breaking collection.
 
-The runnable cells in [checks/recursive-batch.hs](checks/recursive-batch.hs) admit
-two independent findings tasks. [Project.RecursiveWorkChecks.nestedBatches](Project/RecursiveWorkChecks.hs)
-uses those same cells at three descendant levels, then admits a second local
-batch after the first results arrive. It demonstrates the mechanics without
-claiming findings are implementation work or measuring model performance.
-Replace the tasks with the actual ready frontier and use `lunaLead` for component
-owners. Choose selected context across model tiers; focused Luna descendants should
-use `withContext inherited` to reuse the scaffold reasoning. Later source or decisions need explicit delivery.
+Default child lifetime is `InvocationOwned`. Await immediate children in the
+same invocation for an ordinary dependent program. Decorate branches with
+`withLifetime ActorOwned` when model decisions or work across turns participate.
+Returning handles, registering a watch or ending a model response does not
+transfer lifetime. Deferred admission requires explicit persistent lifetime and
+must return before its children start. See [WORKBENCH.md](WORKBENCH.md).
 
-On an actionable notice, read the collector once and inspect relevant original
-receipts. A candidate, reply, accepted review, integrated source and released
-resources are different facts. `finishWorkBatch` refuses while any original
-result remains pending; a successful finish drains the collector, not the workers.
-Make a brief kaizen answer part of each child's handoff and read it before
-retirement. After reviewing, integrating and checking the local result, finish
-the collector and release the completed group with the cleanup skill. One pending
-member blocks the entire group before any stop; retain that group for named work.
-Separately admitted sibling groups can be released independently. Keep the cleanup
-receipt; `StoppedReleasing` still needs its later host notice.
+The source cells in [checks/recursive-batch.hs](checks/recursive-batch.hs) and
+[Project.RecursiveWorkChecks.nestedBatches](Project/RecursiveWorkChecks.hs) exercise
+successive local batches through nested owners. They test mechanics and preserve
+failure observations; they do not measure model performance or establish live
+implementation acceptance.
+
+On an actionable notice, read the collector and relevant original receipts.
+`acknowledgeWork` marks inspected publications, never verified incorporation.
+`finishWorkBatch` refuses while original results remain pending and drains the
+collector after settlement. It does not retire workers. Read each child's brief
+kaizen handoff, review exact source, integrate and verify the resulting revision.
+Release completed groups with the cleanup skill and retain actual stop outcomes;
+a pending group member blocks the group before any stop. Separately admitted
+groups can be released independently. `StoppedReleasing` needs its later notice.
 
 ## Checked review, repair and integration
 
-For a separate implementer whose original response produces `Outcome Candidate`,
-use `startReviewFlow owner task policy response checks`. The return is
-`Either Text ReviewRun`; it retains the flow actor, initial forwarding route and
-check worktree handle. The caller supplies focused `PlanCheck` values rather than
-reconstructing command/evidence logic at every review.
+For a separate implementer, `startReviewFlow owner task policy response checks`
+returns `Either Text ReviewRun`. It subscribes to the original worker directly
+and retains its flow and check worktree. `Exomonad.Contrib.ReviewFlow` owns the
+continuation; `Project.ReviewPolicy` supplies reviewer instructions, placement,
+check/review policy and optional bounded semantic repair routing.
 
-ReviewFlow validates the original response's exact source, runs counted checks,
-admits an exact-source reviewer, and routes within-contract repair to the retained
-implementer under one repair budget. Unknown check evidence and scope uncertainty
-stop for the owner. Reviewer and repair questions are collected while their
-requests stay pending; the local owner receives question changes without a second
-settlement notice. Each collector drains on its original result and retains its
-exit. The automatic reviewer inspects source and supplied check evidence; the
-flow owns executed checks. On a question notice, `reviewSnapshot` retains the
-active `flowReviewerCollectors` and `flowRepairCollectors`; use `readWork` for
-the full question and the corresponding original response to identify its actor.
-Settled collector exits remain in `flowReviewerCollected` and `flowRepairCollected`.
-Set explicit escalation criteria for semantic repair routing.
-`startReviewFlowWith` accepts a project-specific bounded routing function using
-the same machinery. It cannot upgrade a repair verdict into acceptance.
+The flow validates the exact submission, executes counted checks and admits a
+reviewer at that source. It retains original reviewer and repair handles, progress,
+questions and typed attachment refusals. `reviewSnapshot` exposes the retained
+state. Known within-contract repairs use one budget and a separate implementer;
+unknown evidence, scope uncertainty or failed admission stops for the owner.
+Never queue repair behind your own delivery while it waits for review.
 
-The executed setup is [checks/checked-review-setup.hs](checks/checked-review-setup.hs).
-Its recipes cover green evidence, check repair, zero selection, missing evidence,
-source mismatch, escalation, and publication. For local automatic integration,
-set `flowIntegration` to an existing `Project.Merge.MergeTarget`. That actor
-serializes checked publication; `ReviewIntegrated` retains its actual result.
-A failed integration retains its source/evidence and returns to the owner.
-Leave integration unset when the owner will perform that step itself.
+Authored `reportedChecks` and `reviewNotes` remain claims. Counted execution,
+original exact review proof and integration checks remain separate evidence.
+An automatic inspection reviewer consumes source and supplied check evidence;
+choose a coding reviewer when it must execute checks. Component review examines
+joins and combined acceptance rather than repeating every descendant's review.
 
-Never send repair to yourself while your Delivery is waiting for that review.
-Keep leaf review focused on its change; component review checks joins and the
-combined acceptance instead of repeating every descendant's review. For manual
-review of a revised candidate, `requestReview uniqueLabel revisedRequest` admits
-the exact checkout while preserving the supplied review basis. Merely sending a
-new request to a retained reviewer does not move that actor's checkout.
+[checks/checked-review-setup.hs](checks/checked-review-setup.hs) supplies model-free
+recipes for green evidence, repair, zero matches, missing evidence, source mismatch,
+escalation and publication. These examples require execution on the integrated
+revision before reporting them as passing. Optional `flowIntegration` uses an
+existing `Exomonad.Contrib.Merge.MergeTarget` for serialized checked publication.
+A failed integration retains source and evidence; leave integration unset when
+the owner will integrate directly.
 
-Read the terminal flow and retain interviews before `reviewCleanup`; preserve
-its actual stop outcomes, then finish the flow. The returned check worktree is
-explicit retained ownership, not evidence of resource release.
+A revised manual review uses `requestReview uniqueLabel revisedRequest` for an
+exact-source reviewer. Merely requesting another commit from a retained reviewer
+does not move its checkout. Read terminal flow evidence and interviews before
+`reviewCleanup`, retain its actual stop outcomes, then finish the flow. The check
+worktree remains explicitly owned until its cleanup path releases it.
 
-## Relay existing decisions without parent bookkeeping
+## Relay current decisions
 
-Use `unfoldAnsweredWork owner group [(name, task, branchConstructor), ...] sink`
-to admit a batch and attach answers in one call. For example, a constructor can
-be `lunaLead childLabel Medium`; the helper supplies its exact Task and binds the
-recipient from the actual response. For an existing admission,
-`startDecisionAnswers owner targets` attaches the decisions already authorized. Each `AnswerTarget` binds the collector's source name,
-recipient and exact Task. Decorate its normal sink with `withDecisionAnswers`.
-Jev selects only a supplied original decision. The receiver gets that exact
-decision and evidence; it must still check applicability and incorporation.
+`Project.DecisionAnswers` can relay already authorized decisions from exact
+Tasks and source. Its normal sink retains uncertain, conflicting, stale, oversized
+or failed cases for the owner. Notification admission proves neither reading nor
+incorporation. Keep source-bearing decisions current; disable the answer actor
+before changing them and drain its collector before finishing it. It does not
+amend tasks, authorize rebases or replace shared-design decisions.
 
-The deterministic guard requires the question's plan/source and every supplied
-decision's source to match the Task. Changed source needs a newly authorized set.
-At most eight decisions and 6,000 encoded state characters enter a judgment;
-an actor retains at most 32 distinct episodes. Repeated identical questions reuse
-the original receipt and never retry an uncertain send. An admitted notification
-suppresses that question's immediate parent notice; it proves neither reading nor
-incorporation. Unknown, conflicting, oversized,
-exhausted or failed cases preserve it. Full questions remain in the collector.
+## Evaluate delivered work
 
-The answer actor is part of that batch's routing lifetime. Disable it before a
-decision changes; finish the collector before finishing the answer actor. This
-does not amend a Task or authorize a rebase. Shared-design changes still go to
-the parent. [DecisionAnswerChecks.routing](Project/DecisionAnswerChecks.hs) exercises
-the guards and retained original decisions with a deterministic injected chooser;
-live semantic probes are a separate gate.
-
-## Judge the workflow by delivered work
-
-Record useful implementation depth and overlap, time to the first useful fork,
-dependency waiting, source corrections, reviewer findings, parent relay rounds,
-and elapsed time to checked delivery. Three levels of serialized forwarding do
-not satisfy the purpose. The experiment is parallel engineering with less
-bookkeeping and strong review, not an actor-count target.
+Record useful implementation depth and overlap, first useful fork, dependency
+waiting, source corrections, reviewer findings, relay rounds and time to checked
+delivery. Structural simplification is distinct from a measured speedup. Live
+model trials, adapter acceptance and publication remain their own gates.

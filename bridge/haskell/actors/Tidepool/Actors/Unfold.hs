@@ -88,9 +88,9 @@ module Tidepool.Actors.Unfold
   , UnfoldError (..)
   , renderUnfoldError
   , attemptUnfold
-  , attemptUnfoldCaptured
+  , attemptUnfoldDeferred
   , unfold
-  , unfoldCaptured
+  , unfoldDeferred
   , spawnWatched
   , errand
   ) where
@@ -104,6 +104,7 @@ import Prelude
 
 import qualified Tidepool.Actor as Actor
 import Tidepool.Agent.Reply (Replies, Response)
+import Tidepool.Agent.Session (ActivationMetadata (..))
 import Tidepool.Agent.Watch (Settlement, Watch, WatchLabel, Watches, awaitSettled, watch)
 import Tidepool.Agent.Reply.Internal (Progress (..), responseRequestId, responseAdmission, withResponseAdmission)
 import Tidepool.Agent.Assignment (Assignment (..), Label, NameError (..), SettlementReporting, assignment, labelText, renderNameError, validateKebabSegment)
@@ -117,8 +118,8 @@ import Tidepool.Actors.Internal.Agent
   , agentIdentity
   , lookupAgent
   , readonlyAgent
-  , requestWith
-  , requestWithSited
+  , request
+  , requestActivatedSited
   , startAgent
   , startForkedAgent
   , roleCode
@@ -242,14 +243,13 @@ data BranchOptions = BranchOptions
   { branchInstructions :: Maybe Text
   , branchEffort :: Maybe ForkEffort
   , branchModel :: Maybe Model
-  , branchContext :: ForkContext
-  , branchCheckpoint :: Maybe Text
+  , branchContext :: BranchContext
   , branchLifetime :: WorkerLifetime
   , branchBudget :: Maybe ForkBudget
   }
 
 defaultBranchOptions :: BranchOptions
-defaultBranchOptions = BranchOptions Nothing Nothing Nothing InheritedContext Nothing ParentOwned Nothing
+defaultBranchOptions = BranchOptions Nothing Nothing Nothing ContextInherited InvocationOwned Nothing
 
 -- | Requested descendant generations and active descendants across the subtree.
 -- The runtime clamps these to configured ceilings and remaining parent authority.
@@ -313,7 +313,7 @@ previewBranch
   -> Eff effects (Either Text BranchPreview)
 previewBranch (Branch role seed effects options assigned) = do
   let keys = effectKeys effects
-  answer <- send (ForksPreviewWith (roleCode (launchRoleFor role)) keys (budgetPair <$> branchBudget options) (branchModel options) (branchEffort options) (branchContext options) (branchInstructions options) (branchLifetime options))
+  answer <- send (ForksPreviewWith (roleCode (launchRoleFor role)) keys (budgetPair <$> branchBudget options) (branchModel options) (branchEffort options) (contextPolicy (branchContext options)) (branchInstructions options) (branchLifetime options))
   pure $ case answer of
     Left failure -> Left failure
     Right ((row, depth, width), launch) -> Right BranchPreview
@@ -323,7 +323,7 @@ previewBranch (Branch role seed effects options assigned) = do
       , previewRequestedBudget = branchBudget options
       , previewEffectiveBudget = ForkAllowance depth width
       , previewEffects = row
-      , previewContext = branchContext options
+      , previewContext = contextPolicy (branchContext options)
       , previewLifetime = branchLifetime options
       , previewGuidance = guidance assigned
       , previewLaunch = launch
@@ -353,10 +353,25 @@ withModel model (Branch role seed effects options assigned) =
 
 newtype ContextCheckpoint = ContextCheckpoint Text
 
+-- Context selection is independent of checkout and resource authority.
+data BranchContext
+  = ContextInherited
+  | ContextSelected
+  | ContextCaptured ContextCheckpoint
+
+contextPolicy :: BranchContext -> ForkContext
+contextPolicy ContextInherited = InheritedContext
+contextPolicy ContextSelected = SelectedContext
+contextPolicy (ContextCaptured _) = InheritedContext
+
+checkpointToken :: BranchContext -> Maybe Text
+checkpointToken (ContextCaptured (ContextCheckpoint token)) = Just token
+checkpointToken _ = Nothing
+
 -- | Capture the current Haskell environment and exact hosted provider call.
 -- The delivered capture becomes usable before the enclosing call finishes.
--- 'unfold' still defers publication; 'unfoldCaptured' publishes its own group
--- from the provider prefix before this call and the captured Haskell scope.
+-- 'unfold' publishes from the provider prefix before this call and the
+-- captured Haskell scope, without waiting for the enclosing tool result.
 checkpoint :: Member Forks es => Text -> Eff es (Either CheckpointRefusal ContextCheckpoint)
 checkpoint name = fmap ContextCheckpoint <$> send (ForksCheckpointWith name)
 
@@ -381,11 +396,11 @@ fromCheckpoint = FromCheckpoint
 -- remain available from the swarm's fixed source selection.
 withContext :: WorkerContext input -> Branch child input result -> Branch child input result
 withContext context (Branch role seed effects options assigned) = case context of
-  Inherited -> Branch role seed effects (options { branchContext = InheritedContext, branchCheckpoint = Nothing }) assigned
-  Selected render -> Branch role seed effects (options { branchContext = SelectedContext, branchCheckpoint = Nothing })
+  Inherited -> Branch role seed effects (options { branchContext = ContextInherited }) assigned
+  Selected render -> Branch role seed effects (options { branchContext = ContextSelected })
     (assigned { guidance = Just (render (input assigned)) })
-  FromCheckpoint (ContextCheckpoint token) ->
-    Branch role seed effects (options { branchContext = InheritedContext, branchCheckpoint = Just token }) assigned
+  FromCheckpoint captured ->
+    Branch role seed effects (options { branchContext = ContextCaptured captured }) assigned
 
 -- | Persistent behavioral instructions, independent of task context and authority.
 withInstructions :: Text -> Branch child input result -> Branch child input result
@@ -596,47 +611,59 @@ data UnfoldError
   = UnfoldBeginRejected Text
   | UnfoldCheckpointRefused CheckpointRefusal
   | UnfoldUncapturedContext Text
+  | UnfoldDeferredInvocationOwned Text
   | UnfoldBranchRejected Text Text
   | UnfoldShapeMismatch Text
   | UnfoldCommitRejected Text
   deriving (Show, Eq)
 
--- | Interpret one independent applicative layer. Actor construction is a
--- complete first pass and request publication is a complete second pass; the
--- runtime batch owner adds rollback and provider-readiness gating around this
--- same Haskell-owned result tree.
-attemptUnfold
+-- | Admit a group whose inherited context includes the real enclosing tool
+-- result and final committed Haskell bindings. Children start after that
+-- publication boundary. Every branch needs explicit ActorOwned or SwarmOwned
+-- lifetime; invocation-owned work cannot survive this deferred boundary.
+-- Explicit captures and selected contexts are preserved.
+attemptUnfoldDeferred
   :: forall parent result
    . (Member Forks parent, Member Replies parent, Member AgentInspection parent)
   => ForkGroupPath
   -> Unfold parent result
   -> Eff parent (Either UnfoldError result)
-attemptUnfold = attemptUnfoldUsing ForksCommitWith
+attemptUnfoldDeferred path plan = case branchLabelsWhere invocationOwned plan of
+  label : _ -> pure (Left (UnfoldDeferredInvocationOwned label))
+  [] -> attemptUnfoldUsing ForksCommitWith path plan
+  where
+    invocationOwned options = branchLifetime options == InvocationOwned
 
 -- | Publish an independent group before the enclosing call returns. Every
 -- branch must use 'fromCheckpoint' or 'selected'. Checkpoint branches retain
 -- the captured Haskell environment and the provider prefix before its call;
 -- selected branches start with a fresh context. Earlier pending provider
 -- calls in a checkpoint prefix remain dependencies of that context.
-attemptUnfoldCaptured
+attemptUnfold
   :: forall parent result
    . (Member Forks parent, Member Replies parent, Member AgentInspection parent)
   => ForkGroupPath
   -> Unfold parent result
   -> Eff parent (Either UnfoldError result)
-attemptUnfoldCaptured path plan = case uncapturedBranches plan of
+attemptUnfold path plan = case uncapturedBranches plan of
   label : _ -> pure (Left (UnfoldUncapturedContext label))
   [] -> attemptUnfoldUsing ForksCommitCapturedWith path plan
 
 uncapturedBranches :: Unfold parent result -> [Text]
-uncapturedBranches (PureU _) = []
-uncapturedBranches (BranchU _ (Branch _ _ _ options assigned)) =
-  case (branchCheckpoint options, branchContext options) of
-    (Just _, _) -> []
-    (_, SelectedContext) -> []
-    _ -> [labelText (assignmentLabel assigned)]
-uncapturedBranches (ApU functions arguments) =
-  uncapturedBranches functions ++ uncapturedBranches arguments
+uncapturedBranches = branchLabelsWhere inheritedContext
+  where
+    inheritedContext options = case branchContext options of
+      ContextInherited -> True
+      ContextSelected -> False
+      ContextCaptured _ -> False
+
+branchLabelsWhere :: (BranchOptions -> Bool) -> Unfold parent result -> [Text]
+branchLabelsWhere _ (PureU _) = []
+branchLabelsWhere matches (BranchU _ (Branch _ _ _ options assigned))
+  | matches options = [labelText (assignmentLabel assigned)]
+  | otherwise = []
+branchLabelsWhere matches (ApU functions arguments) =
+  branchLabelsWhere matches functions ++ branchLabelsWhere matches arguments
 
 attemptUnfoldUsing
   :: forall parent result
@@ -654,7 +681,7 @@ attemptUnfoldUsing commit path plan = do
 checkpointTokens :: Unfold parent result -> [Text]
 checkpointTokens (PureU _) = []
 checkpointTokens (BranchU _ (Branch _ _ _ options _)) =
-  case branchCheckpoint options of
+  case checkpointToken (branchContext options) of
     Nothing -> []
     Just token -> [token]
 checkpointTokens (ApU functions arguments) =
@@ -763,31 +790,25 @@ unfold path plan = do
     Left failure -> error (Text.unpack (renderUnfoldError failure))
     Right result -> pure result
 
-unfoldCaptured
+unfoldDeferred
   :: forall parent result
    . (Member Forks parent, Member Replies parent, Member AgentInspection parent)
   => ForkGroupPath
   -> Unfold parent result
   -> Eff parent result
-unfoldCaptured path plan = do
-  attempted <- attemptUnfoldCaptured path plan
+unfoldDeferred path plan = do
+  attempted <- attemptUnfoldDeferred path plan
   case attempted of
     Left failure -> error (Text.unpack (renderUnfoldError failure))
     Right result -> pure result
 
--- | What an admission refusal says, in the words the host used.
---
--- The host already composes one clean sentence for each of these — which
--- coordinator's ceiling is full, which branch was rejected and why. Showing
--- the constructor instead wrapped that sentence in Haskell source syntax and
--- buried it, which is what a dogfood run 7 node read when its reviewer was
--- refused. The label is kept for the branch case, because a plan that admits
--- several children needs to know which one was refused.
+-- | Preserve host refusal details and the exact branch label for correlation.
 renderUnfoldError :: UnfoldError -> Text
 renderUnfoldError failure = case failure of
   UnfoldBeginRejected detail -> detail
   UnfoldCheckpointRefused refusal -> Text.pack (show refusal)
-  UnfoldUncapturedContext label -> label <> ": captured unfold requires a checkpoint or selected context"
+  UnfoldUncapturedContext label -> label <> ": immediate unfold requires fromCheckpoint or selected; use unfoldDeferred for inherited context"
+  UnfoldDeferredInvocationOwned label -> label <> ": deferred unfold requires withLifetime ActorOwned or SwarmOwned; invocation-owned work must use immediate unfold"
   UnfoldBranchRejected label detail -> label <> ": " <> detail
   UnfoldShapeMismatch detail -> detail
   UnfoldCommitRejected detail -> detail
@@ -795,7 +816,10 @@ renderUnfoldError failure = case failure of
 -- | Admit one planned child (@child \@T branch@) in @path@ and register a
 -- labeled wake for its settlement: 'unfold' followed by
 -- @watch label (awaitSettled response)@. Both handles are returned; the child
--- starts after the cell returns.
+-- starts at publication from an explicit checkpoint or selected context.
+-- Returning these handles does not extend the branch's lifetime. Use
+-- @awaitWatch@ within the admitting invocation, or explicitly choose
+-- @withLifetime ActorOwned@ when constructing a persistent branch.
 spawnWatched
   :: forall result parent
    . ( Member Forks parent, Member Replies parent, Member AgentInspection parent
@@ -809,27 +833,15 @@ spawnWatched label path planned = do
   settled <- watch label (awaitSettled response)
   pure (response, settled)
 
--- | One read-only errand: a name, a task, a reply.
+-- | Start one inspection-only question and return a watch for its prose reply.
+-- The child uses a fresh context, the caller's checkout and a descendant
+-- budget of zero. It is invocation-owned: compose or poll its watch, or use
+-- @awaitWatch@ within the same invocation. Returning the watch does not detach
+-- the worker; unfinished work ends when that invocation exits.
 --
--- @errand "repo-layout" "which crate owns the compile cache?"@ is the whole
--- call. There is no record to define, no client to construct, no state to
--- query and no retirement to write: the child holds no worktree, so it
--- resolves to the research role (inspection-only native tools,
--- inspection-only workspace, and a descendant budget of zero), and it is
--- started parent-owned, so it goes when its owner does.
---
--- Deliberately NOT 'unfold'. A question needs no fork group, no source
--- checkpoint, no @git worktree add@, and no wait for the enclosing cell to
--- return before the child may start; @plans\/jev-lab\/child-startup-costs.md@
--- is what each of those costs. Use 'unfold' when the child must inherit this
--- conversation or own a checkout. Use 'errand' to ask.
---
--- The reply is prose, not a record: read it off the returned watch with
--- @pollWatch@, then @settledValue@ on the settlement. That is the whole of
--- the difference from 'child' and @request@, which hold a child to a schema
--- derived from a result type you annotate. When the answer has structure
--- worth typing, those are still the calls to make; an errand is for the
--- answer you would have read yourself.
+-- For an ask that must outlive the invocation, use 'unfold' with an explicit
+-- 'selected' or 'fromCheckpoint' context and @withLifetime ActorOwned@.
+-- Typed structured results use 'child' or 'request' with a result annotation.
 errand
   :: forall parent
    . (Member AgentLaunch parent, Member Replies parent, Member Watches parent)
@@ -842,7 +854,7 @@ errand name task = do
   -- site the way 'requestBranch' does. A result type left open for the caller
   -- to fix would have no site at all in this module — the extractor walks the
   -- library's Core, not only the authored cell's.
-  reply <- requestWith @Text @Text agent (assignment name task)
+  reply <- request @Text @Text agent (assignment name task)
   -- 'Label' and 'WatchLabel' validate by the same predicate, so the name that
   -- built the first cannot fail the second.
   watch (WatchLabel (labelText name)) (awaitSettled reply)
@@ -866,8 +878,8 @@ startBranch groupId allocated (Branch role seed effects options _) = do
     (branchEffort options)
     (budgetPair <$> branchBudget options)
     (branchModel options)
-    (branchContext options)
-    (branchCheckpoint options)
+    (contextPolicy (branchContext options))
+    (checkpointToken (branchContext options))
     (branchInstructions options)
     (branchLifetime options)
   pure $ case launched of
@@ -921,8 +933,7 @@ requestBranch site groupId (ForkGroupPath _ group) (Branch role _ _ options assi
   let leaf = labelText (assignmentLabel assigned)
   let requested = group <> "/" <> leaf
       (actorId, incarnation) = agentIdentity actor
-      assignedWithSiblings = assigned { assignmentSiblings = siblings }
-  response <- requestWithSited @result @input site actor assignedWithSiblings
+  response <- requestActivatedSited @result @input site actor assigned (ActivationMetadata siblings (branchLifetime options))
   observed <- lookupAgent actor
   let pair maybeId maybeInc = (,) <$> maybeId <*> maybeInc
   pure (withResponseAdmission

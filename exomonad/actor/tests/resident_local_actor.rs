@@ -253,16 +253,29 @@ async fn supply_command_until_started(
 }
 
 async fn wait_for_command_completions(backend: &DelayedCommandBackend, count: usize) {
-    loop {
-        if backend
-            .completion_count
-            .load(std::sync::atomic::Ordering::Acquire)
-            >= count
-        {
-            return;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            if backend
+                .completion_count
+                .load(std::sync::atomic::Ordering::Acquire)
+                >= count
+            {
+                return;
+            }
+            backend.completed.notified().await;
         }
-        backend.completed.notified().await;
-    }
+    })
+    .await;
+    assert!(
+        result.is_ok(),
+        "expected {count} command completions, observed {} ({} cancellations)",
+        backend
+            .completion_count
+            .load(std::sync::atomic::Ordering::Acquire),
+        backend
+            .cancellation_count
+            .load(std::sync::atomic::Ordering::Acquire),
+    );
 }
 
 #[tokio::test]
@@ -382,6 +395,7 @@ async fn resident_await_watch_case(case: WatchCase) {
         tidepool_mcp::actor_local_decl(),
         tidepool_mcp::commands_decl(),
         tidepool_mcp::fs_read_decl(),
+        tidepool_mcp::sleep_decl(),
     ];
     let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
     let mut include = effects.include_paths().to_vec();
@@ -394,7 +408,7 @@ async fn resident_await_watch_case(case: WatchCase) {
     let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Watch (Watches)");
     let preamble = format!(
         "{preamble}\
-         type ActorEffects = '[AgentTools, Actor, Commands, Watch.Watches]\n\
+         type ActorEffects = '[AgentTools, Actor, Commands, Watch.Watches, Sleep]\n\
          data WaitInput = WaitInput {{ delay :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
          data WaitOutput = WaitOutput {{ settled :: Bool }} deriving (Generic, ToJSON, JsonSchema)\n\
          data ResidentTools mode = ResidentTools {{ waitForCommand :: mode :- Call WaitInput WaitOutput }} deriving (Generic)\n"
@@ -473,6 +487,7 @@ async fn resident_await_watch_case(case: WatchCase) {
                 exomonad_actor::EffectiveRole::root().with_effect_keys(vec![
                     exomonad_actor::ActorEffectKey::Commands,
                     exomonad_actor::ActorEffectKey::Watches,
+                    exomonad_actor::ActorEffectKey::Sleep,
                 ]),
             )
             .await
@@ -692,12 +707,11 @@ async fn resident_await_watch_case(case: WatchCase) {
         })
         .await
         .expect("captured owned sleep parks after compiler preparation");
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(100), &mut cancelled_call)
-                .await
-                .is_err(),
-            "captured sleep keeps the original reply pending"
-        );
+        if let Ok(reply) =
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut cancelled_call).await
+        {
+            panic!("captured sleep settled before cancellation: {reply:?}");
+        }
     } else {
         let cancellation_start_bound = 180;
         tokio::time::timeout(std::time::Duration::from_secs(cancellation_start_bound), async {
@@ -820,8 +834,9 @@ async fn resident_cleanup_case(fail_hook: bool) {
          data SpawnOutput = SpawnOutput {{ started :: Bool }} deriving (Generic, ToJSON, JsonSchema)\n\
          data StateInput = StateInput {{ next :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
          data StateQuery = StateQuery deriving (Generic, FromJSON, JsonSchema)\n\
+         data FinishInput = FinishInput {{ confirm :: Bool }} deriving (Generic, FromJSON, JsonSchema)\n\
          data StateOutput = StateOutput {{ current :: Int }} deriving (Generic, ToJSON, JsonSchema)\n\
-         data ResidentTools mode = ResidentTools {{ doubleValue :: mode :- Call EchoInput EchoOutput, spawnChild :: mode :- Call SpawnInput SpawnOutput, currentValue :: mode :- Call StateQuery StateOutput, setValue :: mode :- Update StateInput StateOutput, finishValue :: mode :- Finish StateQuery StateOutput }} deriving (Generic)\n"
+         data ResidentTools mode = ResidentTools {{ doubleValue :: mode :- Call EchoInput EchoOutput, spawnChild :: mode :- Call SpawnInput SpawnOutput, currentValue :: mode :- Call StateQuery StateOutput, setValue :: mode :- Update StateInput StateOutput, finishValue :: mode :- Finish FinishInput StateOutput }} deriving (Generic)\n"
     );
     let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
@@ -973,6 +988,41 @@ async fn resident_cleanup_case(fail_hook: bool) {
         .expect("change sibling state");
     assert_eq!(changed, serde_json::json!({"current": 73}));
 
+    // Malformed state transitions and completion calls must refuse without
+    // changing state or terminating the actor. The next valid call still runs.
+    for (name, arguments) in [
+        ("double_value", serde_json::json!({"value": "bad"})),
+        ("set_value", serde_json::json!({"next": "bad"})),
+        ("finish_value", serde_json::json!({"confirm": "bad"})),
+    ] {
+        let error = policy
+            .dispatch_boxed(ToolInvocation {
+                context: None,
+                name: name.into(),
+                arguments: ToolArguments::Structured(arguments),
+            })
+            .await
+            .expect_err("malformed tool input is a refusal");
+        assert!(
+            matches!(
+                error,
+                exomonad_actor::ResidentToolError::Invocation(
+                    exomonad_actor::KernelInvocationFailure::Rejected { .. }
+                )
+            ),
+            "{error}"
+        );
+    }
+    let unchanged = policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "current_value".into(),
+            arguments: ToolArguments::Structured(serde_json::json!({})),
+        })
+        .await
+        .expect("state remains available after refused transitions");
+    assert_eq!(unchanged, serde_json::json!({"current": 0}));
+
     let doubled = policy
         .dispatch_boxed(ToolInvocation {
             context: None,
@@ -1008,7 +1058,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
         .dispatch_boxed(ToolInvocation {
             context: None,
             name: "finish_value".into(),
-            arguments: ToolArguments::Structured(serde_json::json!({})),
+            arguments: ToolArguments::Structured(serde_json::json!({"confirm": true})),
         })
         .await
         .expect("finish value");
@@ -1064,7 +1114,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
         .dispatch_boxed(ToolInvocation {
             context: None,
             name: "finish_value".into(),
-            arguments: ToolArguments::Structured(serde_json::json!({})),
+            arguments: ToolArguments::Structured(serde_json::json!({"confirm": true})),
         })
         .await
         .expect("retire sibling");

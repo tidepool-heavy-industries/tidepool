@@ -39,7 +39,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
 
 #[tokio::test]
 async fn bash_call_logs_one_call_timing_summary_line() {
-    let mut campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
 
     let log = CapturedLog(Arc::new(std::sync::Mutex::new(Vec::new())));

@@ -11,5 +11,5 @@ let newer = semantics { questionDetails = (questionDetails semantics) { question
 let changedQuestions = raiseQuestion newer openQuestions
 inspectFull (map questionKey remainingQuestions == ["product-gate"], resolveQuestion acceptedDecision changedQuestions == changedQuestions, raiseQuestion semantics firstQuestions == firstQuestions, taskSource assignment == incorporatedHead)
 let consumerLabel = [label|implement|]
-(consumer, consumerQuestions) <- unfold (taskGroup assignment) (childWithProgress @WorkProgress @(Outcome Candidate) (withContext (selected taskContext) (solTask consumerLabel Medium assignment)))
+(consumer, consumerQuestions) <- unfold (taskGroup assignment) (childWithProgress @WorkProgress @(Outcome Candidate) (withLifetime ActorOwned $ withContext (selected taskContext) (solTask consumerLabel Medium assignment)))
 pollReply sessionReply

@@ -105,6 +105,14 @@ queue wait, service time and worker RSS so rotation is visible in measurements.
 Child agents are launched from committed checkouts. Commit the package before
 you ask an agent to delegate.
 
+## Agent specification
+
+The conventional `AgentSpec` module exports `agentSpec`; `[haskell] spec` can
+select another module. When neither exists, the default spec is empty. The obsolete
+`[haskell] tools` key is rejected: install the typed record through `installSpec`
+and select that spec. Typed tools and actor-mailbox records are different DSLs;
+malformed tool arguments return typed dispatch errors before the body runs.
+
 ## Migrating an existing workspace lookup
 
 `lookup` is now supplied by the workspace agent spec rather than installed

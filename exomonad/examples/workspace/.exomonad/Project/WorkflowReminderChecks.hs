@@ -39,7 +39,7 @@ semanticCases :: Member RecipeCheck effects => Eff effects ()
 semanticCases = do
   owner <- root
   void $ turn owner "import Project.WorkflowReminders\nimport Project.WorkflowReminderExamples"
-  applicable <- turn owner "observed <- semanticReminder reviewRelayPolicy (ReminderEpisode \"relay\" \"Owner is manually forwarding within-contract findings for exact candidate abc to named implementer alice, then requesting review again. Project.ReviewFlow is installed and validated; no review flow currently owns this cycle.\" \"review/repair conversation\")\ninspectFull observed"
+  applicable <- turn owner "observed <- semanticReminder reviewRelayPolicy (ReminderEpisode \"relay\" \"Owner is manually forwarding within-contract findings for exact candidate abc to named implementer alice, then requesting review again. Exomonad.Contrib.ReviewFlow is installed and validated; no review flow currently owns this cycle.\" \"review/repair conversation\")\ninspectFull observed"
   check "semantic trial recognizes instructed review relay" ("Suggest" `T.isInfixOf` output applicable)
   excluded <- turn owner "observed <- semanticReminder reviewRelayPolicy (ReminderEpisode \"design\" \"Review findings dispute a shared persistence invariant; ownership is unresolved.\" \"review findings\")\ninspectFull observed"
   check "semantic trial excludes shared design dispute" ("NotApplicable" `T.isInfixOf` output excluded)

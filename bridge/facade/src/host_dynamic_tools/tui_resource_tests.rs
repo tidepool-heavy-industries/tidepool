@@ -494,7 +494,7 @@ Astra can plan the graph and check Sol's execution understanding once, then idle
 without routine progress subscriptions. Sol owns implementation, integration and
 ordinary choices. Fresh Astra consultations own bounded hard decisions or repairs
 and return directly to the requesting Sol. Haskell handles mechanical collection,
-cursor advancement and routing; use .exomonad/plans/operating.md. Keep routine
+cursor advancement and routing; use .exomonad/WORKBENCH.md. Keep routine
 evidence out of Attention and use compact projections at decision boundaries.
 Return compact commits/checks/gates; exact transport and source
 incorporation still matter without a paragraph of acknowledgment history.
@@ -578,7 +578,7 @@ import qualified Project.Plan as Plan
 import qualified Project.Work as Work
 let Right coordinatorLabel = branchLabel "coordinator"
 let coordinatorBranch = withInstructions (Work.projectPrompt "coordinator") $ withEffort Medium $ withContext (selected Work.taskContext) $ Plan.componentLeadFrom coordinatorLabel projectHead task
-(coordinator, coordinatorProgress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @Delivery coordinatorBranch)
+(coordinator, coordinatorProgress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @Delivery (withLifetime ActorOwned coordinatorBranch))
 owner <- actorContext
 review <- followWork [("coordinator", forkedResponse coordinator, coordinatorProgress)] (notifyWork owner (workMessage deliverySummary))
 ```

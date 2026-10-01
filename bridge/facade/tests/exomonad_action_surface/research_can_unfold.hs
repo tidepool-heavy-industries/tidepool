@@ -12,6 +12,6 @@ result
   -> Label
   -> Label
   -> Eff ResearchEffects (Response Text, Response Text)
-result group coordinator leaf = unfold group $
-  (,) <$> child (researching @Text currentCheckout (assignment coordinator ()))
-      <*> child (researchingLeaf @Text currentCheckout (assignment leaf ()))
+result group coordinator leaf = unfoldDeferred group $
+  (,) <$> child (withLifetime ActorOwned (researching @Text currentCheckout (assignment coordinator ())))
+      <*> child (withLifetime ActorOwned (researchingLeaf @Text currentCheckout (assignment leaf ())))

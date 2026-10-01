@@ -11,8 +11,8 @@ module Project.NotificationTrial
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Worktree (renderGitOid)
-import Project.Routing
-import Project.Types
+import Exomonad.Contrib.Routing
+import Exomonad.Contrib.Types
 import Project.WorkflowReminders
 
 data NotificationDecision = RecordOnly | InterruptOwner | RoutingUncertain Text
@@ -53,7 +53,7 @@ notificationEpisode policy render state index
             WorkChanged _ delta -> Text.intercalate "; "
               (map candidateFacts (addedEvidence delta ++ map checkpointCandidate (addedReviewed delta)))
             _ -> "none"
-        , "Explicitly incorporated candidates: " <> Text.intercalate "; "
+        , "Explicitly acknowledged candidates: " <> Text.intercalate "; "
             [name <> "@" <> candidateFacts candidate
             | (name, candidate) <- handledWork state]
         , "Unresolved questions: " <> Text.intercalate "; "
@@ -68,5 +68,5 @@ notificationEpisode policy render state index
 -- A repeated OID can carry changed check claims or remaining gates.
 candidateFacts :: Candidate -> Text
 candidateFacts candidate = renderGitOid (candidateCommit candidate)
-  <> " reported checks: " <> Text.pack (show (checkedCommands candidate))
+  <> " reported checks: " <> Text.pack (show (reportedChecks candidate))
   <> " remaining gates: " <> Text.pack (show (remainingGates candidate))

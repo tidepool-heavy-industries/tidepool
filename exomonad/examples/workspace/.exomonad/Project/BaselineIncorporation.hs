@@ -39,7 +39,7 @@ import Tidepool.Effects.Core (Actor, Jev, Notifications)
 import Tidepool.Effects.Row (knownEffects)
 import Tidepool.Inspection (Display (..), displayRecord)
 import Tidepool.Worktree (renderGitOid)
-import Project.Types
+import Exomonad.Contrib.Types
 import Project.Work (decisionContext, lunaTaskInputFrom, taskContext)
 
 data BaselineChange = BaselineChange
