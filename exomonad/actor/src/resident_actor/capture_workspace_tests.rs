@@ -174,12 +174,11 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
         .expect("capture published");
 
     let mut calls = Vec::new();
-    let mut launchers = Vec::new();
+    let launcher = forest
+        .new_workbench("shared-launcher".into(), role.clone())
+        .await
+        .expect("launcher");
     for label in ["first", "second"] {
-        let launcher = forest
-            .new_workbench(format!("launcher-{label}"), role.clone())
-            .await
-            .expect("launcher");
         let group_path = crate::ActorPath::parse(&format!("late/{label}")).expect("group path");
         let (group, reservations) = forest
             .environment
@@ -196,7 +195,6 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
             .replace("GROUP_ID", &group.0.to_string())
             .replace("CHECKPOINT_TOKEN", &token);
         calls.push(tokio::spawn(run_cell(launcher.clone(), source)));
-        launchers.push(launcher);
     }
     let mut admitted_paths = Vec::new();
     for _ in 0..2 {
@@ -220,6 +218,14 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
         );
     }
     assert_ne!(admitted_paths[0], admitted_paths[1]);
+    assert!(calls.iter().all(|call| !call.is_finished()));
+    let progressing = tokio::time::timeout(
+        std::time::Duration::from_secs(240),
+        run_cell(launcher.clone(), "pure (42 :: Int)".into()),
+    )
+    .await
+    .expect("third cell progresses while both launches wait");
+    assert_committed(&progressing);
     assert!(calls.iter().all(|call| !call.is_finished()));
     let retired = forest
         .environment
@@ -303,7 +309,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
             .expect("child shutdown");
         assert!(result.cleanup.is_confirmed(), "{:?}", result.cleanup);
     }
-    drop(launchers);
+    drop(launcher);
     forest.shutdown().await;
     assert_eq!(
         forest

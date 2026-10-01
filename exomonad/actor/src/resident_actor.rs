@@ -12,6 +12,7 @@ mod background_command_wait;
 #[cfg(test)]
 mod capture_workspace_tests;
 pub(crate) mod child_initialization;
+mod child_launch;
 pub use child_initialization::ForkChildRelease;
 mod clock_wait;
 mod command_presentation;
@@ -2989,139 +2990,30 @@ where
         start: crate::ResidentActorStart,
     ) -> futures_util::future::BoxFuture<'a, Result<ResidentOutcome, ResidentActorWorkbenchError>>
     {
+        let prepared = self.prepare_child_launch(context, effect_owner, start);
         Box::pin(async move {
-            let crate::ResidentActorStart { parent_hole, child } = start;
-            let fork_group = child.descriptor.fork_group();
-            // Captured before the move below: if this launch minted itself a
-            // fresh session (`child_session_eligibility`) and admission fails
-            // anywhere from here on, that session may already have been
-            // provisioned (published into the shared registry) with nothing
-            // left to own it — discard it outright rather than orphaning it.
-            // A session `try_start_child` never provisioned (ineligible, or
-            // the host fell back to the launching session) is simply not a
-            // member of `child_sessions`, so discarding it here is always safe,
-            // whether or not provisioning ever actually happened.
-            let launch_session = child.descriptor.placement().session;
-            let launch_scope = child.descriptor.placement().lexical_scope;
-            let started = self
-                .try_start_child(kernel, context, effect_owner, child)
-                .await;
-            if started.is_err() && launch_session != context.placement.session {
-                self.environment
-                    .runner
-                    .discard_child_session(launch_session);
-            } else if started.is_err() {
-                if let Err(cleanup) = self
-                    .environment
-                    .runner
-                    .retire_fork_scopes(context.clone(), vec![launch_scope])
-                    .await
-                {
-                    tracing::warn!(%cleanup, "failed launch scope cleanup was retained");
-                }
-            }
-            let (child, allocated_label, admitted_worktree) = match started {
-                Ok(started) => started,
-                Err(error) if fork_group.is_some() => {
-                    if let Some(group) = fork_group {
-                        if let Ok(children) =
-                            self.environment.fork_groups.abort(group, context.actor)
-                        {
-                            for child in children {
-                                if let Some(child) = kernel.resolve(child) {
-                                    // A child already gone from a failed fork-group admission is
-                                    // the common case here; log anything else so an actor that
-                                    // refused shutdown does not silently linger.
-                                    if let Err(error) = child
-                                        .shutdown(ActorTerminal {
-                                            kind: ActorExitKind::Cancelled,
-                                            summary: "fork group admission failed".into(),
-                                        })
-                                        .await
-                                    {
-                                        tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    return self
-                        .environment
-                        .runner
-                        .resume_fork_failure(context.clone(), parent_hole, error.to_string())
-                        .await;
-                }
-                Err(error) => return Err(error),
-            };
-            match admitted_worktree {
-                Some(worktree) => {
-                    self.environment
-                        .runner
-                        .resume_fork_starting_parent(
-                            context.clone(),
-                            parent_hole,
-                            child.identity(),
-                            allocated_label,
-                            worktree,
-                        )
-                        .await
-                }
-                None => {
-                    self.environment
-                        .runner
-                        .resume_starting_parent(
-                            context.clone(),
-                            parent_hole,
-                            child.identity(),
-                            allocated_label,
-                        )
-                        .await
-                }
-            }
+            let completed =
+                child_launch::await_launch(self.environment.clone(), kernel.clone(), prepared)
+                    .await;
+            let resume = self.apply_child_launch(kernel, completed);
+            child_launch::resume_launch(self.environment.clone(), kernel.clone(), resume).await
         })
     }
 
-    fn validate_worker_context(
-        &self,
-        lifetime: crate::WorkerLifetime,
-        context: crate::ForkContext,
-    ) -> Result<(), String> {
-        if lifetime == crate::WorkerLifetime::SwarmOwned {
-            if context == crate::ForkContext::InheritedContext {
-                return Err("a swarm-owned worker requires a selected context".into());
-            }
-            if self.descriptor.supervisor_parent().is_some() && !self.forest_control {
-                return Err("only a top-level actor can admit a swarm-owned worker".into());
-            }
-        }
-        if self.active_route.is_some() && context == crate::ForkContext::InheritedContext {
-            return Err("automatic routes have no provider transcript boundary; select a task context for spawned workers".into());
-        }
-        Ok(())
-    }
-
-    fn try_start_child<'a>(
-        &'a mut self,
-        kernel: &'a KernelContext,
-        context: &'a ActorSessionContext,
-        effect_owner: CurrentEffectOwner<'a>,
-        child: crate::start::CapturedChildLaunch,
-    ) -> futures_util::future::BoxFuture<
-        'a,
-        Result<
-            (
-                LocalActorRef,
-                String,
-                Option<tidepool_bridge_effects::WtWorktreeHandle>,
-            ),
-            ResidentActorWorkbenchError,
-        >,
-    > {
-        Box::pin(async move {
+    fn prepare_child_launch(
+        &mut self,
+        context: &ActorSessionContext,
+        effect_owner: CurrentEffectOwner<'_>,
+        start: crate::ResidentActorStart,
+    ) -> child_launch::PreparedChildLaunch {
+        let crate::ResidentActorStart { parent_hole, child } = start;
+        let fork_group = child.descriptor.fork_group();
+        let original_placement = child.descriptor.placement();
+        let admission = (|| {
             let crate::start::CapturedChildLaunch {
                 mut descriptor,
                 entry,
-                mut launch_worktrees,
+                launch_worktrees,
                 fork_workspace,
                 seed,
             } = child;
@@ -3165,18 +3057,6 @@ where
                     .with_fork_effort(checkpoint_effort.or(self.descriptor.fork_effort()));
             }
             let fork_group = descriptor.fork_group();
-            let root_admission = self.environment.root_admission_closed.clone();
-            let _root_admission = if descriptor.supervisor_parent().is_none() {
-                let admission = root_admission.read().await;
-                if *admission {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "swarm root admission is closed".into(),
-                    ));
-                }
-                Some(admission)
-            } else {
-                None
-            };
             let lifetime = if descriptor.supervisor_parent().is_none() {
                 crate::WorkerLifetime::SwarmOwned
             } else {
@@ -3280,242 +3160,56 @@ where
                     "context fork did not name an admission group".into(),
                 ));
             }
-            let prepared_workspace = if let Some(seed) = fork_workspace {
-                let admission = self.environment.fork_workspaces.clone().ok_or_else(|| {
-                    ResidentActorWorkbenchError::ActorProtocol(
-                        "context-fork workspace admission is not installed".into(),
-                    )
-                })?;
-                let owner = context.actor;
-                let actor_path = descriptor.label().to_owned();
-                let admitted = admission
-                    .admit(
-                        owner,
-                        actor_path,
-                        seed,
-                        crate::ForkWorkspacePolicy {
-                            native_tools: descriptor.effective_role().native_tools(),
-                            workspace: descriptor.effective_role().workspace(),
-                        },
-                    )
-                    .await
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(format!(
-                            "worktree admission for `{}` failed: {}",
-                            descriptor.label(),
-                            error
-                        ))
-                    })?;
-                launch_worktrees = vec![admitted.handle().handle_receipt.tree_id.raw.clone()];
-                Some(admitted)
-            } else {
-                None
-            };
-            // The child may carry declarations that import a helper published by
-            // its parent. Fix its own snapshot and include roots before a fresh
-            // machine bootstraps those declarations.
-            let source_layers = self.environment.source_layers.clone();
-            let helper_branch = if let Some(layers) = &source_layers {
-                Some(
-                    layers
-                        .prepare_helpers(
-                            context.actor.into(),
-                            &launch_worktrees,
-                            prepared_workspace.is_some(),
-                        )
-                        .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
-                )
-            } else {
-                None
-            };
-            if let Some(layers) = &source_layers {
-                let layer = match &checkpoint_lease {
-                    Some(lease) => layers
-                        .admit_checkpoint_layer(
-                            &lease.issuer_source_layer,
-                            context.actor.into(),
-                            helper_branch.as_deref().unwrap_or_default(),
-                            &launch_worktrees,
-                        )
-                        .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
-                    None => layers
-                        .layer_include_for(
-                            helper_branch.as_deref().unwrap_or_default(),
-                            &launch_worktrees,
-                        )
-                        .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
-                };
-                descriptor = descriptor.with_source_layer(layer);
-            }
-            if let Some(retained_scope) = &retained_checkpoint_scope {
-                let scope = self
-                    .environment
-                    .runner
-                    .remint_checkpoint_child_scope_from_lease(
-                        context.clone(),
-                        retained_scope.clone(),
-                        descriptor.placement().lexical_scope,
-                    )
-                    .await?;
-                descriptor = descriptor.with_lexical_scope(scope);
-            }
-            // A launch whose descriptor still names the launching session (the
-            // common case: ineligible, or `InheritedContext`) needs nothing
-            // further — the entry is already resident there. An eligible
-            // `SelectedContext` launch's descriptor names a freshly minted
-            // session instead (`child_session_eligibility`/`capture_decoded`):
-            // provision that session's own dedicated machine now (build,
-            // bootstrap with the run's shared program, install the shared
-            // image registry, mint its own lexical scope), then cross the
-            // entry into it with the same transfer primitive every other
-            // resident-machine-boundary site already uses
-            // (`ResidentActorRunner::transfer_custody`, parcel 6). Failure at
-            // any step here leaves the launching session untouched and starts
-            // nothing; the caller (`start_child`) discards a provisioned but
-            // now-orphaned child session on any error this whole admission
-            // sequence returns from here on, by comparing the ORIGINAL
-            // captured launch's session against the one it actually admits on.
-            let entry = if descriptor.placement().session == context.placement.session {
-                entry
-            } else if !self.environment.runner.supports_child_sessions() {
-                // Eligible, but this host never installed a child-session
-                // factory/bootstrap program (`ResidentActorRunner::supports_child_sessions`)
-                // — fall back to the launching session, rather than failing an
-                // otherwise-ordinary fork over a capability nothing asked for.
-                // `capture_decoded` minted no real lexical scope for this
-                // (eligible) launch, only a placeholder; mint the actual one
-                // here, on the session this actor is actually falling back to.
-                let lexical_scope = self
-                    .environment
-                    .runner
-                    .mint_lexical_scope(context.placement.session)
-                    .await?;
-                descriptor = descriptor
-                    .with_session(context.placement.session)
-                    .with_lexical_scope(lexical_scope);
-                entry
-            } else {
-                let child_session = descriptor.placement().session;
-                let lexical_scope = self
-                    .environment
-                    .runner
-                    .provision_child_session(
-                        child_session,
-                        descriptor.placement().resource_scope,
-                        seed.as_ref(),
-                        descriptor.source_layer(),
-                    )
-                    .await
-                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-                descriptor = descriptor.with_lexical_scope(lexical_scope);
-                self.environment
-                    .runner
-                    .transfer_custody(
-                        entry,
-                        context.placement.session,
-                        child_session,
-                        descriptor.placement().resource_scope,
-                    )
-                    .await?
-            };
-            // The checkout-derived include roots were fixed before any fresh
-            // child machine bootstrapped inherited declarations.
-            let allocated_label = descriptor.label().to_string();
-            let admitted_worktree = prepared_workspace
-                .as_ref()
-                .map(|prepared| prepared.handle().clone());
-            let bound_worktrees = launch_worktrees.clone();
-            let descriptor_scope = descriptor.placement().lexical_scope;
-            let checkpoint_descriptor = fork_group.map(|_| descriptor.clone());
-            let checkpoint_attachment = checkpoint_admission
-                .as_ref()
-                .and_then(|(_, attachment)| attachment.clone());
-            let mut behavior = Self::child(
-                descriptor,
-                self.environment.clone(),
-                entry,
-                launch_worktrees,
-            );
-            behavior.admitted_checkpoint = checkpoint_admission;
-            behavior.prepared_workspace = prepared_workspace;
-            let child = match kernel.spawn_worker(None, behavior, lifetime).await {
-                Ok(child) => child,
-                Err(error) => {
-                    if checkpoint_lease.is_some() {
-                        if let Err(cleanup) = self
-                            .environment
-                            .runner
-                            .retire_checkpoint_scopes(
-                                context.placement.session,
-                                vec![descriptor_scope],
-                            )
-                            .await
-                        {
-                            tracing::warn!(%cleanup, "failed checkpoint child scope cleanup was retained");
-                        }
-                    }
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        error.to_string(),
-                    ));
-                }
-            };
-            if let (Some(group), Some(lease), Some(descriptor)) = (
+            Ok(child_launch::ChildLaunchAdmission {
+                child: crate::start::CapturedChildLaunch {
+                    descriptor,
+                    entry,
+                    launch_worktrees,
+                    fork_workspace,
+                    seed,
+                },
+                checkpoint_admission,
+                retained_checkpoint_scope,
+                lifetime,
+            })
+        })();
+        child_launch::PreparedChildLaunch {
+            continuation: child_launch::ChildLaunchContinuation {
+                context: context.clone(),
+                parent_descriptor: self.descriptor.clone(),
+                parent_hole,
                 fork_group,
-                checkpoint_lease.as_ref(),
-                checkpoint_descriptor.as_ref(),
-            ) {
-                self.environment
-                    .fork_groups
-                    .retain_checkpoint_admission(
-                        group,
-                        context.actor,
-                        child.identity(),
-                        descriptor,
-                        lease,
-                        checkpoint_attachment.as_ref(),
-                    )
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                    })?;
-            } else if let (Some(group), Some(descriptor)) =
-                (fork_group, checkpoint_descriptor.as_ref())
-            {
-                if descriptor.context_parent().is_none() {
-                    self.environment
-                        .fork_groups
-                        .retain_selected_admission(
-                            group,
-                            context.actor,
-                            child.identity(),
-                            descriptor,
-                        )
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                        })?;
-                }
+                original_placement,
+            },
+            admission,
+        }
+    }
+
+    fn apply_child_launch(
+        &mut self,
+        kernel: &KernelContext,
+        completed: child_launch::CompletedChildLaunch,
+    ) -> child_launch::ChildLaunchResume {
+        child_launch::apply_launch(&self.environment, kernel, &self.descriptor, completed)
+    }
+
+    fn validate_worker_context(
+        &self,
+        lifetime: crate::WorkerLifetime,
+        context: crate::ForkContext,
+    ) -> Result<(), String> {
+        if lifetime == crate::WorkerLifetime::SwarmOwned {
+            if context == crate::ForkContext::InheritedContext {
+                return Err("a swarm-owned worker requires a selected context".into());
             }
-            // The child now has a principal, so the layer its descriptor carries
-            // can be named as its own. This happens before the child runs, so its
-            // first cell already reaches its own layer and no other.
-            if let Some(layers) = &source_layers {
-                if let Some(lease) = &checkpoint_lease {
-                    layers
-                        .bind_checkpoint_for(
-                            child.identity().into(),
-                            helper_branch.as_deref().unwrap_or_default(),
-                            &lease.issuer_source_layer,
-                        )
-                        .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-                } else {
-                    layers.bind_for(
-                        child.identity().into(),
-                        helper_branch.as_deref().unwrap_or_default(),
-                        &bound_worktrees,
-                    );
-                }
+            if self.descriptor.supervisor_parent().is_some() && !self.forest_control {
+                return Err("only a top-level actor can admit a swarm-owned worker".into());
             }
-            Ok((child, allocated_label, admitted_worktree))
-        })
+        }
+        if self.active_route.is_some() && context == crate::ForkContext::InheritedContext {
+            return Err("automatic routes have no provider transcript boundary; select a task context for spawned workers".into());
+        }
+        Ok(())
     }
 
     async fn resolve_outbound(
