@@ -7710,6 +7710,7 @@ where
                             role,
                             profile,
                             worktrees,
+                            lifetime,
                         ),
                     ) => crate::ResidentActorStart::capture_decoded(
                         session,
@@ -7719,7 +7720,7 @@ where
                             fork_group: None, fork_workspace: None, effect_keys: None,
                             fork_effort: None, fork_budget: None, model: None, instructions: None, context: crate::ForkContext::SelectedContext,
                             checkpoint: None,
-                            lifetime: crate::start::ActorStartRequest::FRESH_LAUNCH_LIFETIME,
+                            lifetime,
                             session_id: context.placement.session, parent_actor: context.actor,
                             unbound_label,
                         },

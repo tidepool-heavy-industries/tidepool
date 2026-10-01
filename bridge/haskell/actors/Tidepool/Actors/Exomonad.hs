@@ -150,7 +150,7 @@ module Tidepool.Actors.Exomonad
   , unfoldDeferred
   , spawnWatched
   , errand
-  , AgentSpec
+  , AgentLaunchSpec
   , AgentRef
   , AgentState (..)
   , AgentObservation (..)
@@ -190,6 +190,7 @@ module Tidepool.Actors.Exomonad
   , Response
   , codingAgent
   , readonlyAgent
+  , withAgentLifetime
   , startAgent
   , request
   , Duration
@@ -246,6 +247,8 @@ module Tidepool.Actors.Exomonad
   , awaitAnySettled
   , watch
   , pollWatch
+  , awaitWatch
+  , waitFor
   , Route
   , RouteState (..)
   , route
@@ -312,7 +315,7 @@ import Tidepool.Agent.Watch
 import Tidepool.Actors.Internal.Agent
   ( AgentRef
   , AgentObservation (..)
-  , AgentSpec
+  , AgentLaunchSpec
   , AgentState (..)
   , Response
   , codingAgent
@@ -340,6 +343,7 @@ import Tidepool.Actors.Internal.Agent
   , requestWithProgress
   , requestWithProgressInto
   , StopOutcome (..)
+  , withAgentLifetime
   , startAgent
   , stopAgent
   , sendMessage

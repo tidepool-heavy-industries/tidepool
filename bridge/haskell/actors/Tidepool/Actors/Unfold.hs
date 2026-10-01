@@ -611,6 +611,7 @@ data UnfoldError
   = UnfoldBeginRejected Text
   | UnfoldCheckpointRefused CheckpointRefusal
   | UnfoldUncapturedContext Text
+  | UnfoldDeferredInvocationOwned Text
   | UnfoldBranchRejected Text Text
   | UnfoldShapeMismatch Text
   | UnfoldCommitRejected Text
@@ -618,14 +619,20 @@ data UnfoldError
 
 -- | Admit a group whose inherited context includes the real enclosing tool
 -- result and final committed Haskell bindings. Children start after that
--- publication boundary. Explicit captures and selected contexts are preserved.
+-- publication boundary. Every branch needs explicit ActorOwned or SwarmOwned
+-- lifetime; invocation-owned work cannot survive this deferred boundary.
+-- Explicit captures and selected contexts are preserved.
 attemptUnfoldDeferred
   :: forall parent result
    . (Member Forks parent, Member Replies parent, Member AgentInspection parent)
   => ForkGroupPath
   -> Unfold parent result
   -> Eff parent (Either UnfoldError result)
-attemptUnfoldDeferred = attemptUnfoldUsing ForksCommitWith
+attemptUnfoldDeferred path plan = case branchLabelsWhere invocationOwned plan of
+  label : _ -> pure (Left (UnfoldDeferredInvocationOwned label))
+  [] -> attemptUnfoldUsing ForksCommitWith path plan
+  where
+    invocationOwned options = branchLifetime options == InvocationOwned
 
 -- | Publish an independent group before the enclosing call returns. Every
 -- branch must use 'fromCheckpoint' or 'selected'. Checkpoint branches retain
@@ -643,14 +650,20 @@ attemptUnfold path plan = case uncapturedBranches plan of
   [] -> attemptUnfoldUsing ForksCommitCapturedWith path plan
 
 uncapturedBranches :: Unfold parent result -> [Text]
-uncapturedBranches (PureU _) = []
-uncapturedBranches (BranchU _ (Branch _ _ _ options assigned)) =
-  case branchContext options of
-    ContextCaptured _ -> []
-    ContextSelected -> []
-    ContextInherited -> [labelText (assignmentLabel assigned)]
-uncapturedBranches (ApU functions arguments) =
-  uncapturedBranches functions ++ uncapturedBranches arguments
+uncapturedBranches = branchLabelsWhere inheritedContext
+  where
+    inheritedContext options = case branchContext options of
+      ContextInherited -> True
+      ContextSelected -> False
+      ContextCaptured _ -> False
+
+branchLabelsWhere :: (BranchOptions -> Bool) -> Unfold parent result -> [Text]
+branchLabelsWhere _ (PureU _) = []
+branchLabelsWhere matches (BranchU _ (Branch _ _ _ options assigned))
+  | matches options = [labelText (assignmentLabel assigned)]
+  | otherwise = []
+branchLabelsWhere matches (ApU functions arguments) =
+  branchLabelsWhere matches functions ++ branchLabelsWhere matches arguments
 
 attemptUnfoldUsing
   :: forall parent result
@@ -802,6 +815,7 @@ renderUnfoldError failure = case failure of
   UnfoldBeginRejected detail -> detail
   UnfoldCheckpointRefused refusal -> Text.pack (show refusal)
   UnfoldUncapturedContext label -> label <> ": immediate unfold requires fromCheckpoint or selected; use unfoldDeferred for inherited context"
+  UnfoldDeferredInvocationOwned label -> label <> ": deferred unfold requires withLifetime ActorOwned or SwarmOwned; invocation-owned work must use immediate unfold"
   UnfoldBranchRejected label detail -> label <> ": " <> detail
   UnfoldShapeMismatch detail -> detail
   UnfoldCommitRejected detail -> detail
