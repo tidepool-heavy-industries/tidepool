@@ -168,7 +168,7 @@ pub(crate) struct PreparedWorker {
 
 impl PreparedWorker {
     pub(crate) fn prepare() -> Result<Self, FrontendError> {
-        let selection = worker_bin()?;
+        let selection = std::fs::canonicalize(worker_bin()?).map_err(FrontendError::Io)?;
         let mut file = File::open(&selection).map_err(FrontendError::Io)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(FrontendError::Io)?;
@@ -859,6 +859,25 @@ fn main() {{
         );
         assert_eq!(manifest["worker_path"], worker.to_string_lossy().as_ref());
         assert_eq!(manifest["ghc_libdir"], "/ghc/lib-a");
+
+        let alias = dir.join("worker-alias");
+        std::os::unix::fs::symlink(&worker, &alias).unwrap();
+        let mut relative_alias: PathBuf = std::env::current_dir()
+            .unwrap()
+            .ancestors()
+            .skip(1)
+            .map(|_| "..")
+            .collect();
+        relative_alias.push(alias.strip_prefix("/").unwrap());
+        std::env::set_var(WORKER_ENV, relative_alias);
+        let aliased = PreparedWorker::prepare().unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        assert_eq!(aliased.selection(), prepared.selection());
+        assert_eq!(aliased.producer_identity().unwrap(), old_identity);
+        let aliased_manifest: serde_json::Value =
+            serde_json::from_str(&aliased.deployment_manifest().unwrap()).unwrap();
+        assert_eq!(aliased_manifest["worker_path"], manifest["worker_path"]);
+        std::env::set_var(WORKER_ENV, &worker);
 
         compile_fake_worker(&dir.join("replacement.rs"), &replacement, "new-worker");
         std::fs::rename(&replacement, &worker).unwrap();
