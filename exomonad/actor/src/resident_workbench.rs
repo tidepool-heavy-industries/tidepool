@@ -5765,10 +5765,8 @@ where
     };
 
     // Cranelift, no checkout held.
-    let (pending, program) = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-        let mut pending = pending;
-        let program = pending.compile_off_checkout();
-        (pending, program)
+    let program = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+        pending.compile_off_checkout()
     }))
     .await
     .map_err(ResidentActorWorkbenchError::Join)?;
@@ -5798,11 +5796,8 @@ where
                     changed,
                 });
             }
-            let [page, _metadata, cell_display] = bound.as_slice() else {
-                unreachable!("display_bundle_binders checked three binders");
-            };
             match session
-                .revalidate_and_run_display_bundle(*pending, program, page, cell_display)
+                .revalidate_and_run_display_bundle(program)
                 .map_err(ResidentActorWorkbenchError::Resident)?
             {
                 Some(bundle) => decode_display_bundle(&bundle, &run_request.name)
@@ -5886,14 +5881,11 @@ where
         })
         .await?;
     tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_native_snapshot_completed", "workbench phase");
-    let (pending, compiled) =
-        crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-            let mut pending = pending;
-            let compiled = pending.compile_off_checkout();
-            (pending, compiled)
-        }))
-        .await
-        .map_err(ResidentActorWorkbenchError::Join)?;
+    let compiled = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+        pending.compile_off_checkout()
+    }))
+    .await
+    .map_err(ResidentActorWorkbenchError::Join)?;
     let compiled = compiled
         .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Prepared(error)))?;
     tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_jit_completed", "workbench phase");
@@ -5901,9 +5893,8 @@ where
     access
         .with_machine(context.clone(), move |session, _, _| {
             tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_run_started", "workbench phase");
-            let [page, _, alias] = bound.as_ref();
             let bundle = session
-                .revalidate_and_run_display_bundle(pending, compiled, page, alias)
+                .revalidate_and_run_display_bundle(compiled)
                 .map_err(ResidentActorWorkbenchError::Resident)?
                 .ok_or_else(|| {
                     ResidentActorWorkbenchError::ActorProtocol(
@@ -6496,11 +6487,9 @@ where
 
         // No checkout held here: the Cranelift compile runs concurrently
         // with every other actor's turn against this session.
-        let (pending, compiled_program) =
+        let compiled_program =
             crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                let mut pending = pending;
-                let compiled = pending.compile_off_checkout();
-                (pending, compiled)
+                pending.compile_off_checkout()
             }))
             .await
             .map_err(ResidentActorWorkbenchError::Join)?;
@@ -6519,7 +6508,7 @@ where
         let step = access
             .with_machine(context.clone(), move |session, context, _| {
                 tracing::info!(target: "exomonad_actor::workbench_phase", install_attempt, phase = "native_item_run_started", "workbench phase");
-                match session.revalidate_and_run_prepared(*pending, compiled_program) {
+                match session.revalidate_and_run_prepared(compiled_program) {
                     Ok(Some(outcome)) => finish_bind_step(
                         session,
                         context,
@@ -12987,7 +12976,7 @@ mod request_tests {
         // The Cranelift half off-checkout too: snapshot the install, compile
         // with no session borrowed, then revalidate, install and run.
         assert!(split_session.prepared_machine_ready());
-        let mut pending = split_session
+        let pending = split_session
             .snapshot_display_bundle(
                 cloned_turn_code(&compiled),
                 page,
@@ -13000,7 +12989,7 @@ mod request_tests {
             .compile_off_checkout()
             .expect("display bundle compiles off-checkout");
         let bundle = split_session
-            .revalidate_and_run_display_bundle(pending, program, page, cell_display)
+            .revalidate_and_run_display_bundle(program)
             .expect("display bundle runs")
             .expect("nothing changed between snapshot and install");
         let split_output =

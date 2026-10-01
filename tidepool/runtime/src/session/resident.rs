@@ -1142,6 +1142,10 @@ impl PendingPreparedMode {
 /// [`ResidentSession::revalidate_and_run_prepared`].
 pub struct PendingPreparedInstall {
     snapshot: PendingPreparedSource,
+    metadata: PreparedInstallMetadata,
+}
+
+struct PreparedInstallMetadata {
     mode: PendingPreparedMode,
     argument: Option<PreparedHandle>,
     provenance: Arc<ProgramProvenance>,
@@ -1329,56 +1333,67 @@ enum PendingPreparedSource {
 }
 
 impl PendingPreparedSource {
-    fn compile_off_checkout(&mut self) -> Result<CompiledPreparedInstall, PreparedRuntimeError> {
-        let kind = match self {
-            Self::Legacy(snapshot) => CompiledPreparedKind::Legacy(
-                super::prepared::PreparedEngine::compile_off_checkout(snapshot)
-                    .map_err(PreparedRuntimeError::Compile)?,
-            ),
+    fn compile_off_checkout(self) -> Result<ReadyPreparedSource, PreparedRuntimeError> {
+        match self {
+            Self::Legacy(mut snapshot) => {
+                let image = super::prepared::PreparedEngine::compile_off_checkout(&mut snapshot)
+                    .map_err(PreparedRuntimeError::Compile)?;
+                Ok(ReadyPreparedSource::Legacy { snapshot, image })
+            }
             Self::Certified {
                 prepared,
                 resolved,
                 registry,
-                ..
+                admitted_public,
             } => {
                 let target = super::prepared::CertifiedTargetImage::compile_certified(
-                    prepared.clone(),
-                    registry,
+                    prepared,
+                    &registry,
                     resolved.package_interfaces.clone(),
                 )
                 .map_err(PreparedRuntimeError::Compile)?;
                 let demanded =
-                    target.compile_demanded(resolved.groups.iter().cloned(), registry)?;
-                CompiledPreparedKind::Certified { target, demanded }
+                    target.compile_demanded(resolved.groups.iter().cloned(), &registry)?;
+                Ok(ReadyPreparedSource::Certified {
+                    resolved,
+                    admitted_public,
+                    target,
+                    demanded,
+                })
             }
-        };
-        Ok(CompiledPreparedInstall { kind })
+        }
     }
 }
 
-/// Native code compiled for one pending install without holding the session
-/// checkout. Its exact source owner rows stay paired with the pending scope
-/// snapshot until final revalidation.
-pub struct CompiledPreparedInstall {
-    kind: CompiledPreparedKind,
-}
-
-enum CompiledPreparedKind {
-    Legacy(Arc<tidepool_codegen::prepared_program::CompiledProgram>),
+enum ReadyPreparedSource {
+    Legacy {
+        snapshot: super::prepared::InstallSnapshot,
+        image: Arc<tidepool_codegen::prepared_program::CompiledProgram>,
+    },
     Certified {
+        resolved: super::persistent::ResolvedCertifiedTurn,
+        admitted_public: super::PublicVisibilitySnapshot,
         target: super::prepared::CertifiedTargetImage,
         demanded: Vec<DemandedImage>,
     },
 }
 
+/// One compiled install with its original source snapshot and completion
+/// metadata. Only consuming a pending install can construct this capsule.
+pub struct ReadyPreparedInstall {
+    source: ReadyPreparedSource,
+    metadata: PreparedInstallMetadata,
+}
+
 impl PendingPreparedInstall {
-    /// Step (b): compile this pending install's linked program off any
-    /// checkout. No machine access; safe to run on a blocking thread while
-    /// other turns hold the checkout this snapshot was taken under.
-    pub fn compile_off_checkout(
-        &mut self,
-    ) -> Result<CompiledPreparedInstall, PreparedRuntimeError> {
-        self.snapshot.compile_off_checkout()
+    /// Compile this install off checkout, consuming its source and completion
+    /// metadata into one capsule for final revalidation and execution.
+    pub fn compile_off_checkout(self) -> Result<ReadyPreparedInstall, PreparedRuntimeError> {
+        let source = self.snapshot.compile_off_checkout()?;
+        Ok(ReadyPreparedInstall {
+            source,
+            metadata: self.metadata,
+        })
     }
 }
 
@@ -1387,18 +1402,32 @@ impl PendingPreparedInstall {
 /// the display counterpart of [`PendingPreparedInstall`].
 pub struct PendingDisplayInstall {
     snapshot: PendingPreparedSource,
+    metadata: DisplayInstallMetadata,
+}
+
+struct DisplayInstallMetadata {
     provenance: Arc<ProgramProvenance>,
     generation: Generation,
     lexical_scope: ScopeId,
     checked: Option<CheckedDisplayPlan>,
+    binders: [BoundBinder; 3],
+}
+
+/// One compiled display bundle with its original source, binder rows, and
+/// completion metadata. Final installation accepts only this capsule.
+pub struct ReadyDisplayInstall {
+    source: ReadyPreparedSource,
+    metadata: DisplayInstallMetadata,
 }
 
 impl PendingDisplayInstall {
-    /// Step (b): compile the bundle's linked program off any checkout.
-    pub fn compile_off_checkout(
-        &mut self,
-    ) -> Result<CompiledPreparedInstall, PreparedRuntimeError> {
-        self.snapshot.compile_off_checkout()
+    /// Compile off checkout and retain the original bundle as one capsule.
+    pub fn compile_off_checkout(self) -> Result<ReadyDisplayInstall, PreparedRuntimeError> {
+        let source = self.snapshot.compile_off_checkout()?;
+        Ok(ReadyDisplayInstall {
+            source,
+            metadata: self.metadata,
+        })
     }
 }
 
@@ -4879,19 +4908,20 @@ where
         };
         Ok(PendingPreparedInstall {
             snapshot,
-            mode,
-            argument,
-            provenance,
-            realm,
-            lexical_scope,
-            park,
-            checked,
+            metadata: PreparedInstallMetadata {
+                mode,
+                argument,
+                provenance,
+                realm,
+                lexical_scope,
+                park,
+                checked,
+            },
         })
     }
 
-    /// Step (c) of the off-checkout split install: revalidate `pending`'s
-    /// imports against this (possibly different) checkout's live bindings
-    /// and, if nothing changed, install `compiled` and run the turn exactly
+    /// Revalidate the capsule's original imports against this checkout's
+    /// live bindings and, if nothing changed, install its image and run exactly
     /// as [`Self::run_prepared_with_argument`]'s tail does. `Ok(None)`
     /// means revalidation found a stale import (see
     /// `PreparedEngine::revalidate_and_install`): the caller must recompile
@@ -4899,11 +4929,10 @@ where
     /// single-checkout [`Self::run_prepared_with_argument`].
     pub fn revalidate_and_run_prepared(
         &mut self,
-        pending: PendingPreparedInstall,
-        compiled: CompiledPreparedInstall,
+        ready: ReadyPreparedInstall,
     ) -> Result<Option<ResidentOutcome>, ResidentError> {
-        let PendingPreparedInstall {
-            snapshot,
+        let ReadyPreparedInstall { source, metadata } = ready;
+        let PreparedInstallMetadata {
             mode,
             argument,
             provenance,
@@ -4911,29 +4940,27 @@ where
             lexical_scope,
             park,
             checked,
-        } = pending;
+        } = metadata;
         self.state
             .validate_new_binding_ids(binding_ids_of(&mode.as_mode()))?;
         let install_started = std::time::Instant::now();
         let mut checked_completion = None;
-        let (program, source_keys) = match (snapshot, compiled.kind) {
-            (PendingPreparedSource::Legacy(snapshot), CompiledPreparedKind::Legacy(compiled)) => {
+        let (program, source_keys) = match source {
+            ReadyPreparedSource::Legacy { snapshot, image } => {
                 match self
                     .state
-                    .revalidate_and_install_prepared(snapshot, compiled)?
+                    .revalidate_and_install_prepared(snapshot, image)?
                 {
                     Some(program) => (program, Vec::new()),
                     None => return Ok(None),
                 }
             }
-            (
-                PendingPreparedSource::Certified {
-                    resolved,
-                    admitted_public,
-                    ..
-                },
-                CompiledPreparedKind::Certified { target, demanded },
-            ) => {
+            ReadyPreparedSource::Certified {
+                resolved,
+                admitted_public,
+                target,
+                demanded,
+            } => {
                 if self
                     .state
                     .public_visibility_snapshot_in(lexical_scope)
@@ -4959,11 +4986,6 @@ where
                     demanded,
                     &resolved.inherited_needed,
                 )?
-            }
-            _ => {
-                return Err(ResidentError::Prepared(
-                    PreparedRuntimeError::CertifiedTargetOwners,
-                ));
             }
         };
         timing::record_stage(
@@ -5489,53 +5511,54 @@ where
         };
         Ok(PendingDisplayInstall {
             snapshot,
-            provenance,
-            generation,
-            lexical_scope,
-            checked,
+            metadata: DisplayInstallMetadata {
+                provenance,
+                generation,
+                lexical_scope,
+                checked,
+                binders: [page.clone(), metadata.clone(), alias.clone()],
+            },
         })
     }
 
-    /// Step (c) of the display-bundle split: revalidate `pending`'s imports
-    /// under this checkout and, when still current, install `compiled` and
+    /// Revalidate the display capsule's original imports under this checkout
+    /// and, when still current, install its image and
     /// run the bundle exactly as [`Self::run_display_bundle_with_sites`]
     /// does. `Ok(None)` means an import changed (or the machine went away)
     /// since the snapshot; the caller recompiles from a fresh snapshot.
     pub fn revalidate_and_run_display_bundle(
         &mut self,
-        pending: PendingDisplayInstall,
-        compiled: CompiledPreparedInstall,
-        page: &BoundBinder,
-        alias: &BoundBinder,
+        ready: ReadyDisplayInstall,
     ) -> Result<Option<ResidentDisplayBundle>, ResidentError> {
-        let PendingDisplayInstall {
-            snapshot,
+        let ReadyDisplayInstall { source, metadata } = ready;
+        let DisplayInstallMetadata {
             provenance,
             generation,
             lexical_scope,
             checked,
-        } = pending;
+            binders: [page, _metadata, alias],
+        } = metadata;
         if lexical_scope != self.run_context.lexical_scope {
             return Err(SessionError::StaleStagedDeclaration.into());
         }
         self.state.validate_new_binding_ids(
-            [page, alias].map(|binder| SessionVarId::from_extract(binder.var_id)),
+            [&page, &alias].map(|binder| SessionVarId::from_extract(binder.var_id)),
         )?;
         if let Some(plan) = &checked {
-            validate_checked_display_rows(plan, page, alias)?;
+            validate_checked_display_rows(plan, &page, &alias)?;
             plan.validate_ready(&self.state, lexical_scope)?;
         }
         if let Some(plan) = &checked {
-            match &compiled.kind {
-                CompiledPreparedKind::Certified { target, .. }
+            match &source {
+                ReadyPreparedSource::Certified { target, .. }
                     if plan.proof.matches_target(target.prepared()) => {}
                 _ => return Err(PreparedRuntimeError::CertifiedTargetOwners.into()),
             }
         }
         // Refusals before native installation leave this display admission unused.
-        if let PendingPreparedSource::Certified {
+        if let ReadyPreparedSource::Certified {
             admitted_public, ..
-        } = &snapshot
+        } = &source
         {
             if self
                 .state
@@ -5552,27 +5575,22 @@ where
         let mut installed_program = None;
         let result = (|| {
             let install_started = std::time::Instant::now();
-            let (program, source_keys) = match (snapshot, compiled.kind) {
-                (
-                    PendingPreparedSource::Legacy(snapshot),
-                    CompiledPreparedKind::Legacy(compiled),
-                ) => {
+            let (program, source_keys) = match source {
+                ReadyPreparedSource::Legacy { snapshot, image } => {
                     let Some(program) = self
                         .state
-                        .revalidate_and_install_prepared(snapshot, compiled)?
+                        .revalidate_and_install_prepared(snapshot, image)?
                     else {
                         return Ok(None);
                     };
                     (program, Vec::new())
                 }
-                (
-                    PendingPreparedSource::Certified {
-                        resolved,
-                        admitted_public,
-                        ..
-                    },
-                    CompiledPreparedKind::Certified { target, demanded },
-                ) => {
+                ReadyPreparedSource::Certified {
+                    resolved,
+                    admitted_public,
+                    target,
+                    demanded,
+                } => {
                     if self
                         .state
                         .public_visibility_snapshot_in(lexical_scope)
@@ -5590,7 +5608,6 @@ where
                         &resolved.inherited_needed,
                     )?
                 }
-                _ => return Err(PreparedRuntimeError::CertifiedTargetOwners.into()),
             };
             installed_program = Some(program);
             timing::record_stage(
@@ -5604,8 +5621,8 @@ where
                 program,
                 source_keys,
                 provenance,
-                page,
-                alias,
+                &page,
+                &alias,
                 generation,
                 checked_display_input(checked.as_ref())?,
                 ValueInterfaceSource::for_checked(checked.is_some()),
@@ -7873,10 +7890,10 @@ mod authored_publication_tests {
             .find(|binder| binder.name == "cellDisplay")
             .unwrap();
         let code = compiled.into_code();
-        let mut pending = session
+        let pending = session
             .snapshot_run_prepared(code.clone(), PendingPreparedMode::Value, None)
             .unwrap();
-        let mut display = session
+        let display = session
             .snapshot_display_bundle(code, page, metadata, alias, Generation(1))
             .unwrap();
         let compiled = pending.compile_off_checkout().unwrap();
@@ -7919,11 +7936,11 @@ mod authored_publication_tests {
         );
         let residency = session.residency();
         assert!(session
-            .revalidate_and_run_prepared(pending, compiled)
+            .revalidate_and_run_prepared(compiled)
             .unwrap()
             .is_none());
         assert!(session
-            .revalidate_and_run_display_bundle(display, compiled_display, page, alias)
+            .revalidate_and_run_display_bundle(compiled_display)
             .unwrap()
             .is_none());
         assert_eq!(session.residency(), residency);

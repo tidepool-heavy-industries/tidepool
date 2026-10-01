@@ -853,7 +853,7 @@ fn certified_resident_turn_compiles_off_checkout_then_installs() {
     let [binder] = bound.as_slice() else {
         panic!("split turn must bind one value");
     };
-    let mut pending = notebook
+    let pending = notebook
         .session
         .snapshot_run_prepared(
             compiled.into_code(),
@@ -870,7 +870,7 @@ fn certified_resident_turn_compiles_off_checkout_then_installs() {
         .expect("off-checkout compile");
     let outcome = notebook
         .session
-        .revalidate_and_run_prepared(pending, compiled)
+        .revalidate_and_run_prepared(compiled)
         .expect("certified split install")
         .expect("unchanged public view");
     assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
