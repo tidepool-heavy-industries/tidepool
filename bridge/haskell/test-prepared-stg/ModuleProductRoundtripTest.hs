@@ -48,6 +48,7 @@ import Tidepool.PreparedStg (PreparedModule(..))
 import Tidepool.RetainedUnfoldings (scopeRetainedHscEnv)
 import Tidepool.DependencyEvidence (DependencySource(..), sourceEvidence)
 import Tidepool.ModuleCandidates (ModuleCandidate(..))
+import Tidepool.PackageWitness (encodePackageImports)
 
 -- Exercise the skinny interface retained for a prepared defining module,
 -- then import it from a new GHC session with its source absent.
@@ -165,7 +166,15 @@ verifyModuleProductInterfaceRoundtrip work = do
   originalSource <- sourceEvidence a
   let hex = concatMap (\byte -> let s = showHex byte "" in replicate (2 - length s) '0' ++ s)
       manifest = work </> "module-candidates.cbor"
-      candidate = encodeListLen 11
+      packagePath = hi ++ ".packages"
+      packageArtifact = ExactIfaceArtifact
+        (unitString (moduleUnit (pmModule moduleA))) "ModuleProductA" hi
+        (hex (BS.unpack digest)) []
+  packageRoots <- maybe (ioError (userError "module product lacks selected package roots")) pure
+    (Map.lookup name (pprPackageRoots result))
+  let packageBytes = encodePackageImports packageArtifact packageRoots
+      packageHash = hex (BS.unpack (SHA256.hash packageBytes))
+      candidate = encodeListLen 13
         <> encodeString (T.pack (unitString (moduleUnit (pmModule moduleA))))
         <> encodeString "ModuleProductA"
         <> encodeString (T.pack a)
@@ -179,9 +188,11 @@ verifyModuleProductInterfaceRoundtrip work = do
         <> encodeListLen 4 <> encodeString "none" <> encodeString "Prelude"
         <> encodeBool False <> encodeString ""
         <> encodeListLen 0
+        <> encodeString (T.pack packagePath) <> encodeString (T.pack packageHash)
       manifestBytes = toLazyByteString
-        (encodeListLen 3 <> encodeString "TPMCAN" <> encodeString "4"
+        (encodeListLen 3 <> encodeString "TPMCAN" <> encodeString "5"
           <> encodeListLen 1 <> candidate)
+  BS.writeFile packagePath packageBytes
   BS.writeFile manifest (BL.toStrict manifestBytes)
   hydratedCompile <- runPipelineSelected (PreparedProducts (Just manifest)) b [work]
   unless (map candidateModule (pprAcceptedCandidates hydratedCompile) == ["ModuleProductA"]
