@@ -37,6 +37,7 @@ pub struct MaterializedExactDeclarationContext {
     pub lexical: Vec<ExactLexicalNode>,
 }
 
+#[derive(Clone)]
 pub(crate) struct ExactCompilationRequest {
     pub(crate) context: Arc<ExactDeclarationContext>,
     pub(crate) manifest: PathBuf,

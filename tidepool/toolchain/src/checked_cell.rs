@@ -1437,14 +1437,13 @@ impl ExactCompiledPrefix {
         ))
     }
     pub(crate) fn prepared_value_selection(&self) -> Result<CheckedSettledValues, CompileError> {
+        // Requirements keep every original qualified binder, including names
+        // shadowed by a later declaration or Val. Runtime leases retain those
+        // owners independently of the authored lexical selection.
         let mut winners = BTreeMap::new();
         for completed in &self.completed {
             match completed {
-                CompletedCheckedItem::Declaration(item) => {
-                    for name in item.binders() {
-                        winners.remove(name);
-                    }
-                }
+                CompletedCheckedItem::Declaration(_) => {}
                 CompletedCheckedItem::Native(item) => {
                     for binder in &item.bound_binders {
                         let fields = row(binder, 7)?;
@@ -1460,7 +1459,7 @@ impl ExactCompiledPrefix {
                             return Err(failure("binder id is not integer"));
                         };
                         winners.insert(
-                            name.clone(),
+                            (identity.module.clone(), name.clone()),
                             (
                                 name,
                                 identity,
@@ -1490,7 +1489,7 @@ impl ExactCompiledPrefix {
                     return Err(failure("binder id is not integer"));
                 };
                 winners.insert(
-                    name.clone(),
+                    (identity.module.clone(), name.clone()),
                     (
                         name,
                         identity,

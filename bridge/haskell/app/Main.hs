@@ -120,7 +120,7 @@ import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut)
 import Tidepool.Timing (readTimingEnabled, timePhase)
 import Tidepool.TurnSource (extractModuleName, spliceTemplate)
 import Tidepool.DependencyEvidence
-  ( DependencyEvidence(..), DependencyModule(..), ProductAvailability(..)
+  ( DependencyEvidence(..), DependencyModule(..), DependencySource(..), ProductAvailability(..)
   , renderDependencyEvidence, revalidateDependencyEvidence )
 
 renderAsksJson :: [Tidepool.EffectSchema.YieldSite] -> String
@@ -970,7 +970,21 @@ compileClassifiedTurn
   -> String -> StmtBinders -> String -> [String] -> Maybe CheckedItemAdmission -> Maybe CheckedDisplayAdmission
   -> IORef (Maybe (FilePath, String))
   -> IO TurnOut
-compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt = do
+compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt =
+  compiledTurn <$> compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt
+
+data CompiledTurnOutput = CompiledTurnOutput
+  { compiledTurn :: TurnOut
+  , compiledPipeline :: PreparedPipelineResult
+  , compiledOriginalProducts :: [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])]
+  , compiledModule :: String
+  }
+
+compileClassifiedTurnKeeping
+  :: Compiler -> RecoveryCaches -> WorkerRequest -> Bool -> FilePath
+  -> String -> StmtBinders -> String -> [String] -> Maybe CheckedItemAdmission -> Maybe CheckedDisplayAdmission
+  -> IORef (Maybe (FilePath, String)) -> IO CompiledTurnOutput
+compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt = do
     let templates = requestTurnTemplates args
         -- Splice @tmplFile@ against the turn text, write the spliced module
         -- to a scratch file under 'outDir', and return it alongside the
@@ -1077,13 +1091,13 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
     let asksSites = concatMap paYieldSites preparedArtifacts
     timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
-    timePhase timing "module_products" $
-      writeCertifiedProducts outDir hscEnv prepared productContext preparedArtifacts
+    originalProducts <- timePhase timing "module_products" $
+      writeCertifiedProductsKeeping outDir hscEnv prepared productContext preparedArtifacts
     -- Mutable turns never enter the artifact cache, but publication must
     -- still reject source changes observed during this compilation.
     validateDependencyEvidence (pprDependencies prepared)
     let wrapped = T.pack spliced
-    case selector of
+    turn <- case selector of
       SBind -> do
         g    <- requireArg "--bind-gen"     (requestBindGen args)
         root <- requireArg "--session-root" (requestSessionRoot args)
@@ -1098,6 +1112,8 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
           return (TBind [T.pack observation] variant bound asksSites wrapped)
         Nothing -> return (TExpr variant asksSites wrapped)
       SDecl -> error ("--turn: unexpected verdict kind: " ++ templateSelectorWireName selector)
+    owner <- maybe (fail "compiled turn has no module owner") pure (extractModuleName spliced)
+    pure (CompiledTurnOutput turn prepared originalProducts owner)
 
 -- | Block classify mode (@--classify@):
 -- classify EVERY positional file in 'requestFiles' with ONE GHC session boot
@@ -1417,13 +1433,17 @@ runCellProgramMode compiler caches args cellPath exact planned = do
       createDirectoryIfMissing True directory
       validateCheckedItemAdmission localArgs itemAdmission source verdict
       lastAttempt <- newIORef Nothing
-      turn <- timePhase timing "cell_program_native" $ compileClassifiedTurn scoped caches localArgs timing directory
+      output <- timePhase timing "cell_program_native" $ compileClassifiedTurnKeeping scoped caches localArgs timing directory
         source verdict (intercalate ", " (sbBinders verdict)) [] (Just itemAdmission) Nothing lastAttempt
+      extended <- retainProgramProducts directory (compiledPipeline output)
+        [originalProduct | originalProduct@(_,owner,_,_) <- compiledOriginalProducts output, T.unpack owner /= compiledModule output] scope
+      let turn = compiledTurn output
+          retainedState = state { programExact = extended }
       BS.writeFile (directory </> "turn.cbor") (encodeTurnOut turn)
       case turn of
         TBind _ _ binders _ wrapped -> do
           writeCheckedItemReceipt directory scope itemAdmission (T.unpack wrapped)
-          next <- addProgramValue root generation binders state
+          next <- addProgramValue root generation binders retainedState
           case (slot,expression) of
             (PlannedExpression _ display name,Just expressionPlan) ->
               compileDisplay timing admission root outDir index display name expressionPlan next
@@ -1450,13 +1470,16 @@ runCellProgramMode compiler caches args cellPath exact planned = do
           verdict = StmtBinders KBind (checkedDisplayBinders display) []
       createDirectoryIfMissing True directory
       lastAttempt <- newIORef Nothing
-      turn <- timePhase timing "cell_program_display" $ compileClassifiedTurn scoped caches localArgs timing directory
+      output <- timePhase timing "cell_program_display" $ compileClassifiedTurnKeeping scoped caches localArgs timing directory
         "" verdict (intercalate ", " (sbBinders verdict)) [] Nothing (Just display) lastAttempt
+      extended <- retainProgramProducts directory (compiledPipeline output)
+        [originalProduct | originalProduct@(_,owner,_,_) <- compiledOriginalProducts output, T.unpack owner /= compiledModule output] scope
+      let turn = compiledTurn output
       BS.writeFile (directory </> "turn.cbor") (encodeTurnOut turn)
       case turn of
         TBind _ _ binders _ wrapped -> do
           writeCheckedDisplayReceipt directory scope display (T.unpack wrapped)
-          next <- addProgramValue root generation binders state
+          next <- addProgramValue root generation binders (state { programExact = extended })
           pure next { programValues = programValues state }
         _ -> fail "compiled cell display did not return bind metadata"
 
@@ -1578,6 +1601,8 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
     Nothing (map T.pack (prWarnings result)) artifacts
   writePreparedArtifacts directory artifacts
   products <- writeCertifiedProductsKeeping directory environment prepared productContext artifacts
+  supportScope <- retainProgramProducts directory prepared
+    [originalProduct | originalProduct@(_,owner,_,_) <- products, T.unpack owner /= reserved] exact
   (unit, interfaceBytes) <- case
       [(T.unpack unit, bytes) | (unit, name, bytes, _) <- products, T.unpack name == reserved] of
     [value] -> pure value
@@ -1604,10 +1629,10 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
             (Execution.projectedBinders group)
             [(globalIdentity global, globalRequiredEvaluated global) | global <- projectedGlobals (Execution.projectedBody group)]
         | group <- originalGroups']
-      extended = exact
-        { scopeProducts = scopeProducts exact ++ [originalProduct]
-        , scopeInterfaces = scopeInterfaces exact ++ [(interface, packagesPath, shaHex packageBytes)]
-        , scopeLexical = scopeLexical exact ++ [((unit,reserved), requirements)] }
+      extended = supportScope
+        { scopeProducts = scopeProducts supportScope ++ [originalProduct]
+        , scopeInterfaces = scopeInterfaces supportScope ++ [(interface, packagesPath, shaHex packageBytes)]
+        , scopeLexical = scopeLexical supportScope ++ [((unit,reserved), requirements)] }
       text = encodeString . T.pack
       receipt = encodeListLen 8 <> text "TPEXACTDECL" <> text "1"
         <> text (scopeRequestSha256 exact) <> text reserved <> text (plannedSource original)
@@ -1625,12 +1650,64 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
     rejectPlan InvalidOriginalReservation = throwIO InvalidDeclarationReservation
     rejectPlan rejection = throwIO (InvalidDeclarationWrapper (show rejection))
 
+-- Retain fresh supporting originals from this admitted pass. The source digest
+-- comes from the compiler's validated dependency witness, and each native
+-- product keeps its original group ordinals and qualified Names.
+retainProgramProducts
+  :: FilePath -> PreparedPipelineResult
+  -> [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])] -> ExactScope -> IO ExactScope
+retainProgramProducts directory prepared products initial = foldM retain initial (zip [0::Int ..] products)
+  where
+    retain scope (index, originalProduct@(unitText,ownerText,interfaceBytes,groups)) = do
+      let unit = T.unpack unitText
+          owner = T.unpack ownerText
+          admitted = [(exactUnit artifact,exactModule artifact) | (artifact,_,_) <- scopeInterfaces scope]
+      when ((unit,owner) `elem` admitted) (fail "fresh source product replaces an admitted original owner")
+      sourceDigest <- case
+          [dependencySourceSha256 source | node <- dependencyModules (pprDependencies prepared)
+            , dependencyModuleUnit node == unit, dependencyModuleName node == owner
+            , source <- dependencySources (pprDependencies prepared)
+            , dependencySourcePath source == dependencyModuleSource node] of
+        [digest] -> pure digest
+        _ -> fail "supporting original lacks one validated source witness"
+      roots <- maybe (fail "supporting original lacks package interface witness") pure
+        (Map.lookup (mkModuleName owner) (pprPackageRoots prepared))
+      let stem = directory </> "retained-original-" ++ show index
+          interfacePath = stem ++ ".hi"
+          packagesPath = stem ++ ".hi.packages"
+          productPath = stem ++ ".product.cbor"
+          requirements = nub [(importedUnit,name)
+            | compilation <- maybe [] pure (pprExactCompilation prepared)
+            , ((sourceUnit,sourceName,_), edges) <- compilationImports compilation
+            , sourceUnit == unit, sourceName == owner
+            , (_,name,False,importedUnit) <- edges]
+          interface = ExactIfaceArtifact unit owner interfacePath (shaHex interfaceBytes) requirements
+          packageBytes = encodePackageImports interface roots
+          productBytes = encodeModuleProducts [originalProduct]
+          original = ExactProduct unit owner
+            (exactProgramProductVersionFromDigest scope unit owner sourceDigest interfaceBytes productBytes packageBytes)
+            (shaHex interfaceBytes) (shaHex productBytes) productPath
+            [ExactOriginalGroup (fromIntegral (Execution.projectedOriginalOrdinal group))
+              (Execution.projectedBinders group)
+              [(globalIdentity global, globalRequiredEvaluated global)
+                | global <- projectedGlobals (Execution.projectedBody group)] | group <- groups]
+      BS.writeFile interfacePath interfaceBytes
+      BS.writeFile packagesPath packageBytes
+      BS.writeFile productPath productBytes
+      pure scope { scopeProducts = scopeProducts scope ++ [original]
+        , scopeInterfaces = scopeInterfaces scope ++ [(interface,packagesPath,shaHex packageBytes)]
+        , scopeLexical = scopeLexical scope ++ [((unit,owner),requirements)] }
+
 exactProgramProductVersion :: ExactScope -> String -> String -> String -> BS.ByteString -> BS.ByteString -> BS.ByteString -> String
-exactProgramProductVersion scope unit owner source iface productBytes packages = shaHex (BS.concat (map frame fields))
+exactProgramProductVersion scope unit owner source =
+  exactProgramProductVersionFromDigest scope unit owner (shaHex (TE.encodeUtf8 (T.pack source)))
+
+exactProgramProductVersionFromDigest :: ExactScope -> String -> String -> String -> BS.ByteString -> BS.ByteString -> BS.ByteString -> String
+exactProgramProductVersionFromDigest scope unit owner sourceDigest iface productBytes packages = shaHex (BS.concat (map frame fields))
   where
     fields = ["tidepool-exact-source-home-v2", unhex (scopeProducerSha256 scope), unhex (scopeSemanticSha256 scope)
       , TE.encodeUtf8 (T.pack unit), TE.encodeUtf8 (T.pack owner)
-      , SHA256.hash (TE.encodeUtf8 (T.pack source)), iface, productBytes, packages]
+      , unhex sourceDigest, iface, productBytes, packages]
     frame bytes = BS.pack [fromIntegral ((fromIntegral (BS.length bytes) :: Word64) `shiftR` shift)
       | shift <- [56,48..0]] <> bytes
     unhex [] = BS.empty

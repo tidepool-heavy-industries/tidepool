@@ -447,6 +447,20 @@ impl ModuleCandidateOffer {
         values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         planned: crate::checked_cell::CheckedPlannedCellSpecification,
     ) -> Result<Self, CompileError> {
+        let expected = specification
+            .injected_modules
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let actual = values
+            .iter()
+            .map(|(module, _)| module.module_name())
+            .collect::<BTreeSet<_>>();
+        if actual.len() != values.len() || actual != expected {
+            return Err(CompileError::ExtractFailed(
+                "compiled initial interface inventory differs from injected owners".into(),
+            ));
+        }
         let extension = planned.authorization(&specification, producer, include, scratch)?;
         let mut authorization = specification.manifest_value()?;
         let inputs = crate::checked_cell::CheckedValueInputs::capture(values)?;
@@ -699,6 +713,7 @@ impl ModuleCandidateOffer {
             .as_ref()
             .ok_or_else(|| CompileError::ExtractFailed("program has no interface owner".into()))?;
         let mut context = initial.context.clone();
+        let mut program_request = initial.clone();
         let mut declarations = BTreeMap::new();
         let mut admissions = Vec::new();
         let mut outputs = BTreeMap::new();
@@ -722,9 +737,9 @@ impl ModuleCandidateOffer {
                         ))
                     }
                 };
-                let exact =
-                    initial.in_program_context(&root.join("program-inputs"), context.clone())?;
-                let effective = self.program_offer(exact);
+                program_request = program_request
+                    .in_program_context(&root.join("program-inputs"), context.clone())?;
+                let effective = self.program_offer(program_request.clone());
                 let mut source_spec = specification.clone();
                 source_spec.reserved_declaration_modules =
                     vec![
@@ -786,9 +801,9 @@ impl ModuleCandidateOffer {
                     .map_or(planned.parsed_plan.items().len(), |offset| index + offset);
                 admissions.extend(initial.validate_outputs_in_context(&segment_root, &context)?);
                 while index < end {
-                    let exact = initial
+                    program_request = program_request
                         .in_program_context(&root.join("program-inputs"), context.clone())?;
-                    let effective = self.program_offer(exact);
+                    let effective = self.program_offer(program_request.clone());
                     let directory = root.join(format!("item-{index}"));
                     let output = effective.read_program_output(&directory)?;
                     admissions.extend(
@@ -813,9 +828,9 @@ impl ModuleCandidateOffer {
                     if let CheckedPlannedCellSlot::Expression { display, .. } =
                         &planned.slots[index]
                     {
-                        let exact = initial
+                        program_request = program_request
                             .in_program_context(&root.join("program-inputs"), context.clone())?;
-                        let effective = self.program_offer(exact);
+                        let effective = self.program_offer(program_request.clone());
                         let directory = root.join(format!("display-{index}"));
                         let output = effective.read_program_output(&directory)?;
                         admissions.extend(
