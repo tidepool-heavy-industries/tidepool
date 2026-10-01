@@ -730,6 +730,8 @@ rust_filegroup(
         "src/actor_host/m1_browser_process.rs": "bridge/facade/src/actor_host/m1_browser_process.rs",
         "src/actor_host/m1_browser_process_tests.rs": "bridge/facade/src/actor_host/m1_browser_process_tests.rs",
         "src/actor_host/m1_browser_runner.rs": "bridge/facade/src/actor_host/m1_browser_runner.rs",
+        "src/actor_host/m1_cancel_cell.hs": "bridge/facade/src/actor_host/m1_cancel_cell.hs",
+        "src/actor_host/m1_cancel_performance.rs": "bridge/facade/src/actor_host/m1_cancel_performance.rs",
         "src/actor_host/m1_host_fixture.rs": "bridge/facade/src/actor_host/m1_host_fixture.rs",
         "src/actor_host/m1_host_tests.rs": "bridge/facade/src/actor_host/m1_host_tests.rs",
         "src/actor_host/m1_real_host_late_output_tests.rs": "bridge/facade/src/actor_host/m1_real_host_late_output_tests.rs",
