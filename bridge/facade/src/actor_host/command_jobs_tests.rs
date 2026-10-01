@@ -1058,6 +1058,22 @@ async fn inherited_command_is_readable_without_transferring_control_or_display_p
             "{operation}: {rendered}"
         );
     }
+    let detach_denial = super::tests::dispatch_haskell_script_result(
+        observer,
+        "do { Cmd.detach job; pure (424242 :: Int) }",
+    )
+    .await;
+    let rendered = match detach_denial {
+        Ok(value) => {
+            assert_ne!(
+                value["status"], "committed",
+                "discarding unit must not resume after a refused detach: {value}"
+            );
+            value.to_string()
+        }
+        Err(error) => error.to_string(),
+    };
+    assert!(rendered.contains("not authorized"), "{rendered}");
     assert_eq!(
         backend.control_count(),
         0,

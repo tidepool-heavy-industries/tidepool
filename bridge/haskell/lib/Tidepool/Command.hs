@@ -228,7 +228,7 @@ tryStart (Command spec) = fmap Job <$> send (CommandStartWith spec)
 -- | Transfer an owned job to this actor's lifetime. Borrowed handles cannot
 -- detach or cancel another owner's work.
 detach :: (Member Commands effects) => Job -> Eff effects ()
-detach = fmap checked . tryDetach
+detach job = tryDetach job >>= either (error . T.unpack . renderCommandError) pure
 
 tryDetach :: (Member Commands effects) => Job -> Eff effects (Either CommandError ())
 tryDetach (Job key) = send (CommandDetachWith key)
