@@ -8,6 +8,7 @@ module Tidepool.Check
   ( RecipeCheck, CheckActor, Activation (..)
   , root, turn, activation, git, writeFile, readFile
   , present, notPresented, unconfirmed, check, restart
+  , assertThat, assertEventually, assertCell, awaitCell
   , output, lastOutput, literal, gitOidLiteral, checkpoint, awaitOutput
   ) where
 
@@ -72,6 +73,44 @@ unconfirmed = send . RecipeUnconfirmed
 -- value (`True`) and this observed value when the assertion fails.
 check :: Member RecipeCheck effects => Text -> Bool -> Eff effects ()
 check name observed = send (RecipeAssert name observed)
+
+-- | Fail the checked cell before returning an effect action when the predicate
+-- is false. Discarding the unit result cannot discard the assertion.
+assertThat :: Text -> Bool -> Eff effects ()
+assertThat name observed =
+  if observed then pure ()
+  else error (Text.unpack ("Check assertion failed: " <> name))
+
+-- | Observe a typed predicate at most 120 times in the checked actor.
+assertEventually :: Text -> Eff effects Bool -> Eff effects ()
+assertEventually name observe = go (120 :: Int)
+  where
+    go remaining = do
+      observed <- observe
+      if observed then pure ()
+      else if remaining == 1 then assertThat name False
+      else go (remaining - 1)
+
+-- | Evaluate a pure Bool expression in the checked actor's lexical scope.
+-- The host records success only after the assertion cell completes normally.
+assertCell :: Member RecipeCheck effects => CheckActor -> Text -> Text -> Eff effects ()
+assertCell actor name source = do
+  _ <- turn actor (assertionCell "assertThat" name source)
+  check name True
+
+-- | Await a typed effectful predicate in the checked actor's lexical scope.
+awaitCell :: Member RecipeCheck effects => CheckActor -> Text -> Text -> Eff effects ()
+awaitCell actor name source = do
+  _ <- turn actor (assertionCell "assertEventually" name source)
+  check name True
+
+assertionCell :: Text -> Text -> Text -> Text
+assertionCell assertion name source = Text.unlines
+  [ "import qualified Tidepool.Check"
+  , "Tidepool.Check." <> assertion <> " " <> literal name <> " ("
+  , source
+  , ")"
+  ]
 
 -- Intentionally closes this model-free swarm, then captures the edited package.
 -- Earlier CheckActor values cannot address the new swarm even if IDs repeat.
