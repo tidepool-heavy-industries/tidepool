@@ -2462,7 +2462,9 @@ fn retain_failed_compiler_artifacts(
 
 fn retain_program_compile_diagnostics(source: &Path, destination: &Path) -> std::io::Result<()> {
     fn entries(path: &Path) -> std::io::Result<Vec<std::fs::DirEntry>> {
-        let mut entries = std::fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
+        let mut entries = std::fs::read_dir(path)?
+            .take(4097)
+            .collect::<Result<Vec<_>, _>>()?;
         if entries.len() > 4096 {
             return Err(std::io::Error::other(
                 "excessive program diagnostic entries",
