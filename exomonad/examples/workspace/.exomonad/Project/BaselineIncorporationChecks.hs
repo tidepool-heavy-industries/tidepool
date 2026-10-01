@@ -49,21 +49,19 @@ episode = do
     , "Right active <- beginBaselineEpisode opened change [affected worker \"worker\"]"
     , "Right late <- beginBaselineEpisode lateOpened change [affected lateWorker \"late\"]"
     ])
-  route <- turn owner "inspectFull exactRoute"
-  check "explicit question ownership routes to both affected owners"
-    ("worker" `Text.isInfixOf` output route && "late" `Text.isInfixOf` output route)
-  late <- turn owner "lateView <- episodeView late\ninspectFull (map ownerDelivery (collectorOwners lateView), episodeComplete lateView)"
-  check "a settled request is retained as a late update, never treated as delivered"
-    ("UpdateRefused" `Text.isInfixOf` output late && "False" `Text.isInfixOf` output late)
-
-  -- The pending worker receives the owner's update at its next boundary.
+  void $ turn owner "inspectFull exactRoute"
+  assertCell owner "explicit question ownership routes to both affected owners"
+    "exactRoute == Right [\"worker\", \"late\"]"
+  void $ turn owner "lateView <- episodeView late\ninspectFull (map ownerDelivery (collectorOwners lateView), episodeComplete lateView)"
+  assertCell owner "settled request retains a late update without claiming delivery"
+    "not (episodeComplete lateView) && case collectorOwners lateView of { [row] -> case ownerDelivery row of { UpdateRefused _ -> True; _ -> False }; _ -> False }"
   delivered <- present
   check "accepted source and named evidence were delivered to the active worker"
     (after `Text.isInfixOf` delivered && "read exact baseline" `Text.isInfixOf` delivered)
-  refreshed <- turn owner "refreshBaselineEpisode active"
-  check "owner-side refresh accepts the observed presentation" ("ReportAccepted" `Text.isInfixOf` output refreshed)
-
-  handle <- turn (checkActor worker) (Text.unlines
+  void $ turn owner "refreshed <- refreshBaselineEpisode active\npure ()"
+  assertCell owner "owner-side refresh accepts observed presentation"
+    "refreshed == [(\"worker\", ReportAccepted)]"
+  void $ turn (checkActor worker) (Text.unlines
     [ "let workerCollector = openedActor (baselineCollector (sessionInput :: BaselineAssignment))"
     , "let workerLabel = baselineOwnerLabel (sessionInput :: BaselineAssignment)"
     , "workerView <- R.call (snapshotEpisode (R.client workerCollector)) ()"
@@ -73,47 +71,45 @@ episode = do
     , "let workerBefore = baselineBefore workerChange"
     , "inspectFull (baselineTask (sessionInput :: BaselineAssignment), collectorBegun workerView)"
     ])
-  check "typed Luna assignment carries the live handle into selected context"
-    (before `Text.isInfixOf` output handle && "True" `Text.isInfixOf` output handle)
-
-  forged <- turn owner
-    "R.call (submitIncorporation (R.client (openedActor opened))) (\"worker\", Incorporated amendment after [\"read exact baseline\"])"
-  check "another actor cannot claim the worker's incorporation"
-    ("incorporation came from another actor" `Text.isInfixOf` output forged)
-  wrongHead <- turn (checkActor worker)
-    "R.call (submitIncorporation (R.client workerCollector)) (workerLabel, Incorporated workerAmendment workerBefore [\"read exact baseline\"])"
-  check "a report naming an old resulting head is refused"
-    ("changed baseline" `Text.isInfixOf` output wrongHead)
-
-  blocked <- turn (checkActor worker)
-    "R.call (submitIncorporation (R.client workerCollector)) (workerLabel, IncorporationBlocked workerAmendment \"conflict\" [\"needs owner decision\"])"
-  check "the exact worker can report a semantic refusal without settling its task"
-    ("ReportRejected" `Text.isInfixOf` output blocked)
-  partial <- turn (checkActor worker)
-    "R.call (submitIncorporation (R.client workerCollector)) (workerLabel, Incorporated workerAmendment workerAfter [])"
-  check "missing named checks remain a rejected report" ("reported checks missing" `Text.isInfixOf` output partial)
-  beforeCheck <- turn owner "view <- episodeView active\ninspectFull (ownerReport (head (collectorOwners view)), episodeComplete view)"
-  check "partial evidence is retained separately from completed incorporation"
-    ("ReportRefused" `Text.isInfixOf` output beforeCheck && "False" `Text.isInfixOf` output beforeCheck)
-
+  assertCell (checkActor worker) "typed Luna assignment carries live handle into selected context"
+    ("taskSource (baselineTask (sessionInput :: BaselineAssignment)) == workerBefore && collectorBegun workerView && workerBefore == " <> gitOidLiteral before <> "")
+  void $ turn owner
+    "forged <- R.call (submitIncorporation (R.client (openedActor opened))) (\"worker\", Incorporated amendment after [\"read exact baseline\"])\nforgedView <- episodeView active\npure ()"
+  assertCell owner "another actor cannot claim worker incorporation"
+    "case forged of { ReportRejected _ -> case collectorOwners forgedView of { [row] -> ownerReport row == NoReport; _ -> False }; _ -> False }"
+  void $ turn (checkActor worker)
+    "wrongHead <- R.call (submitIncorporation (R.client workerCollector)) (workerLabel, Incorporated workerAmendment workerBefore [\"read exact baseline\"])\nwrongHeadView <- R.call (snapshotEpisode (R.client workerCollector)) ()\npure ()"
+  assertCell (checkActor worker) "old resulting head report is refused with exact report retained"
+    "case wrongHead of { ReportRejected _ -> case collectorOwners wrongHeadView of { [row] -> case ownerReport row of { ReportRefused (Incorporated amendment head checks) _ -> amendment == workerAmendment && head == workerBefore && checks == [\"read exact baseline\"]; _ -> False }; _ -> False }; _ -> False }"
+  void $ turn (checkActor worker)
+    "blocked <- R.call (submitIncorporation (R.client workerCollector)) (workerLabel, IncorporationBlocked workerAmendment \"conflict\" [\"needs owner decision\"])\nblockedView <- R.call (snapshotEpisode (R.client workerCollector)) ()\npure ()"
+  assertCell (checkActor worker) "exact worker reports semantic refusal without settling task"
+    "case blocked of { ReportRejected _ -> case collectorOwners blockedView of { [row] -> case ownerReport row of { ReportBlocked (IncorporationBlocked amendment reason checks) -> amendment == workerAmendment && reason == \"conflict\" && checks == [\"needs owner decision\"]; _ -> False }; _ -> False }; _ -> False }"
+  void $ turn (checkActor worker)
+    "partial <- R.call (submitIncorporation (R.client workerCollector)) (workerLabel, Incorporated workerAmendment workerAfter [])\npartialView <- R.call (snapshotEpisode (R.client workerCollector)) ()\npure ()"
+  assertCell (checkActor worker) "missing named checks retain rejected exact report"
+    "case partial of { ReportRejected _ -> case collectorOwners partialView of { [row] -> case ownerReport row of { ReportRefused (Incorporated amendment head checks) _ -> amendment == workerAmendment && head == workerAfter && null checks; _ -> False }; _ -> False }; _ -> False }"
+  void $ turn owner "view <- episodeView active\ninspectFull (ownerReport (head (collectorOwners view)), episodeComplete view)"
+  assertCell owner "partial evidence remains separate from completed incorporation"
+    "not (episodeComplete view) && case collectorOwners view of { [row] -> case ownerReport row of { ReportRefused (Incorporated amendment head checks) _ -> amendment == baselineAmendment change && head == after && null checks; _ -> False }; _ -> False }"
   void $ git (checkActor worker) ["merge", "--ff-only", after]
   plan <- readFile (checkActor worker) "plans/baseline.md"
   check "worker reads the accepted source in its own checkout" (plan == "Accepted baseline\n")
-  accepted <- turn (checkActor worker)
-    "R.call (submitIncorporation (R.client workerCollector)) (workerLabel, Incorporated workerAmendment workerAfter [\"read exact baseline\"])"
-  check "worker can correct its reported evidence in the same pending request"
-    ("ReportAccepted" `Text.isInfixOf` output accepted)
-  pending <- turn owner "pollResponse worker"
-  check "reporting incorporation does not settle the original task"
-    ("ResponsePending" `Text.isInfixOf` output pending)
-  final <- turn owner "view <- episodeView active\ninspectFull (episodeComplete view, ownerReport (head (collectorOwners view)))"
-  check ("completion means presented plus exact worker report, with checks still only reported: " <> output final)
-    ("True" `Text.isInfixOf` output final && "Reported" `Text.isInfixOf` output final)
-
-  stale <- turn owner "invalid <- openBaselineEpisode me\ninvalidResult <- beginBaselineEpisode invalid (change { baselineBefore = after }) [affected worker \"worker\"]\nR.finish (openedActor invalid)\ninspectFull (case invalidResult of { Left reason -> reason; Right _ -> \"unexpected acceptance\" })"
-  check "a stale amendment base is refused before any update" ("amendment base differs" `Text.isInfixOf` output stale)
-  changed <- turn owner "invalid <- openBaselineEpisode me\ninvalidResult <- beginBaselineEpisode invalid (change { baselineBefore = after, baselineAmendment = amendment { amendmentBase = after } }) [affected worker \"worker\"]\nR.finish (openedActor invalid)\ninspectFull (case invalidResult of { Left reason -> reason; Right _ -> \"unexpected acceptance\" })"
-  check "a changed owner task baseline is refused before any update" ("owner's task names a changed baseline" `Text.isInfixOf` output changed)
-
+  void $ turn (checkActor worker)
+    "accepted <- R.call (submitIncorporation (R.client workerCollector)) (workerLabel, Incorporated workerAmendment workerAfter [\"read exact baseline\"])\npure ()"
+  assertCell (checkActor worker) "worker corrects evidence in same pending request"
+    "accepted == ReportAccepted"
+  void $ turn owner "pending <- pollResponse worker\npure ()"
+  assertCell owner "reporting incorporation does not settle original task"
+    "case pending of { ResponsePending -> True; _ -> False }"
+  void $ turn owner "view <- episodeView active\ninspectFull (episodeComplete view, ownerReport (head (collectorOwners view)))"
+  assertCell owner "completion needs presentation and exact worker reported checks"
+    "episodeComplete view && case collectorOwners view of { [row] -> case (ownerDelivery row, ownerReport row) of { (UpdateTracked _ (Just (Right UpdatePresented)), Reported (Incorporated amendment head checks)) -> amendment == baselineAmendment change && head == after && checks == [\"read exact baseline\"]; _ -> False }; _ -> False }"
+  void $ turn owner "invalid <- openBaselineEpisode me\ninvalidResult <- beginBaselineEpisode invalid (change { baselineBefore = after }) [affected worker \"worker\"]\ninvalidView <- R.call (snapshotEpisode (R.client (openedActor invalid))) ()\nR.finish (openedActor invalid)\ninspectFull (case invalidResult of { Left reason -> reason; Right _ -> \"unexpected acceptance\" })"
+  assertCell owner "stale amendment base refuses before update"
+    "case invalidResult of { Left _ -> not (collectorBegun invalidView) && null (collectorOwners invalidView) && case collectorChange invalidView of { Nothing -> True; _ -> False }; _ -> False }"
+  void $ turn owner "invalid <- openBaselineEpisode me\ninvalidResult <- beginBaselineEpisode invalid (change { baselineBefore = after, baselineAmendment = amendment { amendmentBase = after } }) [affected worker \"worker\"]\ninvalidView <- R.call (snapshotEpisode (R.client (openedActor invalid))) ()\nR.finish (openedActor invalid)\ninspectFull (case invalidResult of { Left reason -> reason; Right _ -> \"unexpected acceptance\" })"
+  assertCell owner "changed owner task baseline refuses before update"
+    "case invalidResult of { Left _ -> not (collectorBegun invalidView) && null (collectorOwners invalidView) && case collectorChange invalidView of { Nothing -> True; _ -> False }; _ -> False }"
   void $ turn (checkActor worker) "respond (Blocked \"report retained; source acceptance remains with owner\" [] :: Outcome Candidate)"
   void $ turn owner "R.finish (openedActor opened)\nR.finish (openedActor lateOpened)"

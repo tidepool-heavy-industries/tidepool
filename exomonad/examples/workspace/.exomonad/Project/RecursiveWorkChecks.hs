@@ -18,8 +18,8 @@ nestedBatches = do
   setup owner base "first"
   component <- activation
   sibling <- activation
-  pending <- turn owner "early <- finishWorkBatch work\ninspectFull (case early of { Left names -> length names == 2; _ -> False })"
-  check "collector cannot close over pending original requests" (lastOutput pending == "True")
+  void $ turn owner "early <- finishWorkBatch work"
+  assertCell owner "collector cannot close over pending original requests" "(case early of { Left names -> length names == 2; _ -> False })"
   componentSource <- checkpoint (checkActor component) "component-scaffold.txt" "component contract\n" "component scaffold fixture"
   setup (checkActor component) componentSource "subcomponents"
   subcomponent <- activation
@@ -53,11 +53,11 @@ nestedBatches = do
       void $ turn actor ("let sourceHead = " <> gitOidLiteral base <> "\nlet groupName = " <> Text.pack (show group) <> " :: ForkGroupLabel")
       script actor "recursive-batch"
     finish actor = do
-      void $ awaitOutput actor
-        "inspectFull . length . filter (maybe False (const True) . sourceResult) . collectedWork <$> readWork (batchRouter work)"
-        (== "2")
-      result <- turn actor "closed <- finishWorkBatch work\ninspectFull (case closed of { Right _ -> True; _ -> False })"
-      check "settled findings batch drains without retiring its workers" (lastOutput result == "True")
+      awaitCell actor "both original sources have terminal results"
+        "do { state <- readWork (batchRouter work); pure (length (filter (maybe False (const True) . sourceResult) (collectedWork state)) == 2) }"
+      void $ turn actor "closed <- finishWorkBatch work"
+      assertCell actor "settled findings batch drains without retiring its workers"
+        "case closed of { Right _ -> True; _ -> False }"
       void $ turn actor "case answerer of { Nothing -> pure (); Just answers -> do { _ <- R.finish answers; pure () } }"
 
 -- A new review request changes both the exact source and the actor, while
@@ -81,5 +81,5 @@ revisedReview = do
   check "revised review gets a fresh actor and the new candidate"
     (checkActor next /= checkActor reviewer && nextHead == revised)
   check "revised review leaves the retained previous checkout intact" (oldHead == first)
-  scope <- turn (checkActor next) ("inspectFull (reviewBase (reviewBasis sessionInput) == " <> gitOidLiteral base <> " && reviewOwnedPaths (reviewBasis sessionInput) == [\"candidate.txt\"])")
-  check "fresh review preserves the original cumulative scope" (lastOutput scope == "True")
+  assertCell (checkActor next) "fresh review preserves the original cumulative scope"
+    ("reviewBase (reviewBasis sessionInput) == " <> gitOidLiteral base <> " && reviewOwnedPaths (reviewBasis sessionInput) == [\"candidate.txt\"]")

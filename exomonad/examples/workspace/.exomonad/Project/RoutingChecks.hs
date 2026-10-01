@@ -8,7 +8,7 @@ import Control.Monad (void)
 import Control.Monad.Freer (Eff, Member)
 import qualified Data.Text as Text
 import Tidepool.Check
-import Project.Checks (script, checkSource)
+import Project.Checks (script)
 
 routing :: Member RecipeCheck effects => Eff effects ()
 routing = do
@@ -33,25 +33,21 @@ routing = do
   consumer <- activation
   script (checkActor consumer) "layout-reply"
   void $ turn owner "layoutReceipt <- pollResponse consumer"
-  layoutResult <- turn owner "(== (Just \"ready; layout preserved\")) (case layoutReceipt of { ResponseReady result -> Just (responseValue result); _ -> Nothing })"
-  check "an indented finding list reaches the actual reply" (output layoutResult == "True")
+  assertCell owner "an indented finding list reaches the actual reply" "(== (Just \"ready; layout preserved\")) (case layoutReceipt of { ResponseReady result -> Just (responseValue result); _ -> Nothing })"
   script owner "progress-route"
   script (checkActor producer) "progress-route-questions"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first])"
-  first <- turn owner "(== ([[\"question-a\"]])) . map (map questionKey . workQuestions . sourceProgress) . collectedWork <$> readWork forwarding"
-  check "the persistent actor consumes the first publication" (output first == "True")
+  awaitCell owner "the persistent actor consumes the first publication" "(== ([[\"question-a\"]])) . map (map questionKey . workQuestions . sourceProgress) . collectedWork <$> readWork forwarding"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first])"
   void $ turn owner "readWork forwarding"
-  counts <- turn owner "Actor.call wakes (RoutingCount 0 id)"
-  check "identical attention does not invoke the sink again" (output counts == "1")
+  void $ turn owner "checkObserved <- (Actor.call wakes (RoutingCount 0 id))"
+  assertCell owner "identical attention does not invoke the sink again" "checkObserved == 1"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first,second])"
-  second <- turn owner "(== ([[\"question-a\",\"question-b\"]])) . map (map questionKey . workQuestions . sourceProgress) . collectedWork <$> readWork forwarding"
-  check "later publications arrive without rearming" (output second == "True")
-  pending <- turn (checkActor producer) "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply"
-  check "publishing progress preserves the original reply" ("ReplyOpen" `Text.isSuffixOf` output pending)
+  awaitCell owner "later publications arrive without rearming" "(== ([[\"question-a\",\"question-b\"]])) . map (map questionKey . workQuestions . sourceProgress) . collectedWork <$> readWork forwarding"
+  void $ turn (checkActor producer) "import Tidepool.Agent.Reply (pollReply)\noriginalReply <- pollReply sessionReply"
+  assertCell (checkActor producer) "publishing progress preserves the original reply" "originalReply == ReplyOpen"
   void $ turn (checkActor producer) "respond (\"finished\" :: Text)"
-  closed <- turn owner "(== ([WorkClosed])) . map Exomonad.Contrib.Routing.sourceStatus . collectedWork <$> readWork forwarding"
-  check "source closure leaves the actor's retained state queryable" (output closed == "True")
+  awaitCell owner "source closure leaves the actor's retained state queryable" "(== ([WorkClosed])) . map Exomonad.Contrib.Routing.sourceStatus . collectedWork <$> readWork forwarding"
   void $ turn owner "finishWork forwarding"
   void restart
   independentSources
@@ -70,44 +66,45 @@ mixedBatch = do
   void $ turn (checkActor numberWorker) "reportProgress (\"numbers ready\" :: Text)"
   void $ turn (checkActor textWorker) "respond (\"text ready\" :: Text)"
   void $ turn (checkActor numberWorker) "respond (42 :: Int)"
-  projected <- turn owner $ Text.unlines
+  void $ turn owner $ Text.unlines
     [ "view <- readWork (routedCollector mixed)"
     , "ResponseReady textReceipt <- pollResponse textResponse"
     , "ResponseReady numberReceipt <- pollResponse numberResponse"
     , "let sameReceipt original projected = responseExecution original == responseExecution projected && responseWorktree original == responseWorktree projected"
     , "let textMatches = [sameReceipt textReceipt receipt && responseValue receipt == TextResult (responseValue textReceipt) | WorkFinished \"text\" (Right receipt) <- workHistory view]"
     , "let numberMatches = [sameReceipt numberReceipt receipt && responseValue receipt == NumberResult (responseValue numberReceipt) | WorkFinished \"number\" (Right receipt) <- workHistory view]"
-    , "inspectFull (textMatches == [True] && numberMatches == [True] && length [() | source <- collectedWork view, Just _ <- [sourceCursor source]] == 2)"
+    , "let checkObserved = (textMatches == [True] && numberMatches == [True] && length [() | source <- collectedWork view, Just _ <- [sourceCursor source]] == 2)"
     ]
-  check "mixed batch keeps original handles and exact receipts across projections" (lastOutput projected == "True")
+  assertCell owner "mixed batch keeps original handles and exact receipts across projections" "checkObserved"
   void $ turn owner "finishRoutedBatch mixed"
 
 refusedBatch :: Member RecipeCheck effects => Eff effects ()
 refusedBatch = do
   owner <- root
-  result <- readFile owner (checkSource "refused-batch") >>= turn owner
-  check "invalid batches return typed refusals before allocating any actor" (lastOutput result == "True")
+  script owner "refused-batch"
+  assertCell owner "invalid batches return typed refusals before allocating any actor" "(case emptyRefusal of { Left EmptyWorkBatch -> True; _ -> False }) && (case blankRefusal of { Left EmptyWorkName -> True; _ -> False }) && (case duplicateRefusal of { Left (DuplicateWorkName \"same\") -> True; _ -> False }) && (case contextRefusal of { Left (WorkAdmissionRefused (UnfoldUncapturedContext _)) -> True; _ -> False }) && beforeRefusal == afterRefusal"
 
 observerIsolation :: Member RecipeCheck effects => Eff effects ()
 observerIsolation = do
   owner <- root
   script owner "progress-route-producer"
   producer <- activation
-  refused <- turn owner "refusedExisting <- followWork [(\"same\", producer, updates), (\"same\", producer, updates)] keepWork\noriginalState <- pollResponse producer\ninspectFull ((case refusedExisting of { Left (DuplicateWorkName \"same\") -> True; _ -> False }) && (case originalState of { ResponsePending _ -> True; _ -> False }))"
-  check "collector refusal leaves original supplied response active" (lastOutput refused == "True")
+  void $ turn owner "refusedExisting <- followWork [(\"same\", producer, updates), (\"same\", producer, updates)] keepWork\noriginalState <- pollResponse producer"
+  assertCell owner "collector refusal leaves original supplied response active" "((case refusedExisting of { Left (DuplicateWorkName \"same\") -> True; _ -> False }) && (case originalState of { ResponsePending _ -> True; _ -> False }))"
   script owner "observer-isolation"
   script (checkActor producer) "progress-route-questions"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first])"
-  _ <- awaitOutput owner "Actor.pollExit (R.actorRef optional)" (Text.isInfixOf "Failed")
+  void $ turn owner "optionalExit <- Actor.awaitExit (R.actorRef optional)"
+  assertCell owner "optional observer fails explicitly" "case optionalExit of { Actor.Failed _ -> True; _ -> False }"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first,second])"
   void $ turn (checkActor producer) "respond (\"still collected\" :: Text)"
-  retained <- turn owner $ Text.unlines
+  void $ turn owner $ Text.unlines
     [ "view <- readWork collection"
     , "let refusals = [() | ObserverAdmission _ _ (Left _) <- workObserverAdmissions view]"
     , "let admissions = [() | ObserverAdmission _ _ (Right ()) <- workObserverAdmissions view]"
-    , "inspectFull (length refusals >= 3 && length admissions == 1 && not (null (workNotices view)) && (case collectedWork view of { [source] -> case sourceResult source of { Just (Right receipt) -> responseValue receipt == \"still collected\"; _ -> False }; _ -> False }))"
+    , "let checkObserved = (length refusals >= 3 && length admissions == 1 && not (null (workNotices view)) && (case collectedWork view of { [source] -> case sourceResult source of { Just (Right receipt) -> responseValue receipt == \"still collected\"; _ -> False }; _ -> False }))"
     ]
-  check "refused and failed optional observers preserve primary terminal collection" (lastOutput retained == "True")
+  assertCell owner "refused and failed optional observers preserve primary terminal collection" "checkObserved"
   void $ turn owner "finishWork collection"
 
 -- Real Delivery values cross a typed parent mailbox; partial source remains in
@@ -124,10 +121,8 @@ twoLaneHandoff = do
   script owner "handoff-router"
   partial <- checkpoint (checkActor left) "left.txt" "partial\n" "left partial checkpoint"
   void $ turn (checkActor left) ("reportProgress (WorkProgress [Candidate " <> gitOidLiteral partial <> " [] [\"final source pending\"]] [])")
-  initial <- turn owner "view <- readWork handoff\ninspectFull (collectedWork view)"
-  check "partial checkpoint is retained before final publication" (partial `Text.isInfixOf` output initial)
-  before <- turn owner "length <$> R.call (handoffSnapshot (R.client parent)) ()"
-  check "partial progress stays local to the subtree" (lastOutput before == "0")
+  awaitCell owner "partial checkpoint is retained before final publication" ("do\n  view <- readWork handoff\n  pure (any (elem (Candidate " <> gitOidLiteral partial <> " [] [\"final source pending\"]) . workEvidence . sourceProgress) (collectedWork view))")
+  awaitCell owner "partial progress stays local to the subtree" "do\n  received <- R.call (handoffSnapshot (R.client parent)) ()\n  pure (null received)\n"
   leftFinal <- checkpoint (checkActor left) "left.txt" "left final\n" "left final checkpoint"
   rightFinal <- checkpoint (checkActor right) "right.txt" "right final\n" "right final checkpoint"
   leftSource <- readFile (checkActor left) "left.txt"
@@ -139,12 +134,10 @@ twoLaneHandoff = do
           <> gitOidLiteral commit <> " [\"read final source\"]))")
   deliver (checkActor left) leftFinal
   deliver (checkActor right) rightFinal
-  final <- turn owner "view <- readWork handoff\ninspectFull (collectedWork view)"
-  check "both later final heads arrive without rearming" (all (`Text.isInfixOf` output final) [partial, leftFinal, rightFinal])
-  parentView <- turn owner "received <- R.call (handoffSnapshot (R.client parent)) ()\ninspectFull received"
-  check "parent receives typed delivery and its runtime receipt" (all (`Text.isInfixOf` output parentView) [leftFinal, rightFinal, "product acceptance remains", "executionActorId"])
-  count <- turn owner "inspectFull (length received)"
-  check "each final result crosses the parent boundary exactly once" (output count == "2")
+  void $ turn owner "view <- readWork handoff\nreceived <- R.call (handoffSnapshot (R.client parent)) ()"
+  assertCell owner "both later final heads arrive without rearming" ("all (\\oid -> any ((== oid) . candidateCommit) (concatMap (workEvidence . sourceProgress) (collectedWork view) ++ [reviewedCandidate reviewed | source <- collectedWork view, Just (Right receipt) <- [sourceResult source], Produced (Delivered reviewed _ _) <- [responseValue receipt]])) " <> "[" <> gitOidLiteral partial <> ", " <> gitOidLiteral leftFinal <> ", " <> gitOidLiteral rightFinal <> "]")
+  assertCell owner "parent receives typed delivery and its runtime receipt" "let deliveries = [(reviewedCandidate reviewed, receipt) | WorkFinished _ (Right receipt) <- received, Produced (Delivered reviewed _ _) <- [responseValue receipt]] in length deliveries == 2 && all (\\(candidate,receipt) -> remainingGates candidate == [\"product acceptance remains\"] && responseWorktree receipt /= NoBoundWorktree) deliveries"
+  assertCell owner "each final result crosses the parent boundary exactly once" "length received == 2"
   void $ git owner ["merge", "--ff-only", leftFinal]
   void $ git owner ["merge", "--no-edit", rightFinal]
   integratedLeft <- readFile owner "left.txt"
@@ -152,8 +145,8 @@ twoLaneHandoff = do
   check "coordinator integrates both exact final candidates" (integratedLeft == leftSource && integratedRight == rightSource)
   void $ git owner ["merge-base", "--is-ancestor", leftFinal, "HEAD"]
   void $ git owner ["merge-base", "--is-ancestor", rightFinal, "HEAD"]
-  retired <- turn owner "retired <- finishWork handoff\ninspectFull (case retired of { Actor.Completed state -> collectedWork state; _ -> [] })"
-  check "drain retains both incorporated final heads" (all (`Text.isInfixOf` output retired) [leftFinal, rightFinal])
+  void $ turn owner "retired <- finishWork handoff"
+  assertCell owner "drain retains both incorporated final heads" ("case retired of { Actor.Completed state -> length [() | source <- collectedWork state, Just (Right receipt) <- [sourceResult source], Produced (Delivered _ commit _) <- [responseValue receipt], commit `elem` " <> "[" <> gitOidLiteral leftFinal <> ", " <> gitOidLiteral rightFinal <> "]" <> "] == 2; _ -> False }")
   void $ turn owner "R.finish parent"
 
 -- A record-actor handler that calls another record actor and waits for the
@@ -164,15 +157,12 @@ handlerCall :: Member RecipeCheck effects => Eff effects ()
 handlerCall = do
   owner <- root
   script owner "handler-call"
-  replied <- awaitOutput owner "state <- R.call (callerView (R.client caller)) ()\ninspectFull (callerReplies state)" (Text.isInfixOf "6")
-  check ("a handler awaiting another record actor's reply is serviced: " <> replied) ("[6]" `Text.isInfixOf` replied)
-  calls <- turn owner "state <- R.call (boxView (R.client box)) ()\ninspectFull (boxCalls state)"
-  check "the callee ran exactly once" (lastOutput calls == "1")
+  awaitCell owner "a handler awaiting another record actor's reply is serviced" "do { state <- R.call (callerView (R.client caller)) (); pure (callerReplies state == [6]) }"
+  awaitCell owner "the callee ran exactly once" "do { state <- R.call (boxView (R.client box)) (); pure (boxCalls state == 1) }"
   -- Every module in `modules` is imported unqualified into cells, so an
   -- exported constructor or field must not share a name with another
   -- module's. These are the names prompts and skills tell a model to write.
-  outcome <- turn owner "case (Blocked \"reason\" [] :: Outcome ReviewDecision) of { Blocked _ _ -> null (map repairFindings []); Produced (Accepted _) -> False; Produced (Repair _ _) -> False }"
-  check ("a cell names reply constructors and fields unqualified: " <> output outcome) (output outcome == "True")
+  assertCell owner "a cell names reply constructors and fields unqualified" "case (Blocked \"reason\" [] :: Outcome ReviewDecision) of { Blocked _ _ -> null (map repairFindings []); Produced (Accepted _) -> False; Produced (Repair _ _) -> False }"
 
 forwardingFailure :: Member RecipeCheck effects => Eff effects ()
 forwardingFailure = do
@@ -181,23 +171,18 @@ forwardingFailure = do
   producer <- activation
   script owner "forwarding-failure"
   identity <- turn owner "forwarding"
-  check "a forwarding handle displays identity without inspecting its result cell" ("Forwarding (" `Text.isPrefixOf` output identity)
+  check "display UX: a forwarding handle displays identity without inspecting its result cell" ("Forwarding (" `Text.isPrefixOf` output identity)
   void $ turn (checkActor producer) "respond (\"retained result\" :: Text)"
-  failed <- awaitOutput owner "R.forwardingExit forwarding" (Text.isInfixOf "Failed")
-  check "finite forwarding retains a failed exit instead of retargeting a stale endpoint" ("Failed" `Text.isInfixOf` failed)
-  count <- turn owner "R.call (acceptedCount (R.client sink)) ()"
-  check "replacement does not receive a send addressed to the old incarnation" (output count == "0")
-  retained <- turn owner "R.forwardingExit forwarding"
-  check "the forwarder's failed exit remains inspectable after another query" ("Failed" `Text.isInfixOf` lastOutput retained)
+  awaitCell owner "finite forwarding retains a failed exit instead of retargeting a stale endpoint" "do { exit <- R.forwardingExit forwarding; pure (case exit of { Just (Actor.Failed _) -> True; _ -> False }) }"
+  awaitCell owner "replacement does not receive a send addressed to the old incarnation" "do { count <- R.call (acceptedCount (R.client sink)) (); pure (count == 0) }"
+  awaitCell owner "the forwarder's failed exit remains inspectable after another query" "do { exit <- R.forwardingExit forwarding; pure (case exit of { Just (Actor.Failed _) -> True; _ -> False }) }"
   void $ turn owner "R.finish sink"
 
 messageDeltas :: Member RecipeCheck effects => Eff effects ()
 messageDeltas = do
   owner <- root
   script owner "question-message-deltas"
-  result <- turn owner "(== ((True,True,True,True))) questionMessageChecks"
-  check "amendments upsert once; source advances, resolutions and unchanged questions stay distinct"
-    (output result == "True")
+  assertCell owner "amendments upsert once; source advances, resolutions and unchanged questions stay distinct" "(== ((True,True,True,True))) questionMessageChecks"
 
 candidateHistory :: Member RecipeCheck effects => Eff effects ()
 candidateHistory = do
@@ -208,15 +193,13 @@ candidateHistory = do
   void $ turn owner "Right collection <- followWork [(\"producer\", producer, updates)] keepWork"
   let candidates = "let firstCandidate = Candidate " <> gitOidLiteral baseline <> " [\"first check\"] []\nlet secondCandidate = firstCandidate { reportedChecks = [\"different check\"] }"
   void $ turn (checkActor producer) (candidates <> "\nreportProgress (WorkProgress [firstCandidate] [])\nreportProgress (WorkProgress [secondCandidate] [])")
-  before <- turn owner "view <- readWork collection\n(== ((2,2))) (length (workEvidence (sourceProgress (head (collectedWork view)))), length (workHistory view))"
-  check "same-commit changed evidence remains distinct and ordered" (lastOutput before == "True")
+  void $ turn owner "view <- readWork collection"
+  assertCell owner "same-commit changed evidence remains distinct and ordered" "(== ((2,2))) (length (workEvidence (sourceProgress (head (collectedWork view)))), length (workHistory view))"
   void $ turn owner (candidates <> "\nR.send (acknowledgeWork (R.client collection)) (\"producer\", [firstCandidate])\nview <- readWork collection\nlet briefBefore = workSnapshotSummary id view")
-  frontier <- turn owner "(== ([[\"different check\"]])) (map reportedChecks (outstandingEvidence view (head (collectedWork view))))"
-  check "incorporation removes only the exact handled evidence" (output frontier == "True")
+  assertCell owner "incorporation removes only the exact handled evidence" "(== ([[\"different check\"]])) (map reportedChecks (outstandingEvidence view (head (collectedWork view))))"
   void $ turn (checkActor producer) "mapM_ reportProgress (replicate 100 (WorkProgress [firstCandidate,secondCandidate] []))"
-  after <- turn owner "view <- readWork collection\n(== ((True,102,[[\"first check\"],[\"different check\"]]))) (workSnapshotSummary id view == briefBefore, length (workHistory view), map reportedChecks (workEvidence (sourceProgress (head (collectedWork view)))))"
-  check "100 retained publications do not expand the normal brief or erase evidence"
-    (lastOutput after == "True")
+  void $ turn owner "view <- readWork collection"
+  assertCell owner "100 retained publications do not expand the normal brief or erase evidence" "(== ((True,102,[[\"first check\"],[\"different check\"]]))) (workSnapshotSummary id view == briefBefore, length (workHistory view), map reportedChecks (workEvidence (sourceProgress (head (collectedWork view)))))"
   void $ turn (checkActor producer) "respond (\"finished\" :: Text)"
   void $ turn owner "finishWork collection"
 
@@ -230,33 +213,19 @@ reviewReadiness = do
   let actor = checkActor worker
   void $ turn actor ("reportProgress (WorkProgress [Candidate " <> gitOidLiteral baseline
     <> " [] [\"review pending\"]] [])")
-  premature <- turn owner "state <- readWork readiness\n(0,Nothing) == (length (workNotices state), reviewReadyMessage (last (workHistory state)))"
-  check "a reported progress candidate cannot signal review readiness" (lastOutput premature == "True")
+  void $ turn owner "state <- readWork readiness"
+  assertCell owner "a reported progress candidate cannot signal review readiness" "(0,Nothing) == (length (workNotices state), reviewReadyMessage (last (workHistory state)))"
   submitted <- checkpoint actor "review-ready.txt" "submitted source\n" "commit review source"
   void $ turn actor ("reportProgress (WorkProgress [Candidate " <> gitOidLiteral submitted
     <> " [] [\"integration remains\"]] [])")
-  checkpointOnly <- turn owner "null . workNotices <$> readWork readiness"
-  check "a committed progress checkpoint still has no terminal source receipt" (lastOutput checkpointOnly == "True")
+  awaitCell owner "a committed progress checkpoint still has no terminal source receipt" "null . workNotices <$> readWork readiness"
   void $ turn actor ("respond (Produced (Candidate " <> gitOidLiteral submitted
     <> " [\"child-reported check\"] [\"integration remains\"]))")
-  notice <- turn owner "state <- readWork readiness\nlet terminal = last (workHistory state)\ninspectFull (length (workNotices state), reviewReadyMessage terminal)"
-  let messageSent = and
-        [ "(1," `Text.isInfixOf` output notice
-        , "Just \"" `Text.isInfixOf` output notice
-        , submitted `Text.isInfixOf` output notice
-        , "matching submitted HEAD" `Text.isInfixOf` output notice
-        , "integration remains" `Text.isInfixOf` output notice
-        , not ("child-reported check" `Text.isInfixOf` output notice)
-        ]
-  check (if messageSent then "matching terminal HEAD sends one exact source notice without claiming review or checks"
-         else "unexpected terminal notice: " <> output notice) messageSent
-  casesSource <- readFile owner (checkSource "review-readiness-cases")
-  cases <- turn owner casesSource
-  check "mismatched and unbound sources refuse readiness; blocked results remain quiet"
-    (baseline `Text.isInfixOf` output cases
-      && submitted `Text.isInfixOf` output cases
-      && "no bound-source evidence" `Text.isInfixOf` output cases
-      && ",Nothing)" `Text.isInfixOf` output cases)
+  void $ turn owner "state <- readWork readiness\nlet terminal = last (workHistory state)"
+  assertCell owner "matching terminal HEAD sends one exact source notice" ("length (workNotices state) == 1 && case Exomonad.Contrib.Routing.reviewReadiness terminal of { Just (ReviewReady _ candidate) -> candidateCommit candidate == " <> gitOidLiteral submitted <> " && remainingGates candidate == [\"integration remains\"]; _ -> False }")
+  assertCell owner "text: source notice reports admission and gates without claiming child checks" "maybe False (\\message -> \"matching submitted HEAD\" `Text.isInfixOf` message && \"integration remains\" `Text.isInfixOf` message && not (\"child-reported check\" `Text.isInfixOf` message)) (reviewReadyMessage terminal)"
+  script owner "review-readiness-cases"
+  assertCell owner "mismatched and unbound sources refuse readiness; blocked results remain quiet" "case cases of { (Just (ReviewSourceRejected _ _), Just (ReviewSourceRejected _ _), Nothing) -> True; _ -> False }"
   void $ turn owner "finishWork readiness"
 
 reviewedCheckpoints :: Member RecipeCheck effects => Eff effects ()
@@ -265,121 +234,84 @@ reviewedCheckpoints = do
   baseline <- git owner ["rev-parse", "HEAD"]
   void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline)
   void $ turn owner "import qualified Tidepool.Actor.Record as R\nimport qualified Data.Text as Text"
-  ordinary <- turn owner
-    "let progress = WorkProgress [] []\nnull (workEvidence progress) && null (workQuestions progress) && null (workReviewed progress)"
-  check "ordinary two-argument progress starts without reviewed evidence"
-    (lastOutput ordinary == "True")
+  void $ turn owner "let progress = WorkProgress [] []"
+  assertCell owner "ordinary two-argument progress starts without reviewed evidence" "null (workEvidence progress) && null (workQuestions progress) && null (workReviewed progress)"
   script owner "reviewed-checkpoint-route"
   reviewerActor <- activation
-  pending <- turn owner "admitReviewedCheckpoint reviewRequest reviewer"
-  check "an unsettled review handle cannot create a reviewed checkpoint"
-    ("CheckpointNotReady" `Text.isInfixOf` output pending)
+  void $ turn owner "checkObserved <- (admitReviewedCheckpoint reviewRequest reviewer)"
+  assertCell owner "an unsettled review handle cannot create a reviewed checkpoint" "case checkObserved of { Left (CheckpointNotReady) -> True; _ -> False }"
   void $ turn (checkActor reviewerActor)
     "respond (Produced (Accepted (ReviewedCandidate (reviewBasis sessionInput) (reviewInput sessionInput) [\"source read\"] \"accepted\")))"
-  mismatchedBasis <- turn owner
-    "admitReviewedCheckpoint (reviewRequest { reviewBasis = ExactScope sourceHead [] \"different\" }) reviewer"
-  check "a review for another basis is refused"
-    ("CheckpointBasisMismatch" `Text.isInfixOf` output mismatchedBasis)
-  mismatchedSource <- turn owner
-    "admitReviewedCheckpoint (reviewRequest { reviewInput = Candidate (GitOid \"different\") [] [] }) reviewer"
-  check "a requested candidate without the review checkout HEAD is refused"
-    ("CheckpointSourceRejected" `Text.isInfixOf` output mismatchedSource)
-  alteredReviewCreated <- turn owner
-    "(alteredReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|altered-review|] reviewRequest)\nalteredReviewRetention <- detachRequest alteredReview\ninspectFull (show alteredReviewRetention)"
-  check ("alteredReview retention: " <> lastOutput alteredReviewCreated)
-    ("Right ()" `Text.isInfixOf` lastOutput alteredReviewCreated)
+  void $ turn owner "checkObserved <- (admitReviewedCheckpoint (reviewRequest { reviewBasis = ExactScope sourceHead [] \"different\" }) reviewer)"
+  assertCell owner "a review for another basis is refused" "case checkObserved of { Left (CheckpointBasisMismatch _ _) -> True; _ -> False }"
+  void $ turn owner "checkObserved <- (admitReviewedCheckpoint (reviewRequest { reviewInput = Candidate (GitOid \"different\") [] [] }) reviewer)"
+  assertCell owner "a requested candidate without the review checkout HEAD is refused" "case checkObserved of { Left (CheckpointSourceRejected _) -> True; _ -> False }"
+  void $ turn owner "(alteredReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|altered-review|] reviewRequest)\nalteredReviewRetention <- detachRequest alteredReview"
+  assertCell owner "alteredReview request detaches successfully" "case alteredReviewRetention of { Right () -> True; _ -> False }"
   void activation
   void $ turn (checkActor reviewerActor)
     "respond (Produced (Accepted (ReviewedCandidate (reviewBasis sessionInput) ((reviewInput sessionInput) { reportedChecks = [\"different\"] }) [] \"accepted\")))"
-  mismatchedCandidate <- turn owner "admitReviewedCheckpoint reviewRequest alteredReview"
-  check "a reviewer verdict for another full candidate is refused"
-    ("CheckpointCandidateMismatch" `Text.isInfixOf` output mismatchedCandidate)
-  blockedReviewCreated <- turn owner
-    "(blockedReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|blocked-review|] reviewRequest)\nblockedReviewRetention <- detachRequest blockedReview\ninspectFull (show blockedReviewRetention)"
-  check ("blockedReview retention: " <> lastOutput blockedReviewCreated)
-    ("Right ()" `Text.isInfixOf` lastOutput blockedReviewCreated)
+  void $ turn owner "checkObserved <- (admitReviewedCheckpoint reviewRequest alteredReview)"
+  assertCell owner "a reviewer verdict for another full candidate is refused" "case checkObserved of { Left (CheckpointCandidateMismatch _ _) -> True; _ -> False }"
+  void $ turn owner "(blockedReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|blocked-review|] reviewRequest)\nblockedReviewRetention <- detachRequest blockedReview"
+  assertCell owner "blockedReview request detaches successfully" "case blockedReviewRetention of { Right () -> True; _ -> False }"
   void activation
   void $ turn (checkActor reviewerActor)
     "respond (Blocked \"review blocked\" [\"missing source proof\"] :: Outcome ReviewDecision)"
-  blocked <- turn owner "admitReviewedCheckpoint reviewRequest blockedReview"
-  check "a blocked review cannot become a reviewed checkpoint"
-    ("CheckpointBlocked" `Text.isInfixOf` output blocked)
-  repairReviewCreated <- turn owner
-    "(repairReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|repair-review|] reviewRequest)\nrepairReviewRetention <- detachRequest repairReview\ninspectFull (show repairReviewRetention)"
-  check ("repairReview retention: " <> lastOutput repairReviewCreated)
-    ("Right ()" `Text.isInfixOf` lastOutput repairReviewCreated)
+  void $ turn owner "checkObserved <- (admitReviewedCheckpoint reviewRequest blockedReview)"
+  assertCell owner "a blocked review cannot become a reviewed checkpoint" "case checkObserved of { Left (CheckpointBlocked _ _) -> True; _ -> False }"
+  void $ turn owner "(repairReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|repair-review|] reviewRequest)\nrepairReviewRetention <- detachRequest repairReview"
+  assertCell owner "repairReview request detaches successfully" "case repairReviewRetention of { Right () -> True; _ -> False }"
   void activation
   void $ turn (checkActor reviewerActor)
     "respond (Produced (Repair (reviewInput sessionInput) [\"repair requested\"]))"
-  needsRepair <- turn owner "admitReviewedCheckpoint reviewRequest repairReview"
-  check "a review requesting repair cannot become a reviewed checkpoint"
-    ("CheckpointNeedsRepair" `Text.isInfixOf` output needsRepair)
-  dirtyReviewCreated <- turn owner
-    "(dirtyReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|dirty-review|] reviewRequest)\ndirtyReviewRetention <- detachRequest dirtyReview\ninspectFull (show dirtyReviewRetention)"
-  check ("dirtyReview retention: " <> lastOutput dirtyReviewCreated)
-    ("Right ()" `Text.isInfixOf` lastOutput dirtyReviewCreated)
+  void $ turn owner "checkObserved <- (admitReviewedCheckpoint reviewRequest repairReview)"
+  assertCell owner "a review requesting repair cannot become a reviewed checkpoint" "case checkObserved of { Left (CheckpointNeedsRepair _ _) -> True; _ -> False }"
+  void $ turn owner "(dirtyReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|dirty-review|] reviewRequest)\ndirtyReviewRetention <- detachRequest dirtyReview"
+  assertCell owner "dirtyReview request detaches successfully" "case dirtyReviewRetention of { Right () -> True; _ -> False }"
   void activation
   writeFile (checkActor reviewerActor) "README.md" "dirty review checkout\n"
   void $ turn (checkActor reviewerActor)
     "respond (Produced (Accepted (ReviewedCandidate (reviewBasis sessionInput) (reviewInput sessionInput) [] \"accepted\")))"
-  dirty <- turn owner "admitReviewedCheckpoint reviewRequest dirtyReview"
-  check "a matching HEAD with uncommitted reviewer edits is refused"
-    ("CheckpointSourceRejected" `Text.isInfixOf` output dirty)
+  void $ turn owner "checkObserved <- (admitReviewedCheckpoint reviewRequest dirtyReview)"
+  assertCell owner "a matching HEAD with uncommitted reviewer edits is refused" "case checkObserved of { Left (CheckpointSourceRejected _) -> True; _ -> False }"
   void $ git (checkActor reviewerActor) ["clean", "-f", "--", "README.md"]
   void $ turn owner
     "Right reviewed <- admitReviewedCheckpoint reviewRequest reviewer"
-  updates <- turn owner
-    "let original = withReviewedCheckpoint reviewed (WorkProgress [] [])\nlet withQuestions = original { workQuestions = [Question \"update\" (DesignQuestion \"plans/component.md\" sourceHead \"owner choice\" [] [] [])] }\nlet withEvidence = original { workEvidence = [checkpointCandidate reviewed] }\nworkReviewed withQuestions == [reviewed] && workReviewed withEvidence == [reviewed]"
-  check "updating questions or evidence preserves the reviewed checkpoint"
-    (lastOutput updates == "True")
-  receipt <- turn owner
-    "executionRequest (responseExecution (checkpointReceipt reviewed)) == requestId reviewer"
-  check "the checkpoint retains the original review response reference"
-    (output receipt == "True")
+  void $ turn owner "let original = withReviewedCheckpoint reviewed (WorkProgress [] [])\nlet withQuestions = original { workQuestions = [Question \"update\" (DesignQuestion \"plans/component.md\" sourceHead \"owner choice\" [] [] [])] }\nlet withEvidence = original { workEvidence = [checkpointCandidate reviewed] }"
+  assertCell owner "updating questions or evidence preserves the reviewed checkpoint" "workReviewed withQuestions == [reviewed] && workReviewed withEvidence == [reviewed]"
+  assertCell owner "the checkpoint retains the original review response reference" "executionRequest (responseExecution (checkpointReceipt reviewed)) == requestId reviewer"
   void $ turn owner
     "(producer, updates) <- unfoldDeferred (batch campaign \"produce\") (childWithProgress @WorkProgress @Text (withLifetime ActorOwned $ coding projectHead (assignment [label|producer|] reviewed)))\nRight collection <- followWork [(\"producer\", producer, updates)] (notifyWork me (workMessage id))"
   producerActor <- activation
   void $ turn (checkActor producerActor)
     "reportProgress (WorkProgress [checkpointCandidate sessionInput] [])"
-  silent <- turn owner
-    "view <- readWork collection\n(length (workNotices view), length (workHistory view), length (outstandingReviewed view)) == (0,1,0)"
-  check "ordinary candidate progress is retained and silent by default"
-    (lastOutput silent == "True")
-  policy <- turn owner "setWorkNoticePolicy collection IncludeReviewed"
-  check "policy change records its own history cursor without replay"
-    ("Just 1" `Text.isInfixOf` output policy)
-  unchanged <- turn owner "policyEvent <$> setWorkNoticePolicy collection IncludeReviewed"
-  check "setting the same policy does not append another event"
-    (output unchanged == "Nothing")
+  void $ turn owner "view <- readWork collection"
+  assertCell owner "ordinary candidate progress is retained and silent by default" "(length (workNotices view), length (workHistory view), length (outstandingReviewed view)) == (0,1,0)"
+  void $ turn owner "policy <- setWorkNoticePolicy collection IncludeReviewed"
+  assertCell owner "policy change records its own history cursor without replay" "policyEvent policy == Just 1"
+  void $ turn owner "checkObserved <- (policyEvent <$> setWorkNoticePolicy collection IncludeReviewed)"
+  assertCell owner "setting the same policy does not append another event" "checkObserved == Nothing"
   void $ turn (checkActor producerActor)
     "let newQuestion = Question \"decision\" (DesignQuestion \"plans/component.md\" (candidateCommit (checkpointCandidate sessionInput)) \"owner decision needed\" [] [] [])\nreportProgress (withReviewedCheckpoint sessionInput (WorkProgress [checkpointCandidate sessionInput] [newQuestion]))"
-  reviewed <- turn owner
-    "view <- readWork collection\nlet event = last (workHistory view)\nlet delta = case event of WorkChanged _ change -> change; _ -> error \"missing delta\"\n(length [() | Notice _ (Left NotificationUnavailable) <- workNotices view], length (outstandingReviewed view), length (addedReviewed delta), length (openedQuestions delta))"
-  check ("validated review and simultaneous question share one retained send attempt: " <> lastOutput reviewed)
-    (lastOutput reviewed == "(1,1,1,1)")
-  content <- turn owner
-    "view <- readWork collection\nlet notice = workNoticeMessage IncludeReviewed (workMessage id) (last (workHistory view))\nmaybe False (\\message -> \"owner decision needed\" `Text.isInfixOf` message && \"browser gate remains\" `Text.isInfixOf` message) notice"
-  check "the notice retains the new question and remaining product gate"
-    (lastOutput content == "True")
+  void $ turn owner "view <- readWork collection"
+  assertCell owner "validated review and simultaneous question share one retained send attempt" "case last (workHistory view) of { WorkChanged _ delta -> (length [() | Notice _ (Left NotificationUnavailable) <- workNotices view], length (outstandingReviewed view), length (addedReviewed delta), length (openedQuestions delta)) == (1,1,1,1); _ -> False }"
+  void $ turn owner "view <- readWork collection\nlet notice = workNoticeMessage IncludeReviewed (workMessage id) (last (workHistory view))"
+  assertCell owner "text: the notice retains the new question and remaining product gate" "maybe False (\\message -> \"owner decision needed\" `Text.isInfixOf` message && \"browser gate remains\" `Text.isInfixOf` message) notice"
   void $ turn (checkActor producerActor)
     "reportProgress (withReviewedCheckpoint sessionInput (WorkProgress [checkpointCandidate sessionInput] [newQuestion]))"
-  duplicate <- turn owner "length . workNotices <$> readWork collection"
-  check "repeating one exact reviewed checkpoint does not wake again"
-    (output duplicate == "1")
-  changed <- turn owner "setWorkNoticePolicy collection AllCheckpoints"
-  check "a later policy change has a distinct cursor"
-    ("Just 4" `Text.isInfixOf` output changed)
+  void $ turn owner "checkObserved <- (length . workNotices <$> readWork collection)"
+  assertCell owner "repeating one exact reviewed checkpoint does not wake again" "checkObserved == 1"
+  void $ turn owner "changed <- setWorkNoticePolicy collection AllCheckpoints"
+  assertCell owner "a later policy change has a distinct cursor" "policyEvent changed == Just 4"
   void $ turn (checkActor producerActor)
     "reportProgress (WorkProgress [(checkpointCandidate sessionInput) { reportedChecks = [\"new raw evidence\"] }] [newQuestion])"
-  future <- turn owner
-    "view <- readWork collection\n(length [() | Notice _ (Left NotificationUnavailable) <- workNotices view], length (workHistory view), sourceCursor (head (collectedWork view)), length (outstandingReviewed view)) == (2,6,Just (ProgressCursor 4),1)"
-  check "future-only policy keeps one history and source cursor"
-    (lastOutput future == "True")
+  void $ turn owner "view <- readWork collection"
+  assertCell owner "future-only policy keeps one history and source cursor" "(length [() | Notice _ (Left NotificationUnavailable) <- workNotices view], length (workHistory view), sourceCursor (head (collectedWork view)), length (outstandingReviewed view)) == (2,6,Just (ProgressCursor 4),1)"
   void $ turn owner
     "R.send (acknowledgeWork (R.client collection)) (\"producer\", [checkpointCandidate reviewed])"
-  handled <- turn owner "length . outstandingReviewed <$> readWork collection"
-  check "explicit incorporation clears the reviewed snapshot"
-    (output handled == "0")
+  void $ turn owner "checkObserved <- (length . outstandingReviewed <$> readWork collection)"
+  assertCell owner "explicit incorporation clears the reviewed snapshot" "checkObserved == 0"
   void $ turn (checkActor producerActor) "respond (\"done\" :: Text)"
   void $ turn owner "finishWork collection"
 
@@ -394,31 +326,24 @@ notificationRetention = do
   void $ turn owner "import qualified Tidepool.Actor as Actor\nRight collection <- followWork [(\"producer\", producer, updates)] (notifyWork (responseActor consumer) (workMessage id))"
   script (checkActor producer) "progress-route-questions"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first])"
-  retained <- turn owner "view <- readWork collection\ninspectFull (collectedWork view, [failure | Notice _ (Left failure) <- workNotices view])"
-  check "a failed real send retains the new question and typed failure" ("question-a" `Text.isInfixOf` output retained && "NotificationUnavailable" `Text.isInfixOf` output retained)
-  compact <- turn (checkActor producer) "inspectFull (workMessage (id :: Text -> Text) (workChange \"producer\" (ProgressCursor 1) (WorkProgress [] [first]) (WorkProgress [] [first,second])))"
-  check "question messages contain only the new question" ("question-b" `Text.isInfixOf` output compact && not ("question-a" `Text.isInfixOf` output compact))
-  combined <- turn (checkActor producer) "inspectFull (withCheckpoints (workMessage (id :: Text -> Text)) (workChange \"producer\" (ProgressCursor 1) (WorkProgress [] [first]) (WorkProgress [Candidate (GitOid \"partial-head\") [] [\"review pending\"]] [first,second])))"
-  check "a useful checkpoint and a new question both reach the owner" ("partial-head" `Text.isInfixOf` output combined && "question-b" `Text.isInfixOf` output combined && not ("question-a" `Text.isInfixOf` output combined))
+  awaitCell owner "a failed real send retains the new question and typed failure" "do\n  view <- readWork collection\n  pure (map (map questionKey . workQuestions . sourceProgress) (collectedWork view) == [[\"question-a\"]] && length [() | Notice _ (Left NotificationUnavailable) <- workNotices view] == 1)\n"
+  assertCell (checkActor producer) "text: question messages contain only the new question" "maybe False (\\message -> \"question-b\" `Text.isInfixOf` message && not (\"question-a\" `Text.isInfixOf` message)) (workMessage (id :: Text -> Text) (workChange \"producer\" (ProgressCursor 1) (WorkProgress [] [first]) (WorkProgress [] [first,second])))"
+  assertCell (checkActor producer) "text: a useful checkpoint and a new question both reach the owner" "maybe False (\\message -> \"partial-head\" `Text.isInfixOf` message && \"question-b\" `Text.isInfixOf` message && not (\"question-a\" `Text.isInfixOf` message)) (withCheckpoints (workMessage (id :: Text -> Text)) (workChange \"producer\" (ProgressCursor 1) (WorkProgress [] [first]) (WorkProgress [Candidate (GitOid \"partial-head\") [] [\"review pending\"]] [first,second])))"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first,first])"
-  once <- turn owner "inspectFull . length . workNotices <$> readWork collection"
-  check "repeated questions do not retry failed notification" (output once == "1")
+  void $ turn owner "checkObserved <- (length . workNotices <$> readWork collection)"
+  assertCell owner "repeated questions do not retry failed notification" "checkObserved == 1"
   void $ turn owner "Right replacementSpec <- pure (workDefinition [(\"producer\", producer, updates)] (notifyWork (responseActor consumer) (workMessage id)))\ncollection <- R.replace collection replacementSpec"
-  preserved <- turn owner "(\\view -> (== ((1,[[\"question-a\"]]))) (length (workNotices view), map (map questionKey . workQuestions . sourceProgress) (collectedWork view))) <$> readWork collection"
-  check "replacement preserves failed notification evidence without replay" (output preserved == "True")
+  awaitCell owner "replacement preserves failed notification evidence without replay" "(\\view -> (== ((1,[[\"question-a\"]]))) (length (workNotices view), map (map questionKey . workQuestions . sourceProgress) (collectedWork view))) <$> readWork collection"
   -- Exercise uncertainty as typed sink data. No external send is claimed here.
   script owner "uncertain-route"
-  uncertain <- turn owner "view <- readWork uncertain\ninspectFull (collectedWork view, [failure | Notice _ (Left failure) <- workNotices view])"
-  check "uncertain admission preserves the observed question" ("question-a" `Text.isInfixOf` output uncertain && "NotificationAdmissionUnconfirmed" `Text.isInfixOf` output uncertain)
+  awaitCell owner "uncertain admission preserves the observed question" "do\n  view <- readWork uncertain\n  pure (map (map questionKey . workQuestions . sourceProgress) (collectedWork view) == [[\"question-a\"]] && length [() | Notice _ (Left (NotificationAdmissionUnconfirmed _)) <- workNotices view] == 1)\n"
   void $ turn owner "Right replacementSpec <- pure (workDefinition [(\"producer\", producer, updates)] keepWork)\nuncertain <- R.replace uncertain replacementSpec"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [])"
-  resolved <- turn owner "(\\view -> (== (([[]],2))) (map (workQuestions . sourceProgress) (collectedWork view), length (workNotices view))) <$> readWork collection"
-  check "resolving the final question produces its own delta" (output resolved == "True")
-  uncertainOnce <- turn owner "inspectFull . length . workNotices <$> readWork uncertain"
-  check "replacement never replays an uncertain send" (output uncertainOnce == "1")
+  awaitCell owner "resolving the final question produces its own delta" "(\\view -> (== (([[]],2))) (map (workQuestions . sourceProgress) (collectedWork view), length (workNotices view))) <$> readWork collection"
+  void $ turn owner "checkObserved <- (length . workNotices <$> readWork uncertain)"
+  assertCell owner "replacement never replays an uncertain send" "checkObserved == 1"
   void $ turn (checkActor producer) "respond (\"finished\" :: Text)"
-  closed <- turn owner "(\\view -> inspectFull (length (workNotices view), collectedWork view)) <$> readWork collection"
-  check "closure is quiet but the final result still arrives" ("(3," `Text.isPrefixOf` output closed && "finished" `Text.isInfixOf` output closed)
+  awaitCell owner "closure is quiet but the final result still arrives" "do\n  view <- readWork collection\n  pure (length (workNotices view) == 3 && case collectedWork view of { [source] -> case sourceResult source of { Just (Right receipt) -> responseValue receipt == \"finished\"; _ -> False }; _ -> False })\n"
   void $ turn owner "finishWork collection\nfinishWork uncertain"
 
 -- Source publications and explicit queries use the same mailbox. A snapshot
@@ -434,25 +359,20 @@ independentSources = do
   script (checkActor left) "attention-sources-question"
   script (checkActor right) "attention-sources-question"
   void $ turn (checkActor left) "reportProgress (WorkProgress [] [first,second])"
-  first <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"],WorkOpen),(\"right\",[],WorkOpen)])) [(sourceName s, map questionKey (workQuestions (sourceProgress s)), Exomonad.Contrib.Routing.sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
-  check "left progresses while right is silent" (output first == "True")
+  awaitCell owner "left progresses while right is silent" "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"],WorkOpen),(\"right\",[],WorkOpen)])) [(sourceName s, map questionKey (workQuestions (sourceProgress s)), Exomonad.Contrib.Routing.sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
   void $ turn owner "Right replacementSpec <- pure (workDefinition [(\"left\", left, leftProgress), (\"right\", right, rightProgress)] countChanges)\ncollection <- R.replace collection replacementSpec"
   void $ turn (checkActor left) "reportProgress (WorkProgress [] [second,first,first])"
   void $ turn owner "readWork collection"
-  count <- turn owner "Actor.call wakes (RoutingCount 0 id)"
-  check "reordered duplicate facts do not invoke the sink" (output count == "1")
+  void $ turn owner "checkObserved <- (Actor.call wakes (RoutingCount 0 id))"
+  assertCell owner "reordered duplicate facts do not invoke the sink" "checkObserved == 1"
   void $ turn (checkActor right) "reportProgress (WorkProgress [] [first])"
-  both <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"]),(\"right\",[\"same-key\"])])) [(sourceName s, map questionKey (workQuestions (sourceProgress s))) | s <- collectedWork view]) <$> readWork collection"
-  check "same-key questions retain both source identities" (output both == "True")
+  awaitCell owner "same-key questions retain both source identities" "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"]),(\"right\",[\"same-key\"])])) [(sourceName s, map questionKey (workQuestions (sourceProgress s))) | s <- collectedWork view]) <$> readWork collection"
   void $ turn (checkActor left) "respond (\"finished\" :: Text)"
-  closed <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"],WorkClosed),(\"right\",[\"same-key\"],WorkOpen)])) [(sourceName s, map questionKey (workQuestions (sourceProgress s)), Exomonad.Contrib.Routing.sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
-  check "closure retains unanswered questions" (output closed == "True")
+  awaitCell owner "closure retains unanswered questions" "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"],WorkClosed),(\"right\",[\"same-key\"],WorkOpen)])) [(sourceName s, map questionKey (workQuestions (sourceProgress s)), Exomonad.Contrib.Routing.sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
   void $ turn (checkActor right) "reportProgress (WorkProgress [] [])"
-  resolved <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"]),(\"right\",[])])) [(sourceName s, map questionKey (workQuestions (sourceProgress s))) | s <- collectedWork view]) <$> readWork collection"
-  check "one resolution cannot erase another source's questions" (output resolved == "True")
+  awaitCell owner "one resolution cannot erase another source's questions" "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"]),(\"right\",[])])) [(sourceName s, map questionKey (workQuestions (sourceProgress s))) | s <- collectedWork view]) <$> readWork collection"
   void $ turn (checkActor right) "respond (\"finished\" :: Text)"
-  final <- turn owner "(== ([WorkClosed,WorkClosed])) . map Exomonad.Contrib.Routing.sourceStatus . collectedWork <$> readWork collection"
-  check "both sources close without rearming" (output final == "True")
+  awaitCell owner "both sources close without rearming" "(== ([WorkClosed,WorkClosed])) . map Exomonad.Contrib.Routing.sourceStatus . collectedWork <$> readWork collection"
   void $ turn owner "finishWork collection"
 
 data RouteCase = Forward | CancelDestination | LoseProducer deriving (Eq)
@@ -473,8 +393,7 @@ forwardCandidate disposition = do
   void $ turn (checkActor lead) "let sharedReasoning = (\"consumer contract established\" :: Text)"
   script (checkActor lead) "route-reply-worker"
   worker <- activation
-  inheritedReasoning <- turn (checkActor worker) "inspectFull sharedReasoning"
-  check "implementation inherits the parent's resident reasoning binding" ("consumer contract established" `Text.isInfixOf` output inheritedReasoning)
+  assertCell (checkActor worker) "implementation inherits the parent's resident reasoning binding" "sharedReasoning == \"consumer contract established\""
   inheritedHead <- git (checkActor worker) ["rev-parse", "HEAD"]
   check "implementation uses current parent source despite older task provenance" (inheritedHead == shared)
   candidate <- checkpoint (checkActor worker) "feature.txt" "routed candidate\n" "prepare candidate"
@@ -484,16 +403,14 @@ forwardCandidate disposition = do
   if disposition == LoseProducer then void (turn (checkActor lead) "stopAgent (responseActor candidate)")
   else void $ turn (checkActor worker) ("respond (Candidate " <> gitOidLiteral candidate <> " [\"read exact feature\"] [\"independent review remains\"])")
   if disposition == CancelDestination then do
-    failure <- awaitOutput (checkActor lead) "pollRoute forwarding" (Text.isInfixOf "RouteFailed")
-    -- Route diagnostics are rendered text; the reply below owns cancellation state.
-    check ("cancellation remains a retained callback failure: " <> failure) ("RouteFailed" `Text.isInfixOf` failure)
-    obligation <- turn (checkActor lead) "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply"
-    check "a cancelled destination cannot silently receive success" ("ReplyCancellationRequested" `Text.isInfixOf` output obligation)
+    awaitCell (checkActor lead) "cancellation remains a retained callback failure" "do\n  state <- pollRoute forwarding\n  pure (case state of { RouteFailed _ -> True; _ -> False })\n"
+    void $ turn (checkActor lead) "import Tidepool.Agent.Reply (pollReply)\nobligation <- pollReply sessionReply"
+    assertCell (checkActor lead) "a cancelled destination cannot silently receive success" "case obligation of { ReplyCancellationRequested _ -> True; _ -> False }"
   else if disposition == LoseProducer then do
-    failure <- awaitOutput (checkActor lead) "pollRoute forwarding" (Text.isInfixOf "RouteFailed")
-    check "lost execution remains explicit in the retained route" ("RouteFailed" `Text.isInfixOf` failure)
-    obligation <- turn (checkActor lead) "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply"
-    check "lost execution does not become a successful candidate" ("ReplyOpen" `Text.isSuffixOf` output obligation)
+    awaitCell (checkActor lead) "lost execution remains explicit in the retained route" "do\n  state <- pollRoute forwarding\n  pure (case state of { RouteFailed _ -> True; _ -> False })\n"
+    void $ turn (checkActor lead) "import Tidepool.Agent.Reply (pollReply)\nobligation <- pollReply sessionReply"
+    assertCell (checkActor lead) "lost execution does not become a successful candidate" "obligation == ReplyOpen"
   else do
-    result <- awaitOutput owner "answer <- pollResponse lead\ninspectFull answer" (Text.isInfixOf candidate)
-    check "routing forwards exact evidence without a lead relay turn" ("independent review remains" `Text.isInfixOf` result)
+    void $ turn owner "ready <- watch \"forwarded-candidate\" (awaitResponse lead)\nanswer <- awaitWatch ready"
+    assertCell owner "routing forwards exact evidence without a lead relay turn"
+      ("case answer of { Right receipt -> candidateCommit (responseValue receipt) == " <> gitOidLiteral candidate <> " && remainingGates (responseValue receipt) == [\"independent review remains\"]; _ -> False }")

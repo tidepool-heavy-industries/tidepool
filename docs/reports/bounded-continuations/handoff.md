@@ -1,5 +1,12 @@
 # Bounded continuations implementation handoff
 
+The follower-attachment design question below was resolved in the finite
+workflow follow-up: caller-owned commands now continue through `Cmd.await`,
+`BackgroundInvestigator` and its resume/follower layers were removed, and browser
+scenarios now return a direct `runBrowserScenarios` result. The implementation
+and failure logs below remain historical evidence; their pending gates do not
+describe the current API.
+
 ## Yield checkpoint — 2026-09-28 22:29 UTC
 
 User requested a status check and yielding instead of live watching. Wave23 has
@@ -177,12 +184,9 @@ all suitable component trees over three waves, with immediate repair of harm.
 - Track unsupported compiler `dataToTagLarge#` separately; removing unused equality
   instances avoids exposure here but is not an engine implementation.
 
-- Consider a small owning primitive for attaching a new completion source to an
-  existing record actor. Current authored continuations need a follower and a
-  lifecycle observer for each late-discovered diagnostic. Investigate whether the
-  existing runtime source owner can provide that behavior directly before adding
-  more Haskell observer layers. This is a future design question, not implemented
-  by the present batch.
+- Resolved by the finite workflow follow-up: await each exact command in the
+  calling continuation. The former `BackgroundInvestigator` follower and resume
+  path no longer needs a completion-source attachment primitive.
 
 ## Latest verification candidate
 

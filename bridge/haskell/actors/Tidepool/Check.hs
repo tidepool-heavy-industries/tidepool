@@ -8,7 +8,8 @@ module Tidepool.Check
   ( RecipeCheck, CheckActor, Activation (..)
   , root, turn, activation, git, writeFile, readFile
   , present, notPresented, unconfirmed, check, restart
-  , output, lastOutput, literal, gitOidLiteral, checkpoint, awaitOutput
+  , assertThat, assertEventually, assertCell, awaitCell
+  , output, literal, gitOidLiteral, checkpoint
   ) where
 
 import Prelude hiding (readFile, writeFile)
@@ -73,6 +74,42 @@ unconfirmed = send . RecipeUnconfirmed
 check :: Member RecipeCheck effects => Text -> Bool -> Eff effects ()
 check name observed = send (RecipeAssert name observed)
 
+-- | Fail the checked cell before returning an effect action when the predicate
+-- is false. Discarding the unit result cannot discard the assertion.
+assertThat :: Text -> Bool -> Eff effects ()
+assertThat name observed =
+  if observed then pure ()
+  else error (Text.unpack ("Check assertion failed: " <> name))
+
+-- | Observe a typed predicate at most 120 times in the checked actor.
+assertEventually :: Text -> Eff effects Bool -> Eff effects ()
+assertEventually name observe = go (120 :: Int)
+  where
+    go remaining = do
+      observed <- observe
+      if observed then pure ()
+      else if remaining == 1 then assertThat name False
+      else go (remaining - 1)
+
+-- | Evaluate a pure Bool expression in the checked actor's lexical scope.
+-- The host records success only after the assertion cell completes normally.
+assertCell :: Member RecipeCheck effects => CheckActor -> Text -> Text -> Eff effects ()
+assertCell actor name source = do
+  _ <- turn actor (assertionCell "assertThat" name source)
+  check name True
+
+-- | Await a typed effectful predicate in the checked actor's lexical scope.
+awaitCell :: Member RecipeCheck effects => CheckActor -> Text -> Text -> Eff effects ()
+awaitCell actor name source = do
+  _ <- turn actor (assertionCell "assertEventually" name source)
+  check name True
+
+assertionCell :: Text -> Text -> Text -> Text
+assertionCell assertion name source = Text.unlines $
+  [ "import qualified Tidepool.Check"
+  , "Tidepool.Check." <> assertion <> " " <> literal name <> " ("
+  ] ++ map ("  " <>) (Text.lines source) ++ ["  )"]
+
 -- Intentionally closes this model-free swarm, then captures the edited package.
 -- Earlier CheckActor values cannot address the new swarm even if IDs repeat.
 restart :: Member RecipeCheck effects => Eff effects Text
@@ -80,13 +117,6 @@ restart = send RecipeRestart
 
 output :: Value -> Text
 output = Text.intercalate "\n" . outputs
-
--- Setup bindings in a multi-unit example also have output. Assertions about
--- its final expression should not depend on those workbench display receipts.
-lastOutput :: Value -> Text
-lastOutput value = case reverse (outputs value) of
-  final : _ -> final
-  [] -> ""
 
 outputs :: Value -> [Text]
 outputs (Object fields) = case KeyMap.lookup "items" fields of
@@ -107,14 +137,3 @@ checkpoint actor path contents message = do
   _ <- git actor ["add", "--", path]
   _ <- git actor ["-c", "commit.gpgsign=false", "commit", "--quiet", "-m", message]
   git actor ["rev-parse", "HEAD"]
-
--- Poll a retained observation while an automatic callback finishes. This does
--- not launch work or infer readiness from elapsed time.
-awaitOutput :: Member RecipeCheck effects => CheckActor -> Text -> (Text -> Bool) -> Eff effects Text
-awaitOutput actor source ready = go (120 :: Int)
-  where
-    go remaining = do
-      observed <- output <$> turn actor source
-      if ready observed then pure observed
-      else if remaining == 0 then error (Text.unpack ("Check observation never became ready: " <> observed))
-      else go (remaining - 1)

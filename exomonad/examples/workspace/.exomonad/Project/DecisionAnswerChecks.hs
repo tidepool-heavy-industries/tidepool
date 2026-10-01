@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Project.DecisionAnswerChecks (routing, exportRequests, replay, decisionCases) where
 
@@ -23,20 +24,21 @@ routing = do
   base <- git owner ["rev-parse", "HEAD"]
   void $ turn owner ("let sourceHead = " <> gitOidLiteral base)
   script owner "decision-answers-setup"
-  exact <- turn owner "sent <- R.call (Answers.answerQuestion (R.client answers)) (\"wait\", question)\nstate <- R.call (Answers.answerRead (R.client answers)) ()\ninspectFull (not sent && map Answers.relayedDecision (Answers.answerEntries state) == [Just decision])"
-  evidence <- turn owner "inspectFull (map (\\entry -> (Answers.answerChoice entry, Answers.relayedDecision entry, Answers.answerDelivery entry)) (Answers.answerEntries state))"
-  check ("unavailable notification retains the original decision and preserves escalation; " <> output evidence) (lastOutput exact == "True")
-  repeatRead <- turn owner "again <- R.call (Answers.answerQuestion (R.client answers)) (\"wait\", question)\nstate <- R.call (Answers.answerRead (R.client answers)) ()\ninspectFull (not again && length (Answers.answerEntries state) == 1)"
-  check "failed relay is retained and never automatically retried" (lastOutput repeatRead == "True")
-  unknown <- turn owner "sent <- R.call (Answers.answerQuestion (R.client answers)) (\"unregistered\", question)\ninspectFull sent"
-  check "unknown targets preserve the parent question notice" (lastOutput unknown == "False")
+  void $ turn owner "sent <- R.call (Answers.answerQuestion (R.client answers)) (\"wait\", question)\nstate <- R.call (Answers.answerRead (R.client answers)) ()"
+  assertCell owner "unavailable notification retains the original decision and preserves escalation"
+    "not sent && map Answers.relayedDecision (Answers.answerEntries state) == [Just decision]"
+  void $ turn owner "again <- R.call (Answers.answerQuestion (R.client answers)) (\"wait\", question)\nstate <- R.call (Answers.answerRead (R.client answers)) ()"
+  assertCell owner "failed relay is retained and never automatically retried"
+    "not again && length (Answers.answerEntries state) == 1"
+  void $ turn owner "sent <- R.call (Answers.answerQuestion (R.client answers)) (\"unregistered\", question)"
+  assertCell owner "unknown targets preserve the parent question notice" "not sent"
   other <- checkpoint owner "changed.txt" "changed source" "change decision source"
-  stale <- turn owner ("let staleQuestion = question { questionDetails = (questionDetails question) { questionSource = " <> gitOidLiteral other <> " } }\nsent <- R.call (Answers.answerQuestion (R.client answers)) (\"wait\", staleQuestion)\ninspectFull sent")
-  check "a newer question cannot use an older decision set" (lastOutput stale == "False")
-  conflict <- turn owner "let conflict = decision { decisionSummary = \"terminate the job\" }\nRight conflicted <- Answers.startDecisionAnswersWith (\\_ _ -> pure (Answers.UseDecision 0)) me [Answers.AnswerTarget \"wait\" me (work { acceptedDecisions = [decision, conflict] })]\nsent <- R.call (Answers.answerQuestion (R.client conflicted)) (\"wait\", question)\ninspectFull sent"
-  check "contradictory decisions cannot be authorized by the chooser" (lastOutput conflict == "False")
-  disabled <- turn owner "closed <- R.call (Answers.disableAnswers (R.client answers)) ()\nlet another = question { questionKey = \"second-question\" }\nsent <- R.call (Answers.answerQuestion (R.client answers)) (\"wait\", another)\ninspectFull (closed && not sent)"
-  check "owner invalidation prevents further relays" (lastOutput disabled == "True")
+  void $ turn owner ("let staleQuestion = question { questionDetails = (questionDetails question) { questionSource = " <> gitOidLiteral other <> " } }\nsent <- R.call (Answers.answerQuestion (R.client answers)) (\"wait\", staleQuestion)")
+  assertCell owner "a newer question cannot use an older decision set" "not sent"
+  void $ turn owner "let conflict = decision { decisionSummary = \"terminate the job\" }\nRight conflicted <- Answers.startDecisionAnswersWith (\\_ _ -> pure (Answers.UseDecision 0)) me [Answers.AnswerTarget \"wait\" me (work { acceptedDecisions = [decision, conflict] })]\nsent <- R.call (Answers.answerQuestion (R.client conflicted)) (\"wait\", question)"
+  assertCell owner "contradictory decisions cannot be authorized by the chooser" "not sent"
+  void $ turn owner "closed <- R.call (Answers.disableAnswers (R.client answers)) ()\nlet another = question { questionKey = \"second-question\" }\nsent <- R.call (Answers.answerQuestion (R.client answers)) (\"wait\", another)"
+  assertCell owner "owner invalidation prevents further relays" "closed && not sent"
   void $ turn owner "R.finish answers\nR.finish conflicted"
 
 -- Pure synthetic cases are exported through the real bounded packet producer.

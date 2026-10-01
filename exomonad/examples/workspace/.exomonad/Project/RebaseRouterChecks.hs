@@ -1,9 +1,11 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Project.RebaseRouterChecks (agentRef, facts) where
 
 import Prelude hiding (readFile)
+import Control.Monad (void)
 import Control.Monad.Freer (Eff, Member)
 import qualified Data.Set as Set
 import qualified Data.Text as Text
@@ -30,6 +32,6 @@ agentRef :: Member RecipeCheck effects => Eff effects ()
 agentRef = do
   owner <- root
   source <- readFile owner (checkSource "rebase-router-agentref")
-  result <- turn owner source
-  check "an admission receipt resolves to a usable child AgentRef"
-    ("Right ()" `Text.isInfixOf` output result)
+  void $ turn owner ("admissionResult <- do\n" <> Text.unlines (map ("  " <>) (Text.lines source)))
+  assertCell owner "an admission receipt resolves to a usable child AgentRef"
+    "case admissionResult of { Right _ -> True; Left _ -> False }"
