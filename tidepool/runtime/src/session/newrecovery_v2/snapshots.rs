@@ -195,7 +195,20 @@ impl RecoveryGraph {
             graph.nodes.insert_mut(key, row);
         }
         let mut previous = None;
-        for row in wire.artifacts {
+        for mut row in wire.artifacts {
+            if let RecoveryArtifactClosure::ValueInterface(reference) = &mut row {
+                if reference
+                    .requirements
+                    .windows(2)
+                    .any(|pair| pair[0] > pair[1])
+                {
+                    // Authenticate the original ordering first, then normalize
+                    // this newly owned admission row exactly once. Keep the
+                    // raw revision token until a successor is sealed.
+                    reference.requirements.sort();
+                    graph.wire_order_matches_maps = false;
+                }
+            }
             let key = row.artifact_id();
             if previous.as_ref().is_some_and(|old| old >= &key) {
                 graph.wire_order_matches_maps = false;

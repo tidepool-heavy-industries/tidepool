@@ -1276,6 +1276,12 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
         if artifacts.insert(artifact.artifact_id(), artifact).is_some() {
             return Err(error("duplicate recovery artifact reference"));
         }
+        if let RecoveryArtifactClosure::ValueInterface(reference) = artifact {
+            let requirements = reference.requirements.iter().collect::<BTreeSet<_>>();
+            if requirements.len() != reference.requirements.len() {
+                return Err(error("duplicate recovery value interface requirement"));
+            }
+        }
     }
     let mut unique_edges = BTreeSet::new();
     for edge in graph.artifact_dependencies() {
@@ -1988,6 +1994,169 @@ mod tests {
             duplicate.checksum = checksum(&duplicate).unwrap();
             assert!(RecoveryGraph::from_wire(duplicate).is_err());
         }
+    }
+
+    #[test]
+    fn noncanonical_value_requirements_continue_through_verified_publication() {
+        use tidepool_toolchain::recovery_artifacts::materialize_joined_interface;
+        let root = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let make_value = |name: &str, requirements: Vec<ExactModuleIdentity>| {
+            let (contents, interface_digest): (&[u8], [u8; 32]) = match name {
+                "Other" => (
+                    b"Other",
+                    [
+                        249, 126, 157, 160, 227, 184, 121, 240, 169, 223, 151, 154, 226, 96, 165,
+                        247, 225, 55, 30, 219, 18, 124, 24, 98, 212, 248, 97, 152, 17, 102, 205,
+                        193,
+                    ],
+                ),
+                "Val1" => (
+                    b"Val1",
+                    [
+                        54, 33, 212, 17, 161, 59, 207, 59, 61, 51, 47, 0, 213, 81, 63, 98, 34, 199,
+                        136, 152, 69, 239, 228, 215, 50, 16, 96, 28, 89, 164, 28, 218,
+                    ],
+                ),
+                _ => panic!("fixture has only two distinct interface owners"),
+            };
+            let interface = source.path().join(format!("{name}.hi"));
+            fs::write(&interface, contents).unwrap();
+            let text = |value: &str| ciborium::value::Value::Text(value.into());
+            let digest = interface_digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let witness = ciborium::value::Value::Array(vec![
+                text("TPPKGROOTS"),
+                text("1"),
+                ciborium::value::Value::Array(vec![text("main"), text(name), text(&digest)]),
+                ciborium::value::Value::Array(vec![]),
+            ]);
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(&witness, &mut bytes).unwrap();
+            fs::write(interface.with_extension("hi.packages"), bytes).unwrap();
+            let interface = materialize_joined_interface(
+                root.path(),
+                [0x11; 32],
+                "main",
+                name,
+                &interface,
+                interface_digest,
+            )
+            .unwrap();
+            let mut value = RecoveryValueInterfaceRef {
+                artifact_id: ArtifactId([0; 32]),
+                interface,
+                requirements,
+            };
+            value.artifact_id = ArtifactDescriptor::from_recovery_value_interface(&value).id;
+            value
+        };
+        let other = make_value("Other", vec![]);
+        let value = make_value("Val1", vec![module("main", "Other"), module("main", "Lib")]);
+        let mut wire = fixture(root.path());
+        let home_id = wire.artifacts[0].artifact_id();
+        for node in &mut wire.nodes {
+            node.artifact_refs
+                .extend([home_id, other.artifact_id, value.artifact_id]);
+        }
+        wire.artifact_dependencies.extend([
+            RecoveryArtifactDependency {
+                source: value.artifact_id,
+                target: home_id,
+                dependency: ArtifactDependency::Interface,
+            },
+            RecoveryArtifactDependency {
+                source: value.artifact_id,
+                target: other.artifact_id,
+                dependency: ArtifactDependency::Interface,
+            },
+        ]);
+        wire.artifacts.extend([
+            RecoveryArtifactClosure::ValueInterface(other),
+            RecoveryArtifactClosure::ValueInterface(value.clone()),
+        ]);
+        wire.seal().unwrap();
+        let stored = wire
+            .artifacts
+            .iter_mut()
+            .find_map(|artifact| match artifact {
+                RecoveryArtifactClosure::ValueInterface(reference)
+                    if reference.artifact_id == value.artifact_id =>
+                {
+                    Some(reference)
+                }
+                _ => None,
+            })
+            .unwrap();
+        stored.requirements.reverse();
+        wire.checksum = checksum(&wire).unwrap();
+        let original_token = wire.checksum.clone();
+        let path = root.path().join("declarations.json");
+        let original_bytes = serde_json::to_vec(&wire).unwrap();
+        fs::write(&path, &original_bytes).unwrap();
+        let recovered = read_v2_bytes(
+            &path,
+            root.path(),
+            &original_bytes,
+            RecoveryReadPurpose::Hydration,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(recovered.inventory.is_some());
+        assert_eq!(recovered.graph.checksum(), original_token);
+        assert_eq!(fs::read(&path).unwrap(), original_bytes);
+        assert!(serde_json::to_vec(&recovered.graph).is_err());
+        let mut candidate = recovered.graph.candidate();
+        candidate
+            .insert_artifact(RecoveryArtifactClosure::ValueInterface(value.clone()))
+            .unwrap();
+        let mut changed = value.clone();
+        changed.requirements.pop();
+        assert!(candidate
+            .insert_artifact(RecoveryArtifactClosure::ValueInterface(changed))
+            .is_err());
+        let successor = candidate.seal().unwrap();
+        assert!(matches!(
+            stage_v2(&path, root.path(), successor).unwrap().publish(),
+            RecoveryPublishOutcome::Durable { .. }
+        ));
+        assert_eq!(recovered.graph.checksum(), original_token);
+        let published = read_v2(&path, root.path()).unwrap().unwrap();
+        let reference = published
+            .graph
+            .artifacts()
+            .find_map(|artifact| match artifact {
+                RecoveryArtifactClosure::ValueInterface(reference)
+                    if reference.artifact_id == value.artifact_id =>
+                {
+                    Some(reference)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut expected = value.requirements;
+        expected.sort();
+        assert_eq!(reference.requirements, expected);
+        let mut duplicate = wire;
+        let reference = duplicate
+            .artifacts
+            .iter_mut()
+            .find_map(|artifact| match artifact {
+                RecoveryArtifactClosure::ValueInterface(reference)
+                    if reference.artifact_id == value.artifact_id =>
+                {
+                    Some(reference)
+                }
+                _ => None,
+            })
+            .unwrap();
+        reference
+            .requirements
+            .push(reference.requirements[0].clone());
+        duplicate.checksum = checksum(&duplicate).unwrap();
+        assert!(RecoveryGraph::from_wire(duplicate).is_err());
     }
 
     #[test]
