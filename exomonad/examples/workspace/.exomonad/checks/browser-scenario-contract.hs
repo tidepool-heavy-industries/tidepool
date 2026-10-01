@@ -7,10 +7,10 @@
 -- unexpected command effect, including background starts and timed observations.
 module Main (main) where
 
-import Control.Exception (SomeException, try)
+import Control.Exception (ErrorCall, Exception, throwIO, try)
 import Control.Monad (forM_, unless)
 import Control.Monad.Freer (Eff, interpretM, runM)
-import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Project.BrowserScenario
@@ -24,9 +24,16 @@ data Step
   | Background Cmd.CommandSpec Text
   | Wait Text (Either Cmd.CommandError CommandObservation)
 
+data ProtocolFailure = ProtocolFailure String deriving (Show)
+instance Exception ProtocolFailure
+
 execute :: [Step] -> Eff '[Commands, IO] value -> IO value
 execute expected action = do
   remaining <- newIORef expected
+  executeScript remaining action
+
+executeScript :: IORef [Step] -> Eff '[Commands, IO] value -> IO value
+executeScript remaining action = do
   let handler :: Commands value -> IO value
       handler request = do
         steps <- readIORef remaining
@@ -43,14 +50,14 @@ execute expected action = do
             assert "wait exact retained job" (actual == wanted)
             writeIORef remaining rest
             pure answer
-          _ -> error "unexpected command effect or command ordering"
+          _ -> throwIO (ProtocolFailure "unexpected command effect or command ordering")
   result <- runM (interpretM handler action)
   steps <- readIORef remaining
   assert "all scripted effects occurred" (null steps)
   pure result
 
 assert :: String -> Bool -> IO ()
-assert label condition = unless condition (error label)
+assert label condition = unless condition (throwIO (ProtocolFailure label))
 
 workspace :: BrowserWorkspace
 workspace = BrowserWorkspace "/tmp/harness-checkout" "0123456789abcdef0123456789abcdef01234567"
@@ -88,7 +95,7 @@ focusedSpecFor scenario = do
   captured <- newIORef Nothing
   let handler :: Commands value -> IO value
       handler (CommandBackgroundWith command) = writeIORef captured (Just command) >> pure (Right "capture")
-      handler _ = error "focused actor helper emitted unexpected effect"
+      handler _ = throwIO (ProtocolFailure "focused actor helper emitted unexpected effect")
   started <- runM $ interpretM handler $ startFocusedIn (browserCheckout workspace)
     (focusedMemory resources) (browserFocusedSpec workspace scenario)
   assert "actor helper retains requested spec and job" $ case started of
@@ -103,7 +110,7 @@ focusedSpecFor scenario = do
         ["harness-demo", focusedTarget (browserFocusedSpec workspace scenario),
           focusedFilter (browserFocusedSpec workspace scenario), "1", "0", "scripts/cargo-focused-test"])
       pure command
-    Nothing -> error "focused command not captured"
+    Nothing -> throwIO (ProtocolFailure "focused command not captured")
 
 focusedObservation :: BrowserScenario -> CommandObservation
 focusedObservation scenario = observation (Cmd.CommandExited 0) Cmd.CommandClean $ Right $
@@ -230,9 +237,18 @@ main = do
           && case focusedEvidence result of Left _ -> True; _ -> False
         _ -> False
     _ -> False
-  awaitRefused <- try (execute [Start prepareSpec (Right "preparation"), Wait "preparation" (Left Cmd.CommandUnauthorized)] $
-    runBrowserScenarios workspace resources [BrowserJourney]) :: IO (Either SomeException (Either BrowserRunIssue BrowserResult))
-  assert "await service refusal fails continuation" $ case awaitRefused of Left _ -> True; _ -> False
+  refusalScript <- newIORef [Start prepareSpec (Right "preparation"), Wait "preparation" (Left Cmd.CommandUnauthorized)]
+  awaitRefused <- try (executeScript refusalScript $ runBrowserScenarios workspace resources [BrowserJourney])
+    :: IO (Either ErrorCall (Either BrowserRunIssue BrowserResult))
+  remainingRefusalSteps <- readIORef refusalScript
+  assert "await service refusal fails continuation after the exact scripted start and refusal" $
+    null remainingRefusalSteps && case awaitRefused of Left _ -> True; _ -> False
+  protocolRejected <- try (try (execute [Start prepareSpec (Right "preparation"),
+    Wait "wrong-job" (Left Cmd.CommandUnauthorized)] $ runBrowserScenarios workspace resources [BrowserJourney])
+      :: IO (Either ErrorCall (Either BrowserRunIssue BrowserResult)))
+    :: IO (Either ProtocolFailure (Either ErrorCall (Either BrowserRunIssue BrowserResult)))
+  assert "wrong-job protocol failure cannot masquerade as expected await refusal" $
+    case protocolRejected of Left _ -> True; _ -> False
   emptyRunner <- execute [] $ startFocusedScopedInWith [] (browserCheckout workspace) (focusedMemory resources) journey
   assert "scoped helper rejects empty runner before effects" $ case emptyRunner of Left EmptyRunner -> True; _ -> False
   invalidExpected <- execute [] $ startFocusedScopedIn (browserCheckout workspace) (focusedMemory resources)
@@ -242,7 +258,7 @@ main = do
   assert "scoped helper rejects relative checkout before effects" $ case relativeFocused of Left (NonAbsoluteCheckout "relative") -> True; _ -> False
   _ <- execute [Background journeyCommand "actor-owned"] $
     startFocusedIn (browserCheckout workspace) (focusedMemory resources) journey
-  putStrLn "browser-scenario-contract: 24 workflow cases passed; 3 scoped-helper validation cases, command parity and production source/spec checks passed"
+  putStrLn "browser-scenario-contract: 24 workflow cases passed; protocol-failure isolation regression and 3 scoped-helper validation cases, command parity and production source/spec checks passed"
   where
     matches refused scenario key result = case (refused, result) of
       (True, Left (FocusedStartRefused Cmd.CommandUnauthorized)) -> True
