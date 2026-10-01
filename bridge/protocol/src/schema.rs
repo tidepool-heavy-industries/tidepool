@@ -1688,6 +1688,8 @@ pub enum OuterEffect {
     Journal,
     /// The run's live workspace source layer.
     Source,
+    /// Model invocations owned by the admitted cell.
+    Model,
 }
 
 /// The extractor's per-verb call-site policy, for the few verbs it rewrites.

@@ -1978,6 +1978,19 @@ impl<'code> PreparedMachine<'code> {
         self.handles.rehome_handle(handle, owner)
     }
 
+    /// Select cancellation for the owning invocation. Native entry, resume and
+    /// observation sample this flag alongside their resource scope's flag.
+    /// Clearing this selection never resets either flag.
+    pub fn set_invocation_cancel(&mut self, cancel: Option<Arc<AtomicBool>>) {
+        self.machine.set_invocation_cancel(cancel);
+    }
+
+    /// Check invocation and resource cancellation before consuming a parked
+    /// continuation or constructing a resume answer.
+    pub fn cancellation_requested(&mut self, realm: RealmId) -> bool {
+        self.machine.invocation_cancel_requested() || self.realm_cancel_handle(realm).is_cancelled()
+    }
+
     /// Obtain a clone-able cancellation handle scoped to ONE runtime
     /// resource scope, lazily minting that scope's flag on first request.
     /// Cancelling this handle aborts only runs/calls made with `realm` --
@@ -2682,7 +2695,8 @@ impl<'code> PreparedMachine<'code> {
 
     /// Materialize a retained value as a bridge `HaskellValue`, forcing its lazy
     /// fields through program `id`'s force adapter under the value's own
-    /// resource-scope cancel flag. The handle stays retained: forcing may evaluate and
+    /// resource-scope cancel flag and the owning invocation flag. The handle stays
+    /// retained: forcing may evaluate and
     /// move the graph it roots, and the handle's root slot follows the move.
     /// `budget` bounds observed nodes and copied payload bytes together, and
     /// exhausting it fails the whole observation.
@@ -3869,6 +3883,169 @@ mod tests {
             .expect("a settled cancellation must leave the machine reusable");
         assert_eq!(result.values.len(), 1);
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    #[test]
+    fn invocation_cancellation_leaves_same_realm_sibling_usable_and_retirement_active() {
+        let (mut machine, program) = machine();
+        let realm = RealmId::fresh();
+        let call = PreparedCallOptions {
+            observation_budget: 0,
+            collect_before_observation: false,
+        };
+        let invocation = Arc::new(AtomicBool::new(true));
+        machine.set_invocation_cancel(Some(Arc::clone(&invocation)));
+        let error = machine
+            .run_entry_retained(program, ValueId(0), &[], call, realm)
+            .expect_err("cancelled invocation returns no retained result");
+        assert!(matches!(error, ExecutionError::Runtime(failure)
+            if failure.cause == RuntimeError::Cancelled
+                && failure.disposition == MachineDisposition::Reusable));
+        assert!(!machine.realm_cancel_handle(realm).is_cancelled());
+        assert_eq!(machine.handle_count(), 0);
+
+        machine.set_invocation_cancel(Some(Arc::new(AtomicBool::new(false))));
+        let sibling = machine
+            .run_entry_retained(program, ValueId(0), &[], call, realm)
+            .expect("sibling invocation sharing the resource scope can still run");
+        let [PreparedResult::Managed(value)] = sibling.values.as_slice() else {
+            panic!("fixture returns one retained value");
+        };
+        assert!(machine.release(*value));
+        assert!(invocation.load(std::sync::atomic::Ordering::Relaxed));
+
+        machine.realm_cancel_handle(realm).cancel();
+        assert!(machine.cancellation_requested(realm));
+        let error = machine
+            .run_entry_retained(program, ValueId(0), &[], call, realm)
+            .expect_err("retirement still cancels an otherwise live invocation");
+        assert!(matches!(error, ExecutionError::Runtime(failure)
+            if failure.cause == RuntimeError::Cancelled));
+        machine.set_invocation_cancel(Some(Arc::new(AtomicBool::new(false))));
+        assert!(machine.cancellation_requested(realm));
+        assert_eq!(machine.handle_count(), 0);
+    }
+
+    #[test]
+    fn invocation_cancellation_interrupts_active_nonallocating_backedges() {
+        use tidepool_repr::execution_schema::{JoinBinding, JoinId};
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.expressions.nodes = vec![
+            ExprFrame::Jump {
+                join: JoinId(0),
+                arguments: vec![],
+            },
+            ExprFrame::Jump {
+                join: JoinId(0),
+                arguments: vec![],
+            },
+            ExprFrame::LetJoins {
+                bindings: Group::Recursive(vec![JoinBinding {
+                    id: JoinId(0),
+                    signature: SignatureId(0),
+                    parameters: vec![],
+                    body: 0,
+                }]),
+                body: 1,
+            },
+        ];
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Thunk {
+            signature: SignatureId(0),
+            update: UpdatePolicy::Memoize,
+            captures: vec![],
+            body: 2,
+        };
+        let linked =
+            link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+        let (mut machine, program) = PreparedMachine::new(
+            CompiledProgram::compile(&linked).unwrap(),
+            PreparedMachineOptions {
+                nursery_bytes: 4096,
+            },
+        )
+        .unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        machine.set_invocation_cancel(Some(Arc::clone(&cancel)));
+        let watchdog = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let error = machine
+            .run_entry_retained(
+                program,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 0,
+                    collect_before_observation: false,
+                },
+                RealmId::ROOT,
+            )
+            .expect_err("backedges sample cancellation after the invocation enters");
+        watchdog.join().unwrap();
+        assert!(matches!(error, ExecutionError::Runtime(failure)
+            if failure.cause == RuntimeError::Cancelled
+                && failure.disposition == MachineDisposition::Reusable));
+        assert!(!machine.realm_cancel_handle(RealmId::ROOT).is_cancelled());
+        assert_eq!(machine.handle_count(), 0);
+    }
+
+    #[test]
+    fn invocation_cancellation_covers_lazy_forcing_without_releasing_roots() {
+        let (mut machine, program) = PreparedMachine::new(
+            outer_with_function_field_program(),
+            PreparedMachineOptions {
+                nursery_bytes: 4096,
+            },
+        )
+        .expect("lazy field fixture installs");
+        let realm = RealmId::fresh();
+        let batch = machine
+            .run_entry_retained(
+                program,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 0,
+                    collect_before_observation: false,
+                },
+                realm,
+            )
+            .unwrap();
+        let [PreparedResult::Managed(outer)] = batch.values.as_slice() else {
+            panic!("fixture returns a constructor");
+        };
+        let PreparedOuter::Constructor { fields, .. } =
+            machine.inspect_outer(*outer, realm).unwrap();
+        let [PreparedResult::Managed(function), PreparedResult::Managed(lazy)] = fields.as_slice()
+        else {
+            panic!("fixture constructor retains function and lazy fields");
+        };
+        let handles = machine.handle_count();
+        let roots = machine.total_persistent_roots();
+        machine.set_invocation_cancel(Some(Arc::new(AtomicBool::new(true))));
+        let error = machine
+            .observe_handle(program, *lazy, 100)
+            .expect_err("forcing samples invocation cancellation");
+        assert!(matches!(error, ExecutionError::Runtime(failure)
+            if failure.cause == RuntimeError::Cancelled));
+        assert_eq!(machine.handle_count(), handles);
+        assert_eq!(machine.total_persistent_roots(), roots);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+
+        machine.set_invocation_cancel(None);
+        assert!(
+            matches!(machine.observe_handle(program, *lazy, 100).unwrap(),
+            HaskellValue::Con(tidepool_repr::DataConId(992), ref fields) if fields.is_empty())
+        );
+        assert!(machine.release(*outer));
+        assert!(machine.release(*function));
+        assert!(machine.release(*lazy));
+        assert_eq!(machine.handle_count(), 0);
     }
 
     #[test]

@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{atomic::AtomicBool, Arc};
 
 use parking_lot::Mutex;
 
@@ -2116,6 +2116,23 @@ where
     // itself only requires `Clone + Send`).
     O: OutputSink + Sync,
 {
+    /// Scope every native call made by `action` to this invocation's flag.
+    /// Resource retirement remains independently active. Restore the previous
+    /// selection even if `action` unwinds; no cancellation flag is reset.
+    pub fn with_invocation_cancel<R>(
+        &mut self,
+        cancel: Arc<AtomicBool>,
+        action: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous = self.state.replace_invocation_cancel(Some(cancel));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(self)));
+        self.state.replace_invocation_cancel(previous);
+        match result {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
     /// Build a resident session with no live machine yet. Construction cannot
     /// fail or compile a seed program. The machine comes up on the first real
     /// turn ([`Self::run_with_sites`]/[`Self::run_bind_with_sites`]/
@@ -6335,6 +6352,50 @@ mod authored_publication_tests {
     }
 
     type TestSession = ResidentSession<frunk::HNil, EmptyOutput>;
+
+    #[test]
+    fn invocation_cancel_scope_survives_bootstrap_and_restores_after_nested_panic() {
+        let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+        let cancelled = Arc::new(AtomicBool::new(true));
+        session.with_invocation_cancel(Arc::clone(&cancelled), |session| {
+            session
+                .state
+                .install_prepared(
+                    tidepool_repr::execution_schema::testing::prepare(
+                        tidepool_repr::execution_schema::testing::wire_program(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            assert!(session
+                .state
+                .require_prepared()
+                .unwrap()
+                .cancellation_requested(RealmId::ROOT));
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                session.with_invocation_cancel(Arc::new(AtomicBool::new(false)), |session| {
+                    assert!(!session
+                        .state
+                        .require_prepared()
+                        .unwrap()
+                        .cancellation_requested(RealmId::ROOT));
+                    panic!("nested invocation unwinds");
+                });
+            }));
+            assert!(panic.is_err());
+            assert!(session
+                .state
+                .require_prepared()
+                .unwrap()
+                .cancellation_requested(RealmId::ROOT));
+        });
+        assert!(!session
+            .state
+            .require_prepared()
+            .unwrap()
+            .cancellation_requested(RealmId::ROOT));
+        assert!(cancelled.load(std::sync::atomic::Ordering::Relaxed));
+    }
 
     fn parcel_source_fixture() -> (TestSession, Parcel, PreparedHandle, Vec<SymbolIdentity>) {
         use tidepool_repr::execution_schema::{

@@ -35,7 +35,7 @@ mod emit;
 mod image;
 mod image_registry;
 mod package_literals;
-pub use package_literals::PackageLiteral;
+pub use package_literals::{PackageLiteral, SourceLiteral};
 mod instance;
 #[cfg(test)]
 mod invocation;
@@ -220,6 +220,8 @@ pub enum CompileError {
     MissingRepresentation(ValueId),
     #[error("immutable package literal differs from the certified global {0:?}")]
     PackageLiteralContract(Box<tidepool_repr::execution_schema::SymbolIdentity>),
+    #[error("immutable source literal differs from the certified global {0:?}")]
+    SourceLiteralContract(Box<SourceBinder>),
     #[error("JSON operation was admitted without a program JSON layout")]
     MissingJsonLayout,
     #[error("JSON layout names constructor {0:?}, which this program does not declare")]
@@ -437,6 +439,8 @@ pub struct CompiledProgram {
     /// Original owner of a worker-certified group image. A target/ordinary
     /// prepared image has no source certificate and cannot mint source leases.
     pub(crate) certified_source: Option<(tidepool_repr::execution_schema::CachedHomeOwner, u32)>,
+    /// Only an independent original Bytes group can produce a source literal.
+    pub(crate) source_literal_producer: Option<(ValueId, package_literals::SourceLiteralOwner)>,
     /// Admitted imports' slots -- see [`plan::ImportSlot`]. Indexed by
     /// `GlobalId`, occupying the block range right after `top_slots`.
     pub(crate) import_slots: Vec<plan::ImportSlot>,
@@ -594,6 +598,7 @@ impl CompiledProgram {
             error
         })?;
         image.certified_source = Some((group.owner().clone(), group.original_ordinal()));
+        image.source_literal_producer = package_literals::SourceLiteralOwner::from_group(group);
         Ok(image)
     }
 
@@ -1427,6 +1432,7 @@ impl CompiledProgram {
                 })
                 .collect(),
             certified_source: None,
+            source_literal_producer: None,
             import_slots: plan.import_slots,
             root_words: plan.root_words,
             interned_constructors: plan.interned_constructors,

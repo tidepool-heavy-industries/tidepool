@@ -1422,6 +1422,7 @@ fn durable_root(actor: ActorRef) -> exomonad_actor::DurableActorRecord {
             launch_worktrees: Vec::new(),
             source_layer: Vec::new(),
         },
+        startup: None,
         application: Some(exomonad_actor::DurableActorApplication {
             binding_path: std::path::PathBuf::from(format!(
                 "binding-{}-{}.json",

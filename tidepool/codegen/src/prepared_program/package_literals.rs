@@ -1,12 +1,12 @@
-//! Native-local literal bindings preserve the certified original group. Only
-//! an actual compiled Bytes top can supply storage; the runtime supplies its
-//! same-target protected package-interface witness before requesting a token.
+//! Immutable literal imports retain their original certified producer. Package
+//! literals additionally require the protected target's interface witness.
 
-use super::{CompileError, CompiledProgram, GlobalRefusalPhase};
+use super::{CompileError, CompiledProgram, DemandedImage, GlobalRefusalPhase, SourceBinder};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tidepool_repr::execution_schema::{
-    CertifiedGroup, GlobalId, ImportOwner, RuntimeRep, SymbolIdentity,
+    CachedHomeOwner, CertifiedGroup, GlobalId, Group, HeapRhs, ImportOwner, RuntimeRep,
+    SymbolIdentity, ValueId,
 };
 
 #[cfg(test)]
@@ -26,19 +26,88 @@ impl PackageLiteral {
     pub(super) fn storage(&self) -> &Arc<[u8]> {
         &self.storage
     }
+}
+
+/// Storage from an actual compiled original singleton Bytes group. Its private
+/// provenance cannot be supplied by a caller with an arbitrary address or handle.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct SourceLiteral {
+    source: SourceLiteralOwner,
+    storage: Arc<[u8]>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct SourceLiteralOwner {
+    pub owner: CachedHomeOwner,
+    pub original_ordinal: u32,
+    pub binder: SourceBinder,
+}
+
+impl SourceLiteralOwner {
+    pub(super) fn from_group(group: &CertifiedGroup) -> Option<(ValueId, Self)> {
+        let definitions = group.definitions();
+        let [Group::NonRecursive(top)] = definitions.bindings() else {
+            return None;
+        };
+        let [binder] = group.binders() else {
+            return None;
+        };
+        if binder != &top.identity
+            || !matches!(top.binding.rhs, HeapRhs::Bytes(_))
+            || !group.imports().is_empty()
+            || !definitions.globals().is_empty()
+        {
+            return None;
+        }
+        Some((
+            top.binding.id,
+            Self {
+                owner: group.owner().clone(),
+                original_ordinal: group.original_ordinal(),
+                binder: SourceBinder {
+                    version: group.owner().module_version.clone(),
+                    binder: binder.clone(),
+                },
+            },
+        ))
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(super) enum LiteralImport {
+    Package(PackageLiteral),
+    Source(SourceLiteral),
+}
+
+impl LiteralImport {
+    pub(super) fn storage(&self) -> &Arc<[u8]> {
+        match self {
+            Self::Package(literal) => literal.storage(),
+            Self::Source(literal) => &literal.storage,
+        }
+    }
 
     pub(super) fn logical_bytes(&self) -> &[u8] {
-        &self.storage[..self.storage.len() - 1]
+        let storage = self.storage();
+        &storage[..storage.len() - 1]
+    }
+
+    pub(super) fn source(&self) -> Option<&SourceLiteralOwner> {
+        match self {
+            Self::Package(_) => None,
+            Self::Source(literal) => Some(&literal.source),
+        }
     }
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub(super) struct GroupPackageLiterals(BTreeMap<GlobalId, PackageLiteral>);
+pub(super) struct GroupPackageLiterals(BTreeMap<GlobalId, LiteralImport>);
 
 impl GroupPackageLiterals {
     pub(super) fn select(
         group: &CertifiedGroup,
         supplied: &BTreeMap<SymbolIdentity, PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, SourceLiteral>,
     ) -> Result<Self, CompileError> {
         let mut selected = BTreeMap::new();
         for (index, (declaration, owner)) in group
@@ -59,6 +128,26 @@ impl GroupPackageLiterals {
                     GlobalRefusalPhase::NonReferenceRepresentation,
                 )
             };
+            if let ImportOwner::Source { version, binder } = owner {
+                let key = SourceBinder {
+                    version: version.clone(),
+                    binder: binder.clone(),
+                };
+                let literal = sources.get(&key).ok_or_else(missing)?;
+                if declaration.entry_signature.is_some()
+                    || !declaration.required_evaluated
+                    || declaration.required_generation.is_some()
+                    || binder != &declaration.identity
+                    || literal.source.binder != key
+                    || literal.source.owner.module_version != *version
+                    || literal.source.owner.unit != binder.unit
+                    || literal.source.owner.module != binder.module
+                {
+                    return Err(CompileError::SourceLiteralContract(Box::new(key)));
+                }
+                selected.insert(id, LiteralImport::Source(literal.clone()));
+                continue;
+            }
             let literal = supplied.get(&declaration.identity).ok_or_else(missing)?;
             let ImportOwner::Package {
                 unit,
@@ -83,21 +172,72 @@ impl GroupPackageLiterals {
                     declaration.identity.clone(),
                 )));
             }
-            selected.insert(id, literal.clone());
+            selected.insert(id, LiteralImport::Package(literal.clone()));
         }
         Ok(Self(selected))
     }
 
-    pub(super) fn get(&self, id: GlobalId) -> Option<&PackageLiteral> {
+    pub(super) fn get(&self, id: GlobalId) -> Option<&LiteralImport> {
         self.0.get(&id)
     }
 
-    pub(super) fn iter(&self) -> impl Iterator<Item = (&GlobalId, &PackageLiteral)> {
+    pub(super) fn iter(&self) -> impl Iterator<Item = (&GlobalId, &LiteralImport)> {
         self.0.iter()
     }
 }
 
+impl DemandedImage {
+    /// Inventory only the original binder of an independent singleton Bytes
+    /// group. Mixed groups need their live managed instance, never a recompile
+    /// of its mutable CAFs to recover an address.
+    pub fn source_literals(&self) -> BTreeMap<SourceBinder, SourceLiteral> {
+        let group = self.group();
+        let image = self.image();
+        let Some((value, source)) = image.source_literal_producer.as_ref() else {
+            return BTreeMap::new();
+        };
+        if &source.owner != group.owner()
+            || source.original_ordinal != group.original_ordinal()
+            || group.binders() != [source.binder.binder.clone()]
+        {
+            return BTreeMap::new();
+        }
+        let Some(export) = image.top_exports.get(value) else {
+            return BTreeMap::new();
+        };
+        let Some(storage) = image.byte_tops.get(value) else {
+            return BTreeMap::new();
+        };
+        if export.identity != source.binder.binder
+            || export.rep != RuntimeRep::Address
+            || export.entry_signature.is_some()
+            || !export.evaluated
+            || storage.last() != Some(&0)
+        {
+            return BTreeMap::new();
+        }
+        let key = source.binder.clone();
+        BTreeMap::from([(
+            key.clone(),
+            SourceLiteral {
+                source: source.clone(),
+                storage: Arc::clone(storage),
+            },
+        )])
+    }
+}
+
 impl CompiledProgram {
+    /// The exact source binder authenticated for this immutable import slot.
+    /// Address representation alone never exempts a managed source lease.
+    pub fn authenticated_source_literal(&self, id: GlobalId) -> Option<&SourceBinder> {
+        self.import_slots
+            .get(id.0 as usize)?
+            .literal_source
+            .as_ref()
+            .map(|source| &source.binder)
+    }
+
     /// Inventory actual immutable byte tops under caller-supplied interface
     /// facts. The runtime must first validate its protected same-target package
     /// certificate; this native storage capsule does not issue that authority.

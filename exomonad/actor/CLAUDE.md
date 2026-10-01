@@ -7,9 +7,10 @@ observability interfaces stay in their owning crates. Ractor is the scheduler;
 `LocalActor` adds Tidepool identity, retained exits, live-value custody, and
 call ancestry. Do not add a second scheduler or result/root registry.
 
-Each actor admits at most one active turn. Delivery validates the exact actor
-incarnation and machine session before mailbox acceptance; synchronous callers
-remain non-reentrant until their RPC resolves. Mailbox values use the existing
+Ractor serializes actor turns. Independent notebook executions retain their own
+fenced task, cursor, reply and cancellation control while parked. Stateful actor
+protocols remain exclusive until their RPC resolves. Delivery validates the exact
+actor incarnation and machine session before mailbox acceptance. Mailbox values use the existing
 managed Haskell custody machinery, and cancellation, abandonment, and exit
 settle once and release kernel-owned roots. Compile actor-authored code through
 its exact `SessionCompileView`; do not pass ambient scope ancestry or caller

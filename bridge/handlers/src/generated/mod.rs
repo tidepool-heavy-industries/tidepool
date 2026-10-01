@@ -3,6 +3,7 @@
 pub mod bound_worktree;
 pub mod exec;
 pub mod journal;
+pub mod model_call;
 pub mod repo_event;
 pub mod source;
 pub mod worktree;

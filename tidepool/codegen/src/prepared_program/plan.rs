@@ -60,6 +60,7 @@ pub(crate) struct ImportSlot {
     /// Native-local immutable bytes, authenticated before specialization.
     /// This word is initialized internally and is never a managed GC root.
     pub literal: Option<Arc<[u8]>>,
+    pub literal_source: Option<super::package_literals::SourceLiteralOwner>,
 }
 
 /// What a `Call` site can know about its callee at compile time. Computed
@@ -443,6 +444,9 @@ impl<'a> ProgramPlan<'a> {
                                 .expect("selected literal is pinned by this plan"),
                         )
                     }),
+                literal_source: literals
+                    .get(tidepool_repr::execution_schema::GlobalId(index as u32))
+                    .and_then(|literal| literal.source().cloned()),
             })
             .collect::<Vec<_>>();
         let root_words = top_slots.len() + import_slots.len();

@@ -527,3 +527,274 @@ fn package_literal_parcel_keeps_image_bytes_after_sender_drop() {
     assert_eq!(receiver.residency().programs, 0);
     assert_bytes(*address);
 }
+
+fn literal_owner() -> CachedHomeOwner {
+    CachedHomeOwner {
+        unit: "main".into(),
+        module: "Tidepool.Duration".into(),
+        module_version: ModuleVersion([4; 32]),
+        skinny_iface_sha256: [5; 32],
+        product_sha256: [6; 32],
+    }
+}
+
+fn source_literal_identity() -> SymbolIdentity {
+    let mut identity = testing::identity("Tidepool.Duration", "milliseconds11");
+    identity.unit = "main".into();
+    identity
+}
+
+fn source_literal_producer(
+    owner: CachedHomeOwner,
+    ordinal: u32,
+    bytes: &[u8],
+    registry: &ImageRegistry,
+) -> DemandedImage {
+    let mut wire = testing::wire_program();
+    wire.expressions.nodes.clear();
+    wire.bindings = vec![Group::NonRecursive(TopBinding {
+        identity: source_literal_identity(),
+        binding: HeapBinding {
+            id: ValueId(0),
+            rhs: HeapRhs::Bytes(bytes.to_vec()),
+        },
+    })];
+    let group = CertifiedGroup::admit(
+        owner,
+        testing::projected_group(wire, ordinal).unwrap(),
+        vec![],
+    )
+    .unwrap();
+    DemandedImage::compile(group, registry).unwrap()
+}
+
+fn source_literal_consumer(captured: bool, version: ModuleVersion) -> CertifiedGroup {
+    let mut wire = group_wire(captured, true);
+    wire.globals[0].identity = source_literal_identity();
+    certify(
+        wire,
+        ImportOwner::Source {
+            version,
+            binder: source_literal_identity(),
+        },
+    )
+}
+
+fn install_source_literal(
+    machine: &mut PreparedMachine<'_>,
+    consumer: &DemandedImage,
+    producer: &DemandedImage,
+) -> Result<Vec<crate::prepared_program::ProgramId>, ExecutionError> {
+    machine.install_shared_batch(vec![
+        BatchProgram {
+            image: Arc::clone(consumer.image()),
+            imports: vec![BatchImport::Source {
+                group: 1,
+                binding: ValueId(0),
+            }],
+        },
+        BatchProgram {
+            image: Arc::clone(producer.image()),
+            imports: vec![],
+        },
+    ])
+}
+
+#[test]
+fn source_literal_original_group_executes_without_a_managed_address_handle() {
+    let registry = ImageRegistry::new();
+    let producer = source_literal_producer(literal_owner(), 1, BYTES, &registry);
+    let supplied = producer.source_literals();
+    let key = SourceBinder {
+        version: literal_owner().module_version,
+        binder: source_literal_identity(),
+    };
+    assert_eq!(supplied.len(), 1);
+    for captured in [false, true] {
+        let consumer = DemandedImage::compile_with_literals(
+            source_literal_consumer(captured, key.version.clone()),
+            &registry,
+            &BTreeMap::new(),
+            &supplied,
+        )
+        .unwrap();
+        assert_eq!(
+            consumer.image().authenticated_source_literal(GlobalId(0)),
+            Some(&key)
+        );
+        let mut machine = machine();
+        let ids = install_source_literal(&mut machine, &consumer, &producer).unwrap();
+        machine.pin(ids[0]).unwrap();
+        assert_bytes(address(&mut machine, ids[0]));
+        assert!(!machine.import_slot_is_registered_root(ids[0], &key.binder));
+        machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_bytes(address(&mut machine, ids[0]));
+        assert!(machine.unpin(ids[0]));
+        machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(machine.residency().programs, 0);
+    }
+}
+
+#[test]
+fn source_literal_missing_or_wrong_version_evidence_stays_refused() {
+    let registry = ImageRegistry::new();
+    let producer = source_literal_producer(literal_owner(), 1, BYTES, &registry);
+    for supplied in [BTreeMap::new(), producer.source_literals()] {
+        let version = if supplied.is_empty() {
+            ModuleVersion([4; 32])
+        } else {
+            ModuleVersion([9; 32])
+        };
+        assert!(matches!(
+            DemandedImage::compile_with_literals(
+                source_literal_consumer(false, version),
+                &registry,
+                &BTreeMap::new(),
+                &supplied,
+            ),
+            Err(DemandError::Compile(CompileError::Unsupported(_)))
+        ));
+    }
+}
+
+#[test]
+fn source_literal_batch_refuses_equal_bytes_from_another_original_producer() {
+    let registry = ImageRegistry::new();
+    let producer = source_literal_producer(literal_owner(), 1, BYTES, &registry);
+    let consumer = DemandedImage::compile_with_literals(
+        source_literal_consumer(false, literal_owner().module_version),
+        &registry,
+        &BTreeMap::new(),
+        &producer.source_literals(),
+    )
+    .unwrap();
+    for difference in 0..4 {
+        let mut owner = literal_owner();
+        let mut ordinal = 1;
+        match difference {
+            0 => owner.product_sha256 = [7; 32],
+            1 => owner.skinny_iface_sha256 = [7; 32],
+            2 => owner.module_version = ModuleVersion([7; 32]),
+            _ => ordinal = 2,
+        }
+        let wrong = source_literal_producer(owner, ordinal, BYTES, &registry);
+        let mut machine = machine();
+        let before = machine.residency();
+        assert!(matches!(
+            install_source_literal(&mut machine, &consumer, &wrong),
+            Err(ExecutionError::BatchSourceContract(_))
+        ));
+        assert_eq!(machine.residency(), before);
+        let ids = install_source_literal(&mut machine, &consumer, &producer).unwrap();
+        machine.pin(ids[0]).unwrap();
+        assert_bytes(address(&mut machine, ids[0]));
+    }
+}
+
+#[test]
+fn source_literal_registry_keys_keep_exact_producer_and_bytes() {
+    let registry = ImageRegistry::new();
+    let compile = |producer: &DemandedImage| {
+        DemandedImage::compile_with_literals(
+            source_literal_consumer(false, literal_owner().module_version),
+            &registry,
+            &BTreeMap::new(),
+            &producer.source_literals(),
+        )
+        .unwrap()
+    };
+    let producer = source_literal_producer(literal_owner(), 1, BYTES, &registry);
+    let first = compile(&producer);
+    let equal = compile(&producer);
+    assert!(Arc::ptr_eq(first.image(), equal.image()));
+    let different_bytes = source_literal_producer(literal_owner(), 1, b"False", &registry);
+    assert!(!Arc::ptr_eq(
+        first.image(),
+        compile(&different_bytes).image()
+    ));
+    let mut owner = literal_owner();
+    owner.product_sha256 = [7; 32];
+    let different_owner = source_literal_producer(owner, 1, BYTES, &registry);
+    assert!(!Arc::ptr_eq(
+        first.image(),
+        compile(&different_owner).image()
+    ));
+}
+
+#[test]
+fn source_literal_inventory_excludes_mixed_original_groups() {
+    let producer = source_literal_producer(literal_owner(), 1, BYTES, &ImageRegistry::new());
+    let mut wire = group_wire(false, true);
+    wire.globals.clear();
+    wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(1)))]);
+    wire.bindings.push(Group::NonRecursive(TopBinding {
+        identity: testing::identity("Fixture", "literal"),
+        binding: HeapBinding {
+            id: ValueId(1),
+            rhs: HeapRhs::Bytes(BYTES.to_vec()),
+        },
+    }));
+    // This schema shape is valid but cannot recover literal storage by replaying
+    // an original group that also owns callable or mutable state.
+    let mixed = CertifiedGroup::admit(
+        CachedHomeOwner {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            ..literal_owner()
+        },
+        testing::projected_group(wire, 2).unwrap(),
+        vec![],
+    )
+    .unwrap();
+    let mixed = DemandedImage::compile(mixed, &ImageRegistry::new()).unwrap();
+    assert!(mixed.source_literals().is_empty());
+    assert_eq!(producer.source_literals().len(), 1);
+}
+
+#[test]
+fn source_literal_batch_refuses_a_mixed_producer_with_matching_bytes_and_owner() {
+    let registry = ImageRegistry::new();
+    let producer = source_literal_producer(literal_owner(), 1, BYTES, &registry);
+    let consumer = DemandedImage::compile_with_literals(
+        source_literal_consumer(false, literal_owner().module_version),
+        &registry,
+        &BTreeMap::new(),
+        &producer.source_literals(),
+    )
+    .unwrap();
+    let mut wire = testing::wire_program();
+    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
+    wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(0)))]);
+    let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+        unreachable!()
+    };
+    top.identity = source_literal_identity();
+    top.identity.occurrence = "extraCallable".into();
+    top.binding.id = ValueId(1);
+    wire.bindings.insert(
+        0,
+        Group::NonRecursive(TopBinding {
+            identity: source_literal_identity(),
+            binding: HeapBinding {
+                id: ValueId(0),
+                rhs: HeapRhs::Bytes(BYTES.to_vec()),
+            },
+        }),
+    );
+    let mixed = CertifiedGroup::admit(
+        literal_owner(),
+        testing::projected_group(wire, 1).unwrap(),
+        vec![],
+    )
+    .unwrap();
+    let mixed = DemandedImage::compile(mixed, &registry).unwrap();
+    assert!(mixed.source_literals().is_empty());
+    let mut machine = machine();
+    let before = machine.residency();
+    assert!(matches!(
+        install_source_literal(&mut machine, &consumer, &mixed),
+        Err(ExecutionError::BatchSourceContract(_))
+    ));
+    assert_eq!(machine.residency(), before);
+    assert!(install_source_literal(&mut machine, &consumer, &producer).is_ok());
+}

@@ -213,7 +213,7 @@ pub(crate) struct CapturedChildLaunch {
     /// one (an eligible `SelectedContext` launch — see
     /// `child_session_eligibility`). Crossing it to the child's own machine
     /// is the launch path's job, not capture's: `resident_actor.rs`'s
-    /// `try_start_child` (and `replacement.rs`'s matching resolution)
+    /// `child_launch::await_launch` (and `replacement.rs`'s matching resolution)
     /// provisions that session and calls
     /// `ResidentActorRunner::transfer_custody` once the checkout that
     /// captured this launch has long since been released — never here,

@@ -7,9 +7,18 @@ unconsumed proposals are removed; Git retains their history.
 
 ## Open design questions
 
+- [Bounded model turns](bounded-model-turns.md): typed caller-owned tools, shared
+  cell budget, remote Buck qualification and run timeline evidence.
+- [ModelCall integration handoff](model-call-integration-handoff.md): the
+  admitted execution service hook and joined resident acceptance still owed.
+
 - [Final engine and harness delivery](engine-harness-final-delivery.md): accepted
   implementation wave through M1/M2, recovery, structural performance and native
   Buck release readiness; live trials and publication remain separate.
+
+- [Release preparation handoff](release-preparation-handoff.md): package
+  producer, immutable staging/selection, run retention, and state compatibility
+  contracts required before deployment can move to staged releases.
 
 - [Engine and harness implementation](engine-harness-integration.md): approved
   parallel foundation closure, compiler/native and Git/process redesign, shared

@@ -38,7 +38,7 @@
 --   own schema for one field, a fixed-length @prefixItems@ array for
 --   several) — aeson's @TaggedObject@ shape, which is what the two defaults
 --   use ('IsRecordCon' picks the branch, shared with the encoder/decoder);
--- * a @Maybe@ FIELD → its payload's schema, omitted from @required@,
+-- * a @Maybe@ FIELD → its nullable schema, omitted from @required@,
 --   because the decoder accepts an absent key AND an explicit @null@ there;
 -- * a RECORD payload constructor with a field literally named @tag@ →
 --   a compile-time 'TypeError', via the SAME 'GAllFieldsNamed' witness
@@ -162,12 +162,10 @@ instance {-# OVERLAPPABLE #-} (JsonSchema a) => JsonSchema [a] where
 instance {-# OVERLAPPING #-} JsonSchema [Char] where
   jsonSchema _ = object [("type", String "string")]
 
--- | 'Maybe' OUTSIDE field position is just its payload: the encoder writes
--- @null@ for 'Nothing' and the decoder reads @null@ back. In FIELD position
--- the optionality is additionally expressed by absence from @required@ — see
--- 'GSchemaRecord'.
+-- | 'Nothing' encodes as @null@, including inside arrays and nested values.
+-- In field position absence is also accepted by 'GSchemaRecord'.
 instance (JsonSchema a) => JsonSchema (Maybe a) where
-  jsonSchema _ = jsonSchema (Proxy :: Proxy a)
+  jsonSchema _ = object [("anyOf", Array [jsonSchema (Proxy :: Proxy a), object [("type", String "null")]])]
 
 -- ---------------------------------------------------------------------------
 -- Object assembly
@@ -307,6 +305,6 @@ instance (Selector s, JsonSchema c) => GSchemaRecord (M1 S s (K1 R c)) where
       fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
 
 instance {-# OVERLAPPING #-} (Selector s, JsonSchema c) => GSchemaRecord (M1 S s (K1 R (Maybe c))) where
-  gSchemaFields _ = [(fieldName, jsonSchema (Proxy :: Proxy c), False)]
+  gSchemaFields _ = [(fieldName, jsonSchema (Proxy :: Proxy (Maybe c)), False)]
     where
       fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
