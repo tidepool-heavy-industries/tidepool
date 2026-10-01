@@ -867,7 +867,7 @@ fn validate_startup(
         || admission.creator.is_some()
         || admission.supervisor_parent.is_some()
         || admission.context_parent.is_some()
-        || admission.actor_path.is_none()
+        || owner_for_admission(admission).is_none()
     {
         return Err(std::io::Error::other(
             "startup intent requires a canonical independent root",
@@ -879,6 +879,7 @@ fn validate_startup(
             .get(&previous)
             .ok_or_else(|| std::io::Error::other("startup predecessor is absent"))?;
         if previous == admission.actor
+            || owner_for_admission(&prior.admission) == owner_for_admission(admission)
             || prior.admission.actor_path != admission.actor_path
             || prior.admission.role != "root"
             || prior
