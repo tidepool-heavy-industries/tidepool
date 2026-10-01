@@ -158,15 +158,16 @@ validateProbe probe
 
 startValidProbe :: Member Commands effects => CommandProbe -> Eff effects ProbeStart
 startValidProbe probe = do
-  started <- Cmd.tryStart
+  started <- Cmd.tryBackground
     (Cmd.withMemory (probeMemory probe)
       (Cmd.inDirectory (probeDirectory probe) (probeCommand probe)))
   pure $ case started of
     Left refusal -> ProbeRejected (probeName probe) refusal
     Right job -> ProbeRunning (probeName probe) job
 
--- | Start at most `maximumConcurrent` jobs. Observe the exact returned handles
--- before starting a continuation; a pending result remains a running job.
+-- | Start at most `maximumConcurrent` jobs, owned by the caller's actor across
+-- notebook calls. Observe the exact returned handles before starting a
+-- continuation; a pending result remains a running job.
 startProbeBatch
   :: Member Commands effects
   => ProbeLimits -> [CommandProbe]
