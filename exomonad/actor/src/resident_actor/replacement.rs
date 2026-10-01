@@ -293,6 +293,7 @@ where
             }
         };
         let crate::start::CapturedChildLaunch {
+            lifetime: _,
             mut descriptor,
             entry,
             launch_worktrees,

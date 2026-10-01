@@ -331,7 +331,7 @@ impl KernelContext {
                 )
             })?;
             context
-                .spawn_worker_retained(None, behavior, crate::WorkerLifetime::ParentOwned)
+                .spawn_worker_retained(None, behavior, crate::WorkerLifetime::ActorOwned)
                 .await
                 .map(|(actor, admission)| (actor, Some(admission)))
         } else {
@@ -454,7 +454,7 @@ impl KernelContext {
     where
         C: KernelBehavior,
     {
-        self.spawn_worker(name, behavior, crate::WorkerLifetime::ParentOwned)
+        self.spawn_worker(name, behavior, crate::WorkerLifetime::ActorOwned)
             .await
     }
 
@@ -506,7 +506,7 @@ impl KernelContext {
             mailbox_admission: mailbox_admission.clone(),
         };
         let spawned = match lifetime {
-            crate::WorkerLifetime::ParentOwned => {
+            crate::WorkerLifetime::InvocationOwned | crate::WorkerLifetime::ActorOwned => {
                 self.myself
                     .spawn_linked(name, LocalActor::<C>(PhantomData), arguments)
                     .await
@@ -532,7 +532,7 @@ impl KernelContext {
         drop(task);
         let child =
             LocalActorRef::with_identity_admission(address, terminal, identity, mailbox_admission);
-        if lifetime == crate::WorkerLifetime::ParentOwned {
+        if lifetime != crate::WorkerLifetime::SwarmOwned {
             self.children
                 .lock()
                 .insert(child.address().get_id(), child.clone());

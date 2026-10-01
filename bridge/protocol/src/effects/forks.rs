@@ -60,7 +60,7 @@ pub fn forks() -> Effect {
                 wire_rust: None,
                 haskell_module: None,
                 shape: TypeShape::Sum {
-                    variants: ["ParentOwned", "SwarmOwned"]
+                    variants: ["InvocationOwned", "ActorOwned", "SwarmOwned"]
                         .into_iter()
                         .map(|ctor| SumVariant {
                             ctor,

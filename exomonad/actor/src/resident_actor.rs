@@ -8,7 +8,6 @@
 use std::sync::Arc;
 
 mod after_tool_wait;
-mod background_command_wait;
 #[cfg(test)]
 mod capture_workspace_tests;
 pub(crate) mod child_initialization;
@@ -19,6 +18,7 @@ mod command_settlement;
 mod commands;
 mod drain_wait;
 mod inspection_wait;
+pub(crate) mod invocation_work;
 mod owned_workbench;
 #[cfg(test)]
 mod provider_owner_tests;
@@ -34,6 +34,9 @@ pub(crate) use owned_workbench::{
     ExecutionResourceOwners, WorkbenchCompilationAuthority, WorkbenchPublicOwner,
 };
 
+use invocation_work::{
+    ensure_workbench_execution_id, retain_invocation_cleanup_summary, InvocationWork,
+};
 use status_rendering::{
     render_bindings_section, render_job_line, render_revisions_section, render_roster_changes,
     render_source_drift_section, RevisionIdentities, RosterSnapshot,
@@ -1208,6 +1211,8 @@ fn install_cell_preparation(
 struct WorkbenchFinalization {
     context: ActorSessionContext,
     reservation_owner: RequestReservationOwner,
+    invocation_work: Arc<InvocationWork>,
+    kernel: KernelContext,
     result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     rejected: bool,
     retire_scopes: Option<Vec<tidepool_codegen::scope::ScopeId>>,
@@ -1224,10 +1229,14 @@ where
     let WorkbenchFinalization {
         context,
         reservation_owner,
+        invocation_work,
+        kernel,
         result,
         rejected,
         retire_scopes,
     } = finalization;
+    let invocation_cleanup = invocation_work.cleanup(&environment, &kernel).await;
+    let result = retain_invocation_cleanup_summary(result, invocation_cleanup.uncertainty());
     let checkpoint_cleanup_failure = match retire_scopes {
         Some(scopes) => environment
             .runner
@@ -1297,6 +1306,7 @@ struct WorkbenchEffectState {
     installed_tools: Option<crate::InstalledToolLease>,
     admitted_source: crate::CheckpointSourceLayer,
     reservation_owner: RequestReservationOwner,
+    invocation_work: Arc<InvocationWork>,
     publication: ForkPublication,
     /// The nested slot borrows this execution and cannot recursively invoke itself.
     after_tool_active: bool,
@@ -1486,7 +1496,6 @@ enum WorkbenchRunAdvance {
     ParkEffect,
     ParkAfterToolStart,
     ParkAfterToolFinish,
-    ParkBackground(background_command_wait::BackgroundCommandRequest),
 }
 
 enum FragmentAdvance {
@@ -1507,6 +1516,18 @@ enum CurrentEffectOwner<'a> {
 }
 
 impl CurrentEffectOwner<'_> {
+    fn invocation_work(&self) -> Option<Arc<InvocationWork>> {
+        match self {
+            Self::Workbench(execution) => {
+                assert!(execution
+                    .invocation_work
+                    .matches(execution.context.actor, &execution.reservation_owner));
+                Some(execution.invocation_work.clone())
+            }
+            Self::Actor { .. } => None,
+        }
+    }
+
     fn publication(&self) -> &ForkPublication {
         match self {
             Self::Workbench(execution) => &execution.publication,
@@ -1817,7 +1838,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         O: OutputSink + Sync + 'static,
     {
         let mut context = self.context(actor);
-        let request = invocation.request;
+        let request = ensure_workbench_execution_id(invocation.request);
         let installed_tools = match invocation.installed_tools {
             Some(lease) if lease.actor() != context.actor => {
                 return Err(KernelInvocationFailure::Rejected {
@@ -2610,6 +2631,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let journal = self.workbench_executions.lock();
         let executions = journal.terminal_entries();
         let binding_lines = render_bindings_section(bindings, &executions);
+        let warnings = journal.cleanup_warnings();
+        let cleanup_warnings = if warnings.is_empty() {
+            String::new()
+        } else {
+            format!("\ninvocation cleanup unconfirmed:\n{}", warnings.join("\n"))
+        };
         let source_drift =
             render_source_drift_section(&self.runtime_observation.snapshot().source_drift);
         let attachments = self
@@ -2641,7 +2668,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         };
 
         format!(
-            "actor {}@{} what-is-live\ncollectors:\n{jobs}\nbindings:\n{binding_lines}\nattachments:\n{attachments}\nsource drift:\n{source_drift}",
+            "actor {}@{} what-is-live\ncollectors:\n{jobs}\nbindings:\n{binding_lines}\nattachments:\n{attachments}\nsource drift:\n{source_drift}{cleanup_warnings}",
             actor.id.0, actor.incarnation.0,
         )
     }
@@ -3059,6 +3086,7 @@ where
     > {
         Box::pin(async move {
             let crate::start::CapturedChildLaunch {
+                lifetime,
                 mut descriptor,
                 entry,
                 mut launch_worktrees,
@@ -3116,11 +3144,6 @@ where
                 Some(admission)
             } else {
                 None
-            };
-            let lifetime = if descriptor.supervisor_parent().is_none() {
-                crate::WorkerLifetime::SwarmOwned
-            } else {
-                crate::WorkerLifetime::ParentOwned
             };
             let fork_context = if descriptor.context_parent().is_some() {
                 crate::ForkContext::InheritedContext
@@ -3397,6 +3420,21 @@ where
                     ));
                 }
             };
+            if lifetime == crate::WorkerLifetime::InvocationOwned {
+                if let Some(invocation) = effect_owner.invocation_work() {
+                    if let Err(detail) = invocation.register_worker(child.clone()) {
+                        let cleanup = child
+                            .shutdown_with_cleanup(ActorTerminal {
+                                kind: ActorExitKind::Cancelled,
+                                summary: "invocation closed during worker admission".into(),
+                            })
+                            .await;
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "{detail}; worker admission cleanup: {cleanup:?}"
+                        )));
+                    }
+                }
+            }
             if let (Some(group), Some(lease), Some(descriptor)) = (
                 fork_group,
                 checkpoint_lease.as_ref(),
@@ -3816,7 +3854,13 @@ where
             } => Box::pin(async move {
                 let started = std::time::Instant::now();
                 let resolution = self
-                    .resolve_command(kernel, context, continuation, request)
+                    .resolve_command(
+                        kernel,
+                        context,
+                        continuation,
+                        request,
+                        effect_owner.invocation_work().as_deref(),
+                    )
                     .await;
                 crate::call_timing::add_exec_ms(started.elapsed().as_millis());
                 resolution.outcome
@@ -4654,6 +4698,16 @@ where
                 })();
                 match admitted {
                     Ok((group_id, group_path, reservations)) => {
+                        if let Some(invocation) = effect_owner.invocation_work() {
+                            if let Err(detail) = invocation.register_group(group_id) {
+                                let _ = self.environment.fork_groups.abort(group_id, context.actor);
+                                return self
+                                    .environment
+                                    .runner
+                                    .resume_fork_failure(context.clone(), continuation, detail)
+                                    .await;
+                            }
+                        }
                         if let Some((_, groups)) = &mut self.active_route {
                             groups.push(group_id);
                         }
@@ -4697,6 +4751,46 @@ where
                 continuation,
                 group,
             }) => Box::pin(async move {
+                if let Some(invocation) = effect_owner.invocation_work() {
+                    let children = self
+                        .environment
+                        .fork_groups
+                        .children_for_owner(group, context.actor)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                        })?;
+                    if children
+                        .into_iter()
+                        .any(|child| invocation.owns_worker(child))
+                    {
+                        let children = self
+                            .environment
+                            .fork_groups
+                            .abort(group, context.actor)
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                            })?;
+                        for child in children {
+                            if let Some(child) = kernel.resolve(child) {
+                                let _ = child
+                                    .shutdown_with_cleanup(ActorTerminal {
+                                        kind: ActorExitKind::Cancelled,
+                                        summary: "deferred invocation-owned worker refused".into(),
+                                    })
+                                    .await;
+                            }
+                        }
+                        return self
+                            .environment
+                            .runner
+                            .resume_fork_failure(
+                                context.clone(),
+                                continuation,
+                                "deferred workers require ActorOwned or SwarmOwned lifetime".into(),
+                            )
+                            .await;
+                    }
+                }
                 let mut phase = match self
                     .environment
                     .fork_groups
@@ -6842,12 +6936,6 @@ where
                 Some(result) => result?,
                 None => {
                     let request = match current.resume_failure.take() {
-                        Some(ResidentActorWorkbenchError::CommandObservationStopped {
-                            job,
-                            reason,
-                        }) => {
-                            owned_workbench::WorkbenchFragmentRequest::BackgroundJob { job, reason }
-                        }
                         Some(error) => return Err(error),
                         None => owned_workbench::WorkbenchFragmentRequest::Settle {
                             fragment: current
@@ -7204,7 +7292,13 @@ where
                                 } => {
                                     let exec_started = std::time::Instant::now();
                                     let resolved = self
-                                        .resolve_command(kernel, context, continuation, request)
+                                        .resolve_command(
+                                            kernel,
+                                            context,
+                                            continuation,
+                                            request,
+                                            Some(execution_state.invocation_work.as_ref()),
+                                        )
                                         .await;
                                     crate::call_timing::add_exec_ms(
                                         exec_started.elapsed().as_millis(),
@@ -7247,26 +7341,6 @@ where
                                             .unwrap_or(WorkbenchOperationDisposition::Committed),
                                     );
                                     outcome
-                                }
-                                Err(ResidentActorWorkbenchError::CommandObservationStopped {
-                                    job,
-                                    reason,
-                                }) => {
-                                    current.inflight_effect = None;
-                                    record_workbench_operation(
-                                        unit.operations,
-                                        unit.execution,
-                                        unit.input_unit_index,
-                                        ordinal,
-                                        &effect,
-                                        effect_started.elapsed(),
-                                        command_disposition
-                                            .unwrap_or(WorkbenchOperationDisposition::Committed),
-                                    );
-                                    return workbench
-                                        .bind_background_job(context.clone(), job, reason)
-                                        .await
-                                        .map(FragmentAdvance::Settled);
                                 }
                                 Err(error) => {
                                     current.inflight_effect = None;
@@ -8381,56 +8455,6 @@ where
                             ),
                         )));
                     }
-                    ResidentWorkbenchStep::CommandBackgrounded {
-                        job,
-                        binding,
-                        reason,
-                    } => {
-                        let presentation = background_command_wait::BackgroundCommandRequest {
-                            job,
-                            binding: binding.clone(),
-                            reason,
-                            named_tool: request.tool_call().is_some(),
-                            command_prefix,
-                            display_remaining: cursor.unit.display_remaining,
-                        };
-                        if effects.park_effects {
-                            return Ok(WorkbenchRunAdvance::ParkBackground(presentation));
-                        }
-                        let output = background_command_wait::prepare(
-                            &self.environment.commands,
-                            context.actor,
-                            presentation,
-                        )
-                        .await
-                        .apply(&self.environment.commands, context.actor);
-                        cursor.receipts.push(WorkbenchItemReceipt {
-                            diagnostics: Vec::new(),
-                            index: cursor.index,
-                            kind: None,
-                            span: None,
-                            source_items: Vec::new(),
-                            status: WorkbenchItemStatus::Stopped,
-                            output,
-                            warnings: Vec::new(),
-                            installed_bindings: vec![binding],
-                            operations: std::mem::take(&mut cursor.unit.operations),
-                            terminal_transfer: Some(WorkbenchTerminalTransfer::CommandBackgrounded),
-                            failure_layer: None,
-                        });
-                        return Ok(WorkbenchRunAdvance::Complete(KernelStep::Continue(
-                            workbench_response(
-                                WorkbenchRunStatus::Backgrounded,
-                                std::mem::take(&mut cursor.receipts),
-                                cursor.index,
-                                request.items.len(),
-                                cursor
-                                    .cell_check
-                                    .as_ref()
-                                    .map(|checked| checked.items.as_slice()),
-                            ),
-                        )));
-                    }
                     ResidentWorkbenchStep::Replied {
                         request: request_id,
                         result,
@@ -8660,10 +8684,12 @@ where
     fn begin_workbench_finalization(
         &mut self,
         execution_state: &WorkbenchExecutionState,
+        kernel: &KernelContext,
         result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     ) -> WorkbenchFinalization {
         let context = execution_state.effects.context.clone();
         let checkpoint_boundary = execution_state.request.fork_boundary().cloned();
+        execution_state.effects.invocation_work.close();
         self.fork_publication = ForkPublication::Resident;
         match &result {
             Ok(KernelStep::Continue(_)) => self
@@ -8734,6 +8760,8 @@ where
         WorkbenchFinalization {
             context,
             reservation_owner: execution_state.effects.reservation_owner.clone(),
+            invocation_work: execution_state.effects.invocation_work.clone(),
+            kernel: kernel.clone(),
             result,
             rejected,
             retire_scopes,
@@ -8780,9 +8808,10 @@ where
     async fn finalize_serial_workbench_execution(
         &mut self,
         execution_state: &mut WorkbenchExecutionState,
+        kernel: &KernelContext,
         result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     ) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure> {
-        let finalization = self.begin_workbench_finalization(execution_state, result);
+        let finalization = self.begin_workbench_finalization(execution_state, kernel, result);
         let result = settle_workbench_finalization(self.environment.clone(), finalization).await;
         self.complete_workbench_finalization(execution_state, result)
     }
@@ -9954,6 +9983,12 @@ where
                 execution: local_execution_id.clone(),
                 attempt: crate::request::WorkbenchReservationAttempt::fresh(),
             };
+            let invocation_work = InvocationWork::new(context.actor, reservation_owner.clone());
+            self.workbench_executions.lock().retain_invocation_work(
+                invocation_work.clone(),
+                execution.as_ref(),
+                invocation.as_ref(),
+            );
             let mut execution_state = WorkbenchExecutionState {
                 effects: WorkbenchEffectState {
                     park_effects: false,
@@ -9963,6 +9998,7 @@ where
                     installed_tools,
                     admitted_source,
                     reservation_owner,
+                    invocation_work,
                     publication: ForkPublication::Workbench {
                         boundary: request.fork_boundary().cloned(),
                         capture,
@@ -10009,8 +10045,7 @@ where
                     | WorkbenchRunAdvance::ParkUnit
                     | WorkbenchRunAdvance::ParkNative
                     | WorkbenchRunAdvance::ParkAfterToolStart
-                    | WorkbenchRunAdvance::ParkAfterToolFinish
-                    | WorkbenchRunAdvance::ParkBackground(_) => {
+                    | WorkbenchRunAdvance::ParkAfterToolFinish => {
                         unreachable!("legacy workbench remains serial")
                     }
                 });
@@ -10025,7 +10060,7 @@ where
                 Err(_) => "error".to_string(),
             };
             call_scope.finish(&call_outcome);
-            self.finalize_serial_workbench_execution(&mut execution_state, result)
+            self.finalize_serial_workbench_execution(&mut execution_state, kernel, result)
                 .await
         })
     }
@@ -10322,6 +10357,22 @@ where
     > {
         Box::pin(async move {
             use crate::CleanupComponentOutcome::{Confirmed, Unconfirmed};
+            let invocations = self.workbench_executions.lock().invocation_work();
+            for invocation in &invocations {
+                invocation.close();
+            }
+            let environment = &self.environment;
+            let invocation_cleanup = futures_util::future::join_all(invocations.into_iter().map(
+                |invocation| async move {
+                    tokio::time::timeout_at(deadline, invocation.cleanup(environment, kernel))
+                        .await
+                        .map(|cleanup| cleanup.uncertainty())
+                        .unwrap_or_else(|_| {
+                            Some("invocation cleanup remains pending at actor retirement".into())
+                        })
+                },
+            ))
+            .await;
             let staged_replacement = self.replacement_staged();
             let staged_fork = self.boot.is_some() && self.descriptor.fork_group().is_some();
             self.source_connections.take();
@@ -10369,7 +10420,7 @@ where
             self.set_standing(context.actor, ResidentStanding::Terminal);
             self.boot = None;
             self.sources.clear();
-            let mut retained_errors = Vec::new();
+            let mut retained_errors = invocation_cleanup.into_iter().flatten().collect::<Vec<_>>();
             for retained in std::mem::take(&mut self.retained_replacements) {
                 let placement = retained.placement;
                 drop(retained);
