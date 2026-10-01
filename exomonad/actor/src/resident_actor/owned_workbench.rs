@@ -1312,6 +1312,65 @@ where
             .take()
             .expect("one captured effect wait");
         let pending = match pending.wait {
+            OwnedWorkbenchWait::DeferredCommit(prepared) => {
+                let environment = self.environment.clone();
+                let readiness_kernel = kernel.clone();
+                return Self::owned_step_task(
+                    owned,
+                    move |_| {
+                        Box::pin(captured_commit::await_ready_deferred(
+                            environment,
+                            readiness_kernel,
+                            prepared,
+                        ))
+                    },
+                    move |behavior, kernel, owned, ready| {
+                        let scopes = behavior.apply_ready_deferred_commit(kernel, ready);
+                        let environment = behavior.environment.clone();
+                        Ok(WorkbenchAdvance::Park(Self::owned_step_task(
+                            owned,
+                            move |_| Box::pin(captured_commit::await_scopes(environment, scopes)),
+                            move |behavior, kernel, owned, finalized| {
+                                let release =
+                                    behavior.apply_finalized_deferred_commit(kernel, finalized);
+                                let environment = behavior.environment.clone();
+                                let release_kernel = kernel.clone();
+                                Ok(WorkbenchAdvance::Park(Self::owned_step_task(
+                                    owned,
+                                    move |_| {
+                                        Box::pin(captured_commit::await_release(
+                                            environment,
+                                            release_kernel,
+                                            release,
+                                        ))
+                                    },
+                                    move |behavior, kernel, owned, completed| {
+                                        let resume = behavior.settle_captured_commit(completed);
+                                        let operation = Box::pin(captured_commit::resume(
+                                            behavior.environment.clone(),
+                                            kernel.clone(),
+                                            resume,
+                                        ));
+                                        let pending = ParkedWorkbenchEffect {
+                                            wait: OwnedWorkbenchWait::Prepared(operation),
+                                            ordinal: pending.ordinal,
+                                            effect: pending.effect,
+                                            started: pending.started,
+                                        };
+                                        Ok(WorkbenchAdvance::Park(
+                                            behavior.resume_owned_effect_task(
+                                                owned,
+                                                kernel.clone(),
+                                                pending,
+                                            ),
+                                        ))
+                                    },
+                                )))
+                            },
+                        )))
+                    },
+                );
+            }
             OwnedWorkbenchWait::CapturedCommit(prepared) => {
                 let environment = self.environment.clone();
                 let readiness_kernel = kernel.clone();
@@ -1893,7 +1952,9 @@ where
     O: OutputSink + Sync + 'static,
 {
     let result = match wait {
-        OwnedWorkbenchWait::Launch(_) | OwnedWorkbenchWait::CapturedCommit(_) => {
+        OwnedWorkbenchWait::Launch(_)
+        | OwnedWorkbenchWait::CapturedCommit(_)
+        | OwnedWorkbenchWait::DeferredCommit(_) => {
             unreachable!("child launch requires fenced actor application")
         }
         OwnedWorkbenchWait::Prepared(operation) => operation.await,

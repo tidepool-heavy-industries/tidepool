@@ -1449,6 +1449,7 @@ struct ParkedWorkbenchEffect {
 enum OwnedWorkbenchWait {
     Launch(child_launch::PreparedChildLaunch),
     CapturedCommit(captured_commit::PreparedCapturedCommit),
+    DeferredCommit(captured_commit::PreparedDeferredCommit),
     Prepared(
         futures_util::future::BoxFuture<
             'static,
@@ -1613,8 +1614,8 @@ enum WorkbenchPreflight {
     Admitted(WorkbenchAdmission),
 }
 
-// Even a raw operator notebook with no provider boundary publishes at the
-// end of its input. A resident handler has no later notebook completion.
+// Hosted groups retain provider completion custody. Direct executions and
+// resident handlers publish committed admissions before continuing.
 #[derive(Clone)]
 enum ForkPublication {
     Resident,
@@ -3657,129 +3658,135 @@ where
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Commit {
                 continuation,
                 group,
-            }) => Box::pin(async move {
-                let owned_boundary = environment
-                    .fork_groups
-                    .completion_boundary(group, context.actor);
-                if !matches!(&owned_boundary, Ok(boundary) if boundary.as_ref() == publication.boundary())
-                {
-                    return environment
-                        .runner
-                        .resume_fork_failure(
-                            context.clone(),
-                            continuation,
-                            "fork group belongs to another execution boundary".into(),
-                        )
-                        .await;
-                }
-                let mut phase = match environment.fork_groups.request_commit(group, context.actor) {
-                    Ok(phase) => phase,
-                    Err(error) => {
-                        return environment
-                            .runner
-                            .resume_fork_failure(context.clone(), continuation, error.to_string())
-                            .await;
-                    }
-                };
-                loop {
-                    let current = *phase.borrow();
-                    match current {
-                        crate::ForkGroupPhase::Ready | crate::ForkGroupPhase::Committed => break,
-                        crate::ForkGroupPhase::Aborted => {
-                            let children = environment
-                                .fork_groups
-                                .cleanup_failed(group, context.actor)
-                                .map_err(|error| {
-                                    ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                                })?;
-                            for child in children {
-                                if let Some(child) = kernel.resolve(child) {
-                                    // A child already gone from a failed fork-group admission is
-                                    // the common case here; log anything else so an actor that
-                                    // refused shutdown does not silently linger.
-                                    if let Err(error) = child
-                                        .shutdown(ActorTerminal {
-                                            kind: ActorExitKind::Cancelled,
-                                            summary: "fork group admission failed".into(),
-                                        })
-                                        .await
-                                    {
-                                        tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
-                                    }
-                                }
-                            }
-                            return environment
-                                .runner
-                                .resume_fork_failure(
-                                    context.clone(),
-                                    continuation,
-                                    format!(
-                                        "fork group {} was aborted while awaiting readiness",
-                                        group.0
-                                    ),
-                                )
-                                .await;
-                        }
-                        crate::ForkGroupPhase::Staging => {}
-                    }
-                    let cancelled = async {
-                        match &control {
-                            Some(control) => control.wait_for_cancellation().await,
-                            None => std::future::pending::<()>().await,
-                        }
-                    };
-                    let changed = tokio::select! {
-                        changed = phase.changed() => changed,
-                        () = cancelled => return Err(ResidentActorWorkbenchError::ActorProtocol(
-                            "fork readiness interrupted by invocation cancellation".into(),
-                        )),
-                    };
-                    if changed.is_err() {
+            }) if !matches!(
+                publication.boundary(),
+                Some(tidepool_runtime::session::WorkbenchForkBoundary::Execution { .. })
+            ) =>
+            {
+                Box::pin(async move {
+                    let owned_boundary = environment
+                        .fork_groups
+                        .completion_boundary(group, context.actor);
+                    if !matches!(&owned_boundary, Ok(boundary) if boundary.as_ref() == publication.boundary())
+                    {
                         return environment
                             .runner
                             .resume_fork_failure(
                                 context.clone(),
                                 continuation,
-                                format!("fork group {} readiness channel closed", group.0),
+                                "fork group belongs to another execution boundary".into(),
                             )
                             .await;
                     }
-                }
-                if control
-                    .as_ref()
-                    .is_some_and(|control| control.cancellation_requested())
-                {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "fork readiness interrupted by invocation cancellation".into(),
-                    ));
-                }
-                // Resident actor handlers have no provider tool completion to
-                // publish their children. Publish this admission before resuming
-                // the handler, which may immediately await a child's reply.
-                // Notebook groups remain fenced by their completion boundary.
-                if matches!(
-                    publication,
-                    ForkPublication::Resident
-                        | ForkPublication::Workbench {
-                            boundary: Some(
-                                tidepool_runtime::session::WorkbenchForkBoundary::Execution { .. }
-                            ),
-                            ..
+                    let mut phase =
+                        match environment.fork_groups.request_commit(group, context.actor) {
+                            Ok(phase) => phase,
+                            Err(error) => {
+                                return environment
+                                    .runner
+                                    .resume_fork_failure(
+                                        context.clone(),
+                                        continuation,
+                                        error.to_string(),
+                                    )
+                                    .await;
+                            }
+                        };
+                    loop {
+                        let current = *phase.borrow();
+                        match current {
+                            crate::ForkGroupPhase::Ready | crate::ForkGroupPhase::Committed => {
+                                break
+                            }
+                            crate::ForkGroupPhase::Aborted => {
+                                let children = environment
+                                    .fork_groups
+                                    .cleanup_failed(group, context.actor)
+                                    .map_err(|error| {
+                                        ResidentActorWorkbenchError::ActorProtocol(
+                                            error.to_string(),
+                                        )
+                                    })?;
+                                for child in children {
+                                    if let Some(child) = kernel.resolve(child) {
+                                        // A child already gone from a failed fork-group admission is
+                                        // the common case here; log anything else so an actor that
+                                        // refused shutdown does not silently linger.
+                                        if let Err(error) = child
+                                            .shutdown(ActorTerminal {
+                                                kind: ActorExitKind::Cancelled,
+                                                summary: "fork group admission failed".into(),
+                                            })
+                                            .await
+                                        {
+                                            tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
+                                        }
+                                    }
+                                }
+                                return environment
+                                    .runner
+                                    .resume_fork_failure(
+                                        context.clone(),
+                                        continuation,
+                                        format!(
+                                            "fork group {} was aborted while awaiting readiness",
+                                            group.0
+                                        ),
+                                    )
+                                    .await;
+                            }
+                            crate::ForkGroupPhase::Staging => {}
                         }
-                ) {
+                        let cancelled = async {
+                            match &control {
+                                Some(control) => control.wait_for_cancellation().await,
+                                None => std::future::pending::<()>().await,
+                            }
+                        };
+                        let changed = tokio::select! {
+                            changed = phase.changed() => changed,
+                            () = cancelled => return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                "fork readiness interrupted by invocation cancellation".into(),
+                            )),
+                        };
+                        if changed.is_err() {
+                            return environment
+                                .runner
+                                .resume_fork_failure(
+                                    context.clone(),
+                                    continuation,
+                                    format!("fork group {} readiness channel closed", group.0),
+                                )
+                                .await;
+                        }
+                    }
+                    if control
+                        .as_ref()
+                        .is_some_and(|control| control.cancellation_requested())
+                    {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "fork readiness interrupted by invocation cancellation".into(),
+                        ));
+                    }
+                    // Resident actor handlers have no provider tool completion to
+                    // publish their children. Publish this admission before resuming
+                    // the handler, which may immediately await a child's reply.
+                    // Notebook groups remain fenced by their completion boundary.
+                    if matches!(publication, ForkPublication::Resident) {
+                        environment
+                            .fork_groups
+                            .publish_groups(&[group], context.actor)
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                            })?;
+                        tracing::info!(actor = ?context.actor, group = group.0, "resident fork admission published");
+                    }
                     environment
-                        .fork_groups
-                        .publish_groups(&[group], context.actor)
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                        })?;
-                    tracing::info!(actor = ?context.actor, group = group.0, "resident fork admission published");
-                }
-                environment
-                    .runner
-                    .resume_fork_unit(context.clone(), continuation)
-                    .await
-            }),
+                        .runner
+                        .resume_fork_unit(context.clone(), continuation)
+                        .await
+                })
+            }
             ResidentActorBoundary::Console { continuation, text } => Box::pin(async move {
                 tracing::debug!(actor = ?context.actor, output = %crate::workbench_display::bounded_output(&text, 8192), "actor console");
                 environment
@@ -4796,6 +4803,36 @@ where
                     .runner
                     .resume_value(context.clone(), continuation, preview)
                     .await
+            }),
+            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Commit {
+                continuation,
+                group,
+            }) => Box::pin(async move {
+                let prepared = self.prepare_deferred_commit(
+                    context,
+                    effect_owner.publication(),
+                    effect_owner.control(),
+                    continuation,
+                    group,
+                );
+                let ready = captured_commit::await_ready_deferred(
+                    self.environment.clone(),
+                    kernel.clone(),
+                    prepared,
+                )
+                .await;
+                let scopes = self.apply_ready_deferred_commit(kernel, ready);
+                let finalized =
+                    captured_commit::await_scopes(self.environment.clone(), scopes).await;
+                let release = self.apply_finalized_deferred_commit(kernel, finalized);
+                let completed = captured_commit::await_release(
+                    self.environment.clone(),
+                    kernel.clone(),
+                    release,
+                )
+                .await;
+                let resume = self.settle_captured_commit(completed);
+                captured_commit::resume(self.environment.clone(), kernel.clone(), resume).await
             }),
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::CommitCaptured {
                 continuation,
@@ -7042,6 +7079,26 @@ where
                     }
                     let boundary = if execution_state.park_effects {
                         let captured = match boundary {
+                            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Commit {
+                                continuation,
+                                group,
+                            }) if matches!(
+                                execution_state.publication.boundary(),
+                                Some(
+                                    tidepool_runtime::session::WorkbenchForkBoundary::Execution { .. }
+                                )
+                            ) =>
+                            {
+                                Ok(OwnedWorkbenchWait::DeferredCommit(
+                                    self.prepare_deferred_commit(
+                                        context,
+                                        &execution_state.publication,
+                                        execution_state.control.clone(),
+                                        continuation,
+                                        group,
+                                    ),
+                                ))
+                            }
                             ResidentActorBoundary::ForkGroup(
                                 ForkGroupBoundary::CommitCaptured {
                                     continuation,
