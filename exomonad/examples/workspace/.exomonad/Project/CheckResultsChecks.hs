@@ -142,6 +142,23 @@ completionRouting = do
   check "mismatched terminal receipt or job cannot verify execution or source"
     ("(ExecutionUnknown,SourceUnrecorded,ExecutionUnknown,SourceUnrecorded)"
       `Text.isInfixOf` Text.filter (/= ' ') (lastOutput mismatch))
+  complete <- turn owner
+    "view <- readChecks watcher\nlet [passEntry, failEntry, unknownEntry] = checkEntries view\nlet Just passOutcome = checkOutcome passEntry\nlet Just failOutcome = checkOutcome failEntry\nlet Just unknownOutcome = checkOutcome unknownEntry\n(checkEvidenceComplete passEntry passOutcome, checkEvidenceComplete failEntry failOutcome, checkEvidenceComplete unknownEntry unknownOutcome, checkEvidenceComplete passEntry failOutcome, checkEvidenceComplete failEntry (failOutcome { checkCompletion = checkCompletion passOutcome }))"
+  check "complete proof accepts counted success and assertion failure only for their original jobs"
+    ("(True,True,False,False,False)" `Text.isInfixOf` Text.filter (/= ' ') (lastOutput complete))
+  malformedSelection <- turn owner
+    "original <- collectFocused (FocusedRun spec late)\nlet Right record = focusedEvidence original\nlet changed record = original { focusedEvidence = Right record }\nlet selections = [record { recordMatched = Nothing }, record { recordMatched = Just [\"other::one\"] }, record { recordMatched = Just [\"fixture::one\", \"fixture::one\"] }]\n(map (focusedExecution . changed) selections, map (focusedPassed . changed) selections)"
+  check "observed execution counts stay distinct from missing, mismatched or duplicate selection proof"
+    ("([ExecutionPassed1,ExecutionPassed1,ExecutionPassed1],[False,False,False])"
+      `Text.isInfixOf` Text.filter (/= ' ') (lastOutput malformedSelection))
+  duplicatedSelection <- turn owner
+    "original <- collectFocused (FocusedRun spec late)\nlet Right record = focusedEvidence original\nlet duplicate = original { focusedSpec = spec { focusedExpected = 2 }, focusedEvidence = Right (record { recordMatched = Just [\"fixture::one\", \"fixture::one\"], recordRunnable = Just [\"fixture::one\", \"fixture::one\"], recordSummaries = Just [[2,0,0,0,0]] }) }\n(focusedExecution duplicate, focusedEvidenceComplete duplicate, focusedPassed duplicate)"
+  check "matching duplicated names and counts cannot prove two distinct requested tests"
+    ("(ExecutionPassed2,False,False)" `Text.isInfixOf` Text.filter (/= ' ') (lastOutput duplicatedSelection))
+  incompleteFailure <- turn owner
+    "view <- readChecks watcher\nlet [_, entry, _] = checkEntries view\nlet Just outcome = checkOutcome entry\nlet focused = checkFocused outcome\nlet Right record = focusedEvidence focused\nlet Cmd.Finished job receipt output = focusedCommand focused\nlet retainedReceipt = receipt { Cmd.commandCleanup = Cmd.CommandRetained }\nlet changed record = outcome { checkFocused = focused { focusedEvidence = Right record } }\nlet retained = outcome { checkCompletion = retainedReceipt, checkFocused = focused { focusedCommand = Cmd.Finished job retainedReceipt output } }\nlet unknownPreparation = outcome { checkFocused = focused { focusedPreparation = PreparationUnknown } }\nmap (checkEvidenceComplete entry) [changed (record { recordMatched = Just [\"other::one\"] }), changed (record { recordExitCode = Just 2 }), changed (record { recordSource = Just \"other-source\" }), changed (record { recordSummaries = Just [[0,0,0,0,0]] }), retained, unknownPreparation]"
+  check "failure proof requires selection, matching exit, exact source, counts, cleanup and preparation"
+    ("[False,False,False,False,False,False]" `Text.isInfixOf` Text.filter (/= ' ') (lastOutput incompleteFailure))
   productFailure <- turn owner
     "view <- readChecks watcher\nlet [_, failedEntry, _] = checkEntries view\nlet Just failedOutcome = checkOutcome failedEntry\ndiagnosis <- diagnoseFocused (checkFocused failedOutcome)\n(diagnosisBranch diagnosis, diagnosisExcerpt diagnosis)"
   check "assertion failure diagnosis retains a bounded output excerpt"

@@ -12,10 +12,11 @@ module Project.TestEvidence
   , FailureEvidence (..), FocusedDiagnosis (..)
   , PreparationEvidence (..), startFocusedAfter
   , startFocused, startFocusedIn, collectFocused, diagnoseFocused, finishFocused
-  , focusedPassed, focusedExecution, focusedSourceAssurance, focusedResultSummary
+  , focusedPassed, focusedEvidenceComplete, focusedExecution, focusedSourceAssurance, focusedResultSummary
   ) where
 
 import Control.Monad.Freer (Eff, Member)
+import Data.List (nub, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Jev.Operators as J
@@ -377,14 +378,34 @@ finishFocused run = do
 -- A Jev classification is never an input to this predicate.
 focusedPassed :: FocusedResult -> Bool
 focusedPassed result =
-  focusedExecution result == ExecutionPassed (focusedExpected (focusedSpec result))
-    && focusedPreparation result `elem` [NoPreparation, PreparationPassed]
+  focusedEvidenceComplete result
+    && focusedExecution result == ExecutionPassed (focusedExpected (focusedSpec result))
+
+-- | Prove either a passing check or a counted assertion failure. Runner,
+-- preparation and infrastructure failures remain observable without claiming
+-- that the requested tests established a result against the requested source.
+focusedEvidenceComplete :: FocusedResult -> Bool
+focusedEvidenceComplete result =
+  focusedPreparation result `elem` [NoPreparation, PreparationPassed]
     && focusedSourceAssurance result == SourceVerified
-    && Cmd.failure (focusedCommand result) == Nothing
-    && Cmd.commandCleanup (Cmd.commandResult (focusedCommand result)) == Cmd.CommandClean
+    && Cmd.commandCleanup receipt == Cmd.CommandClean
     && case focusedEvidence result of
-      Right record -> recordExitCode record == Just 0
+      Right record -> selectionComplete record && case Cmd.commandOutcome receipt of
+        Cmd.CommandExited code | recordExitCode record == Just code ->
+          case focusedExecution result of
+            ExecutionPassed passed -> passed == expected && code == 0
+            ExecutionFailed _ failed -> failed > 0 && code /= 0
+            ExecutionUnknown -> False
+        _ -> False
       Left _ -> False
+  where
+    expected = focusedExpected (focusedSpec result)
+    receipt = Cmd.commandResult (focusedCommand result)
+    selectionComplete record = case (recordMatched record, recordRunnable record) of
+      (Just matched, Just runnable) ->
+        length matched == expected && length (nub matched) == expected
+          && sort matched == sort runnable
+      _ -> False
 
 evidencePath :: Text -> Maybe Text
 evidencePath stderr = case
