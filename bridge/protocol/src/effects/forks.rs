@@ -28,10 +28,20 @@ pub fn forks() -> Effect {
                 name: "Model",
                 wire_rust: None,
                 haskell_module: None,
-                shape: TypeShape::Sum { variants: vec![
-                    SumVariant { ctor: "Alias", fields: VariantFields::Positional(vec![HsType::Text]), doc: &[] },
-                    SumVariant { ctor: "Literal", fields: VariantFields::Positional(vec![HsType::Text]), doc: &[] },
-                ] },
+                shape: TypeShape::Sum {
+                    variants: vec![
+                        SumVariant {
+                            ctor: "Alias",
+                            fields: VariantFields::Positional(vec![HsType::Text]),
+                            doc: &[],
+                        },
+                        SumVariant {
+                            ctor: "Literal",
+                            fields: VariantFields::Positional(vec![HsType::Text]),
+                            doc: &[],
+                        },
+                    ],
+                },
                 json: JsonInstance::None,
                 derives: WireDerives(&[]),
                 domain: None,
@@ -41,20 +51,53 @@ pub fn forks() -> Effect {
                 name: "WorkerLaunchPreview",
                 wire_rust: None,
                 haskell_module: None,
-                shape: TypeShape::Record { fields: vec![
-                    RecordField { hs_name: "launchModel", rust_name: "launchModel", ty: HsType::maybe(HsType::Text), doc: &[] },
-                    RecordField { hs_name: "launchEffort", rust_name: "launchEffort", ty: HsType::Named("ForkEffort"), doc: &[] },
-                    RecordField { hs_name: "launchInstructions", rust_name: "launchInstructions", ty: HsType::Text, doc: &[] },
-                    RecordField { hs_name: "launchBaseFingerprint", rust_name: "launchBaseFingerprint", ty: HsType::Text, doc: &[] },
-                    RecordField { hs_name: "launchWorkspaceIdentity", rust_name: "launchWorkspaceIdentity", ty: HsType::maybe(HsType::Text), doc: &[] },
-                    RecordField { hs_name: "launchModules", rust_name: "launchModules", ty: HsType::list(HsType::Text), doc: &[] },
-                ] },
+                shape: TypeShape::Record {
+                    fields: vec![
+                        RecordField {
+                            hs_name: "launchModel",
+                            rust_name: "launchModel",
+                            ty: HsType::maybe(HsType::Text),
+                            doc: &[],
+                        },
+                        RecordField {
+                            hs_name: "launchEffort",
+                            rust_name: "launchEffort",
+                            ty: HsType::Named("ForkEffort"),
+                            doc: &[],
+                        },
+                        RecordField {
+                            hs_name: "launchInstructions",
+                            rust_name: "launchInstructions",
+                            ty: HsType::Text,
+                            doc: &[],
+                        },
+                        RecordField {
+                            hs_name: "launchBaseFingerprint",
+                            rust_name: "launchBaseFingerprint",
+                            ty: HsType::Text,
+                            doc: &[],
+                        },
+                        RecordField {
+                            hs_name: "launchWorkspaceIdentity",
+                            rust_name: "launchWorkspaceIdentity",
+                            ty: HsType::maybe(HsType::Text),
+                            doc: &[],
+                        },
+                        RecordField {
+                            hs_name: "launchModules",
+                            rust_name: "launchModules",
+                            ty: HsType::list(HsType::Text),
+                            doc: &[],
+                        },
+                    ],
+                },
                 json: JsonInstance::None,
                 derives: WireDerives(&[]),
                 domain: None,
-                doc: &["Resolved host settings. Nothing model preserves the parent's boundary selection; paths and request orientation are added at admission."],
+                doc: &[
+                    "Resolved host settings. Nothing model preserves the parent's boundary selection; paths and request orientation are added at admission.",
+                ],
             },
-
             TypeDef {
                 name: "WorkerLifetime",
                 wire_rust: None,
@@ -72,7 +115,9 @@ pub fn forks() -> Effect {
                 json: JsonInstance::None,
                 derives: WireDerives(&[]),
                 domain: None,
-                doc: &["InvocationOwned is the hosted invocation default; ActorOwned and SwarmOwned retain work beyond it. Structured actor turns without a hosted invocation use actor ownership."],
+                doc: &[
+                    "InvocationOwned is the hosted invocation default; ActorOwned and SwarmOwned retain work beyond it. Structured actor turns without a hosted invocation use actor ownership.",
+                ],
             },
             TypeDef {
                 name: "ForkContext",
@@ -98,10 +143,21 @@ pub fn forks() -> Effect {
                 wire_rust: None,
                 haskell_module: None,
                 shape: TypeShape::Sum {
-                    variants: ["NoHostedBoundary", "WrongSession", "UnavailableCheckpoint", "ReleasedCheckpoint", "CaptureFailed", "ProcessRestartUnsupported"]
-                        .into_iter()
-                        .map(|ctor| SumVariant { ctor, fields: VariantFields::Positional(Vec::new()), doc: &[] })
-                        .collect(),
+                    variants: [
+                        "NoHostedBoundary",
+                        "WrongSession",
+                        "UnavailableCheckpoint",
+                        "ReleasedCheckpoint",
+                        "CaptureFailed",
+                        "ProcessRestartUnsupported",
+                    ]
+                    .into_iter()
+                    .map(|ctor| SumVariant {
+                        ctor,
+                        fields: VariantFields::Positional(Vec::new()),
+                        doc: &[],
+                    })
+                    .collect(),
                 },
                 json: JsonInstance::None,
                 derives: WireDerives(&[]),
@@ -149,6 +205,7 @@ pub fn forks() -> Effect {
                         "EffectConsole",
                         "EffectNotifications",
                         "EffectJev",
+                        "EffectModelCall",
                         "EffectActor",
                         "EffectReflect",
                         "EffectLookup",
@@ -309,7 +366,11 @@ pub fn forks() -> Effect {
             Verb {
                 ctor: "ForksCheckpointWith",
                 method: "forks_checkpoint_with",
-                args: vec![Arg { name: "name", ty: HsType::Text, rust: RustBinding::Path("String") }],
+                args: vec![Arg {
+                    name: "name",
+                    ty: HsType::Text,
+                    rust: RustBinding::Path("String"),
+                }],
                 ret: HsType::either(HsType::Named("CheckpointRefusal"), HsType::Text),
                 errors: None,
                 handling: HandlingClass::Actor,
@@ -318,7 +379,11 @@ pub fn forks() -> Effect {
             Verb {
                 ctor: "ForksCheckCheckpointWith",
                 method: "forks_check_checkpoint_with",
-                args: vec![Arg { name: "checkpoint", ty: HsType::Text, rust: RustBinding::Path("String") }],
+                args: vec![Arg {
+                    name: "checkpoint",
+                    ty: HsType::Text,
+                    rust: RustBinding::Path("String"),
+                }],
                 ret: HsType::either(HsType::Named("CheckpointRefusal"), HsType::Unit),
                 errors: None,
                 handling: HandlingClass::Actor,
@@ -327,7 +392,11 @@ pub fn forks() -> Effect {
             Verb {
                 ctor: "ForksReleaseCheckpointWith",
                 method: "forks_release_checkpoint_with",
-                args: vec![Arg { name: "checkpoint", ty: HsType::Text, rust: RustBinding::Path("String") }],
+                args: vec![Arg {
+                    name: "checkpoint",
+                    ty: HsType::Text,
+                    rust: RustBinding::Path("String"),
+                }],
                 ret: HsType::either(HsType::Named("CheckpointRefusal"), HsType::Unit),
                 errors: None,
                 handling: HandlingClass::Actor,
@@ -352,13 +421,36 @@ pub fn forks() -> Effect {
                         ty: HsType::maybe(HsType::Tuple(vec![HsType::Int, HsType::Int])),
                         rust: RustBinding::Path("Option<(i64, i64)>"),
                     },
-                    Arg { name: "model", ty: HsType::maybe(HsType::Named("Model")), rust: RustBinding::Path("Option<crate::Model>") },
-                    Arg { name: "effort", ty: HsType::maybe(HsType::Named("ForkEffort")), rust: RustBinding::Path("Option<crate::ForkEffort>") },
-                    Arg { name: "context", ty: HsType::Named("ForkContext"), rust: RustBinding::Path("crate::ForkContext") },
-                    Arg { name: "instructions", ty: HsType::maybe(HsType::Text), rust: RustBinding::Path("Option<String>") },
-                    Arg { name: "lifetime", ty: HsType::Named("WorkerLifetime"), rust: RustBinding::Path("crate::WorkerLifetime") },
+                    Arg {
+                        name: "model",
+                        ty: HsType::maybe(HsType::Named("Model")),
+                        rust: RustBinding::Path("Option<crate::Model>"),
+                    },
+                    Arg {
+                        name: "effort",
+                        ty: HsType::maybe(HsType::Named("ForkEffort")),
+                        rust: RustBinding::Path("Option<crate::ForkEffort>"),
+                    },
+                    Arg {
+                        name: "context",
+                        ty: HsType::Named("ForkContext"),
+                        rust: RustBinding::Path("crate::ForkContext"),
+                    },
+                    Arg {
+                        name: "instructions",
+                        ty: HsType::maybe(HsType::Text),
+                        rust: RustBinding::Path("Option<String>"),
+                    },
+                    Arg {
+                        name: "lifetime",
+                        ty: HsType::Named("WorkerLifetime"),
+                        rust: RustBinding::Path("crate::WorkerLifetime"),
+                    },
                 ],
-                ret: fallible(HsType::Tuple(vec![HsType::Tuple(vec![HsType::Text, HsType::Int, HsType::maybe(HsType::Int)]), HsType::maybe(HsType::Named("WorkerLaunchPreview"))])),
+                ret: fallible(HsType::Tuple(vec![
+                    HsType::Tuple(vec![HsType::Text, HsType::Int, HsType::maybe(HsType::Int)]),
+                    HsType::maybe(HsType::Named("WorkerLaunchPreview")),
+                ])),
                 errors: None,
                 handling: HandlingClass::Actor,
                 extract: None,

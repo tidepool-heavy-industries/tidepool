@@ -5,6 +5,13 @@ directory keeps only open design questions, evidence still named by a test or
 guide, and Haskell support imported by its consumers. Completed designs and
 unconsumed proposals are removed; Git retains their history.
 
+Current implementation checkpoint: Tidepool `76f80c9f0ce0`, with companion
+harness `9df6a7c66b5e`. All five async implementation branches are merged;
+full M1/M2 acceptance remains open. ModelCall is being connected through the
+admitted actor execution boundary and still needs joined acceptance. The first
+live embedded run will be driven by the user. Backend default changes and
+publication remain separate decisions.
+
 ## Open design questions
 
 - [Bounded model turns](bounded-model-turns.md): typed caller-owned tools, shared
@@ -15,8 +22,8 @@ unconsumed proposals are removed; Git retains their history.
   lifetime cleanup, pending-cell adapter gates and separate live evaluation.
 
 - [Final engine and harness delivery](engine-harness-final-delivery.md): accepted
-  implementation wave through M1/M2, recovery, structural performance and native
-  Buck release readiness; live trials and publication remain separate.
+  implementation plan for M1/M2, recovery, structural performance and native
+  Buck release readiness; full acceptance, live trials and publication remain open.
 
 - [Release preparation handoff](release-preparation-handoff.md): package
   producer, immutable staging/selection, run retention, and state compatibility
@@ -43,7 +50,7 @@ unconsumed proposals are removed; Git retains their history.
   reclamation design is accepted.
 - [Embedded harness integration](harness-integration.md): accepted host/library
   contracts, Codex compatibility, implementation parcels and acceptance gates.
-  Compiler/runtime implementation is held pending the engine investigation.
+  Joined resident and engine acceptance remains open.
 - [First embedded Haskell worker tree](harness-first-tree-prd.md): handoff to
   the engine owner, remaining resident integration, and connected release gates.
 - [Harness adoption](harness-adoption.md): how Exomonad moves from the forked

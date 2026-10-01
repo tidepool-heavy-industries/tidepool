@@ -85,6 +85,9 @@ pub enum BindingPromotionError {
     NotCurrentInSource,
     DuplicateName,
     MissingOrForeignSourceInstance,
+    ConflictingSourceOrigin,
+    MissingSourceDomain,
+    UnverifiableSourceSelection,
 }
 
 /// Exact binding writes and dependency leases checked before a publication
@@ -94,6 +97,116 @@ pub struct PreparedBindingPromotion {
     writes: Vec<(BindingName, SessionVarId)>,
     retained: HashSet<SessionVarId>,
     source_instances: HashSet<SourceLeaseKey>,
+    source_origins: HashMap<
+        tidepool_repr::execution_schema::CachedHomeOwner,
+        crate::prepared_program::SourceInstanceDomain,
+    >,
+    source_domains: HashMap<crate::prepared_program::SourceInstanceDomain, SourceDomainRecord>,
+    next_tip: Option<u64>,
+}
+
+pub struct PreparedSourceOwnerOrigin {
+    scope: ScopeId,
+    owner: tidepool_repr::execution_schema::CachedHomeOwner,
+    domain: crate::prepared_program::SourceInstanceDomain,
+}
+
+#[derive(Clone)]
+struct SourceDomainRecord {
+    selected: HashTrieSetSync<SourceLeaseKey>,
+    authored: HashTrieMapSync<
+        tidepool_repr::execution_schema::CachedHomeOwner,
+        crate::prepared_program::SourceInstanceDomain,
+    >,
+}
+
+impl SourceDomainRecord {
+    fn empty() -> Self {
+        Self {
+            selected: HashTrieSetSync::new_sync(),
+            authored: HashTrieMapSync::new_sync(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SourceSelectionView {
+    current: crate::prepared_program::SourceInstanceDomain,
+    domains: HashTrieMapSync<crate::prepared_program::SourceInstanceDomain, SourceDomainRecord>,
+}
+
+impl SourceSelectionView {
+    fn for_scope(scope: ScopeId) -> Self {
+        let current = crate::prepared_program::SourceInstanceDomain::for_scope(scope);
+        let mut domains = HashTrieMapSync::new_sync();
+        domains.insert_mut(current, SourceDomainRecord::empty());
+        Self { current, domains }
+    }
+
+    fn add(&mut self, domain: crate::prepared_program::SourceInstanceDomain, key: SourceLeaseKey) {
+        let mut record = self
+            .domains
+            .get(&domain)
+            .cloned()
+            .expect("source domain was admitted");
+        record.selected.insert_mut(key);
+        self.domains.insert_mut(domain, record);
+    }
+
+    /// Relabel the retained semantic graph; physical leases remain unchanged.
+    fn fork(
+        &self,
+        namespace: BindingTipId,
+        roots: impl IntoIterator<Item = crate::prepared_program::SourceInstanceDomain>,
+    ) -> Result<
+        (
+            HashMap<
+                crate::prepared_program::SourceInstanceDomain,
+                crate::prepared_program::SourceInstanceDomain,
+            >,
+            HashMap<crate::prepared_program::SourceInstanceDomain, SourceDomainRecord>,
+        ),
+        BindingPromotionError,
+    > {
+        let mut pending: Vec<_> = roots.into_iter().collect();
+        let mut reachable = std::collections::BTreeSet::new();
+        while let Some(domain) = pending.pop() {
+            if !reachable.insert(domain) {
+                continue;
+            }
+            let record = self
+                .domains
+                .get(&domain)
+                .ok_or(BindingPromotionError::MissingSourceDomain)?;
+            pending.extend(record.authored.values().copied());
+        }
+        let remap: HashMap<_, _> = reachable
+            .iter()
+            .enumerate()
+            .map(|(slot, old)| {
+                (
+                    *old,
+                    crate::prepared_program::SourceInstanceDomain::in_view(namespace, slot as u64),
+                )
+            })
+            .collect();
+        let records = reachable
+            .into_iter()
+            .map(|old| {
+                let original = self.domains.get(&old).expect("reachable domain admitted");
+                let record = SourceDomainRecord {
+                    selected: original.selected.clone(),
+                    authored: original
+                        .authored
+                        .iter()
+                        .map(|(owner, target)| (owner.clone(), remap[target]))
+                        .collect(),
+                };
+                (remap[&old], record)
+            })
+            .collect();
+        Ok((remap, records))
+    }
 }
 
 /// One machine-owned materialized source binder. `GroupInstanceId` prevents a
@@ -111,6 +224,48 @@ impl SourceLeaseKey {
             instance: lease.instance(),
             binder: Arc::new(lease.binder().clone()),
         }
+    }
+}
+
+fn same_source_lease(left: &SourceInstanceLease, right: &SourceInstanceLease) -> bool {
+    left.instance() == right.instance()
+        && left.owner() == right.owner()
+        && left.original_ordinal() == right.original_ordinal()
+        && left.binder() == right.binder()
+        && left.value() == right.value()
+        && left.handle() == right.handle()
+        && left.entry_signature() == right.entry_signature()
+}
+
+/// One install's exact changes to lexical selection and physical custody.
+/// It cannot be cloned; failed-turn cleanup applies this delta at most once.
+#[derive(Debug, Default)]
+pub struct SourceScopeAdmission {
+    scope: Option<ScopeId>,
+    keys: Vec<SourceLeaseKey>,
+    owned: Vec<SourceLeaseKey>,
+    selected: Vec<(
+        crate::prepared_program::SourceInstanceDomain,
+        SourceLeaseKey,
+    )>,
+    shares: HashSet<SourceLeaseKey>,
+    rolled_back: std::sync::atomic::AtomicBool,
+}
+
+static_assertions::assert_impl_all!(SourceScopeAdmission: Send, Sync);
+
+impl std::ops::Deref for SourceScopeAdmission {
+    type Target = [SourceLeaseKey];
+    fn deref(&self) -> &Self::Target {
+        &self.keys
+    }
+}
+
+impl<'a> IntoIterator for &'a SourceScopeAdmission {
+    type Item = &'a SourceLeaseKey;
+    type IntoIter = std::slice::Iter<'a, SourceLeaseKey>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.keys.iter()
     }
 }
 
@@ -282,6 +437,9 @@ pub struct BindingTable {
     source_instances: HashMap<SourceLeaseKey, ScopedSourceLease>,
     source_owned: HashMap<ScopeId, HashSet<SourceLeaseKey>>,
     promoted_source_instances: HashMap<ScopeId, HashSet<SourceLeaseKey>>,
+    /// Explicit lexical installation choices. Custody promotion retains roots
+    /// without granting an ambient choice among independent mutable instances.
+    source_selection: HashMap<ScopeId, SourceSelectionView>,
 }
 
 #[cfg(test)]
@@ -508,6 +666,7 @@ impl Default for BindingTable {
             source_instances: HashMap::new(),
             source_owned: HashMap::new(),
             promoted_source_instances: HashMap::new(),
+            source_selection: HashMap::new(),
         }
     }
 }
@@ -583,6 +742,7 @@ impl BindingTable {
             || self.source_owned.contains_key(&scope)
             || self.promoted.contains_key(&scope)
             || self.promoted_source_instances.contains_key(&scope)
+            || self.source_selection.contains_key(&scope)
         {
             self.scope_revisions.insert(scope, self.revision);
         } else {
@@ -1055,6 +1215,21 @@ impl BindingTable {
         scope: ScopeId,
         token: SourceInstanceLease,
     ) -> Result<SourceLeaseKey, SourceInstanceLease> {
+        let domain = self
+            .source_selection
+            .get(&scope)
+            .map(|view| view.current)
+            .unwrap_or_else(|| crate::prepared_program::SourceInstanceDomain::for_scope(scope));
+        self.register_source_instance_in_domain(tree, scope, domain, token)
+    }
+
+    fn register_source_instance_in_domain(
+        &mut self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+        domain: crate::prepared_program::SourceInstanceDomain,
+        token: SourceInstanceLease,
+    ) -> Result<SourceLeaseKey, SourceInstanceLease> {
         if !tree.is_live(scope) {
             return Err(token);
         }
@@ -1076,6 +1251,11 @@ impl BindingTable {
             .or_default()
             .insert(key.clone());
         self.add_capturable_sources(scope, [key.clone()]);
+        let selected = self
+            .source_selection
+            .entry(scope)
+            .or_insert_with(|| SourceSelectionView::for_scope(scope));
+        selected.add(domain, key.clone());
         self.changed(scope);
         Ok(key)
     }
@@ -1106,6 +1286,226 @@ impl BindingTable {
             .collect())
     }
 
+    /// Admit a domain-qualified native batch before committing its machine pins.
+    /// Domains must already belong to this captured view and every physical root
+    /// must be new; independent mutable roots are never chosen by code identity.
+    pub fn register_source_instances_in_domains(
+        &mut self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+        tokens: Vec<crate::prepared_program::SourceInstanceAttachment>,
+        machine: &crate::prepared_program::PreparedMachine<'_>,
+    ) -> Result<SourceScopeAdmission, Vec<crate::prepared_program::SourceInstanceAttachment>> {
+        let empty = SourceSelectionView::for_scope(scope);
+        let view = self.source_selection.get(&scope).unwrap_or(&empty);
+        let mut physical = HashMap::<SourceLeaseKey, SourceInstanceLease>::new();
+        let mut entries = Vec::new();
+        for (domain, record) in view.domains.iter() {
+            for key in record.selected.iter() {
+                let Some(existing) = self.source_instances.get(key) else {
+                    return Err(tokens);
+                };
+                entries.push((*domain, existing.token.clone()));
+            }
+        }
+        let mut installs = HashSet::new();
+        for attachment in &tokens {
+            if machine.validate_source_attachment(attachment).is_err() {
+                return Err(tokens);
+            }
+            let domain = attachment.domain();
+            let token = attachment.lease();
+            if !tree.is_live(scope) || !view.domains.contains_key(&domain) {
+                return Err(tokens);
+            }
+            let key = SourceLeaseKey::of(token);
+            if let Some(demand) = attachment.demand() {
+                let anchor_key = SourceLeaseKey::of(demand.anchor());
+                let selected = view
+                    .domains
+                    .get(&domain)
+                    .is_some_and(|record| record.selected.contains(&anchor_key));
+                if !selected
+                    || self
+                        .source_instances
+                        .get(&anchor_key)
+                        .is_none_or(|anchor| !same_source_lease(&anchor.token, demand.anchor()))
+                {
+                    return Err(tokens);
+                }
+            } else if self.source_instances.contains_key(&key) || !installs.insert(key.clone()) {
+                return Err(tokens);
+            }
+            let existing = physical
+                .get(&key)
+                .or_else(|| self.source_instances.get(&key).map(|record| &record.token));
+            if existing.is_some_and(|old| !same_source_lease(old, token)) {
+                return Err(tokens);
+            }
+            physical.insert(key, token.clone());
+            entries.push((domain, token.clone()));
+        }
+        let transitions = view
+            .domains
+            .iter()
+            .map(|(domain, record)| {
+                (
+                    *domain,
+                    record
+                        .authored
+                        .iter()
+                        .map(|(owner, target)| (owner.clone(), *target))
+                        .collect(),
+                )
+            })
+            .collect();
+        if crate::prepared_program::SourceDomainSelection::new(view.current, transitions, entries)
+            .is_err()
+        {
+            return Err(tokens);
+        }
+        let mut admission = SourceScopeAdmission {
+            scope: Some(scope),
+            ..Default::default()
+        };
+        let custody = self.source_instance_keys_in(tree, scope);
+        let mut attached = HashSet::new();
+        for attachment in tokens {
+            let (domain, token) = attachment.into_parts();
+            let key = SourceLeaseKey::of(&token);
+            let selected = self
+                .source_selection
+                .get(&scope)
+                .and_then(|view| view.domains.get(&domain))
+                .is_some_and(|record| record.selected.contains(&key));
+            if !selected {
+                admission.selected.push((domain, key.clone()));
+            }
+            if !admission.keys.contains(&key) && !selected {
+                admission.keys.push(key.clone());
+            }
+            if self.source_instances.contains_key(&key) {
+                if !custody.contains(&key) && attached.insert(key.clone()) {
+                    admission.shares.insert(key.clone());
+                    self.promoted_source_instances
+                        .entry(scope)
+                        .or_default()
+                        .insert(key.clone());
+                    self.add_capturable_sources(scope, [key.clone()]);
+                    self.acquire_source_shares(&HashSet::from([key.clone()]));
+                }
+                self.source_selection
+                    .entry(scope)
+                    .or_insert_with(|| SourceSelectionView::for_scope(scope))
+                    .add(domain, key);
+            } else {
+                admission.owned.push(
+                    self.register_source_instance_in_domain(tree, scope, domain, token)
+                        .expect("qualified batch prevalidated"),
+                );
+            }
+        }
+        self.changed(scope);
+        Ok(admission)
+    }
+
+    pub fn register_source_install_in(
+        &mut self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+        tokens: Vec<SourceInstanceLease>,
+    ) -> Result<SourceScopeAdmission, Vec<SourceInstanceLease>> {
+        let keys = self.register_source_instances_in(tree, scope, tokens)?;
+        Ok(SourceScopeAdmission {
+            scope: Some(scope),
+            owned: keys.clone(),
+            keys,
+            ..Default::default()
+        })
+    }
+
+    pub fn rollback_source_admission(
+        &mut self,
+        scope: ScopeId,
+        admission: &SourceScopeAdmission,
+    ) -> Option<Vec<SourceInstanceLease>> {
+        if admission.scope != Some(scope)
+            || admission
+                .rolled_back
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return None;
+        }
+        if admission.owned.iter().any(|key| {
+            self.source_instances
+                .get(key)
+                .is_none_or(|lease| lease.owner != scope || lease.owner_retired)
+        }) || admission.shares.iter().any(|key| {
+            !self
+                .promoted_source_instances
+                .get(&scope)
+                .is_some_and(|keys| keys.contains(key))
+        }) {
+            return None;
+        }
+        if admission.selected.iter().any(|(domain, key)| {
+            !self
+                .source_selection
+                .get(&scope)
+                .and_then(|view| view.domains.get(domain))
+                .is_some_and(|record| record.selected.contains(key))
+        }) {
+            return None;
+        }
+        admission
+            .rolled_back
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(view) = self.source_selection.get_mut(&scope) {
+            for (domain, key) in &admission.selected {
+                let mut record = view.domains.get(domain)?.clone();
+                record.selected.remove_mut(key);
+                view.domains.insert_mut(*domain, record);
+            }
+        }
+        for key in &admission.shares {
+            self.promoted_source_instances
+                .get_mut(&scope)
+                .expect("admission shares owned")
+                .remove(key);
+            self.remove_capturable_source(scope, key);
+        }
+        let mut released = self.release_source_shares(admission.shares.clone());
+        released.extend(self.retire_source_instances_in(scope, &admission.owned)?);
+        self.changed(scope);
+        Some(released)
+    }
+
+    /// An exact existing sibling root can be attached to a second captured
+    /// domain only through its already selected physical group anchor.
+    pub fn retained_source_sibling_attachment(
+        &self,
+        demand: &crate::prepared_program::InheritedSourceDemand,
+    ) -> Option<crate::prepared_program::SourceInstanceAttachment> {
+        let anchor = self
+            .source_instances
+            .get(&SourceLeaseKey::of(demand.anchor()))?;
+        if !same_source_lease(&anchor.token, demand.anchor()) {
+            return None;
+        }
+        let key = SourceLeaseKey {
+            instance: demand.anchor().instance(),
+            binder: Arc::new(demand.binder().clone()),
+        };
+        let token = &self.source_instances.get(&key)?.token;
+        (token.owner() == demand.owner()
+            && token.original_ordinal() == demand.original_ordinal()
+            && token.value() == demand.value())
+        .then(|| {
+            crate::prepared_program::SourceInstanceAttachment::inherited(demand, token.clone()).ok()
+        })
+        .flatten()
+    }
+
     /// Retire only the newly registered roots of one failed turn. All keys
     /// must still belong to that lexical owner; a shared capture keeps its
     /// exact instance rooted until the last share releases.
@@ -1133,6 +1533,18 @@ impl BindingTable {
             lease.owner_retired = true;
             let unshared = lease.shares == 0;
             self.remove_capturable_source(scope, key);
+            if let Some(selected) = self.source_selection.get_mut(&scope) {
+                let domains: Vec<_> = selected.domains.keys().copied().collect();
+                for domain in domains {
+                    let mut record = selected
+                        .domains
+                        .get(&domain)
+                        .cloned()
+                        .expect("selected domain exists");
+                    record.selected.remove_mut(key);
+                    selected.domains.insert_mut(domain, record);
+                }
+            }
             self.changed(scope);
             if unshared {
                 released.push(
@@ -1145,7 +1557,8 @@ impl BindingTable {
         Some(released)
     }
 
-    /// Exact materialized source instances available to this lexical scope.
+    /// All exact source instances retained by this scope, including dependencies
+    /// of independently published values. This is custody, not lexical selection.
     /// Returned descriptors share machine handles; callers never release them.
     #[must_use]
     pub fn source_instances_in(
@@ -1171,6 +1584,146 @@ impl BindingTable {
                     .clone()
             })
             .collect()
+    }
+
+    /// Exact native instances selected by installation or frozen lexical capture.
+    /// Published value dependencies remain rooted separately and cannot choose a
+    /// mutable instance for an unrelated execution's source imports.
+    #[must_use]
+    pub fn selected_source_instances_in(
+        &self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+    ) -> Vec<SourceInstanceLease> {
+        let mut keys: Vec<_> = self
+            .selected_source_keys_in(tree, scope)
+            .iter()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys.into_iter()
+            .map(|key| {
+                self.source_instances
+                    .get(&key)
+                    .expect("selected source retains exact custody")
+                    .token
+                    .clone()
+            })
+            .collect()
+    }
+
+    fn selected_source_keys_in(
+        &self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+    ) -> HashTrieSetSync<SourceLeaseKey> {
+        if !tree.is_live(scope) {
+            return HashTrieSetSync::new_sync();
+        }
+        let owners = if self.tips.contains_key(&scope) || tree.parent_of(scope).is_none() {
+            vec![scope]
+        } else {
+            tree.lookup_chain(scope)
+        };
+        owners
+            .into_iter()
+            .flat_map(|owner| {
+                self.source_selection
+                    .get(&owner)
+                    .into_iter()
+                    .flat_map(|view| view.domains.values())
+                    .flat_map(|record| record.selected.iter().cloned())
+            })
+            .collect()
+    }
+
+    /// Freeze exact original-owner origins and their retained mutable choices.
+    /// Every returned lease is backed by this scope's current physical custody.
+    pub fn source_domain_selection_in(
+        &self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+    ) -> Result<crate::prepared_program::SourceDomainSelection, BindingPromotionError> {
+        if self.scope_witness(tree, scope).is_none() {
+            return Err(BindingPromotionError::UnverifiableSourceSelection);
+        }
+        let empty = SourceSelectionView::for_scope(scope);
+        let view = self.source_selection.get(&scope).unwrap_or(&empty);
+        let custody = self.source_instance_keys_in(tree, scope);
+        let mut entries = Vec::new();
+        for (domain, record) in view.domains.iter() {
+            for key in record.selected.iter() {
+                if !custody.contains(key) {
+                    return Err(BindingPromotionError::MissingOrForeignSourceInstance);
+                }
+                let lease = self
+                    .source_instances
+                    .get(key)
+                    .ok_or(BindingPromotionError::MissingOrForeignSourceInstance)?;
+                entries.push((*domain, lease.token.clone()));
+            }
+        }
+        crate::prepared_program::SourceDomainSelection::new(
+            view.current,
+            view.domains
+                .iter()
+                .map(|(domain, record)| {
+                    (
+                        *domain,
+                        record
+                            .authored
+                            .iter()
+                            .map(|(owner, target)| (owner.clone(), *target))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            entries,
+        )
+        .map_err(|_| BindingPromotionError::ConflictingSourceOrigin)
+    }
+
+    pub fn prepare_source_owner_origin_in(
+        &self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+        owner: tidepool_repr::execution_schema::CachedHomeOwner,
+    ) -> Result<PreparedSourceOwnerOrigin, BindingPromotionError> {
+        if self.scope_witness(tree, scope).is_none() {
+            return Err(BindingPromotionError::UnverifiableSourceSelection);
+        }
+        let empty = SourceSelectionView::for_scope(scope);
+        let view = self.source_selection.get(&scope).unwrap_or(&empty);
+        if view
+            .domains
+            .get(&view.current)
+            .ok_or(BindingPromotionError::MissingSourceDomain)?
+            .authored
+            .get(&owner)
+            .is_some_and(|domain| *domain != view.current)
+        {
+            return Err(BindingPromotionError::ConflictingSourceOrigin);
+        }
+        Ok(PreparedSourceOwnerOrigin {
+            scope,
+            owner,
+            domain: view.current,
+        })
+    }
+
+    pub fn commit_source_owner_origin(&mut self, prepared: PreparedSourceOwnerOrigin) {
+        let view = self
+            .source_selection
+            .entry(prepared.scope)
+            .or_insert_with(|| SourceSelectionView::for_scope(prepared.scope));
+        let mut record = view
+            .domains
+            .get(&view.current)
+            .cloned()
+            .expect("origin domain admitted");
+        record.authored.insert_mut(prepared.owner, prepared.domain);
+        view.domains.insert_mut(view.current, record);
+        self.changed(prepared.scope);
     }
 
     /// Exact materialized instances visible at one frozen lexical scope.
@@ -1386,6 +1939,9 @@ impl BindingTable {
             writes,
             retained,
             source_instances: HashSet::new(),
+            source_origins: HashMap::new(),
+            source_domains: HashMap::new(),
+            next_tip: None,
         })
     }
 
@@ -1416,6 +1972,74 @@ impl BindingTable {
         Ok(prepared)
     }
 
+    /// Authored declaration publication preserves the originating private
+    /// lexical choices within the exact custody batch. Dependencies that are
+    /// only retained by that view grant no selection; the installer refuses
+    /// conflicting selected domains rather than choosing a mutable instance.
+    pub fn prepare_authored_source_publication_in(
+        &self,
+        tree: &ScopeTree,
+        source: ScopeId,
+        target: ScopeId,
+        ids: &[SessionVarId],
+        instances: &[SourceLeaseKey],
+        accepted_owners: &[tidepool_repr::execution_schema::CachedHomeOwner],
+    ) -> Result<PreparedBindingPromotion, BindingPromotionError> {
+        let mut prepared =
+            self.prepare_exact_publication_in(tree, source, target, ids, instances)?;
+        let source_view = self
+            .source_selection
+            .get(&source)
+            .ok_or(BindingPromotionError::MissingSourceDomain)?;
+        let current = source_view
+            .domains
+            .get(&source_view.current)
+            .ok_or(BindingPromotionError::MissingSourceDomain)?;
+        let roots = accepted_owners
+            .iter()
+            .map(|owner| {
+                current
+                    .authored
+                    .get(owner)
+                    .copied()
+                    .ok_or(BindingPromotionError::MissingSourceDomain)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let target_view = self.source_selection.get(&target);
+        let target_record = target_view.and_then(|view| view.domains.get(&view.current));
+        if accepted_owners
+            .iter()
+            .any(|owner| target_record.is_some_and(|record| record.authored.contains_key(owner)))
+        {
+            return Err(BindingPromotionError::ConflictingSourceOrigin);
+        }
+        let next_tip = self
+            .next_tip
+            .checked_add(1)
+            .ok_or(BindingPromotionError::UnverifiableSourceSelection)?;
+        let (remap, records) = source_view.fork(BindingTipId(self.next_tip), roots)?;
+        let custody = self.source_instance_keys_in(tree, source);
+        let target_custody = self.source_instance_keys_in(tree, target);
+        for record in records.values() {
+            for key in record.selected.iter() {
+                if !custody.contains(key) || !self.source_instances.contains_key(key) {
+                    return Err(BindingPromotionError::MissingOrForeignSourceInstance);
+                }
+                if !target_custody.contains(key) {
+                    prepared.source_instances.insert(key.clone());
+                }
+            }
+        }
+        for owner in accepted_owners {
+            prepared
+                .source_origins
+                .insert(owner.clone(), remap[&current.authored[owner]]);
+        }
+        prepared.source_domains = records;
+        prepared.next_tip = Some(next_tip);
+        Ok(prepared)
+    }
+
     /// The checkout that prepared this promotion must still own the table;
     /// there is no fallible operation after the public durability boundary.
     pub fn commit_exact_binding_promotion(&mut self, prepared: PreparedBindingPromotion) {
@@ -1424,6 +2048,9 @@ impl BindingTable {
             writes,
             retained,
             source_instances,
+            source_origins,
+            source_domains,
+            next_tip,
         } = prepared;
         let existing = self.promoted.entry(target).or_default();
         let added: HashSet<_> = retained.difference(existing).copied().collect();
@@ -1438,6 +2065,25 @@ impl BindingTable {
         existing_source.extend(added_source.iter().cloned());
         self.add_capturable_sources(target, added_source.iter().cloned());
         self.acquire_source_shares(&added_source);
+        let selected = self
+            .source_selection
+            .entry(target)
+            .or_insert_with(|| SourceSelectionView::for_scope(target));
+        for (domain, record) in source_domains {
+            selected.domains.insert_mut(domain, record);
+        }
+        let mut record = selected
+            .domains
+            .get(&selected.current)
+            .cloned()
+            .expect("current domain admitted");
+        for (owner, domain) in source_origins {
+            record.authored.insert_mut(owner, domain);
+        }
+        selected.domains.insert_mut(selected.current, record);
+        if let Some(next_tip) = next_tip {
+            self.next_tip = next_tip;
+        }
         for (name, id) in writes {
             if let Some(hidden) = self.hidden.get_mut(&target) {
                 hidden.remove(&name);
@@ -1608,6 +2254,7 @@ impl BindingTable {
     /// The session owner releases returned machine handles under checkout.
     pub fn drain_scope_with_sources(&mut self, scope: ScopeId) -> ScopeDrain {
         self.capture_history.remove(&scope);
+        self.source_selection.remove(&scope);
         self.capturable_membership.remove(&scope);
         let (mut released, mut source_instances) = self.release_tip(scope);
         if let Some(promoted) = self.promoted.remove(&scope) {
@@ -1704,6 +2351,40 @@ impl BindingTable {
         };
         // Inherited custody is already closed at its capture. Only the
         // parent's own mutable owner dependencies may grow this new capture.
+        let parent_view = self
+            .source_selection
+            .get(&parent)
+            .cloned()
+            .unwrap_or_else(|| SourceSelectionView::for_scope(parent));
+        let (remap, records) = parent_view
+            .fork(id, [parent_view.current])
+            .expect("captured source domain graph is closed");
+        let mut selected = SourceSelectionView {
+            current: remap[&parent_view.current],
+            domains: records.into_iter().collect(),
+        };
+        if let Some(previous) = self.source_selection.remove(&child) {
+            let mut record = selected
+                .domains
+                .get(&selected.current)
+                .cloned()
+                .expect("captured current domain exists");
+            let previous_current = previous
+                .domains
+                .get(&previous.current)
+                .expect("preseed current domain exists");
+            for key in previous_current.selected.iter() {
+                record.selected.insert_mut(key.clone());
+            }
+            for (owner, domain) in previous_current.authored.iter() {
+                record.authored.insert_mut(owner.clone(), *domain);
+            }
+            for (domain, record) in previous.domains.iter() {
+                selected.domains.insert_mut(*domain, record.clone());
+            }
+            selected.domains.insert_mut(selected.current, record);
+        }
+        self.source_selection.insert(child, selected);
         let membership = self.capture_membership(tree, parent);
         let leases = self.capture_leases(parent, &membership);
         let CaptureMembership {

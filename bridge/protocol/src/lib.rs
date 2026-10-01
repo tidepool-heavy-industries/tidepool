@@ -108,6 +108,7 @@ pub fn actor_generated_files() -> Vec<GeneratedFile> {
         effects::console::console(),
         effects::notifications::notifications(),
         effects::jev::jev(),
+        effects::model::model(),
         effects::agent_inspection::agent_inspection(),
         effects::agent_launch::agent_launch(),
         effects::forks::forks(),
@@ -125,7 +126,13 @@ pub fn actor_generated_files() -> Vec<GeneratedFile> {
     }
     let mut out: Vec<GeneratedFile> = effects
         .iter()
-        .map(|e| gen::suspension_req_rs::file(e, "exomonad/actor"))
+        .map(|e| {
+            if e.name == "ModelCall" {
+                gen::suspension_req_rs::file_with_errors(e, "exomonad/actor")
+            } else {
+                gen::suspension_req_rs::file(e, "exomonad/actor")
+            }
+        })
         .collect();
     out.push(gen::suspension_req_rs::module_index(
         &effects,

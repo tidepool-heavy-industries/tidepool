@@ -8,7 +8,7 @@ do
         path childEntry Nothing group
         Core.ActorResearchRole Core.ActorReadOnlyProfile []
         Nothing Core.RequireClean [] Nothing Nothing Nothing
-        Core.InheritedContext (Just "CHECKPOINT_TOKEN") Nothing Core.ParentOwned)
+        Core.InheritedContext (Just "CHECKPOINT_TOKEN") Nothing Core.ActorOwned)
   begun <- send (Core.ForksBeginWith False "captured/readers" ["first", "second"])
   case begun of
     Right (group, _, [firstPath, secondPath]) -> do

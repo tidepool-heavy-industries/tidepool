@@ -314,6 +314,14 @@ impl WorkbenchExecutionControl {
         execution: WorkbenchExecutionId,
         reply: crate::KernelWorkbenchReply,
     ) -> WorkbenchCancellationOutcome {
+        // The first terminal owner reply wins over a later transport result.
+        let reply = self.terminal_reply().unwrap_or(reply);
+        if matches!(
+            &reply,
+            Err(crate::KernelInvocationFailure::CleanupUnconfirmed { .. })
+        ) {
+            return WorkbenchCancellationOutcome::Unconfirmed { execution };
+        }
         if matches!(
             self.publication.phase(),
             PublicationPhase::CommitClaimed { .. }
@@ -1374,6 +1382,41 @@ mod tests {
             WORKBENCH_CANCELLED
         );
         assert!(control.settled().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn terminal_cleanup_evidence_preserves_the_first_reply_after_native_acknowledgement() {
+        for cleanup_failed_first in [false, true] {
+            let control = WorkbenchExecutionControl::untracked();
+            control.arm_sleep();
+            assert!(control.request_cancellation());
+            control.acknowledge_cancellation();
+            let failure = Err(crate::KernelInvocationFailure::CleanupUnconfirmed {
+                actor: crate::ActorRef::first(crate::ActorId(1)),
+                detail: "model invocation terminal receipt unavailable".into(),
+            });
+            if cleanup_failed_first {
+                control.settle(failure.clone());
+                control.settle(terminal_reply());
+                assert_eq!(control.settled().await, failure);
+                assert!(matches!(
+                    control.cancellation_outcome(
+                        WorkbenchExecutionId::from_digest([6; 16]),
+                        terminal_reply(),
+                    ),
+                    WorkbenchCancellationOutcome::Unconfirmed { .. }
+                ));
+            } else {
+                control.settle(terminal_reply());
+                control.settle(failure.clone());
+                assert_eq!(control.settled().await, terminal_reply());
+                assert!(matches!(
+                    control
+                        .cancellation_outcome(WorkbenchExecutionId::from_digest([6; 16]), failure,),
+                    WorkbenchCancellationOutcome::Cancelled { reply: Ok(_), .. }
+                ));
+            }
+        }
     }
 
     #[tokio::test]

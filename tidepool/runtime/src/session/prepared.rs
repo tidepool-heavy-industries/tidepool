@@ -21,8 +21,9 @@ use tidepool_codegen::prepared_program::{
     InheritedSourceDemand, ManagedBuilder, ManagedField, ManagedNode, PackageLiteral, Parcel,
     ParkRequest, PreparedCallOptions, PreparedFrameEvidence, PreparedHandle, PreparedInput,
     PreparedMachine, PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter, PreparedResult,
-    PreparedResultBatch, ProgramId, RunOptions, SourceBinder, SourceInstanceLease,
-    MAX_ANSWER_DEPTH,
+    PreparedResultBatch, ProgramId, RunOptions, ScopedCertifiedGroup, ScopedDemandedImage,
+    ScopedSourceBinder, SourceBinder, SourceInstanceAttachment, SourceInstanceDomain,
+    SourceInstanceLease, MAX_ANSWER_DEPTH,
 };
 // Re-exported: callers of this module's resource-scope cancellation API
 // (`open_realm`/`cancel_handle`/`close_realm`) need both types without a
@@ -442,6 +443,7 @@ pub(crate) struct CertifiedTargetImage {
     image: Arc<CompiledProgram>,
     package_interfaces: CertifiedTargetPackageInterfaces,
     package_literals: BTreeMap<SymbolIdentity, PackageLiteral>,
+    source_plan: Option<super::persistent::ResolvedSourceDomainPlan>,
 }
 
 impl CertifiedTargetImage {
@@ -475,6 +477,7 @@ impl CertifiedTargetImage {
             image,
             package_interfaces,
             package_literals,
+            source_plan: None,
         })
     }
 
@@ -504,8 +507,12 @@ impl CertifiedTargetImage {
                 &self.package_literals,
             )?;
             for (binder, literal) in image.source_literals() {
-                if source_literals.insert(binder.clone(), literal).is_some() {
-                    return Err(DemandError::DuplicateBinder(binder));
+                if let Some(previous) = source_literals.get(&binder) {
+                    if previous != &literal {
+                        return Err(DemandError::DuplicateBinder(binder));
+                    }
+                } else {
+                    source_literals.insert(binder, literal);
                 }
             }
             compiled[index] = Some(image);
@@ -525,6 +532,48 @@ impl CertifiedTargetImage {
             .collect()
     }
 
+    pub(crate) fn with_source_plan(
+        mut self,
+        plan: super::persistent::ResolvedSourceDomainPlan,
+    ) -> Self {
+        self.source_plan = Some(plan);
+        self
+    }
+    pub(crate) fn source_plan(&self) -> Option<&super::persistent::ResolvedSourceDomainPlan> {
+        self.source_plan.as_ref()
+    }
+    fn qualified_source(&self, source: &SourceBinder) -> Result<ScopedSourceBinder, DemandError> {
+        match &self.source_plan {
+            Some(plan) => plan
+                .target
+                .get(source)
+                .cloned()
+                .ok_or_else(|| DemandError::MissingSource(source.clone())),
+            None => Ok(ScopedSourceBinder {
+                domain: SourceInstanceDomain::single(),
+                source: source.clone(),
+            }),
+        }
+    }
+    pub(crate) fn compile_scoped_demanded(
+        &self,
+        groups: impl IntoIterator<Item = ScopedCertifiedGroup>,
+        registry: &ImageRegistry,
+    ) -> Result<Vec<DemandedImage>, DemandError> {
+        let groups: Vec<_> = groups.into_iter().collect();
+        let compiled = self.compile_demanded(
+            groups.iter().map(|group| group.original().clone()),
+            registry,
+        )?;
+        compiled
+            .into_iter()
+            .zip(groups)
+            .map(|(image, group)| {
+                ScopedDemandedImage::admit(image, group).map(ScopedDemandedImage::into_image)
+            })
+            .collect()
+    }
+
     pub(crate) fn prepared(&self) -> &PreparedProgram {
         &self.prepared
     }
@@ -538,6 +587,7 @@ pub(crate) struct CertifiedTurnInstall {
     pub target: ProgramId,
     pub groups: Vec<ProgramId>,
     pub leases: Vec<SourceInstanceLease>,
+    pub domain_leases: Vec<SourceInstanceAttachment>,
     facts: Vec<ProgramFacts>,
     plans: Vec<EvidencePlan>,
     package_updates: BTreeMap<SymbolIdentity, [u8; 32]>,
@@ -2864,6 +2914,17 @@ impl PreparedEngine {
         Ok(ids)
     }
 
+    pub(crate) fn admit_source_instances(
+        &self,
+        bindings: &mut BindingTable,
+        scopes: &tidepool_codegen::scope::ScopeTree,
+        scope: tidepool_codegen::scope::ScopeId,
+        attachments: Vec<SourceInstanceAttachment>,
+    ) -> Result<tidepool_codegen::binding_table::SourceScopeAdmission, Vec<SourceInstanceAttachment>>
+    {
+        bindings.register_source_instances_in_domains(scopes, scope, attachments, &self.machine)
+    }
+
     /// Install one executable target and only its newly demanded certified
     /// source groups in a single native transaction. Existing source imports
     /// are selected by exact lexical instance leases supplied by the caller;
@@ -2877,7 +2938,7 @@ impl PreparedEngine {
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
         demanded: Vec<DemandedImage>,
         inherited_needed: &[InheritedSourceDemand],
-        inherited: &BTreeMap<SourceBinder, SourceInstanceLease>,
+        inherited: &BTreeMap<ScopedSourceBinder, SourceInstanceLease>,
         exact_external: &HashMap<ImportOwner, PreparedHandle>,
         bindings: &BindingTable,
     ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
@@ -2982,7 +3043,7 @@ impl PreparedEngine {
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
         demanded: Vec<DemandedImage>,
         inherited_needed: &[InheritedSourceDemand],
-        inherited: &BTreeMap<SourceBinder, SourceInstanceLease>,
+        inherited: &BTreeMap<ScopedSourceBinder, SourceInstanceLease>,
         exact_external: &HashMap<ImportOwner, PreparedHandle>,
         bindings: &BindingTable,
         target_packages: BTreeMap<SymbolIdentity, (ValueId, [u8; 32])>,
@@ -3022,7 +3083,7 @@ impl PreparedEngine {
             }
         }
 
-        let mut source = BTreeMap::<SourceBinder, (usize, ValueId)>::new();
+        let mut source = BTreeMap::<ScopedSourceBinder, (usize, ValueId)>::new();
         for (index, selected) in demanded.iter().enumerate() {
             let group = selected.group();
             for binder in group.binders() {
@@ -3042,40 +3103,48 @@ impl PreparedEngine {
                             binder: binder.clone(),
                         })
                     })?;
-                let key = SourceBinder {
-                    version: group.owner().module_version.clone(),
-                    binder: binder.clone(),
+                let key = ScopedSourceBinder {
+                    domain: selected.domain(),
+                    source: SourceBinder {
+                        version: group.owner().module_version.clone(),
+                        binder: binder.clone(),
+                    },
                 };
                 if inherited.contains_key(&key) || source.insert(key.clone(), (index, id)).is_some()
                 {
-                    return Err(DemandError::DuplicateBinder(key).into());
+                    return Err(DemandError::DuplicateBinder(key.source).into());
                 }
             }
         }
 
         let mut late_sources = BTreeMap::new();
         for requested in inherited_needed {
-            let key = requested.binder().clone();
+            let key = ScopedSourceBinder {
+                domain: requested.domain(),
+                source: requested.binder().clone(),
+            };
             if inherited.contains_key(&key)
                 || source.contains_key(&key)
                 || late_sources.insert(key.clone(), requested).is_some()
             {
-                return Err(DemandError::DuplicateBinder(key).into());
+                return Err(DemandError::DuplicateBinder(key.source).into());
             }
         }
 
         let mut pending = target_owners
             .iter()
             .filter_map(|owner| match owner {
-                ImportOwner::Source { version, binder } => Some(SourceBinder {
-                    version: version.clone(),
-                    binder: binder.clone(),
-                }),
+                ImportOwner::Source { version, binder } => {
+                    Some(target.qualified_source(&SourceBinder {
+                        version: version.clone(),
+                        binder: binder.clone(),
+                    }))
+                }
                 ImportOwner::Retained { .. }
                 | ImportOwner::CodeExport { .. }
                 | ImportOwner::Package { .. } => None,
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         let mut reachable = BTreeSet::new();
         let mut needed_late = BTreeSet::new();
         while let Some(binder) = pending.pop() {
@@ -3087,41 +3156,66 @@ impl PreparedEngine {
                             .imports()
                             .iter()
                             .filter_map(|owner| match owner {
-                                ImportOwner::Source { version, binder } => Some(SourceBinder {
-                                    version: version.clone(),
-                                    binder: binder.clone(),
-                                }),
+                                ImportOwner::Source { version, binder } => {
+                                    Some(demanded[index].qualified_source(&SourceBinder {
+                                        version: version.clone(),
+                                        binder: binder.clone(),
+                                    }))
+                                }
                                 ImportOwner::Retained { .. }
                                 | ImportOwner::CodeExport { .. }
                                 | ImportOwner::Package { .. } => None,
-                            }),
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
                     );
                 }
             } else if late_sources.contains_key(&binder) {
                 needed_late.insert(binder);
             } else if !inherited.contains_key(&binder) {
-                return Err(DemandError::MissingSource(binder).into());
+                return Err(DemandError::MissingSource(binder.source).into());
             }
         }
         if reachable.len() != demanded.len() || needed_late.len() != late_sources.len() {
             return Err(PreparedRuntimeError::UnreachableCertifiedGroup);
         }
 
-        for owner in target_owners.iter().chain(
-            demanded
-                .iter()
-                .flat_map(|selected| selected.group().imports()),
-        ) {
-            let ImportOwner::Source { version, binder } = owner else {
-                continue;
-            };
-            let key = SourceBinder {
-                version: version.clone(),
-                binder: binder.clone(),
-            };
-            let expected = source_evidence
-                .get(&key)
-                .ok_or_else(|| PreparedRuntimeError::InvalidCertifiedSourceOwner(key.clone()))?;
+        for key in target_owners
+            .iter()
+            .filter_map(|owner| match owner {
+                ImportOwner::Source { version, binder } => {
+                    Some(target.qualified_source(&SourceBinder {
+                        version: version.clone(),
+                        binder: binder.clone(),
+                    }))
+                }
+                _ => None,
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .chain(
+                demanded
+                    .iter()
+                    .flat_map(|selected| {
+                        selected
+                            .group()
+                            .imports()
+                            .iter()
+                            .filter_map(|owner| match owner {
+                                ImportOwner::Source { version, binder } => {
+                                    Some(selected.qualified_source(&SourceBinder {
+                                        version: version.clone(),
+                                        binder: binder.clone(),
+                                    }))
+                                }
+                                _ => None,
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        {
+            let expected = source_evidence.get(&key.source).ok_or_else(|| {
+                PreparedRuntimeError::InvalidCertifiedSourceOwner(key.source.clone())
+            })?;
             let actual = if let Some(&(index, _)) = source.get(&key) {
                 let group = demanded[index].group();
                 (group.owner(), group.original_ordinal())
@@ -3130,21 +3224,43 @@ impl PreparedEngine {
             } else if let Some(requested) = late_sources.get(&key) {
                 (requested.owner(), requested.original_ordinal())
             } else {
-                return Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(key));
+                return Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(
+                    key.source,
+                ));
             };
             if actual.0 != &expected.0 || actual.1 != expected.1 {
-                return Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(key));
+                return Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(
+                    key.source,
+                ));
             }
         }
 
         let mut late_leases = BTreeMap::new();
+        let mut late_attachments = Vec::<SourceInstanceAttachment>::new();
+        let mut late_roots = BTreeMap::<
+            (
+                tidepool_codegen::prepared_program::GroupInstanceId,
+                SourceBinder,
+            ),
+            usize,
+        >::new();
+        let mut new_late_roots = Vec::<SourceInstanceLease>::new();
         for (key, requested) in late_sources {
-            match self.machine.retain_certified_source_top(requested) {
-                Ok(lease) => {
-                    late_leases.insert(key, lease);
-                }
+            let physical = (requested.anchor().instance(), requested.binder().clone());
+            let existing = bindings.retained_source_sibling_attachment(requested);
+            let new_root = existing.is_none() && !late_roots.contains_key(&physical);
+            let issued = if let Some(existing) = existing {
+                Ok(existing)
+            } else if let Some(index) = late_roots.get(&physical) {
+                self.machine
+                    .share_certified_source_attachment(requested, &late_attachments[*index])
+            } else {
+                self.machine.retain_certified_source_attachment(requested)
+            };
+            let attachment = match issued {
+                Ok(attachment) => attachment,
                 Err(error) => {
-                    for lease in late_leases.into_values() {
+                    for lease in new_late_roots {
                         assert!(
                             self.release(lease.handle()),
                             "staged sibling source root remains live"
@@ -3152,7 +3268,14 @@ impl PreparedEngine {
                     }
                     return Err(PreparedRuntimeError::Install(error));
                 }
+            };
+            let lease = attachment.lease().clone();
+            if new_root {
+                new_late_roots.push(lease.clone());
             }
+            late_roots.entry(physical).or_insert(late_attachments.len());
+            late_leases.insert(key, lease);
+            late_attachments.push(attachment);
         }
 
         let result = (|| -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
@@ -3177,23 +3300,28 @@ impl PreparedEngine {
             let exports = exportable_code_tops(&target.prepared);
             let mut programs = Vec::with_capacity(demanded.len() + 1);
             let mut package_updates = BTreeMap::<SymbolIdentity, [u8; 32]>::new();
-            let mut source_needed = BTreeSet::<SourceBinder>::new();
+            let mut source_needed = BTreeSet::<ScopedSourceBinder>::new();
 
             let mut append = |image: Arc<CompiledProgram>,
                               globals: &[tidepool_repr::execution_schema::GlobalDecl],
-                              owners: &[ImportOwner]|
+                              owners: &[ImportOwner],
+                              source_plan: &dyn Fn(
+                &SourceBinder,
+            )
+                -> Result<ScopedSourceBinder, DemandError>|
              -> Result<(), PreparedRuntimeError> {
                 let mut imports = Vec::with_capacity(owners.len());
                 for (index, (declaration, owner)) in globals.iter().zip(owners).enumerate() {
                     let import = match owner {
                         ImportOwner::Source { version, binder } => {
-                            let key = SourceBinder {
+                            let binder_key = SourceBinder {
                                 version: version.clone(),
                                 binder: binder.clone(),
                             };
+                            let key = source_plan(&binder_key)?;
                             if let Some(&(group, binding)) = source.get(&key) {
                                 if image.authenticated_source_literal(GlobalId(index as u32))
-                                    != Some(&key)
+                                    != Some(&key.source)
                                 {
                                     source_needed.insert(key);
                                 }
@@ -3203,12 +3331,14 @@ impl PreparedEngine {
                                     .get(&key)
                                     .or_else(|| late_leases.get(&key))
                                     .filter(|lease| {
-                                        lease.binder() == &key
+                                        lease.binder() == &key.source
                                             && lease.owner().module_version == *version
                                             && lease.owner().unit == binder.unit
                                             && lease.owner().module == binder.module
                                     })
-                                    .ok_or_else(|| DemandError::MissingSource(key.clone()))?;
+                                    .ok_or_else(|| {
+                                        DemandError::MissingSource(key.source.clone())
+                                    })?;
                                 self.machine
                                     .handle_is_evaluated(lease.handle())
                                     .map_err(PreparedRuntimeError::Install)?;
@@ -3301,12 +3431,14 @@ impl PreparedEngine {
                     Arc::clone(selected.image()),
                     selected.group().definitions().globals(),
                     selected.group().imports(),
+                    &|source| selected.qualified_source(source),
                 )?;
             }
             append(
                 Arc::clone(&target.image),
                 target.prepared.globals(),
                 target_owners,
+                &|source| target.qualified_source(source),
             )?;
             drop(append);
             let requests = source_needed
@@ -3315,7 +3447,7 @@ impl PreparedEngine {
                     let &(group, _) = source
                         .get(binder)
                         .expect("source edge selected an in-batch binder");
-                    BatchLeaseRequest::for_demanded(group, &demanded[group], binder)
+                    BatchLeaseRequest::for_demanded(group, &demanded[group], &binder.source)
                         .map_err(PreparedRuntimeError::Install)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -3335,6 +3467,7 @@ impl PreparedEngine {
             let mut staged = CertifiedTurnInstall {
                 target: target_id,
                 groups: installed.programs[..installed.programs.len() - 1].to_vec(),
+                domain_leases: installed.source_attachments,
                 leases: installed.leases,
                 facts,
                 plans,
@@ -3360,11 +3493,12 @@ impl PreparedEngine {
         })();
         match result {
             Ok(mut staged) => {
-                staged.leases.extend(late_leases.into_values());
+                staged.domain_leases.extend(late_attachments);
+                staged.leases.extend(new_late_roots);
                 Ok(staged)
             }
             Err(error) => {
-                for lease in late_leases.into_values() {
+                for lease in new_late_roots {
                     assert!(
                         self.release(lease.handle()),
                         "failed install retains sibling source root"
@@ -4936,14 +5070,24 @@ pub(super) mod tests {
         ordinal: u32,
         imported: &str,
     ) -> tidepool_repr::execution_schema::CertifiedGroup {
+        certified_source_group_modules("Fixture", name, ordinal, "Fixture", imported)
+    }
+
+    pub(in crate::session) fn certified_source_group_modules(
+        module: &str,
+        name: &str,
+        ordinal: u32,
+        imported_module: &str,
+        imported: &str,
+    ) -> CertifiedGroup {
         use tidepool_repr::execution_schema::{
             CachedHomeOwner, CertifiedGroup, ImportOwner, ModuleVersion,
         };
         let mut wire = testing::wire_program();
         if let Group::NonRecursive(top) = &mut wire.bindings[0] {
-            top.identity = testing::identity("Fixture", name);
+            top.identity = testing::identity(module, name);
         }
-        let binder = testing::identity("Fixture", imported);
+        let binder = testing::identity(imported_module, imported);
         wire.globals.push(GlobalDecl {
             identity: binder.clone(),
             rep: RuntimeRep::LiftedRef,
@@ -4954,7 +5098,7 @@ pub(super) mod tests {
         CertifiedGroup::admit(
             CachedHomeOwner {
                 unit: "fixture".into(),
-                module: "Fixture".into(),
+                module: module.into(),
                 module_version: ModuleVersion([1; 32]),
                 skinny_iface_sha256: [2; 32],
                 product_sha256: [3; 32],
@@ -5512,7 +5656,13 @@ pub(super) mod tests {
             .handle_is_evaluated(selected.handle())
             .is_ok());
         assert!(engine.machine.release(*returned));
-        let inherited = BTreeMap::from([(root.clone(), selected.clone())]);
+        let inherited = BTreeMap::from([(
+            ScopedSourceBinder {
+                domain: SourceInstanceDomain::single(),
+                source: root.clone(),
+            },
+            selected.clone(),
+        )]);
         let reused = engine
             .install_certified_turn(
                 CertifiedTargetImage::compile(target_prepared.clone(), &registry).unwrap(),
@@ -5630,65 +5780,115 @@ pub(super) mod tests {
         scope: tidepool_codegen::scope::ScopeId,
     ) -> (
         ProgramId,
-        Vec<tidepool_codegen::binding_table::SourceLeaseKey>,
+        tidepool_codegen::binding_table::SourceScopeAdmission,
     ) {
-        use tidepool_codegen::prepared_program::GroupInventory;
-        use tidepool_repr::execution_schema::{ImportOwner, ModuleVersion};
+        install_selected_source_fixture(session, scope, "a")
+    }
+
+    pub(in crate::session) fn install_selected_source_fixture(
+        session: &mut super::super::PersistentSession,
+        scope: tidepool_codegen::scope::ScopeId,
+        root_name: &str,
+    ) -> (
+        ProgramId,
+        tidepool_codegen::binding_table::SourceScopeAdmission,
+    ) {
+        use tidepool_repr::execution_schema::ModuleVersion;
 
         let groups = [
             certified_source_group("a", 2, "b"),
             certified_source_group("b", 7, "a"),
+            certified_source_group("late", 12, "a"),
         ];
         let root = SourceBinder {
             version: ModuleVersion([1; 32]),
-            binder: testing::identity("Fixture", "a"),
+            binder: testing::identity("Fixture", root_name),
         };
-        let registry = ImageRegistry::new();
-        let demand = GroupInventory::new(&groups)
+        install_selected_groups_fixture(session, scope, &groups, root)
+    }
+
+    pub(in crate::session) fn install_selected_groups_fixture(
+        session: &mut super::super::PersistentSession,
+        scope: tidepool_codegen::scope::ScopeId,
+        groups: &[CertifiedGroup],
+        root: SourceBinder,
+    ) -> (
+        ProgramId,
+        tidepool_codegen::binding_table::SourceScopeAdmission,
+    ) {
+        let (target, owners, evidence, demanded, inherited) =
+            prepare_selected_groups_fixture(session, scope, groups, &[root]);
+        session
+            .install_certified_turn_in(scope, target, &owners, &evidence, demanded, &inherited)
             .unwrap()
-            .seal([root.clone()])
+    }
+
+    pub(in crate::session) fn prepare_selected_groups_fixture(
+        session: &super::super::PersistentSession,
+        scope: tidepool_codegen::scope::ScopeId,
+        groups: &[CertifiedGroup],
+        roots: &[SourceBinder],
+    ) -> (
+        CertifiedTargetImage,
+        Vec<ImportOwner>,
+        BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
+        Vec<DemandedImage>,
+        Vec<InheritedSourceDemand>,
+    ) {
+        use tidepool_codegen::prepared_program::GroupInventory;
+        let selection = session
+            .bindings()
+            .source_domain_selection_in(session.scope_tree(), scope)
             .unwrap();
+        let witness = session
+            .bindings()
+            .scope_witness(session.scope_tree(), scope)
+            .unwrap();
+        let registry = ImageRegistry::new();
+        let (selected, inherited, target_sources) = GroupInventory::new(groups)
+            .unwrap()
+            .seal_in_domains(roots.iter().cloned(), &selection)
+            .unwrap();
+        let inherited = inherited
+            .into_iter()
+            .map(|scoped| scoped.into_demand())
+            .collect();
         let mut wire = testing::wire_program();
         let Group::NonRecursive(entry) = &mut wire.bindings[0] else {
-            unreachable!("fixture has one entry")
+            unreachable!()
         };
         entry.identity.unit = "main".into();
-        wire.globals.push(GlobalDecl {
-            identity: root.binder.clone(),
-            rep: RuntimeRep::LiftedRef,
-            entry_signature: None,
-            required_evaluated: false,
-            required_generation: None,
-        });
-        let target =
-            CertifiedTargetImage::compile(testing::prepare(wire).unwrap(), &registry).unwrap();
-        let owner = ImportOwner::Source {
-            version: root.version.clone(),
-            binder: root.binder.clone(),
-        };
-        let source_evidence = BTreeMap::from([
-            (
-                root,
-                (groups[0].owner().clone(), groups[0].original_ordinal()),
-            ),
-            (
-                SourceBinder {
-                    version: ModuleVersion([1; 32]),
-                    binder: testing::identity("Fixture", "b"),
-                },
-                (groups[1].owner().clone(), groups[1].original_ordinal()),
-            ),
-        ]);
-        session
-            .install_certified_turn_in(
-                scope,
-                target,
-                &[owner],
-                &source_evidence,
-                demand.compile(&registry).unwrap(),
-                &[],
-            )
+        for root in roots {
+            wire.globals.push(GlobalDecl {
+                identity: root.binder.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                required_generation: None,
+            });
+        }
+        let target = CertifiedTargetImage::compile(testing::prepare(wire).unwrap(), &registry)
             .unwrap()
+            .with_source_plan(super::super::persistent::ResolvedSourceDomainPlan::fixture(
+                target_sources,
+                selection,
+                witness,
+            ));
+        let demanded = target.compile_scoped_demanded(selected, &registry).unwrap();
+        let owners = roots
+            .iter()
+            .map(|root| ImportOwner::Source {
+                version: root.version.clone(),
+                binder: root.binder.clone(),
+            })
+            .collect();
+        (
+            target,
+            owners,
+            certified_source_evidence(groups),
+            demanded,
+            inherited,
+        )
     }
 
     #[test]
@@ -5770,7 +5970,8 @@ pub(super) mod tests {
         session
             .bind_durable_public_scope(owner.clone(), public)
             .unwrap();
-        let (target, mut keys) = install_source_publication_fixture(&mut session, private);
+        let (target, admission) = install_source_publication_fixture(&mut session, private);
+        let mut keys = admission.to_vec();
         keys.sort();
         assert_eq!(keys.len(), 2);
         assert!(session.prepared_mut().unwrap().unpin(target));
@@ -5780,14 +5981,14 @@ pub(super) mod tests {
             .machine_incarnation
             .unwrap();
         assert!(matches!(
-            session.snapshot_publication(owner.clone(), public, foreign, vec![], keys.clone()),
+            session.snapshot_publication(owner.clone(), public, foreign, vec![], keys.to_vec()),
             Err(SessionError::InvalidPublicBindingPromotion(
                 BindingPromotionError::MissingOrForeignSourceInstance
             ))
         ));
 
         let cancel_stage = session
-            .snapshot_publication(owner.clone(), public, private, vec![], keys.clone())
+            .snapshot_publication(owner.clone(), public, private, vec![], keys.to_vec())
             .unwrap()
             .stage()
             .unwrap();
@@ -5807,12 +6008,12 @@ pub(super) mod tests {
         assert!(!path.exists());
 
         let stage = session
-            .snapshot_publication(owner.clone(), public, private, vec![], keys.clone())
+            .snapshot_publication(owner.clone(), public, private, vec![], keys.to_vec())
             .unwrap()
             .stage()
             .unwrap();
         let old_stage = session
-            .snapshot_publication(owner.clone(), public, private, vec![], keys.clone())
+            .snapshot_publication(owner.clone(), public, private, vec![], keys.to_vec())
             .unwrap()
             .stage()
             .unwrap();
@@ -5828,7 +6029,7 @@ pub(super) mod tests {
         let published = session.public_visibility_snapshot_in(public).unwrap();
         assert_eq!(published.epoch, 1);
         assert_eq!(published.machine_incarnation, Some(incarnation));
-        assert_eq!(published.source_instances, keys);
+        assert_eq!(published.source_instances, keys.to_vec());
         let graph = super::super::recovery::read_v2(&path, root.path())
             .unwrap()
             .unwrap()
@@ -5875,7 +6076,7 @@ pub(super) mod tests {
                 .public_visibility_snapshot_in(public)
                 .unwrap()
                 .source_instances,
-            keys
+            keys.to_vec()
         );
         assert_eq!(session.retire_scope(public).roots_released, keys.len());
         // Retiring the leases releases their handles. Quiescence then retires
@@ -5887,6 +6088,171 @@ pub(super) mod tests {
             .unwrap();
         assert_eq!(session.residency().unwrap().programs, 0);
         assert_eq!(session.persistent_roots_count(), 0);
+    }
+
+    pub(in crate::session) fn certified_sibling_fixture() -> CertifiedGroup {
+        use tidepool_repr::execution_schema::ModuleVersion;
+        let mut wire = testing::wire_program();
+        let Group::NonRecursive(mut first) = wire.bindings[0].clone() else {
+            unreachable!()
+        };
+        first.identity = testing::identity("Fixture", "a");
+        let mut sibling = first.clone();
+        sibling.identity = testing::identity("Fixture", "b");
+        sibling.binding.id = ValueId(1);
+        wire.expressions
+            .nodes
+            .push(wire.expressions.nodes[0].clone());
+        if let HeapRhs::Function { body, .. } = &mut sibling.binding.rhs {
+            *body = 1;
+        }
+        wire.bindings = vec![Group::Recursive(vec![first, sibling])];
+        CertifiedGroup::admit(
+            CachedHomeOwner {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                module_version: ModuleVersion([1; 32]),
+                skinny_iface_sha256: [2; 32],
+                product_sha256: [3; 32],
+            },
+            testing::projected_group(wire, 11).unwrap(),
+            vec![],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn issued_source_attachments_refuse_released_handles_before_consumption() {
+        use tidepool_codegen::{prepared_program::GroupInventory, scope::ScopeTree};
+        use tidepool_repr::execution_schema::ModuleVersion;
+        let mut scopes = ScopeTree::new();
+        let a = scopes.mint_isolated();
+        let c = scopes.mint_isolated();
+        let mut bindings = BindingTable::new();
+        let registry = ImageRegistry::new();
+        let group = certified_sibling_fixture();
+        let groups = [group];
+        let binder = |name| SourceBinder {
+            version: ModuleVersion([1; 32]),
+            binder: testing::identity("Fixture", name),
+        };
+        let prepare = |bindings: &BindingTable, scope, root: SourceBinder| {
+            let selected = bindings.source_domain_selection_in(&scopes, scope).unwrap();
+            let witness = bindings.scope_witness(&scopes, scope).unwrap();
+            let (groups, inherited, roots) = GroupInventory::new(&groups)
+                .unwrap()
+                .seal_in_domains([root.clone()], &selected)
+                .unwrap();
+            let inherited: Vec<_> = inherited
+                .into_iter()
+                .map(|request| request.into_demand())
+                .collect();
+            let mut wire = testing::wire_program();
+            let Group::NonRecursive(entry) = &mut wire.bindings[0] else {
+                unreachable!()
+            };
+            entry.identity.unit = HOME_UNIT.into();
+            wire.globals.push(GlobalDecl {
+                identity: root.binder.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                required_generation: None,
+            });
+            let target = CertifiedTargetImage::compile(testing::prepare(wire).unwrap(), &registry)
+                .unwrap()
+                .with_source_plan(super::super::persistent::ResolvedSourceDomainPlan::fixture(
+                    roots,
+                    selected.clone(),
+                    witness,
+                ));
+            let demanded = target.compile_scoped_demanded(groups, &registry).unwrap();
+            (
+                target,
+                vec![ImportOwner::Source {
+                    version: root.version,
+                    binder: root.binder,
+                }],
+                demanded,
+                inherited,
+                selected,
+            )
+        };
+        let evidence = certified_source_evidence(&groups);
+        let mut engine = PreparedEngine::empty_certified(64 * 1024, None).unwrap();
+        let (target, owners, demanded, inherited, selected) = prepare(&bindings, a, binder("a"));
+        let mut refused = engine
+            .install_certified_turn(
+                target,
+                &owners,
+                &evidence,
+                demanded,
+                &inherited,
+                selected.inherited(),
+                &HashMap::new(),
+                &bindings,
+            )
+            .unwrap();
+        let dead = refused.leases[0].handle();
+        assert!(engine.release(dead));
+        let revision = bindings.mutation_revision();
+        let held = std::mem::take(&mut refused.domain_leases);
+        assert!(engine
+            .admit_source_instances(&mut bindings, &scopes, a, held)
+            .is_err());
+        assert_eq!(bindings.mutation_revision(), revision);
+        assert!(bindings.source_instances_in(&scopes, a).is_empty());
+        refused.leases.clear();
+        engine.abort_certified_turn(refused, vec![]).unwrap();
+        let install = |engine: &mut PreparedEngine, bindings: &mut BindingTable, scope, root| {
+            let (target, owners, demanded, inherited, selected) = prepare(bindings, scope, root);
+            let mut staged = engine
+                .install_certified_turn(
+                    target,
+                    &owners,
+                    &evidence,
+                    demanded,
+                    &inherited,
+                    selected.inherited(),
+                    &HashMap::new(),
+                    bindings,
+                )
+                .unwrap();
+            let admissions = std::mem::take(&mut staged.domain_leases);
+            let delta = engine
+                .admit_source_instances(bindings, &scopes, scope, admissions)
+                .ok()
+                .unwrap();
+            staged.leases.clear();
+            (engine.commit_certified_turn(staged), delta)
+        };
+        let (ta, _) = install(&mut engine, &mut bindings, a, binder("a"));
+        bindings.seed_detached_scope(&scopes, a, c);
+        let (tb, delta_b) = install(&mut engine, &mut bindings, a, binder("b"));
+        let (_, _, _, late, _) = prepare(&bindings, c, binder("b"));
+        let held = bindings
+            .retained_source_sibling_attachment(&late[0])
+            .unwrap();
+        let released = bindings.rollback_source_admission(a, &delta_b).unwrap();
+        for lease in released {
+            assert!(engine.release(lease.handle()));
+        }
+        let revision = bindings.mutation_revision();
+        assert!(engine
+            .admit_source_instances(&mut bindings, &scopes, c, vec![held])
+            .is_err());
+        assert_eq!(bindings.mutation_revision(), revision);
+        assert_eq!(bindings.selected_source_instances_in(&scopes, c).len(), 1);
+        for target in [ta, tb] {
+            assert!(engine.unpin(target));
+        }
+        for scope in [a, c] {
+            for lease in bindings.drain_scope_with_sources(scope).source_instances {
+                assert!(engine.release(lease.handle()));
+            }
+        }
+        engine.quiesce_and_collect_now().unwrap();
+        assert_eq!(engine.residency().programs, 0);
     }
 
     #[test]
@@ -6030,7 +6396,18 @@ pub(super) mod tests {
             &source_evidence,
             vec![],
             pending_sibling.inherited_demands(),
-            &existing,
+            &existing
+                .iter()
+                .map(|(source, lease)| {
+                    (
+                        ScopedSourceBinder {
+                            domain: SourceInstanceDomain::single(),
+                            source: source.clone(),
+                        },
+                        lease.clone(),
+                    )
+                })
+                .collect(),
             &HashMap::new(),
             &BindingTable::new(),
         );
@@ -6055,7 +6432,18 @@ pub(super) mod tests {
                 &source_evidence,
                 vec![],
                 pending_sibling.inherited_demands(),
-                &existing,
+                &existing
+                    .iter()
+                    .map(|(source, lease)| {
+                        (
+                            ScopedSourceBinder {
+                                domain: SourceInstanceDomain::single(),
+                                source: source.clone(),
+                            },
+                            lease.clone(),
+                        )
+                    })
+                    .collect(),
                 &HashMap::new(),
                 &BindingTable::new(),
             )
@@ -8718,4 +9106,5 @@ pub(super) mod tests {
         assert_eq!(b[0].name, "b");
         assert_eq!(b[0].winner.variable, 12);
     }
+    include!("prepared/package_original_caf_tests.rs");
 }

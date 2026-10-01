@@ -1,7 +1,12 @@
 //! Single-admission preparation and watch tasks retain one execution cursor.
 
+mod reload;
+
 use super::*;
 use crate::{OwnedWorkbenchCompletion, OwnedWorkbenchTask, WorkbenchAdvance, WorkbenchDispatch};
+
+#[cfg(test)]
+mod model_tests;
 
 /// Source and tool owners admitted once for this hosted execution. Compiler
 /// recipe observations are added by the workbench's original snapshot owner.
@@ -246,6 +251,9 @@ struct OwnedExecution<H, O> {
 
 impl<H, O> Drop for OwnedExecution<H, O> {
     fn drop(&mut self) {
+        if let Some(model) = &self.state.effects.model {
+            model.cancel();
+        }
         // Lost actor tasks cannot admit further work. The original journal and
         // resource owners retain any cleanup that could not be observed.
         self.state.effects.invocation_work.close();
@@ -412,6 +420,113 @@ impl<H, O> OwnedExecution<H, O> {
     }
 }
 
+async fn join_execution_step<T>(
+    running: impl std::future::Future<Output = T>,
+    control: Arc<crate::WorkbenchExecutionControl>,
+    retirement: crate::RetainedActorExit,
+    model: Option<Arc<dyn crate::CellModelBinding>>,
+) -> T {
+    tokio::pin!(running);
+    tokio::select! {
+        completed = &mut running => completed,
+        _ = control.wait_for_cancellation() => {
+            if let Some(model) = &model { model.cancel(); }
+            running.await
+        }
+        _ = retirement.wait_requested_shutdown() => {
+            if let Some(model) = &model { model.cancel(); }
+            control.request_cancellation();
+            running.await
+        }
+    }
+}
+
+async fn settle_execution_owners<H, O>(
+    owned: &mut OwnedExecution<H, O>,
+) -> Result<(), KernelInvocationFailure>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    let control = owned
+        .state
+        .effects
+        .control
+        .as_ref()
+        .expect("owned execution retains its original control");
+    let abort_requested = control.cancellation_requested();
+    let native_cleanup = if abort_requested {
+        owned
+            .workbench
+            .as_ref()
+            .expect("cancelled execution retains its native cleanup owner")
+            .abort_owned_continuations(
+                owned.state.effects.context.clone(),
+                owned.cleanup.registration(),
+                "execution cancelled before settlement".into(),
+            )
+            .await
+    } else {
+        Ok(())
+    };
+    // Native waits may already have acknowledged consuming their own hole.
+    // The cell's reply still waits for its model invocation owner, including
+    // callbacks abandoned by authored failure or a normal early return.
+    let model_cleanup = match &owned.state.effects.model {
+        Some(model) => model.settle().await,
+        None => Ok(()),
+    };
+    let failures = native_cleanup
+        .err()
+        .map(|error| format!("native cleanup unconfirmed: {error}"))
+        .into_iter()
+        .chain(
+            model_cleanup
+                .err()
+                .map(|error| format!("model cleanup unconfirmed: {error}")),
+        )
+        .collect::<Vec<_>>();
+    if !failures.is_empty() {
+        control.mark_unconfirmed();
+        return Err(KernelInvocationFailure::CleanupUnconfirmed {
+            actor: owned.state.effects.context.actor,
+            detail: failures.join("; "),
+        });
+    }
+    if abort_requested && control.cancellation_requested() {
+        control.acknowledge_cancellation();
+    }
+    Ok(())
+}
+
+async fn settle_execution_finalization<H, O>(
+    owned: &mut OwnedExecution<H, O>,
+    environment: ResidentEnvironment<H, O>,
+    finalization: WorkbenchFinalization,
+) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    let owners = settle_execution_owners(owned).await;
+    // Invocation membership, reservations and checkpoint scopes keep their
+    // own cleanup obligations even when native or model settlement refuses.
+    let finalized = settle_workbench_finalization(environment, finalization).await;
+    match owners {
+        Ok(()) => finalized,
+        Err(error) => {
+            let (actor, mut detail) = match error {
+                KernelInvocationFailure::CleanupUnconfirmed { actor, detail } => (actor, detail),
+                other => (owned.state.effects.context.actor, other.to_string()),
+            };
+            if let Err(error) = finalized {
+                detail.push_str(&format!("; workbench finalization: {error}"));
+            }
+            Err(KernelInvocationFailure::CleanupUnconfirmed { actor, detail })
+        }
+    }
+}
+
 impl<H, O> ResidentKernelBehavior<H, O>
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -458,6 +573,7 @@ where
             let index = owned.state.cursor.index;
             let total = owned.state.request.items.len();
             let retirement = owned.retirement.clone();
+            let model = owned.state.effects.model.clone();
             let control = owned
                 .state
                 .effects
@@ -487,6 +603,7 @@ where
                                     biased;
                                     completed = &mut operation => break Some(completed),
                                     () = tokio::time::sleep_until(deadline) => {
+                                        if let Some(model) = &model { model.cancel(); }
                                         control.request_cancellation();
                                         operation.await;
                                         break None;
@@ -507,14 +624,7 @@ where
                     cancel,
                     timing.scope(cleanup.scope(operation)),
                 );
-                tokio::pin!(running);
-                tokio::select! {
-                    completed = &mut running => completed,
-                    _ = retirement.wait_requested_shutdown() => {
-                        control.request_cancellation();
-                        running.await
-                    }
-                }
+                join_execution_step(running, control.clone(), retirement, model.clone()).await
             };
             OwnedWorkbenchCompletion::advance(move |behavior: &mut Self, kernel| {
                 let (timing, cleanup) = owned.scopes();
@@ -539,19 +649,6 @@ where
         invocation: crate::ActorWorkbenchInvocation,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
     ) -> WorkbenchDispatch<Self> {
-        // Repair paths retain their serial admission until their source-publication task is converted.
-        if invocation.request.tool_call().is_some_and(|call| {
-            matches!(
-                call.name.as_str(),
-                crate::reload_spec_tool::RELOAD_SPEC_TOOL
-                    | crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
-            )
-        }) {
-            return WorkbenchDispatch::Sequential {
-                invocation,
-                control,
-            };
-        }
         let admitted = match self.preflight_workbench(kernel.identity(), invocation, control) {
             Ok(WorkbenchPreflight::Admitted(admitted)) => admitted,
             Ok(WorkbenchPreflight::Retained(reply)) => {
@@ -575,7 +672,14 @@ where
             .tool_call()
             .filter(|call| call.name == crate::status_tool::STATUS_TOOL)
             .map(|call| crate::status_tool::parse(call.arguments.clone()));
-        if inspection.is_none() && compilation_authority.is_none() {
+        let reload = request.tool_call().is_some_and(|call| {
+            matches!(
+                call.name.as_str(),
+                crate::reload_spec_tool::RELOAD_SPEC_TOOL
+                    | crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
+            )
+        });
+        if inspection.is_none() && !reload && compilation_authority.is_none() {
             return terminal_task(Err(KernelInvocationFailure::Rejected {
                 actor: context.actor,
                 detail: "authored execution has no compilation authority".into(),
@@ -610,6 +714,21 @@ where
             }),
             attempt: crate::request::WorkbenchReservationAttempt::fresh(),
         };
+        let model = if inspection.is_none() && !reload {
+            self.environment.cell_model_factory.as_ref().map(|factory| {
+                let RequestReservationOwner::Workbench { execution, .. } = &reservation_owner
+                else {
+                    unreachable!("workbench admission retains its execution identity")
+                };
+                factory.bind(
+                    execution,
+                    tidepool_repr::PrincipalId::from(context.actor),
+                    &self.descriptor,
+                )
+            })
+        } else {
+            None
+        };
         let invocation_work = InvocationWork::new(context.actor, reservation_owner.clone());
         self.workbench_executions.lock().retain_invocation_work(
             invocation_work.clone(),
@@ -621,7 +740,12 @@ where
             .map(|call| call.name.clone())
             .unwrap_or_else(|| "cell".into());
         let (actor, incarnation) = actor_address(context.actor);
-        let timing = crate::call_timing::CallScope::new(kind, actor as u64, incarnation as u64);
+        let timing = crate::call_timing::CallScope::for_execution(
+            kind,
+            actor as u64,
+            incarnation as u64,
+            request.execution_id().cloned(),
+        );
         let resources = match compilation_authority {
             Some(authority) => ExecutionResourceOwners::new(authority, public_owner),
             None => ExecutionResourceOwners::for_inspection(public_owner),
@@ -641,6 +765,7 @@ where
                     context: context.clone(),
                     public_visibility: None,
                     control,
+                    model,
                     installed_tools,
                     admitted_source,
                     reservation_owner,
@@ -662,6 +787,9 @@ where
             cleanup,
             resources,
         };
+        if reload {
+            return WorkbenchDispatch::Owned(self.owned_reload_task(owned));
+        }
         if let Some(inspection) = inspection {
             return WorkbenchDispatch::Owned(match inspection {
                 Ok(view) => self.owned_inspection_task(kernel, owned, view),
@@ -880,6 +1008,14 @@ where
                         .filter(|slot| slot.enforce_deadline)
                         .map(|slot| slot.frame.deadline());
                     let result = {
+                        let model = owned.state.effects.model.clone();
+                        let control = owned
+                            .state
+                            .effects
+                            .control
+                            .clone()
+                            .expect("original cancellation owner");
+                        let retirement = owned.retirement.clone();
                         let cancel = owned
                             .state
                             .effects
@@ -896,13 +1032,27 @@ where
                             ))),
                         );
                         tokio::pin!(advance);
-                        match deadline {
-                            Some(deadline) => tokio::select! {
-                                biased;
-                                result = &mut advance => Some(result),
-                                () = tokio::time::sleep_until(deadline) => None,
+                        tokio::select! {
+                            biased;
+                            result = &mut advance => Some(result),
+                            _ = control.wait_for_cancellation() => {
+                                if let Some(model) = &model { model.cancel(); }
+                                Some(advance.await)
                             },
-                            None => Some(advance.await),
+                            _ = retirement.wait_requested_shutdown() => {
+                                if let Some(model) = &model { model.cancel(); }
+                                control.request_cancellation();
+                                Some(advance.await)
+                            },
+                            () = async {
+                                match deadline {
+                                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                                    None => std::future::pending().await,
+                                }
+                            } => {
+                                if let Some(model) = &model { model.cancel(); }
+                                None
+                            },
                         }
                     };
                     let Some(result) = result else {
@@ -1434,6 +1584,21 @@ where
                 .contains(&crate::ActorEffectKey::Commands);
             return OwnedWorkbenchTask::new(Box::pin(async move {
                 let (timing, cleanup) = owned.scopes();
+                let control = owned
+                    .state
+                    .effects
+                    .control
+                    .clone()
+                    .expect("original cancellation owner");
+                let model = owned.state.effects.model.clone();
+                let retirement = owned.retirement.clone();
+                let deadline = owned
+                    .state
+                    .cursor
+                    .after_tool
+                    .as_ref()
+                    .filter(|slot| slot.enforce_deadline)
+                    .map(|slot| slot.frame.deadline());
                 let cancel = owned
                     .state
                     .effects
@@ -1441,7 +1606,7 @@ where
                     .as_ref()
                     .expect("original cancellation owner")
                     .native_cancel();
-                let prepared = crate::resident_workbench::with_invocation_cancellation(
+                let preparing = crate::resident_workbench::with_invocation_cancellation(
                     cancel,
                     timing.scope(
                         cleanup.scope(command_presentation::prepare(
@@ -1455,8 +1620,26 @@ where
                             permitted,
                         )),
                     ),
-                )
-                .await;
+                );
+                let operation = async {
+                    tokio::pin!(preparing);
+                    tokio::select! {
+                        prepared = &mut preparing => prepared,
+                        () = async {
+                            match deadline {
+                                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                                None => std::future::pending().await,
+                            }
+                        } => {
+                            if let Some(model) = &model { model.cancel(); }
+                            control.request_cancellation();
+                            preparing.await
+                        },
+                    }
+                };
+                let prepared =
+                    join_execution_step(operation, control.clone(), retirement, model.clone())
+                        .await;
                 OwnedWorkbenchCompletion::advance(move |behavior: &mut Self, _kernel| {
                     let (timing, cleanup) = owned.scopes();
                     timing.sync_scope(|| {
@@ -1539,6 +1722,7 @@ where
             .clone()
             .unwrap_or_else(crate::WorkbenchExecutionControl::untracked);
         let invocation = owned.state.effects.invocation_work.clone();
+        let model = owned.state.effects.model.clone();
         let observed_child = pending.wait.observe_after_resume();
         Self::owned_step_task(
             owned,
@@ -1551,6 +1735,7 @@ where
                     pending.wait,
                     commands_permitted,
                     invocation,
+                    model,
                 ))
             },
             move |behavior, _kernel, mut owned, result| {
@@ -1786,45 +1971,7 @@ where
             owned,
             move |owned| {
                 Box::pin(async move {
-                    if owned
-                        .state
-                        .effects
-                        .control
-                        .as_ref()
-                        .is_some_and(|control| control.cancellation_requested())
-                    {
-                        let cleanup = owned
-                            .workbench
-                            .as_ref()
-                            .expect("cancelled execution retains its native cleanup owner")
-                            .abort_owned_continuations(
-                                owned.state.effects.context.clone(),
-                                owned.cleanup.registration(),
-                                "execution cancelled before settlement".into(),
-                            )
-                            .await;
-                        if let Err(error) = cleanup {
-                            owned
-                                .state
-                                .effects
-                                .control
-                                .as_ref()
-                                .expect("original cancellation owner")
-                                .mark_unconfirmed();
-                            return Err(KernelInvocationFailure::Failed {
-                                actor: owned.state.effects.context.actor,
-                                detail: format!("cancelled execution cleanup unconfirmed: {error}"),
-                            });
-                        }
-                        owned
-                            .state
-                            .effects
-                            .control
-                            .as_ref()
-                            .expect("original cancellation owner")
-                            .acknowledge_cancellation();
-                    }
-                    settle_workbench_finalization(environment, finalization).await
+                    settle_execution_finalization(owned, environment, finalization).await
                 })
             },
             |behavior, _kernel, mut owned, result| {
@@ -1902,6 +2049,7 @@ async fn await_effect<H, O>(
     wait: OwnedWorkbenchWait,
     commands_permitted: bool,
     invocation: Arc<InvocationWork>,
+    model: Option<Arc<dyn crate::CellModelBinding>>,
 ) -> commands::CommandResolution
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -1977,6 +2125,7 @@ where
                 Some(control),
                 continuation,
                 work,
+                model,
             )
             .await
         }
@@ -2033,6 +2182,7 @@ pub(super) async fn await_external<H, O>(
     control: Option<Arc<crate::WorkbenchExecutionControl>>,
     continuation: ResidentHole,
     work: tidepool_effect::DeferredEffect,
+    model: Option<Arc<dyn crate::CellModelBinding>>,
 ) -> Result<ResidentOutcome, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -2051,11 +2201,13 @@ where
                 None => std::future::pending().await,
             }
         } => {
+            if let Some(model) = &model { model.cancel(); }
             if let Some(cancellation) = cancellation { cancellation.request(); }
             // Cancellation requests do not prove owner settlement.
             running.await
         }
         _ = kernel.wait_requested_shutdown() => {
+            if let Some(model) = &model { model.cancel(); }
             if let Some(control) = &control { control.request_cancellation(); }
             if let Some(cancellation) = cancellation { cancellation.request(); }
             running.await

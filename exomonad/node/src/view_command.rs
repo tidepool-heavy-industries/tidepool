@@ -23,7 +23,9 @@ const ENTRY_FD: i32 = 3;
 const SETUP_FD: i32 = 4;
 const MAX_ENTRY_BYTES: i64 = 64 * 1024;
 
-fn helper_path() -> io::Result<PathBuf> {
+/// The companion executable selected by the current host build.
+/// Run launchers retain this file beside the copied host executable.
+pub fn helper_path() -> io::Result<PathBuf> {
     let executable = std::env::current_exe()?;
     let directory = executable
         .parent()

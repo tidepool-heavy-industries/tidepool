@@ -193,7 +193,11 @@ impl CheckedPlannedCellSpecification {
             || self.parsed_plan.specification_digest() != specification.specification_digest()
             || !same_include_paths(self.parsed_plan.include_paths(), include)
             || self.parsed_plan.injected_modules() != specification.injected_modules
-            || self.parsed_plan.producer_sha256() != <[u8; 32]>::from(Sha256::digest(producer))
+            || self.parsed_plan.producer_sha256()
+                != crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                    producer,
+                )
+                .sha256()
             || self.slots.len() != self.parsed_plan.items().len()
         {
             return Err(planned_input_rejection(
@@ -599,7 +603,9 @@ impl ExactCheckedCell {
         producer: &[u8],
         context: &[u8; 32],
     ) -> Result<(), CompileError> {
-        if self.producer != <[u8; 32]>::from(Sha256::digest(producer))
+        if self.producer
+            != crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
+                .sha256()
             || &self.context != context
             || self
                 .evidence
@@ -2315,7 +2321,10 @@ pub(crate) fn admit_checked_cell(
     }
     Ok(Arc::new(ExactCheckedCell {
         specification: specification.clone(),
-        producer: Sha256::digest(producer).into(),
+        producer: crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+            producer,
+        )
+        .sha256(),
         context,
         declaration_context,
         receipt_digest: Sha256::digest(&receipt).into(),

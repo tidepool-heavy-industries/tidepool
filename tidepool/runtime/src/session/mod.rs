@@ -468,6 +468,7 @@ pub struct PublicVisibilitySnapshot {
     pub machine_incarnation: Option<SessionId>,
     pub bindings: Vec<(String, SessionVarId)>,
     pub source_instances: Vec<SourceLeaseKey>,
+    pub source_selection: tidepool_codegen::binding_table::BindingScopeWitness,
 }
 
 /// Immutable v2 manifest baseline captured under the owning session checkout.
@@ -508,6 +509,16 @@ enum StagedPublicationTarget {
     Ephemeral,
 }
 
+/// Actual completed recovery work for one staged publication ticket.
+/// Hash phases are disjoint; descriptor hashing and compiler work are excluded.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
+pub struct RecoveryPublicationWork {
+    pub checksum_encode_bytes: u64,
+    pub recovery_validation_hash_bytes: u64,
+    pub recovery_materialization_hash_bytes: u64,
+    pub manifest_write_bytes: u64,
+}
+
 /// A fully written, fsynced manifest candidate. Only the owning session may
 /// compare its baseline and rename it while holding the machine checkout.
 pub struct StagedPublicManifest {
@@ -525,6 +536,16 @@ pub struct StagedPublicManifest {
     expected_public: PublicVisibilitySnapshot,
     expected_private: PublicVisibilitySnapshot,
     declaration: Option<paired_publication::PreparedDeclarationPublication>,
+}
+
+impl StagedPublicManifest {
+    /// Per-ticket durable work; ephemeral staging performs no recovery I/O.
+    pub fn recovery_work(&self) -> RecoveryPublicationWork {
+        match &self.target {
+            StagedPublicationTarget::Durable { staged, .. } => staged.work,
+            StagedPublicationTarget::Ephemeral => RecoveryPublicationWork::default(),
+        }
+    }
 }
 
 /// A stale stage preserves the execution's intent; its caller can stage again

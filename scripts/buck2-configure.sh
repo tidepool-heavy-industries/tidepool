@@ -7,6 +7,13 @@ cd "$(dirname "$0")/.."
 if [[ -z ${TIDEPOOL_DEV_SHELL:-} ]]; then
   exec bash scripts/dev-shell.sh bash scripts/buck2-configure.sh "$@"
 fi
+runtime_stdlib=false
+if [[ $# == 1 && $1 == --runtime-stdlib ]]; then
+  runtime_stdlib=true
+elif [[ $# != 0 ]]; then
+  echo 'Usage: scripts/buck2-configure.sh [--runtime-stdlib]' >&2
+  exit 2
+fi
 flake_source=${TIDEPOOL_DEV_SHELL%#*}
 system="$(nix eval --raw --impure --expr 'builtins.currentSystem')"
 output_path() {
@@ -31,6 +38,32 @@ coreutils="$(output_path coreutils)"
 tar_path="$(output_path tar)"
 gzip="$(output_path gzip)"
 python="$(output_path python)"
+bubblewrap="$(output_path bubblewrap)"
+runtime_stdlib_sources=
+runtime_stdlib_products=
+runtime_stdlib_extract=
+exomonad_runtime_tools=
+if [[ $runtime_stdlib == true ]]; then
+  # The default shell can use a reduced toolchain-only tree. Project resources
+  # require a full committed capture, independently of mounted build outputs.
+  package_flake_source=${TIDEPOOL_DEV_FLAKE:-git+file://$PWD?rev=$(git rev-parse HEAD)\&submodules=1}
+  case "$package_flake_source" in
+    git+*\?*rev=*) ;;
+    *) echo '--runtime-stdlib requires a full revision-pinned Git project flake' >&2; exit 2 ;;
+  esac
+  captured_source=$(nix flake metadata --json --no-write-lock-file "$package_flake_source" |
+    "$python/bin/python3" -c 'import json,sys; print(json.load(sys.stdin)["path"])')
+  if [[ ! -d $captured_source/bridge/haskell/lib ||
+        ! -f $captured_source/tidepool/toolchain/src/bin/tidepool-module-package.rs ]]; then
+    echo '--runtime-stdlib requires the full project source; a reduced toolchain flake cannot supply compiler products' >&2
+    exit 2
+  fi
+  # Evaluation declares paths; materialize the matched package before its gate.
+  runtime_stdlib_sources="$(nix eval --raw "${package_flake_source}#packages.${system}.runtime-stdlib-sources.outPath")"
+  runtime_stdlib_products="$(nix eval --raw "${package_flake_source}#packages.${system}.runtime-stdlib-products.outPath")"
+  runtime_stdlib_extract="$(nix eval --raw "${package_flake_source}#packages.${system}.tidepool-extract.outPath")"
+  exomonad_runtime_tools="$(nix eval --raw "${package_flake_source}#packages.${system}.buck-exomonad-runtime-tools.outPath")"
+fi
 cmake="$(output_path cmake)"
 perl="$(output_path perl)"
 pkg_config="$(output_path pkg-config)"
@@ -82,6 +115,12 @@ sleep = $coreutils/bin/sleep
 tar = $tar_path/bin/tar
 gzip = $gzip/bin/gzip
 python = $python/bin/python3
+bubblewrap = $bubblewrap/bin/bwrap
+runtime_stdlib_sources = $runtime_stdlib_sources
+runtime_stdlib_products = $runtime_stdlib_products
+runtime_stdlib_extract = $runtime_stdlib_extract
+runtime_stdlib_ghc_libdir = $ghc_libdir
+exomonad_runtime_tools = $exomonad_runtime_tools
 cmake = $cmake/bin/cmake
 perl = $perl/bin/perl
 pkg_config = $pkg_config/bin/pkg-config

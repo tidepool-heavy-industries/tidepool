@@ -217,7 +217,6 @@ impl PreparedWorker {
         let frontend = std::fs::read("/proc/self/exe").map_err(FrontendError::Io)?;
         Ok(crate::endpoint::producer_identity(
             &frontend,
-            self.selection.as_os_str(),
             &self.bytes,
             &self.ghc_libdir,
         ))
@@ -232,12 +231,8 @@ impl PreparedWorker {
         let frontend_path = std::env::current_exe()
             .and_then(|path| std::fs::canonicalize(path))
             .map_err(FrontendError::Io)?;
-        let producer_identity = crate::endpoint::producer_identity(
-            &frontend_bytes,
-            self.selection.as_os_str(),
-            &self.bytes,
-            &self.ghc_libdir,
-        );
+        let producer_identity =
+            crate::endpoint::producer_identity(&frontend_bytes, &self.bytes, &self.ghc_libdir);
         let frontend_path = json_path(&frontend_path)?;
         let worker_path = json_path(&self.selection)?;
         let ghc_libdir = json_os_str(&self.ghc_libdir)?;
@@ -392,7 +387,7 @@ fn serve_bound_endpoint() -> Result<u8, FrontendError> {
     let mut stdin = io::stdin().lock();
     let mut prefix = [0u8; 8];
     stdin.read_exact(&mut prefix).map_err(FrontendError::Io)?;
-    if &prefix == daemon::TRANSACTION {
+    if &prefix == daemon::DIRECT_TRANSACTION {
         let mut worker = daemon::Worker::spawn(&prepared)?;
         let result = (|| {
             worker.begin_transaction()?;
@@ -894,6 +889,27 @@ fn main() {{
         let aliased_manifest: serde_json::Value =
             serde_json::from_str(&aliased.deployment_manifest().unwrap()).unwrap();
         assert_eq!(aliased_manifest["worker_path"], manifest["worker_path"]);
+
+        let retained_path = dir.join("run-worker");
+        std::fs::copy(&worker, &retained_path).unwrap();
+        std::env::set_var(WORKER_ENV, &retained_path);
+        let retained = PreparedWorker::prepare().unwrap();
+        assert_eq!(retained.producer_identity().unwrap(), old_identity);
+        assert_eq!(retained.consumed_worker_identity(), old_worker_identity);
+        let retained_manifest: serde_json::Value =
+            serde_json::from_str(&retained.deployment_manifest().unwrap()).unwrap();
+        assert_ne!(retained_manifest["worker_path"], manifest["worker_path"]);
+        assert_eq!(
+            retained_manifest["producer_identity"],
+            manifest["producer_identity"]
+        );
+        let output = retained
+            .command()
+            .env("TIDEPOOL_PREPARED_WORKER_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"old-worker");
         std::env::set_var(WORKER_ENV, &worker);
 
         compile_fake_worker(&dir.join("replacement.rs"), &replacement, "new-worker");

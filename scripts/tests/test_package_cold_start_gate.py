@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -16,6 +17,115 @@ SPEC.loader.exec_module(gate)
 
 
 class ColdStartObservationTests(unittest.TestCase):
+    def test_sample_completion_is_bound_to_stopped_trace_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trace = root / "compiler.jsonl"
+            trace.write_text('{"fields":{"message":"compiler daemon ready"}}\n')
+            sample = gate.seal_sample({"failure": None, "daemon_trace": str(trace)})
+            self.assertTrue(sample["completed"])
+            self.assertEqual(sample["daemon_trace_sha256"], gate.sha256(trace))
+            trace.write_text("changed\n")
+            self.assertNotEqual(sample["daemon_trace_sha256"], gate.sha256(trace))
+            missing = gate.seal_sample({"failure": None, "daemon_trace": str(root / "missing")})
+            self.assertFalse(missing["completed"])
+            self.assertIn("trace unavailable", missing["failure"])
+
+    def test_runner_does_not_claim_an_unobserved_build_profile(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "exomonad"
+            binary.write_bytes(b"\x7fELFfixture")
+            binary.chmod(0o700)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            output = root / "evidence"
+            argv = [str(SCRIPT), "--package-entrypoint", str(binary),
+                    "--binary-path", str(binary), "--workspace", str(workspace),
+                    "--output", str(output), "--cargo-lock", str(binary),
+                    "--harness-checkout", str(root)]
+            with mock.patch.object(gate.sys, "argv", argv), \
+                    mock.patch.object(gate, "matched_harness_schema", side_effect=gate.GateError("fixture refusal")), \
+                    mock.patch.object(gate, "run_one") as run:
+                self.assertEqual(gate.main(), 1)
+            run.assert_not_called()
+            report = json.loads((output / "report.json").read_text())
+            runner = report["runners"]["cold_start"]
+            self.assertNotIn("profile", runner)
+            self.assertEqual(runner["binary_sha256"], gate.sha256(binary))
+            self.assertEqual(runner["exit_code"], 1)
+
+    def test_schema_authority_uses_pinned_owner_instead_of_current_head(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(['git', 'init', '--quiet', str(root)], check=True)
+            def commit(version):
+                owner = root / 'crates/harness/src/store/schema.rs'
+                owner.parent.mkdir(parents=True, exist_ok=True)
+                owner.write_text(f'pub const VERSION: u32 = {version};\n')
+                subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
+                subprocess.run(['git', '-C', str(root), '-c', 'user.name=Fixture', '-c',
+                                'user.email=fixture@example.invalid', 'commit', '--quiet', '-m', 'schema'], check=True)
+                return subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
+            pinned = commit(8)
+            commit(9)
+            lock = root / 'matched.lock'
+            lock.write_text('[[package]]\nname="harness"\nsource="git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=' + pinned + '#' + pinned + '"\n')
+            authority = gate.matched_harness_schema(lock, root)
+            self.assertEqual(authority['version'], 8)
+            self.assertEqual(authority['revision'], pinned)
+            self.assertEqual(authority['owner_bytes'], b'pub const VERSION: u32 = 8;\n')
+            self.assertEqual(authority['lock_sha256'], gate.sha256(lock))
+            # Dirty/newer owner files cannot silently change the matched contract.
+            (root / 'crates/harness/src/store/schema.rs').write_text('invalid current owner')
+            self.assertEqual(gate.matched_harness_schema(lock, root)['version'], 8)
+
+    def test_schema_authority_refuses_missing_ambiguous_or_nonexact_pin(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock = root / 'lock'
+            for content in ('', '[[package]]\nname="harness"\nsource="path:local"\n',
+                            '[[package]]\nname="harness"\n[[package]]\nname="harness"\n'):
+                lock.write_text(content)
+                with self.assertRaises(gate.GateError):
+                    gate.matched_harness_schema(lock, root)
+
+    def test_schema_authority_refuses_unavailable_or_ambiguous_owner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(['git', 'init', '--quiet', str(root)], check=True)
+            owner = root / 'crates/harness/src/store/schema.rs'
+            owner.parent.mkdir(parents=True)
+            owner.write_text('pub const VERSION: u32 = 8;\npub const VERSION: u32 = 9;\n')
+            subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
+            subprocess.run(['git', '-C', str(root), '-c', 'user.name=Fixture', '-c',
+                            'user.email=fixture@example.invalid', 'commit', '--quiet', '-m', 'ambiguous'], check=True)
+            revision = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
+            lock = root / 'matched.lock'
+            def pin(value):
+                lock.write_text('[[package]]\nname="harness"\nsource="git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=' + value + '#' + value + '"\n')
+            pin(revision)
+            with self.assertRaisesRegex(gate.GateError, 'version declaration'):
+                gate.matched_harness_schema(lock, root)
+            pin('0' * 40)
+            with self.assertRaisesRegex(gate.GateError, 'owner is unavailable'):
+                gate.matched_harness_schema(lock, root)
+
+    def test_read_only_store_refuses_schema_other_than_projected_owner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'store.sqlite'
+            with sqlite3.connect(path) as connection:
+                connection.executescript('CREATE TABLE schema_version(version INTEGER NOT NULL);'
+                                         'INSERT INTO schema_version VALUES(8);'
+                                         'CREATE TABLE decisions(hook TEXT NOT NULL);'
+                                         'CREATE TABLE events(kind TEXT NOT NULL);')
+            before = path.read_bytes()
+            evidence = gate.provider_store_evidence(path, 8)
+            self.assertEqual(evidence['store_schema_version'], 8)
+            with self.assertRaisesRegex(gate.GateError, 'schema version'):
+                gate.provider_store_evidence(path, 5)
+            self.assertEqual(path.read_bytes(), before)
+
     def test_status_waits_for_ready_phase_and_exact_run_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "status.json"
@@ -135,7 +245,7 @@ class ColdStartObservationTests(unittest.TestCase):
             connection.commit()
             connection.close()
 
-            evidence = gate.provider_store_evidence(path)
+            evidence = gate.provider_store_evidence(path, 5)
 
             self.assertTrue(evidence["verified"])
             self.assertEqual(evidence["method"], "harness-store-decisions-before-request")
@@ -148,7 +258,7 @@ class ColdStartObservationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             with self.assertRaises(gate.GateError):
-                gate.provider_store_evidence(root / "missing.sqlite")
+                gate.provider_store_evidence(root / "missing.sqlite", 5)
 
             path = root / "store.sqlite"
             connection = sqlite3.connect(path)
@@ -162,7 +272,7 @@ class ColdStartObservationTests(unittest.TestCase):
             connection.commit()
             connection.close()
             with self.assertRaises(gate.GateError):
-                gate.provider_store_evidence(path)
+                gate.provider_store_evidence(path, 5)
 
     def test_partial_init_run_pointer_is_retired_through_packaged_stop(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -172,6 +282,7 @@ class ColdStartObservationTests(unittest.TestCase):
             (workspace / ".exomonad" / "sessions").mkdir(parents=True)
             output.mkdir()
             args = argparse.Namespace(
+                harness_store_schema=8,
                 package_entrypoint=Path("/frozen/package/bin/exomonad"),
                 workspace=workspace,
             )
@@ -264,6 +375,7 @@ class ColdStartObservationTests(unittest.TestCase):
             workspace.mkdir()
             output.mkdir()
             args = argparse.Namespace(
+                harness_store_schema=8,
                 package_entrypoint=Path("/frozen/package/bin/exomonad"),
                 workspace=workspace,
             )

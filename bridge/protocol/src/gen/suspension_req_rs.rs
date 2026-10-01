@@ -53,14 +53,28 @@ pub fn module_index(effects: &[Effect], crate_dir: &str) -> GeneratedFile {
 pub fn file(e: &Effect, crate_dir: &str) -> GeneratedFile {
     GeneratedFile {
         path: path(e, crate_dir),
-        contents: body(e),
+        contents: body(e, false),
     }
 }
 
-fn body(e: &Effect) -> String {
+/// Include the same per-verb errors when the suspension owner emits typed replies.
+#[must_use]
+pub fn file_with_errors(e: &Effect, crate_dir: &str) -> GeneratedFile {
+    GeneratedFile {
+        path: path(e, crate_dir),
+        contents: body(e, true),
+    }
+}
+
+fn body(e: &Effect, errors: bool) -> String {
     let mut out = header("//! ", &format!("`{}` suspension request type", e.name));
     out.push('\n');
-    out.push_str("use tidepool_bridge_derive::FromHaskell;\n\n");
+    if errors && e.errors.is_some() {
+        out.push_str("use tidepool_bridge_derive::{FromHaskell, ToHaskell};\n\n");
+        out.push_str(&super::handler_rs::typed_failure(e));
+    } else {
+        out.push_str("use tidepool_bridge_derive::FromHaskell;\n\n");
+    }
 
     out.push_str(&format!(
         "/// One variant per `{}` GADT constructor, named EXACTLY as in Haskell.\n\
@@ -90,8 +104,14 @@ fn body(e: &Effect) -> String {
             .args
             .iter()
             .map(|a| {
-                a.rust
-                    .rust_type(&a.ty, &format!("{}::{}::{}", e.name, v.ctor, a.name))
+                // Suspension owners interpret JSON under the original observed table.
+                let binding = match a.rust {
+                    crate::schema::RustBinding::JsonValue => {
+                        crate::schema::RustBinding::HaskellValue
+                    }
+                    binding => binding,
+                };
+                binding.rust_type(&a.ty, &format!("{}::{}::{}", e.name, v.ctor, a.name))
             })
             .collect();
         out.push_str(&super::render_variant(v.ctor, &tys));

@@ -44,8 +44,92 @@ fn final_turn(response_id: &str, text: &str) -> ResponsesTurn {
 
 fn usage_turn(response_id: &str, text: &str, input_tokens: u64) -> ResponsesTurn {
     let mut turn = final_turn(response_id, text);
+    // A final answer waits for pending jobs before another Engine iteration.
+    // Commentary triggers compaction while the actual resident call is parked.
+    turn.items[0].0["phase"] = json!("commentary");
     turn.usage.input_tokens = input_tokens;
     turn
+}
+
+pub(super) fn compressible_history(request: &ResponsesRequest) -> String {
+    let input_bytes = serde_json::to_vec(&request.input)
+        .expect("serialize issued input")
+        .len();
+    let bytes = input_bytes.checked_mul(2).unwrap().max(4096);
+    assert!(bytes <= 1024 * 1024, "fixture history exceeds its bound");
+    "x".repeat(bytes)
+}
+
+pub(super) fn assert_applied_compaction(
+    host: &RunningBrowserHost,
+    operation: &OperationId,
+) -> harness::model::RequestId {
+    let store = host.runtime.store();
+    let events = store.events(None).expect("read compaction evidence");
+    let evidence = events
+        .iter()
+        .filter(|event| matches!(event.kind.as_str(), "compaction" | "compaction_attempt"))
+        .map(|event| {
+            json!({"request":event.request.as_ref().map(|id| &id.0),
+                "kind":event.kind,"payload":serde_json::from_str::<serde_json::Value>(&event.payload).unwrap()})
+        })
+        .collect::<Vec<_>>();
+    eprintln!("m1-compaction-evidence {}", json!({"events":evidence}));
+    assert!(
+        events.iter().any(|event| {
+            event.kind == "compaction_attempt"
+                && serde_json::from_str::<serde_json::Value>(&event.payload).unwrap()["outcome"]
+                    == "applied"
+        }),
+        "fixture must apply compaction rather than merely request a summary"
+    );
+    let claims = store.claims_for_operation(operation).unwrap();
+    assert_eq!(
+        claims.len(),
+        2,
+        "original and applied-compaction claimant only"
+    );
+    let inherited = claims
+        .iter()
+        .find(|claim| claim.request != operation.request)
+        .expect("compaction inherits the qualified original operation");
+    assert!(
+        events.iter().any(|event| {
+            event.kind == "compaction" && event.request.as_ref() == Some(&inherited.request)
+        }),
+        "inherited claimant must belong to the applied compaction boundary"
+    );
+    inherited.request.clone()
+}
+
+async fn wait_for_armed_cell(
+    host: &RunningBrowserHost,
+    target: &harness::embedding::HostIdentity,
+    operation: &OperationId,
+) {
+    let context = exomonad_tool::ToolInvocationContext {
+        origin: exomonad_tool::ToolInvocationOrigin::Model(
+            embedded_harness::original_operation(target, operation).unwrap(),
+        ),
+        call_id: operation.call.0.clone(),
+        namespace: None,
+    };
+    tokio::time::timeout(Duration::from_secs(180), async {
+        loop {
+            wait_for_cell_state(host, operation, CellState::Pending, Duration::from_secs(1)).await;
+            if host
+                .campaign
+                .actor
+                .hosted_workbench_waiting(&context)
+                .is_some()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("raw Haskell must finish preparation and arm its actual resident Sleep");
 }
 
 fn output_for_call(request: &ResponsesRequest) -> impl Iterator<Item = &harness::item::Item> {
@@ -92,7 +176,7 @@ impl ResponsesTransport for PendingCellTransport {
                         "type":"custom_tool_call",
                         "call_id":CELL_CALL_ID,
                         "name":"haskell",
-                        "input":"answer <- do { sleep (seconds 30); pure (40 + 2 :: Int) }"
+                        "input":"do { sleep (seconds 30); pure (40 + 2 :: Int) }"
                     }))],
                     usage: Usage::default(),
                 })
@@ -150,6 +234,16 @@ impl ResponsesTransport for PendingCellTransport {
                     .map_err(|_| TransportError::Stream("test dropped successor response".into()))
             }
             4 => {
+                if !request
+                    .input
+                    .iter()
+                    .any(|item| item.0["content"] == CONTINUE_INPUT)
+                {
+                    return Err(TransportError::Stream(
+                        "late-output request did not include the explicit continuation input"
+                            .into(),
+                    ));
+                }
                 if !retains_declared_tools(self, &request) {
                     return Err(TransportError::Stream(
                         "late-output tool declarations changed during the resident call".into(),
@@ -225,11 +319,14 @@ async fn wait_for_cell_state(
         loop {
             let store = host.runtime.store();
             let claims = store
-                .claims(&operation.call)
+                .claims_for_operation(operation)
                 .expect("read original resident tool claim");
-            assert_eq!(claims.len(), 1, "resident operation must keep one claim");
-            let claim = &claims[0];
-            assert_eq!(&claim.operation, operation, "original operation changed");
+            let claim = claims
+                .iter()
+                .find(|claim| claim.request == operation.request)
+                .expect("resident operation must retain its original claimant");
+            assert!(claims.iter().all(|claim| &claim.operation == operation),
+                "compacted claimants must retain the qualified original operation");
             let persisted = store
                 .replay_output_operation(operation)
                 .expect("read original resident output");
@@ -240,7 +337,7 @@ async fn wait_for_cell_state(
                 .expect("original resident operation must remain in the scheduler");
             match output {
                 None => {
-                    assert_eq!(claim.state, ClaimState::Pending);
+                    assert!(claims.iter().all(|claim| claim.state == ClaimState::Pending));
                     assert!(persisted.is_none(), "pending operation already has output");
                     if matches!(expected, CellState::Pending) {
                         assert!(
@@ -268,6 +365,7 @@ async fn wait_for_cell_state(
                         "scheduler did not retain the exact committed resident result: {output:?}",
                     );
                     if claim.state == ClaimState::Settled {
+                        assert!(claims.iter().all(|claim| claim.state == ClaimState::Settled));
                         let persisted = persisted.expect("settled claim must retain its output");
                         assert!(
                             cell_output_matches(&persisted, CELL_CALL_ID, "42"),
@@ -291,7 +389,7 @@ async fn wait_for_cell_state(
     }
 }
 
-async fn submit_host_input(
+pub(super) async fn submit_host_input(
     client: &reqwest::Client,
     address: std::net::SocketAddr,
     origin: &str,
@@ -387,17 +485,11 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
         .any(|item| item.0["call_id"] == CELL_CALL_ID));
     assert_eq!(output_for_call(&pending_request).count(), 0);
     let operation = resident_cell_operation(&host, &target);
-    wait_for_cell_state(
-        &host,
-        &operation,
-        CellState::Pending,
-        Duration::from_secs(180),
-    )
-    .await;
+    wait_for_armed_cell(&host, &target, &operation).await;
     pending_reply
         .send(usage_turn(
             "m1-late-cell-trigger-compaction",
-            "The resident operation is still running.",
+            &compressible_history(&pending_request),
             100_001,
         ))
         .expect("Engine stopped before compaction threshold was applied");
@@ -426,6 +518,7 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
         .iter()
         .any(|item| item.0["call_id"] == CELL_CALL_ID));
     assert_eq!(output_for_call(&successor_request).count(), 0);
+    assert_applied_compaction(&host, &operation);
     wait_for_cell_state(
         &host,
         &operation,
@@ -433,13 +526,8 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
         Duration::from_secs(30),
     )
     .await;
-    successor_reply
-        .send(final_turn(
-            "m1-late-cell-waiting",
-            "Waiting for the resident Haskell result.",
-        ))
-        .expect("Engine stopped before pending output could settle");
-
+    // Hold the issued response until completion so the final answer can stop
+    // this turn without automatically requesting a pending job's late output.
     wait_for_cell_state(
         &host,
         &operation,
@@ -447,6 +535,15 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
         Duration::from_secs(60),
     )
     .await;
+    successor_reply
+        .send(final_turn(
+            "m1-late-cell-waiting",
+            "The resident Haskell result is retained.",
+        ))
+        .expect("Engine stopped before retained output could settle");
+    let (mut socket, snapshot) = browser_snapshot_until(host.address, &cookie, "waiting").await;
+    assert_eq!(snapshot["snapshot"]["conversations"][0]["state"], "idle");
+    socket.close(None).await.unwrap();
     submit_host_input(
         &client,
         host.address,
@@ -472,8 +569,10 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
         .store()
         .claims(&CallId(CELL_CALL_ID.into()))
         .expect("read resident tool claim");
-    assert_eq!(claims.len(), 1, "one real Haskell call must have one claim");
-    assert_eq!(claims[0].state, ClaimState::Settled);
+    assert_eq!(claims.len(), 2, "one original and one compacted claimant");
+    assert!(claims
+        .iter()
+        .all(|claim| claim.operation == operation && claim.state == ClaimState::Settled));
     assert_eq!(target.actor, AgentPath("/root".into()));
 
     host.stop()

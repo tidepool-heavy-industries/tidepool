@@ -7,6 +7,7 @@ use harness::{
     },
     item::Item,
     model::{AgentPath, Effort, OperationId},
+    provider::ToolFailure,
     store::Store,
     transport::Auth,
     turn::JobScheduler,
@@ -178,6 +179,45 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelService<A, C> 
             }
         }
     }
+    /// The cell owner calls this after its native callback can no longer resume.
+    /// Signal-only cancellation cannot abandon a handed-out callback safely.
+    pub fn settle(&self) -> Result<(), ModelBoundaryError> {
+        self.cancel();
+        let entries = self
+            .registry
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(token, registered)| (token.clone(), registered.entry.clone()))
+            .collect::<Vec<_>>();
+        for (_, entry) in &entries {
+            let mut entry = entry.lock().unwrap();
+            match entry.pending.take() {
+                Some(Pending::Callback(callback)) => {
+                    // Only this still-unanswered continuation is abandoned. A
+                    // callback that already completed has left `pending`.
+                    let _ = callback.complete(Err("cell ended before callback completion".into()));
+                }
+                Some(Pending::Hook { hook, .. }) => {
+                    let _ = hook.complete(HookAnnotation::NoAnnotation);
+                }
+                None => {}
+            }
+        }
+        let mut failure = None;
+        for (token, entry) in entries {
+            let mut entry = entry.lock().unwrap();
+            if let Err(error) = self.next(&token, &mut entry) {
+                if failure.is_none() {
+                    failure = Some(error);
+                }
+            }
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
     fn authorize(&self, caller: PrincipalId) -> Result<(), ModelBoundaryError> {
         if caller != self.principal {
             return Err(rejected("model service belongs to another principal"));
@@ -246,8 +286,25 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelService<A, C> 
                 Ok(value)
             }
             Step::Finished(receipt) => {
+                let retained = json!(receipt);
+                let events = self
+                    .store
+                    .events(receipt.requests.last())
+                    .map_err(|error| transport_error(error.to_string()))?;
+                let confirmed = events
+                    .iter()
+                    .filter(|event| event.kind == "model_invocation_receipt")
+                    .any(|event| {
+                        serde_json::from_str::<Value>(&event.payload)
+                            .is_ok_and(|payload| payload == retained)
+                    });
+                if !confirmed {
+                    return Err(transport_error(
+                        "original model invocation receipt is not retained",
+                    ));
+                }
                 self.registry.lock().unwrap().remove(token);
-                Ok(json!({"kind":"finished","receipt":receipt}))
+                Ok(json!({"kind":"finished","receipt":retained}))
             }
         }
     }
@@ -368,11 +425,27 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
                 "callback identity does not match pending continuation",
             ));
         }
+        let reply: exomonad_actor::ToolDispatchReply = serde_json::from_value(answer)
+            .map_err(|error| rejected(format!("invalid callback reply: {error}")))?;
+        let Some(Pending::Callback(callback)) = &entry.pending else {
+            unreachable!()
+        };
+        let result = match reply.into_output() {
+            Ok(output) => Ok(output),
+            Err(error) => {
+                if error.tool() != callback.name {
+                    return Err(rejected("callback refusal names another tool"));
+                }
+                let metadata = serde_json::to_value(&error)
+                    .map_err(|error| transport_error(error.to_string()))?;
+                Err(ToolFailure::with_metadata(error.to_string(), metadata))
+            }
+        };
         let Some(Pending::Callback(callback)) = entry.pending.take() else {
             unreachable!()
         };
         callback
-            .complete(Ok(answer))
+            .complete(result)
             .map_err(|_| transport_error("callback continuation closed"))?;
         self.next(token, &mut entry)
     }
@@ -502,6 +575,9 @@ mod tests {
             json!({"type":"function_call","call_id":"call-1","name":"echo","arguments":"{}"}),
         )])
     }
+    fn callback_reply(output: Value) -> Value {
+        json!({"status":"success","output":output})
+    }
     fn request(hook: bool) -> Value {
         json!({"instructions":"offline","input":"run","model":null,"effort":null,"limits":{"requests":null,"tools":null,"reported_tokens":null,"seconds":null},"tools":[{"name":"echo","description":"echo","kind":"call","inputSchema":{"type":"object","properties":{},"required":[],"additionalProperties":false},"outputSchema":null}],"result_schema":null,"after_tool":hook})
     }
@@ -530,6 +606,197 @@ mod tests {
                 ))
             }),
         )
+    }
+    #[test]
+    fn settlement_abandons_unanswered_callbacks_without_waiting_for_binding_drop() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let owner = Arc::new(service(
+            &runtime,
+            vec![vec![callback(), final_turn()]],
+            Limits::default(),
+        ));
+        let retained = owner.clone();
+        let caller = PrincipalId::new(1, 2);
+        let first = owner.start(caller, request(false)).unwrap();
+        let operation: OperationId =
+            serde_json::from_str(first["call_id"].as_str().unwrap()).unwrap();
+        owner.cancel();
+        assert!(owner
+            .store
+            .events(None)
+            .unwrap()
+            .iter()
+            .all(|event| event.kind != "model_invocation_receipt"));
+        assert!(matches!(
+            owner
+                .entry(caller, first["invocation"].as_str().unwrap())
+                .unwrap()
+                .lock()
+                .unwrap()
+                .pending,
+            Some(Pending::Callback(_))
+        ));
+        owner.settle().unwrap();
+        assert_eq!(Arc::strong_count(&owner), 2);
+        assert!(retained.registry.lock().unwrap().is_empty());
+        let receipts = retained
+            .store
+            .events(None)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == "model_invocation_receipt")
+            .collect::<Vec<_>>();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&receipts[0].payload).unwrap()["outcome"]["kind"],
+            "cancelled"
+        );
+        assert!(retained
+            .store
+            .replay_tool_output_operation(&operation)
+            .unwrap()
+            .is_some());
+        assert!(retained.start(caller, request(false)).is_err());
+        retained.settle().unwrap();
+        assert_eq!(
+            retained
+                .store
+                .events(None)
+                .unwrap()
+                .iter()
+                .filter(|event| event.kind == "model_invocation_receipt")
+                .count(),
+            1
+        );
+
+        let completed = service(
+            &runtime,
+            vec![vec![callback(), final_turn()]],
+            Limits::default(),
+        );
+        let first = completed.start(caller, request(false)).unwrap();
+        let operation: OperationId =
+            serde_json::from_str(first["call_id"].as_str().unwrap()).unwrap();
+        completed
+            .resume(
+                caller,
+                first["invocation"].as_str().unwrap(),
+                first["call_id"].as_str().unwrap(),
+                callback_reply(json!("actual completed result")),
+            )
+            .unwrap();
+        let original = completed
+            .store
+            .replay_tool_output_operation(&operation)
+            .unwrap()
+            .unwrap();
+        completed.settle().unwrap();
+        assert_eq!(
+            completed
+                .store
+                .replay_tool_output_operation(&operation)
+                .unwrap()
+                .unwrap(),
+            original
+        );
+        assert_eq!(original.terminal, harness::store::TerminalOutcome::Success);
+    }
+    #[test]
+    fn malformed_callback_envelopes_do_not_consume_the_original_continuation() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let service = service(
+            &runtime,
+            vec![vec![callback(), final_turn()]],
+            Limits::default(),
+        );
+        let caller = PrincipalId::new(1, 2);
+        let first = service.start(caller, request(false)).unwrap();
+        let token = first["invocation"].as_str().unwrap();
+        let call = first["call_id"].as_str().unwrap();
+        for invalid in [
+            json!({"Right":"accidental Either encoding"}),
+            json!({"Left":{"UnknownTool":"echo"}}),
+            json!({"status":"refused","kind":"invented","error":"bad","tool":"echo"}),
+            json!({"status":"refused","kind":"invalid_input","error":"bad","tool":"echo"}),
+            json!({"status":"refused","kind":"unknown_tool","error":"bad","tool":"foreign"}),
+        ] {
+            assert!(matches!(
+                service.resume(caller, token, call, invalid),
+                Err(ModelBoundaryError::ModelRejected(_))
+            ));
+            assert!(matches!(
+                service
+                    .entry(caller, token)
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .pending,
+                Some(Pending::Callback(_))
+            ));
+        }
+        let authored = json!({"error":"ordinary authored output","status":"refused"});
+        let finished = service
+            .resume(caller, token, call, callback_reply(authored.clone()))
+            .unwrap();
+        assert_eq!(finished["receipt"]["outcome"]["kind"], "text");
+        let operation: OperationId = serde_json::from_str(call).unwrap();
+        let recorded = service
+            .store
+            .replay_tool_output_operation(&operation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.terminal, harness::store::TerminalOutcome::Success);
+        assert_eq!(
+            serde_json::from_str::<Value>(recorded.item.0["output"].as_str().unwrap()).unwrap(),
+            authored
+        );
+    }
+    #[test]
+    fn callback_dispatch_refusals_retain_the_original_typed_error() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for refusal in [
+            json!({"status":"refused","kind":"unknown_tool","error":"no such tool: echo","tool":"echo"}),
+            json!({"status":"refused","kind":"invalid_input","error":"invalid input for tool echo: semantic rejection","tool":"echo","detail":"semantic rejection"}),
+        ] {
+            let service = service(
+                &runtime,
+                vec![vec![callback(), final_turn()]],
+                Limits::default(),
+            );
+            let caller = PrincipalId::new(1, 2);
+            let first = service.start(caller, request(false)).unwrap();
+            let call = first["call_id"].as_str().unwrap();
+            let finished = service
+                .resume(
+                    caller,
+                    first["invocation"].as_str().unwrap(),
+                    call,
+                    refusal.clone(),
+                )
+                .unwrap();
+            assert_eq!(finished["receipt"]["outcome"]["kind"], "text");
+            let operation: OperationId = serde_json::from_str(call).unwrap();
+            let recorded = service
+                .store
+                .replay_tool_output_operation(&operation)
+                .unwrap()
+                .unwrap();
+            let harness::store::TerminalOutcome::Failure(failure) = recorded.terminal else {
+                panic!("typed dispatch refusal expected")
+            };
+            let mut metadata = refusal.clone();
+            metadata.as_object_mut().unwrap().remove("status");
+            metadata.as_object_mut().unwrap().remove("error");
+            assert_eq!(failure.metadata(), Some(&metadata));
+            assert_eq!(
+                failure.message(),
+                format!("tool failed: {}", refusal["error"].as_str().unwrap())
+            );
+            let output: Value =
+                serde_json::from_str(recorded.item.0["output"].as_str().unwrap()).unwrap();
+            assert_eq!(output["failure"], metadata);
+            assert_eq!(output["error"], failure.message());
+        }
     }
     #[test]
     fn invalid_policy_choices_and_negative_limits_do_not_admit_work() {
@@ -575,10 +842,15 @@ mod tests {
         let first = service.start(caller, request(false)).unwrap();
         let token = first["invocation"].as_str().unwrap();
         assert!(service
-            .resume(caller, token, "wrong", json!("result"))
+            .resume(caller, token, "wrong", callback_reply(json!("result")))
             .is_err());
         assert!(service
-            .resume(PrincipalId::SYSTEM, token, "call-1", json!("result"))
+            .resume(
+                PrincipalId::SYSTEM,
+                token,
+                "call-1",
+                callback_reply(json!("result"))
+            )
             .is_err());
         let nested = service.start(caller, request(false)).unwrap();
         assert_eq!(nested["receipt"]["outcome"]["kind"], "text");
@@ -587,7 +859,7 @@ mod tests {
                 caller,
                 token,
                 first["call_id"].as_str().unwrap(),
-                json!("nested result"),
+                callback_reply(json!("nested result")),
             )
             .unwrap();
         assert_eq!(finished["receipt"]["parent_cell"], "retained-cell");
@@ -598,7 +870,7 @@ mod tests {
                 caller,
                 token,
                 first["call_id"].as_str().unwrap(),
-                json!("duplicate")
+                callback_reply(json!("duplicate"))
             )
             .is_err());
     }
@@ -615,7 +887,7 @@ mod tests {
         let token = first["invocation"].as_str().unwrap();
         let first_id = first["call_id"].as_str().unwrap();
         let first_hook = service
-            .resume(caller, token, first_id, json!("first"))
+            .resume(caller, token, first_id, callback_reply(json!("first")))
             .unwrap();
         let second = service
             .annotate(
@@ -632,13 +904,23 @@ mod tests {
         assert_eq!(first_operation.call, second_operation.call);
         assert_ne!(first_operation.request, second_operation.request);
         assert!(service
-            .resume(caller, token, first_id, json!("late duplicate"))
+            .resume(
+                caller,
+                token,
+                first_id,
+                callback_reply(json!("late duplicate"))
+            )
             .is_err());
         assert!(service
-            .resume(caller, token, "call-1", json!("unqualified"))
+            .resume(
+                caller,
+                token,
+                "call-1",
+                callback_reply(json!("unqualified"))
+            )
             .is_err());
         let second_hook = service
-            .resume(caller, token, second_id, json!("second"))
+            .resume(caller, token, second_id, callback_reply(json!("second")))
             .unwrap();
         assert_eq!(second_hook["operation"], second["call_id"]);
         let finished = service
@@ -667,7 +949,7 @@ mod tests {
                 caller,
                 token,
                 first["call_id"].as_str().unwrap(),
-                json!("original"),
+                callback_reply(json!("original")),
             )
             .unwrap();
         assert_eq!(hook["kind"], "hook");
@@ -719,7 +1001,7 @@ mod tests {
                 caller,
                 token,
                 first["call_id"].as_str().unwrap(),
-                json!("completed after close"),
+                callback_reply(json!("completed after close")),
             )
             .unwrap();
         assert_eq!(finished["receipt"]["outcome"]["kind"], "cancelled");
@@ -740,7 +1022,7 @@ mod tests {
                 caller,
                 token,
                 first["call_id"].as_str().unwrap(),
-                json!("result"),
+                callback_reply(json!("result")),
             )
             .unwrap();
         service
@@ -777,7 +1059,7 @@ mod tests {
                 caller,
                 token,
                 first["call_id"].as_str().unwrap(),
-                json!("original"),
+                callback_reply(json!("original")),
             )
             .unwrap();
         assert!(service
@@ -801,5 +1083,33 @@ mod tests {
             receipt.outcome,
             harness::invocation::Outcome::Cancelled
         ));
+    }
+    #[test]
+    fn foreign_cell_tokens_are_refused_even_for_the_same_actor_principal() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let owner = service(
+            &runtime,
+            vec![vec![callback(), final_turn()]],
+            Limits::default(),
+        );
+        let foreign = service(&runtime, vec![], Limits::default());
+        let caller = PrincipalId::new(1, 2);
+        let first = owner.start(caller, request(false)).unwrap();
+        let token = first["invocation"].as_str().unwrap();
+        let operation = first["call_id"].as_str().unwrap();
+        assert!(matches!(
+            foreign.resume(caller, token, operation, callback_reply(json!("foreign"))),
+            Err(ModelBoundaryError::ModelRejected(_))
+        ));
+        assert!(matches!(
+            foreign.close(caller, token),
+            Err(ModelBoundaryError::ModelRejected(_))
+        ));
+        assert!(foreign.registry.lock().unwrap().is_empty());
+        assert!(foreign.budget.get().is_none());
+        let finished = owner
+            .resume(caller, token, operation, callback_reply(json!("original")))
+            .unwrap();
+        assert_eq!(finished["receipt"]["outcome"]["kind"], "text");
     }
 }

@@ -45,6 +45,7 @@ library tidepool-extract-internal
     Tidepool.GhcPipeline
     Tidepool.ExactHydration
     Tidepool.ExactScope
+    Tidepool.ExecutionSource
     Tidepool.HostBindingAuthority
     Tidepool.HomeProducts
     Tidepool.FamilyConsistency

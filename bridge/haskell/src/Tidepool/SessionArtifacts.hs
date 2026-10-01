@@ -46,7 +46,7 @@ import Tidepool.Session
   , sessionModuleString, writeSessionIface )
 import Tidepool.Session (sessionHiPath)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
-import Tidepool.PackageWitness (encodePackageImports, packageImportRoot)
+import Tidepool.PackageWitness (PackageImportEvidence(..), CompilerProvidedImport(..), encodePackageImports, packageImportRoot)
 import qualified Crypto.Hash.SHA256 as SHA256
 import Numeric (showHex)
 import Tidepool.TypePolicy (rootNominalHeadOfType, stabilizeEffectRows)
@@ -101,7 +101,7 @@ mkBoundBinders bindNames generation root result = do
         replicate (2 - length rendered) '0' ++ rendered) (BS.unpack (SHA256.hash bytes))
       artifact = ExactIfaceArtifact (unitString home) (sessionModuleString sessionModule) path digest requirements
       text = encodeString . T.pack
-  BS.writeFile (path ++ ".packages") (encodePackageImports artifact roots)
+  BS.writeFile (path ++ ".packages") (encodePackageImports artifact (PackageImportEvidence roots [CompilerPrimitive | gHC_PRIM `elem` owners]))
   BS.writeFile (path ++ ".requirements") (toStrictByteString
     (encodeListLen (fromIntegral (length requirements))
       <> foldMap (\(unit,owner) -> encodeListLen 2 <> text unit <> text owner) requirements))

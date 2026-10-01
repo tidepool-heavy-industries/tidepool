@@ -661,4 +661,4 @@ pub(super) fn retain_invocation_cleanup_summary(
 
 #[cfg(test)]
 #[path = "invocation_work_tests.rs"]
-mod tests;
+pub(in crate::resident_actor) mod tests;

@@ -73,6 +73,9 @@ nix_tool = rule(
 
 
 def _nix_directory_impl(ctx):
+    path = ctx.attrs.store_path
+    if not path.startswith("/nix/store/") or any([part in ["", ".", ".."] for part in path.split("/")[1:]]):
+        fail("{} requires an immutable Nix store directory; materialize its pinned package output and rerun scripts/buck2-configure.sh".format(ctx.label))
     output = ctx.actions.declare_output(ctx.label.name, dir = True)
     ctx.actions.run(
         cmd_args([ctx.attrs.cp, "-a", ctx.attrs.store_path + "/.", output.as_output()]),
@@ -85,5 +88,54 @@ nix_directory = rule(
     attrs = {
         "cp": attrs.string(),
         "store_path": attrs.string(),
+    },
+)
+
+
+def _checked_harness_source_impl(ctx):
+    if bool(ctx.attrs.source) == bool(ctx.attrs.store_path):
+        fail("checked_harness_source requires exactly one Git source or immutable Nix store path")
+    if ctx.attrs.store_path:
+        path = ctx.attrs.store_path
+        if not path.startswith("/nix/store/") or any([part in ["", ".", ".."] for part in path.split("/")[1:]]):
+            fail("checked_harness_source requires an immutable Nix store path")
+        source = path + "/."
+    else:
+        source = cmd_args(ctx.attrs.source, format = "{}/.")
+    revision = ctx.actions.declare_output("harness-source-revision.txt")
+    ctx.actions.run(
+        cmd_args([
+            ctx.attrs.python,
+            ctx.attrs.provenance_script,
+            "--generated-source-revision", ctx.attrs.revision,
+            "--generated-source-nar-hash", ctx.attrs.nar_hash,
+            "--cargo-lock", ctx.attrs.cargo_lock,
+            "--flake-lock", ctx.attrs.flake_lock,
+            "--output", revision.as_output(),
+        ]),
+        category = "harness_source_revision",
+    )
+    output = ctx.actions.declare_output(ctx.label.name, dir = True)
+    ctx.actions.run(
+        cmd_args([ctx.attrs.cp, "-a", source, output.as_output()], hidden = [revision]),
+        category = "harness_source",
+    )
+    return [DefaultInfo(
+        default_output = output,
+        sub_targets = {"revision": [DefaultInfo(default_output = revision)]},
+    )]
+
+checked_harness_source = rule(
+    impl = _checked_harness_source_impl,
+    attrs = {
+        "cp": attrs.string(),
+        "python": attrs.string(),
+        "store_path": attrs.string(default = ""),
+        "source": attrs.option(attrs.source(), default = None),
+        "revision": attrs.string(),
+        "nar_hash": attrs.string(),
+        "cargo_lock": attrs.source(),
+        "flake_lock": attrs.source(),
+        "provenance_script": attrs.source(),
     },
 )

@@ -43,8 +43,6 @@ rust_filegroup(
     name = "tidepool-extract_sources",
     mapped_srcs = {
         "//bridge/haskell:extract_request_source": "bridge/haskell/src/Tidepool/ExtractRequest.hs",
-        "//bridge/haskell:ghc_pipeline_source": "bridge/haskell/src/Tidepool/GhcPipeline.hs",
-        "//bridge/haskell:timing_source": "bridge/haskell/src/Tidepool/Timing.hs",
         "//bridge/haskell:worker_server_source": "bridge/haskell/src/Tidepool/WorkerServer.hs",
         "Cargo.toml": "tidepool/extract-cmd/Cargo.toml",
         "src/daemon.rs": "tidepool/extract-cmd/src/daemon.rs",
@@ -88,6 +86,7 @@ rust_filegroup(
         "Cargo.toml": "tidepool/extract-cmd/Cargo.toml",
         "src/daemon.rs": "tidepool/extract-cmd/src/daemon.rs",
         "src/diagnostics.rs": "tidepool/extract-cmd/src/diagnostics.rs",
+        "src/diagnostics_tests.rs": "tidepool/extract-cmd/src/diagnostics_tests.rs",
         "src/endpoint.rs": "tidepool/extract-cmd/src/endpoint.rs",
         "src/exec_check.rs": "tidepool/extract-cmd/src/exec_check.rs",
         "src/frontend.rs": "tidepool/extract-cmd/src/frontend.rs",

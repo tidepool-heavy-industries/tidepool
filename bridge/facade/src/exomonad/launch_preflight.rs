@@ -376,9 +376,11 @@ mod tests {
             verdicts(&lines),
             [Verdict::Ok, Verdict::Fail, Verdict::Fail]
         );
-        assert!(lines[1]
-            .to_string()
-            .starts_with("preflight codex:     FAIL"));
+        assert!(
+            lines[1]
+                .to_string()
+                .starts_with("preflight codex:     FAIL")
+        );
     }
 
     #[test]

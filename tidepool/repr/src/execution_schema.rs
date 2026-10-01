@@ -1326,6 +1326,37 @@ pub fn parse_module_products(
     requirements: &ProgramRequirements,
     limits: DecodeLimits,
 ) -> Result<Vec<RawModuleProduct>, ParseError> {
+    parse_module_products_inner(bytes, requirements, limits, |_| Ok(()))
+}
+
+/// Decode products and normalize each singleton sidecar from the same bounded
+/// wire value. Interface bytes and opaque projected-group bytes are preserved;
+/// only the enclosing TPMOD framing follows the encoder's normal widths.
+pub fn parse_module_products_with_framing(
+    bytes: &[u8],
+    requirements: &ProgramRequirements,
+    limits: DecodeLimits,
+) -> Result<(Vec<RawModuleProduct>, Vec<Vec<u8>>), ParseError> {
+    let mut sidecars = Vec::new();
+    let products = parse_module_products_inner(bytes, requirements, limits, |row| {
+        let mut singleton = Vec::new();
+        ciborium::ser::into_writer(&("TPMOD", 1u64, [row]), &mut singleton)
+            .map_err(|error| ParseError::Malformed(format!("module product framing: {error}")))?;
+        if singleton.len() > limits.max_bytes {
+            return Err(ParseError::LimitExceeded("module product framing"));
+        }
+        sidecars.push(singleton);
+        Ok(())
+    })?;
+    Ok((products, sidecars))
+}
+
+fn parse_module_products_inner(
+    bytes: &[u8],
+    requirements: &ProgramRequirements,
+    limits: DecodeLimits,
+    mut normalized_row: impl FnMut(&ciborium::value::Value) -> Result<(), ParseError>,
+) -> Result<Vec<RawModuleProduct>, ParseError> {
     use ciborium::value::Value;
 
     let Value::Array(header) = codec::decode_value(bytes, limits)? else {
@@ -1409,6 +1440,7 @@ pub fn parse_module_products(
             }
             projected.push(parsed);
         }
+        normalized_row(module)?;
         output.push(RawModuleProduct {
             unit: unit.clone(),
             module: name.clone(),
@@ -1583,6 +1615,74 @@ mod projected_group_tests {
                 }
             },
         ])
+    }
+
+    #[test]
+    fn module_framing_normalizes_outer_widths_and_preserves_opaque_group_bytes() {
+        let (group, requirements, entry) = fixture();
+        // The group itself has a valid nonminimal definite array width. TPMOD
+        // normalization must preserve it as an opaque byte string.
+        assert_eq!(group[0], 0x93);
+        let mut opaque = vec![0x98, 19];
+        opaque.extend_from_slice(&group[1..]);
+        let row = Value::Array(vec![
+            Value::Text(entry.unit),
+            Value::Text(entry.module),
+            Value::Bytes(vec![0x42, 0x00, 0xff]),
+            Value::Array(vec![Value::Bytes(opaque.clone())]),
+        ]);
+        let mut singleton = Vec::new();
+        ciborium::ser::into_writer(&("TPMOD", 1u64, [&row]), &mut singleton).unwrap();
+        let mut widened = vec![0x98, 3, 0x78, 5];
+        widened.extend_from_slice(b"TPMOD");
+        widened.extend_from_slice(&[0x18, 1, 0x98, 1, 0x98, 4]);
+        // Widen the product's unit-text length without changing its identity.
+        let Value::Array(fields) = &row else {
+            unreachable!()
+        };
+        let unit = fields[0].as_text().unwrap();
+        assert!(unit.len() < 256);
+        widened.extend_from_slice(&[0x78, unit.len() as u8]);
+        widened.extend_from_slice(unit.as_bytes());
+        for value in &fields[1..] {
+            ciborium::ser::into_writer(value, &mut widened).unwrap();
+        }
+        let (products, frames) =
+            parse_module_products_with_framing(&widened, &requirements, DecodeLimits::default())
+                .unwrap();
+        assert_eq!(products[0].interface, [0x42, 0x00, 0xff]);
+        assert_eq!(frames, [singleton.clone()]);
+        let Value::Array(header) = ciborium::de::from_reader(frames[0].as_slice()).unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(
+            header[2].as_array().unwrap()[0].as_array().unwrap()[3],
+            Value::Array(vec![Value::Bytes(opaque)])
+        );
+        let unrelated = Value::Array(vec![
+            Value::Text("other".into()),
+            Value::Text("Unrelated".into()),
+            Value::Bytes(vec![0x43]),
+            Value::Array(vec![]),
+        ]);
+        let mut combined = Vec::new();
+        ciborium::ser::into_writer(&("TPMOD", 1u64, [&row, &unrelated]), &mut combined).unwrap();
+        let (_, frames) =
+            parse_module_products_with_framing(&combined, &requirements, DecodeLimits::default())
+                .unwrap();
+        assert_eq!(frames[0], singleton);
+        let mut limits = DecodeLimits::default();
+        limits.max_bytes = widened.len() - 1;
+        assert!(matches!(
+            parse_module_products_with_framing(&widened, &requirements, limits),
+            Err(ParseError::ByteLimit { .. })
+        ));
+        let mut trailing = widened;
+        trailing.push(0);
+        assert_eq!(
+            parse_module_products_with_framing(&trailing, &requirements, DecodeLimits::default()),
+            Err(ParseError::TrailingBytes)
+        );
     }
 
     #[test]

@@ -14,3 +14,5 @@ rustc --edition=2021 bridge/haskell/test-check/PreparedContract.rs \
   -L dependency="$dependencies" "$@" -o "$output/prepared-contract"
 rustc --edition=2021 bridge/haskell/test-check/CaptureRecipes.rs \
   -L dependency="$dependencies" "$@" -o "$output/capture-recipes"
+rustc --edition=2021 bridge/haskell/test-check/EffectSupport.rs \
+  -L dependency="$dependencies" "$@" -o "$output/effect-support"

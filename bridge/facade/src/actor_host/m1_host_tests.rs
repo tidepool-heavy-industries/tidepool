@@ -28,9 +28,14 @@ mod warm_cell_performance;
 
 #[path = "m1_cancel_performance.rs"]
 mod cancel_performance;
+#[path = "m1_eight_actor_performance.rs"]
+mod eight_actor_performance;
 
 #[path = "m1_real_host_late_output_tests.rs"]
 mod real_host_late_output_tests;
+
+#[path = "m1_request_reload_tests.rs"]
+mod request_reload_tests;
 
 #[tokio::test]
 #[ignore = "requires declared matched web, Node, Playwright and resident compiler inputs"]

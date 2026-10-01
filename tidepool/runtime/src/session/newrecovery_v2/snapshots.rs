@@ -236,11 +236,13 @@ impl RecoveryGraph {
         }
         Ok(graph)
     }
-    pub(super) fn into_staging_snapshot(self) -> Result<Self, RecoveryError> {
+    pub(super) fn into_staging_snapshot_with_encoded_bytes(
+        self,
+    ) -> Result<(Self, u64), RecoveryError> {
         if self.wire_order_matches_maps {
-            Ok(self)
+            Ok((self, 0))
         } else {
-            self.candidate().seal()
+            self.candidate().seal_with_encoded_bytes()
         }
     }
     pub(crate) fn checksum(&self) -> &str {
@@ -352,10 +354,14 @@ impl RecoveryGraphCandidate {
     pub(crate) fn remove_surface(&mut self, owner: &RecoveryPublicOwner) {
         self.0.public_surfaces.remove_mut(owner);
     }
-    pub(crate) fn seal(mut self) -> Result<RecoveryGraph, RecoveryError> {
+    pub(crate) fn seal(self) -> Result<RecoveryGraph, RecoveryError> {
+        self.seal_with_encoded_bytes().map(|(graph, _)| graph)
+    }
+    pub(crate) fn seal_with_encoded_bytes(mut self) -> Result<(RecoveryGraph, u64), RecoveryError> {
         validate_shape(&self.0)?;
-        self.0.checksum = checksum(&self.0)?;
+        let (checksum, encoded_bytes) = checksum_with_encoded_bytes(&self.0)?;
+        self.0.checksum = checksum;
         self.0.wire_order_matches_maps = true;
-        Ok(self.0)
+        Ok((self.0, encoded_bytes))
     }
 }

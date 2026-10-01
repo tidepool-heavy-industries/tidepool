@@ -10,11 +10,11 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use exomonad_actor::ActorRef;
+use exomonad_agent::{BackendThreadId, InteractiveLaunchMode, ReasoningEffort};
 #[cfg(feature = "codex-compat")]
 use exomonad_agent::{
-    copy_interactive_binding, read_interactive_binding, InteractiveAgentInstallation,
+    InteractiveAgentInstallation, copy_interactive_binding, read_interactive_binding,
 };
-use exomonad_agent::{BackendThreadId, InteractiveLaunchMode, ReasoningEffort};
 #[cfg(feature = "codex-compat")]
 use exomonad_node::host_command::{HostCommand, HostCommandSpec, HostExit, HostStdin, HostStream};
 use exomonad_node::{TmuxLaunch, TmuxSession};
@@ -22,9 +22,9 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tracing::Instrument;
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::Layer;
 
 #[cfg(feature = "codex-compat")]
 use crate::actor_host::ACTOR_PROJECT_ROOT;
@@ -332,6 +332,7 @@ impl Default for CompilerConfig {
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct LaunchConfig {
     pub(crate) systemd_slice: exomonad_node::systemd_slice::SystemdSlice,
+    pub(crate) host_filesystem: exomonad_node::systemd_slice::HostFilesystemPolicy,
     pub(crate) source_exclude: Vec<String>,
     pub(crate) source: SourceImportPolicy,
     pub(crate) backend: ExomonadBackend,
@@ -946,6 +947,13 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         .join("runs")
         .join(&run_id);
     ensure_private_run_root(&run_root)?;
+    let compiler_socket = run_root.join("compiler.sock");
+    std::os::unix::net::SocketAddr::from_pathname(&compiler_socket).map_err(|error| {
+        runtime_error(format!(
+            "invalid compiler socket path {}: {error}; select a shorter XDG_STATE_HOME",
+            compiler_socket.display()
+        ))
+    })?;
     record_run_backend(&run_root, &run_id, selected_backend)?;
     let selected = workspace::FrozenWorkspace::load(&workspace, &run_root)?;
     crate::actor_host::validate_workspace_program(&selected, &run_root)?;
@@ -985,37 +993,42 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     )?;
 
     let executable = retain_run_executable(&run_root, "exomonad", &std::env::current_exe()?)?;
-    let compiler_socket = run_root.join("compiler.sock");
-    // `tidepool_extract_cmd::resolve_bin()` intentionally returns the bare
-    // `tidepool-extract` name when unset, deferring the PATH search to the
-    // OS at actual spawn time (see its doc comment). This call site needs an
-    // absolute path up front, to retain (copy) the binary into the run root
-    // below — so it goes through `locate_extract`, the existing mechanism
-    // that already does that PATH search and produces a typed, actionable
-    // error (also used by `preflight`'s `bind_extract_endpoint` check below)
-    // instead of reinventing (and, as `.canonicalize()` did here, getting
-    // wrong: canonicalize resolves a bare name against the CWD, never PATH,
-    // so it failed even when `tidepool-extract` WAS on PATH).
-    let compiler_source = tidepool_toolchain::toolchain::locate_extract()
-        .map_err(|error| {
-            runtime_error(format!(
-                "{error} Exomonad also needs TIDEPOOL_EXTRACT_WORKER for the Haskell compiler \
-                 worker. Launch through `just exomonad-console` or `just exomonad-init` (or the \
-                 packaged `nix build .#exomonad` wrapper), which set both."
-            ))
-        })?
-        .path;
-    let worker_source = tidepool_extract_cmd::frontend::worker_for_frontend(&compiler_source);
-    let compiler_bin = retain_run_executable(&run_root, "tidepool-extract", &compiler_source)?;
-    let mut selected_environment = std::collections::BTreeMap::from([(
-        "TIDEPOOL_EXTRACT".to_owned(),
-        compiler_bin.display().to_string(),
-    )]);
-    let worker = retain_run_executable(&run_root, "tidepool-extract-worker", &worker_source)?;
-    selected_environment.insert(
-        "TIDEPOOL_EXTRACT_WORKER".into(),
-        worker.display().to_string(),
-    );
+    let view_helper = exomonad_node::view_command::helper_path()?;
+    retain_run_executable(&run_root, "exomonad-view-helper", &view_helper)?;
+    let compiler_deployment =
+        tidepool_toolchain::toolchain::CompilerDeploymentConfiguration::from_env()?;
+    let tidepool_toolchain::toolchain::CompilerDeploymentConfiguration::Configured(authority) =
+        &compiler_deployment
+    else {
+        return Err(tidepool_toolchain::toolchain::DeploymentAdmissionError::Unknown.into());
+    };
+    // Retain the configured artifacts, not a launcher wrapper that can replace
+    // the worker selection. Readiness checks the copied bytes against this same
+    // authority before the host is allowed to start.
+    let compiler_bin =
+        retain_run_executable(&run_root, "tidepool-extract", &authority.frontend_path)?;
+    let worker =
+        retain_run_executable(&run_root, "tidepool-extract-worker", &authority.worker_path)?;
+    let deployment_path = run_root.join("compiler-deployment.json");
+    tidepool_atomic_write::write_durable(&deployment_path, &serde_json::to_vec_pretty(authority)?)?;
+    let selected_environment = std::collections::BTreeMap::from([
+        (
+            "TIDEPOOL_EXTRACT".to_owned(),
+            compiler_bin.display().to_string(),
+        ),
+        (
+            "TIDEPOOL_EXTRACT_WORKER".to_owned(),
+            worker.display().to_string(),
+        ),
+        (
+            "TIDEPOOL_GHC_LIBDIR".to_owned(),
+            authority.ghc_libdir.display().to_string(),
+        ),
+        (
+            tidepool_toolchain::toolchain::ENV_COMPILER_DEPLOYMENT.to_owned(),
+            deployment_path.display().to_string(),
+        ),
+    ]);
     match &host_backend {
         #[cfg(feature = "codex-compat")]
         HostBackendOptions::Codex(interactive_agent) => println!(
@@ -1075,7 +1088,9 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         )?;
         return Err(error.into());
     }
-    if let Err(error) = wait_until_compiler_daemon(&tmux, &compiler_socket).await {
+    if let Err(error) =
+        wait_until_compiler_daemon(&tmux, &compiler_socket, &compiler_deployment).await
+    {
         write_startup_failure(
             &status_path,
             &run_id,
@@ -1143,6 +1158,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             },
         ),
         &host_environment,
+        &configuration.launch.host_filesystem,
     );
     let unset_environment = compiler_deployment_unsets(&host_environment);
     let launch = tmux
@@ -1361,6 +1377,7 @@ fn write_startup_failure(
 async fn wait_until_compiler_daemon(
     tmux: &TmuxSession,
     socket: &Path,
+    deployment: &tidepool_toolchain::toolchain::CompilerDeploymentConfiguration,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let socket = socket.to_owned();
     tokio::time::timeout(COMPILER_DAEMON_START_TIMEOUT, async {
@@ -1371,7 +1388,11 @@ async fn wait_until_compiler_daemon(
             })
             .await
             .map_err(|error| runtime_error(format!("compiler preflight task failed: {error}")))?;
-            if ready.is_ok() {
+            if let Ok(identity) = ready {
+                deployment.admit(
+                    *identity.producer_bytes(),
+                    *identity.consumed_worker_bytes(),
+                )?;
                 return Ok(());
             }
             if !tmux.exists().await? {
@@ -2556,6 +2577,8 @@ fn pane_environment_from(
         "NIX_SSL_CERT_FILE",
         "SSH_AUTH_SOCK",
         "RUST_LOG",
+        "EXOMONAD_TRACE",
+        "TIDEPOOL_TIMING",
     ];
     NAMES
         .iter()
@@ -2594,10 +2617,12 @@ mod tests {
         let run = directory.path().join("run");
         let selected = super::retain_run_executable(&run, "runner", &source).unwrap();
         std::fs::remove_dir_all(target).unwrap();
-        assert!(std::process::Command::new(selected)
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            std::process::Command::new(selected)
+                .status()
+                .unwrap()
+                .success()
+        );
         assert!(run.join("bin/runner.blake3").is_file());
     }
 
@@ -2609,12 +2634,14 @@ mod tests {
             HostBackendOptions::from_parts(ExomonadBackend::Embedded, None, None).unwrap(),
             HostBackendOptions::Embedded
         ));
-        assert!(HostBackendOptions::from_parts(
-            ExomonadBackend::Embedded,
-            Some(PathBuf::from("/unused/codex")),
-            Some("unused".into()),
-        )
-        .is_err());
+        assert!(
+            HostBackendOptions::from_parts(
+                ExomonadBackend::Embedded,
+                Some(PathBuf::from("/unused/codex")),
+                Some("unused".into()),
+            )
+            .is_err()
+        );
     }
 
     #[cfg(not(feature = "codex-compat"))]
@@ -2623,9 +2650,33 @@ mod tests {
         let error = HostBackendOptions::from_parts(ExomonadBackend::Codex, None, None)
             .err()
             .expect("Codex request must be rejected without codex-compat");
-        assert!(error
-            .to_string()
-            .contains("does not include the codex-compat feature"));
+        assert!(
+            error
+                .to_string()
+                .contains("does not include the codex-compat feature")
+        );
+    }
+
+    #[test]
+    fn launch_host_filesystem_configuration_is_optional_and_validated() {
+        let omitted: LaunchConfig = toml::from_str("").unwrap();
+        assert_eq!(omitted.host_filesystem, Default::default());
+        let configured: LaunchConfig = toml::from_str(
+            "[host_filesystem]\ninaccessible_paths = ['/srv/swarm/checkouts', '/srv/build']\n",
+        )
+        .unwrap();
+        assert_eq!(
+            configured.host_filesystem,
+            exomonad_node::systemd_slice::HostFilesystemPolicy::try_new(vec![
+                PathBuf::from("/srv/swarm/checkouts"),
+                PathBuf::from("/srv/build")
+            ])
+            .unwrap()
+        );
+        for path in ["relative", "/a b", "/a%b", "/a\\b"] {
+            let config = format!("[host_filesystem]\ninaccessible_paths = ['{path}']\n");
+            assert!(toml::from_str::<LaunchConfig>(&config).is_err(), "{path:?}");
+        }
     }
 
     #[test]
@@ -2659,10 +2710,12 @@ mod tests {
         let direct: EmbeddedLaunchConfig =
             toml::from_str(&format!("{config}public_origin_scheme = 'http'\n")).unwrap();
         assert_eq!(direct.public_origin_scheme.as_str(), "http");
-        assert!(toml::from_str::<EmbeddedLaunchConfig>(&format!(
-            "{config}public_origin_scheme = 'ftp'\n"
-        ))
-        .is_err());
+        assert!(
+            toml::from_str::<EmbeddedLaunchConfig>(&format!(
+                "{config}public_origin_scheme = 'ftp'\n"
+            ))
+            .is_err()
+        );
     }
 
     #[test]
@@ -2672,11 +2725,13 @@ mod tests {
                 "listen = '{listen}'\nasset_root = '/tmp/assets'\nsession_secret_file = '/tmp/secret'\ncodex_auth_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n"
             ))
             .unwrap();
-            assert!(config
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("tailscale0"));
+            assert!(
+                config
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("tailscale0")
+            );
         }
     }
 
@@ -2718,10 +2773,12 @@ mod tests {
             .unwrap();
             assert_eq!(config.defaults.effort, effort);
         }
-        assert!(toml::from_str::<ExomonadConfig>(
-            "[defaults]\nmodel = \"test\"\neffort = \"invalid\"\n"
-        )
-        .is_err());
+        assert!(
+            toml::from_str::<ExomonadConfig>(
+                "[defaults]\nmodel = \"test\"\neffort = \"invalid\"\n"
+            )
+            .is_err()
+        );
     }
 
     /// A lock step that produces what `nix flake lock` would, so scaffolding
@@ -3256,10 +3313,12 @@ mod tests {
             "depth = 3",
         ] {
             std::fs::write(&path, format!("{base}\n[research]\n{invalid}\n")).unwrap();
-            assert!(read_project_config(workspace.path())
-                .unwrap_err()
-                .to_string()
-                .contains("invalid Exomonad configuration"));
+            assert!(
+                read_project_config(workspace.path())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("invalid Exomonad configuration")
+            );
         }
     }
 
@@ -3281,10 +3340,12 @@ mod tests {
             .unwrap();
         };
         write_config("tracked");
-        assert!(read_project_config(repo.path())
-            .unwrap_err()
-            .to_string()
-            .contains("contains tracked source"));
+        assert!(
+            read_project_config(repo.path())
+                .unwrap_err()
+                .to_string()
+                .contains("contains tracked source")
+        );
         write_config("scratch");
         assert_eq!(
             read_project_config(repo.path())
@@ -3606,10 +3667,12 @@ mod tests {
             "session": "exomonad-work",
             "phase": {"state": "awaiting_input", "root_actor": root_actor},
         });
-        assert!(decode_run_status(&serde_json::to_vec(&old).unwrap())
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported Exomonad run status version 3"));
+        assert!(
+            decode_run_status(&serde_json::to_vec(&old).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported Exomonad run status version 3")
+        );
     }
 
     #[test]
@@ -3697,6 +3760,23 @@ mod tests {
     }
 
     #[test]
+    fn pane_environment_preserves_explicit_structured_trace_filter() {
+        let selected = std::collections::BTreeMap::from([
+            (
+                "EXOMONAD_TRACE".to_owned(),
+                "info,tidepool_toolchain::module_candidates=debug".to_owned(),
+            ),
+            ("RUST_LOG".to_owned(), "warn".to_owned()),
+            ("TIDEPOOL_TIMING".to_owned(), "1".to_owned()),
+        ]);
+        assert_eq!(
+            pane_environment_from(|name| selected.get(name).cloned()),
+            selected
+        );
+        assert!(!pane_environment_from(|_| None).contains_key("EXOMONAD_TRACE"));
+    }
+
+    #[test]
     fn compiler_deployment_environment_preserves_present_and_clears_absent() {
         let deployment = tidepool_toolchain::toolchain::ENV_COMPILER_DEPLOYMENT;
         let modules = tidepool_toolchain::toolchain::ENV_COMPILER_MODULES;
@@ -3765,23 +3845,31 @@ mod tests {
             log_path,
             &configured.compiler,
         );
-        assert!(configured_launch
-            .args
-            .windows(2)
-            .any(|pair| pair == ["--workers", "2"]));
-        assert!(configured_launch
-            .args
-            .windows(2)
-            .any(|pair| pair == ["--rss-ceiling-mb", "10240"]));
+        assert!(
+            configured_launch
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--workers", "2"])
+        );
+        assert!(
+            configured_launch
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--rss-ceiling-mb", "10240"])
+        );
         for setting in ["workers = 0", "rss_ceiling_mb = 0", "unknown = 2"] {
-            assert!(toml::from_str::<ExomonadConfig>(&format!(
-                "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"
-            ))
-            .is_err());
+            assert!(
+                toml::from_str::<ExomonadConfig>(&format!(
+                    "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"
+                ))
+                .is_err()
+            );
         }
-        assert!(!launch
-            .environment
-            .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV));
+        assert!(
+            !launch
+                .environment
+                .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
+        );
         assert_eq!(
             host_environment(socket)
                 .get(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
@@ -3890,9 +3978,11 @@ mod tests {
         let error = resolve_root_launch_mode(true, &missing)
             .await
             .expect_err("resume must not silently become fresh");
-        assert!(error
-            .to_string()
-            .contains("cannot resume the requested root conversation"));
+        assert!(
+            error
+                .to_string()
+                .contains("cannot resume the requested root conversation")
+        );
         assert_eq!(
             resolve_root_launch_mode(false, &missing).await.unwrap(),
             InteractiveLaunchMode::Fresh
@@ -4010,9 +4100,11 @@ mod tests {
         let error = validate_recreate_continuity(&root_binding_path)
             .await
             .expect_err("a present but corrupt binding must still fail closed");
-        assert!(error
-            .to_string()
-            .contains("cannot resume the requested root conversation"));
+        assert!(
+            error
+                .to_string()
+                .contains("cannot resume the requested root conversation")
+        );
     }
 
     #[cfg(unix)]

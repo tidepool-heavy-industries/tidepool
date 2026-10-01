@@ -17,6 +17,7 @@ import http.client
 import ipaddress
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import socket
@@ -33,7 +34,6 @@ SAMPLE_COUNT = 5
 MAX_SAMPLE_SECONDS = 10
 POLL_SECONDS = 0.05
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-PINNED_HARNESS_STORE_SCHEMA = 5
 
 
 class GateError(RuntimeError):
@@ -46,6 +46,19 @@ def sha256(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def seal_sample(sample: dict) -> dict:
+    """Bind successful stop/store evidence to the retained compiler trace."""
+    if sample.get("daemon_trace"):
+        trace_path = Path(sample["daemon_trace"])
+        try:
+            sample["daemon_trace_sha256"] = sha256(trace_path)
+        except OSError as error:
+            sample["failure"] = sample.get("failure") or (
+                f"compiler daemon trace unavailable after stop: {error}")
+    sample["completed"] = sample.get("failure") is None
+    return sample
 
 
 def parse_status(path: Path, run_id: str, session: str) -> dict | None:
@@ -105,7 +118,49 @@ def read_session_run_id(workspace: Path, session: str) -> str | None:
     return run_id
 
 
-def provider_store_evidence(store_path: Path) -> dict:
+def matched_harness_schema(lock_path: Path, checkout: Path) -> dict:
+    """Project schema authority from the exact Harness revision in Cargo.lock.
+
+    This is source/build-contract evidence. The delivery packet must separately
+    establish that the packaged ELF was built with this same lockfile.
+    """
+    if lock_path.stat().st_size > 4 * 1024 * 1024:
+        raise GateError("matched Cargo.lock exceeds the provenance bound")
+    lock_bytes = lock_path.read_bytes()
+    lock = tomllib.loads(lock_bytes.decode())
+    packages = [row for row in lock.get("package", []) if row.get("name") == "harness"]
+    if len(packages) != 1:
+        raise GateError("matched Cargo.lock must contain exactly one Harness package")
+    source = packages[0].get("source", "")
+    match = re.fullmatch(
+        r"git\+https://github\.com/tidepool-heavy-industries/exomonad-harness\.git\?rev=([0-9a-f]{40})#([0-9a-f]{40})",
+        source,
+    )
+    if not match or match[1] != match[2]:
+        raise GateError("Harness source must have one exact matched revision pin")
+    revision = match[1]
+    owner_path = "crates/harness/src/store/schema.rs"
+    try:
+        owner = subprocess.run(
+            ["git", "-C", str(checkout), "show", f"{revision}:{owner_path}"],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+        ).stdout
+    except subprocess.SubprocessError as error:
+        raise GateError("matched Harness schema owner is unavailable") from error
+    if len(owner) > 65536:
+        raise GateError("Harness schema owner exceeds the provenance bound")
+    declarations = re.findall(rb"(?m)^pub const VERSION: u32 = ([1-9][0-9]{0,4});$", owner)
+    if len(declarations) != 1:
+        raise GateError("Harness schema owner lacks one supported version declaration")
+    return {
+        "version": int(declarations[0]), "revision": revision, "source": source,
+        "owner_path": owner_path, "owner_sha256": hashlib.sha256(owner).hexdigest(),
+        "lock_sha256": hashlib.sha256(lock_bytes).hexdigest(),
+        "owner_bytes": owner, "lock_bytes": lock_bytes,
+    }
+
+
+def provider_store_evidence(store_path: Path, expected_schema: int) -> dict:
     """Count provider attempts from the pinned harness Store, without reading payloads.
 
     The harness writes a durable `before-request` decision immediately before
@@ -128,10 +183,10 @@ def provider_store_evidence(store_path: Path) -> dict:
         if not {"schema_version", "decisions", "events"}.issubset(tables):
             raise GateError("embedded provider Store lacks the pinned request evidence tables")
         versions = [row[0] for row in connection.execute("SELECT version FROM schema_version")]
-        if len(versions) != 1 or versions[0] != PINNED_HARNESS_STORE_SCHEMA:
+        if len(versions) != 1 or versions[0] != expected_schema:
             raise GateError(
                 "embedded provider Store schema version does not match the pinned harness "
-                f"schema {PINNED_HARNESS_STORE_SCHEMA}: {versions!r}"
+                f"schema {expected_schema}: {versions!r}"
             )
         attempt_count = connection.execute(
             "SELECT COUNT(*) FROM decisions WHERE hook='before-request'").fetchone()[0]
@@ -586,7 +641,7 @@ def run_one(index: int, args, output: Path, report: dict) -> dict:
             sample["failure"] = sample["failure"] or f"packaged exomonad stop failed: {error}"
         store_path = run_root / "harness" / "store.sqlite"
         try:
-            evidence = provider_store_evidence(store_path)
+            evidence = provider_store_evidence(store_path, args.harness_store_schema)
             sample["provider_request_evidence"] = evidence
             sample["provider_requests"] = evidence["provider_request_attempts"]
             if sample["provider_requests"] != 0:
@@ -605,6 +660,7 @@ def run_one(index: int, args, output: Path, report: dict) -> dict:
         sample["stop_exit_code"] = None
     sample["init_stdout"] = str(stdout_path)
     sample["init_stderr"] = str(stderr_path)
+    sample = seal_sample(sample)
     if sample["failure"] is not None:
         sample["readiness"] = None
         report["samples"].append(sample)
@@ -619,6 +675,8 @@ def main() -> int:
     parser.add_argument("--binary-path", required=True, type=Path)
     parser.add_argument("--workspace", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--cargo-lock", required=True, type=Path, help="lockfile used for the packaged ELF build")
+    parser.add_argument("--harness-checkout", required=True, type=Path, help="Git repository containing that exact Harness source revision")
     parser.add_argument("--compiler-producer", help="expected compiler producer identity")
     args = parser.parse_args()
     args.package_entrypoint = args.package_entrypoint.resolve(strict=True)
@@ -639,7 +697,6 @@ def main() -> int:
         "package_entrypoint": str(args.package_entrypoint),
         "package_entrypoint_sha256": sha256(args.package_entrypoint),
         "command": [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]],
-        "profile": "release",
         "exit_code": None,
         "expected_test_count": 0,
         "executed_test_count": 0,
@@ -649,6 +706,12 @@ def main() -> int:
     report_path = args.output / "report.json"
     write_report(report_path, report)
     try:
+        schema = matched_harness_schema(args.cargo_lock.resolve(strict=True), args.harness_checkout.resolve(strict=True))
+        args.harness_store_schema = schema["version"]
+        (args.output / "matched-harness-schema.rs").write_bytes(schema.pop("owner_bytes"))
+        (args.output / "matched-Cargo.lock").write_bytes(schema.pop("lock_bytes"))
+        runner["harness_store_schema"] = schema
+        write_report(report_path, report)
         for index in range(SAMPLE_COUNT):
             sample = run_one(index, args, args.output, report)
             report["samples"].append(sample)
