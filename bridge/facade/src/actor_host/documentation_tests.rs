@@ -1378,7 +1378,9 @@ async fn reattachment_preserves_completed_unacknowledged_forks() {
             )),
             name: exomonad_actor::HASKELL_TOOL.into(),
             arguments: ToolArguments::Raw(
-                example(include_str!("../../../../exomonad/prompts/docs/unfold.md")).into(),
+                example(include_str!("../../../../exomonad/prompts/docs/unfold.md"))
+                    .replace("workers <- unfold", "workers <- unfoldDeferred")
+                    .into(),
             ),
         })
         .await
@@ -1468,7 +1470,8 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
             name: exomonad_actor::HASKELL_TOOL.into(),
             arguments: ToolArguments::Raw(format!(
                 "{}\n{}\n{}\n{}",
-                example(include_str!("../../../../exomonad/prompts/docs/unfold.md")),
+                example(include_str!("../../../../exomonad/prompts/docs/unfold.md"))
+                    .replace("workers <- unfold", "workers <- unfoldDeferred"),
                 example(include_str!("../../../../exomonad/prompts/docs/watch.md")),
                 extra_group,
                 suffix.unwrap_or("")
@@ -1476,7 +1479,7 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
         }),
     )
     .await
-    .expect("unfold must return without provider startup")
+    .expect("deferred unfold must return without provider startup")
     .unwrap();
     assert_eq!(
         result["status"],
@@ -2191,7 +2194,7 @@ async fn independent_admission_rejects_inheritance_and_supervised_escape() {
     )
     .await;
     assert!(
-        result.to_string().contains("requires a selected context"),
+        result.to_string().contains("UnfoldUncapturedContext"),
         "{result}"
     );
     committed(root.as_ref(), &fixture.replace("SwarmOwned", "ParentOwned")).await;
