@@ -99,10 +99,6 @@ pub(crate) struct ActorStartRequest {
 impl ActorStartRequest {
     /// Explicit record services remain owned by their creating actor.
     pub(crate) const RECORD_SERVICE_LIFETIME: WorkerLifetime = WorkerLifetime::ActorOwned;
-
-    /// Provider launches belong to the current hosted invocation. Structured
-    /// actor turns without one retain their nearest actor ownership.
-    pub(crate) const FRESH_LAUNCH_LIFETIME: WorkerLifetime = WorkerLifetime::InvocationOwned;
 }
 
 #[derive(tidepool_bridge_derive::FromHaskell)]
@@ -851,14 +847,6 @@ mod tests {
         // what the errand declines to allocate.
         let with_tree = super::ActorLaunchRoleWire::ActorInheritedRole.effective_role(true);
         assert_eq!(with_tree.workspace(), crate::WorkspaceAccess::WritableBound);
-    }
-
-    #[test]
-    fn a_fresh_launch_defaults_to_invocation_ownership() {
-        assert_eq!(
-            super::ActorStartRequest::FRESH_LAUNCH_LIFETIME,
-            crate::WorkerLifetime::InvocationOwned
-        );
     }
 }
 

@@ -1031,3 +1031,256 @@ async fn closed_invocation_refuses_real_scoped_spawn_before_worker_initializatio
     fixture.cleanup(&work).await;
     fixture.finish().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn interrupted_scope_retirement_admission_retries_original_terminal_once() {
+    let mut fixture = Fixture::start().await;
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let (worker, task) = crate::spawn_local_actor(None, Owner::new(send))
+        .await
+        .unwrap();
+    let _worker_context = receive.await.unwrap();
+    let child = worker.identity();
+    let completed = ActorTerminal {
+        kind: ActorExitKind::Completed,
+        summary: "original successful worker outcome".into(),
+    };
+    let shutdown = worker
+        .shutdown_with_cleanup(completed.clone())
+        .await
+        .unwrap();
+    assert!(shutdown.cleanup.is_confirmed());
+    task.await.unwrap();
+    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    work.register_worker(worker.clone()).unwrap();
+    fixture
+        .environment
+        .release_tracked
+        .store(true, Ordering::Release);
+    let filler = LocalResidentDeployment::Retired {
+        actor: fixture.actor.identity(),
+        terminal: ActorTerminal {
+            kind: ActorExitKind::Completed,
+            summary: "channel filler".into(),
+        },
+    };
+    for _ in 0..DEPLOYMENT_CHANNEL_CAPACITY {
+        assert!(fixture
+            .environment
+            .deployments
+            .try_send(filler.clone())
+            .is_ok());
+    }
+    assert_eq!(fixture.environment.deployments.capacity(), 0);
+    let mut first_cleanup = Box::pin(work.cleanup(&fixture.environment, &fixture.kernel));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), &mut first_cleanup)
+            .await
+            .is_err(),
+        "full retirement admission must wait"
+    );
+    assert!(!fixture.environment.retired.lock().contains(&child));
+    assert!(work.cleanup_observation().is_none());
+    assert!(work.owns_worker(child));
+    assert_eq!(worker.terminal().get(), Some(completed.clone()));
+    drop(first_cleanup);
+    for _ in 0..DEPLOYMENT_CHANNEL_CAPACITY {
+        let LocalResidentDeployment::Retired { actor, .. } =
+            fixture.deployments.try_recv().unwrap()
+        else {
+            panic!("only filler events are queued")
+        };
+        assert_eq!(actor, fixture.actor.identity());
+    }
+
+    let cleanup = tokio::time::timeout(Duration::from_secs(1), async {
+        let (cleanup, ()) =
+            tokio::join!(work.cleanup(&fixture.environment, &fixture.kernel), async {
+                let Some(LocalResidentDeployment::Retired { actor, terminal }) =
+                    fixture.deployments.recv().await
+                else {
+                    panic!("retry must publish original retirement")
+                };
+                assert_eq!(actor, child);
+                assert_eq!(terminal, completed);
+                let Some(LocalResidentDeployment::ReleaseAwait(request)) =
+                    fixture.deployments.recv().await
+                else {
+                    panic!("host cleanup follows retirement admission")
+                };
+                assert_eq!(request.actor, child);
+                assert!(request.answer(ResourceRelease::Released));
+            });
+        cleanup
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(cleanup.uncertainty(), None);
+    assert_eq!(cleanup.workers.len(), 1);
+    assert_eq!(cleanup.workers[0].kernel, Ok(shutdown.cleanup));
+    assert_eq!(cleanup.workers[0].host, Ok(ResourceRelease::Released));
+    assert!(fixture.environment.retired.lock().contains(&child));
+    assert!(matches!(
+        fixture.deployments.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+    fixture.cleanup(&work).await;
+    assert!(
+        matches!(
+            fixture.deployments.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ),
+        "confirmed cleanup retry must not publish duplicate retirement or host cleanup"
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn invocation_cleanup_rolls_back_unsubmitted_and_detached_original_reservations() {
+    let mut fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let target = ActorRef::first(crate::ActorId(owner.id.0 + 100));
+    let work = InvocationWork::new(owner, reservation());
+    let sibling = InvocationWork::new(owner, reservation());
+    let requests = &fixture.environment.requests;
+    let reserve = |scope: &InvocationWork| {
+        requests.reserve_for_operation(
+            owner,
+            target,
+            "unsubmitted reservation".into(),
+            false,
+            Some(scope.reservation.clone()),
+        )
+    };
+    let original = reserve(&work);
+    let detached = reserve(&work);
+    let sibling_request = reserve(&sibling);
+    work.detach_request(requests, owner, detached).unwrap();
+    let (watch, _) = requests
+        .register_watch(owner, vec![original, detached])
+        .unwrap();
+    let subscription = requests.subscribe_watch(owner, watch).unwrap();
+
+    fixture.cleanup(&work).await;
+
+    for request in [original, detached] {
+        assert_eq!(
+            requests.observe_response(owner, request),
+            Err(crate::ReplyError::Stale)
+        );
+    }
+    assert!(matches!(
+        requests.observe_response(owner, sibling_request),
+        Ok(ResponseObservation::Pending(_))
+    ));
+    requests
+        .mark_queued(owner, target, sibling_request)
+        .expect("sibling reservation can still be published");
+    assert!(work.cleanup_observation().unwrap().requests.is_empty());
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), subscription.wait())
+            .await
+            .unwrap(),
+        Ok(crate::request::WatchObservation::Unavailable {
+            request: original,
+            failure: crate::ResponseFailure::Released,
+        })
+    );
+    let LocalResidentDeployment::WatchChanged { notification } =
+        fixture.deployments.try_recv().unwrap()
+    else {
+        panic!("rollback publishes the original named watch's unavailable transition")
+    };
+    assert_eq!(notification.owner, owner);
+    assert_eq!(notification.watch, watch);
+    assert!(
+        matches!(
+            fixture.deployments.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ),
+        "never-published requests must not emit cancellation events"
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn interrupted_automatic_group_abort_retains_worker_for_invocation_cleanup() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let gate = Arc::new(ShutdownGate {
+        entered: tokio::sync::Semaphore::new(0),
+        release: tokio::sync::Semaphore::new(0),
+        calls: AtomicUsize::new(0),
+    });
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let worker = fixture
+        .kernel
+        .spawn_worker(
+            None,
+            Owner {
+                context: Some(send),
+                startup_gate: None,
+                shutdown_gate: Some(gate.clone()),
+            },
+            crate::WorkerLifetime::ActorOwned,
+        )
+        .await
+        .unwrap();
+    let _worker_context = receive.await.unwrap();
+    let child = worker.identity();
+    let group = group_with_child(&fixture, child);
+    let work = InvocationWork::new(owner, reservation());
+    work.register_group(group).unwrap();
+    let descriptor = ActorDescriptor::new(
+        "automatic group abort fixture",
+        crate::ActorPlacement {
+            session: tidepool_repr::SessionId(1),
+            resource_scope: RealmId::fresh(),
+            lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+        },
+    );
+    let behavior = ResidentKernelBehavior::with_boot(
+        descriptor,
+        fixture.environment.clone(),
+        ResidentBoot::Workbench,
+        Vec::new(),
+    );
+    let mut abort = Box::pin(behavior.abort_incomplete_groups(
+        &fixture.kernel,
+        owner,
+        "reply interrupted group admission",
+        Some(work.as_ref()),
+    ));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::select! {
+            _ = &mut abort => panic!("automatic abort must wait for the held worker shutdown"),
+            permit = gate.entered.acquire() => permit.unwrap().forget(),
+        }
+    })
+    .await
+    .unwrap();
+    assert!(work.owns_worker(child));
+    assert!(matches!(
+        fixture
+            .environment
+            .fork_groups
+            .children_for_owner(group, owner),
+        Err(crate::ForkGroupError::Unknown(_))
+    ));
+    drop(abort);
+    gate.release.add_permits(1);
+
+    fixture.cleanup(&work).await;
+
+    let cleanup = work.cleanup_observation().unwrap();
+    assert_eq!(cleanup.workers.len(), 1);
+    assert_eq!(cleanup.workers[0].actor, child);
+    assert_eq!(
+        cleanup.workers[0].kernel,
+        Ok(worker.terminal().cleanup().unwrap())
+    );
+    assert_eq!(gate.calls.load(Ordering::Relaxed), 1);
+    drop(behavior);
+    fixture.finish().await;
+}

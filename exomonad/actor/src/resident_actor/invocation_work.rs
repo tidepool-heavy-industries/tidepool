@@ -290,6 +290,18 @@ impl InvocationWork {
             )
         };
         let mut cleanup = InvocationCleanup::default();
+        // Reserved identities never reached a target. Preserve the original
+        // rollback fence, including internally detached branch reservations,
+        // before target cancellation changes any request state.
+        let (_, notifications) = environment
+            .requests
+            .abort_unsubmitted(self.owner, &self.reservation);
+        publish_request_notifications(
+            &environment.requests,
+            &environment.deployments,
+            notifications,
+        )
+        .await;
         {
             let mut state = self.state.lock();
             let pending = std::mem::take(&mut state.pending_workers);

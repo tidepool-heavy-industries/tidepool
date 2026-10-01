@@ -1119,6 +1119,7 @@ pub struct ResidentKernelBehavior<H, O> {
     checkpoint: Option<StateCheckpoint>,
     admitted_checkpoint: Option<(crate::CheckpointLease, Option<HostedCheckpointAttachment>)>,
     child_scope_lease: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
+    child_session_startup: Option<crate::resident_workbench::ChildSessionStartupLease>,
     pending_checkpoint: Option<StateCheckpoint>,
     active_input: Option<RetainedActorInput>,
     input_origin: ActorInputOrigin,
@@ -1847,6 +1848,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             checkpoint: None,
             admitted_checkpoint: None,
             child_scope_lease: None,
+            child_session_startup: None,
             pending_checkpoint: None,
             active_input: None,
             input_origin: ActorInputOrigin::ActorStartup,
@@ -3000,25 +3002,12 @@ where
             let crate::ResidentActorStart { parent_hole, child } = start;
             let fork_group = child.descriptor.fork_group();
             let invocation_work = effect_owner.invocation_work();
-            // Captured before the move below: if this launch minted itself a
-            // fresh session (`child_session_eligibility`) and admission fails
-            // anywhere from here on, that session may already have been
-            // provisioned (published into the shared registry) with nothing
-            // left to own it — discard it outright rather than orphaning it.
-            // A session `try_start_child` never provisioned (ineligible, or
-            // the host fell back to the launching session) is simply not a
-            // member of `child_sessions`, so discarding it here is always safe,
-            // whether or not provisioning ever actually happened.
             let launch_session = child.descriptor.placement().session;
             let launch_scope = child.descriptor.placement().lexical_scope;
             let started = self
                 .try_start_child(kernel, context, effect_owner, child)
                 .await;
-            if started.is_err() && launch_session != context.placement.session {
-                self.environment
-                    .runner
-                    .discard_child_session(launch_session);
-            } else if started.is_err() {
+            if started.is_err() && launch_session == context.placement.session {
                 if let Err(cleanup) = self
                     .environment
                     .runner
@@ -3137,6 +3126,14 @@ where
                 fork_workspace,
                 seed,
             } = child;
+            let child_session_startup = (descriptor.placement().session
+                != context.placement.session
+                && self.environment.runner.supports_child_sessions())
+            .then(|| {
+                self.environment
+                    .runner
+                    .child_session_startup_lease(descriptor.placement().session)
+            });
             let checkpoint_admission = descriptor
                 .checkpoint_token()
                 .map(|token| {
@@ -3443,6 +3440,7 @@ where
             );
             behavior.admitted_checkpoint = checkpoint_admission;
             behavior.prepared_workspace = prepared_workspace;
+            behavior.child_session_startup = child_session_startup;
             let startup_admission = (lifetime == crate::WorkerLifetime::InvocationOwned)
                 .then(|| effect_owner.invocation_work())
                 .flatten();
@@ -3669,6 +3667,7 @@ where
         request: crate::RequestId,
         result: RootCustody,
         carried_preview: Option<String>,
+        invocation: Option<&InvocationWork>,
     ) -> Result<(), ResidentActorWorkbenchError> {
         let settled = async {
             if self.environment.fork_groups.has_incomplete(context.actor) {
@@ -3676,6 +3675,7 @@ where
                     kernel,
                     context.actor,
                     "request reply interrupted unfold admission",
+                    invocation,
                 )
                 .await;
                 return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -8032,6 +8032,7 @@ where
                             kernel,
                             context.actor,
                             "Haskell input ended before unfold admission committed",
+                            Some(effects.invocation_work.as_ref()),
                         )
                         .await;
                         settle_prepared_operations(
@@ -8256,6 +8257,7 @@ where
                                 kernel,
                                 context.actor,
                                 "Haskell workbench failed during unfold admission",
+                                Some(effects.invocation_work.as_ref()),
                             )
                             .await;
                             return Err(workbench_failure(
@@ -8311,6 +8313,7 @@ where
                                     kernel,
                                     context.actor,
                                     "Haskell workbench failed during unfold admission",
+                                    Some(effects.invocation_work.as_ref()),
                                 )
                                 .await;
                                 let mut failure = workbench_failure_after_operations(
@@ -8486,6 +8489,7 @@ where
                             kernel,
                             context.actor,
                             "Haskell input rejected during unfold admission",
+                            Some(effects.invocation_work.as_ref()),
                         )
                         .await;
                         cursor.receipts.push(WorkbenchItemReceipt {
@@ -8520,17 +8524,24 @@ where
                         result,
                         preview,
                     } => {
-                        self.stage_request_reply(kernel, context, request_id, result, preview)
-                            .await
-                            .map_err(|error| {
-                                workbench_failure_after_operations(
-                                    &cursor.receipts,
-                                    cursor.index,
-                                    request.items.len(),
-                                    error,
-                                    cursor.unit.operations.clone(),
-                                )
-                            })?;
+                        self.stage_request_reply(
+                            kernel,
+                            context,
+                            request_id,
+                            result,
+                            preview,
+                            Some(effects.invocation_work.as_ref()),
+                        )
+                        .await
+                        .map_err(|error| {
+                            workbench_failure_after_operations(
+                                &cursor.receipts,
+                                cursor.index,
+                                request.items.len(),
+                                error,
+                                cursor.unit.operations.clone(),
+                            )
+                        })?;
                         cursor.receipts.push(WorkbenchItemReceipt {
                             diagnostics: Vec::new(),
                             index: cursor.index,
@@ -8566,6 +8577,7 @@ where
                                 kernel,
                                 context.actor,
                                 "request cancellation interrupted unfold admission",
+                                Some(effects.invocation_work.as_ref()),
                             )
                             .await;
                             self.environment
@@ -9256,16 +9268,20 @@ where
         kernel: &KernelContext,
         owner: ActorRef,
         summary: &str,
+        invocation: Option<&InvocationWork>,
     ) {
         let selected = self
             .active_route
             .as_ref()
             .map(|(_, groups)| groups.as_slice());
-        for child in self
+        let children = self
             .environment
             .fork_groups
-            .abort_incomplete(owner, selected)
-        {
+            .abort_incomplete(owner, selected);
+        if let Some(invocation) = invocation {
+            invocation.retain_aborted_children(kernel, &children);
+        }
+        for child in children {
             if let Some(child) = kernel.resolve(child) {
                 // A child already gone from a failed fork-group admission is
                 // the common case here; log anything else so an actor that
@@ -9485,6 +9501,11 @@ where
         &'a mut self,
         kernel: &'a KernelContext,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+        // LocalActor inserted the exact identity and admitted scope custody
+        // before entering this initializer. Retirement now owns the session.
+        if let Some(lease) = self.child_session_startup.take() {
+            lease.admitted();
+        }
         Box::pin(async move {
             let context = self.context(kernel.identity());
             let public_owner = match self.descriptor.persistence_policy() {
@@ -10192,6 +10213,7 @@ where
                                         attempt.request,
                                         attempt.result,
                                         attempt.preview,
+                                        None,
                                     )
                                     .await?;
                                     return Ok(true);

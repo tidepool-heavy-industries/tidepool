@@ -1484,6 +1484,26 @@ pub struct ResidentActorRunner<H, O> {
     access: ResidentMachineAccess<H, O>,
 }
 
+/// Preparation owns a fresh session until an exact actor takes custody. The
+/// runner's existing synchronous discard operation also covers a dropped await.
+pub(crate) struct ChildSessionStartupLease {
+    discard: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl ChildSessionStartupLease {
+    pub(crate) fn admitted(mut self) {
+        self.discard = None;
+    }
+}
+
+impl Drop for ChildSessionStartupLease {
+    fn drop(&mut self) {
+        if let Some(discard) = self.discard.take() {
+            discard();
+        }
+    }
+}
+
 pub(crate) struct ExecutionPrivateScope {
     pub owner: Arc<crate::resident_actor::WorkbenchPublicOwner>,
     pub public_scope: tidepool_codegen::scope::ScopeId,
@@ -2622,6 +2642,20 @@ impl<H, O> ResidentActorRunner<H, O> {
         // deferral (still outstanding) — nothing further to do here either
         // way.
         Ok(())
+    }
+
+    pub(crate) fn child_session_startup_lease(
+        &self,
+        session_id: tidepool_repr::SessionId,
+    ) -> ChildSessionStartupLease
+    where
+        H: DispatchEffect<O> + Send + 'static,
+        O: OutputSink + Sync + 'static,
+    {
+        let runner = self.clone();
+        ChildSessionStartupLease {
+            discard: Some(Box::new(move || runner.discard_child_session(session_id))),
+        }
     }
 
     /// Discard `session_id`'s dedicated machine immediately, unconditionally
@@ -14725,6 +14759,131 @@ mod request_tests {
             imported_render, crossing_before,
             "the value round-trips byte-for-byte across sessions"
         );
+    }
+
+    #[tokio::test]
+    async fn cancelling_child_startup_during_custody_transfer_discards_only_the_child_session() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        tidepool_testing::eval_harness::require_extract();
+        let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[])
+            .expect("materialize minimal effect surface");
+        let parent_id = tidepool_repr::SessionId(0xD0_D0);
+        let child_id = tidepool_repr::SessionId(0xD1_D1);
+        let (mut parent, parent_root) = bare_session_at(parent_id);
+        let retained = bind_bare_value(
+            &mut parent,
+            parent_id,
+            parent_root.path(),
+            &surface,
+            1,
+            "parentValue",
+            "333 :: Int",
+        );
+        let entry = parent
+            .prepared_binding_handle("parentValue")
+            .expect("independent custody for the startup entry");
+        let before = parent
+            .render_retained_preview(&retained, 64)
+            .expect("parent custody is evaluable before startup");
+        assert!(before.contains("333"), "parent value: {before}");
+
+        let templates = resident_workbench_templates(surface.preamble(), surface.row(), "");
+        let include: Vec<_> = surface
+            .include_paths()
+            .iter()
+            .map(PathBuf::as_path)
+            .collect();
+        let bootstrap = run_turn(TurnRequest {
+            exact_context: None,
+            session_id: Some(parent_id),
+            turn_text: "startupBootstrap <- pure (0 :: Int)",
+            templates: &templates,
+            include: &include,
+            session_root: parent_root.path(),
+            inject_modules: &[],
+            gen: 2,
+            verdict: None,
+            target: None,
+            retained_imports: &[],
+        })
+        .expect("child bootstrap compiles");
+        let TurnResult::Bind { compiled, .. } = bootstrap else {
+            panic!("child bootstrap must be a bind turn");
+        };
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(parent_id, Box::new(parent));
+        let source = ActorWorkbenchSource::new(
+            surface.preamble().to_string(),
+            surface.include_paths().to_vec(),
+        );
+        let child_root = std::sync::Mutex::new(None);
+        let runner = ResidentActorRunner::new(Arc::clone(&machines), source)
+            .with_child_session_factory(Arc::new(move |id, _source_layer| {
+                let (session, root) = bare_session_at(id);
+                *child_root.lock().unwrap() = Some(root);
+                Ok(Box::new(session))
+            }))
+            .with_child_bootstrap_program(Arc::new(compiled));
+        let owner = RealmId::fresh();
+        runner
+            .provision_child_session(child_id, owner, None, &[])
+            .await
+            .expect("fresh child session provisions through its real factory");
+        assert!(runner
+            .access
+            .child_sessions
+            .lock()
+            .unwrap()
+            .contains(&child_id));
+        assert_eq!(
+            machines.kind(child_id),
+            Some(tidepool_runtime::session::SlotKind::Idle)
+        );
+
+        let parent_checkout = machines
+            .checkout_run(parent_id)
+            .expect("hold the source checkout so custody transfer must wait");
+        let lease = runner.child_session_startup_lease(child_id);
+        let mut preparation = Box::pin(async {
+            let _lease = lease;
+            runner
+                .transfer_custody(entry, parent_id, child_id, owner)
+                .await
+        });
+        let progress = std::future::poll_fn(|cx| Poll::Ready(preparation.as_mut().poll(cx))).await;
+        assert!(
+            matches!(progress, Poll::Pending),
+            "preparation must be awaiting the held source checkout"
+        );
+        drop(preparation);
+        assert_eq!(
+            machines.kind(child_id),
+            None,
+            "cancelled startup removes its child machine"
+        );
+        assert!(!runner
+            .access
+            .child_sessions
+            .lock()
+            .unwrap()
+            .contains(&child_id));
+        assert_eq!(
+            machines.kind(parent_id),
+            Some(tidepool_runtime::session::SlotKind::Running),
+            "child cleanup preserves the parent's independent checkout"
+        );
+        drop(parent_checkout);
+        let after = runner
+            .access
+            .with_host_machine("render-parent", parent_id, None, move |session, _| {
+                Ok(session.render_retained_preview(&retained, 64))
+            })
+            .await
+            .expect("parent remains registered after cancelled child startup")
+            .expect("independent parent custody remains evaluable");
+        assert_eq!(after, before);
     }
 
     /// [`ResidentActorRunner::import_shared_custody`]: the non-consuming,
