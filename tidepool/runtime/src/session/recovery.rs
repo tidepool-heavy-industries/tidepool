@@ -21,7 +21,8 @@ pub(crate) fn graph_error(path: &Path, error: RecoveryError) -> SessionError {
     }
 }
 
-/// A public declaration tip restored under its original module identity.
+/// Declaration evidence restored under its original module identity.
+/// Native execution still requires each demanded original binding lease.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RestoredDeclaration {
     pub generation: u64,

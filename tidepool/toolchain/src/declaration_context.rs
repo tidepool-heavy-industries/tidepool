@@ -10,8 +10,7 @@ use crate::artifact_inventory::{
     ArtifactEntry, ArtifactInventory, ArtifactKind, ArtifactPayload, ArtifactView,
 };
 use crate::certified_products::{
-    certify_inherited_products, certify_inherited_products_with_validation, InheritedProductInput,
-    PendingCertifiedGroup,
+    certify_inherited_products_with_validation, InheritedProductInput, PendingCertifiedGroup,
 };
 use crate::declaration_join::{
     AcceptedJoin, CertifiedAuthoredDeclaration, DeclarationArtifact, ExactIfaceArtifact,
@@ -28,6 +27,288 @@ pub struct ExactDeclarationContext {
     producer: [u8; 32],
     inventory: ArtifactView,
     lexical: Vec<ExactLexicalNode>,
+}
+
+/// One recovery admission owns authenticated original bytes. Scoped contexts
+/// share these immutable entries without reopening or decoding artifacts.
+pub struct RecoveredArtifactInventory {
+    producer: [u8; 32],
+    entries: BTreeMap<crate::artifact_inventory::ArtifactId, Arc<ArtifactEntry>>,
+    originals: BTreeMap<
+        crate::artifact_inventory::ArtifactId,
+        crate::certified_products::RecoveryOriginalRequirements,
+    >,
+    interfaces: Vec<(
+        crate::artifact_inventory::ArtifactId,
+        crate::artifact_inventory::ArtifactId,
+        crate::artifact_inventory::ArtifactDependency,
+    )>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RecoveryInventoryError {
+    #[error("recovery artifact verification failed")]
+    Artifacts(
+        Vec<(
+            crate::artifact_inventory::ArtifactId,
+            recovery_artifacts::RecoveryArtifactError,
+        )>,
+    ),
+    #[error(transparent)]
+    Certification(#[from] CompileError),
+}
+
+impl RecoveredArtifactInventory {
+    pub fn capture(
+        root: &Path,
+        products: &[RecoveryArtifactRef],
+        joins: &[RecoveryJoinRef],
+        values: &[RecoveryValueInterfaceRef],
+        descriptors: &[crate::artifact_inventory::ArtifactDescriptor],
+        interfaces: &[(
+            crate::artifact_inventory::ArtifactId,
+            crate::artifact_inventory::ArtifactId,
+            crate::artifact_inventory::ArtifactDependency,
+        )],
+    ) -> Result<Self, RecoveryInventoryError> {
+        Self::capture_inputs(
+            root,
+            products,
+            joins,
+            values,
+            Some((descriptors, interfaces)),
+        )
+    }
+
+    fn capture_inputs(
+        root: &Path,
+        products: &[RecoveryArtifactRef],
+        joins: &[RecoveryJoinRef],
+        values: &[RecoveryValueInterfaceRef],
+        inventory: Option<(
+            &[crate::artifact_inventory::ArtifactDescriptor],
+            &[(
+                crate::artifact_inventory::ArtifactId,
+                crate::artifact_inventory::ArtifactId,
+                crate::artifact_inventory::ArtifactDependency,
+            )],
+        )>,
+    ) -> Result<Self, RecoveryInventoryError> {
+        let mut context = ExactDeclarationContext {
+            producer: [0; 32],
+            inventory: ArtifactInventory::default().empty_view(),
+            lexical: vec![],
+        };
+        let mut validation = PackageInterfaceValidation::default();
+        let mut entries = Vec::new();
+        let mut losses = Vec::new();
+        let mut verified = Vec::new();
+        for reference in products {
+            match recovery_artifacts::verify_materialized_ref_with_validation(
+                root,
+                reference,
+                &mut validation,
+            ) {
+                Ok(artifact) => verified.push(artifact),
+                Err(error) => losses.push((
+                    crate::artifact_inventory::ArtifactDescriptor::from_recovery_product(reference)
+                        .id,
+                    error,
+                )),
+            }
+        }
+        let mut verified_joins = Vec::new();
+        for reference in joins {
+            match recovery_artifacts::verify_materialized_join_with_validation(
+                root,
+                reference,
+                &mut validation,
+            ) {
+                Ok(artifact) => verified_joins.push(artifact),
+                Err(error) => losses.push((
+                    crate::artifact_inventory::ArtifactDescriptor::from_recovery_join(reference).id,
+                    error,
+                )),
+            }
+        }
+        let mut verified_values = Vec::new();
+        for reference in values {
+            match recovery_artifacts::verify_materialized_join_with_validation(
+                root,
+                &reference.interface,
+                &mut validation,
+            ) {
+                Ok(artifact) => verified_values.push(artifact),
+                Err(error) => losses.push((reference.artifact_id, error)),
+            }
+        }
+        if !losses.is_empty() {
+            return Err(RecoveryInventoryError::Artifacts(losses));
+        }
+        let inputs = verified
+            .iter()
+            .map(|artifact| InheritedProductInput { artifact })
+            .collect::<Vec<_>>();
+        let requirements = crate::certified_products::certify_recovery_products_with_validation(
+            &inputs,
+            &mut validation,
+        )
+        .map_err(failure)?;
+        let mut original_requirements = BTreeMap::new();
+        for (artifact, requirements) in verified.into_iter().zip(requirements) {
+            context.admit_producer(artifact.reference.toolchain_identity_sha256)?;
+            let product = CertifiedRecoveryProduct::from_certification(
+                tidepool_repr::execution_schema::CachedHomeOwner {
+                    unit: artifact.reference.unit,
+                    module: artifact.reference.module,
+                    module_version: tidepool_repr::execution_schema::ModuleVersion(
+                        artifact.reference.module_version,
+                    ),
+                    skinny_iface_sha256: artifact.reference.skinny_iface_sha256,
+                    product_sha256: artifact.reference.product_sha256,
+                },
+                artifact.interface_bytes,
+                artifact.product_bytes,
+                artifact.package_imports_bytes,
+                artifact.certification_bytes,
+            );
+            let sources = requirements
+                .sources
+                .iter()
+                .map(|owner| identity(&owner.unit, &owner.module))
+                .collect();
+            if product.owner() != &requirements.owner {
+                return Err(failure("recovered original owner differs").into());
+            }
+            let entry = ArtifactEntry::original(context.producer, product, sources)?;
+            original_requirements.insert(entry.descriptor.id, requirements);
+            entries.push(entry);
+        }
+        for (reference, artifact) in joins.iter().zip(verified_joins) {
+            context.admit_producer(reference.toolchain_identity_sha256)?;
+            let join = CertifiedJoinedInterface::from_certification(
+                reference.toolchain_identity_sha256,
+                reference.unit.clone(),
+                reference.module.clone(),
+                artifact.interface_bytes,
+                artifact.package_imports_bytes,
+            )
+            .map_err(failure)?;
+            entries.push(ArtifactEntry::interface(
+                join,
+                ArtifactKind::LexicalJoin,
+                Vec::new(),
+            ));
+        }
+        for (reference, artifact) in values.iter().zip(verified_values) {
+            context.admit_producer(reference.interface.toolchain_identity_sha256)?;
+            let interface = CertifiedJoinedInterface::from_certification(
+                reference.interface.toolchain_identity_sha256,
+                reference.interface.unit.clone(),
+                reference.interface.module.clone(),
+                artifact.interface_bytes,
+                artifact.package_imports_bytes,
+            )
+            .map_err(failure)?;
+            let entry = ArtifactEntry::interface(
+                interface,
+                ArtifactKind::ValueInterface,
+                reference.requirements.clone(),
+            );
+            if entry.descriptor.id != reference.artifact_id {
+                return Err(failure("value interface artifact identity differs").into());
+            }
+            entries.push(entry);
+        }
+        let mut interfaces = Vec::new();
+        if let Some((descriptors, dependencies)) = inventory {
+            crate::artifact_inventory::restore_recovery_interface_dependencies(
+                &mut entries,
+                descriptors,
+                dependencies,
+            )?;
+            interfaces = dependencies.to_vec();
+        }
+        for entry in &mut entries {
+            entry.requirements.sort();
+            entry.requirements.dedup();
+        }
+        let entries = entries
+            .into_iter()
+            .map(|entry| (entry.descriptor.id, Arc::new(entry)))
+            .collect::<BTreeMap<_, _>>();
+        Ok(Self {
+            producer: context.producer,
+            entries,
+            originals: original_requirements,
+            interfaces,
+        })
+    }
+
+    pub fn context(
+        &self,
+        ids: &[crate::artifact_inventory::ArtifactId],
+        lexical: Vec<ExactLexicalNode>,
+    ) -> Result<ExactDeclarationContext, CompileError> {
+        let selected = ids.iter().copied().collect::<BTreeSet<_>>();
+        if selected.len() != ids.len() {
+            return Err(failure("duplicate recovered artifact selection"));
+        }
+        let entries = ids
+            .iter()
+            .map(|id| {
+                self.entries
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| failure("missing recovered artifact selection"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let owners = entries
+            .iter()
+            .map(|entry| (entry.descriptor.owner.clone(), entry))
+            .collect::<BTreeMap<_, _>>();
+        if owners.len() != entries.len() {
+            return Err(failure("ambiguous recovered dependency owner"));
+        }
+        for (from, to, _) in &self.interfaces {
+            if selected.contains(from) && !selected.contains(to) {
+                return Err(failure("recovered interface closure is incomplete"));
+            }
+        }
+        for id in ids {
+            if let Some(original) = self.originals.get(id) {
+                for required in &original.sources {
+                    let entry = owners
+                        .get(&identity(&required.unit, &required.module))
+                        .ok_or_else(|| failure("native dependency artifact is missing"))?;
+                    let ArtifactPayload::Original(product) = &entry.payload else {
+                        return Err(failure("native source requires an original product"));
+                    };
+                    if product.owner() != required {
+                        return Err(failure(
+                            "native source owner differs from original certification",
+                        ));
+                    }
+                }
+                if original
+                    .packages
+                    .iter()
+                    .any(|owner| owners.contains_key(owner))
+                {
+                    return Err(failure("home owner downgraded to package"));
+                }
+            }
+        }
+        let inventory = ArtifactInventory::default();
+        let empty = inventory.empty_view();
+        let mut context = ExactDeclarationContext {
+            producer: self.producer,
+            inventory: inventory.admit_shared(&empty, entries)?,
+            lexical,
+        };
+        context.normalize()?;
+        Ok(context)
+    }
 }
 
 /// The paths live under the caller's owned artifact directory. Their content
@@ -513,106 +794,13 @@ impl ExactDeclarationContext {
         )>,
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
-        let mut context = Self {
-            producer: [0; 32],
-            inventory: ArtifactInventory::default().empty_view(),
-            lexical,
-        };
-        let mut entries = Vec::new();
-        let verified = products
-            .iter()
-            .map(|reference| recovery_artifacts::verify_materialized_ref(root, reference))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(failure)?;
-        let inputs = verified
-            .iter()
-            .map(|artifact| InheritedProductInput { artifact })
-            .collect::<Vec<_>>();
-        certify_inherited_products(&inputs, &[]).map_err(failure)?;
-        for artifact in verified {
-            context.admit_producer(artifact.reference.toolchain_identity_sha256)?;
-            let product = CertifiedRecoveryProduct::from_certification(
-                tidepool_repr::execution_schema::CachedHomeOwner {
-                    unit: artifact.reference.unit,
-                    module: artifact.reference.module,
-                    module_version: tidepool_repr::execution_schema::ModuleVersion(
-                        artifact.reference.module_version,
-                    ),
-                    skinny_iface_sha256: artifact.reference.skinny_iface_sha256,
-                    product_sha256: artifact.reference.product_sha256,
-                },
-                artifact.interface_bytes,
-                artifact.product_bytes,
-                artifact.package_imports_bytes,
-                artifact.certification_bytes,
-            );
-            let requirements = crate::certified_products::certified_home_requirements(
-                product.certification_bytes(),
-                product.owner(),
-            )
-            .map_err(failure)?
-            .iter()
-            .map(|owner| identity(&owner.unit, &owner.module))
-            .collect();
-            entries.push(ArtifactEntry::original(
-                context.producer,
-                product,
-                requirements,
-            )?);
-        }
-        for reference in joins {
-            context.admit_producer(reference.toolchain_identity_sha256)?;
-            let artifact =
-                recovery_artifacts::verify_materialized_join(root, reference).map_err(failure)?;
-            let join = CertifiedJoinedInterface::from_certification(
-                reference.toolchain_identity_sha256,
-                reference.unit.clone(),
-                reference.module.clone(),
-                artifact.interface_bytes,
-                artifact.package_imports_bytes,
-            )
-            .map_err(failure)?;
-            entries.push(ArtifactEntry::interface(
-                join,
-                ArtifactKind::LexicalJoin,
-                Vec::new(),
-            ));
-        }
-        for reference in values {
-            context.admit_producer(reference.interface.toolchain_identity_sha256)?;
-            let artifact = recovery_artifacts::verify_materialized_join(root, &reference.interface)
+        let inventory =
+            RecoveredArtifactInventory::capture_inputs(root, products, joins, values, inventory)
                 .map_err(failure)?;
-            let interface = CertifiedJoinedInterface::from_certification(
-                reference.interface.toolchain_identity_sha256,
-                reference.interface.unit.clone(),
-                reference.interface.module.clone(),
-                artifact.interface_bytes,
-                artifact.package_imports_bytes,
-            )
-            .map_err(failure)?;
-            let entry = ArtifactEntry::interface(
-                interface,
-                ArtifactKind::ValueInterface,
-                reference.requirements.clone(),
-            );
-            if entry.descriptor.id != reference.artifact_id {
-                return Err(failure("value interface artifact identity differs"));
-            }
-            entries.push(entry);
-        }
-        if let Some((descriptors, dependencies)) = inventory {
-            crate::artifact_inventory::restore_recovery_dependencies(
-                &mut entries,
-                descriptors,
-                dependencies,
-            )?;
-        }
-        context.inventory = context
-            .inventory
-            .inventory()
-            .admit(&context.inventory, entries)?;
-        context.normalize()?;
-        Ok(context)
+        inventory.context(
+            &inventory.entries.keys().copied().collect::<Vec<_>>(),
+            lexical,
+        )
     }
 
     /// Merge recovered inputs with fresh certificates, replacing the complete

@@ -4,9 +4,9 @@ use super::*;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tidepool_toolchain::declaration_join::{
-    certify_recovered_declaration_tip_with_inventory, ClassInstanceEvidence, DeclarationExport,
+    certify_recovered_declaration_tip_in_context, ClassInstanceEvidence, DeclarationExport,
     DeclarationKind, ExportIdentity, ExportNamespace, InstanceInventory,
-    RecoveryDeclarationSelection,
+    RecoveredArtifactInventory, RecoveryDeclarationSelection,
 };
 
 /// Configured native composition backed by the lifetime run lock. This trait
@@ -130,6 +130,7 @@ impl SessionLib {
                 .parent()
                 .expect("attached canonical manifest parent"),
             &bytes,
+            recovery::RecoveryReadPurpose::Metadata,
         )
         .map_err(|error| recovery::graph_error(&state.path, error))?
         .ok_or(SessionError::WrongPublicManifestTicket)?;
@@ -217,14 +218,26 @@ impl SessionLib {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(invalid(error.to_string())),
         };
-        let graph = match bytes
+        let (graph, inventory) = match bytes
             .as_ref()
-            .map(|bytes| recovery::read_v2_bytes(&path, &root, bytes))
+            .map(|bytes| {
+                recovery::read_v2_bytes(
+                    &path,
+                    &root,
+                    bytes,
+                    recovery::RecoveryReadPurpose::Hydration,
+                )
+            })
             .transpose()
             .map_err(|error| recovery::graph_error(&path, error))?
             .flatten()
         {
-            Some(read) if read.artifact_losses.is_empty() => read.graph,
+            Some(read) if read.artifact_losses.is_empty() => (
+                read.graph,
+                read.inventory.ok_or_else(|| {
+                    invalid("recovery hydration lacks authenticated inventory".into())
+                })?,
+            ),
             Some(_) => {
                 return Err(invalid(
                     "recovery graph has unavailable or corrupt artifacts".into(),
@@ -235,8 +248,14 @@ impl SessionLib {
                     "existing recovery manifest did not yield an exact graph".into(),
                 ))
             }
-            None => recovery::RecoveryGraph::empty(self.id.0, self.id.0)
-                .map_err(|error| invalid(error.to_string()))?,
+            None => {
+                let graph = recovery::RecoveryGraph::empty(self.id.0, self.id.0)
+                    .map_err(|error| invalid(error.to_string()))?;
+                let inventory = graph
+                    .capture_inventory(&root)
+                    .map_err(|error| invalid(error.to_string()))?;
+                (graph, inventory)
+            }
         };
         if authority.is_none() && !graph.public_surfaces.is_empty() {
             return Err(invalid(
@@ -254,7 +273,7 @@ impl SessionLib {
         if let Some(owner) = &owner {
             owner.validate_read()?;
         }
-        let recovered_log = self.hydrate_recovery_graph(&graph, &root)?;
+        let recovered_log = self.hydrate_recovery_graph(&graph, &root, inventory)?;
         if let Some(owner) = &owner {
             owner.validate_read()?;
         }
@@ -271,6 +290,7 @@ impl SessionLib {
         &self,
         graph: &recovery::RecoveryGraph,
         recovery_root: &Path,
+        inventory: RecoveredArtifactInventory,
     ) -> Result<DeclLog, SessionError> {
         let invalid = |detail: String| SessionError::RecoveryManifest {
             path: recovery_root.to_path_buf(),
@@ -281,6 +301,12 @@ impl SessionLib {
             return Err(invalid(
                 "could not restore burned declaration identities".into(),
             ));
+        }
+        let mut contexts = BTreeMap::new();
+        for node in &graph.nodes {
+            let context = Arc::new(inventory.context(&node.artifact_refs, node.lexical.clone())?);
+            validate_recovery_native_markers(node, &context).map_err(invalid)?;
+            contexts.insert(node.id, context);
         }
         for surface in &graph.public_surfaces {
             let Some(generation) = surface.declaration_root else {
@@ -314,42 +340,6 @@ impl SessionLib {
                     invalid("unsupported durable declaration export identity".into())
                 })?);
             }
-            let selected = graph
-                .artifacts
-                .iter()
-                .filter(|artifact| node.artifact_refs.contains(&artifact.artifact_id()))
-                .collect::<Vec<_>>();
-            let mut products = Vec::new();
-            let mut joins = Vec::new();
-            let mut values = Vec::new();
-            for artifact in selected {
-                match artifact {
-                    recovery::RecoveryArtifactClosure::Home(reference) => {
-                        products.push(reference.clone())
-                    }
-                    recovery::RecoveryArtifactClosure::Join(reference) => {
-                        joins.push(reference.clone())
-                    }
-                    recovery::RecoveryArtifactClosure::ValueInterface(reference) => {
-                        values.push(reference.clone())
-                    }
-                }
-            }
-            let artifact_ids = node.artifact_refs.iter().copied().collect::<BTreeSet<_>>();
-            let descriptors = graph
-                .artifacts
-                .iter()
-                .filter(|artifact| artifact_ids.contains(&artifact.artifact_id()))
-                .map(|artifact| artifact.descriptor())
-                .collect::<Vec<_>>();
-            let dependencies = graph
-                .artifact_dependencies
-                .iter()
-                .filter(|edge| {
-                    artifact_ids.contains(&edge.source) && artifact_ids.contains(&edge.target)
-                })
-                .map(|edge| (edge.source, edge.target, edge.dependency.clone()))
-                .collect::<Vec<_>>();
             let instances = recovered_instances(&node.instances)
                 .ok_or_else(|| invalid("unsupported durable instance identity".into()))?;
             let family_closure = node
@@ -359,13 +349,8 @@ impl SessionLib {
                 .map(recovered_identity)
                 .collect::<Option<Vec<_>>>()
                 .ok_or_else(|| invalid("unsupported durable family closure identity".into()))?;
-            let evidence = Arc::new(certify_recovered_declaration_tip_with_inventory(
-                recovery_root,
-                &products,
-                &joins,
-                &values,
-                &descriptors,
-                &dependencies,
+            let evidence = Arc::new(certify_recovered_declaration_tip_in_context(
+                Arc::clone(&contexts[&generation]),
                 RecoveryDeclarationSelection {
                     root: root.clone(),
                     lexical: node.lexical.clone(),
@@ -434,6 +419,52 @@ impl SessionLib {
         }
         Ok(log)
     }
+}
+
+pub(super) fn validate_recovery_native_markers(
+    node: &recovery::RecoveryNode,
+    context: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
+) -> Result<(), String> {
+    let owners = match node.kind {
+        recovery::RecoveryNodeKind::Authored => {
+            node.lexical_roots.iter().cloned().collect::<BTreeSet<_>>()
+        }
+        recovery::RecoveryNodeKind::Join => node
+            .exports
+            .iter()
+            .flat_map(|export| std::iter::once(&export.identity).chain(export.children.iter()))
+            .map(
+                |identity| tidepool_toolchain::declaration_join::ExactModuleIdentity {
+                    unit: identity.unit.clone(),
+                    module: identity.module.clone(),
+                },
+            )
+            .collect(),
+    };
+    let roots = context
+        .artifact_view()
+        .descriptors()
+        .into_iter()
+        .filter(|descriptor| {
+            descriptor.kind == tidepool_toolchain::artifact_inventory::ArtifactKind::OriginalModule
+                && owners.contains(&descriptor.owner)
+        })
+        .map(|descriptor| descriptor.id)
+        .collect::<Vec<_>>();
+    let expected =
+        certified_native_dependencies(context, &roots).map_err(|error| error.to_string())?;
+    let expected = expected.into_iter().collect::<BTreeSet<_>>();
+    let actual = node
+        .live_dependencies
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if actual.len() != node.live_dependencies.len() || actual != expected {
+        return Err(
+            "recovery live dependencies differ from verified original native requirements".into(),
+        );
+    }
+    Ok(())
 }
 
 fn recovered_identity(identity: &recovery::RecoverySymbolIdentity) -> Option<ExportIdentity> {

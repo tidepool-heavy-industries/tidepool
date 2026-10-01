@@ -18,11 +18,13 @@ pub(crate) use planned::certify_same_offer_planned_declaration;
 
 pub use crate::declaration_context::{
     ExactDeclarationContext, ExactSourceWitness, MaterializedExactDeclarationContext,
+    RecoveredArtifactInventory, RecoveryInventoryError,
 };
 
 mod recovery;
 pub use recovery::{
-    certify_recovered_declaration_tip, certify_recovered_declaration_tip_with_inventory,
+    certify_recovered_declaration_tip, certify_recovered_declaration_tip_in_context,
+    certify_recovered_declaration_tip_with_inventory,
     certify_recovered_declaration_tip_with_value_interfaces, RecoveredDeclarationTip,
     RecoveryDeclarationSelection,
 };
@@ -558,6 +560,7 @@ pub struct MaterializedDeclarationJoin {
     pub anchors: Vec<crate::recovery_artifacts::RecoveryJoinRef>,
     pub value_interfaces: Vec<crate::recovery_artifacts::RecoveryValueInterfaceRef>,
     pub artifact_descriptors: Vec<crate::artifact_inventory::ArtifactDescriptor>,
+    /// Durable Interface edges; native edges remain in the certified original graph.
     pub artifact_dependencies: Vec<(
         crate::artifact_inventory::ArtifactId,
         crate::artifact_inventory::ArtifactId,
@@ -632,7 +635,7 @@ impl AcceptedJoin {
         let join = self.interface.materialize(root)?;
         let mut artifact_descriptors = self.context.artifact_view().descriptors();
         let descriptor = crate::artifact_inventory::ArtifactDescriptor::from_recovery_join(&join);
-        let mut artifact_dependencies = self.context.artifact_view().dependencies();
+        let mut artifact_dependencies = self.context.artifact_view().interface_dependencies();
         artifact_dependencies.extend(artifact_descriptors.iter().map(|entry| {
             (
                 descriptor.id,

@@ -1549,56 +1549,180 @@ pub(crate) fn certify_inherited_products_with_validation(
     current_groups: &[PendingCertifiedGroup],
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<PendingCertifiedGroup>> {
-    let requirements = crate::prepared_artifact::production_requirements()
-        .map_err(|_| CertificationError::Mismatch("production requirements"))?;
     let mut modules = BTreeSet::new();
     let mut parsed = Vec::new();
     for input in inputs {
-        let artifact = input.artifact;
-        let reference = &artifact.reference;
+        let reference = &input.artifact.reference;
         if !modules.insert((reference.unit.clone(), reference.module.clone())) {
             return Err(CertificationError::Mismatch("duplicate inherited module"));
         }
-        let owner = CachedHomeOwner {
-            unit: reference.unit.clone(),
-            module: reference.module.clone(),
-            module_version: ModuleVersion(reference.module_version),
-            skinny_iface_sha256: reference.skinny_iface_sha256,
-            product_sha256: reference.product_sha256,
-        };
-        if sha(&artifact.interface_bytes) != owner.skinny_iface_sha256
-            || sha(&artifact.product_bytes) != owner.product_sha256
-            || sha(&artifact.certification_bytes) != reference.certification_sha256
-        {
-            return Err(CertificationError::Mismatch("inherited artifact bytes"));
-        }
-        let products = parse_module_products(
-            &artifact.product_bytes,
-            &requirements,
-            crate::module_candidates::product_decode_limits(),
-        )?;
-        let [product] = products.as_slice() else {
-            return Err(CertificationError::Mismatch("inherited per-module product"));
-        };
-        if product.unit != owner.unit
-            || product.module != owner.module
-            || product.interface != artifact.interface_bytes
-        {
-            return Err(CertificationError::Mismatch(
-                "inherited interface/product pair",
-            ));
-        }
-        let witness =
-            verify_home_witness_with_validation(&artifact.certification_bytes, &owner, validation)?;
-        check_direct_package_agreement_with_validation(
-            &artifact.package_imports_bytes,
-            &owner,
-            &witness.packages,
-            validation,
-        )?;
-        parsed.push((product.clone(), witness));
+        parsed.push(capture_inherited_product_with_validation(
+            input, validation,
+        )?);
     }
     certify_inherited_inventory_with_validation(parsed, current_groups, validation)
+}
+
+fn capture_inherited_product_with_validation(
+    input: &InheritedProductInput<'_>,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<(RawModuleProduct, HomeCertification)> {
+    let requirements = crate::prepared_artifact::production_requirements()
+        .map_err(|_| CertificationError::Mismatch("production requirements"))?;
+    let artifact = input.artifact;
+    let reference = &artifact.reference;
+    let owner = CachedHomeOwner {
+        unit: reference.unit.clone(),
+        module: reference.module.clone(),
+        module_version: ModuleVersion(reference.module_version),
+        skinny_iface_sha256: reference.skinny_iface_sha256,
+        product_sha256: reference.product_sha256,
+    };
+    if sha(&artifact.interface_bytes) != owner.skinny_iface_sha256
+        || sha(&artifact.product_bytes) != owner.product_sha256
+        || sha(&artifact.certification_bytes) != reference.certification_sha256
+    {
+        return Err(CertificationError::Mismatch("inherited artifact bytes"));
+    }
+    let mut products = parse_module_products(
+        &artifact.product_bytes,
+        &requirements,
+        crate::module_candidates::product_decode_limits(),
+    )?;
+    if products.len() != 1 {
+        return Err(CertificationError::Mismatch("inherited per-module product"));
+    }
+    let product = products.pop().expect("one original product checked");
+    if product.unit != owner.unit
+        || product.module != owner.module
+        || product.interface != artifact.interface_bytes
+    {
+        return Err(CertificationError::Mismatch(
+            "inherited interface/product pair",
+        ));
+    }
+    let witness =
+        verify_home_witness_with_validation(&artifact.certification_bytes, &owner, validation)?;
+    check_direct_package_agreement_with_validation(
+        &artifact.package_imports_bytes,
+        &owner,
+        &witness.packages,
+        validation,
+    )?;
+    Ok((product, witness))
+}
+
+/// Authenticate every retained original once. Different lexical views may
+/// retain different versions of one module; source witnesses select a full
+/// owner here, while recovery context admission later selects one per view.
+pub(crate) struct RecoveryOriginalRequirements {
+    pub owner: CachedHomeOwner,
+    pub sources: Vec<CachedHomeOwner>,
+    pub packages: Vec<crate::declaration_join::ExactModuleIdentity>,
+}
+
+pub(crate) fn certify_recovery_products_with_validation(
+    inputs: &[InheritedProductInput<'_>],
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<Vec<RecoveryOriginalRequirements>> {
+    let parsed = inputs
+        .iter()
+        .map(|input| capture_inherited_product_with_validation(input, validation))
+        .collect::<CertResult<Vec<_>>>()?;
+    let mut originals = std::collections::HashMap::new();
+    for (product, witness) in &parsed {
+        if originals.insert(witness.owner.clone(), product).is_some() {
+            return Err(CertificationError::Mismatch("duplicate recovery original"));
+        }
+        validate_inherited_group_headers(product, witness)?;
+    }
+    for (product, witness) in &parsed {
+        let mut sources = SourceGroupMap::new();
+        let mut scoped_owners = BTreeMap::new();
+        for owner in std::iter::once(&witness.owner).chain(witness.sources.values()) {
+            let key = (owner.unit.clone(), owner.module.clone());
+            if scoped_owners
+                .insert(key, owner)
+                .is_some_and(|old| old != owner)
+            {
+                return Err(CertificationError::Mismatch(
+                    "ambiguous recovery source owner",
+                ));
+            }
+            let original = originals.get(owner).ok_or(CertificationError::Mismatch(
+                "recovery source owner closure",
+            ))?;
+            for group in &original.groups {
+                for binder in group.binders() {
+                    sources.insert(
+                        (
+                            owner.unit.clone(),
+                            owner.module.clone(),
+                            group.original_ordinal(),
+                            binder.clone(),
+                        ),
+                        (owner.clone(), ProductOrigin::Cached),
+                    );
+                }
+            }
+        }
+        for (group, (_, _, globals)) in product.groups.iter().zip(&witness.groups) {
+            for (declaration, selected) in group.globals().iter().zip(globals) {
+                if let ReceiptImportOwner::Package { unit, module, .. } = &selected.owner {
+                    if scoped_owners.contains_key(&(unit.clone(), module.clone())) {
+                        return Err(CertificationError::Mismatch(
+                            "home owner downgraded to package",
+                        ));
+                    }
+                }
+                let import = validate_global_witness(
+                    declaration,
+                    group.definitions().signatures(),
+                    selected,
+                )?;
+                resolve_receipt_owner_with_validation(
+                    import,
+                    &sources,
+                    &witness.packages,
+                    validation,
+                )?;
+            }
+        }
+    }
+    Ok(parsed
+        .into_iter()
+        .map(|(_, witness)| RecoveryOriginalRequirements {
+            owner: witness.owner,
+            sources: witness.sources.into_values().collect(),
+            packages: witness
+                .packages
+                .into_keys()
+                .map(|(unit, module)| crate::declaration_join::ExactModuleIdentity { unit, module })
+                .collect(),
+        })
+        .collect())
+}
+
+fn validate_inherited_group_headers(
+    product: &RawModuleProduct,
+    witness: &HomeCertification,
+) -> CertResult<()> {
+    if product.groups.len() != witness.groups.len() {
+        return Err(CertificationError::Mismatch(
+            "inherited original group count",
+        ));
+    }
+    for (group, (ordinal, binders, globals)) in product.groups.iter().zip(&witness.groups) {
+        if group.original_ordinal() != *ordinal
+            || group.binders() != binders
+            || group.globals().len() != globals.len()
+        {
+            return Err(CertificationError::Mismatch(
+                "inherited original group/globals",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1663,20 +1787,8 @@ fn certify_inherited_inventory_with_validation(
         } else {
             homes.insert(key, owner.clone());
         }
-        if product.groups.len() != witness.groups.len() {
-            return Err(CertificationError::Mismatch(
-                "inherited original group count",
-            ));
-        }
-        for (group, (ordinal, binders, globals)) in product.groups.iter().zip(&witness.groups) {
-            if group.original_ordinal() != *ordinal
-                || group.binders() != binders
-                || group.globals().len() != globals.len()
-            {
-                return Err(CertificationError::Mismatch(
-                    "inherited original group/globals",
-                ));
-            }
+        validate_inherited_group_headers(product, witness)?;
+        for (group, (ordinal, _, _)) in product.groups.iter().zip(&witness.groups) {
             for binder in group.binders() {
                 if shared.contains(&(owner.unit.clone(), owner.module.clone())) {
                     continue;
@@ -2185,6 +2297,356 @@ mod tests {
     use crate::cache::{ModuleEvidence, SourceEvidence};
     use tidepool_repr::execution_schema::testing;
     use tidepool_repr::execution_schema::DecodeLimits;
+
+    fn recovery_native_fixture(
+        root: &Path,
+    ) -> (
+        crate::recovery_artifacts::RecoveryArtifactRef,
+        crate::recovery_artifacts::RecoveryValueInterfaceRef,
+    ) {
+        use crate::recovery_artifacts::{
+            CertifiedJoinedInterface, CertifiedRecoveryProduct, CertifiedValueInterface,
+        };
+        use tidepool_repr::execution_schema::{parse_program, parse_projected_group, Group};
+        let bytes =
+            include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor");
+        let requirements = crate::prepared_artifact::production_requirements().unwrap();
+        let prepared = parse_program(bytes, &requirements, DecodeLimits::default()).unwrap();
+        let mut binders = prepared
+            .bindings()
+            .iter()
+            .flat_map(|group| match group {
+                Group::NonRecursive(top) => std::slice::from_ref(top),
+                Group::Recursive(tops) => tops,
+            })
+            .map(|top| top.identity.clone())
+            .collect::<Vec<_>>();
+        binders.truncate(1);
+        let entry = binders[0].clone();
+        let retained = SymbolIdentity {
+            unit: entry.unit.clone(),
+            module: "Val1".into(),
+            namespace: "value".into(),
+            occurrence: "x".into(),
+            record_parent: None,
+        };
+        let symbol = |identity: &SymbolIdentity| {
+            value_array([
+                value_text(&identity.unit),
+                value_text(&identity.module),
+                value_text(&identity.namespace),
+                value_text(&identity.occurrence),
+                value_array([Value::Integer(0.into())]),
+            ])
+        };
+        let Value::Array(mut fields) = ciborium::de::from_reader(bytes.as_slice()).unwrap() else {
+            unreachable!()
+        };
+        fields[7] = value_array([
+            value_array([
+                symbol(&entry),
+                value_array([Value::Integer(1.into())]),
+                value_array([Value::Integer(0.into())]),
+                Value::Bool(false),
+                value_array([Value::Integer(0.into())]),
+            ]),
+            value_array([
+                symbol(&retained),
+                value_array([Value::Integer(1.into())]),
+                value_array([Value::Integer(0.into())]),
+                Value::Bool(false),
+                value_array([Value::Integer(1.into()), Value::Integer(1.into())]),
+            ]),
+        ]);
+        // Keep the pinned envelope and replace executable fixture payload with
+        // a neutral original group whose two certified imports are explicit.
+        let number = |value: u64| Value::Integer(value.into());
+        fields[6] = value_array([value_array([
+            value_array([]),
+            value_array([
+                number(0),
+                value_array([value_array([number(4), number(64)])]),
+            ]),
+        ])]);
+        fields[8] = value_array([]);
+        fields[9] = value_array([]);
+        fields[10] = value_array([value_array([
+            number(0),
+            value_array([value_array([
+                number(1),
+                value_array([
+                    number(0),
+                    number(64),
+                    Value::Bytes(42_i64.to_be_bytes().to_vec()),
+                ]),
+            ])]),
+        ])]);
+        fields[11] = value_array([value_array([
+            number(0),
+            value_array([
+                symbol(&entry),
+                value_array([
+                    number(0),
+                    value_array([
+                        number(0),
+                        number(0),
+                        value_array([]),
+                        value_array([]),
+                        number(0),
+                    ]),
+                ]),
+            ]),
+        ])]);
+        fields[13] = value_array([]);
+        fields[14] = value_array([]);
+        fields[15] = value_array([]);
+        fields[16] = value_array([number(0)]);
+        fields.remove(12);
+        let mut group_fields = vec![
+            value_text("TPGRP"),
+            Value::Integer(1.into()),
+            Value::Integer(7.into()),
+            value_array(binders.iter().map(symbol)),
+        ];
+        group_fields.extend(fields.into_iter().skip(1));
+        let mut group_bytes = Vec::new();
+        ciborium::ser::into_writer(&value_array(group_fields), &mut group_bytes).unwrap();
+        let group =
+            parse_projected_group(&group_bytes, &requirements, DecodeLimits::default()).unwrap();
+        let interface = b"original interface".to_vec();
+        let value = value_array([
+            value_text("TPMOD"),
+            Value::Integer(1.into()),
+            value_array([value_array([
+                value_text(&entry.unit),
+                value_text(&entry.module),
+                Value::Bytes(interface.clone()),
+                value_array([Value::Bytes(group_bytes)]),
+            ])]),
+        ]);
+        let mut product_bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut product_bytes).unwrap();
+        let owner = CachedHomeOwner {
+            unit: entry.unit.clone(),
+            module: entry.module.clone(),
+            module_version: ModuleVersion([1; 32]),
+            skinny_iface_sha256: sha(&interface),
+            product_sha256: sha(&product_bytes),
+        };
+        let certified = PendingCertifiedGroup {
+            owner: owner.clone(),
+            group: Arc::new(group),
+            origin: ProductOrigin::Cached,
+            imports: vec![
+                PendingImportOwner::Source {
+                    owner: owner.clone(),
+                    original_ordinal: 7,
+                    binder: entry,
+                },
+                PendingImportOwner::Retained {
+                    identity: retained,
+                    generation: 1,
+                },
+            ]
+            .into(),
+        };
+        let packages = |unit: &str, module: &str, bytes: &[u8]| {
+            let value = value_array([
+                value_text("TPPKGROOTS"),
+                value_text("1"),
+                value_array([
+                    value_text(unit),
+                    value_text(module),
+                    value_text(hex(&sha(bytes))),
+                ]),
+                value_array([]),
+            ]);
+            let mut output = Vec::new();
+            ciborium::ser::into_writer(&value, &mut output).unwrap();
+            output
+        };
+        let seal = encode_home_certification(&owner, &[certified], &BTreeMap::new()).unwrap();
+        let package_bytes = packages(&owner.unit, &owner.module, &interface);
+        let product = CertifiedRecoveryProduct::from_certification(
+            owner.clone(),
+            interface,
+            product_bytes,
+            package_bytes,
+            seal,
+        );
+        let original =
+            crate::recovery_artifacts::materialize_certified_products(root, [2; 32], &[product])
+                .unwrap()
+                .remove(0);
+        let value_bytes = b"value interface".to_vec();
+        let package_bytes = packages(&owner.unit, "Val1", &value_bytes);
+        let interface = CertifiedJoinedInterface::from_certification(
+            [2; 32],
+            owner.unit,
+            "Val1".into(),
+            value_bytes,
+            package_bytes,
+        )
+        .unwrap();
+        let value = CertifiedValueInterface::from_admitted_interface(interface, vec![])
+            .materialize(root)
+            .unwrap();
+        (original, value)
+    }
+
+    #[test]
+    fn recovery_derives_native_relations_from_roundtripped_original_seals_once() {
+        use crate::artifact_inventory::{ArtifactDependency, ArtifactDescriptor};
+        use crate::declaration_join::RecoveredArtifactInventory;
+        let root = tempfile::tempdir().unwrap();
+        let (original, value) = recovery_native_fixture(root.path());
+        let (original, value) = serde_json::from_slice::<(
+            crate::recovery_artifacts::RecoveryArtifactRef,
+            crate::recovery_artifacts::RecoveryValueInterfaceRef,
+        )>(&serde_json::to_vec(&(original, value)).unwrap())
+        .unwrap();
+        let descriptors = [
+            ArtifactDescriptor::from_recovery_product(&original),
+            ArtifactDescriptor::from_recovery_value_interface(&value),
+        ];
+        let inventory = RecoveredArtifactInventory::capture(
+            root.path(),
+            &[original.clone()],
+            &[],
+            &[value.clone()],
+            &descriptors,
+            &[],
+        )
+        .unwrap();
+        let ids = descriptors
+            .iter()
+            .map(|descriptor| descriptor.id)
+            .collect::<Vec<_>>();
+        // The admission owns authenticated bytes; scoped views need no file reread.
+        std::fs::remove_file(root.path().join(&original.product_path)).unwrap();
+        let first = inventory.context(&ids, vec![]).unwrap();
+        let second = inventory.context(&ids, vec![]).unwrap();
+        let first_entries = first.artifact_view().entries();
+        let second_entries = second.artifact_view().entries();
+        assert!(first_entries
+            .iter()
+            .zip(&second_entries)
+            .all(|(a, b)| Arc::ptr_eq(a, b)));
+        let edges = first.artifact_view().dependencies();
+        assert!(edges.iter().any(|(_, _, edge)| matches!(
+            edge,
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal: 7,
+                required_ordinal: 7
+            }
+        )));
+        assert!(edges.iter().any(|(_, target, edge)| *target == value.artifact_id && matches!(edge, ArtifactDependency::NativeBinding { dependent_ordinal: 7, generation: 1, occurrence, .. } if occurrence == "x")));
+        assert!(first.artifact_view().interface_dependencies().is_empty());
+        let required = first
+            .artifact_view()
+            .native_binding_requirements_from_roots(&[descriptors[0].id])
+            .unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0].generation, 1);
+        assert_eq!(required[0].artifact_id, value.artifact_id);
+        assert!(inventory.context(&ids[..1], vec![]).is_err());
+        assert!(RecoveredArtifactInventory::capture(
+            root.path(),
+            &[original],
+            &[],
+            &[value],
+            &descriptors,
+            &[]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn recovery_refuses_tampered_and_ambiguous_native_dependency_owners() {
+        use crate::artifact_inventory::ArtifactDescriptor;
+        use crate::declaration_join::RecoveredArtifactInventory;
+        let root = tempfile::tempdir().unwrap();
+        let (original, value) = recovery_native_fixture(root.path());
+        let descriptors = [
+            ArtifactDescriptor::from_recovery_product(&original),
+            ArtifactDescriptor::from_recovery_value_interface(&value),
+        ];
+        let mut forged = descriptors.clone();
+        forged[1].interface_sha256 = [99; 32];
+        assert!(RecoveredArtifactInventory::capture(
+            root.path(),
+            &[original.clone()],
+            &[],
+            &[value.clone()],
+            &forged,
+            &[]
+        )
+        .is_err());
+        let bytes = b"another value interface".to_vec();
+        let package = value_array([
+            value_text("TPPKGROOTS"),
+            value_text("1"),
+            value_array([
+                value_text(&value.interface.unit),
+                value_text("Val1"),
+                value_text(hex(&sha(&bytes))),
+            ]),
+            value_array([]),
+        ]);
+        let mut packages = Vec::new();
+        ciborium::ser::into_writer(&package, &mut packages).unwrap();
+        let interface = crate::recovery_artifacts::CertifiedJoinedInterface::from_certification(
+            [2; 32],
+            value.interface.unit.clone(),
+            "Val1".into(),
+            bytes,
+            packages,
+        )
+        .unwrap();
+        let alternative =
+            crate::recovery_artifacts::CertifiedValueInterface::from_admitted_interface(
+                interface,
+                vec![],
+            )
+            .materialize(root.path())
+            .unwrap();
+        let descriptors = [
+            descriptors[0].clone(),
+            descriptors[1].clone(),
+            ArtifactDescriptor::from_recovery_value_interface(&alternative),
+        ];
+        let inventory = RecoveredArtifactInventory::capture(
+            root.path(),
+            &[original.clone()],
+            &[],
+            &[value.clone(), alternative],
+            &descriptors,
+            &[],
+        )
+        .unwrap();
+        assert!(inventory
+            .context(&[descriptors[0].id, descriptors[1].id], vec![])
+            .is_ok());
+        assert!(inventory
+            .context(&[descriptors[0].id, descriptors[2].id], vec![])
+            .is_ok());
+        assert!(inventory
+            .context(
+                &descriptors.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+                vec![]
+            )
+            .is_err());
+        std::fs::write(root.path().join(&original.certification_path), b"tampered").unwrap();
+        assert!(RecoveredArtifactInventory::capture(
+            root.path(),
+            &[original],
+            &[],
+            &[value],
+            &descriptors[..2],
+            &[]
+        )
+        .is_err());
+    }
 
     #[test]
     #[ignore = "requires an exact retained original declaration packet"]

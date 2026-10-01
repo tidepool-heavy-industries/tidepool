@@ -13,8 +13,8 @@ use tidepool_toolchain::recovery_artifacts::{
     RecoveryJoinRef, RecoveryValueInterfaceRef,
 };
 
-const VERSION: u32 = 4;
-const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v4";
+const VERSION: u32 = 5;
+const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v5";
 const MAX_MANIFEST_BYTES: usize = 64 << 20;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -248,7 +248,7 @@ pub(crate) struct RecoveryInstanceInventory {
     pub family_consistency_closure: Vec<RecoverySymbolIdentity>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(tag = "dependency", rename_all = "snake_case")]
 pub(crate) enum RecoveryLiveDependency {
     NativeBinding {
@@ -309,6 +309,13 @@ pub(crate) struct RecoveryArtifactLoss {
 pub(crate) struct RecoveryV2Read {
     pub graph: RecoveryGraph,
     pub artifact_losses: BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>,
+    pub inventory: Option<tidepool_toolchain::declaration_join::RecoveredArtifactInventory>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum RecoveryReadPurpose {
+    Metadata,
+    Hydration,
 }
 
 impl RecoveryV2Read {
@@ -588,7 +595,7 @@ pub(crate) fn read_v2(
             ));
         }
     };
-    read_v2_bytes(path, recovery_root, &bytes)
+    read_v2_bytes(path, recovery_root, &bytes, RecoveryReadPurpose::Metadata)
 }
 
 /// Validate bytes read once by the configured manifest owner.
@@ -596,6 +603,7 @@ pub(crate) fn read_v2_bytes(
     path: &Path,
     recovery_root: &Path,
     bytes: &[u8],
+    purpose: RecoveryReadPurpose,
 ) -> Result<Option<RecoveryV2Read>, RecoveryError> {
     if bytes.len() > MAX_MANIFEST_BYTES {
         return Err(at(path, "recovery manifest exceeds the bounded size"));
@@ -625,18 +633,42 @@ pub(crate) fn read_v2_bytes(
     {
         return Err(at(
             path,
-            "v4 recovery graph lacks the supported paired-public-v4 schema",
+            "v5 recovery graph lacks the supported paired-public-v5 schema",
         ));
     }
     let graph: RecoveryGraph = serde_json::from_value(value)
-        .map_err(|e| at(path, format!("invalid v4 recovery graph: {e}")))?;
+        .map_err(|e| at(path, format!("invalid v5 recovery graph: {e}")))?;
     graph.validate().map_err(|e| at(path, e.detail))?;
-    let artifact_losses = graph
-        .validate_artifact_files(recovery_root)
-        .map_err(|e| at(path, e.detail))?;
+    let (inventory, artifact_losses) = match purpose {
+        RecoveryReadPurpose::Metadata => (
+            None,
+            graph
+                .validate_artifact_files_after_graph_validation(recovery_root)
+                .map_err(|error| at(path, error.detail))?,
+        ),
+        RecoveryReadPurpose::Hydration => match graph.capture_inventory(recovery_root) {
+            Ok(inventory) => (Some(inventory), BTreeMap::new()),
+            Err(tidepool_toolchain::declaration_join::RecoveryInventoryError::Artifacts(
+                errors,
+            )) => {
+                let artifacts = graph
+                    .artifacts
+                    .iter()
+                    .map(|artifact| (artifact.artifact_id(), artifact))
+                    .collect::<BTreeMap<_, _>>();
+                let losses = errors
+                    .into_iter()
+                    .map(|(id, error)| (id, vec![artifact_error_loss(artifacts[&id], error)]))
+                    .collect();
+                (None, losses)
+            }
+            Err(error) => return Err(at(path, error.to_string())),
+        },
+    };
     Ok(Some(RecoveryV2Read {
         graph,
         artifact_losses,
+        inventory,
     }))
 }
 
@@ -653,6 +685,45 @@ impl std::fmt::Display for RecoveryError {
 impl std::error::Error for RecoveryError {}
 
 impl RecoveryGraph {
+    pub(crate) fn capture_inventory(
+        &self,
+        root: &Path,
+    ) -> Result<
+        tidepool_toolchain::declaration_join::RecoveredArtifactInventory,
+        tidepool_toolchain::declaration_join::RecoveryInventoryError,
+    > {
+        let mut products = Vec::new();
+        let mut joins = Vec::new();
+        let mut values = Vec::new();
+        for artifact in &self.artifacts {
+            match artifact {
+                RecoveryArtifactClosure::Home(reference) => products.push(reference.clone()),
+                RecoveryArtifactClosure::Join(reference) => joins.push(reference.clone()),
+                RecoveryArtifactClosure::ValueInterface(reference) => {
+                    values.push(reference.clone())
+                }
+            }
+        }
+        let descriptors = self
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.descriptor())
+            .collect::<Vec<_>>();
+        let interfaces = self
+            .artifact_dependencies
+            .iter()
+            .map(|edge| (edge.source, edge.target, edge.dependency.clone()))
+            .collect::<Vec<_>>();
+        tidepool_toolchain::declaration_join::RecoveredArtifactInventory::capture(
+            root,
+            &products,
+            &joins,
+            &values,
+            &descriptors,
+            &interfaces,
+        )
+    }
+
     pub(crate) fn empty(source_session: u64, lineage: u64) -> Result<Self, RecoveryError> {
         let mut graph = Self {
             version: VERSION,
@@ -1189,6 +1260,11 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
         }
     }
     for edge in &graph.artifact_dependencies {
+        if !matches!(edge.dependency, ArtifactDependency::Interface) {
+            return Err(error(
+                "native recovery edges must derive from original certification",
+            ));
+        }
         if !artifacts.contains_key(&edge.source) || !artifacts.contains_key(&edge.target) {
             return Err(error(
                 "recovery artifact dependency references a missing artifact",
@@ -1224,10 +1300,12 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
             let RecoveryLiveDependency::NativeBinding {
                 artifact_id,
                 binding,
-                generation,
+                generation: _,
             } = dependency
             else {
-                continue;
+                return Err(error(
+                    "unsupported recovery instance live dependency marker",
+                ));
             };
             let artifact = artifacts
                 .get(artifact_id)
@@ -1236,15 +1314,10 @@ fn validate_shape(graph: &RecoveryGraph) -> Result<(), RecoveryError> {
                     error("native binding dependency has no retained exact interface")
                 })?;
             let owner = artifact.owner();
-            if owner.unit != binding.unit || owner.module != binding.module
-                || !graph.artifact_dependencies.iter().any(|edge| {
-                    edge.target == *artifact_id && node_artifacts.contains(&edge.source)
-                        && matches!(&edge.dependency, ArtifactDependency::NativeBinding {
-                            generation: required_generation, namespace, occurrence, record_parent, ..
-                        } if required_generation == generation && namespace == &binding.namespace
-                            && occurrence == &binding.occurrence && record_parent == &binding.record_parent)
-                }) {
-                return Err(error("native binding dependency differs from its certified original identity"));
+            if owner.unit != binding.unit || owner.module != binding.module {
+                return Err(error(
+                    "native binding dependency differs from its certified original identity",
+                ));
             }
         }
         for id in &node_artifacts {
@@ -1342,7 +1415,7 @@ fn checksum(graph: &RecoveryGraph) -> Result<String, RecoveryError> {
     };
     let bytes = serde_json::to_vec(&unsigned)
         .map_err(|e| error(format!("could not encode recovery graph: {e}")))?;
-    let mut domain = b"tidepool-recovery-graph-v4\0".to_vec();
+    let mut domain = b"tidepool-recovery-graph-v5\0".to_vec();
     domain.extend_from_slice(&bytes);
     Ok(blake3::hash(&domain).to_hex().to_string())
 }
@@ -1616,12 +1689,6 @@ mod tests {
         0x15, 0xc0, 0xf3, 0x77, 0xf9, 0xf0, 0xf3, 0xcb, 0xb3, 0x21, 0x6f, 0xbb, 0xf7, 0x76, 0xda,
         0x63, 0x25,
     ];
-    const PRODUCT_SHA: [u8; 32] = [
-        0xa8, 0x79, 0x21, 0x57, 0xcb, 0x4f, 0x27, 0xfb, 0x94, 0x9c, 0x03, 0x5f, 0x45, 0x51, 0x8c,
-        0x61, 0xe8, 0x84, 0xbb, 0x86, 0xe6, 0xf4, 0x20, 0x20, 0x43, 0x79, 0xc2, 0xba, 0xa8, 0xbe,
-        0xb6, 0x6e,
-    ];
-
     fn identity(occurrence: &str) -> RecoverySymbolIdentity {
         RecoverySymbolIdentity {
             unit: "main".into(),
@@ -1654,13 +1721,29 @@ mod tests {
         let iface = source.path().join("Lib.hi");
         let product = source.path().join("Lib.product");
         fs::write(&iface, b"interface").unwrap();
-        fs::write(&product, b"product").unwrap();
+        let value = ciborium::value::Value::Array(vec![
+            ciborium::value::Value::Text("TPMOD".into()),
+            ciborium::value::Value::Integer(1.into()),
+            ciborium::value::Value::Array(vec![ciborium::value::Value::Array(vec![
+                ciborium::value::Value::Text("main".into()),
+                ciborium::value::Value::Text("Lib".into()),
+                ciborium::value::Value::Bytes(b"interface".to_vec()),
+                ciborium::value::Value::Array(vec![]),
+            ])]),
+        ]);
+        let mut product_bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut product_bytes).unwrap();
+
+        fs::write(&product, product_bytes).unwrap();
         let home_owner = CachedHomeOwner {
             unit: "main".into(),
             module: "Lib".into(),
             module_version: ModuleVersion([0x22; 32]),
             skinny_iface_sha256: IFACE_SHA,
-            product_sha256: PRODUCT_SHA,
+            product_sha256: [
+                203, 118, 219, 99, 35, 245, 3, 47, 232, 172, 108, 229, 10, 166, 133, 26, 194, 49,
+                195, 255, 222, 100, 218, 15, 219, 241, 254, 186, 229, 90, 19, 16,
+            ],
         };
         let package_witness = ciborium::value::Value::Array(vec![
             ciborium::value::Value::Text("TPPKGROOTS".into()),
@@ -1786,19 +1869,6 @@ mod tests {
         graph
             .artifacts
             .push(RecoveryArtifactClosure::ValueInterface(value));
-        graph
-            .artifact_dependencies
-            .push(RecoveryArtifactDependency {
-                source: original_id,
-                target: value_id,
-                dependency: ArtifactDependency::NativeBinding {
-                    dependent_ordinal: 0,
-                    generation: 1,
-                    namespace: "value".into(),
-                    occurrence: "x".into(),
-                    record_parent: None,
-                },
-            });
         for node in &mut graph.nodes {
             node.artifact_refs = vec![original_id, value_id];
             node.state = RecoveryNodeState::LiveValueDependency {
@@ -1888,7 +1958,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let manifest = root.path().join("declarations.json");
         let mut graph = fixture(root.path());
-        graph.public_surfaces[0].declaration_root = None;
+        graph.public_surfaces.clear();
         graph.nodes.retain(|node| node.id == Generation(1));
         graph.seal().unwrap();
         assert!(matches!(
@@ -1916,6 +1986,94 @@ mod tests {
         let retained = read_v2(&manifest, root.path()).unwrap().unwrap();
         assert_eq!(retained.graph.nodes, graph.nodes);
         assert_eq!(retained.graph.high_water, Generation(3));
+    }
+
+    #[test]
+    fn private_recovery_refuses_live_marker_not_in_verified_native_inventory() {
+        use crate::session::{ModuleEnv, SessionId, SessionLib};
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("declarations.json");
+        let mut graph = fixture(root.path());
+        graph.public_surfaces.clear();
+        graph.nodes.truncate(1);
+        let node = &mut graph.nodes[0];
+        node.lexical_roots = vec![module("main", "Lib")];
+        node.lexical = vec![ExactLexicalNode {
+            owner: module("main", "Lib"),
+            imports: vec![],
+        }];
+        node.state = RecoveryNodeState::LiveValueDependency {
+            reason: "claimed native lease".into(),
+        };
+        node.live_dependencies
+            .push(RecoveryLiveDependency::NativeBinding {
+                artifact_id: node.artifact_refs[0],
+                binding: RecoverySourceIdentity {
+                    unit: "main".into(),
+                    module: "Lib".into(),
+                    namespace: "value".into(),
+                    occurrence: "answer".into(),
+                    record_parent: None,
+                },
+                generation: 1,
+            });
+        graph.seal().unwrap();
+        assert!(matches!(
+            stage_v2(&manifest, root.path(), graph.clone())
+                .unwrap()
+                .publish(),
+            RecoveryPublishOutcome::Durable { .. }
+        ));
+        let bytes = fs::read(&manifest).unwrap();
+        let mut reopened = SessionLib::open(
+            SessionId(42),
+            root.path().join("session"),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        assert!(matches!(reopened.attach_recovery_graph_v2(&manifest),
+            Err(crate::session::SessionError::RecoveryManifest { detail, .. })
+                if detail.contains("live dependencies differ from verified original native requirements")));
+        assert_eq!(fs::read(&manifest).unwrap(), bytes);
+        graph.nodes[0].live_dependencies = vec![RecoveryLiveDependency::Instance {
+            dfun: identity("dfun"),
+        }];
+        assert!(graph
+            .seal()
+            .unwrap_err()
+            .detail
+            .contains("unsupported recovery instance"));
+    }
+
+    #[test]
+    fn v5_manifest_refuses_persisted_native_relation_rows() {
+        let root = tempfile::tempdir().unwrap();
+        let mut graph = fixture(root.path());
+        let original = graph.artifacts[0].artifact_id();
+        for dependency in [
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal: 1,
+                required_ordinal: 7,
+            },
+            ArtifactDependency::NativeBinding {
+                dependent_ordinal: 1,
+                generation: 7,
+                namespace: "value".into(),
+                occurrence: "x".into(),
+                record_parent: None,
+            },
+        ] {
+            graph.artifact_dependencies = vec![RecoveryArtifactDependency {
+                source: original,
+                target: original,
+                dependency,
+            }];
+            assert!(graph
+                .seal()
+                .unwrap_err()
+                .detail
+                .contains("native recovery edges must derive"));
+        }
     }
 
     #[test]
@@ -2404,7 +2562,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_checksum_covers_lexical_roots_and_edges() {
+    fn v5_checksum_covers_lexical_roots_and_edges() {
         let dir = tempfile::tempdir().unwrap();
         let root = module("main", "Lib");
         let other = module("main", "Other");
@@ -2474,7 +2632,7 @@ mod tests {
         let mut unsigned = graph.clone();
         unsigned.checksum.clear();
         let bytes = serde_json::to_vec(&unsigned).unwrap();
-        let mut domain = b"tidepool-recovery-graph-v4\0".to_vec();
+        let mut domain = b"tidepool-recovery-graph-v5\0".to_vec();
         domain.extend_from_slice(&bytes);
         assert_eq!(
             checksum(&graph).unwrap(),

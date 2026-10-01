@@ -2022,9 +2022,14 @@ impl PersistentSession {
             Err(error) => return Err(invalid(error.to_string())),
         };
         if let Some(bytes) = &original {
-            let read = super::recovery::read_v2_bytes(&state.path, root, bytes)
-                .map_err(|error| invalid(error.to_string()))?
-                .ok_or(SessionError::WrongPublicManifestTicket)?;
+            let read = super::recovery::read_v2_bytes(
+                &state.path,
+                root,
+                bytes,
+                super::recovery::RecoveryReadPurpose::Metadata,
+            )
+            .map_err(|error| invalid(error.to_string()))?
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
             if !read.artifact_losses.is_empty() || read.graph.checksum != state.graph.checksum {
                 return Err(SessionError::WrongPublicManifestTicket);
             }
@@ -2214,9 +2219,14 @@ impl PersistentSession {
         }
         let current_bytes =
             std::fs::read(&state.path).map_err(|error| invalid(error.to_string()))?;
-        let current = super::recovery::read_v2_bytes(&state.path, root, &current_bytes)
-            .map_err(|error| invalid(error.to_string()))?
-            .ok_or_else(|| invalid("current manifest is not the exact retained graph".into()))?;
+        let current = super::recovery::read_v2_bytes(
+            &state.path,
+            root,
+            &current_bytes,
+            super::recovery::RecoveryReadPurpose::Metadata,
+        )
+        .map_err(|error| invalid(error.to_string()))?
+        .ok_or_else(|| invalid("current manifest is not the exact retained graph".into()))?;
         if !current.artifact_losses.is_empty()
             || current.graph.checksum != state.graph.checksum
             || current.graph.high_water != state.graph.high_water

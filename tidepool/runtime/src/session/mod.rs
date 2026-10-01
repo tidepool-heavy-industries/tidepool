@@ -2161,15 +2161,19 @@ impl SessionLib {
                 graph.artifacts.push(artifact);
             }
         }
-        graph
-            .artifact_dependencies
-            .extend(context.artifact_view().dependencies().into_iter().map(
-                |(source, target, dependency)| recovery::RecoveryArtifactDependency {
-                    source,
-                    target,
-                    dependency,
-                },
-            ));
+        graph.artifact_dependencies.extend(
+            context
+                .artifact_view()
+                .interface_dependencies()
+                .into_iter()
+                .map(
+                    |(source, target, dependency)| recovery::RecoveryArtifactDependency {
+                        source,
+                        target,
+                        dependency,
+                    },
+                ),
+        );
         graph.seal().map_err(|error| invalid(&error.to_string()))?;
         recovery::stage_v2(&state.path, root, graph).map_err(|error| invalid(&error.to_string()))
     }
