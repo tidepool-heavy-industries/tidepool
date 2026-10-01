@@ -2588,6 +2588,12 @@ pub fn check_cell_admitted(
     fold: Option<CellFoldTurn<'_>>,
 ) -> Result<(CellCheck, Option<TurnResult>), CellCheckFailure> {
     validate_cell_admitted_request(&req, &admission)?;
+    if admission.plan_reservation().is_some() {
+        return Err(CompileError::ExtractFailed(
+            "planned cells require complete program compilation".into(),
+        )
+        .into());
+    }
     let view = admission.view();
     if admission.reserved_generations().len() > 1 {
         return Err(CompileError::ExtractFailed(
@@ -3240,6 +3246,9 @@ pub fn run_checked_item(
         )
         .into());
     }
+    if prefix.cell_program().is_some() {
+        return consume_cell_program_item(item_admission);
+    }
     run_turn_with_pin(req, None, false, Some(item_admission), None)
 }
 
@@ -3250,6 +3259,9 @@ pub fn run_checked_display(
     admission: Arc<super::RuntimeCheckedDisplayAdmission>,
     include: &[&Path],
 ) -> Result<TurnResult, TurnFailure> {
+    if admission.prefix().cell_program().is_some() {
+        return consume_cell_program_display(admission);
+    }
     let snapshot = admission.snapshot();
     let view = snapshot.view();
     let templates = admission
