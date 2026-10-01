@@ -530,33 +530,34 @@ where
         }
         // Wakes are hints. A prior Engine round may have returned while a
         // forwarded hint remained in its receiver; the Store is authoritative.
-        let first = match store
+        let frontier = store
+            .embedded_round_frontier(conversation.identity())
+            .map_err(|error| error.to_string())?;
+        let first = store
             .unread(&actor.0)
             .map_err(|error| error.to_string())?
             .first()
-        {
-            Some(envelope) => harness::mailbox::DurableMailboxWake {
+            .map(|envelope| harness::mailbox::DurableMailboxWake {
                 envelope_id: envelope.id,
-            },
-            None => tokio::select! {
+            });
+        if first.is_none() && frontier.pending_head.is_none() {
+            tokio::select! {
                 biased;
                 changed = cancellation.changed() => {
                     if changed.is_err() || *cancellation.borrow() { return Ok(()); }
-                    continue;
                 }
-                wake = incoming.recv() => match wake { Some(_) => continue, None => return Ok(()) },
-            },
-        };
-        let head = store
-            .agent(&actor)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("missing embedded agent {}", actor.0))?
-            .head_request;
+                wake = incoming.recv() => if wake.is_none() { return Ok(()); },
+            }
+            continue;
+        }
+        let head = frontier.settled_head;
         let (forward, forwarded) = mpsc::unbounded_channel();
-        forward
-            .send(first)
-            .map_err(|_| "embedded Engine wake receiver closed")?;
-        let recovering_this_round = recovering;
+        if let Some(first) = first {
+            forward
+                .send(first)
+                .map_err(|_| "embedded Engine wake receiver closed")?;
+        }
+        let recovering_this_round = recovering || frontier.pending_head.is_some();
         let mut lifetime_stopped = false;
         let result = {
             let round = round_control
@@ -610,10 +611,21 @@ where
             }
         };
         // A clean rejection already committed its exact failed head in Engine.
-        let advanced = if rejected {
+        let advanced = if rejected || durable_head == head {
             Ok(true)
+        } else if let Some(durable_head) = &durable_head {
+            store.settle_embedded_round(
+                conversation.identity(),
+                head.as_ref(),
+                durable_head,
+                if interrupted {
+                    harness::store::EmbeddedRoundOutcome::Cancelled
+                } else {
+                    harness::store::EmbeddedRoundOutcome::Completed
+                },
+            )
         } else {
-            store.advance_agent_head(&actor, head.as_ref(), durable_head.as_ref())
+            Ok(false)
         };
         if let Some(error) = cleanup_failure {
             if !matches!(&advanced, Ok(true)) {
@@ -732,3 +744,7 @@ mod shutdown_tests {
         assert!(!error.cleanup_failed());
     }
 }
+
+#[cfg(test)]
+#[path = "embedded_restart_driver_tests.rs"]
+mod restart_tests;
