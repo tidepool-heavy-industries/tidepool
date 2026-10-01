@@ -78,7 +78,7 @@ submitConfigured
   -> input
   -> Eff ActorEffects (Response result)
 submitConfigured actor name timeout value =
-  requestWith actor ((assignment name value)
+  request actor ((assignment name value)
     { guidance = Just "inspect the typed input before acting"
     , deadline = Just timeout
     })
@@ -195,7 +195,7 @@ heterogeneousUnfold
   -> Label
   -> Eff ActorEffects (Response Text, Response Int)
 heterogeneousUnfold group textLeaf intLeaf =
-  unfold group $
+  unfoldDeferred group $
     (,)
       <$> child (withEffort High (researching @Text projectHead (assignment textLeaf ())))
       <*> child (withEffort Low (coding @Int projectHead (assignment intLeaf ())))
@@ -205,7 +205,7 @@ progressiveUnfold
   -> Label
   -> Eff ActorEffects (Response Text, Progress Int)
 progressiveUnfold group leaf =
-  unfold group $
+  unfoldDeferred group $
     childWithProgress @Int (researching @Text projectHead (assignment leaf ()))
 
 homogeneousUnfold
@@ -213,7 +213,7 @@ homogeneousUnfold
   -> [Label]
   -> Eff ActorEffects [Response Text]
 homogeneousUnfold group leaves =
-  unfold group $
+  unfoldDeferred group $
     traverse
       (\leaf -> child (researching @Text projectHead (assignment leaf ())))
       leaves
@@ -223,8 +223,27 @@ recoverableUnfold
   -> Label
   -> Eff ActorEffects (Either UnfoldError (Response Text))
 recoverableUnfold group leaf =
-  attemptUnfold group $
+  attemptUnfoldDeferred group $
     child (researching @Text projectHead (assignment leaf ()))
+
+checkpointUnfold
+  :: ContextCheckpoint
+  -> ForkGroupPath
+  -> Label
+  -> Eff ActorEffects (Response Text)
+checkpointUnfold checkpoint group leaf =
+  unfold group $
+    child (withContext (fromCheckpoint checkpoint)
+      (researching @Text projectHead (assignment leaf ())))
+
+selectedUnfold
+  :: ForkGroupPath
+  -> Label
+  -> Eff ActorEffects (Either UnfoldError (Response Text))
+selectedUnfold group leaf =
+  attemptUnfold group $
+    child (withContext (selected id)
+      (researching @Text projectHead (assignment leaf ("inspect only" :: Text))))
 
 configuredBranch
   :: Duration
@@ -246,7 +265,7 @@ subSecondRequest
   -> Label
   -> Eff ActorEffects (Response Text)
 subSecondRequest actor label =
-  requestWith actor ((assignment label ()) { deadline = Just (milliseconds 25) })
+  request actor ((assignment label ()) { deadline = Just (milliseconds 25) })
 
 type TinyResearchEffects = '[Replies, ActorContext]
 
@@ -255,7 +274,7 @@ narrowResearch
   -> Label
   -> Eff ActorEffects (Response Text)
 narrowResearch group leaf =
-  unfold group $
+  unfoldDeferred group $
     child $
       narrowed
         (knownEffects @TinyResearchEffects)

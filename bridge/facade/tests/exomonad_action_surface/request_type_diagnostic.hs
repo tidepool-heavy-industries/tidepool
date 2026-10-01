@@ -13,14 +13,14 @@ import Tidepool.Actors.Exomonad
 unresolved :: forall result. AgentRef -> Eff ActorEffects (Response result)
 unresolved actor =
   let requestLabel = [label|review|]
-  in requestWith @result actor (assignment requestLabel (7 :: Int))
+  in request @result actor (assignment requestLabel (7 :: Int))
 
 annotated :: AgentRef -> Eff ActorEffects (Response Bool)
 annotated actor =
   let requestLabel = [label|review|]
-  in requestWith @Bool actor (assignment requestLabel (7 :: Int))
+  in request @Bool actor (assignment requestLabel (7 :: Int))
 
 functionResult :: AgentRef -> Eff ActorEffects (Response (Int -> Int))
 functionResult actor =
   let requestLabel = [label|transform|]
-  in requestWith @(Int -> Int) actor (assignment requestLabel (7 :: Int))
+  in request @(Int -> Int) actor (assignment requestLabel (7 :: Int))

@@ -24,4 +24,4 @@ reply state = case state of
 -- the ordinary typed path, which the errand does not replace.
 typedStillWorks :: ForkGroupPath -> Label -> Eff ActorEffects (Response Int)
 typedStillWorks group leaf =
-  unfold group (child (coding @Int projectHead (assignment leaf ())))
+  unfoldDeferred group (child (coding @Int projectHead (assignment leaf ())))

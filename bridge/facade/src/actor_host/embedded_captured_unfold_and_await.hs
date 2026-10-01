@@ -1,10 +1,10 @@
 do
-  inheritedRefusal <- attemptUnfoldCaptured (batch ("embedded-captured" :: CampaignLabel)
+  inheritedRefusal <- attemptUnfold (batch ("embedded-captured" :: CampaignLabel)
     ("inherited-refusal" :: ForkGroupLabel))
     (child (researching @Int projectHead
       (assignment [label|must-not-launch|] ("inherited context is not independent" :: Text))))
   Right seed <- checkpoint "same-cell captured context"
-  (alpha, beta) <- unfoldCaptured (batch ("embedded-captured" :: CampaignLabel)
+  (alpha, beta) <- unfold (batch ("embedded-captured" :: CampaignLabel)
     ("reply-workers" :: ForkGroupLabel))
     ((,) <$>
       child (withContext (fromCheckpoint seed)
@@ -15,7 +15,7 @@ do
           (assignment [label|captured-beta|] ("reply with the captured getter" :: Text)))))
   firstRelease <- releaseCheckpoint seed
   secondRelease <- releaseCheckpoint seed
-  releasedRefusal <- attemptUnfoldCaptured (batch ("embedded-captured" :: CampaignLabel)
+  releasedRefusal <- attemptUnfold (batch ("embedded-captured" :: CampaignLabel)
     ("released-refusal" :: ForkGroupLabel))
     (child (withContext (fromCheckpoint seed)
       (researching @Int projectHead

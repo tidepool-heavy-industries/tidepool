@@ -830,7 +830,7 @@ async fn invalid_label_literals_fail_before_actor_side_effects() {
     let invalid_unfold = dispatch_haskell_script(
         root.as_ref(),
         concat!(
-            "badWorkers <- unfold (batch \"literal-errors\" \"branches\") $ ",
+            "badWorkers <- unfoldDeferred (batch \"literal-errors\" \"branches\") $ ",
             "(,) <$> child (researching @Text projectHead (assignment [label|valid|] ())) ",
             "<*> child (researching @Text projectHead (assignment [label|Bad Label|] ()))",
         ),
@@ -851,7 +851,7 @@ async fn invalid_label_literals_fail_before_actor_side_effects() {
     committed(
         root.as_ref(),
         concat!(
-            "worker <- unfold (batch \"literal-errors\" \"request\") ",
+            "worker <- unfoldDeferred (batch \"literal-errors\" \"request\") ",
             "(child (researching @Text projectHead (assignment [label|target|] ())))",
         ),
     )
@@ -1909,7 +1909,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
     let reply = dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput").await;
     assert_eq!(reply["status"], "replied", "{reply}");
     committed(root.as_ref(), "stopAgent (responseActor producer)").await;
-    committed(root.as_ref(), "unavailable <- requestWith @Text (responseActor producer) (assignment forwardedLabel (\"lost target\" :: Text))\nhandled <- route (awaitSettled unavailable) (\\settled -> case settled of { ReplyUnavailable _ -> pure (); ReplyAvailable _ -> error \"unexpected success\" })").await;
+    committed(root.as_ref(), "unavailable <- request @Text (responseActor producer) (assignment forwardedLabel (\"lost target\" :: Text))\nhandled <- route (awaitSettled unavailable) (\\settled -> case settled of { ReplyUnavailable _ -> pure (); ReplyAvailable _ -> error \"unexpected success\" })").await;
     let handled = committed(
         root.as_ref(),
         "pollRoute handled\nforgetRoute forwarding\nforgetRoute broken",

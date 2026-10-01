@@ -1,6 +1,6 @@
 do
   Just seed <- R.call (readSeed (R.client seedStore)) ()
-  again <- unfoldCaptured (batch ("embedded-captured" :: CampaignLabel)
+  again <- unfold (batch ("embedded-captured" :: CampaignLabel)
     ("after-cell-failure" :: ForkGroupLabel))
     (child (withContext (fromCheckpoint seed)
       (researching @Int projectHead
