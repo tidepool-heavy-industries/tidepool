@@ -17,14 +17,16 @@ module Tidepool.Agent.Session
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Text (Text)
 
-import Tidepool.Effects.Core (AgentSession (..))
+import Tidepool.Effects.Core (AgentSession (..), WorkerLifetime (..))
 
 -- | Runtime activation data, separate from the caller's authored assignment.
-newtype ActivationMetadata = ActivationMetadata
-  { activationSiblings :: [(Text, Text, Text)] }
+data ActivationMetadata = ActivationMetadata
+  { activationSiblings :: [(Text, Text, Text)]
+  , activationRequestLifetime :: WorkerLifetime
+  }
 
 emptyActivationMetadata :: ActivationMetadata
-emptyActivationMetadata = ActivationMetadata []
+emptyActivationMetadata = ActivationMetadata [] InvocationOwned
 
 -- | Request this actor's Codex application without manufacturing a model turn.
 attachAgent :: Member AgentSession effs => Maybe Text -> Eff effs ()

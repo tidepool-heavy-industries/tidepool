@@ -940,7 +940,7 @@ requestBranch site groupId (ForkGroupPath _ group) (Branch role _ _ options assi
   let leaf = labelText (assignmentLabel assigned)
   let requested = group <> "/" <> leaf
       (actorId, incarnation) = agentIdentity actor
-  response <- requestActivatedSited @result @input site actor assigned (ActivationMetadata siblings)
+  response <- requestActivatedSited @result @input site actor assigned (ActivationMetadata siblings (branchLifetime options))
   observed <- lookupAgent actor
   let pair maybeId maybeInc = (,) <$> maybeId <*> maybeInc
   pure (withResponseAdmission

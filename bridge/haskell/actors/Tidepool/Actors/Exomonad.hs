@@ -225,6 +225,7 @@ module Tidepool.Actors.Exomonad
   , requestId
   , pollResponse
   , cancelRequest
+  , detachRequest
   , abandonResponse
   , forgetResponse
   , acknowledgeCancellation

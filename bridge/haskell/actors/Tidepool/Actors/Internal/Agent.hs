@@ -80,6 +80,7 @@ import Tidepool.Agent.Reply.Internal
   , fillResponse
   , newRequestHandles
   , reserveRequest
+  , detachRequest
   , replyRequestId
   , submitRequest
   , ResponseResult (..)
@@ -101,7 +102,7 @@ import Tidepool.Agent.Watch.Internal (WatchId (..))
 import Tidepool.Inspection
   ( Display (..), DisplayTree (..), PageDisplay (..), opaqueHandle, pageWithContinuation )
 import Tidepool.Agent.Session
-  ( ActivationMetadata
+  ( ActivationMetadata (..)
   , emptyActivationMetadata
   , attachAgent
   , requestSessionSited
@@ -449,6 +450,14 @@ requestConfiguredSited site target targetWorktree options metadata retain = do
       requestDeadline = deadline options
       (response, reply) = newRequestHandles requestInput requestId (AgentRef target targetWorktree)
   retain response
+  case activationRequestLifetime metadata of
+    InvocationOwned -> pure ()
+    lifetime -> do
+      detached <- detachRequest response
+      case detached of
+        Left failure -> error
+          ("initial " <> show lifetime <> " request detachment refused: " <> show failure)
+        Right () -> pure ()
   submitRequest
     requestId
     (actorAddress target)
