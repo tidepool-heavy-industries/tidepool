@@ -120,6 +120,16 @@ class ResidentPerformanceReport(unittest.TestCase):
                 row["source_digest"] = "0" * 64
         self.assertFalse(REPORT.analyze(samples, events, manifest)["accepted"])
 
+    def test_retained_cell_source_must_match_its_digest(self):
+        samples, events, manifest = self.fixture()
+        for row in samples:
+            if row["kind"] == "warm_cell":
+                row["source"] = f"({row['index']} + 42 :: Int)"
+                row["source_digest"] = hashlib.sha256(row["source"].encode()).hexdigest()
+        self.assertTrue(REPORT.analyze(samples, events, manifest)["accepted"])
+        samples[0]["source"] = "(0 :: Int)"
+        self.assertFalse(REPORT.analyze(samples, events, manifest)["accepted"])
+
     def test_worker_phase_costs_and_io_counts_remain_separate_from_wall_clock(self):
         samples, events, manifest = self.fixture()
         for line in (

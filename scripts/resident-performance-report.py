@@ -123,6 +123,10 @@ def analyze(samples, events, manifest):
             source_digest = row.get("source_digest")
             if not isinstance(source_digest, str) or len(source_digest) != 64 or any(char not in "0123456789abcdef" for char in source_digest):
                 problems.append(f"warm sample {key} has no actual cell source digest")
+            if "source" in row:
+                source = row["source"]
+                if not isinstance(source, str) or hashlib.sha256(source.encode()).hexdigest() != source_digest:
+                    problems.append(f"warm sample {key} source differs from its SHA256 digest")
             if row.get("displayed") is not True:
                 problems.append(f"warm sample {key} has no display evidence")
             epoch = row.get("daemon_epoch")

@@ -103,6 +103,8 @@ Cold samples carry `packaged: true`, actual `host_pid`, `readiness:
 unique `operation_id`, confirmed `effect_active_ns` at or before interrupt,
 and `acknowledged: true` only when the actual acknowledgment arrives. Record
 these in the owning fixture at the observed process/effect boundaries.
+A sample may retain its submitted `source`; the reporter then recomputes its
+UTF-8 SHA256 and refuses a mismatched `source_digest`.
 Warm cells require at least ten distinct actual source digests and repeated
 measured use of every participating worker PID. Private-session attribution uses a different
 composition and cannot satisfy the product gate.
