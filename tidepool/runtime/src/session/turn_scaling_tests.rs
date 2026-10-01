@@ -971,8 +971,13 @@ fn resident_durable_display_cells_2_baseline() {
     resident_display_cells(2, true);
 }
 
-#[test]
-fn complete_cell_consumes_item_and_display_without_compiler_requests() {
+fn simple_cell_vertical(
+    label: &str,
+    source: &str,
+    declarations: usize,
+    expected: &str,
+    authority_checks: AuthorityChecks,
+) -> Vec<String> {
     tidepool_testing::eval_harness::require_extract();
     let root = tempfile::tempdir().unwrap();
     let effects = TestEffectSurface::minimal(&[]).unwrap();
@@ -995,11 +1000,209 @@ fn complete_cell_consumes_item_and_display_without_compiler_requests() {
         &effects,
         &images,
         (0, 0),
+        label,
+        source,
+        declarations,
+        Some(expected),
+        &ScalePublication::Ephemeral,
+        authority_checks,
+    );
+    resident.binding_names_in(public)
+}
+
+#[test]
+fn complete_cell_consumes_item_and_display_without_compiler_requests() {
+    simple_cell_vertical(
         "complete_cell",
         include_str!("fixtures/compiled-cell-simple.hs"),
         0,
-        Some("42"),
-        &ScalePublication::Ephemeral,
+        "42",
         AuthorityChecks::RefusalBranches,
     );
+}
+
+#[test]
+fn late_record_selector_replaces_earlier_cell_value() {
+    let names = simple_cell_vertical(
+        "record_selector",
+        include_str!("fixtures/compiled-cell-record-selector.hs"),
+        1,
+        "2",
+        AuthorityChecks::Configured,
+    );
+    assert!(
+        !names.iter().any(|name| name == "f"),
+        "old heap f must not survive its exact declaration selector"
+    );
+}
+
+#[test]
+#[ignore = "local fixity guard remains until production prepared-cell native8 passes"]
+fn complete_cell_preserves_exact_local_fixity() {
+    simple_cell_vertical(
+        "local_fixity",
+        include_str!("fixtures/compiled-cell-local-fixity.hs"),
+        0,
+        "8",
+        AuthorityChecks::Configured,
+    );
+}
+
+fn persisted_root_state(
+    manifest: &Path,
+    owner: &RecoveryPublicOwner,
+) -> crate::session::recovery::RecoveryNodeState {
+    let graph: crate::session::recovery::RecoveryGraph =
+        serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
+    let root = graph
+        .public_surfaces
+        .iter()
+        .find(|surface| &surface.owner == owner)
+        .unwrap()
+        .declaration_root
+        .unwrap();
+    graph
+        .nodes
+        .into_iter()
+        .find(|node| node.id == root)
+        .unwrap()
+        .state
+}
+
+#[test]
+#[ignore = "requires an admitted real compiler, retained durable workspace, and fresh native test process"]
+fn durable_mixed_originals_recover_independent_native_entry() {
+    tidepool_testing::eval_harness::require_extract();
+    let child_root = std::env::var_os("TIDEPOOL_RECOVERY_CHILD_WORKSPACE").map(PathBuf::from);
+    let (root_path, root_guard) = if let Some(root) = &child_root {
+        (root.clone(), None)
+    } else {
+        scale_workspace(true)
+    };
+    let manifest = root_path.join("declarations.json");
+    let owner = RecoveryPublicOwner::new(
+        &tidepool_repr::ActorPath::parse("root/performance").unwrap(),
+        1,
+    )
+    .unwrap();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let images = Arc::new(ImageRegistry::new());
+    let source_root = if child_root.is_some() {
+        let source = root_path.join("fresh-process-source");
+        std::fs::create_dir(&source).unwrap();
+        source
+    } else {
+        root_path.clone()
+    };
+    let mut lib = SessionLib::open(
+        SessionId(if child_root.is_some() { 1003 } else { 1002 }),
+        &source_root,
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(effects.include_paths().to_vec());
+    lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path))
+        .unwrap();
+    let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+    persistent.set_image_registry(images.clone());
+    let public = if child_root.is_some() {
+        persistent.recover_public_scope(&owner).unwrap()
+    } else {
+        persistent.mint_scope(ScopeId::ROOT).unwrap()
+    };
+    let mut resident =
+        ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    let publication = ScalePublication::Durable {
+        owner: owner.clone(),
+        manifest: manifest.clone(),
+    };
+    if child_root.is_some() {
+        assert!(!resident
+            .binding_names_in(public)
+            .iter()
+            .any(|name| name == "x"));
+        eprintln!("durable-recovery fresh_process_pid={}", std::process::id());
+        // Both y and z interfaces survived. Only y's independent native entry
+        // is demanded; z's old process-local x lease cannot be reconstructed.
+        execute_cell(
+            &mut resident,
+            public,
+            &effects,
+            &images,
+            (0, 0),
+            "recovered_independent",
+            "y",
+            0,
+            Some("42"),
+            &publication,
+        );
+        return;
+    }
+    assert_eq!(
+        resident
+            .initialize_durable_public_scope(owner.clone(), public)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    );
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "live_x",
+        "x <- pure (1 :: Int)",
+        0,
+        None,
+        &publication,
+    );
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "independent_original",
+        include_str!("fixtures/compiled-cell-independent-original.hs"),
+        1,
+        None,
+        &publication,
+    );
+    assert!(matches!(
+        persisted_root_state(&manifest, &owner),
+        crate::session::recovery::RecoveryNodeState::ExactArtifactClosure
+    ));
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "dependent_original",
+        include_str!("fixtures/compiled-cell-dependent-original.hs"),
+        1,
+        None,
+        &publication,
+    );
+    assert!(matches!(
+        persisted_root_state(&manifest, &owner),
+        crate::session::recovery::RecoveryNodeState::LiveValueDependency { .. }
+    ));
+    drop(resident);
+    // Execute the already-built native test binary in a fresh process. The
+    // battery still owns the one compiler daemon and configured endpoint.
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["session::turn::scaling_tests::durable_mixed_originals_recover_independent_native_entry", "--ignored", "--exact", "--nocapture"])
+        .env("TIDEPOOL_RECOVERY_CHILD_WORKSPACE", &root_path).output().unwrap();
+    eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+    println!("{}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        output.status.success(),
+        "fresh process must execute independent y despite lost x and dependent z"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed;"),
+        "fresh process must select exactly its one test"
+    );
+    drop(root_guard);
 }
