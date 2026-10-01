@@ -1181,6 +1181,14 @@ where
                     return Ok(());
                 }
                 KernelMessage::Shutdown { terminal, reply } => {
+                    for pending in state.pending_tasks.values() {
+                        if let Some(control) = pending
+                            .workbench()
+                            .and_then(|pending| pending.control.as_ref())
+                        {
+                            control.request_cancellation();
+                        }
+                    }
                     state.mailbox_admission.close();
                     state
                         .deferred_mailbox
@@ -1200,7 +1208,7 @@ where
                                     .as_ref()
                                     .and_then(|control| control.invocation.as_ref())
                                     == invocation
-                                        .as_ref()
+                                        .clone()
                                         .map(crate::resident_tools::WorkbenchCallKey::from)
                                         .as_ref()
                         })
@@ -1236,12 +1244,9 @@ where
                             .send(crate::WorkbenchBoundaryReconciliation::Pending)
                             .ok();
                     } else {
-                        state
-                            .deferred_mailbox
-                            .push_back(KernelMessage::ReconcileWorkbenchBoundary {
-                                boundary,
-                                reply,
-                            });
+                        state.deferred_mailbox.push_back(
+                            KernelMessage::ReconcileWorkbenchBoundary { boundary, reply },
+                        );
                     }
                     return Ok(());
                 }
@@ -1875,19 +1880,24 @@ fn start_workbench<B: KernelBehavior>(
             invocation,
             control,
         } if concurrent => {
-            if let Some(control) = pending.workbench().and_then(|pending| pending.control.as_ref()) {
-                pending.workbench().expect("workbench task").hosted_cell.complete(control);
+            if let Some(control) = pending
+                .workbench()
+                .and_then(|pending| pending.control.as_ref())
+            {
+                pending
+                    .workbench()
+                    .expect("workbench task")
+                    .hosted_cell
+                    .complete(control);
             }
-            state
-                .deferred_mailbox
-                .push_front(KernelMessage::Workbench {
-                    invocation,
-                    control,
-                    reply: match pending {
-                        PendingActorTask::Workbench(pending) => pending.reply,
-                        PendingActorTask::Kernel(_) => unreachable!("workbench admission"),
-                    },
-                });
+            state.deferred_mailbox.push_front(KernelMessage::Workbench {
+                invocation,
+                control,
+                reply: match pending {
+                    PendingActorTask::Workbench(pending) => pending.reply,
+                    PendingActorTask::Kernel(_) => unreachable!("workbench admission"),
+                },
+            });
             return;
         }
         WorkbenchDispatch::Sequential {
@@ -1900,8 +1910,15 @@ fn start_workbench<B: KernelBehavior>(
             })
         }),
     };
-    if let Some(control) = pending.workbench().and_then(|pending| pending.control.as_ref()) {
-        pending.workbench().expect("workbench task").hosted_cell.claim(control);
+    if let Some(control) = pending
+        .workbench()
+        .and_then(|pending| pending.control.as_ref())
+    {
+        pending
+            .workbench()
+            .expect("workbench task")
+            .hosted_cell
+            .claim(control);
     }
     if let PendingActorTask::Workbench(workbench) = &mut pending {
         workbench.serial = task.is_serial();
@@ -1936,7 +1953,10 @@ async fn start_kernel_task<B: KernelBehavior>(
         return;
     };
     state.next_task_generation = generation;
-    assert!(state.pending_tasks.is_empty(), "kernel admission is exclusive");
+    assert!(
+        state.pending_tasks.is_empty(),
+        "kernel admission is exclusive"
+    );
     let pending = PendingActorTask::Kernel(PendingKernel {
         step: crate::WorkbenchStepKey::new(state.context.identity, generation, None),
         operation,
@@ -2096,7 +2116,8 @@ fn park_actor_task<B: KernelBehavior, T: Send + 'static>(
             myself,
             state,
             pending,
-            "serial actor continuation parked while independent workbench tasks remain active".into(),
+            "serial actor continuation parked while independent workbench tasks remain active"
+                .into(),
         );
         return;
     }
@@ -2168,26 +2189,28 @@ async fn complete_actor_task<B: KernelBehavior>(
                 }
             }
         }
-        PendingActorTask::Kernel(pending) => match apply_actor_outcome::<B, ()>(state, outcome).await {
-            Ok(ActorAdvance::Park(task)) => {
-                park_actor_task(myself, state, PendingActorTask::Kernel(pending), task);
-                return;
+        PendingActorTask::Kernel(pending) => {
+            match apply_actor_outcome::<B, ()>(state, outcome).await {
+                Ok(ActorAdvance::Park(task)) => {
+                    park_actor_task(myself, state, PendingActorTask::Kernel(pending), task);
+                    return;
+                }
+                Ok(ActorAdvance::Complete(step)) => finish_after_step(myself, state, step).await,
+                Err(TaskApplyFailure::Invocation(error)) => {
+                    fail_kernel_operation(
+                        myself,
+                        state,
+                        pending.operation,
+                        format!("{:?} failed: {error}", pending.operation),
+                    )
+                    .await;
+                }
+                Err(TaskApplyFailure::Unconfirmed(detail)) => {
+                    fail_unconfirmed_task(myself, state, PendingActorTask::Kernel(pending), detail);
+                    return;
+                }
             }
-            Ok(ActorAdvance::Complete(step)) => finish_after_step(myself, state, step).await,
-            Err(TaskApplyFailure::Invocation(error)) => {
-                fail_kernel_operation(
-                    myself,
-                    state,
-                    pending.operation,
-                    format!("{:?} failed: {error}", pending.operation),
-                )
-                .await;
-            }
-            Err(TaskApplyFailure::Unconfirmed(detail)) => {
-                fail_unconfirmed_task(myself, state, PendingActorTask::Kernel(pending), detail);
-                return;
-            }
-        },
+        }
     }
     if state.pending_tasks.is_empty() && state.terminal.get().is_none() {
         for notice in std::mem::take(&mut state.pending_child_exits) {
@@ -3855,11 +3878,7 @@ mod tests {
         actor
             .address()
             .send_message(KernelMessage::ActorStepCompleted {
-                step: crate::WorkbenchStepKey::new(
-                    actor.identity(),
-                    1,
-                    Some(first_execution),
-                ),
+                step: crate::WorkbenchStepKey::new(actor.identity(), 1, Some(first_execution)),
                 outcome: Box::new(()),
             })
             .expect("queue stale pre-park step");

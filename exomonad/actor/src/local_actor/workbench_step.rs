@@ -134,7 +134,8 @@ enum CompletionFinalizer<B, T> {
             dyn for<'a> FnOnce(
                     &'a mut B,
                     &'a KernelContext,
-                ) -> BoxFuture<'a, Result<ActorAdvance<B, T>, KernelInvocationFailure>>
+                )
+                    -> BoxFuture<'a, Result<ActorAdvance<B, T>, KernelInvocationFailure>>
                 + Send,
         >,
     ),
@@ -180,7 +181,8 @@ impl<B, T> OwnedActorCompletion<B, T> {
         finish: impl for<'a> FnOnce(
                 &'a mut B,
                 &'a KernelContext,
-            ) -> BoxFuture<'a, Result<ActorAdvance<B, T>, KernelInvocationFailure>>
+            )
+                -> BoxFuture<'a, Result<ActorAdvance<B, T>, KernelInvocationFailure>>
             + Send
             + 'static,
     ) -> Self {
