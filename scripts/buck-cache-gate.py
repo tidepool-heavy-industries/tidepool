@@ -103,7 +103,7 @@ def parse_action_records(text, expected_build_id=None):
     else:
         source_records = []
         for line_number, line in enumerate(text.splitlines(), 1):
-            if not line.strip():
+            if not line.strip() or line.startswith("Showing commands from: "):
                 continue
             try:
                 source_records.append(json.loads(line))
@@ -141,14 +141,15 @@ def parse_args(argv):
     parser.add_argument("--root", required=True, type=Path, help="isolated Tidepool Git checkout")
     parser.add_argument("--evidence-dir", required=True, type=Path, help="new directory outside the checkout")
     parser.add_argument("--target", action="append", required=True, help="Buck target; repeat as needed")
+    parser.add_argument("--profile", required=True, choices=("fast-dev", "debug", "production"), help="fixed tidepool.profile for all four builds")
     parser.add_argument("--probe-input", required=True, type=Path, help="clean tracked file to mutate temporarily")
     mutation = parser.add_mutually_exclusive_group(required=True)
     mutation.add_argument("--append-text", help="harmless text suffix to append during the mutation phase")
     mutation.add_argument("--append-hex", help="hex bytes to append during the mutation phase")
     parser.add_argument("--buck2", default=os.environ.get("BUCK2", "buck2"), help="pinned Buck executable")
     parser.add_argument("--build-timeout", type=float, default=1800)
-    parser.add_argument("--expect-mutated-action", action="append", default=[], help="action label expected in mutation what-ran output")
-    parser.add_argument("--expect-unaffected-action", action="append", default=[], help="action label forbidden in mutation what-ran output")
+    parser.add_argument("--expect-mutated-action", action="append", required=True, help="action label required to execute after mutation; repeat as needed")
+    parser.add_argument("--expect-unaffected-action", action="append", required=True, help="action label forbidden from executing after mutation; repeat as needed")
     options = parser.parse_args(argv)
     if not math.isfinite(options.build_timeout) or options.build_timeout <= 0:
         parser.error("--build-timeout must be finite and positive")
@@ -156,6 +157,13 @@ def parse_args(argv):
         parser.error("--target values must be unique")
     if any(not target.strip() for target in options.target):
         parser.error("--target values must not be empty")
+    affected = [normalize_label(label) for label in options.expect_mutated_action]
+    unaffected = [normalize_label(label) for label in options.expect_unaffected_action]
+    for labels in (affected, unaffected):
+        if len(labels) != len(set(labels)) or any(not label.startswith("root//") or ":" not in label for label in labels):
+            parser.error("expected action labels must be unique root-cell target labels")
+    if set(affected) & set(unaffected):
+        parser.error("affected and unaffected action labels must be disjoint")
     if options.append_hex is not None:
         try:
             options.mutation_bytes = bytes.fromhex(options.append_hex)
@@ -166,6 +174,82 @@ def parse_args(argv):
     if not options.mutation_bytes:
         parser.error("mutation suffix must not be empty")
     return options
+
+
+def normalize_label(label):
+    return "root" + label if label.startswith("//") else label
+
+
+def build_configuration(options, root):
+    return {
+        "profile": options.profile,
+        "targets": options.target,
+        "local_only": True,
+        "remote_enabled": False,
+        "config_sha256": {
+            name: sha256((root / name).read_bytes())
+            for name in (".buckconfig", ".buckconfig.local")
+        },
+    }
+
+
+def output_digest(path):
+    """Hash primary output contents, including directory names and symlink values."""
+    digest = hashlib.sha256()
+    byte_count = 0
+
+    def visit(entry, relative):
+        nonlocal byte_count
+        check_interrupted()
+        digest.update(relative.encode("utf-8") + b"\0")
+        if entry.is_symlink():
+            digest.update(b"link\0" + os.readlink(entry).encode("utf-8") + b"\0")
+        elif entry.is_file():
+            digest.update(b"file\0" + str(entry.stat().st_size).encode("ascii") + b"\0")
+            with entry.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    check_interrupted()
+                    digest.update(chunk)
+                    byte_count += len(chunk)
+        elif entry.is_dir():
+            digest.update(b"directory\0")
+            for child in sorted(entry.iterdir(), key=lambda child: child.name):
+                visit(child, relative + "/" + child.name)
+        else:
+            raise ProbeError(f"unsupported or missing Buck output: {entry}")
+
+    # Buck may publish its primary output through a symlink. Hash the selected
+    # artifact itself; interior links remain part of the directory artifact.
+    visit(path.resolve(strict=True), "")
+    return {"sha256": digest.hexdigest(), "bytes_hashed": byte_count}
+
+
+def primary_outputs(text, root):
+    paths = sorted({line.strip() for line in text.splitlines() if line.strip().startswith(str(root / "buck-out") + "/")})
+    if not paths:
+        raise ProbeError("build did not report primary outputs; cannot compare output reuse")
+    return [{"path": name, **output_digest(Path(name))} for name in paths]
+
+
+def compare_phase(baseline, report):
+    if report["configuration"] != baseline["configuration"]:
+        raise ProbeError(f"{report['phase']} build configuration differs from baseline")
+    report["outputs_match_baseline"] = report["primary_outputs"] == baseline["primary_outputs"]
+    if report["phase"] in ("warm", "restored") and not report["outputs_match_baseline"]:
+        raise ProbeError(f"{report['phase']} primary outputs differ from baseline")
+    summary = report["action_summary"]
+    if summary["remote"]:
+        raise ProbeError(f"{report['phase']} unexpectedly used remote actions")
+    if report["phase"] == "warm" and (summary["local"] or summary["other"]):
+        raise ProbeError("warm build executed actions instead of reusing unchanged inputs")
+
+
+def validate_mutation(options, report):
+    actions = {record["identity"] for record in report["what_ran_records"]}
+    missing = [label for label in options.expect_mutated_action if normalize_label(label) not in actions]
+    unexpected = [label for label in options.expect_unaffected_action if normalize_label(label) in actions]
+    if not report["action_summary"]["local"] or missing or unexpected:
+        raise ProbeError(f"mutation action mismatch: missing={missing!r}, unexpected={unexpected!r}; local execution is required")
 
 
 def checked_paths(options):
@@ -314,15 +398,18 @@ def run_command(command, cwd, timeout):
 
 def run_build_phase(options, root, evidence, executable, phase):
     check_interrupted()
+    configuration = build_configuration(options, root)
     event_log = evidence / f"{phase}.events.jsonl"
     build_id_file = evidence / f"{phase}.build-id"
-    command = [
+    build_command = [
         executable, "build", "--local-only", "-c", "remote.enabled=false",
+        "-c", f"tidepool.profile={options.profile}",
         "--event-log", str(event_log), "--write-build-id", str(build_id_file),
         "--show-full-simple-output", "-v", "1", *options.target,
     ]
     started = time.monotonic()
-    status, output, timed_out = run_command(command, root, options.build_timeout)
+    status, output, timed_out = run_command(build_command, root, options.build_timeout)
+    build_duration = time.monotonic() - started
     (evidence / f"{phase}.build.log").write_text(output)
     if timed_out:
         raise ProbeError(f"{phase} build exceeded {options.build_timeout:g}s; log: {phase}.build.log")
@@ -330,7 +417,12 @@ def run_build_phase(options, root, evidence, executable, phase):
         raise ProbeError(f"{phase} build failed ({status}); log: {phase}.build.log")
     if not build_id_file.is_file():
         raise ProbeError(f"{phase} did not produce a Buck build ID")
+    if configuration != build_configuration(options, root):
+        raise ProbeError(f"{phase} build configuration changed during the build")
     build_id = build_id_file.read_text().strip()
+    hash_started = time.monotonic()
+    artifacts = primary_outputs(output, root)
+    hash_duration = time.monotonic() - hash_started
 
     commands = {
         "actions": [executable, "log", "what-ran", "--no-remote", "--format", "json", str(event_log)],
@@ -347,11 +439,18 @@ def run_build_phase(options, root, evidence, executable, phase):
         outputs[name] = log
 
     summary = parse_action_summary(outputs["summary"])
+    if summary.remote:
+        raise ProbeError(f"{phase} unexpectedly used remote actions")
     records = parse_action_records(outputs["actions"], build_id)
     cache_records = parse_action_records(outputs["cache-queries"], build_id)
     report = {
         "phase": phase,
+        "command": build_command,
+        "configuration": configuration,
+        "primary_outputs": artifacts,
         "build_id": build_id,
+        "build_duration_seconds": round(build_duration, 3),
+        "output_hash_duration_seconds": round(hash_duration, 3),
         "duration_seconds": round(time.monotonic() - started, 3),
         "classification": summary.classification,
         "action_summary": asdict(summary),
@@ -413,6 +512,8 @@ def restore_input(path, baseline, mutated_hash, original_mode, original_mtime_ns
             os.fsync(handle.fileno())
         os.chmod(temporary, original_mode)
         os.utime(temporary, ns=(original_mtime_ns, original_mtime_ns))
+        if sha256(path.read_bytes()) != mutated_hash:
+            return False
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
@@ -452,6 +553,9 @@ def run_probe(options):
         "probe_baseline_sha256": baseline_hash,
         "probe_mutated_sha256": mutation_hash,
         "targets": options.target,
+        "profile": options.profile,
+        "expected_affected_actions": options.expect_mutated_action,
+        "expected_unaffected_actions": options.expect_unaffected_action,
         "evidence_directory": str(evidence),
     }
     (evidence / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
@@ -462,6 +566,7 @@ def run_probe(options):
     try:
         reports.append(run_build_phase(options, root, evidence, executable, "baseline"))
         reports.append(run_build_phase(options, root, evidence, executable, "warm"))
+        compare_phase(reports[0], reports[-1])
         check_interrupted()
         before_mutation = git_snapshot(root, probe_relative)
         metadata["pre_mutation_full_status_porcelain"] = before_mutation["full_status_porcelain"]
@@ -495,14 +600,8 @@ def run_probe(options):
             if os.path.exists(temporary):
                 os.unlink(temporary)
         reports.append(run_build_phase(options, root, evidence, executable, "mutated"))
-        mutated_actions = {record["identity"] for record in reports[-1]["what_ran_records"]}
-        normalize = lambda label: label if label.startswith("root//") else "root" + label
-        missing = [label for label in options.expect_mutated_action if normalize(label) not in mutated_actions]
-        unexpected = [label for label in options.expect_unaffected_action if normalize(label) in mutated_actions]
-        if missing or unexpected:
-            raise ProbeError(
-                f"mutation action mismatch: missing={missing!r}, unexpected={unexpected!r}"
-            )
+        compare_phase(reports[0], reports[-1])
+        validate_mutation(options, reports[-1])
     finally:
         if mutated:
             try:
@@ -523,6 +622,7 @@ def run_probe(options):
                 else:
                     try:
                         reports.append(run_build_phase(options, root, evidence, executable, "restored"))
+                        compare_phase(reports[0], reports[-1])
                     except ProbeInterrupted:
                         restored_build_skipped = True
                     except BaseException as error:

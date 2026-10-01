@@ -1,0 +1,296 @@
+{
+  "version": 1,
+  "status": "prepared-only; no probe or Buck build campaign executed",
+  "admission": [
+    "Freeze source edits before running. Root owns campaign admission and commits.",
+    "Each command runs baseline, warm, mutated, restored on the same targets/profile/configuration. Evidence directory must be new; use a new directory for each repeat.",
+    "Only a clean tracked probe may be mutated. Other WIP is recorded and preserved. buck-out must be the existing bind mount; use the admitted Buck daemon and action PATH.",
+    "Local-only and remote.enabled=false are enforced. Expected mutation actions must execute locally; action-cache queries alone do not pass this execution gate.",
+    "Baseline/warm/restored output fingerprints must agree. Mutated outputs may be identical despite valid local execution.",
+    "Building unit targets links tests; this matrix does not execute their tests."
+  ],
+  "missing_coverage": [
+    "No current five-row execution evidence; historic different revision/profile/output counts are not a valid comparison.",
+    "Haskell helper production exclusion awaits final first-party sourcegroup regeneration.",
+    "Meaningful schema/compiler change: full structural fixture corpus and canonical embedded producer regeneration.",
+    "Matched immutable stdlib catalog/source package and runtime bundle actions, native/Nix ownership differences, cross-repository pinned harness composition.",
+    "Remote execution/isolation and NativeLink cache acceptance; this gate intentionally runs local-only."
+  ],
+  "probes": [
+    {
+      "id": "rust-production",
+      "checkout": "/srv/swarm/checkouts/tidepool",
+      "profile": "production",
+      "probe_input": "tidepool/toolchain/src/cache.rs",
+      "append_text": "\n// Buck cache probe: Rust production owner.\n",
+      "targets": [
+        "//tidepool/toolchain:tidepool_toolchain",
+        "//tidepool/toolchain:tidepool_toolchain_unit_tests",
+        "//bridge/haskell:tidepool_extract_internal",
+        "//tidepool/repr:tidepool_repr"
+      ],
+      "expected_affected": [
+        "//tidepool/toolchain:tidepool_toolchain",
+        "//tidepool/toolchain:tidepool_toolchain_unit_tests"
+      ],
+      "expected_unaffected": [
+        "//bridge/haskell:tidepool_extract_internal",
+        "//tidepool/repr:tidepool_repr"
+      ],
+      "command_argv": [
+        "python3",
+        "/srv/swarm/checkouts/tidepool/scripts/buck-cache-gate.py",
+        "--root",
+        "/srv/swarm/checkouts/tidepool",
+        "--profile",
+        "production",
+        "--evidence-dir",
+        "/tmp/tidepool-buck-delivery-rust-production",
+        "--probe-input",
+        "tidepool/toolchain/src/cache.rs",
+        "--append-text",
+        "\n// Buck cache probe: Rust production owner.\n",
+        "--target",
+        "//tidepool/toolchain:tidepool_toolchain",
+        "--target",
+        "//tidepool/toolchain:tidepool_toolchain_unit_tests",
+        "--target",
+        "//bridge/haskell:tidepool_extract_internal",
+        "--target",
+        "//tidepool/repr:tidepool_repr",
+        "--expect-mutated-action",
+        "//tidepool/toolchain:tidepool_toolchain",
+        "--expect-mutated-action",
+        "//tidepool/toolchain:tidepool_toolchain_unit_tests",
+        "--expect-unaffected-action",
+        "//bridge/haskell:tidepool_extract_internal",
+        "--expect-unaffected-action",
+        "//tidepool/repr:tidepool_repr"
+      ],
+      "notes": [
+        "Direct source consumers must execute; downstream links are observed, not required, because unchanged compiled bytes can keep them cached."
+      ]
+    },
+    {
+      "id": "test-fixture",
+      "checkout": "/srv/swarm/checkouts/tidepool",
+      "profile": "production",
+      "probe_input": "tidepool/toolchain/tests/fixtures/deployment-module-package/Consumer.hs",
+      "append_text": "\n-- Buck cache probe: test fixture owner.\n",
+      "targets": [
+        "//tidepool/toolchain:tidepool_toolchain_unit_tests",
+        "//tidepool/toolchain:tidepool_toolchain",
+        "//bridge/haskell:tidepool_extract_internal"
+      ],
+      "expected_affected": [
+        "//tidepool/toolchain:tidepool_toolchain_unit_tests"
+      ],
+      "expected_unaffected": [
+        "//tidepool/toolchain:tidepool_toolchain",
+        "//bridge/haskell:tidepool_extract_internal"
+      ],
+      "command_argv": [
+        "python3",
+        "/srv/swarm/checkouts/tidepool/scripts/buck-cache-gate.py",
+        "--root",
+        "/srv/swarm/checkouts/tidepool",
+        "--profile",
+        "production",
+        "--evidence-dir",
+        "/tmp/tidepool-buck-delivery-test-fixture",
+        "--probe-input",
+        "tidepool/toolchain/tests/fixtures/deployment-module-package/Consumer.hs",
+        "--append-text",
+        "\n-- Buck cache probe: test fixture owner.\n",
+        "--target",
+        "//tidepool/toolchain:tidepool_toolchain_unit_tests",
+        "--target",
+        "//tidepool/toolchain:tidepool_toolchain",
+        "--target",
+        "//bridge/haskell:tidepool_extract_internal",
+        "--expect-mutated-action",
+        "//tidepool/toolchain:tidepool_toolchain_unit_tests",
+        "--expect-unaffected-action",
+        "//tidepool/toolchain:tidepool_toolchain",
+        "--expect-unaffected-action",
+        "//bridge/haskell:tidepool_extract_internal"
+      ],
+      "notes": [
+        "Consumer.hs is test-only. PreludePackage.hs is a production producer input and is deliberately not used for this row."
+      ]
+    },
+    {
+      "id": "haskell-helper",
+      "checkout": "/srv/swarm/checkouts/tidepool",
+      "profile": "production",
+      "probe_input": "bridge/haskell/src/Tidepool/GhcPipeline.hs",
+      "append_text": "\n-- Buck cache probe: Haskell helper owner.\n",
+      "targets": [
+        "//bridge/haskell:tidepool_extract_internal",
+        "//tidepool/extract-cmd:tidepool_extract_cmd_unit_tests",
+        "//tidepool/extract-cmd:tidepool_extract_cmd",
+        "//tidepool/extract-cmd:tidepool-extract",
+        "//tidepool/repr:tidepool_repr",
+        "//bridge/haskell:tidepool_extract_bin"
+      ],
+      "expected_affected": [
+        "//bridge/haskell:tidepool_extract_internal",
+        "//tidepool/extract-cmd:tidepool_extract_cmd_unit_tests"
+      ],
+      "expected_unaffected": [
+        "//tidepool/extract-cmd:tidepool_extract_cmd",
+        "//tidepool/extract-cmd:tidepool-extract",
+        "//tidepool/repr:tidepool_repr"
+      ],
+      "command_argv": [
+        "python3",
+        "/srv/swarm/checkouts/tidepool/scripts/buck-cache-gate.py",
+        "--root",
+        "/srv/swarm/checkouts/tidepool",
+        "--profile",
+        "production",
+        "--evidence-dir",
+        "/tmp/tidepool-buck-delivery-haskell-helper",
+        "--probe-input",
+        "bridge/haskell/src/Tidepool/GhcPipeline.hs",
+        "--append-text",
+        "\n-- Buck cache probe: Haskell helper owner.\n",
+        "--target",
+        "//bridge/haskell:tidepool_extract_internal",
+        "--target",
+        "//tidepool/extract-cmd:tidepool_extract_cmd_unit_tests",
+        "--target",
+        "//tidepool/extract-cmd:tidepool_extract_cmd",
+        "--target",
+        "//tidepool/extract-cmd:tidepool-extract",
+        "--target",
+        "//tidepool/repr:tidepool_repr",
+        "--target",
+        "//bridge/haskell:tidepool_extract_bin",
+        "--expect-mutated-action",
+        "//bridge/haskell:tidepool_extract_internal",
+        "--expect-mutated-action",
+        "//tidepool/extract-cmd:tidepool_extract_cmd_unit_tests",
+        "--expect-unaffected-action",
+        "//tidepool/extract-cmd:tidepool_extract_cmd",
+        "--expect-unaffected-action",
+        "//tidepool/extract-cmd:tidepool-extract",
+        "--expect-unaffected-action",
+        "//tidepool/repr:tidepool_repr"
+      ],
+      "notes": [
+        "Rust parity readers are cfg(test). Run only after final generated sourcegroups remove the current binary source overtaint. Worker binary is an observed output, not a required action if helper object bytes remain identical."
+      ]
+    },
+    {
+      "id": "web",
+      "checkout": "/srv/swarm/checkouts/harness",
+      "profile": "production",
+      "probe_input": "web/src/ws-client.ts",
+      "append_text": "\n// Buck cache probe: web owner.\n",
+      "targets": [
+        "//web:check",
+        "//web:dist",
+        "//web:npm_dependencies",
+        "//crates/harness:harness"
+      ],
+      "expected_affected": [
+        "//web:check",
+        "//web:dist"
+      ],
+      "expected_unaffected": [
+        "//web:npm_dependencies",
+        "//crates/harness:harness"
+      ],
+      "command_argv": [
+        "python3",
+        "/srv/swarm/checkouts/tidepool/scripts/buck-cache-gate.py",
+        "--root",
+        "/srv/swarm/checkouts/harness",
+        "--profile",
+        "production",
+        "--evidence-dir",
+        "/tmp/tidepool-buck-delivery-web",
+        "--probe-input",
+        "web/src/ws-client.ts",
+        "--append-text",
+        "\n// Buck cache probe: web owner.\n",
+        "--target",
+        "//web:check",
+        "--target",
+        "//web:dist",
+        "--target",
+        "//web:npm_dependencies",
+        "--target",
+        "//crates/harness:harness",
+        "--expect-mutated-action",
+        "//web:check",
+        "--expect-mutated-action",
+        "//web:dist",
+        "--expect-unaffected-action",
+        "//web:npm_dependencies",
+        "--expect-unaffected-action",
+        "//crates/harness:harness"
+      ],
+      "notes": [
+        "Labels and probe verified from canonical harness revision 9df6a7c66b5eeb3c075c53a2790f094310b77836. tidepool.profile is pinned invocation configuration but inert for harness web scripts; CI/TZ and npm scripts own web build behavior.",
+        "This proves the harness source boundary; Tidepool pinned harness distribution and matched runtime bundle fanout remain separate coverage."
+      ]
+    },
+    {
+      "id": "shared-schema",
+      "checkout": "/srv/swarm/checkouts/tidepool",
+      "profile": "production",
+      "probe_input": "tidepool/repr/src/execution_schema.rs",
+      "append_text": "\n// Buck cache probe: shared schema owner.\n",
+      "targets": [
+        "//tidepool/repr:tidepool_repr",
+        "//tidepool/repr:tidepool_repr_unit_tests",
+        "//bridge/haskell:tidepool_extract_internal",
+        "//tidepool/extract-cmd:tidepool_extract_cmd"
+      ],
+      "expected_affected": [
+        "//tidepool/repr:tidepool_repr",
+        "//tidepool/repr:tidepool_repr_unit_tests"
+      ],
+      "expected_unaffected": [
+        "//bridge/haskell:tidepool_extract_internal",
+        "//tidepool/extract-cmd:tidepool_extract_cmd"
+      ],
+      "command_argv": [
+        "python3",
+        "/srv/swarm/checkouts/tidepool/scripts/buck-cache-gate.py",
+        "--root",
+        "/srv/swarm/checkouts/tidepool",
+        "--profile",
+        "production",
+        "--evidence-dir",
+        "/tmp/tidepool-buck-delivery-shared-schema",
+        "--probe-input",
+        "tidepool/repr/src/execution_schema.rs",
+        "--append-text",
+        "\n// Buck cache probe: shared schema owner.\n",
+        "--target",
+        "//tidepool/repr:tidepool_repr",
+        "--target",
+        "//tidepool/repr:tidepool_repr_unit_tests",
+        "--target",
+        "//bridge/haskell:tidepool_extract_internal",
+        "--target",
+        "//tidepool/extract-cmd:tidepool_extract_cmd",
+        "--expect-mutated-action",
+        "//tidepool/repr:tidepool_repr",
+        "--expect-mutated-action",
+        "//tidepool/repr:tidepool_repr_unit_tests",
+        "--expect-unaffected-action",
+        "//bridge/haskell:tidepool_extract_internal",
+        "--expect-unaffected-action",
+        "//tidepool/extract-cmd:tidepool_extract_cmd"
+      ],
+      "notes": [
+        "This is source invalidation for the Rust side of the shared execution schema, not a schema migration. A meaningful compiler/schema change still requires the full structural corpus and all canonical embedded producers.",
+        "Rust downstream consumers can reuse equal output bytes; the paired Haskell schema is independently owned and must be checked by the structural corpus."
+      ]
+    }
+  ]
+}
