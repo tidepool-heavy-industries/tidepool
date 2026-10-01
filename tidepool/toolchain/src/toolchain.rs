@@ -1060,19 +1060,15 @@ impl HandshakeSeverity {
 /// Run the startup handshake and apply the severity policy. Call once, at
 /// server startup, after the toolchain is located — never per-eval.
 ///
-/// Returns the outcome so the caller can log the non-fatal cases with its own
-/// subscriber (this crate stays quiet by default) — EXCEPT a corrupt stamp
-/// under [`HandshakeSeverity::Warn`], which this function logs directly via
-/// `tracing::warn!` before degrading to [`HandshakeOutcome::NoStamp`]: the
-/// corrupt-vs-genuinely-absent distinction has no home in that variant (it
-/// carries only a path), and widening [`HandshakeOutcome`] with a new arm
-/// would break every existing exhaustive match on it outside this crate.
+/// Returns the outcome so the caller can log non-fatal cases. Under the explicit
+/// [`HandshakeSeverity::Warn`] override, stamp or source-manifest verification
+/// errors are logged and returned as [`HandshakeOutcome::NoStamp`].
 ///
 /// # Errors
 /// [`ToolchainError::Skew`] when a skew is detected and severity is
-/// [`HandshakeSeverity::Error`]. [`ToolchainError::Stamp`] when the stamp is
-/// corrupt (fails to parse) and severity is [`HandshakeSeverity::Error`] —
-/// fail closed rather than silently treat corruption as no stamp.
+/// [`HandshakeSeverity::Error`]. Under that default policy, unreadable, corrupt
+/// or obsolete stamps return [`ToolchainError::Stamp`], and incomplete source
+/// inspection returns [`ToolchainError::StdlibManifest`].
 pub fn enforce_handshake(
     endpoint: &tidepool_extract_cmd::CompilerEndpoint,
     extract_path: &Path,
