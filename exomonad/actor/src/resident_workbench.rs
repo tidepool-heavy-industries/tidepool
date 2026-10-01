@@ -2971,6 +2971,8 @@ pub enum ResidentActorWorkbenchError {
     Inspection(String),
     #[error("actor protocol violation: {0}")]
     ActorProtocol(String),
+    #[error(transparent)]
+    ToolDeclaration(#[from] exomonad_tool::ToolDeclarationError),
     #[error("unsupported resident actor request `{constructor}`")]
     UnsupportedRequest { constructor: String },
     #[error("could not decode resident actor request `{constructor}`: {source}")]

@@ -392,6 +392,8 @@ pub(crate) struct ResidentToolReply {
 pub enum ResidentToolError {
     #[error("resident tool policy is unavailable: {0}")]
     Unavailable(String),
+    #[error(transparent)]
+    Declaration(#[from] exomonad_tool::ToolDeclarationError),
     #[error("invalid resident tool invocation: {0}")]
     InvalidInvocation(String),
     #[error(transparent)]
@@ -1091,7 +1093,7 @@ fn project_local_resident_tools(
     declarations
         .iter()
         .cloned()
-        .map(HostedTool::try_from_declaration)
+        .map(HostedTool::try_from)
         .collect()
 }
 
@@ -1126,14 +1128,12 @@ mod tests {
             Err(exomonad_tool::ToolDeclarationError::FunctionInputMustBeObject { name })
                 if name == "ping"
         ));
-        assert!(
-            project_local_resident_tools(&[declaration(
-                "empty",
-                exomonad_tool::ToolKind::Call,
-                serde_json::json!({}),
-            )])
-            .is_err()
-        );
+        assert!(project_local_resident_tools(&[declaration(
+            "empty",
+            exomonad_tool::ToolKind::Call,
+            serde_json::json!({}),
+        )])
+        .is_err());
 
         let valid = declaration(
             "lookup",

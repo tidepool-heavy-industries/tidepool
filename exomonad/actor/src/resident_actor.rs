@@ -5467,15 +5467,11 @@ where
                                 "local actor was absent from its routing directory".into(),
                             )
                         })?;
-                        let policy: Arc<dyn ResidentToolEndpoint> = Arc::new(
-                            crate::resident_tools::install_local_resident_tools(
-                                actor.clone(),
-                                &awaiting,
-                            )
-                            .map_err(|error| {
-                                ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                            })?,
-                        );
+                        let local_policy = crate::resident_tools::install_local_resident_tools(
+                            actor.clone(),
+                            &awaiting,
+                        )?;
+                        let policy: Arc<dyn ResidentToolEndpoint> = Arc::new(local_policy);
                         let fork_gate = self
                             .descriptor
                             .fork_group()
@@ -10033,8 +10029,7 @@ where
             };
             if !awaiting.declarations.iter().any(|tool| {
                 tool.name == invocation.name
-                    && exomonad_tool::HostedTool::try_from_declaration(tool.clone())
-                        .is_ok_and(|hosted| hosted.accepts(&invocation.arguments))
+                    && tool.accepts_arguments(&invocation.arguments)
             }) {
                 self.set_standing(context.actor, ResidentStanding::Tools(awaiting));
                 return Err(KernelInvocationFailure::Rejected {

@@ -33,19 +33,6 @@ pub enum HostedTool {
     Function(ToolDeclaration),
 }
 
-impl From<ToolDeclaration> for HostedTool {
-    fn from(declaration: ToolDeclaration) -> Self {
-        if declaration.kind == ToolKind::Raw {
-            Self::Custom(CustomToolDeclaration {
-                name: declaration.name,
-                description: declaration.description,
-            })
-        } else {
-            Self::Function(declaration)
-        }
-    }
-}
-
 /// A declaration that cannot be represented by the model-facing hosted
 /// invocation contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,15 +53,10 @@ impl std::fmt::Display for ToolDeclarationError {
 
 impl std::error::Error for ToolDeclarationError {}
 
-impl HostedTool {
-    /// Convert one typed declaration to its model-facing representation.
-    ///
-    /// Function transports return structured JSON objects. Require the
-    /// declaration to describe object arguments explicitly. Raw tools keep
-    /// their existing text contract.
-    pub fn try_from_declaration(
-        declaration: ToolDeclaration,
-    ) -> Result<Self, ToolDeclarationError> {
+impl TryFrom<ToolDeclaration> for HostedTool {
+    type Error = ToolDeclarationError;
+
+    fn try_from(declaration: ToolDeclaration) -> Result<Self, Self::Error> {
         if declaration.kind != ToolKind::Raw
             && declaration
                 .input_schema
@@ -86,9 +68,18 @@ impl HostedTool {
                 name: declaration.name,
             });
         }
-        Ok(declaration.into())
+        if declaration.kind == ToolKind::Raw {
+            Ok(Self::Custom(CustomToolDeclaration {
+                name: declaration.name,
+                description: declaration.description,
+            }))
+        } else {
+            Ok(Self::Function(declaration))
+        }
     }
+}
 
+impl HostedTool {
     #[must_use]
     pub fn name(&self) -> &str {
         match self {
@@ -107,14 +98,30 @@ impl HostedTool {
 
     #[must_use]
     pub fn accepts(&self, arguments: &ToolArguments) -> bool {
-        matches!(
-            (self, arguments),
-            (Self::Custom(_), ToolArguments::Raw(_))
-                | (
-                    Self::Function(_),
-                    ToolArguments::Structured(serde_json::Value::Object(_))
-                )
-        )
+        match self {
+            Self::Custom(_) => tool_arguments_match_kind(ToolKind::Raw, arguments),
+            Self::Function(_) => tool_arguments_match_kind(ToolKind::Call, arguments),
+        }
+    }
+}
+
+impl ToolDeclaration {
+    /// Whether an invocation has the argument shape this declaration kind
+    /// can receive. Schema validity is checked when the declaration is
+    /// registered.
+    #[must_use]
+    pub fn accepts_arguments(&self, arguments: &ToolArguments) -> bool {
+        tool_arguments_match_kind(self.kind, arguments)
+    }
+}
+
+fn tool_arguments_match_kind(kind: ToolKind, arguments: &ToolArguments) -> bool {
+    match kind {
+        ToolKind::Raw => matches!(arguments, ToolArguments::Raw(_)),
+        _ => matches!(
+            arguments,
+            ToolArguments::Structured(serde_json::Value::Object(_))
+        ),
     }
 }
 
@@ -285,7 +292,7 @@ mod tests {
             serde_json::json!({"type": "array", "items": {"type": "string"}}),
         ] {
             assert_eq!(
-                HostedTool::try_from_declaration(declaration(ToolKind::Call, input_schema)),
+                HostedTool::try_from(declaration(ToolKind::Call, input_schema)),
                 Err(ToolDeclarationError::FunctionInputMustBeObject {
                     name: "probe".into(),
                 })
@@ -295,21 +302,22 @@ mod tests {
 
     #[test]
     fn hosted_declarations_keep_object_functions_and_raw_text_inputs() {
-        let object = HostedTool::try_from_declaration(declaration(
+        let object_declaration = declaration(
             ToolKind::Update,
             serde_json::json!({"type": "object", "properties": {}}),
-        ))
-        .expect("object function declaration");
+        );
+        let structured = ToolArguments::Structured(serde_json::json!({}));
+        assert!(object_declaration.accepts_arguments(&structured));
+        let object = HostedTool::try_from(object_declaration).expect("object function declaration");
         assert!(matches!(object, HostedTool::Function(_)));
-        assert!(object.accepts(&ToolArguments::Structured(serde_json::json!({}))));
+        assert!(object.accepts(&structured));
 
-        let raw = HostedTool::try_from_declaration(declaration(
-            ToolKind::Raw,
-            serde_json::json!({"type": "string"}),
-        ))
-        .expect("raw text declaration");
+        let raw_declaration = declaration(ToolKind::Raw, serde_json::json!({"type": "string"}));
+        let text = ToolArguments::Raw("literal".into());
+        assert!(raw_declaration.accepts_arguments(&text));
+        let raw = HostedTool::try_from(raw_declaration).expect("raw text declaration");
         assert!(matches!(raw, HostedTool::Custom(_)));
-        assert!(raw.accepts(&ToolArguments::Raw("literal".into())));
+        assert!(raw.accepts(&text));
     }
 
     #[test]

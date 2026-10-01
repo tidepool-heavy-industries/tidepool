@@ -119,8 +119,7 @@ pub(crate) fn project_tools(
             }
             match declaration.kind {
                 ToolKind::Raw | ToolKind::Call | ToolKind::Notify => {
-                    HostedTool::try_from_declaration(declaration)
-                        .map_err(|error| ResidentToolError::InvalidInvocation(error.to_string()))
+                    HostedTool::try_from(declaration).map_err(ResidentToolError::from)
                 }
                 _ => Err(ResidentToolError::InvalidInvocation(format!(
                     "tool {:?} is not an interactive call with supported input",
@@ -321,8 +320,9 @@ mod tests {
         structured.input_schema = serde_json::json!({"type": "null"});
         assert!(matches!(
             project_tools(vec![structured.clone()]),
-            Err(ResidentToolError::InvalidInvocation(detail))
-                if detail.contains("structured") && detail.contains("object input schema")
+            Err(ResidentToolError::Declaration(
+                exomonad_tool::ToolDeclarationError::FunctionInputMustBeObject { name }
+            )) if name == "structured"
         ));
         structured.input_schema = serde_json::json!({"type":"object","properties":{}});
         let projected = project_tools(vec![raw("bash"), structured]).unwrap();
