@@ -44,6 +44,14 @@ pub enum ModulePackageError {
     ArtifactChanged(PathBuf),
     #[error("module package must contain a closed immutable source cohort")]
     OpenCohort,
+    #[error(
+        "module package original product is unavailable for {unit}:{module} ({availability:?})"
+    )]
+    IncompleteProduct {
+        unit: String,
+        module: String,
+        availability: crate::cache::ProductAvailability,
+    },
 }
 
 fn io(path: &Path, source: std::io::Error) -> ModulePackageError {
@@ -418,9 +426,9 @@ impl DeploymentModulePackage {
 }
 
 fn validate_closed(records: &[Record], source_root: &Path) -> Result<(), ModulePackageError> {
-    let owners: BTreeSet<_> = records
+    let owners: std::collections::BTreeMap<_, _> = records
         .iter()
-        .map(|r| (r.unit.as_str(), r.module.as_str()))
+        .map(|r| ((r.unit.as_str(), r.module.as_str()), r.source.as_path()))
         .collect();
     for record in records {
         if record
@@ -441,10 +449,36 @@ fn validate_closed(records: &[Record], source_root: &Path) -> Result<(), ModuleP
             i.selected.as_ref().is_some_and(|p| {
                 !p.starts_with(source_root)
                     || i.boot
-                    || !owners.contains(&(record.unit.as_str(), i.module.as_str()))
+                    || owners
+                        .get(&(record.unit.as_str(), i.module.as_str()))
+                        .copied()
+                        != Some(p.as_path())
             })
         }) {
             return Err(ModulePackageError::OpenCohort);
+        }
+    }
+    Ok(())
+}
+
+fn require_complete_cohort(
+    records: &[Record],
+    evidence: &crate::cache::DependencyEvidence,
+) -> Result<(), ModulePackageError> {
+    let owners: BTreeSet<_> = records
+        .iter()
+        .map(|r| (r.unit.as_str(), r.module.as_str()))
+        .collect();
+    for module in &evidence.modules {
+        if !module.boot
+            && module.source != Path::new("@generated-source")
+            && !owners.contains(&(module.unit.as_str(), module.module.as_str()))
+        {
+            return Err(ModulePackageError::IncompleteProduct {
+                unit: module.unit.clone(),
+                module: module.module.clone(),
+                availability: module.product,
+            });
         }
     }
     Ok(())
@@ -715,6 +749,129 @@ mod tests {
         symlink(fixture.source.join("Library.hs"), &alias).unwrap();
         assert!(matches!(fixture.load(),Err(ModulePackageError::SourceAlias(p)) if p == alias));
     }
+
+    #[test]
+    #[serial_test::serial]
+    fn invalid_configured_catalog_refuses_at_the_candidate_front_door() {
+        struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (name, value) in self.0.drain(..) {
+                    match value {
+                        Some(value) => unsafe { std::env::set_var(name, value) },
+                        None => unsafe { std::env::remove_var(name) },
+                    }
+                }
+            }
+        }
+        let fixture = Fixture::new();
+        let names = [
+            crate::toolchain::ENV_COMPILER_MODULES,
+            crate::toolchain::ENV_COMPILER_DEPLOYMENT,
+        ];
+        let _restore = Restore(
+            names
+                .into_iter()
+                .map(|name| (name, std::env::var_os(name)))
+                .collect(),
+        );
+        let configured = fixture._root.path().join("compiler.json");
+        fs::write(&configured, serde_json::to_vec(&fixture.authority).unwrap()).unwrap();
+        let malformed = fixture._root.path().join("catalog.json");
+        fs::write(&malformed, b"not a catalog").unwrap();
+        unsafe {
+            std::env::set_var(crate::toolchain::ENV_COMPILER_MODULES, &malformed);
+            std::env::set_var(crate::toolchain::ENV_COMPILER_DEPLOYMENT, &configured);
+        }
+        assert!(matches!(
+            crate::artifacts::ModuleCandidateOffer::select(
+                &[3; 32],
+                &[fixture.source.clone()],
+                &fixture.output
+            ),
+            Err(crate::CompileError::ModulePackage(
+                ModulePackageError::Format("catalog JSON")
+            ))
+        ));
+        unsafe { std::env::remove_var(crate::toolchain::ENV_COMPILER_DEPLOYMENT) }
+        assert!(matches!(
+            crate::toolchain::configured_module_package(),
+            Err(ModulePackageError::UnknownCompiler)
+        ));
+    }
+
+    #[test]
+    fn changed_original_owner_and_open_home_closure_refuse_package_hydration() {
+        use crate::cache::{ImportQualifier, ModuleImportEvidence};
+        let fixture = Fixture::new();
+        let mut catalog = fixture.catalog();
+        let files = &mut catalog.modules[0];
+        let path = fixture.output.join(&files.owner.path);
+        let original = fs::read(&path).unwrap();
+        let mut owner: Owner = serde_json::from_slice(&original).unwrap();
+        owner.module_version = [9; 32];
+        let altered = serde_json::to_vec(&owner).unwrap();
+        fs::write(&path, &altered).unwrap();
+        files.owner.sha256 = sha(&altered);
+        files.owner.length = altered.len() as u64;
+        fs::write(
+            fixture.output.join("catalog.json"),
+            serde_json::to_vec(&catalog).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            fixture.load(),
+            Err(ModulePackageError::OpenCohort)
+        ));
+
+        let other = Fixture::new();
+        let mut records = other.load().unwrap().records(&[3; 32]).unwrap();
+        records[0].evidence.modules[0]
+            .imports
+            .push(ModuleImportEvidence {
+                qualifier: ImportQualifier::Unqualified,
+                module: "Missing".into(),
+                boot: false,
+                selected: Some(other.source.join("Missing.hs")),
+            });
+        assert!(matches!(
+            validate_closed(&records, &other.source),
+            Err(ModulePackageError::OpenCohort)
+        ));
+        records[0].evidence.modules[0].imports[0].module = "Library".into();
+        records[0].evidence.modules[0].imports[0].selected =
+            Some(other.source.join("WrongSource.hs"));
+        assert!(matches!(
+            validate_closed(&records, &other.source),
+            Err(ModulePackageError::OpenCohort)
+        ));
+    }
+
+    #[test]
+    fn strict_producer_cannot_hide_missing_prelude_behind_closed_leaves() {
+        let fixture = Fixture::new();
+        let records = fixture.load().unwrap().records(&[3; 32]).unwrap();
+        let mut evidence = records[0].evidence.clone();
+        evidence.modules.push(ModuleEvidence {
+            unit: "u".into(),
+            module: "Tidepool.Prelude".into(),
+            source: fixture.source.join("Tidepool/Prelude.hs"),
+            boot: false,
+            imports: vec![],
+            product: ProductAvailability::ProjectionRejected,
+        });
+        assert!(matches!(require_complete_cohort(&records,&evidence),
+            Err(ModulePackageError::IncompleteProduct { module, availability: ProductAvailability::ProjectionRejected, .. })
+                if module == "Tidepool.Prelude"));
+        evidence.modules.last_mut().unwrap().product = ProductAvailability::Ready;
+        assert!(matches!(
+            require_complete_cohort(&records, &evidence),
+            Err(ModulePackageError::IncompleteProduct {
+                availability: ProductAvailability::Ready,
+                ..
+            })
+        ));
+    }
 }
 
 fn write_ref(root: &Path, relative: PathBuf, bytes: &[u8]) -> Result<FileRef, ModulePackageError> {
@@ -798,6 +955,7 @@ fn export_under(
         package_bytes,
         target_source,
     );
+    require_complete_cohort(&records, evidence)?;
     if records.is_empty() || records.len() > CANDIDATE_LIMIT {
         return Err(ModulePackageError::Bounds);
     }

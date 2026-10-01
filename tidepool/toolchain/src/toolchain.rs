@@ -80,7 +80,9 @@ pub const ENV_COMPILER_MODULES: &str = "TIDEPOOL_COMPILER_MODULES";
 pub use crate::module_candidates::deployment::{DeploymentModulePackage, ModulePackageError};
 
 /// Load explicit source provenance; this never admits an observed endpoint.
-/// Present invalid configuration refuses before compilation or source capture.
+/// Present invalid configuration refuses when selecting package source roots or
+/// original product candidates. Sealed exact contexts retain their owned
+/// artifacts; the package producer does not consume a configured catalog.
 pub fn configured_module_package() -> Result<Option<DeploymentModulePackage>, ModulePackageError> {
     let Some(path) = std::env::var_os(ENV_COMPILER_MODULES) else {
         return Ok(None);

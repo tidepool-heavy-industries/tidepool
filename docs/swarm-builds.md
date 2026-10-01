@@ -178,6 +178,38 @@ manifest must be regenerated there from the copied frontend, worker, and same
 GHC library directory before use; the Buck bundle does not promise path-free
 relocation.
 
+The Nix `runtime-stdlib-sources` and `runtime-stdlib-products` packages produce
+the immutable source and original product inputs for the shipped Prelude
+cohort. `tidepool-module-package` is the producing CLI; the product derivation
+runs `tidepool-module-package build --source-root SOURCE/lib --output-root OUT`
+with the same configured compiler deployment as `exomonad`. Source and product
+roots must be their final canonical Nix store paths. The version 1 catalog
+does not support moving either tree or redirecting source files through aliases.
+Development and authored source roots retain their existing capture policy.
+
+`exomonad` selects the optional catalog with `TIDEPOOL_COMPILER_MODULES`.
+The existing toolchain candidate owner validates its configured producer and
+worker, complete source manifest, and per-module `owner.json`, `products.cbor`,
+`skinny.hi`, `packages.cbor`, and `dependencies.json` files. Original product
+bytes and module versions are preserved. The generated catalog's schema is
+owned by `tidepool/toolchain/src/module_candidates/deployment.rs`; original
+TPMOD payloads are admitted by the production execution-schema reader. The
+producing CLI validates its completed catalog through that same owner. These
+generated package resources are separate from the checked-in TPSTG fixtures.
+
+The first producer requires an original product for every home source reached
+from `Tidepool.Prelude`. A missing product refuses with its module and compiler
+availability status. At runtime, current ordered source resolution, package
+witnesses, GHC interface checks, and candidate closure admission still determine
+reuse. A valid candidate shadowed by authored code can fall back to fresh
+compilation; invalid configured catalogs refuse at package source or candidate
+selection. Sealed exact contexts use their own admitted artifacts, and the
+package producer bypasses configured candidate input. The first package builds the
+cohort in one action and exposes independent module files. It does not claim
+independent build actions per module. Buck's copying `nix_directory` rule cannot
+relocate this catalog; consuming the original store roots requires declared
+resources that preserve those roots.
+
 `buck-out` must be a bind mount of a per-checkout directory on `/srv/build`; a
 symlink is not supported. Check `findmnt --mountpoint "$PWD/buck-out"` before
 any Buck invocation. Do not run Buck metadata queries or builds from an
