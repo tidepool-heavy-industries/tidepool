@@ -874,17 +874,7 @@ impl ResidentToolClient {
         request: WorkbenchRequest,
         invocation: Option<ToolInvocationContext>,
     ) -> Result<serde_json::Value, ResidentToolError> {
-        self.dispatch_workbench_issued(request, invocation, None)
-            .await
-    }
-
-    pub(crate) async fn dispatch_workbench_issued(
-        &self,
-        request: WorkbenchRequest,
-        invocation: Option<ToolInvocationContext>,
-        installed_tools: Option<crate::InstalledToolLease>,
-    ) -> Result<serde_json::Value, ResidentToolError> {
-        self.dispatch_workbench_issued_with_capture(request, invocation, installed_tools, None)
+        self.dispatch_workbench_issued_with_capture(request, invocation, None, None)
             .await
     }
 

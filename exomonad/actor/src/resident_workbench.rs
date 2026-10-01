@@ -7370,23 +7370,6 @@ where
             .await
     }
 
-    /// Drain an execution's exact private lexical owner after failure,
-    /// cancellation, or a completed publication. Detached scope retirement
-    /// releases its binding and source-instance shares even if the actor that
-    /// started the execution can no longer run a normal finalizer.
-    pub(crate) async fn retire_private_execution(
-        &self,
-        context: crate::ActorSessionContext,
-        private_scope: tidepool_codegen::scope::ScopeId,
-    ) -> Result<(), ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                session.retire_scope(private_scope);
-                Ok(())
-            })
-            .await
-    }
-
     pub(crate) async fn public_visibility_snapshot(
         &self,
         context: crate::ActorSessionContext,
@@ -7405,6 +7388,7 @@ where
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn capture_context_scope(
         &self,
         context: crate::ActorSessionContext,
