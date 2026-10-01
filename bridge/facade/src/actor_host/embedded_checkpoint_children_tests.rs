@@ -286,7 +286,7 @@ async fn operation_with_timeout(
         .unwrap_or_else(|_| panic!("embedded Haskell operation {call_id} did not settle"))
         .unwrap()
     {
-        JobOutput::Completed(result) => result,
+        JobOutput::Completed(result) => result.map_err(|error| error.to_string()),
         other => panic!("embedded Haskell operation {call_id} failed: {other:?}"),
     }
 }

@@ -1420,6 +1420,7 @@ where
             receipts: failure.receipts,
             failed_index: failure.failed_index,
             total: failure.total,
+            diagnostic: source.failure_diagnostic(),
             detail: source.to_string(),
         }),
     });

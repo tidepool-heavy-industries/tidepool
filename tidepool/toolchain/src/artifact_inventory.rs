@@ -42,7 +42,8 @@ pub enum ArtifactDependency {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ArtifactInventoryFailure {
     #[error("artifact {artifact:?} has differing metadata")]
     MetadataConflict { artifact: ArtifactId },

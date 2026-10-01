@@ -79,8 +79,10 @@ impl RunningBrowserHost {
                 Err(_) => "lookup_failed",
             };
             let failure = match &scheduler {
-                Ok(Some(harness::turn::JobOutput::Completed(Err(error))))
-                | Ok(Some(harness::turn::JobOutput::CancellationUnconfirmed(error))) => {
+                Ok(Some(harness::turn::JobOutput::Completed(Err(error)))) => {
+                    Some(error.message().chars().take(2048).collect::<String>())
+                }
+                Ok(Some(harness::turn::JobOutput::CancellationUnconfirmed(error))) => {
                     Some(error.chars().take(2048).collect::<String>())
                 }
                 Ok(Some(harness::turn::JobOutput::Completed(Ok(value)))) => {

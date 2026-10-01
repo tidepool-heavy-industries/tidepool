@@ -33,7 +33,8 @@ use tidepool_repr::serial::{ReadError, VERSION_MAJOR, VERSION_MINOR};
 /// WHAT failed — the axis a caller routes on. Stable lowercase tags via
 /// [`FailureClass::tag`]; never reword them, they are the machine-greppable
 /// vocabulary a caller branches on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum FailureClass {
     /// GHC parse/type/scope error in the user's code, or an unsupported IO
     /// result type — the extractor ran and rejected the source. Fix the code.
@@ -72,7 +73,8 @@ impl FailureClass {
 /// WHEN it failed — source extraction, prepared-program installation, or
 /// execution. The `install` stage distinguishes failures before a prepared
 /// program starts running from failures produced by execution itself.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Phase {
     /// During source compilation (the `tidepool-extract` shell-out + read).
     Compile,
@@ -97,7 +99,7 @@ impl Phase {
 
 /// A classified failure: the two routing axes plus the human-facing message.
 /// Successful evals never build one — this rides only the error path.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct FailureEnvelope {
     /// WHAT failed.
     pub class: FailureClass,
@@ -105,7 +107,49 @@ pub struct FailureEnvelope {
     pub phase: Phase,
     /// Human-facing message (already re-messaged for a version skew; the
     /// error's own `Display` text otherwise).
+    #[serde(skip_serializing)]
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<CompileFailureCause>,
+}
+
+/// Compiler-owned diagnostic category; it grants no compilation authority.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CompileFailureCause {
+    Io,
+    ExtractorContract,
+    InputRejected,
+    SourceDiagnostics,
+    WorkerFailure,
+    MalformedDiagnostics,
+    WireDecode,
+    PreparedArtifact,
+    MissingOutput,
+    TypedSites,
+    UnsupportedIo,
+    ConstructorIdentity,
+    ArtifactInventory {
+        failure: crate::artifact_inventory::ArtifactInventoryFailure,
+    },
+}
+
+impl std::fmt::Display for FailureEnvelope {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(output)
+    }
+}
+
+impl From<String> for FailureEnvelope {
+    fn from(message: String) -> Self {
+        Self::new(FailureClass::Infra, Phase::Compile, message)
+    }
+}
+
+impl From<&str> for FailureEnvelope {
+    fn from(message: &str) -> Self {
+        Self::from(message.to_owned())
+    }
 }
 
 impl FailureEnvelope {
@@ -117,6 +161,7 @@ impl FailureEnvelope {
             class,
             phase,
             message,
+            cause: None,
         }
     }
 }
@@ -128,7 +173,7 @@ impl FailureEnvelope {
 /// variant keeps its own Display text.
 #[must_use]
 pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
-    match err {
+    let mut envelope = match err {
         // Real GHC rejections carry `Diagnostics`. This arm is reserved for a
         // malformed extractor artifact or impossible internal request shape.
         CompileError::ExtractFailed(_)
@@ -208,7 +253,25 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         CompileError::ConstructorIdentity(_) => {
             FailureEnvelope::new(FailureClass::VersionSkew, Phase::Compile, err.to_string())
         }
-    }
+    };
+    envelope.cause = Some(match err {
+        CompileError::Io(_) => CompileFailureCause::Io,
+        CompileError::ExtractFailed(_) => CompileFailureCause::ExtractorContract,
+        CompileError::ArtifactInventory(error) => CompileFailureCause::ArtifactInventory {
+            failure: error.failure.clone(),
+        },
+        CompileError::InputRejected(_) => CompileFailureCause::InputRejected,
+        CompileError::Diagnostics(_) => CompileFailureCause::SourceDiagnostics,
+        CompileError::WorkerFailure(_) => CompileFailureCause::WorkerFailure,
+        CompileError::MalformedDiagnostics(_) => CompileFailureCause::MalformedDiagnostics,
+        CompileError::ReadError(_) => CompileFailureCause::WireDecode,
+        CompileError::Prepared(_) => CompileFailureCause::PreparedArtifact,
+        CompileError::MissingOutput(_) => CompileFailureCause::MissingOutput,
+        CompileError::Asks(_) => CompileFailureCause::TypedSites,
+        CompileError::IOTypeDetected => CompileFailureCause::UnsupportedIo,
+        CompileError::ConstructorIdentity(_) => CompileFailureCause::ConstructorIdentity,
+    });
+    envelope
 }
 
 /// A self-diagnosing version-skew report: names the wire version seen (when the
@@ -234,6 +297,58 @@ fn version_skew_message(re: &ReadError) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn artifact_inventory_diagnostic_retains_typed_owner_edge() {
+        use crate::artifact_inventory::{
+            ArtifactDependency, ArtifactId, ArtifactInventoryError, ArtifactInventoryFailure,
+        };
+        use crate::declaration_join::ExactModuleIdentity;
+        let failure = ArtifactInventoryFailure::MissingDependency {
+            artifact: ArtifactId([7; 32]),
+            dependent: ExactModuleIdentity {
+                unit: "main".into(),
+                module: "Dependent".into(),
+            },
+            required: ExactModuleIdentity {
+                unit: "package".into(),
+                module: "Original".into(),
+            },
+            dependency: ArtifactDependency::NativeBinding {
+                dependent_ordinal: 23,
+                generation: 0,
+                namespace: "value".into(),
+                occurrence: "map".into(),
+                record_parent: None,
+            },
+        };
+        let error = CompileError::ArtifactInventory(ArtifactInventoryError {
+            failure: failure.clone(),
+            diagnostic_artifacts: Some(PathBuf::from("retained-evidence")),
+        });
+        let diagnostic = classify_compile(&error);
+        assert_eq!(diagnostic.class, FailureClass::VersionSkew);
+        assert_eq!(diagnostic.phase, Phase::Compile);
+        assert_eq!(
+            diagnostic.cause,
+            Some(CompileFailureCause::ArtifactInventory { failure })
+        );
+        assert!(diagnostic.message.contains("retained-evidence"));
+        let metadata = serde_json::to_value(&diagnostic).unwrap();
+        assert_eq!(metadata["class"], "version-skew");
+        assert_eq!(
+            metadata["cause"]["failure"]["required"]["module"],
+            "Original"
+        );
+        assert_eq!(
+            metadata["cause"]["failure"]["dependency"]["native_binding"]["dependent_ordinal"],
+            23
+        );
+        assert!(
+            metadata.get("message").is_none(),
+            "human diagnostic must not be duplicated in metadata"
+        );
+    }
 
     #[test]
     fn extractor_contract_failure_is_version_skew_compile() {

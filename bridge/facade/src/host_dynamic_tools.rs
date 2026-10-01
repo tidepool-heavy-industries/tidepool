@@ -2303,6 +2303,7 @@ pub(crate) mod tests {
             actor: exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7)),
             failed_index: 1,
             total: 3,
+            diagnostic: None,
             detail: "large diagnostic λ\n".repeat(20_000),
             receipts: vec![WorkbenchItemReceipt {
                 index: 1,

@@ -141,6 +141,7 @@ pub struct KernelWorkbenchFailure {
     pub failed_index: usize,
     pub total: usize,
     pub detail: String,
+    pub diagnostic: Option<tidepool_toolchain::failclass::FailureEnvelope>,
 }
 
 impl std::fmt::Display for KernelWorkbenchFailure {
@@ -1017,6 +1018,7 @@ mod tests {
             }],
             failed_index: 1,
             total: 3,
+            diagnostic: None,
             detail: "actor protocol violation: unsupported resident actor request `MissingEffect`"
                 .into(),
         };

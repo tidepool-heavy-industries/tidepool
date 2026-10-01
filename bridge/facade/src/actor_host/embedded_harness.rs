@@ -23,7 +23,7 @@ use harness::{
     model::{AgentPath, ConversationIdentity, OperationId},
     provider::{
         CallContext, CancellationAcknowledgment, CancellationOwner, JobHandle, Provider,
-        ProviderError,
+        ProviderError, ToolFailure,
     },
     store::Store,
     turn::JobScheduler,
@@ -623,8 +623,8 @@ impl HostedCheckpointCapture for EmbeddedCheckpointCapture {
 
 impl EmbeddedDispatcher {
     fn context(&self, operation: &OperationId) -> Result<ToolInvocationContext, ProviderError> {
-        let original =
-            original_operation(&self.identity, operation).map_err(ProviderError::Tool)?;
+        let original = original_operation(&self.identity, operation)
+            .map_err(|error| ProviderError::Tool(error.into()))?;
         Ok(ToolInvocationContext {
             origin: exomonad_tool::ToolInvocationOrigin::Model(original),
             call_id: operation.call.0.clone(),
@@ -665,8 +665,26 @@ impl EmbeddedDispatcher {
                 checkpoint_capture,
             )
             .await
-            .map_err(|error| ProviderError::Tool(error.to_string()))
+            .map_err(provider_tool_error)
     }
+}
+
+fn provider_tool_error(error: ResidentToolError) -> ProviderError {
+    let diagnostic = match &error {
+        ResidentToolError::Invocation(exomonad_actor::KernelInvocationFailure::Workbench(
+            failure,
+        )) => failure.diagnostic.as_ref(),
+        _ => None,
+    };
+    let failure = match diagnostic {
+        Some(diagnostic) => ToolFailure::with_metadata(
+            error.to_string(),
+            serde_json::to_value(diagnostic)
+                .expect("failure diagnostics contain only serializable data"),
+        ),
+        None => error.to_string().into(),
+    };
+    ProviderError::Tool(failure)
 }
 
 #[async_trait::async_trait]
@@ -730,7 +748,8 @@ impl CancellationOwner for EmbeddedDispatcher {
                     .and_then(|response| {
                         serde_json::to_value(response).map_err(ResidentToolError::Encoding)
                     })
-                    .map_err(|error| ProviderError::Tool(error.to_string()).to_string());
+                    .map_err(provider_tool_error)
+                    .map_err(ProviderError::into_tool_failure);
                 CancellationAcknowledgment::Completed(result)
             }
             Ok(outcome) => CancellationAcknowledgment::Unconfirmed(format!("{outcome:?}")),
@@ -742,6 +761,33 @@ impl CancellationOwner for EmbeddedDispatcher {
 #[cfg(test)]
 mod round_control_tests {
     use super::*;
+
+    #[test]
+    fn embedded_tool_failure_preserves_classification_and_original_error_text() {
+        let diagnostic = tidepool_toolchain::failclass::classify_compile(
+            &tidepool_toolchain::CompileError::ExtractFailed("retained owner missing".into()),
+        );
+        let error =
+            ResidentToolError::Invocation(exomonad_actor::KernelInvocationFailure::Workbench(
+                exomonad_actor::KernelWorkbenchFailure {
+                    actor: ActorRef::first(exomonad_actor::ActorId(7)),
+                    receipts: vec![],
+                    failed_index: 0,
+                    total: 1,
+                    detail: "retained owner missing".into(),
+                    diagnostic: Some(diagnostic),
+                },
+            ));
+        let original = error.to_string();
+        let failure = provider_tool_error(error).into_tool_failure();
+        assert_eq!(failure.message(), format!("tool failed: {original}"));
+        assert_eq!(failure.metadata().unwrap()["class"], "version-skew");
+        assert_eq!(failure.metadata().unwrap()["phase"], "compile");
+        assert_eq!(
+            failure.metadata().unwrap()["cause"]["kind"],
+            "extractor_contract"
+        );
+    }
 
     #[test]
     fn delayed_interrupt_never_targets_a_successor_round() {

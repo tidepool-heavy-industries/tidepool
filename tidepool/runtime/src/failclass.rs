@@ -8,7 +8,7 @@
 //! JIT/session state and must not be visible to `tidepool-toolchain`, which
 //! this crate depends on, not the reverse.
 
-use crate::session::prepared::PreparedFailureStage;
+use crate::session::prepared::{PreparedFailureStage, PreparedRuntimeError};
 use crate::session::SessionError;
 use crate::{CompileError, RuntimeError};
 
@@ -26,13 +26,21 @@ pub fn classify(err: &RuntimeError) -> FailureEnvelope {
             FailureEnvelope::new(FailureClass::Runtime, Phase::Run, err.to_string())
         }
         RuntimeError::Prepared(prepared) => {
-            let phase = match prepared.stage() {
-                PreparedFailureStage::Install => Phase::Install,
-                PreparedFailureStage::Run => Phase::Run,
-            };
-            FailureEnvelope::new(FailureClass::Runtime, phase, err.to_string())
+            let mut diagnostic = classify_prepared(prepared);
+            diagnostic.message = err.to_string();
+            diagnostic
         }
     }
+}
+
+/// Retain the owning prepared operation's install/run stage at actor boundaries.
+#[must_use]
+pub fn classify_prepared(error: &PreparedRuntimeError) -> FailureEnvelope {
+    let phase = match error.stage() {
+        PreparedFailureStage::Install => Phase::Install,
+        PreparedFailureStage::Run => Phase::Run,
+    };
+    FailureEnvelope::new(FailureClass::Runtime, phase, error.to_string())
 }
 
 /// The repl's declaration-accumulation path fails with a [`SessionError`]; its

@@ -249,9 +249,10 @@ fn cell_check_error(
         explain_source_order(&mut failure, cell_source);
         ResidentActorWorkbenchError::CellCheck(failure)
     } else {
-        ResidentActorWorkbenchError::CompileInfrastructure(
-            tidepool_runtime::session::render_cell_compile_error(&failure.error, cell_source),
-        )
+        let mut diagnostic = classify_compile(&failure.error);
+        diagnostic.message =
+            tidepool_runtime::session::render_cell_compile_error(&failure.error, cell_source);
+        ResidentActorWorkbenchError::CompileInfrastructure(diagnostic)
     }
 }
 
@@ -302,6 +303,34 @@ mod same_cell_collision_tests {
             ),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod failure_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn preflight_infrastructure_failure_keeps_compiler_class_and_cause() {
+        let failure =
+            CompileError::MissingOutput(std::path::PathBuf::from("missing-output")).into();
+        let error = cell_check_error(failure, "authored cell");
+        let diagnostic = error
+            .failure_diagnostic()
+            .expect("compile failure classified");
+        assert_eq!(diagnostic.class, FailureClass::Infra);
+        assert_eq!(
+            diagnostic.phase,
+            tidepool_toolchain::failclass::Phase::Compile
+        );
+        assert_eq!(
+            diagnostic.cause,
+            Some(tidepool_toolchain::failclass::CompileFailureCause::MissingOutput)
+        );
+        assert!(error.to_string().contains("missing-output"));
+        assert!(error
+            .to_string()
+            .starts_with("resident workbench compiler infrastructure failed:"));
     }
 }
 
@@ -3000,7 +3029,7 @@ pub enum ResidentActorWorkbenchError {
     #[error("resident cell check failed: {0}")]
     CellCheck(tidepool_runtime::session::CellCheckFailure),
     #[error("resident workbench compiler infrastructure failed:\n{0}")]
-    CompileInfrastructure(String),
+    CompileInfrastructure(tidepool_toolchain::failclass::FailureEnvelope),
     #[error("resident workbench execution failed: {0}")]
     Resident(#[from] ResidentError),
     /// The response that answers a boundary's effect was already handed to
@@ -3021,8 +3050,8 @@ pub enum ResidentActorWorkbenchError {
     /// all further execution.
     #[error(
         "this actor's Haskell machine was lost to an earlier integrity failure (reported by that \
-         cell); no further cells can run here. Restart the session: declarations are replayed, \
-         live values are lost"
+         cell); no further cells can run here. Restart requires verified durable declarations; \
+         live values are lost and effects are not replayed"
     )]
     MachineLost,
     #[error("resident workbench task panicked or was cancelled: {0}")]
@@ -3057,6 +3086,29 @@ pub enum ResidentActorWorkbenchError {
 }
 
 impl ResidentActorWorkbenchError {
+    pub(crate) fn failure_diagnostic(
+        &self,
+    ) -> Option<tidepool_toolchain::failclass::FailureEnvelope> {
+        match self {
+            Self::Compile(error) => Some(classify_compile(error)),
+            Self::CellCheck(failure) => Some(classify_compile(&failure.error)),
+            Self::CompileInfrastructure(diagnostic) => Some(diagnostic.clone()),
+            Self::Resident(ResidentError::Session(error))
+            | Self::Delivered(ResidentError::Session(error)) => {
+                Some(tidepool_runtime::failclass::classify_session(error))
+            }
+            Self::Resident(ResidentError::Run(error))
+            | Self::Delivered(ResidentError::Run(error)) => {
+                Some(tidepool_runtime::failclass::classify(error))
+            }
+            Self::Resident(ResidentError::Prepared(error))
+            | Self::Delivered(ResidentError::Prepared(error)) => {
+                Some(tidepool_runtime::failclass::classify_prepared(error))
+            }
+            _ => None,
+        }
+    }
+
     /// Whether this failure is only an observation budget running out
     /// somewhere in the turn, rather than a fault in the program, the heap,
     /// the value, or the actor protocol around it. `Resident` and
@@ -4242,9 +4294,10 @@ where
                                     .then(tempfile::tempdir)
                                     .transpose()
                                     .map_err(|error| {
-                                        ResidentActorWorkbenchError::CompileInfrastructure(format!(
-                                            "declaration candidate directory: {error}"
-                                        ))
+                                        ResidentActorWorkbenchError::CompileInfrastructure(
+                                            format!("declaration candidate directory: {error}")
+                                                .into(),
+                                        )
                                     })?;
                                 let staged = match (declaration_candidate, &candidate_dir) {
                                     (Some((candidate, visible_values)), Some(candidate_dir)) => {
@@ -5878,7 +5931,7 @@ where
     tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_admit_completed", "workbench phase");
     let result = tidepool_runtime::session::turn::consume_cell_program_display(admission.clone())
         .map_err(|failure| {
-        ResidentActorWorkbenchError::CompileInfrastructure(classify_compile(&failure.error).message)
+        ResidentActorWorkbenchError::CompileInfrastructure(classify_compile(&failure.error))
     })?;
     let TurnResult::Bind {
         bound, compiled, ..
@@ -6026,7 +6079,11 @@ where
     let verdict = match checked_verdict {
         Some(checked) => Some(checked.clone()),
         None => tidepool_runtime::session::classify_block(&[&block.source])
-            .map_err(|error| ResidentActorWorkbenchError::CompileInfrastructure(error.to_string()))?
+            .map_err(|error| {
+                let mut diagnostic = classify_compile(&error);
+                diagnostic.message = error.to_string();
+                ResidentActorWorkbenchError::CompileInfrastructure(diagnostic)
+            })?
             .into_iter()
             .next(),
     };
@@ -6138,7 +6195,7 @@ fn compile_fragment_off_checkout(
             )))
         }
         Err(failure) => Err(ResidentActorWorkbenchError::CompileInfrastructure(
-            classify_compile(&failure.error).message,
+            classify_compile(&failure.error),
         )),
     }
 }
@@ -10550,12 +10607,14 @@ fn consume_admitted_cell_item(
                 )));
             }
             Err(failure) => {
+                let mut diagnostic = classify_compile(&failure.error);
+                diagnostic.message = tidepool_runtime::session::render_cell_compile_error(
+                    &failure.error,
+                    &block.source,
+                );
                 return Err(ResidentActorWorkbenchError::CompileInfrastructure(
-                    tidepool_runtime::session::render_cell_compile_error(
-                        &failure.error,
-                        &block.source,
-                    ),
-                ))
+                    diagnostic,
+                ));
             }
         };
     let observation = reservation
@@ -11033,9 +11092,9 @@ fn compile_cell_items_off_checkout(
                     tidepool_repr::SessionModule::val(compile_view.next_value_generation());
                 let expected = module.module_name();
                 if bound.iter().any(|binder| binder.module != expected) {
-                    return Err(ResidentActorWorkbenchError::CompileInfrastructure(format!(
-                        "staged cell binder module does not match {expected}"
-                    )));
+                    return Err(ResidentActorWorkbenchError::CompileInfrastructure(
+                        format!("staged cell binder module does not match {expected}").into(),
+                    ));
                 }
                 let names = bound
                     .iter()
@@ -11308,9 +11367,9 @@ where
                         tidepool_repr::SessionModule::val(compile_view.next_value_generation());
                     let expected = module.module_name();
                     if bound.iter().any(|binder| binder.module != expected) {
-                        return Err(ResidentActorWorkbenchError::CompileInfrastructure(format!(
-                            "staged cell binder module does not match {expected}"
-                        )));
+                        return Err(ResidentActorWorkbenchError::CompileInfrastructure(
+                            format!("staged cell binder module does not match {expected}").into(),
+                        ));
                     }
                     let names = bound
                         .iter()
@@ -11820,7 +11879,11 @@ where
     let verdict = match checked_verdict {
         Some(checked) => Some(checked.clone()),
         None => tidepool_runtime::session::classify_block(&[&block.source])
-            .map_err(|error| ResidentActorWorkbenchError::CompileInfrastructure(error.to_string()))?
+            .map_err(|error| {
+                let mut diagnostic = classify_compile(&error);
+                diagnostic.message = error.to_string();
+                ResidentActorWorkbenchError::CompileInfrastructure(diagnostic)
+            })?
             .into_iter()
             .next(),
     };
@@ -12010,7 +12073,7 @@ fn compile_block_off_checkout(
             )))
         }
         Err(failure) => Err(ResidentActorWorkbenchError::CompileInfrastructure(
-            classify_compile(&failure.error).message,
+            classify_compile(&failure.error),
         )),
     }
 }
@@ -12169,11 +12232,14 @@ fn inspect_compile_view(
                 _ => Ok(result),
             })
             .collect()),
-        Ok(results) => Err(ResidentActorWorkbenchError::CompileInfrastructure(format!(
-            "inspection returned {} results for {} queries",
-            results.len(),
-            queries.len()
-        ))),
+        Ok(results) => Err(ResidentActorWorkbenchError::CompileInfrastructure(
+            format!(
+                "inspection returned {} results for {} queries",
+                results.len(),
+                queries.len()
+            )
+            .into(),
+        )),
         Err(error) if classify_compile(&error).class == FailureClass::UserHaskell => {
             Ok(vec![Err(classify_compile(&error).message)])
         }
