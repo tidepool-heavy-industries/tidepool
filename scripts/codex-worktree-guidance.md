@@ -18,6 +18,18 @@ its invariants; callers should not need to remember a separate pre-check.
 
 ## Focused verification is still complete verification
 
+Use one Cargo target directory per canonical checkout. `dev-shell.sh` preserves
+targets inside that checkout and namespaces an external build base by checkout
+identity; it refuses a target inside another Git checkout and reports the
+resolved directory. Share compiler caches such as sccache separately, never a
+mutable Cargo target tree. Sequential use of one target by different checkouts
+can reuse stale dependency metadata because Cargo freshness uses source mtimes.
+
+For acceptance, build the exact candidate in its own target, then retain the
+source OID (and content hashes of any dirty inputs), command, toolchain and flags,
+actual artifact path and SHA-256, executed test count and result. A source OID
+and test log alone do not bind a reused binary to that candidate's dependencies.
+
 The ban on broad batteries is a resource constraint, not permission to leave a
 changed target uncompiled.
 

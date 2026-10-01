@@ -7,6 +7,16 @@ if [[ ${1:-} == --exomonad ]]; then
   shell=exomonad
   shift
 fi
+source_root=$(git rev-parse --show-toplevel)
+cargo_target_args=("$source_root")
+if [[ -n ${CARGO_TARGET_DIR:-} ]]; then
+  cargo_target_args+=("$CARGO_TARGET_DIR")
+fi
+resolved_cargo_target=$(python3 "$source_root/scripts/cargo-target.py" "${cargo_target_args[@]}")
+if [[ ${CARGO_TARGET_DIR:-} != "$resolved_cargo_target" ]]; then
+  echo "Cargo build directory: $resolved_cargo_target" >&2
+fi
+export CARGO_TARGET_DIR="$resolved_cargo_target"
 if [[ $shell == exomonad ]]; then
   # Only exomonad's flake forces the codex path input, so only it needs the
   # vendor/codex source capture verified before Nix evaluates anything.
@@ -22,7 +32,6 @@ if [[ -n ${TIDEPOOL_DEV_FLAKE:-} ]]; then
 else
   # Nix can open a worktree root even when Git metadata is shared. Opening the
   # .git directory directly fails under a sandbox that protects nested .git.
-  source_root=$(git rev-parse --show-toplevel)
   if [[ $shell == default ]]; then
     # default only needs the toolchain inputs, so pin a synthetic commit over
     # them instead of HEAD: unrelated commits then reuse the same revision
@@ -57,7 +66,7 @@ if [[ ${TIDEPOOL_DEV_SHELL:-} == "$selection" &&
       $(command -v rustc || true) == "${TIDEPOOL_DEV_RUSTC:-}" ]]; then
   exec "$@"
 fi
-# Retain cwd and CARGO_TARGET_DIR: only the environment comes from the flake.
+# Retain cwd and the checkout's resolved Cargo target across the Nix boundary.
 #
 # `nix develop --command CMD` builds its own NIX_BUILD_TOP with
 # `mktemp -d -t nix-shell.XXXXXX` inside a generated rc script, then execve's
