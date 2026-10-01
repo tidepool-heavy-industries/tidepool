@@ -268,18 +268,18 @@ agentSpec = defaultSpec { specTools = Tools.tools }
         let root = tempfile::tempdir().unwrap();
         let layer = vec![root.path().to_path_buf()];
         let with_spec = resolve(
-            &layer,
+            layer.clone(),
             Some("Project.Spec.agentSpec"),
             Some("P.Tools.tools"),
         );
         assert_eq!(with_spec.rule, SpecRule::WorkspaceSpec);
         assert_eq!(with_spec.entry.as_deref(), Some("Project.Spec.agentSpec"));
 
-        let tools_only = resolve(&layer, None, Some("P.Tools.tools"));
+        let tools_only = resolve(layer.clone(), None, Some("P.Tools.tools"));
         assert_eq!(tools_only.rule, SpecRule::WorkspaceTools);
         assert_eq!(tools_only.entry.as_deref(), Some("P.Tools.tools"));
 
-        let nothing = resolve(&layer, None, None);
+        let nothing = resolve(layer, None, None);
         assert_eq!(nothing.rule, SpecRule::BuiltinDefault);
         assert_eq!(nothing.entry, None);
         assert_eq!(nothing.checked_module(), None);
