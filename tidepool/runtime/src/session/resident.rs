@@ -7102,7 +7102,15 @@ mod authored_publication_tests {
             template_source: template.clone(),
             turn_templates: templates
                 .iter()
-                .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                .map(|template| {
+                    let kind = match template.kind {
+                        crate::session::TemplateSelector::Decl => "decl",
+                        crate::session::TemplateSelector::Bind => "bind",
+                        crate::session::TemplateSelector::BindDiscard => "binddiscard",
+                        crate::session::TemplateSelector::Expr => "expr",
+                    };
+                    (kind.into(), template.source.clone())
+                })
                 .collect(),
             injected_modules: view.injected_module_names(),
             reserved_declaration_modules: vec![],
@@ -7235,6 +7243,10 @@ mod authored_publication_tests {
             resident.state.bindings().get(id).is_some(),
             "failed publication still has private native custody"
         );
+        drop(before);
+        drop(compiled);
+        drop(checked);
+        drop(first);
         drop(snapshot);
         drop(reservation);
         drop(prefix);

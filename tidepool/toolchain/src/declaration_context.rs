@@ -542,9 +542,7 @@ impl GeneratedScaffoldImportAuthority {
         }
         context.artifact_view().entries().iter().any(|entry| {
             matches!(&entry.payload, ArtifactPayload::Original(product)
-                if product.owner() == &self.owner
-                    && product.execution_source().is_some_and(|graph|
-                        graph.eligible_execution_root(&self.owner)))
+                if product.owner() == &self.owner)
         })
     }
 }
@@ -699,10 +697,7 @@ impl ExactCompilationRequest {
                 .filter_map(|entry| match &entry.payload {
                     ArtifactPayload::Original(product)
                         if product.owner().unit == "main"
-                            && product.owner().module == "Tidepool.Internal.Resume"
-                            && product.execution_source().is_some_and(|graph| {
-                                graph.eligible_execution_root(product.owner())
-                            }) =>
+                            && product.owner().module == "Tidepool.Internal.Resume" =>
                     {
                         Some(product.owner())
                     }
