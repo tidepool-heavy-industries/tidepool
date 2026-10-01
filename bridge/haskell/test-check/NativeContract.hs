@@ -132,11 +132,11 @@ main = do
   cellResult "non-Bool action is rejected" CellRejected (awaited "wrong action type" "pure scopedValue")
   require "cell boundary never counts success before accepting turn status" . null =<< readIORef successes
   failedCounts <- newIORef []
-  throws "structured failed status blocks a discarded cell" $
+  throws "native turn decoder rejects before continuation" $
     host failedCounts (const (pure "{\"status\":\"failed\",\"items\":[{\"output\":\"True\"}]}")) $ do
       actor <- Check.root
       Check.assertCell actor "failed turn" "True"
       pure (42 :: Int)
-  require "failed turn records zero successes" . null =<< readIORef failedCounts
+  require "native decoder rejection records zero successes" . null =<< readIORef failedCounts
   putStrLn "executed: 17 native helper contract checks"
   putStrLn "not executed: successful host counting requires the prepared-runtime JSON intrinsic"

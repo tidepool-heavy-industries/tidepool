@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 use tidepool_bridge::FromHaskell;
+use tidepool_codegen::host_fns::RuntimeError as HaskellError;
+use tidepool_codegen::prepared_program::ExecutionError;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext, EffectDispatch};
 use tidepool_effect::{EffectError, Response};
+use tidepool_runtime::session::prepared::PreparedRuntimeError;
 use tidepool_runtime::HaskellValue;
 
 #[path = "../../facade/src/generated/recipe_check.rs"]
@@ -13,6 +16,15 @@ struct Host {
     helper: String,
     successes: Vec<String>,
     cells: Vec<String>,
+    attempts: Vec<Attempt>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Attempt {
+    Root,
+    SelectorRead,
+    Turn,
+    Assert(bool),
 }
 
 impl DispatchEffect for Host {
@@ -22,16 +34,22 @@ impl DispatchEffect for Host {
         cx: &EffectContext<'_>,
     ) -> Result<Option<Response>, EffectError> {
         let response = match RecipeCheckReq::from_value(request, cx.table())? {
-            RecipeCheckReq::RecipeRoot => cx.respond(("fixture".to_owned(), 1_i64, 1_i64))?,
+            RecipeCheckReq::RecipeRoot => {
+                self.attempts.push(Attempt::Root);
+                cx.respond(("fixture".to_owned(), 1_i64, 1_i64))?
+            }
             RecipeCheckReq::RecipeTurn(actor, source) => {
                 assert_eq!(actor, ("fixture".to_owned(), 1, 1));
+                self.attempts.push(Attempt::Turn);
                 self.cells.push(source);
                 cx.respond(self.receipt.clone())?
             }
             RecipeCheckReq::RecipeRead(_, path) if path == "helper" => {
+                self.attempts.push(Attempt::SelectorRead);
                 cx.respond(self.helper.clone())?
             }
             RecipeCheckReq::RecipeAssert(label, observed) => {
+                self.attempts.push(Attempt::Assert(observed));
                 if !observed {
                     return Err(EffectError::Handler(label));
                 }
@@ -126,6 +144,7 @@ fn run() {
             helper: helper.to_owned(),
             successes: vec![],
             cells: vec![],
+            attempts: vec![],
         };
         let result = tidepool_runtime::run_prepared_program(
             compiled.prepared.clone().into_prepared(),
@@ -136,6 +155,55 @@ fn run() {
             |_| {},
         );
         assert_eq!(result.is_ok(), succeeds, "{label}: {result:?}");
+        let expected_attempts = if helper == "false" {
+            vec![Attempt::Root, Attempt::SelectorRead]
+        } else {
+            vec![
+                Attempt::Root,
+                Attempt::SelectorRead,
+                Attempt::Turn,
+                Attempt::Assert(succeeds),
+            ]
+        };
+        assert_eq!(
+            host.attempts, expected_attempts,
+            "{label}: exact effect attempts"
+        );
+        if !succeeds {
+            if helper == "false" {
+                assert!(
+                    matches!(
+                        &result,
+                        Err(tidepool_runtime::RuntimeError::Prepared(
+                            PreparedRuntimeError::Run(ExecutionError::Runtime(failure))
+                        )) if matches!(&failure.cause,
+                            HaskellError::UserError | HaskellError::UserErrorMsg(_)
+                            | HaskellError::RaisedException | HaskellError::RaisedExceptionMessage(_)
+                        )
+                    ),
+                    "{label}: expected a typed Haskell error after selector read: {result:?}"
+                );
+                assert!(
+                    host.cells.is_empty(),
+                    "{label}: unexpectedly submitted an actor cell"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        &result,
+                        Err(tidepool_runtime::RuntimeError::Prepared(
+                            PreparedRuntimeError::Handler { .. }
+                        ))
+                    ),
+                    "{label}: expected failed host assertion after exact turn: {result:?}"
+                );
+                assert_eq!(
+                    host.cells.len(),
+                    1,
+                    "{label}: expected exactly one actor cell"
+                );
+            }
+        }
         assert_eq!(
             host.successes.len(),
             usize::from(succeeds),
@@ -147,6 +215,11 @@ fn run() {
         for (index, cell) in host.cells.iter().enumerate() {
             std::fs::write(scratch.join(format!("{label}-cell-{index}.hs")), cell).unwrap();
         }
+        std::fs::write(
+            scratch.join(format!("{label}-attempts.txt")),
+            format!("attempts={:?}\nresult={result:?}\n", host.attempts),
+        )
+        .unwrap();
         println!(
             "passed: {label}; accepted={succeeds}; host successes={}",
             host.successes.len()
