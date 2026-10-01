@@ -394,47 +394,58 @@ fn serve_bound_endpoint() -> Result<u8, FrontendError> {
     stdin.read_exact(&mut prefix).map_err(FrontendError::Io)?;
     if &prefix == daemon::TRANSACTION {
         let mut worker = daemon::Worker::spawn(&prepared)?;
-        worker.begin_transaction()?;
-        io::stdout().write_all(&[1]).map_err(FrontendError::Io)?;
-        io::stdout().flush().map_err(FrontendError::Io)?;
-        loop {
-            let mut command = [0u8; 1];
-            if stdin.read_exact(&mut command).is_err() {
-                break;
-            }
-            match command[0] {
-                daemon::TRANSACTION_END => break,
-                daemon::TRANSACTION_REQUEST => {
-                    let (cwd, argv) = daemon::read_request(&mut stdin)?;
-                    let worker_argv = daemon::normalize_worker_argv(argv)?;
-                    let (code, out, err) = worker.request(&cwd, &worker_argv)?;
-                    daemon::write_response(io::stdout().lock(), code, &out, &err)?;
-                    io::stdout().flush().map_err(FrontendError::Io)?;
+        let result = (|| {
+            worker.begin_transaction()?;
+            io::stdout().write_all(&[1]).map_err(FrontendError::Io)?;
+            io::stdout().flush().map_err(FrontendError::Io)?;
+            loop {
+                let mut command = [0u8; 1];
+                if stdin.read_exact(&mut command).is_err() {
+                    break;
                 }
-                other => {
-                    return Err(FrontendError::Daemon(format!(
-                        "unknown compiler transaction command {other}"
-                    )))
+                match command[0] {
+                    daemon::TRANSACTION_END => break,
+                    daemon::TRANSACTION_REQUEST => {
+                        let (cwd, argv) = daemon::read_request(&mut stdin)?;
+                        let worker_argv = daemon::normalize_worker_argv(argv)?;
+                        let (code, out, err) = worker.request(&cwd, &worker_argv)?;
+                        daemon::write_response(io::stdout().lock(), code, &out, &err)?;
+                        io::stdout().flush().map_err(FrontendError::Io)?;
+                    }
+                    other => {
+                        return Err(FrontendError::Daemon(format!(
+                            "unknown compiler transaction command {other}"
+                        )))
+                    }
                 }
             }
+            worker.end_transaction()
+        })();
+        if result.is_ok() {
+            worker.shutdown();
+        } else {
+            worker.abort();
         }
-        let result = worker.end_transaction();
-        worker.shutdown();
         return result.map(|()| 0);
     }
     let mut request = io::Cursor::new(prefix).chain(stdin);
     let (cwd, argv) = daemon::read_request(&mut request)?;
     let worker_argv = daemon::normalize_worker_argv(argv)?;
     let mut worker = daemon::Worker::spawn(&prepared)?;
-    let result = worker
-        .begin_transaction()
-        .and_then(|()| worker.request(&cwd, &worker_argv))
-        .and_then(|response| worker.end_transaction().map(|()| response));
-    if let Ok((code, stdout, stderr)) = &result {
-        daemon::write_response(io::stdout().lock(), *code, stdout, stderr)?;
+    let result = (|| {
+        worker.begin_transaction()?;
+        let (code, stdout, stderr) = worker.request(&cwd, &worker_argv)?;
+        worker.end_transaction()?;
+        daemon::write_response(io::stdout().lock(), code, &stdout, &stderr)
+    })();
+    if result.is_ok() {
+        worker.shutdown();
+    } else {
+        // A rejected frame can leave the worker blocked writing its unread
+        // body. Waiting for stdin EOF would not make that worker exit.
+        worker.abort();
     }
-    worker.shutdown();
-    result.map(|_| 0)
+    result.map(|()| 0)
 }
 
 pub(crate) struct DaemonConfig {

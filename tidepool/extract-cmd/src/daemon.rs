@@ -2418,7 +2418,7 @@ impl Worker {
         Ok(())
     }
 
-    fn abort(&mut self) {
+    pub(crate) fn abort(&mut self) {
         drop(self.stdin.take());
         if let Err(error) = self.child.kill() {
             tracing::warn!(%error, "failed to kill aborted compiler worker");
