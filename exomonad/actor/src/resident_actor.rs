@@ -9390,6 +9390,18 @@ where
                     ActorPublicOwnerPlane::DurablePending(owner)
                 }
             };
+            if let Some((intent, _)) = &self.root_startup {
+                let Some(ResidentBoot::Startup(entry)) = &self.boot else {
+                    return Err(Self::failure(
+                        "pending root lost its original unexecuted startup entry",
+                    ));
+                };
+                if entry.compile_input_identity() != intent.bootstrap_identity {
+                    return Err(Self::failure(
+                        "startup intent differs from its original compiler-issued input identity",
+                    ));
+                }
+            }
             if let Some(recovery) = &self.environment.recovery {
                 recovery
                     .admit_with_startup(
