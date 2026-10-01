@@ -1,5 +1,7 @@
 """Pinned GHC options and package environments for native Haskell targets."""
 
+load("//build:native_profile.bzl", "haskell_optimization_flags")
+
 GHC_COMPONENT_FLAGS = [
     "-Wall",
     "-XGHC2024",
@@ -53,7 +55,7 @@ def _package_flags(packages):
     return flags
 
 def _component_flags(packages, extra):
-    return GHC_COMPONENT_FLAGS + _package_flags(packages) + list(extra)
+    return GHC_COMPONENT_FLAGS + haskell_optimization_flags() + _package_flags(packages) + list(extra)
 
 def extractor_library_flags(*extra):
     return _component_flags(EXTRACTOR_LIBRARY_PACKAGES, extra)

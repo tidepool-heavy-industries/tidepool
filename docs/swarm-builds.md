@@ -77,6 +77,30 @@ bash scripts/dev-shell.sh bash -c 'nix build --no-link "${TIDEPOOL_DEV_SHELL%#*}
 bash scripts/buck2-configure.sh
 ```
 
+First-party Rust and Haskell actions use the Buck `tidepool.profile` setting.
+The checked-in default, `fast-dev`, preserves the existing per-crate Rust
+optimization and leaves GHC at its normal development level. Use `debug` to
+compile all first-party Rust at opt-level 0 and leave GHC unoptimized, or select
+`production` for opt-level 3 Rust and `-O2` GHC. Rust test binaries follow the
+selected profile so optimized host tests exercise the same first-party code as
+the shipped host. Compiler flags are explicit action inputs: each profile has
+its own Buck action key and reuse remains at the current crate/component action
+boundaries. The pinned Nix compilers and third-party Rust optimization remain
+unchanged.
+
+For a matched production host and extractor worker, select the profile on each
+Buck invocation:
+
+```sh
+bash scripts/buck2-run.sh build --local-only -c remote.enabled=false \
+  -c tidepool.profile=production \
+  //bridge/facade:tidepool //bridge/haskell:tidepool_extract_bin
+```
+
+Unknown profile names fail during target analysis. The setting can also be
+stored in a local Buck config, but the exact command should be retained with
+performance evidence so the action profile is clear.
+
 `buck-out` must be a bind mount of a per-checkout directory on `/srv/build`; a
 symlink is not supported. Check `findmnt --mountpoint "$PWD/buck-out"` before
 any Buck invocation. Do not run Buck metadata queries or builds from an

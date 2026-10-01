@@ -21,3 +21,9 @@ target_platform_detector_spec = target:root//...->prelude//platforms:default \
 
 [build]
 execution_platforms = root//platforms:platforms
+
+# Fast incremental work remains the default. Select `production` explicitly
+# for matched optimized host and GHC worker builds; `debug` disables native
+# optimization while retaining compiler diagnostics.
+[tidepool]
+profile = fast-dev
