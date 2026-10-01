@@ -71,17 +71,17 @@ model polling or forwarding actor.
 Starting with no output is ordinary progress. Readable-but-empty output has byte
 positions; an unavailable-output error is different and keeps the same job.
 
-Direct execution defaults: 1024 MiB and up to 60 seconds awaiting completion.
-If still running, the same job receives one completion notice (or its existing
-watch owns that wake). Continue useful work; no polling is needed. Explicit
-`yield_time_ms` (0..300000) requests a deliberate snapshot without automatic
-notification. `background: true` returns immediately with completion delivery.
-In Haskell, `Cmd.observeCompletion` and `Cmd.observeWithCompletion` provide the
-same bounded waiting and notification behavior for an existing job. They do
-not detach it: explicit ownership transfer is required before the invocation
-returns with unfinished work. Use ordinary `Cmd.await` for a dependent
-continuation, or completion events for ongoing observers. Waiting alone does
-not collect test evidence.
+Direct execution defaults to 1024 MiB and waits until terminal completion,
+preserving the invocation and presenting output once. Explicit `yield_time_ms`
+(0..300000) requests bounded observation without automatic notification; if the
+job is still live, the tool detaches it to actor-owned lifetime before returning.
+`background: true` starts actor-owned work and returns immediately with completion
+delivery; focus, yield and output-budget presentation options do not apply there.
+In Haskell, `Cmd.observe`, `Cmd.observeCompletion` and `Cmd.observeWithCompletion`
+return bounded status normally and never detach. Explicit ownership transfer is
+required before returning unfinished owned work. Use ordinary `Cmd.await` for a
+dependent continuation, or completion events for ongoing observers. Waiting alone
+does not collect test evidence.
 `max_output_bytes` is a byte budget, not a token count. Direct execution responses
 use at most 32 KiB (default 32 KiB). Output that fits `max_output_bytes` is shown
 whole. Without `focus`, output over budget is shown as a head and a tail with a

@@ -39,9 +39,9 @@ followed by a passing one reads as a pass. Give expensive commands
 explicit, realistic memory limits. For large or failing output pass `focus`
 with what you are looking for: the result keeps the relevant sections and
 names the retained job; `read_output` pages the rest without rerunning, and
-ordinary Bash waits for completion or hands the same job to a completion notice.
-Omit `yield_time_ms` for ordinary batch work; an explicit short yield requests
-a snapshot and can create an avoidable polling loop. Use `write_stdin` for input
+ordinary Bash preserves its invocation until completion, then presents once.
+`background: true` returns with completion delivery; explicit `yield_time_ms`
+returns bounded status and detaches live work without a notice. Use `write_stdin` for input
 or a deliberate snapshot, not repeated empty waits. In Haskell, compose command
 completion with evidence collection and the next bounded action; a routine wait
 or reread need not consume a model round.
