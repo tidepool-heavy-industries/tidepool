@@ -180,7 +180,9 @@ where
         Readiness::Interrupted => Release::Interrupted,
         Readiness::Rejected(detail) => Release::Rejected(detail),
         Readiness::Ready(descriptors) => {
-            if !child_launch::matches_parent(
+            if frame.control.cancellation_requested() {
+                Release::Interrupted
+            } else if !child_launch::matches_parent(
                 kernel,
                 parent,
                 &frame.parent_descriptor,
