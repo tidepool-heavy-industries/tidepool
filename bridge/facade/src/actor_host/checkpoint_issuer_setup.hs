@@ -18,4 +18,4 @@ let campaign = "checkpoint" :: CampaignLabel
 let producerGroup = "producer" :: ForkGroupLabel
 let producerLabel = [label|producer|]
 producer <- unfoldDeferred (batch campaign producerGroup)
-  (child (researching @Text projectHead (assignment producerLabel ("capture" :: Text))))
+  (child (withLifetime ActorOwned (researching @Text projectHead (assignment producerLabel ("capture" :: Text)))))

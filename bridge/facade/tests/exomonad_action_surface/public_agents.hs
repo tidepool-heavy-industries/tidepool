@@ -197,8 +197,8 @@ heterogeneousUnfold
 heterogeneousUnfold group textLeaf intLeaf =
   unfoldDeferred group $
     (,)
-      <$> child (withEffort High (researching @Text projectHead (assignment textLeaf ())))
-      <*> child (withEffort Low (coding @Int projectHead (assignment intLeaf ())))
+      <$> child (withLifetime ActorOwned (withEffort High (researching @Text projectHead (assignment textLeaf ()))))
+      <*> child (withLifetime ActorOwned (withEffort Low (coding @Int projectHead (assignment intLeaf ()))))
 
 progressiveUnfold
   :: ForkGroupPath
@@ -206,7 +206,7 @@ progressiveUnfold
   -> Eff ActorEffects (Response Text, Progress Int)
 progressiveUnfold group leaf =
   unfoldDeferred group $
-    childWithProgress @Int (researching @Text projectHead (assignment leaf ()))
+    childWithProgress @Int (withLifetime ActorOwned (researching @Text projectHead (assignment leaf ())))
 
 homogeneousUnfold
   :: ForkGroupPath
@@ -215,7 +215,7 @@ homogeneousUnfold
 homogeneousUnfold group leaves =
   unfoldDeferred group $
     traverse
-      (\leaf -> child (researching @Text projectHead (assignment leaf ())))
+      (\leaf -> child (withLifetime ActorOwned (researching @Text projectHead (assignment leaf ()))))
       leaves
 
 recoverableUnfold
@@ -224,7 +224,7 @@ recoverableUnfold
   -> Eff ActorEffects (Either UnfoldError (Response Text))
 recoverableUnfold group leaf =
   attemptUnfoldDeferred group $
-    child (researching @Text projectHead (assignment leaf ()))
+    child (withLifetime ActorOwned (researching @Text projectHead (assignment leaf ())))
 
 checkpointUnfold
   :: ContextCheckpoint
@@ -233,8 +233,8 @@ checkpointUnfold
   -> Eff ActorEffects (Response Text)
 checkpointUnfold checkpoint group leaf =
   unfold group $
-    child (withContext (fromCheckpoint checkpoint)
-      (researching @Text projectHead (assignment leaf ())))
+    child (withLifetime ActorOwned (withContext (fromCheckpoint checkpoint)
+      (researching @Text projectHead (assignment leaf ()))))
 
 selectedUnfold
   :: ForkGroupPath
@@ -242,8 +242,8 @@ selectedUnfold
   -> Eff ActorEffects (Either UnfoldError (Response Text))
 selectedUnfold group leaf =
   attemptUnfold group $
-    child (withContext (selected id)
-      (researching @Text projectHead (assignment leaf ("inspect only" :: Text))))
+    child (withLifetime ActorOwned (withContext (selected id)
+      (researching @Text projectHead (assignment leaf ("inspect only" :: Text)))))
 
 configuredBranch
   :: Duration
@@ -276,10 +276,11 @@ narrowResearch
 narrowResearch group leaf =
   unfoldDeferred group $
     child $
-      narrowed
-        (knownEffects @TinyResearchEffects)
-        (inspectionPolicy projectHead)
-        (assignment leaf ())
+      withLifetime ActorOwned $
+        narrowed
+          (knownEffects @TinyResearchEffects)
+          (inspectionPolicy projectHead)
+          (assignment leaf ())
 
 usageTotals :: ActorContextInfo -> Maybe (ProviderUsageScope, ProviderUsageCompleteness, Int, Int, Int)
 usageTotals context = fmap project (contextUsageSummary context)

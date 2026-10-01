@@ -831,8 +831,8 @@ async fn invalid_label_literals_fail_before_actor_side_effects() {
         root.as_ref(),
         concat!(
             "badWorkers <- unfoldDeferred (batch \"literal-errors\" \"branches\") $ ",
-            "(,) <$> child (researching @Text projectHead (assignment [label|valid|] ())) ",
-            "<*> child (researching @Text projectHead (assignment [label|Bad Label|] ()))",
+            "(,) <$> child (withLifetime ActorOwned (researching @Text projectHead (assignment [label|valid|] ()))) ",
+            "<*> child (withLifetime ActorOwned (researching @Text projectHead (assignment [label|Bad Label|] ())))",
         ),
     )
     .await;
@@ -852,7 +852,7 @@ async fn invalid_label_literals_fail_before_actor_side_effects() {
         root.as_ref(),
         concat!(
             "worker <- unfoldDeferred (batch \"literal-errors\" \"request\") ",
-            "(child (researching @Text projectHead (assignment [label|target|] ())))",
+            "(child (withLifetime ActorOwned (researching @Text projectHead (assignment [label|target|] ()))))",
         ),
     )
     .await;

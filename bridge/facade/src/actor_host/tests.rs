@@ -6330,7 +6330,7 @@ async fn typed_reply_settles_response_and_wakes_registered_watch() {
     let nested_submitted = tokio::spawn(async move {
         dispatch_haskell_script(
             scaffold_policy.as_ref(),
-            "nested <- unfoldDeferred (subgroup \"leaves\") ((,) <$> child (coding @ReplyReport currentCheckout (assignment [label|implementation|] (7 :: Int))) <*> child (coding @EchoReport currentCheckout (assignment [label|verification|] (\"nested\" :: Text))))",
+            "nested <- unfoldDeferred (subgroup \"leaves\") ((,) <$> child (withLifetime ActorOwned (coding @ReplyReport currentCheckout (assignment [label|implementation|] (7 :: Int)))) <*> child (withLifetime ActorOwned (coding @EchoReport currentCheckout (assignment [label|verification|] (\"nested\" :: Text)))))",
         )
         .await
     });

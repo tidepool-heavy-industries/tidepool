@@ -18,5 +18,5 @@ result
   -> Label
   -> Eff CodingEffects (Response Text, Response Text)
 result group workerA workerB = unfoldDeferred group $
-  (,) <$> child (coding @Text currentCheckout (assignment workerA ()))
-      <*> child (scaffolding @Text currentCheckout (assignment workerB ()))
+  (,) <$> child (withLifetime ActorOwned (coding @Text currentCheckout (assignment workerA ())))
+      <*> child (withLifetime ActorOwned (scaffolding @Text currentCheckout (assignment workerB ())))

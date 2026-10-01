@@ -578,7 +578,7 @@ import qualified Project.Plan as Plan
 import qualified Project.Work as Work
 let Right coordinatorLabel = branchLabel "coordinator"
 let coordinatorBranch = withInstructions (Work.projectPrompt "coordinator") $ withEffort Medium $ withContext (selected Work.taskContext) $ Plan.componentLeadFrom coordinatorLabel projectHead task
-(coordinator, coordinatorProgress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @Delivery coordinatorBranch)
+(coordinator, coordinatorProgress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @Delivery (withLifetime ActorOwned coordinatorBranch))
 owner <- actorContext
 review <- followWork [("coordinator", forkedResponse coordinator, coordinatorProgress)] (notifyWork owner (workMessage deliverySummary))
 ```

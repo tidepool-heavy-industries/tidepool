@@ -1602,7 +1602,7 @@ fn watchdog_child_script(label: &str) -> String {
         "let campaign = \"watchdog\" :: CampaignLabel\n\
          let group = \"children\" :: ForkGroupLabel\n\
          let leaf = [label|{label}|]\n\
-         worker <- unfoldDeferred (batch campaign group) (child (coding @Text projectHead (assignment leaf ())))\n"
+         worker <- unfoldDeferred (batch campaign group) (child (withLifetime ActorOwned (coding @Text projectHead (assignment leaf ()))))\n"
     )
 }
 

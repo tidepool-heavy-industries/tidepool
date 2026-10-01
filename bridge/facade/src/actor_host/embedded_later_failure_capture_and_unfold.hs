@@ -3,10 +3,10 @@ do
   _ <- unfold (batch ("embedded-later-failure" :: CampaignLabel)
     ("checkpoint-readers" :: ForkGroupLabel))
     ((,) <$>
-      child (withContext (fromCheckpoint seed)
+      child (withLifetime ActorOwned (withContext (fromCheckpoint seed)
         (researching @Text projectHead
-          (assignment [label|checkpoint-alpha|] ("read the captured Haskell context" :: Text))))
-      <*> child (withContext (fromCheckpoint seed)
+          (assignment [label|checkpoint-alpha|] ("read the captured Haskell context" :: Text)))))
+      <*> child (withLifetime ActorOwned (withContext (fromCheckpoint seed)
         (researching @Text projectHead
-          (assignment [label|checkpoint-beta|] ("read the captured Haskell context" :: Text)))))
+          (assignment [label|checkpoint-beta|] ("read the captured Haskell context" :: Text))))))
   pure True

@@ -10,7 +10,7 @@ third3 (_, _, value) = value
 -- TIDEPOOL-ITEM --
 sharedDelta <- pure (1 :: Int)
 -- TIDEPOOL-ITEM --
-workers <- unfoldDeferred (batch "reply-watch" "roundtrip") ((,,) <$> child (researching @ReplyReport projectHead ((assignment [label|worker|] (41 :: Int)) { deadline = Just (minutes 5) })) <*> child (researching @EchoReport projectHead (assignment [label|witness|] ("cache" :: Text))) <*> child (coding @ScaffoldReport projectHead (assignment [label|scaffold|] ("recursive" :: Text))))
+workers <- unfoldDeferred (batch "reply-watch" "roundtrip") ((,,) <$> child (withLifetime ActorOwned (researching @ReplyReport projectHead ((assignment [label|worker|] (41 :: Int)) { deadline = Just (minutes 5) }))) <*> child (withLifetime ActorOwned (researching @EchoReport projectHead (assignment [label|witness|] ("cache" :: Text)))) <*> child (withLifetime ActorOwned (coding @ScaffoldReport projectHead (assignment [label|scaffold|] ("recursive" :: Text)))))
 -- TIDEPOOL-ITEM --
 initially <- (,) <$> pollResponse (first3 workers) <*> pollResponse (second3 workers)
 -- TIDEPOOL-ITEM --

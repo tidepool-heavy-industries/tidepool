@@ -182,7 +182,7 @@ async fn preview_and_explicit_research_budget_match_without_spawning_during_prev
     let launch = tokio::spawn(async move {
         dispatch_haskell_script(
             root.as_ref(),
-            "worker <- unfoldDeferred (batch campaign group) (child proposal)",
+            "worker <- unfoldDeferred (batch campaign group) (child (withLifetime ActorOwned proposal))",
         )
         .await
     });
