@@ -258,9 +258,16 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
           (Left "generated scaffold lacks a paired original native owner")
         let hiddenHomeWitnesses = filter (isHomeUnit (hsc_home_unit env) . moduleUnit)
               (dep_orphs (mi_deps iface) ++ dep_finsts (mi_deps iface))
-        unless (null (exactRequirements artifact) && null (mi_insts iface) && null (mi_fam_insts iface)
-            && null hiddenHomeWitnesses)
-          (Left "generated scaffold support introduces home instance or family dependencies")
+        -- Same-owner requirements preserve custody of native references between
+        -- groups. They introduce no additional interface or lexical owner.
+        unless (all (== key) (exactRequirements artifact))
+          (Left "generated scaffold support requires another home implementation owner")
+        unless (null (mi_insts iface))
+          (Left "generated scaffold support defines class instances")
+        unless (null (mi_fam_insts iface))
+          (Left "generated scaffold support defines family instances")
+        unless (null hiddenHomeWitnesses)
+          (Left "generated scaffold support imports home orphan or family witnesses")
         let exports = concatMap availNames (mi_exports iface)
         unless (all (\occurrence -> any (\name -> nameModule_maybe name == Just support
             && occNameString (nameOccName name) == occurrence) exports) ["settle","resumeLifted"])

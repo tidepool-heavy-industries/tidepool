@@ -576,6 +576,49 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             eprintln!(
                 "[captured-engine] actual parent execution failed after both typed child replies"
             );
+            // Capturing a completed prefix retains it for children without
+            // publishing the failed cell's private names into its parent.
+            let policy = campaign.root_installation.policy.clone();
+            let public_names = tokio::time::timeout(
+                COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                policy.dispatch_boxed(preflight_invocation(
+                    "captured-parent-public-probe",
+                    "captured-parent-public-probe",
+                    "(x, getX)".into(),
+                )),
+            )
+            .await
+            .expect("earlier parent public names remain readable within the cell budget")
+            .expect("earlier parent public names remain installed");
+            assert_committed_haskell_value(&public_names, "(41, 42)");
+            for name in ["capturedValue", "capturedGetter"] {
+                let private_name = tokio::time::timeout(
+                    COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                    policy.dispatch_boxed(preflight_invocation(
+                        &format!("captured-parent-private-probe-{name}"),
+                        &format!("captured-parent-private-probe-{name}"),
+                        format!("{name} :: Int"),
+                    )),
+                )
+                .await
+                .expect("failed-cell private name probe settles within the cell budget")
+                .expect("a missing private name returns a compile rejection");
+                assert_preflight_rejection(&private_name);
+                assert!(
+                    private_name["items"].as_array().unwrap().iter().any(|item| {
+                        item["diagnostics"].as_array().is_some_and(|diagnostics| {
+                            diagnostics.iter().any(|diagnostic| {
+                                diagnostic["severity"] == "error"
+                                    && diagnostic["message"].as_str().is_some_and(|message| {
+                                        message.contains(name)
+                                            && message.to_ascii_lowercase().contains("not in scope")
+                                    })
+                            })
+                        })
+                    }),
+                    "failed cell leaked {name}, or its probe failed for an unrelated reason: {private_name}"
+                );
+            }
             transport.parent_failed.send_replace(true);
             let mut retained = std::collections::HashSet::new();
             for _ in 0..2 {

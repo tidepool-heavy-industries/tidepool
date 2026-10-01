@@ -19,11 +19,16 @@ import Data.Set qualified as Set
 import Data.Text qualified as T
 import GHC (runGhc, setSession, ms_mod_name, ms_hsc_src, parseModule, typecheckModule, Target(..))
 import GHC.Core qualified as Core
+import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy)
+import GHC.Types.Id (idName, setIdName)
 import GHC.Types.Literal (Literal(..), LitNumType(..))
-import GHC.Types.Name (getOccString)
+import GHC.Types.Name (getOccString, nameOccName, nameSrcSpan, mkExternalName, mkInternalName)
+import GHC.Types.Avail (availNames)
+import GHC.Types.TypeEnv (typeEnvIds)
+import GHC.Types.Unique.Supply (mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
-import GHC.Driver.Env (HscEnv(..), hsc_HPT)
-import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), lookupHpt)
+import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscUpdateHPT)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), lookupHpt, addToHpt)
 import GHC.Unit.Finder (initFinderCache, addModuleToFinder)
 import GHC.Unit.Module.Location (ml_hi_file)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
@@ -36,7 +41,8 @@ import Control.Monad.IO.Class (liftIO)
 import GHC.Driver.Session (targetProfile)
 import GHC.Driver.Hooks (hscCompileCoreExprHook)
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
-import GHC.Unit.Module.ModIface (set_mi_module, mi_module)
+import GHC.Unit.Module.ModIface (set_mi_module, mi_module, mi_exports)
+import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module (Module, mkModule, mkModuleName, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString, stringToUnit, GenWithIsBoot(..))
 import Numeric (showHex)
@@ -60,7 +66,9 @@ import Tidepool.ExecutionProjection (resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedJson (resolveJsonAuthority)
-import Tidepool.PreparedSites (SiteRejection(..))
+import Tidepool.PreparedSites (SiteRejection(..), resolvePreparedInterfaceSiblings, lookupPreparedVerb)
+import Tidepool.SiteClassifier (SiteFailure(..), classifySiteOccurrence)
+import Tidepool.EffectSchema (YieldSite(..), SiteType(..))
 import GHC.Driver.Env (hsc_home_unit)
 import GHC.Unit.Home (isHomeUnit)
 import GHC.Core.DataCon (dataConWorkId, dataConTyCon)
@@ -107,6 +115,8 @@ main = getArgs >>= \case
   ["--candidate-manifest-products", path] -> candidateManifestProducts path
   ["--candidate-ghc-load"] -> candidateGhcLoad
   ["--generated-scaffold-imports"] -> generatedScaffoldImports
+  ["--generated-scaffold-retained",scope,seal] -> generatedScaffoldRetained scope seal
+  ["--hydrated-site-siblings"] -> hydratedSiteSiblings
   ["--candidate-execution-sources"] -> candidateExecutionSourcesTest
   ["--candidate-execution-wire", path] -> candidateExecutionWire path
   ["--checked-value-type-closure", effects] -> checkedValueTypeClosure effects
@@ -455,6 +465,86 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult cold))) $
       fail "generated cold source scaffold failed ordinary support admission"
   putStrLn "generated scaffold: exact hidden support, settled result, ordinary/cold scope, bind/display CellProgram; duplicate/helper/source-drift/native/export/hidden-orphan/family/metadata refusals passed"
+
+-- The producer fixture retains real published native/interface/Home-seal
+-- bytes. Only the transport envelope is composed here; this test does not
+-- substitute for Rust's original certificate issuer or the lost G3 scope.
+generatedScaffoldRetained :: FilePath -> FilePath -> IO ()
+generatedScaffoldRetained manifestPath sealPath = withTiming $ withScratch $ \work -> do
+  scope <- readExactScope manifestPath >>= either fail pure
+  (artifact,original) <- case (scopeInterfaces scope,scopeProducts scope) of
+    ([(artifact,_,_)],[original]) -> pure (artifact,original)
+    _ -> fail "retained scaffold fixture lacks one original pair"
+  let owner = (originalUnit original,originalModule original)
+      fullOwner = TList (map (TString . T.pack) [originalUnit original,originalModule original,
+        originalVersion original,originalIfaceSha256 original,originalProductSha256 original])
+      term path = BS.readFile path >>= either (fail . show) (pure . snd)
+        . deserialiseFromBytes decodeTerm . BSL.fromStrict
+      scopeSession = emptySessionScope {ssRoot=work,ssExactScope=Just manifestPath}
+  seal <- term sealPath
+  case seal of
+    TList (TString "TPHOMEOWNERS":_:sealedOwner:_:TList [required]:_)
+      | sealedOwner == fullOwner && required == fullOwner -> pure ()
+    _ -> fail "production Home seal does not retain the exact native self owner"
+  unless (owner == ("main","Tidepool.Internal.Resume") && exactRequirements artifact == [owner]) $
+    fail "retained scaffold fixture lost its native self requirement"
+  native <- term (originalProductPath original)
+  interfaceBytes <- BS.readFile (exactPath artifact)
+  case native of
+    TList [TString "TPMOD",TInt 1,TList [TList [unit,name,TBytes paired,TList groups]]]
+      | [unit,name] == map (TString . T.pack) [fst owner,snd owner]
+      , paired == interfaceBytes, length groups == length (originalGroups original) -> pure ()
+    _ -> fail "production scaffold native bytes are not paired with the exact GHC interface"
+  let target = work </> "Expr.hs"
+  copyFile "test-source-boot/fixtures/GeneratedScaffoldExpr.hs" target
+  source <- readFile target
+  recipe <- generatedScaffoldRecipe source source target "Expr" >>= either fail pure
+  let purpose = GeneratedScaffoldCompile recipe (CheckedItemCompile [] Nothing [])
+      reject label expected action = do
+        refused <- try (void action) :: IO (Either SomeException ())
+        case refused of
+          Left reason | expected `isInfixOf` show reason ->
+            putStrLn ("retained scaffold refused " ++ label ++ ": " ++ take 512 (show reason))
+          Left reason -> fail ("retained scaffold unexpected refusal for " ++ label ++ ": " ++ show reason)
+          Right _ -> fail ("retained scaffold accepted " ++ label)
+  withResidentPipelineSelected [work] $ \compile -> do
+    reject "general compile" "source graph imports unadmitted home implementation" $
+      compile (PreparedProducts Nothing) Set.empty GeneralCompile
+      (Just scopeSession) target [] Nothing
+    result <- compile (PreparedProducts Nothing) Set.empty purpose (Just scopeSession) target [] Nothing
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult result))) $
+      fail "real retained Resume self-custody lost settled result"
+    originalTerm <- term manifestPath
+    copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" (work </> "MetadataQuoteSupport.hs")
+    helper <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+      Nothing (work </> "MetadataQuoteSupport.hs") [] Nothing
+    let helperScope = work </> "helper.cbor"
+    writeExecutionScope helperScope work helper []
+    helperTerm <- term helperScope
+    let encode = toStrictByteString . encodeTerm
+        replacement requirement includeHelper = case (originalTerm,helperTerm) of
+          (TList fields,TList helperFields) -> TList [case index of
+            4 -> case field of
+              TList [TList ownerFields] -> TList ([TList [if column == 4 then TList requirement else value
+                | (column,value) <- zip [0::Int ..] ownerFields]] ++ if includeHelper then
+                  case helperFields !! 4 of TList rows -> rows; _ -> [] else [])
+              _ -> field
+            6 | includeHelper -> case (field,helperFields !! 6) of
+              (TList rows,TList extra) -> TList (rows ++ extra)
+              _ -> field
+            _ -> field | (index,field) <- zip [0::Int ..] fields]
+          _ -> error "retained fixture scope framing changed"
+        key unit name = TList (map (TString . T.pack) [unit,name])
+    forM_ [("foreign home requirement",[key "main" "Tidepool.Internal.Resume",key "main" "MetadataQuoteSupport"],True)
+      ,("wrong unit self requirement",[key "foreign" "Tidepool.Internal.Resume"],False)] $ \(label,requirements,includeHelper) -> do
+        let changedPath = work </> (if includeHelper then "foreign.cbor" else "wrong-unit.cbor")
+        BS.writeFile changedPath (encode (replacement requirements includeHelper))
+        reject label (if includeHelper then "generated scaffold support requires another home implementation owner"
+          else "incomplete or conflicting exact owner closure") $ compile (PreparedProducts Nothing) Set.empty purpose
+          (Just scopeSession {ssExactScope=Just changedPath}) target [] Nothing
+  after <- term sealPath
+  unless (after == seal) (fail "scaffold consumer changed the original Home seal")
+  putStrLn "retained scaffold: real production full owner/native/interface/seal self-custody admitted, foreign and wrong-unit requirements refused; original proof unchanged"
 
 exactRetainedQuoter :: IO ()
 exactRetainedQuoter = withTiming $ withScratch $ \work -> do
@@ -1525,6 +1615,142 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
     unless (any (isInfixOf "\"cache_safe\":false") evidence) $
       fail "untracked dependency was certified as cache safe"
   putStrLn "exact loaded metadata: parity, source drift, quoter bytecode, hidden family and untracked input passed"
+
+-- Native candidates and exact owners bypass fresh preparation. Their defining
+-- interfaces must still supply typed site siblings without widening imports.
+hydratedSiteSiblings :: IO ()
+hydratedSiteSiblings = withScratch $ \work -> do
+  let unfoldName = "Tidepool.Actors.Unfold"
+      replyName = "Tidepool.Agent.Reply.Internal"
+      names = [replyName,unfoldName]
+      target = work </> "HydratedSiteExpr.hs"
+      unfoldPath = work </> "Tidepool/Actors/Unfold.hs"
+      replyPath = work </> "Tidepool/Agent/Reply/Internal.hs"
+      scopePath = work </> "exact-scope.cbor"
+      scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
+      compile selection session = runPipelineSessionSelected selection Set.empty GeneralCompile
+        session target [work] Nothing
+      targetModule prepared = case [value | value <- pprModules prepared
+          , moduleNameString (moduleName (pmModule value)) == "HydratedSiteExpr"] of
+        [value] -> pure value
+        _ -> fail "hydrated sibling fixture lost its target"
+      evidence prepared = do
+        target' <- targetModule prepared
+        unless (null (pmSiteRejections target')) $
+          fail ("hydrated child site was rejected: " ++ show (map srMessage (pmSiteRejections target')))
+        let root = SymbolIdentity "main" "HydratedSiteExpr" "value" "__result" Nothing
+            sibling = SymbolIdentity "main" "Tidepool.Actors.Unfold" "value" "childSited" Nothing
+            context = ProjectionContext "test" "matched"
+              (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+              root [] Nothing Nothing Nothing Nothing
+            tops (NonRecursive binding) = [binding]
+            tops (Recursive bindings) = bindings
+        program <- either (fail . show) pure (projectPrepared context [target'])
+        unless ([length arguments | TopBinding identity (HeapBinding _ (Function _ arguments _ _))
+              <- concatMap tops (programBindings program), identity == root] == [1]
+            && any ((== sibling) . globalIdentity) (programGlobals program)) $
+          fail "hydrated sibling changed the capture root arity or original defining global"
+        case pmYieldSites target' of
+          [site] | ysOrigin site == "HydratedSiteExpr.__result"
+            , stType (ysAnswer site) == "Bool"
+            , map stType (ysInputs site) == ["Char"] -> pure site
+          actual -> fail ("hydrated sibling changed the lexical site/root/input arity: " ++ show actual)
+  createDirectoryIfMissing True (work </> "Tidepool/Actors")
+  createDirectoryIfMissing True (work </> "Tidepool/Agent/Reply")
+  copyFile "test-source-boot/fixtures/HydratedSiteUnfold.hs" unfoldPath
+  copyFile "test-source-boot/fixtures/HydratedSiteReply.hs" replyPath
+  copyFile "test-source-boot/fixtures/HydratedSiteExpr.hs" target
+  cold <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing target [work] Nothing
+  originalSite <- evidence cold
+  writeManifestFor names work cold
+  warm <- compile (PreparedProducts (Just (manifest work))) Nothing
+  unless (sortOn id (map candidateModule (pprAcceptedCandidates warm)) == sortOn id names
+      && all (`notElem` preparedNames warm) names) $
+    fail "hydrated sibling regression did not take native-candidate reuse"
+  warmSite <- evidence warm
+  unless (warmSite == originalSite) (fail "native-candidate hydration changed exact child-site identity")
+  let env = prHscEnv (pprPipelineResult cold)
+  owners <- forM names $ \name -> do
+    let hi = work </> (name ++ ".candidate.hi")
+        packages = hi ++ ".packages"
+    bytes <- BS.readFile hi
+    packageBytes <- BS.readFile packages
+    requirements <- either fail pure (selectedHomeRequirements (pprDependencies cold) "main" name)
+    pure (ExactIfaceArtifact "main" name hi (digest bytes) requirements,packages,digest packageBytes)
+  writeExactMetadataScopeWithLexical scopePath owners [(artifact,exactRequirements artifact) | (artifact,_,_) <- owners]
+  exact <- compile (PreparedProducts Nothing) (Just scope)
+  unless (all (`notElem` preparedNames exact) names) $
+    fail "hydrated sibling regression recompiled an exact defining owner"
+  exactSite <- evidence exact
+  unless (exactSite == originalSite) (fail "exact hydration changed child-site identity")
+  targetSource <- BSC.unpack <$> BS.readFile target
+  writeFile target (T.unpack (T.replace "module HydratedSiteExpr where"
+    "module HydratedSiteExpr (result) where" (T.pack targetSource)))
+  let compilePrivate session = runPipelineSessionSelected (PreparedProducts (Just (manifest work)))
+        Set.empty OriginalDeclarationCompile session target [work] Nothing
+  privateCandidate <- compilePrivate Nothing
+  privateExact <- compilePrivate (Just scope)
+  forM_ [privateCandidate,privateExact] $ \prepared -> do
+    unless (all (`notElem` preparedNames prepared) names) $
+      fail "private capture regression recompiled a hydrated defining owner"
+    privateInterface <- maybe (fail "private capture fixture lacks its target interface") pure
+      (Map.lookup (mkModuleName "HydratedSiteExpr") (pprProductInterfaces prepared))
+    unless (all ((/= "__result") . getOccString) (concatMap availNames (mi_exports privateInterface))) $
+      fail "private capture root became a lexical module export"
+    privateSite <- evidence prepared
+    unless (privateSite == originalSite) (fail "private capture root changed its child-site identity")
+  writeFile target targetSource
+  home <- maybe (fail "hydrated sibling fixture lacks its original owner") pure
+    (lookupHpt (hsc_HPT env) (mkModuleName unfoldName))
+  let wrong = home {hm_iface=set_mi_module (mkModule (stringToUnit "other") (mkModuleName unfoldName)) (hm_iface home)}
+      invalid = hscUpdateHPT (\table -> addToHpt table (mkModuleName unfoldName) wrong) env
+  -- A same-spelling interface with another defining unit cannot authorize IDs
+  -- whose Names still belong to the original owner.
+  unless (Map.notMember "child" (resolvePreparedInterfaceSiblings invalid)) $
+    fail "wrong defining interface owner authorized a sibling"
+  surface <- case [binder | binder <- typeEnvIds (md_types (hm_details home)), getOccString binder == "child"] of
+    [binder] -> pure binder
+    _ -> fail "cold HPT lacks its genuine child surface Id"
+  spec <- maybe (fail "cold HPT child did not match its declared surface module") pure (lookupPreparedVerb surface)
+  let siblings = resolvePreparedInterfaceSiblings env
+      arguments = map Core.Type [boolTy,intTy,charTy,stringTy]
+  case classifySiteOccurrence siblings spec surface arguments of
+    Right _ -> pure ()
+    Left _ -> fail "genuine cold HPT child/sibling pair was refused"
+  sibling <- maybe (fail "cold HPT lacks its genuine child sibling Id") pure (Map.lookup "child" siblings)
+  uniqueSupply <- mkSplitUniqSupply 's'
+  let (foreignUnique,remaining) = takeUniqFromSupply uniqueSupply
+      (surfaceUnique,remaining') = takeUniqFromSupply remaining
+      (siblingUnique,_) = takeUniqFromSupply remaining'
+      originalName = idName surface
+      foreignSurface = setIdName surface (mkExternalName foreignUnique
+        (mkModule (stringToUnit "other") (mkModuleName unfoldName))
+        (nameOccName originalName) (nameSrcSpan originalName))
+      unnamedSurface = setIdName surface (mkInternalName surfaceUnique
+        (nameOccName originalName) (nameSrcSpan originalName))
+      unnamedSibling = setIdName sibling (mkInternalName siblingUnique
+        (nameOccName (idName sibling)) (nameSrcSpan (idName sibling)))
+  -- Alter only the surface's defining unit; its occurrence, module and type
+  -- remain identical to GHC's genuine child Id, and the home sibling is valid.
+  case classifySiteOccurrence siblings spec foreignSurface arguments of
+    Left MismatchedSiblingUnit -> pure ()
+    _ -> fail "a foreign-unit child surface acquired the valid home sibling"
+  forM_ [(siblings,unnamedSurface),(Map.insert "child" unnamedSibling siblings,surface)] $ \(available,verb) ->
+    case classifySiteOccurrence available spec verb arguments of
+      Left MissingSiteOwner -> pure ()
+      _ -> fail "a site pair without a defining module acquired sibling authority"
+  source <- BSC.unpack <$> BS.readFile unfoldPath
+  let withoutSibling = unlines (takeWhile (/= "{-# OPAQUE childSited #-}") (lines source))
+  writeFile unfoldPath withoutSibling
+  missing <- compile (PreparedProducts Nothing) Nothing >>= targetModule
+  unless (any (isInfixOf "missing generated site-aware sibling" . srMessage) (pmSiteRejections missing)) $
+    fail "missing typed sibling did not remain a source rejection"
+  writeFile unfoldPath (T.unpack (T.replace ". Int -> input -> Maybe result" ". Bool -> input -> Maybe result" (T.pack source)))
+  incompatible <- compile (PreparedProducts Nothing) Nothing >>= targetModule
+  unless (any (isInfixOf "incompatible type" . srMessage) (pmSiteRejections incompatible)) $
+    fail "incompatible typed sibling did not remain a source rejection"
+  putStrLn "hydrated site siblings: 10 checks passed (native/exact, private native/exact, wrong interface owner, foreign surface unit, two missing owners, missing sibling, incompatible sibling)"
 
 writeExactMetadataScope :: FilePath -> [(ExactIfaceArtifact, FilePath, String)] -> IO ()
 writeExactMetadataScope path owners = writeExactMetadataScopeWithLexical path owners []
