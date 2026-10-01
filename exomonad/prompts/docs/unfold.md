@@ -25,7 +25,7 @@ preserves its continuation while awaiting both children. `waitFor` returns
 inside its `Settlement`. Named `watch` subscriptions are useful when later
 model decisions or independently inspectable observations participate.
 
-Work is `InvocationOwned` by default. Scope exit cancels unfinished owned work
+Provider workers are `InvocationOwned` by default. Scope exit cancels unfinished owned work
 and retains cleanup. Returning handles or installing a watch does not extend
 its lifetime. Use `withLifetime ActorOwned` on branches that span model turns;
 `SwarmOwned` is an explicit top-level, selected-context choice. Borrowed handles

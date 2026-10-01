@@ -1,7 +1,10 @@
 A record actor keeps coordination in Haskell so routine events do not wake a
 model. One record describes private state, public calls, and fixed event
 handlers; the same record supplies both the definition and the typed client.
-`R` is `Tidepool.Actor.Record`.
+`R` is `Tidepool.Actor.Record`. `R.start` creates an explicit persistent service
+with actor lifetime. It survives the creating invocation; ordinary command,
+provider-worker and request defaults remain scoped to a hosted invocation.
+Handlers without such an invocation use actor ownership for their work.
 
 Find out whether this workspace already authors one that fits. `doc topics` ends
 by naming its compiled modules and `lookup` on one of those names browses their

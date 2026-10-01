@@ -7,7 +7,10 @@ One record describes private state, public calls and fixed source handlers. The
 same record supplies its definition and typed client. `R` is already imported as
 `Tidepool.Actor.Record`; nonconflicting actor names are in the default scope.
 Keep project policy in Haskell. The existing runtime owns ordering, authority,
-request admission and lifetime.
+request admission and lifetime. `R.start` creates an explicit persistent record
+service with actor lifetime, surviving its creating invocation. A handler without
+a hosted invocation uses actor ownership for its commands and requests; it still
+processes one accepted call or event at a time.
 
 Availability of the names below:
 

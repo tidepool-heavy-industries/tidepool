@@ -94,7 +94,10 @@ Borrowed handles permit observation while available, never owner cancellation.
 An **`Await a`** describes typed readiness. `waitFor` suspends the current Haskell
 continuation and returns either `WatchFailure` or its result. A named **`Watch a`**
 is an inspectable subscription. An **`EventSource a`** delivers retained source
-state and subsequent events to serialized record-actor handlers.
+state and subsequent events to serialized record-actor handlers. `R.start`
+creates a persistent record service with actor lifetime, independently of its
+creating invocation. Handlers without a hosted invocation use actor ownership
+and remain serialized.
 
 ## Model-facing prompt rules
 

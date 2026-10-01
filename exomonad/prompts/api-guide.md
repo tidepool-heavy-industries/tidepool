@@ -35,7 +35,7 @@ ready
 ```
 
 `spawnWatched` composes immediate `unfold` and a named settlement watch. The
-explicit `ActorOwned` branch survives this cell. Default `InvocationOwned` work
+explicit `ActorOwned` branch survives this cell. Default `InvocationOwned` branches
 must settle within its creating invocation; returning handles does not extend it.
 A wave composes independent children with `<$>` and `<*>`. Capture an exact
 checkpoint to reuse your current reasoning:
@@ -72,7 +72,7 @@ settled <- watch "wave-1-settled" (awaitAnySettled [parser, consumer, review])
 the watch on an unavailable dependency. `pollResponse` distinguishes pending,
 cancellation pending, ready, and unavailable. Progress uses `childWithProgress`
 and `pollProgress`; snapshots are not replies. Record actors (`R.*`) collect
-and route events without model inference.
+and route events without model inference. `R.start` creates persistent services.
 
 `currentCheckout` seeds the executing actor's checkout; `projectHead` selects
 the project source and `atRef` an explicit commit. Live-source admission checkpoints

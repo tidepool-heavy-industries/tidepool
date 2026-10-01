@@ -14,7 +14,7 @@ results; inspect outcome, stderr, output completeness and cleanup separately.
 `Cmd.observe options job` returns bounded status normally. It never transfers
 lifetime, cancels the command or reruns it.
 
-Work starts invocation-owned. Await unfinished work before returning, or explicitly
+Commands start invocation-owned. Await unfinished work before returning, or explicitly
 transfer it: `Cmd.detach job` for an existing owned command, `Cmd.background command`
 for an actor-owned start with completion notice. A returned or captured handle
 alone does not extend lifetime. Scope exit cancels unfinished owned work while
@@ -23,8 +23,10 @@ retaining cleanup; borrowed observers cannot cancel another owner's resource.
 `waitFor awaiting` suspends directly on `Await a` and returns
 `Either WatchFailure a`. Applicative readiness preserves original typed handles.
 Use a named `Watch` for inspectable subscriptions or model notification, and an
-`EventSource` for ongoing delivery. Record-actor handlers remain serialized while
-suspended. Never wait for an event that requires another handler on the same
+`EventSource` for ongoing delivery. `R.start` explicitly creates a persistent
+record service with actor lifetime; returning from its creator's invocation does
+not cancel that service. Handlers without a hosted invocation use actor ownership
+for their work and remain serialized while suspended. Never wait for an event that requires another handler on the same
 mailbox to run; start independent work and consume its event instead.
 
 ## Children and context
