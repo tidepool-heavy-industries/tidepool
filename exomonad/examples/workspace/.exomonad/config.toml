@@ -82,6 +82,7 @@ checks = [
   "Project.MergeChecks.greenReceipt",
   "Project.MergeChecks.commandFailure",
   "Project.MergeChecks.checkedHeadChanged",
+  "Project.MergeChecks.dirtyAfterSuccess",
   "Project.CheckResultsChecks.preparedCompletion",
   "Project.CheckResultsChecks.managedEvidence",
   "Project.CheckResultsChecks.runningCommandCleanup",

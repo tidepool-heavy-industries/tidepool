@@ -41,7 +41,7 @@ import qualified Tidepool.Command as Cmd
 import Tidepool.Actors.Exomonad
 import Tidepool.Effects.Core (BranchName (..), Commands, WorktreeHandle (..), WorktreeReceipt (..))
 import Tidepool.Worktree (SubmissionObservation (..), HeadState (..), renderGitOid, renderWorktreeError)
-import Project.Types (cleanReviewCheckout)
+import Exomonad.Contrib.Types (cleanReviewCheckout)
 
 -- One serialized actor owns the integration checkout and optional publication
 -- branch. The project supplies the command; successful execution alone does

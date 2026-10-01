@@ -171,7 +171,7 @@ dirtyAfterSuccess = do
   let branch = "recipe/dirty-success"
   void $ git owner ["branch", branch, before]
   observed <- turn owner $ Text.unlines
-    [ "import qualified Project.Merge as M"
+    [ "import qualified Exomonad.Contrib.Merge as M"
     , "import Tidepool.Worktree (SubmissionObservation (..), WorkingState (..), DirtySummary (..))"
     , "Right sourceTree <- createWorktree (fromRef \"HEAD\" \"dirty-success-source\")"
     , "Right integration <- createWorktree (fromRef \"HEAD\" \"dirty-success\")"
