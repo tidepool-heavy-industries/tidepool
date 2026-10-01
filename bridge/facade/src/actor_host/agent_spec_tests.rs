@@ -462,19 +462,24 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
             // source root. The shared tool record still uses Project.Shell
             // after the root spec drops its Watchdog import.
             let shared = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.exomonad/workspace");
-            for directory in ["Project", "Jev"] {
-                let destination = authored.join("workspace").join(directory);
-                std::fs::create_dir_all(&destination).unwrap();
-                for entry in std::fs::read_dir(shared.join(directory)).unwrap() {
+            fn copy_haskell_sources(source: &Path, destination: &Path) {
+                std::fs::create_dir_all(destination).unwrap();
+                for entry in std::fs::read_dir(source).unwrap() {
                     let entry = entry.unwrap();
-                    if entry
-                        .path()
-                        .extension()
-                        .is_some_and(|extension| extension == "hs")
-                    {
-                        std::fs::copy(entry.path(), destination.join(entry.file_name())).unwrap();
+                    let path = entry.path();
+                    let target = destination.join(entry.file_name());
+                    if entry.file_type().unwrap().is_dir() {
+                        copy_haskell_sources(&path, &target);
+                    } else if path.extension().is_some_and(|extension| extension == "hs") {
+                        std::fs::copy(path, target).unwrap();
                     }
                 }
+            }
+            for directory in ["Project", "Jev", "Exomonad/Contrib"] {
+                copy_haskell_sources(
+                    &shared.join(directory),
+                    &authored.join("workspace").join(directory),
+                );
             }
             std::fs::write(
                 authored.join("config.toml"),
