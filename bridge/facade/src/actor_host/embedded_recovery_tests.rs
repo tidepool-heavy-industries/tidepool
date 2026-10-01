@@ -481,10 +481,10 @@ async fn production_authored_root_failure_is_not_evaluated_before_durable_bindin
     .unwrap();
     let mut process = start_crashing(root, "authored-failure-before-bound", "bound");
     crashed(root, "authored-failure-before-bound", &mut process).await;
-    let records = ActorRecoveryJournal::open(root.join("run/actor-lifecycle.v2.jsonl"))
-        .unwrap()
-        .validated_records()
-        .unwrap();
+    let records = exomonad_actor::ActorRecoveryJournal::read_observed(
+        &root.join("run/actor-lifecycle.v2.jsonl"),
+    )
+    .unwrap();
     let head = latest_durable_root_application(&records).unwrap().unwrap();
     assert!(head.application.as_ref().unwrap().conversation.is_some());
     assert!(
