@@ -153,6 +153,13 @@ pub struct CommandBackendRequest {
     reply: Mutex<Option<oneshot::Sender<BackendResult>>>,
 }
 impl CommandBackendRequest {
+    pub(crate) fn pending(&self) -> bool {
+        self.reply
+            .lock()
+            .as_ref()
+            .is_some_and(|reply| !reply.is_closed())
+    }
+
     pub fn supply(&self, backend: BackendResult) {
         if let Some(reply) = self.reply.lock().take() {
             // best-effort: the caller awaiting the backend may have dropped

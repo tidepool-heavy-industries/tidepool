@@ -64,6 +64,9 @@ pub(super) fn dispatch_backend(
     deployments: &mpsc::Sender<LocalResidentDeployment>,
     request: Arc<CommandBackendRequest>,
 ) {
+    if !request.pending() {
+        return;
+    }
     if deployments
         .try_send(LocalResidentDeployment::CommandBackend(request.clone()))
         .is_err()

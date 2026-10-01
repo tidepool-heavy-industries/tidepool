@@ -11,6 +11,7 @@ struct TransientWatchLease {
     actor: crate::ActorRef,
     watch: WatchId,
     armed: bool,
+    deployments: Option<mpsc::Sender<LocalResidentDeployment>>,
 }
 
 impl TransientWatchLease {
@@ -20,17 +21,25 @@ impl TransientWatchLease {
             actor,
             watch,
             armed: requests.is_transient_watch(actor, watch),
+            deployments: None,
         }
     }
 }
 
 impl Drop for TransientWatchLease {
     fn drop(&mut self) {
-        if self.armed {
-            drop(
-                self.requests
-                    .release_transient_watch(self.actor, self.watch),
-            );
+        if self.armed
+            && self
+                .requests
+                .release_transient_watch(self.actor, self.watch)
+                .is_ok()
+        {
+            if let Some(deployments) = self.deployments.clone() {
+                let requests = Arc::clone(&self.requests);
+                tokio::spawn(async move {
+                    publish_request_notifications(&requests, &deployments, Vec::new()).await;
+                });
+            }
         }
     }
 }
@@ -59,7 +68,15 @@ async fn wait_watch_event(
         observation = &mut waiting => {
             tracing::debug!(?actor, ?watch, ?observation, "owned watch received settlement");
             match retirement.claim_before_shutdown(|| control.claim_expiry()) {
-                Ok(true) => WatchWaitEvent::Resume(observation),
+                Ok(true) => {
+                    let observation = observation.and_then(|observation| {
+                        if requests.is_transient_watch(actor, watch) {
+                            requests.claim_transient_watch_wake(actor, watch)?;
+                        }
+                        Ok(observation)
+                    });
+                    WatchWaitEvent::Resume(observation)
+                }
                 Ok(false) => WatchWaitEvent::Cancelled,
                 Err(terminal) => WatchWaitEvent::Retired(terminal),
             }
@@ -80,6 +97,7 @@ where
 {
     tracing::debug!(actor = ?context.actor, watch = ?poll.watch, "owned watch awaiting settlement");
     let mut transient = TransientWatchLease::new(&environment.requests, context.actor, poll.watch);
+    transient.deployments = Some(environment.deployments.clone());
     match wait_watch_event(
         &environment.requests,
         context.actor,

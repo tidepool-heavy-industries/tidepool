@@ -16,14 +16,34 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_watch(false, true)
+    }
+
+    fn with_watch(transient: bool, notify_owner: bool) -> Self {
         let registry = Arc::new(RequestRegistry::default());
         let owner = ActorRef::first(ActorId(41));
         let target = ActorRef::first(ActorId(42));
-        let request = registry.reserve(owner, target);
+        let request =
+            registry.reserve_labeled_with_reporting(owner, target, "request".into(), notify_owner);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
-        let (watch, notices) = registry.register_watch(owner, vec![request]).unwrap();
-        assert!(notices.is_empty());
+        let watch = if transient {
+            registry
+                .register_transient_watch(
+                    owner,
+                    vec![vec![(
+                        request,
+                        crate::request::WatchRequirement::Response {
+                            allow_failure: false,
+                        },
+                    )]],
+                )
+                .unwrap()
+        } else {
+            let (watch, notices) = registry.register_watch(owner, vec![request]).unwrap();
+            assert!(notices.is_empty());
+            watch
+        };
         let control = crate::WorkbenchExecutionControl::untracked();
         control.arm_sleep();
         Self {
@@ -340,4 +360,159 @@ fn transient_release_checks_exact_owner_and_never_removes_named_watch() {
         .registry
         .release_transient_watch(fixture.owner, transient)
         .unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_direct_wait_restores_one_owner_notice_even_when_settlement_wins_the_registry_race(
+) {
+    for complete_first in [false, true] {
+        let fixture = Fixture::with_watch(true, true);
+        let lease = TransientWatchLease::new(&fixture.registry, fixture.owner, fixture.watch);
+        if complete_first {
+            fixture.complete();
+        }
+        assert!(fixture.control.request_cancellation());
+        if !complete_first {
+            fixture.complete();
+        }
+        assert!(fixture.registry.take_settlement_notifications().is_empty());
+        assert!(matches!(fixture.wait().await, WatchWaitEvent::Cancelled));
+        drop(lease);
+        let notices = fixture.registry.take_settlement_notifications();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].request, fixture.request);
+        assert!(fixture.registry.take_settlement_notifications().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn captured_direct_wait_consumes_the_owner_wake_without_emitting_a_later_notice() {
+    let fixture = Fixture::with_watch(true, true);
+    fixture.complete();
+    assert!(matches!(
+        fixture.wait().await,
+        WatchWaitEvent::Resume(Ok(WatchObservation::Ready(_)))
+    ));
+    fixture
+        .registry
+        .release_transient_watch(fixture.owner, fixture.watch)
+        .unwrap();
+    assert!(fixture.registry.take_settlement_notifications().is_empty());
+}
+
+#[tokio::test]
+async fn overlapping_direct_waits_restore_the_notice_only_after_the_last_cancelled_subscription() {
+    let fixture = Fixture::with_watch(true, true);
+    let second = fixture
+        .registry
+        .register_transient_watch(
+            fixture.owner,
+            vec![vec![(
+                fixture.request,
+                crate::request::WatchRequirement::Response {
+                    allow_failure: false,
+                },
+            )]],
+        )
+        .unwrap();
+    fixture.complete();
+    fixture
+        .registry
+        .release_transient_watch(fixture.owner, fixture.watch)
+        .unwrap();
+    assert!(fixture.registry.take_settlement_notifications().is_empty());
+    fixture
+        .registry
+        .release_transient_watch(fixture.owner, second)
+        .unwrap();
+    assert_eq!(fixture.registry.take_settlement_notifications().len(), 1);
+}
+
+#[tokio::test]
+async fn named_watch_and_silent_reporting_keep_their_policy_after_direct_wait_cancellation() {
+    let fixture = Fixture::new();
+    let direct = fixture
+        .registry
+        .register_transient_watch(
+            fixture.owner,
+            vec![vec![(
+                fixture.request,
+                crate::request::WatchRequirement::Response {
+                    allow_failure: false,
+                },
+            )]],
+        )
+        .unwrap();
+    fixture.complete();
+    fixture
+        .registry
+        .release_transient_watch(fixture.owner, direct)
+        .unwrap();
+    assert!(fixture.registry.take_settlement_notifications().is_empty());
+    assert!(matches!(
+        fixture.registry.observe_watch(fixture.owner, fixture.watch),
+        Ok(WatchObservation::Ready(_))
+    ));
+
+    let silent = Fixture::with_watch(true, false);
+    silent.complete();
+    silent
+        .registry
+        .release_transient_watch(silent.owner, silent.watch)
+        .unwrap();
+    assert!(silent.registry.take_settlement_notifications().is_empty());
+}
+
+#[tokio::test]
+async fn dropped_direct_wait_publishes_restored_owner_notice_without_another_event() {
+    let fixture = Fixture::with_watch(true, true);
+    let (deployments, mut receive) = mpsc::channel(4);
+    let mut lease = TransientWatchLease::new(&fixture.registry, fixture.owner, fixture.watch);
+    lease.deployments = Some(deployments);
+    fixture.complete();
+    assert!(fixture.registry.take_settlement_notifications().is_empty());
+    drop(lease);
+    let event = tokio::time::timeout(Duration::from_secs(2), receive.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(event, LocalResidentDeployment::SettlementChanged { notification }
+        if notification.owner == fixture.owner && notification.request == fixture.request)
+    );
+    assert!(receive.try_recv().is_err());
+}
+
+#[test]
+fn direct_command_wait_cancellation_restores_notice_but_capture_consumes_it() {
+    for captured in [false, true] {
+        let registry = RequestRegistry::default();
+        let owner = ActorRef::first(ActorId(91));
+        let request = registry.reserve_command_settlement(owner, "job".into(), true);
+        let watch = registry
+            .register_transient_watch(
+                owner,
+                vec![vec![(
+                    request,
+                    crate::request::WatchRequirement::Response {
+                        allow_failure: false,
+                    },
+                )]],
+            )
+            .unwrap();
+        assert!(registry
+            .settle_command(request, "exit 0".into(), Some("revision".into()))
+            .is_empty());
+        assert!(registry.take_settlement_notifications().is_empty());
+        if captured {
+            registry.claim_transient_watch_wake(owner, watch).unwrap();
+        }
+        registry.release_transient_watch(owner, watch).unwrap();
+        let notices = registry.take_settlement_notifications();
+        assert_eq!(notices.len(), usize::from(!captured));
+        if let Some(notice) = notices.first() {
+            assert_eq!(notice.command_job.as_deref(), Some("job"));
+            assert_eq!(notice.target_revision.as_deref(), Some("revision"));
+        }
+    }
 }
