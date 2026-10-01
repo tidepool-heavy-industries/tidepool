@@ -2585,7 +2585,7 @@ fn assemble_with_products(
             })
             .collect();
         let mut protected_groups = BTreeMap::<_, BTreeMap<_, _>>::new();
-        for group in exact.into_iter().flat_map(|request| &request.groups) {
+        for group in exact.into_iter().flat_map(|request| request.groups.iter()) {
             protected_groups
                 .entry((group.owner().unit.as_str(), group.owner().module.as_str()))
                 .or_default()

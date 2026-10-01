@@ -45,7 +45,7 @@ pub(crate) struct ExactCompilationRequest {
     pub(crate) semantic_sha256: [u8; 32],
     pub(crate) producer_sha256: [u8; 32],
     pub(crate) artifacts: Vec<DeclarationArtifact>,
-    pub(crate) groups: Vec<PendingCertifiedGroup>,
+    pub(crate) groups: Arc<[PendingCertifiedGroup]>,
 }
 
 /// A successful compiler transaction's actual generated source, bound to its
@@ -144,18 +144,22 @@ impl ExactCompilationRequest {
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(failure)?;
-        let mut groups = self.groups.clone();
-        groups.extend(
-            certify_inherited_products_with_validation(
-                &verified
-                    .iter()
-                    .map(|artifact| InheritedProductInput { artifact })
-                    .collect::<Vec<_>>(),
-                &self.groups,
-                &mut validation,
-            )
-            .map_err(failure)?,
-        );
+        let additional = certify_inherited_products_with_validation(
+            &verified
+                .iter()
+                .map(|artifact| InheritedProductInput { artifact })
+                .collect::<Vec<_>>(),
+            &self.groups,
+            &mut validation,
+        )
+        .map_err(failure)?;
+        let groups = if additional.is_empty() {
+            Arc::clone(&self.groups)
+        } else {
+            let mut groups = self.groups.to_vec();
+            groups.extend(additional);
+            groups.into()
+        };
         Ok(Self {
             context,
             manifest: self.manifest.clone(),
@@ -163,7 +167,7 @@ impl ExactCompilationRequest {
             semantic_sha256: self.semantic_sha256,
             producer_sha256: self.producer_sha256,
             artifacts: materialized.artifacts,
-            groups,
+            groups: groups.into(),
         })
     }
 
@@ -1159,7 +1163,7 @@ impl ExactDeclarationContext {
             semantic_sha256,
             producer_sha256: sha2::Sha256::digest(producer).into(),
             artifacts: materialized.artifacts,
-            groups,
+            groups: groups.into(),
         })
     }
 }
