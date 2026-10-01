@@ -17,7 +17,9 @@ separately from measured latency improvements.
   present in sealed artifacts. Joined v5 persists interface selection
   and derives native requirements from verified artifacts, preserving exact
   lost-binding refusal. Focused validation includes authentic native markers and
-  tampering after hydration; the real compiler baseline remains pending. A
+  tampering after hydration. The latest real foundation manifest is 388,062 bytes,
+  with 157 interface rows; the following warm-up also published and displayed 42.
+  Both selected baseline tests still failed later admission checks. A
   structural projection of that v4 snapshot is 132,000 compact bytes, compared
   with 4,220,736 compact v4 bytes. This is not a valid emitted v5 manifest or a
   measured latency result; see the retained size diagnostic under
@@ -29,7 +31,9 @@ separately from measured latency improvements.
   bundle, eliminating the second
   certification and cache publication. Mutating a public runtime bundle must
   still fail its compiler-issued proof check. Independent source review and ten
-  focused checks passed; real startup execution with reuse remains pending.
+  focused checks passed. The real startup activation smoke also passed at
+  `97e1bef3b0`: one executed test, 18.562 seconds, with compiler teardown confirmed.
+  This does not establish cold declaration recovery or the full startup gate.
   `turn.cbor` still undergoes semantic decoding in both layers.
 - Recovery hydration: joined v5 shares a verified artifact inventory
   between manifest admission and hydration instead of discarding and decoding
@@ -236,3 +240,72 @@ must refuse the same identity and generation. Unexpected compiler or native
 errors fail the test. The battery continues to own the one compiler daemon.
 This fixture does not establish packaged host cold-start timing or instance
 fallback behavior.
+
+## Static work on cold compilation
+
+The debug attribution run at `11beceefdd` selected frontend SHA256 `cee8dae…`
+and worker `8e6bc527…`, exactly two tests, and failed both at Rust's temporary
+support-graph admission. Its successful foundation publication took 114.034 s:
+106.511 s complete-cell admission, 2.075 s adoption, 3.080 s certification,
+1.993 s stage/file sync, and 5.068 ms rename/directory sync. These are distinct
+boundaries; the compiler phases below nest inside admission and overlap.
+This is not packaged cold-start evidence. The optimized packaged pair remains
+unmeasured.
+
+The foundation's worker request `b28c689d10d5204d` took 88.742 s. Its declaration
+phase took 88.737 s, GHC load recorded two phases totalling 10.364 s, lowering
+12.168 s, and 44 prepared-STG phases totalling 1.122 s. The complete-cell request
+`4a897ffa413880ec` took 90.814 s and recorded three module-product phases totalling
+56.369 s; native item phases totalled 61.408 s and display 21.139 s. Do not sum
+these nested values. Its 60 exact interface reads/decode calls captured
+3,564,668 bytes, with 243 recovery module preparations across 56 rounds. The
+later warm-up recorded 138 interface reads/decode calls and captured 7,140,463
+bytes; it still failed admission before execution, so it is not a successful
+warm-cell sample.
+
+Source inspection at package revision `2de99bbd36` finds source embedding,
+not prepared support selection: facade `build.rs` embeds `.hs` text;
+`haskell_sources::ensure_embedded_stdlib` materializes those sources; the actor
+host supplies that directory as an include path. `build/package:compiler_deployment`
+and `matched_runtime_bundle` package the worker, frontend, authority manifest,
+shared native libraries, host and browser assets, but no certified prepared
+stdlib product resource. The host's compiled driver is already shared with
+children; there is no per-child driver compilation to remove.
+
+The first candidate for removing work is a build-time certified stdlib/support
+resource admitted through the existing artifact inventory and exact-scope owner.
+On a fresh host, select those immutable products so GHC compiles the authored
+wrapper and workspace source while omitting unchanged library lowering and
+module-product emission. `Main.writeModuleProducts` currently visits every fresh
+prepared module, projects its groups, writes and reads a temporary interface,
+then encodes the module products and certification. A selected immutable base
+would make those steps unnecessary for fixed modules; it must retain complete
+interfaces, instances, source identity and exact native ownership, including
+transitive home import edges.
+
+Within a cell, avoid re-emitting the same certified support products for each
+item and display, and construct each fresh GHC environment from admitted
+immutable support. `GhcPipeline.runCompileCycle` explicitly disables mutable
+memo/cache reuse and creates fresh exact state. Keep that isolation: sharing
+certified bytes or immutable decoded products must not retain mutable EPS/HPT
+state or broaden the selected graph to unrelated inventory. The ordinary startup
+bundle's duplicated parse/certify/publish is a separate compiler-owner repair.
+The counts above identify repeated work; none establishes a measured speedup.
+
+The later `0092148c64` run still failed both selected tests: standalone admission
+refused the selected graph, while the durable case displayed 42 and committed
+its warm-up before the next planned admission hit a missing file. It selected
+exactly two tests, exited 100, retained unchanged frozen binaries and recorded
+an aggregate scope peak of 8,567,394,304 bytes; its daemon and workers exited.
+
+The actual retained foundation snapshots provide storage evidence for v5's
+native-edge removal. With the same frozen worker and authored foundation,
+both snapshots contain 45 artifact descriptors and two nodes. V4 contains
+12,303 dependency rows (12,146 native-group rows and 157 interface rows) and is
+12,663,202 bytes. V5 persists only the 157 interface rows and is 388,062 bytes:
+12,275,140 fewer bytes. Native relations are reconstructed by the owning v5
+validator from certification. This is a measured file-size difference, not a
+latency claim. The v5 warm-up manifest is 397,505 bytes; its successful private
+cell took 18.773 s, including 734.924 ms stage/file sync and 617 microseconds
+rename/directory sync. It does not satisfy a product performance target or make
+the failed two-test baseline a pass.
