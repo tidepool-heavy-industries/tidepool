@@ -3,7 +3,7 @@ do
       childEntry _ = do
         send Core.ActorReadyWith
         serveToolsWith () $ \_ -> CaptureTools
-          { ping = tool "Read the completed private capture." $ \() -> pure (capturedValue + 1) }
+          { ping = tool "Read the completed private capture." $ \_ -> pure (capturedValue + 1) }
       startChild group path = send (Core.ForksStartWith
         path childEntry Nothing group
         Core.ActorResearchRole Core.ActorReadOnlyProfile []
