@@ -628,6 +628,39 @@ fn closure(
 /// Cloning a view retains its roots without copying the graph or artifact bytes.
 #[derive(Clone)]
 pub struct ArtifactView(Arc<ViewLease>);
+
+/// One retained closure observed under the inventory lock. Entries are ordered
+/// by exact owner; dependency tuples keep their canonical wire order.
+pub(crate) struct ArtifactMetadataSnapshot {
+    pub entries: BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
+}
+
+impl ArtifactMetadataSnapshot {
+    pub fn dependencies(&self) -> Vec<(ArtifactId, ArtifactId, ArtifactDependency)> {
+        let mut dependencies = Vec::new();
+        for entry in self.entries.values() {
+            for (owner, dependency) in entry
+                .requirements
+                .iter()
+                .map(|owner| (owner, ArtifactDependency::Interface))
+                .chain(
+                    entry
+                        .native_requirements
+                        .iter()
+                        .map(|(owner, dependency)| (owner, dependency.clone())),
+                )
+            {
+                dependencies.push((
+                    entry.descriptor.id,
+                    self.entries[owner].descriptor.id,
+                    dependency,
+                ));
+            }
+        }
+        dependencies.sort();
+        dependencies
+    }
+}
 impl std::fmt::Debug for ArtifactView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ArtifactView")
@@ -636,6 +669,21 @@ impl std::fmt::Debug for ArtifactView {
     }
 }
 impl ArtifactView {
+    pub(crate) fn metadata_snapshot(&self) -> ArtifactMetadataSnapshot {
+        let state = self.0.inventory.0.lock().expect("inventory lock");
+        state.view_queries.fetch_add(1, Ordering::Relaxed);
+        let ids = closure(&state, self.roots().into_iter());
+        let mut entries = BTreeMap::new();
+        for id in ids {
+            let entry = &state.payloads[&id];
+            entries.insert(entry.descriptor.owner.clone(), Arc::clone(entry));
+        }
+        state
+            .entry_handle_copies
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
+        ArtifactMetadataSnapshot { entries }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.roots().is_empty()
     }
@@ -959,6 +1007,52 @@ mod tests {
             .admit(&empty, vec![entry("Original", &[])])
             .unwrap();
         assert_eq!(replacement.descriptors().len(), 1);
+    }
+
+    #[test]
+    fn metadata_snapshot_preserves_canonical_typed_edges_in_one_closure() {
+        let inventory = ArtifactInventory::default();
+        let mut consumer = entry("Consumer", &["Original"]);
+        consumer.native_requirements.push((
+            module("Original"),
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal: 4,
+                required_ordinal: 7,
+            },
+        ));
+        consumer.native_requirements.push((
+            module("Original"),
+            ArtifactDependency::NativeBinding {
+                dependent_ordinal: 4,
+                generation: 9,
+                namespace: "value".into(),
+                occurrence: "kept".into(),
+                record_parent: None,
+            },
+        ));
+        let view = inventory
+            .admit(
+                &inventory.empty_view(),
+                vec![consumer, entry("Original", &[])],
+            )
+            .unwrap();
+        let expected_descriptors = view.descriptors();
+        let expected_dependencies = view.dependencies();
+        let before = inventory.metrics();
+        let metadata = view.metadata_snapshot();
+        assert_eq!(
+            metadata
+                .entries
+                .values()
+                .map(|entry| entry.descriptor.clone())
+                .collect::<Vec<_>>(),
+            expected_descriptors,
+        );
+        assert_eq!(metadata.dependencies(), expected_dependencies);
+        let after = inventory.metrics();
+        assert_eq!(after.graph_visits - before.graph_visits, 2);
+        assert_eq!(after.view_queries - before.view_queries, 1);
+        assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 2);
     }
 
     #[test]

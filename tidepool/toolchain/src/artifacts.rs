@@ -698,20 +698,25 @@ impl ModuleCandidateOffer {
         };
         checked_item.validate_templates(templates)?;
         checked_item.validate_include(include)?;
-        let authorization = checked_search_authorization(
-            CheckedPurpose::Item,
-            checked_item.authorization(producer, context.semantic_sha256())?,
-            include,
+        let mut selected = None;
+        let exact = context.prepare_compilation_authorizing(
+            &scratch.join("exact-scope"),
+            producer,
+            |semantic_sha256| {
+                let authorization = checked_search_authorization(
+                    CheckedPurpose::Item,
+                    checked_item.authorization(producer, semantic_sha256)?,
+                    include,
+                )?;
+                selected = immutable_candidates_in_context(&context, producer, include, scratch)?;
+                Ok(authorization)
+            },
         )?;
         Ok(Self {
-            selected: immutable_candidates_in_context(&context, producer, include, scratch)?,
+            selected,
             producer: producer.to_vec(),
             include: include.to_vec(),
-            exact: Some(context.prepare_compilation_with_authorization(
-                &scratch.join("exact-scope"),
-                producer,
-                Some(authorization),
-            )?),
+            exact: Some(exact),
             checked_cell: None,
             planned_cell: None,
             checked_values: None,
@@ -755,20 +760,25 @@ impl ModuleCandidateOffer {
             settled_values,
             is_program: false,
         };
-        let authorization = checked_search_authorization(
-            CheckedPurpose::Display,
-            display.authorization(producer, context.semantic_sha256())?,
-            include,
+        let mut selected = None;
+        let exact = context.prepare_compilation_authorizing(
+            &scratch.join("exact-scope"),
+            producer,
+            |semantic_sha256| {
+                let authorization = checked_search_authorization(
+                    CheckedPurpose::Display,
+                    display.authorization(producer, semantic_sha256)?,
+                    include,
+                )?;
+                selected = immutable_candidates_in_context(&context, producer, include, scratch)?;
+                Ok(authorization)
+            },
         )?;
         Ok(Self {
-            selected: immutable_candidates_in_context(&context, producer, include, scratch)?,
+            selected,
             producer: producer.to_vec(),
             include: include.to_vec(),
-            exact: Some(context.prepare_compilation_with_authorization(
-                &scratch.join("exact-scope"),
-                producer,
-                Some(authorization),
-            )?),
+            exact: Some(exact),
             checked_cell: None,
             planned_cell: None,
             checked_values: None,

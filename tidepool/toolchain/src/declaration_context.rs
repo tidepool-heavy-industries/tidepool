@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::artifact_inventory::{
-    ArtifactEntry, ArtifactInventory, ArtifactKind, ArtifactPayload, ArtifactView,
+    ArtifactEntry, ArtifactInventory, ArtifactKind, ArtifactMetadataSnapshot, ArtifactPayload,
+    ArtifactView,
 };
 use crate::certified_products::{
     certify_inherited_products_with_validation, InheritedProductInput, PendingCertifiedGroup,
@@ -1136,6 +1137,10 @@ impl ExactDeclarationContext {
     /// Logical identity is independent of materialization paths and of the
     /// optional source bytes retained only by a fresh authored certificate.
     pub fn semantic_sha256(&self) -> [u8; 32] {
+        self.semantic_sha256_from_metadata(&self.inventory.metadata_snapshot())
+    }
+
+    fn semantic_sha256_from_metadata(&self, metadata: &ArtifactMetadataSnapshot) -> [u8; 32] {
         use sha2::Digest;
         let mut lexical = self.lexical.iter().collect::<Vec<_>>();
         lexical.sort_by_key(|node| &node.owner);
@@ -1143,15 +1148,27 @@ impl ExactDeclarationContext {
             text("TPEXACTCONTEXT"),
             text("2"),
             text(hex(&sha2::Sha256::digest(
-                serde_json::to_vec(&(self.inventory.descriptors(), self.inventory.dependencies()))
-                    .expect("inventory encoding"),
+                serde_json::to_vec(&(
+                    metadata
+                        .entries
+                        .values()
+                        .map(|entry| &entry.descriptor)
+                        .collect::<Vec<_>>(),
+                    metadata.dependencies(),
+                ))
+                .expect("inventory encoding"),
             )
             .into())),
             text(hex(&self.producer)),
             Value::Array(
-                self.recovery_products()
-                    .iter()
-                    .map(|product| {
+                metadata
+                    .entries
+                    .values()
+                    .filter_map(|entry| match &entry.payload {
+                        ArtifactPayload::Original(product) => Some((&entry.descriptor, product)),
+                        _ => None,
+                    })
+                    .map(|(descriptor, product)| {
                         let owner = product.owner();
                         Value::Array(vec![
                             text(&owner.unit),
@@ -1159,21 +1176,30 @@ impl ExactDeclarationContext {
                             text(hex(&owner.module_version.0)),
                             text(hex(&owner.skinny_iface_sha256)),
                             text(hex(&owner.product_sha256)),
-                            text(sha256(product.package_imports_bytes())),
-                            text(sha256(product.certification_bytes())),
+                            text(hex(&descriptor.package_imports_sha256)),
+                            text(hex(&descriptor
+                                .certification_sha256
+                                .expect("original certification digest"))),
                         ])
                     })
                     .collect(),
             ),
             Value::Array(
-                self.joined_interfaces()
-                    .iter()
-                    .map(|join| {
+                metadata
+                    .entries
+                    .values()
+                    .filter_map(|entry| match &entry.payload {
+                        ArtifactPayload::Interface(interface, ArtifactKind::LexicalJoin) => {
+                            Some((&entry.descriptor, interface))
+                        }
+                        _ => None,
+                    })
+                    .map(|(descriptor, join)| {
                         Value::Array(vec![
                             text(join.unit()),
                             text(join.module()),
-                            text(sha256(join.interface_bytes())),
-                            text(sha256(join.package_imports_bytes())),
+                            text(hex(&descriptor.interface_sha256)),
+                            text(hex(&descriptor.package_imports_sha256)),
                         ])
                     })
                     .collect(),
@@ -1201,14 +1227,14 @@ impl ExactDeclarationContext {
         &self,
         artifacts: &[DeclarationArtifact],
     ) -> Result<(), CompileError> {
-        let interfaces = self.interface_owners();
-        let products = self.recovery_products();
-        let mut joins = self.joined_interfaces();
-        joins.extend(
-            self.value_interfaces()
-                .into_iter()
-                .map(|value| value.interface().clone()),
-        );
+        self.validate_artifacts_from_metadata(artifacts, &self.inventory.metadata_snapshot())
+    }
+
+    fn validate_artifacts_from_metadata(
+        &self,
+        artifacts: &[DeclarationArtifact],
+        metadata: &ArtifactMetadataSnapshot,
+    ) -> Result<(), CompileError> {
         let mut seen = BTreeSet::new();
         for artifact in artifacts {
             let exact = &artifact.interface;
@@ -1216,12 +1242,12 @@ impl ExactDeclarationContext {
             if !seen.insert(owner.clone()) || !exact.path.is_absolute() {
                 return Err(failure("duplicate owner or relative interface path"));
             }
-            let metadata = interfaces
-                .iter()
-                .find(|entry| entry.owner == owner)
+            let entry = metadata
+                .entries
+                .get(&owner)
                 .ok_or_else(|| failure("artifact is not owned by the context"))?;
             if exact.requirements.iter().cloned().collect::<BTreeSet<_>>()
-                != metadata
+                != entry
                     .requirements
                     .iter()
                     .map(|owner| (owner.unit.clone(), owner.module.clone()))
@@ -1229,10 +1255,7 @@ impl ExactDeclarationContext {
             {
                 return Err(failure("artifact requirements differ from owned context"));
             }
-            let (iface, packages) = if let Some(product) = products
-                .iter()
-                .find(|product| identity(&product.owner().unit, &product.owner().module) == owner)
-            {
+            let (iface, packages) = if let ArtifactPayload::Original(product) = &entry.payload {
                 let snapshot = artifact
                     .product
                     .as_ref()
@@ -1246,10 +1269,13 @@ impl ExactDeclarationContext {
                 }
                 (product.interface_bytes(), product.package_imports_bytes())
             } else {
-                let join = joins
-                    .iter()
-                    .find(|join| identity(join.unit(), join.module()) == owner)
-                    .ok_or_else(|| failure("synthetic anchor is missing"))?;
+                let ArtifactPayload::Interface(
+                    join,
+                    ArtifactKind::LexicalJoin | ArtifactKind::ValueInterface,
+                ) = &entry.payload
+                else {
+                    return Err(failure("synthetic anchor is missing"));
+                };
                 if artifact.product.is_some() {
                     return Err(failure("synthetic anchor has an implementation product"));
                 }
@@ -1264,7 +1290,7 @@ impl ExactDeclarationContext {
                 return Err(failure("package witness differs from owned bytes"));
             }
         }
-        if seen.len() != self.interface_owners().len() {
+        if seen.len() != metadata.entries.len() {
             return Err(failure("owned artifact closure is incomplete"));
         }
         Ok(())
@@ -1477,12 +1503,49 @@ impl ExactDeclarationContext {
         producer: &[u8],
         authorization: Option<Value>,
     ) -> Result<ExactCompilationRequest, CompileError> {
+        let metadata = self.inventory.metadata_snapshot();
+        let semantic_sha256 = self.semantic_sha256_from_metadata(&metadata);
+        self.prepare_compilation_from_metadata(
+            root,
+            producer,
+            authorization,
+            &metadata,
+            semantic_sha256,
+        )
+    }
+
+    /// Bind authorization and the request to one observation of this immutable
+    /// context. The caller cannot supply an unrelated semantic identity.
+    pub(crate) fn prepare_compilation_authorizing(
+        self: &Arc<Self>,
+        root: &Path,
+        producer: &[u8],
+        authorize: impl FnOnce([u8; 32]) -> Result<Value, CompileError>,
+    ) -> Result<ExactCompilationRequest, CompileError> {
+        let metadata = self.inventory.metadata_snapshot();
+        let semantic_sha256 = self.semantic_sha256_from_metadata(&metadata);
+        let authorization = authorize(semantic_sha256)?;
+        self.prepare_compilation_from_metadata(
+            root,
+            producer,
+            Some(authorization),
+            &metadata,
+            semantic_sha256,
+        )
+    }
+
+    fn prepare_compilation_from_metadata(
+        self: &Arc<Self>,
+        root: &Path,
+        producer: &[u8],
+        authorization: Option<Value>,
+        metadata: &ArtifactMetadataSnapshot,
+        semantic_sha256: [u8; 32],
+    ) -> Result<ExactCompilationRequest, CompileError> {
         use sha2::Digest;
         let admitted_empty = authorization.is_some()
             && self.producer == [0; 32]
-            && self.recovery_products().is_empty()
-            && self.joined_interfaces().is_empty()
-            && self.interface_owners().is_empty()
+            && metadata.entries.is_empty()
             && self.lexical.is_empty();
         if !root.is_absolute()
             || (!admitted_empty
@@ -1497,11 +1560,28 @@ impl ExactDeclarationContext {
         // Package reads share one synchronous preparation snapshot. It does not
         // escape this stage; post-worker verification opens a fresh snapshot.
         let mut validation = PackageInterfaceValidation::default();
-        let (materialized, references) =
-            self.materialize_with_validation(root, &mut validation, MaterializationMode::Scratch)?;
-        self.validate_artifacts(&materialized.artifacts)?;
+        let entries = metadata.entries.values().cloned().collect::<Vec<_>>();
+        let (materialized, references) = self.materialize_entries_with_validation(
+            root,
+            &entries,
+            &mut validation,
+            MaterializationMode::Scratch,
+        )?;
+        self.validate_artifacts_from_metadata(&materialized.artifacts, metadata)?;
         let groups = self.materialized_groups(root, &references, &mut validation)?;
-        let semantic_sha256 = self.semantic_sha256();
+        let artifacts_by_owner = materialized
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                (
+                    (
+                        artifact.interface.unit.as_str(),
+                        artifact.interface.module.as_str(),
+                    ),
+                    artifact,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         let mut fields = vec![
             text("TPEXACTSCOPE"),
             text(if authorization.is_some() { "4" } else { "2" }),
@@ -1547,17 +1627,17 @@ impl ExactDeclarationContext {
                     .collect(),
             ),
             Value::Array(
-                self.recovery_products()
-                    .iter()
+                metadata
+                    .entries
+                    .values()
+                    .filter_map(|entry| match &entry.payload {
+                        ArtifactPayload::Original(product) => Some(product),
+                        _ => None,
+                    })
                     .map(|product| {
                         let owner = product.owner();
-                        let artifact = materialized
-                            .artifacts
-                            .iter()
-                            .find(|artifact| {
-                                artifact.interface.unit == owner.unit
-                                    && artifact.interface.module == owner.module
-                            })
+                        let artifact = artifacts_by_owner
+                            .get(&(owner.unit.as_str(), owner.module.as_str()))
                             .and_then(|artifact| artifact.product.as_ref())
                             .ok_or_else(|| failure("original product anchor is missing"))?;
                         Ok(Value::Array(vec![
@@ -1766,6 +1846,99 @@ mod tests {
         )
     }
 
+    // Retain the pre-snapshot wire-v2 encoder as an independent compatibility oracle.
+    fn legacy_semantic_sha256(context: &ExactDeclarationContext) -> [u8; 32] {
+        use sha2::Digest;
+        let mut lexical = context.lexical.iter().collect::<Vec<_>>();
+        lexical.sort_by_key(|node| &node.owner);
+        let value = Value::Array(vec![
+            text("TPEXACTCONTEXT"),
+            text("2"),
+            text(hex(&sha2::Sha256::digest(
+                serde_json::to_vec(&(
+                    context.inventory.descriptors(),
+                    context.inventory.dependencies(),
+                ))
+                .expect("inventory encoding"),
+            )
+            .into())),
+            text(hex(&context.producer)),
+            Value::Array(
+                context
+                    .recovery_products()
+                    .iter()
+                    .map(|product| {
+                        let owner = product.owner();
+                        Value::Array(vec![
+                            text(&owner.unit),
+                            text(&owner.module),
+                            text(hex(&owner.module_version.0)),
+                            text(hex(&owner.skinny_iface_sha256)),
+                            text(hex(&owner.product_sha256)),
+                            text(sha256(product.package_imports_bytes())),
+                            text(sha256(product.certification_bytes())),
+                        ])
+                    })
+                    .collect(),
+            ),
+            Value::Array(
+                context
+                    .joined_interfaces()
+                    .iter()
+                    .map(|join| {
+                        Value::Array(vec![
+                            text(join.unit()),
+                            text(join.module()),
+                            text(sha256(join.interface_bytes())),
+                            text(sha256(join.package_imports_bytes())),
+                        ])
+                    })
+                    .collect(),
+            ),
+            Value::Array(
+                lexical
+                    .into_iter()
+                    .map(|node| {
+                        let mut imports = node.imports.iter().collect::<Vec<_>>();
+                        imports.sort();
+                        Value::Array(vec![
+                            module_value(&node.owner),
+                            Value::Array(imports.into_iter().map(module_value).collect()),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut bytes).expect("owned value encoding");
+        sha2::Sha256::digest(bytes).into()
+    }
+
+    #[test]
+    fn metadata_identity_preserves_existing_v2_canonical_encoding() {
+        let (context, _) = metadata_fixture();
+        assert_eq!(context.semantic_sha256(), legacy_semantic_sha256(&context));
+        let mut reordered = context.as_ref().clone();
+        reordered.lexical.reverse();
+        assert_eq!(
+            reordered.semantic_sha256(),
+            legacy_semantic_sha256(&reordered)
+        );
+        let extended = context
+            .as_ref()
+            .clone()
+            .extend_checked_original_products(
+                context.producer,
+                &[support_product("Later")],
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            extended.semantic_sha256(),
+            legacy_semantic_sha256(&extended)
+        );
+    }
+
     fn support_admission(root: &Path) -> ExactSourceAdmission {
         let modules = [
             ("InstanceOwner", None),
@@ -1816,6 +1989,221 @@ mod tests {
             evidence,
             exact_imports: BTreeMap::new(),
         }
+    }
+
+    fn metadata_fixture() -> (Arc<ExactDeclarationContext>, Vec<u8>) {
+        let producer = b"metadata producer".to_vec();
+        let producer_sha256 = Sha256::digest(&producer).into();
+        let interface = |module: &str| {
+            let bytes = format!("{module} interface").into_bytes();
+            let mut packages = Vec::new();
+            ciborium::ser::into_writer(
+                &Value::Array(vec![
+                    text("TPPKGROOTS"),
+                    text("1"),
+                    Value::Array(vec![text("fixture"), text(module), text(sha256(&bytes))]),
+                    Value::Array(Vec::new()),
+                ]),
+                &mut packages,
+            )
+            .unwrap();
+            CertifiedJoinedInterface::from_certification(
+                producer_sha256,
+                "fixture".into(),
+                module.into(),
+                bytes,
+                packages,
+            )
+            .unwrap()
+        };
+        let inventory = ArtifactInventory::default();
+        let view = inventory
+            .admit(
+                &inventory.empty_view(),
+                vec![
+                    ArtifactEntry::original(producer_sha256, support_product("Alpha"), Vec::new())
+                        .unwrap(),
+                    ArtifactEntry::original(
+                        producer_sha256,
+                        support_product("Beta"),
+                        vec![identity("fixture", "Alpha")],
+                    )
+                    .unwrap(),
+                    ArtifactEntry::interface(
+                        interface("Joined"),
+                        ArtifactKind::LexicalJoin,
+                        vec![identity("fixture", "Alpha"), identity("fixture", "Beta")],
+                    ),
+                    ArtifactEntry::interface(
+                        interface("Value"),
+                        ArtifactKind::ValueInterface,
+                        vec![identity("fixture", "Alpha")],
+                    ),
+                ],
+            )
+            .unwrap();
+        let context = ExactDeclarationContext {
+            producer: producer_sha256,
+            inventory: view,
+            lexical: vec![
+                ExactLexicalNode {
+                    owner: identity("fixture", "Joined"),
+                    imports: vec![identity("fixture", "Alpha")],
+                },
+                ExactLexicalNode {
+                    owner: identity("fixture", "Alpha"),
+                    imports: Vec::new(),
+                },
+            ],
+        };
+        context.clone().normalize().unwrap();
+        (Arc::new(context), producer)
+    }
+
+    #[test]
+    fn metadata_validation_indexes_owners_and_rechecks_late_corruption() {
+        let (context, _) = metadata_fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let artifacts = context.materialize_scratch(&directory).unwrap().artifacts;
+        let before = context.inventory.inventory().metrics();
+        context.validate_artifacts(&artifacts).unwrap();
+        let after = context.inventory.inventory().metrics();
+        assert_eq!(after.graph_visits - before.graph_visits, 4);
+        assert_eq!(after.view_queries - before.view_queries, 1);
+        assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 4);
+        assert!(context.validate_artifacts(&artifacts[..3]).is_err());
+        let mut duplicate = artifacts.clone();
+        duplicate.push(artifacts[0].clone());
+        assert!(context.validate_artifacts(&duplicate).is_err());
+        let mut wrong_kind = artifacts.clone();
+        wrong_kind[0].product = None;
+        assert!(context.validate_artifacts(&wrong_kind).is_err());
+        let mut wrong_kind = artifacts.clone();
+        wrong_kind[2].product = artifacts[0].product.clone();
+        assert!(context.validate_artifacts(&wrong_kind).is_err());
+        let mut wrong_requirements = artifacts.clone();
+        wrong_requirements[1].interface.requirements.clear();
+        assert!(context.validate_artifacts(&wrong_requirements).is_err());
+        let mut foreign = artifacts.clone();
+        foreign[0].interface.module = "Foreign".into();
+        assert!(context.validate_artifacts(&foreign).is_err());
+        let mut entries = context
+            .inventory
+            .entries()
+            .iter()
+            .map(|entry| entry.as_ref().clone())
+            .collect::<Vec<_>>();
+        let entry = entries
+            .iter_mut()
+            .find(|entry| entry.descriptor.owner.module == "Joined")
+            .unwrap();
+        let ArtifactPayload::Interface(interface, _) = &entry.payload else {
+            unreachable!()
+        };
+        *entry = ArtifactEntry::interface(
+            interface.clone(),
+            ArtifactKind::OriginalModule,
+            entry.requirements.clone(),
+        );
+        let inventory = ArtifactInventory::default();
+        let mut wrong_kind = context.as_ref().clone();
+        wrong_kind.inventory = inventory.admit(&inventory.empty_view(), entries).unwrap();
+        assert!(wrong_kind.validate_artifacts(&artifacts).is_err());
+        let paths = [
+            artifacts[0].interface.path.clone(),
+            artifacts[0].product.as_ref().unwrap().path.clone(),
+            artifacts[0].interface.path.with_extension("hi.packages"),
+        ];
+        for path in paths {
+            let saved = std::fs::read(&path).unwrap();
+            std::fs::write(&path, b"changed after preparation").unwrap();
+            assert!(context.validate_artifacts(&artifacts).is_err());
+            std::fs::write(&path, saved).unwrap();
+            context.validate_artifacts(&artifacts).unwrap();
+        }
+    }
+
+    #[test]
+    fn metadata_authorization_and_preparation_share_one_identity() {
+        let (context, producer) = metadata_fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let expected = context.semantic_sha256();
+        let before = context.inventory.inventory().metrics();
+        let request = context
+            .prepare_compilation_authorizing(directory.path(), &producer, |semantic_sha256| {
+                assert_eq!(semantic_sha256, expected);
+                Ok(Value::Array(vec![
+                    text("authorized"),
+                    text(hex(&semantic_sha256)),
+                ]))
+            })
+            .unwrap();
+        let after = context.inventory.inventory().metrics();
+        assert_eq!(after.graph_visits - before.graph_visits, 4);
+        assert_eq!(after.view_queries - before.view_queries, 1);
+        assert_eq!(request.semantic_sha256, expected);
+        let value: Value =
+            ciborium::de::from_reader(std::fs::read(&request.manifest).unwrap().as_slice())
+                .unwrap();
+        let fields = row(&value, 8).unwrap();
+        assert_eq!(string(&fields[2]).unwrap(), hex(&expected));
+        assert_eq!(row(&fields[7], 2).unwrap()[1], text(hex(&expected)));
+        std::fs::write(&request.artifacts[0].interface.path, b"late corruption").unwrap();
+        assert!(request
+            .context
+            .validate_artifacts(&request.artifacts)
+            .is_err());
+    }
+
+    #[test]
+    fn metadata_identity_is_path_independent_and_tracks_graph_selection() {
+        let (context, _) = metadata_fixture();
+        let expected = context.semantic_sha256();
+        let before = context.inventory.inventory().metrics();
+        assert_eq!(context.semantic_sha256(), expected);
+        let after = context.inventory.inventory().metrics();
+        assert_eq!(after.graph_visits - before.graph_visits, 4);
+        assert_eq!(after.view_queries - before.view_queries, 1);
+        for _ in 0..2 {
+            let directory = tempfile::tempdir().unwrap();
+            context.materialize_scratch(&directory).unwrap();
+            assert_eq!(context.semantic_sha256(), expected);
+        }
+        let mut changed = context.as_ref().clone();
+        changed.producer = [9; 32];
+        assert_ne!(changed.semantic_sha256(), expected);
+        let mut changed = context.as_ref().clone();
+        changed.lexical.clear();
+        assert_ne!(changed.semantic_sha256(), expected);
+        let mut reordered = context.as_ref().clone();
+        reordered.lexical.reverse();
+        assert_eq!(reordered.semantic_sha256(), expected);
+        let extended = context
+            .as_ref()
+            .clone()
+            .extend_checked_original_products(
+                context.producer,
+                &[support_product("Later")],
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert_ne!(extended.semantic_sha256(), expected);
+        let mut entries = context
+            .inventory
+            .entries()
+            .iter()
+            .map(|entry| entry.as_ref().clone())
+            .collect::<Vec<_>>();
+        entries
+            .iter_mut()
+            .find(|entry| entry.descriptor.owner.module == "Beta")
+            .unwrap()
+            .requirements
+            .clear();
+        let inventory = ArtifactInventory::default();
+        let mut changed = context.as_ref().clone();
+        changed.inventory = inventory.admit(&inventory.empty_view(), entries).unwrap();
+        assert_ne!(changed.semantic_sha256(), expected);
     }
 
     fn program_request(
