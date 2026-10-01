@@ -1427,8 +1427,10 @@ impl<'a> Validator<'a> {
         }
 
         self.check_type_nodes(&family_sizes)?;
-        self.check_sites()?;
-        self.check_verb_sites()?;
+        {
+            let site_ids = self.check_sites()?;
+            self.check_verb_sites(&site_ids)?;
+        }
 
         let mut operation_contracts = BTreeSet::new();
         for operation in self.wire.operations {
@@ -1811,7 +1813,7 @@ impl<'a> Validator<'a> {
         Ok(())
     }
 
-    fn check_sites(&mut self) -> Result<(), ParseError> {
+    fn check_sites(&mut self) -> Result<BTreeSet<u64>, ParseError> {
         let mut ids = BTreeSet::new();
         for index in 0..self.wire.sites.len() {
             let work = self.wire.sites[index]
@@ -1834,14 +1836,14 @@ impl<'a> Validator<'a> {
                 self.type_node(*input)?;
             }
         }
-        Ok(())
+        Ok(ids)
     }
 
     /// Each verb-site entry names a declared constructor (at most once) and
     /// an admitted synthetic row; every synthetic row is named by one. With
     /// dynamic ids never carrying [`SYNTHETIC_SITE_BIT`], the two site ranges
     /// cannot collide.
-    fn check_verb_sites(&mut self) -> Result<(), ParseError> {
+    fn check_verb_sites(&mut self, site_ids: &BTreeSet<u64>) -> Result<(), ParseError> {
         let mut constructors = BTreeSet::new();
         let mut named = BTreeSet::new();
         for index in 0..self.wire.verb_sites.len() {
@@ -1860,7 +1862,7 @@ impl<'a> Validator<'a> {
                     "verb site {site} is not in the synthetic range"
                 )));
             }
-            if !self.wire.sites.iter().any(|row| row.site == site) {
+            if !site_ids.contains(&site) {
                 return Err(ParseError::InvalidReference(format!(
                     "verb site {site} names no site row"
                 )));
@@ -3233,6 +3235,62 @@ mod tests {
         assert_eq!(
             validate_program(&program, &requirements(), DecodeLimits::default()),
             Err(ParseError::DuplicateDefinition("verb site".into()))
+        );
+    }
+
+    #[test]
+    fn large_verb_site_membership_reuses_validated_ids_and_preserves_work_bound() {
+        const SITES: usize = 4096;
+        let mut program = valid_program();
+        program.types = vec![TypeNode::Text];
+        program.constructors = (0..SITES)
+            .map(|index| empty_constructor(&format!("Verb{index}"), index as u32 + 1, SITES as u32))
+            .collect();
+        program.sites = (0..SITES)
+            .map(|index| SiteRow {
+                site: SYNTHETIC_SITE_BIT | (index as u64 + 1),
+                origin: format!("Fixture.Verb{index}"),
+                ordinal: index as u64,
+                delivery: SiteDelivery::HostAnswer,
+                wire: TypeNodeId(0),
+                inputs: vec![],
+            })
+            .collect();
+        program.verb_sites = (0..SITES)
+            .rev()
+            .map(|index| {
+                (
+                    ConstructorId(index as u32),
+                    SYNTHETIC_SITE_BIT | (index as u64 + 1),
+                )
+            })
+            .collect();
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+
+        let mut validator = Validator::new(&program, DecodeLimits::default());
+        let ids = validator.check_sites().unwrap();
+        assert_eq!(ids.len(), SITES);
+        let site_work = validator.work;
+        validator.limits.max_work = site_work + SITES;
+        validator.check_verb_sites(&ids).unwrap();
+        assert_eq!(validator.work, site_work + SITES);
+        let mut validator = Validator::new(
+            &program,
+            DecodeLimits {
+                max_work: site_work + SITES - 1,
+                ..DecodeLimits::default()
+            },
+        );
+        let ids = validator.check_sites().unwrap();
+        assert_eq!(
+            validator.check_verb_sites(&ids),
+            Err(ParseError::LimitExceeded("work"))
+        );
+
+        program.sites[SITES - 1].site = program.sites[0].site;
+        assert_eq!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::DuplicateDefinition("site".into()))
         );
     }
 
