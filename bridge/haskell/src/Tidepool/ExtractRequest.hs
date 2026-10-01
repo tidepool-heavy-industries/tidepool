@@ -43,6 +43,7 @@ data RequestField
   | ClassifyOut FilePath
   | Cell
   | CellPlan
+  | CheckSource
   | CellTemplate FilePath
   | CellOut FilePath
   | TurnPin String
@@ -98,6 +99,7 @@ data WorkerRequest = WorkerRequest
   , requestClassify :: Bool
   , requestClassifyOut :: Maybe FilePath
   , requestCell :: Bool
+  , requestCheckSource :: Bool
   , requestCellPlan :: Bool
   , requestCellTemplate :: Maybe FilePath
   , requestCellOut :: Maybe FilePath
@@ -144,6 +146,7 @@ emptyWorkerRequest = WorkerRequest
   , requestClassify = False
   , requestClassifyOut = Nothing
   , requestCell = False
+  , requestCheckSource = False
   , requestCellPlan = False
   , requestCellTemplate = Nothing
   , requestCellOut = Nothing
@@ -223,6 +226,7 @@ requestFromFields = foldl apply emptyWorkerRequest
       ClassifyOut path -> request { requestClassifyOut = Just path }
       Cell -> request { requestCell = True }
       CellPlan -> request { requestCellPlan = True }
+      CheckSource -> request { requestCheckSource = True }
       CellTemplate path -> request { requestCellTemplate = Just path }
       CellOut path -> request { requestCellOut = Just path }
       TurnPin pin -> request { requestTurnPin = Just pin }
@@ -259,7 +263,7 @@ requestFromFields = foldl apply emptyWorkerRequest
       CellFoldTurn -> request { requestCellFoldTurn = True }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v16"
+workerRequestFlag = "--worker-request-v17"
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -305,7 +309,7 @@ type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 decodeRequest :: BS.ByteString -> Either String [RequestField]
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ016"
+  if magic /= "TPREQ017"
     then Left "worker request: unsupported magic or version"
     else do
       (count, rest) <- pWord32 body
@@ -315,7 +319,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ016" <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = "TPREQ017" <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
@@ -349,6 +353,7 @@ encodeField field = case field of
   InspectBrowseExpanded value -> taggedText 30 value
   Cell -> BS.singleton 31
   CellPlan -> BS.singleton 51
+  CheckSource -> BS.singleton 52
   CellTemplate value -> taggedText 32 value
   CellOut value -> taggedText 33 value
   TurnPin value -> taggedText 34 value
@@ -458,6 +463,7 @@ pField bytes = do
     30 -> mapParser InspectBrowseExpanded pText rest
     31 -> Right (Cell, rest)
     51 -> Right (CellPlan, rest)
+    52 -> Right (CheckSource, rest)
     32 -> mapParser CellTemplate pText rest
     33 -> mapParser CellOut pText rest
     34 -> mapParser TurnPin pText rest

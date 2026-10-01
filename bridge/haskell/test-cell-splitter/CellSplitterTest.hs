@@ -57,6 +57,7 @@ import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 
 main :: IO ()
 main = getArgs >>= \case
+  ["--check-source-request"] -> checkingSourceRequestRoundTrip >> putStrLn "checking source request: 1 passed"
   ["--ordered-segments"] -> orderedInferenceSegments >> putStrLn "ordered inference segments: 1 passed"
   ["--program-originals"] -> programOriginalImportsCompilation >> putStrLn "program original imports: 1 passed"
   ["--function-value-iface"] -> functionValueInterfaceCompilation >> putStrLn "function value interface: 1 passed"
@@ -66,6 +67,7 @@ main = getArgs >>= \case
 runAllTests :: IO ()
 runAllTests = do
   certificationRequestValidation
+  checkingSourceRequestRoundTrip
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     flags <- getSessionDynFlags
@@ -293,6 +295,22 @@ orderedInferenceSegments = do
       , "{{CELL_DECLS}}"
       , "__tidepool_cell_check = do { {{CELL_BODY}} } :: Maybe ()"
       ]
+
+checkingSourceRequestRoundTrip :: IO ()
+checkingSourceRequestRoundTrip = do
+  let fields = [Input "Complete.hs", CheckSource, Include "source-graph"
+               , ModuleCandidates "candidates.cbor", BuildProductsDir "interfaces"]
+  case workerRequestFromArgv (workerArgv fields) of
+    Right (Just request) -> do
+      assertEqual "checking mode retained" True (requestCheckSource request)
+      assertEqual "complete input retained" ["Complete.hs"] (requestFiles request)
+      assertEqual "candidate manifest retained" (Just "candidates.cbor") (requestModuleCandidates request)
+      assertEqual "no product output" Nothing (requestOutDir request)
+      assertEqual "no cell rewriting" False (requestCell request)
+    other -> fail ("checking source request round trip failed: " ++ show other)
+  case workerRequestFromArgv ["--worker-request-v16", last (workerArgv fields)] of
+    Left _ -> pure ()
+    other -> fail ("retired request protocol accepted: " ++ show other)
 
 certificationRequestValidation :: IO ()
 certificationRequestValidation = do

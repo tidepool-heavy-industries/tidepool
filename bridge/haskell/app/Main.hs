@@ -245,7 +245,7 @@ runParsedInvocation compiler caches parsedWorkerRequest = do
   -- dispatch below, so every mode (one-shot, session, turn) sees a plain
   -- file with no pragma-block requirement of its own. See
   -- 'spliceHarnessProfilePragma'.
-  args <- if requestHarnessProfile parsedWorkerRequest
+  args <- if requestHarnessProfile parsedWorkerRequest && not (requestCheckSource parsedWorkerRequest)
             then spliceHarnessProfilePragma parsedWorkerRequest
             else pure parsedWorkerRequest
   dispatch compiler caches timing args
@@ -255,6 +255,24 @@ dispatch
   :: Compiler -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
 dispatch compiler caches timing args = do
   admitted <- trySynchronous $ do
+    when (requestCheckSource args) $
+      unless (length (requestFiles args) == 1 && not (requestCell args)
+          && not (requestCellPlan args) && not (requestTurn args) && not (requestClassify args)
+          && null (requestInspections args) && not (hasSessionScope args)
+          && not (isJust (requestDeclarationJoin args)) && not (isJust (requestDeclarationJoinOut args))
+          && not (requestCertifyHomeProducts args) && not (requestActivationPreview args)
+          && not (requestHarnessProfile args) && not (requestCellFoldTurn args)
+          && not (isJust (requestOutDir args)) && not (isJust (requestTarget args))
+          && null (requestTargets args) && not (isJust (requestBindGen args))
+          && null (requestTurnTemplates args) && not (isJust (requestTurnOut args))
+          && not (isJust (requestTurnVerdict args)) && not (isJust (requestTurnPin args))
+          && not (isJust (requestCellOut args)) && not (isJust (requestCellTemplate args))
+          && not (isJust (requestClassifyOut args)) && not (isJust (requestInspectOut args))
+          && not (isJust (requestInspectTypeBatch args)) && not (isJust (requestSessionArtifacts args))
+          && not (isJust (requestSessionIncarnation args))
+          && not (requestTargetModuleOnly args) && not (requestInspectionStrict args)
+          && Map.null (requestRetainedGenerations args))
+        (fail "source checking cannot carry product or notebook authority")
     when (requestCellPlan args) $
       unless (length (requestFiles args) == 1 && not (requestCell args)
           && not (requestTurn args) && not (requestClassify args)
@@ -297,6 +315,7 @@ dispatchSource compiler caches timing args =
                                                   -> reportDiags (Left (toException (userError "inspection type batch requires at least two type queries and no other query kinds")))
         | requestActivationPreview args && (not (requestTurn args) || not (isJust (requestTurnVerdict args)))
                                                   -> reportDiags (Left (toException (userError "activation requires a prepared turn with a generated bind verdict")))
+        | requestCheckSource args                 -> runSourceCheckMode compiler args file
         | requestCellPlan args                    -> runCellPlanMode args file
         | requestCell args                        -> runCellMode compiler caches args file
         | requestClassify args                    -> runClassifyMode timing args
@@ -307,6 +326,14 @@ dispatchSource compiler caches timing args =
         | not (null (requestTargets args))        -> timePhase timing "total" (processFile compiler caches timing args file)
         -- Normal one-shot extraction.
         | otherwise                           -> timePhase timing "total" (processFile compiler caches timing args file)
+
+runSourceCheckMode :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode
+runSourceCheckMode compiler args path = do
+  checked <- trySynchronous $ do
+    compiled <- compiler (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args))
+      Set.empty GeneralCompile Nothing path (requestIncludes args) (requestBuildProductsDir args)
+    pure (crWarnings compiled)
+  reportDiagsWithWarnings checked
 
 runDeclarationOperation :: WorkerRequest -> FilePath -> IO ExitCode
 runDeclarationOperation args manifest = do

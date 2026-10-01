@@ -485,6 +485,12 @@ impl ExtractCmd {
         self
     }
 
+    /// Check the supplied complete source module without emitting native products.
+    pub fn check_source(&mut self) -> &mut Self {
+        self.request.check_source();
+        self
+    }
+
     /// `--turn` — the session-turn mode (extract classifies, picks its own
     /// wrapper template, compiles, and writes the `TurnOut` sidecar).
     pub fn turn(&mut self) -> &mut Self {

@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v16";
-const MAGIC: &[u8; 8] = b"TPREQ016";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v17";
+const MAGIC: &[u8; 8] = b"TPREQ017";
 
 /// A probe flag deliberately outside the versioned request grammar above: it
 /// asks a worker binary to print the request flag it was built against and
@@ -67,6 +67,7 @@ enum Field {
     ClassifyOut(OsString),
     Cell,
     CellPlan,
+    CheckSource,
     CellTemplate(PathBuf),
     CellOut(OsString),
     TurnPin(String),
@@ -158,6 +159,7 @@ impl ExtractRequest {
                 Some("--classify-out") => request.classify_out(value(&mut args, "--classify-out")?),
                 Some("--cell") => request.cell(),
                 Some("--cell-plan") => request.cell_plan(),
+                Some("--check-source") => request.check_source(),
                 Some("--cell-template") => {
                     request.cell_template(Path::new(value(&mut args, "--cell-template")?))
                 }
@@ -286,6 +288,7 @@ impl ExtractRequest {
                 43 => Field::InspectScopeBrowse,
                 31 => Field::Cell,
                 51 => Field::CellPlan,
+                52 => Field::CheckSource,
                 32 => Field::CellTemplate(PathBuf::from(decoder.os_string()?)),
                 33 => Field::CellOut(decoder.os_string()?),
                 34 => Field::TurnPin(decoder.string()?),
@@ -468,6 +471,14 @@ impl ExtractRequest {
         self.fields.push(Field::Cell);
     }
 
+    pub(crate) fn check_source(&mut self) {
+        self.fields.push(Field::CheckSource);
+    }
+
+    pub fn is_check_source(&self) -> bool {
+        self.fields.iter().any(|field| matches!(field, Field::CheckSource))
+    }
+
     pub(crate) fn cell_plan(&mut self) {
         self.fields.push(Field::CellPlan);
     }
@@ -612,6 +623,7 @@ impl ExtractRequest {
                 Field::ClassifyOut(value) => flag(&mut flags, "--classify-out", value),
                 Field::Cell => flags.push("--cell".into()),
                 Field::CellPlan => flags.push("--cell-plan".into()),
+                Field::CheckSource => flags.push("--check-source".into()),
                 Field::CellTemplate(value) => {
                     flag(&mut flags, "--cell-template", value.as_os_str())
                 }
@@ -968,6 +980,7 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         Field::ClassifyOut(value) => tagged_frame(out, 21, value),
         Field::Cell => out.push(31),
         Field::CellPlan => out.push(51),
+        Field::CheckSource => out.push(52),
         Field::CellTemplate(value) => tagged_frame(out, 32, value.as_os_str()),
         Field::CellOut(value) => tagged_frame(out, 33, value),
         Field::TurnPin(value) => tagged_frame(out, 34, OsStr::new(value)),
@@ -1460,6 +1473,9 @@ mod tests {
             b"TPREQ011",
             b"TPREQ012",
             b"TPREQ013",
+            b"TPREQ014",
+            b"TPREQ015",
+            b"TPREQ016",
         ] {
             let mut request = magic.to_vec();
             request.extend_from_slice(&0u32.to_le_bytes());
@@ -1521,6 +1537,26 @@ mod tests {
         let request = ExtractRequest::from_cli(&args).unwrap();
         let decoded = ExtractRequest::decode(&request.encode()).unwrap();
         assert_eq!(decoded.cli_argv(), request.cli_argv());
+    }
+
+    #[test]
+    fn checking_only_source_request_round_trips_without_output_authority() {
+        let args = [
+            "WholeModule.hs".into(),
+            "--check-source".into(),
+            "--include".into(),
+            "/tmp/source-graph".into(),
+            "--module-candidates".into(),
+            "/tmp/candidates.cbor".into(),
+            "--build-products-dir".into(),
+            "/tmp/interfaces".into(),
+        ];
+        let request = ExtractRequest::from_cli(&args).unwrap();
+        let decoded = ExtractRequest::decode(&request.encode()).unwrap();
+        assert!(decoded.is_check_source());
+        assert_eq!(decoded.cli_argv(), request.cli_argv());
+        assert!(!decoded.is_turn());
+        assert!(decoded.output_directory().is_none());
     }
 
     #[test]

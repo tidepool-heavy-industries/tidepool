@@ -43,6 +43,36 @@ pub struct SourceCheckRequest<'a> {
     pub fallback_module_name: &'a str,
 }
 
+/// Typecheck the supplied complete module against its admitted source graph.
+///
+/// This operation emits no prepared or native artifacts and grants no authority
+/// to publish a mutable source graph. Diagnostics retain the selected inputs.
+pub fn check_source(request: &SourceCheckRequest<'_>) -> Result<(), CompileError> {
+    let directory = TempDir::new()?;
+    let module = extract_module_name(request.source)
+        .unwrap_or_else(|| request.fallback_module_name.to_owned());
+    let input = directory.path().join(format!("{module}.hs"));
+    std::fs::write(&input, request.source)?;
+    let mut command = ExtractCmd::new().map_err(|error| CompileError::Io(error.into()))?;
+    command.input(&input).check_source().includes(request.include);
+    let bound = command
+        .bind()
+        .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))?;
+    let endpoint = crate::toolchain::AdmittedCompilerEndpoint::from_bound(bound)
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    crate::paths::apply_admitted_build_products_dir(&mut command, &endpoint);
+    let offer = ModuleCandidateOffer::select_admitted(&endpoint, request.include, directory.path());
+    if let Some(manifest) = offer.manifest_path() {
+        command.module_candidates(manifest);
+    }
+    let run = endpoint
+        .execute(&command)
+        .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))?;
+    diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
+        .map(|_| ())
+        .map_err(|error| offer.retain_failure(directory.path(), &run.output.stderr, error))
+}
+
 /// Parse the source before reserving original module and value identities.
 /// This capability contains no checked types or native authority.
 pub fn parse_cell_plan(
