@@ -420,6 +420,55 @@
                   "$out/share/exomonad/compiler-deployment.json"
             '';
 
+          # Keep the source tree and its compiled products as distinct immutable
+          # outputs. The module packager must consume the exact extractor/worker
+          # pair above, and its product root must remain at its final Nix store
+          # path because that path is pinned into the catalog.
+          packages.runtime-stdlib-sources = pkgs.runCommand "tidepool-runtime-stdlib-sources" { } ''
+            mkdir -p "$out/lib"
+            cp -a ${
+              pkgs.lib.cleanSourceWith {
+                src = ./bridge/haskell/lib;
+                filter = path: type:
+                  if type == "directory" then builtins.baseNameOf path != "Prelude_cbor"
+                  else type == "regular" && pkgs.lib.hasSuffix ".hs" path;
+              }
+            }/. "$out/lib/"
+          '';
+
+          packages.tidepool-module-package = tidepoolRustPlatform.buildRustPackage {
+            pname = "tidepool-module-package";
+            version = "0.1.0";
+            src = exomonadSource;
+            cargoDeps = matchedCargoDeps;
+            cargoBuildFlags = [
+              "-p"
+              "tidepool-toolchain"
+              "--bin"
+              "tidepool-module-package"
+            ];
+            cargoInstallFlags = [
+              "-p"
+              "tidepool-toolchain"
+              "--bin"
+              "tidepool-module-package"
+            ];
+            doCheck = false;
+            nativeBuildInputs = [ pkgs.pkg-config ];
+            buildInputs = [ pkgs.openssl ];
+          };
+
+          packages.runtime-stdlib-products = pkgs.runCommand "tidepool-runtime-stdlib-products" { } ''
+            export TIDEPOOL_EXTRACT="${self.packages.${system}.tidepool-extract}/bin/tidepool-extract"
+            export TIDEPOOL_EXTRACT_WORKER="${self.packages.${system}.tidepool-extract}/bin/tidepool-extract-bin"
+            export TIDEPOOL_COMPILER_DEPLOYMENT="${self.packages.${system}.tidepool-extract}/share/exomonad/compiler-deployment.json"
+            export TIDEPOOL_PRELUDE_DIR="${self.packages.${system}.runtime-stdlib-sources}/lib"
+            export TIDEPOOL_GHC_LIBDIR="$(${ghcEnv}/bin/ghc --print-libdir)"
+            ${self.packages.${system}.tidepool-module-package}/bin/tidepool-module-package build \
+              --source-root "${self.packages.${system}.runtime-stdlib-sources}/lib" \
+              --output-root "$out"
+          '';
+
           packages.exomonad-embedded-assets = embeddedWebAssets;
 
           packages.exomonad-unwrapped = tidepoolRustPlatform.buildRustPackage {
@@ -476,6 +525,8 @@
                 --set TIDEPOOL_COMPILER_DEPLOYMENT "${
                   self.packages.${system}.tidepool-extract
                 }/share/exomonad/compiler-deployment.json" \
+                --set TIDEPOOL_PRELUDE_DIR "${self.packages.${system}.runtime-stdlib-sources}/lib" \
+                --set TIDEPOOL_COMPILER_MODULES "${self.packages.${system}.runtime-stdlib-products}/catalog.json" \
                 --set EXOMONAD_INTERACTIVE_CODEX_BIN "${interactiveCodex}/bin/codex" \
                 --set EXOMONAD_CODEX_CLOSURE "${interactiveCodex}" \
                 --set EXOMONAD_NIX_STORE_BIN "${pkgs.nix}/bin/nix-store" \
