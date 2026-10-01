@@ -5,11 +5,13 @@ module Tidepool.CheckedPrefixImports
   , hydrateCompletedValueImports, hydrateCompletedValueImportsWithDependencies
   , transformCompletedValueImports
   , refineOriginalDeclarationImports, refineOriginalDeclarationImportsWithCompleted
+  , refineProgramDeclarationImports
   ) where
 
 import Control.Exception (evaluate)
 import Control.Monad (forM, forM_, unless)
 import Data.List (nub, sort)
+import qualified Data.Map.Strict as Map
 import Data.Word (Word64)
 import GHC (ParsedModule(..), ModSummary(ms_hspp_opts))
 import GHC.Data.Maybe (MaybeErr(..))
@@ -149,6 +151,48 @@ refineOriginalDeclarationImportsWithCompleted owner fingerprint names
   original <- originalRefinement env owner fingerprint names
   intermediate <- refineImports [original] completed env parsed
   refineImports completed [] env intermediate
+
+-- Select the source-ordered declaration winners while keeping every original
+-- owner available through its qualified import. Completed Val selections have
+-- already been pruned by declaration shadowing before they enter this pass.
+refineProgramDeclarationImports
+  :: [(Module,Fingerprint,[[ExportIdentity]])] -> Maybe CompletedValueImports
+  -> HscEnv -> ParsedModule -> IO ParsedModule
+refineProgramDeclarationImports originals captured env parsed = do
+  owners <- mapM (\(owner,fingerprint,groups) -> originalRefinement env owner fingerprint (concat groups)) originals
+  let completed = case captured of Just (CompletedValueImports values) -> values; Nothing -> []
+      namespace TypeNamespace = TypeNamespace
+      namespace ConstructorNamespace = ConstructorNamespace
+      namespace FieldNamespace = FieldNamespace
+      namespace _ = ValueNamespace
+      key identity = (namespace (exportNamespace identity),exportOccurrence identity,exportRecordParent identity)
+      headWinners = Map.fromList [(key headName,owner)
+        | (owner,_,groups) <- originals, headName:_ <- groups]
+      originalWinners = [(key name,owner)
+        | (owner,_,groups) <- originals, group@(headName:_) <- groups
+        , Map.lookup (key headName) headWinners == Just owner, name <- group]
+      winners = Map.fromList (originalWinners ++ [(key name,refinementOwner owner)
+        | owner <- completed, name <- refinementNames owner])
+  verified <- refineImports owners completed env parsed
+  let syntax = unLoc (pm_parsed_source verified)
+      select located = case [owner | owner <- owners
+          , unLoc (ideclName (unLoc located)) == moduleName (refinementOwner owner)
+          , ideclQualified (unLoc located) == NotQualified] of
+        [] -> pure [located]
+        [owner] -> do
+          original <- currentOwner env (refinementOwner owner) (refinementFingerprint owner)
+          selected <- either fail pure (selectedImportNames (mi_exports (hm_iface original)) Nothing)
+          let retained = [name | name <- selected
+                , Map.lookup (key (exportIdentity name)) winners == Just (refinementOwner owner)]
+              declaration = unLoc located
+              replace value = case located of L location _ -> L location value
+          pure [replace declaration {ideclImportList = Just (Exactly,noLocA (map importName retained))}
+            , replace declaration {ideclQualified = QualifiedPre}]
+        _ -> fail "program declaration owner is duplicated"
+  imports <- concat <$> mapM select (hsmodImports syntax)
+  let selected = verified {pm_parsed_source = case pm_parsed_source verified of
+        L location _ -> L location syntax {hsmodImports = imports}}
+  if null completed then pure selected else refineImports completed [] env selected
 
 originalRefinement
   :: HscEnv -> Module -> Fingerprint -> [ExportIdentity] -> IO RefinementOwner

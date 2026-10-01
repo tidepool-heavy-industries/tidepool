@@ -9,6 +9,7 @@ module Tidepool.PlannedDeclaration
   , renderPlannedDeclarationInventory
   , certifyPlannedDeclaration, hydratePlannedDeclarationInventory
   , transformPlannedDeclarationImports, transformPlannedDeclarationImportsWithCompleted
+  , transformProgramDeclarationImports
   ) where
 
 import Control.Monad (unless)
@@ -33,7 +34,7 @@ import GHC.Types.Name.Occurrence
   ( isSymOcc, mkTcOcc, mkVarOcc )
 import Tidepool.CheckedPrefixImports
   ( CompletedValueImports, refineOriginalDeclarationImports
-  , refineOriginalDeclarationImportsWithCompleted )
+  , refineOriginalDeclarationImportsWithCompleted, refineProgramDeclarationImports )
 import Tidepool.Binders
   ( CellSourcePlan(..), CellAnalysisItem(..), CellAnalysisSourceItem(..), CellSourceSpan(..)
   , StmtBinders(..), TurnKind(..), ExportItem(..), LocatedImport(..)
@@ -260,3 +261,11 @@ transformPlannedDeclarationImportsWithCompleted
 transformPlannedDeclarationImportsWithCompleted inventory = refineOriginalDeclarationImportsWithCompleted
   (inventoryOwner inventory) (inventoryInterface inventory)
   (concatMap (\item -> exportHead item : exportChildren item) (plannedExports inventory))
+
+transformProgramDeclarationImports
+  :: [PlannedDeclarationInventory] -> Maybe CompletedValueImports
+  -> HscEnv -> ParsedModule -> IO ParsedModule
+transformProgramDeclarationImports inventories = refineProgramDeclarationImports
+  [(inventoryOwner inventory,inventoryInterface inventory,
+      map (\item -> exportHead item : exportChildren item) (plannedExports inventory))
+    | inventory <- inventories]

@@ -38,7 +38,7 @@ import GHC.Core.DataCon (DataCon)
 import GHC.Core.TyCon (TyCon)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Id (idName)
-import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Types.Name.Occurrence (occNameString, isSymOcc, mkVarOcc)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 
@@ -84,6 +84,7 @@ import qualified Crypto.Hash.SHA256 as SHA256
 import Numeric (showHex, readHex)
 import Tidepool.DeclarationJoin
   ( DeclarationOperation(..), readDeclarationOperation, validateDeclarationJoin
+  , DeclarationExport(..), ExportIdentity(..), ExportNamespace(..)
   , renderDeclarationJoinOutcome, inspectDeclarationArtifacts
   , renderDeclarationInventoryOutcome )
 import qualified Tidepool.WorkerServer as WorkerServer
@@ -101,7 +102,7 @@ import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import GHC.Core.Type (splitFunTy_maybe)
 import Tidepool.CheckedCell (CheckedSignature(..), encodeCheckedSignature)
 import Tidepool.PlannedDeclaration
-  ( PlannedDeclaration, PlannedDeclarationRejection(..), PlannedDeclarationInventory, plannedSource, plannedCheckPlan, replaceTemplateModuleHeader
+  ( PlannedDeclaration, PlannedDeclarationRejection(..), PlannedDeclarationInventory, plannedExports, plannedSource, plannedCheckPlan, replaceTemplateModuleHeader
   , preparePlannedDeclaration, certifyPlannedDeclaration
   , renderPlannedDeclarationInventory, plannedInterfaceFingerprint )
 import Tidepool.Session
@@ -189,6 +190,9 @@ throwCellSplitError errorValue = case errorValue of
     throwIO (LocatedCellRejection sourceSpan
       ("cell ends with a dangling operator `" ++ operatorText
         ++ "`: remove it or supply its right operand"))
+  CellUnsupportedLocalFixity sourceSpan ->
+    throwIO (LocatedCellRejection sourceSpan
+      "local fixity cannot cross prepared item boundaries; put the operator and its fixity in an authored declaration group")
   CellHeaderFailure message -> fail ("cell check template header: " ++ message)
 
 -- | Serve one typed request. Stdout contains exactly one diagnostics document;
@@ -971,7 +975,7 @@ compileClassifiedTurn
   -> IORef (Maybe (FilePath, String))
   -> IO TurnOut
 compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt =
-  compiledTurn <$> compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt
+  compiledTurn <$> compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt []
 
 data CompiledTurnOutput = CompiledTurnOutput
   { compiledTurn :: TurnOut
@@ -983,8 +987,8 @@ data CompiledTurnOutput = CompiledTurnOutput
 compileClassifiedTurnKeeping
   :: Compiler -> RecoveryCaches -> WorkerRequest -> Bool -> FilePath
   -> String -> StmtBinders -> String -> [String] -> Maybe CheckedItemAdmission -> Maybe CheckedDisplayAdmission
-  -> IORef (Maybe (FilePath, String)) -> IO CompiledTurnOutput
-compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt = do
+  -> IORef (Maybe (FilePath, String)) -> [String] -> IO CompiledTurnOutput
+compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt programImports = do
     let templates = requestTurnTemplates args
         -- Splice @tmplFile@ against the turn text, write the spliced module
         -- to a scratch file under 'outDir', and return it alongside the
@@ -1005,7 +1009,10 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
             Nothing -> pure tmplSrc
             Just ((_, owner), _) -> replaceRecipeMarker "default (Int, Double, Text)\n"
               ("import " ++ owner ++ "\ndefault (Int, Double, Text)\n") tmplSrc
-          tmplWithImports <- insertCheckedTypeImports typeImports withOriginal
+          withProgram <- if null programImports then pure withOriginal else
+            replaceRecipeMarker "default (Int, Double, Text)\n"
+              (concatMap (\owner -> "import " ++ owner ++ "\n") programImports ++ "default (Int, Double, Text)\n") withOriginal
+          tmplWithImports <- insertCheckedTypeImports typeImports withProgram
           spliced <- case (display, admitted) of
             (Just admission, Nothing) -> if requestCell args
               then checkedProgramDisplayRecipe admission tmplWithImports
@@ -1015,7 +1022,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
             (Nothing, Just admission) -> do
               withPrefix <- if null (itemValueImports admission) then pure tmplWithImports else
                 replaceRecipeMarker "default (Int, Double, Text)\n"
-                  (concatMap (\(moduleName',names) -> "import " ++ moduleName' ++ " (" ++ intercalate ", " names ++ ")\n")
+                  (concatMap (\(moduleName',names) -> "import " ++ moduleName' ++ " (" ++ intercalate ", " (map renderProgramBinder names) ++ ")\n")
                     (itemValueImports admission) ++ "default (Int, Double, Text)\n") tmplWithImports
               checkedRecipeSource admission withPrefix turnSrc
           if requestActivationPreview args
@@ -1285,6 +1292,7 @@ data ProgramCellState = ProgramCellState
   { programExact :: ExactScope
   , programValues :: [CompletedValueImport]
   , programOriginal :: Maybe ((String,String),String)
+  , programOriginals :: [((String,String),String)]
   , programRetained :: Map.Map SymbolIdentity Word64
   , programPlans :: [CellSourcePlan]
   , programPins :: [CheckedBinderPin]
@@ -1313,7 +1321,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
       (fail "compiled cell reservation count differs from parser")
     root <- requireArg "--session-root" (requestSessionRoot args)
     let outDir = fromMaybe (takeDirectory cellPath </> "cell-program") (requestOutDir args)
-        initialState = ProgramCellState exact [] Nothing (requestRetainedGenerations args)
+        initialState = ProgramCellState exact [] Nothing [] (requestRetainedGenerations args)
           [] [] [] [] [] []
     createDirectoryIfMissing True outDir
     settled <- foldM (compileSegment timing admission template root outDir)
@@ -1346,13 +1354,13 @@ runCellProgramMode compiler caches args cellPath exact planned = do
     compileSegment timing admission template root outDir state (segmentIndex, segment) = do
       let offset = sum (map (length . cellPlanItems) (programPlans state))
           prefix = selectedProgramValues (programValues state)
-          withPrefix = installProgramImports prefix (programOriginal state) segment
+          withPrefix = installProgramImports prefix (programOriginals state) segment
           scope = programExact state
-          localArgs = args { requestInjectVals = map exactModule (maybe [] checkedValueInterfaces (scopeCheckedCell scope))
+          localArgs = args { requestModuleCandidates = Nothing, requestInjectVals = map exactModule (maybe [] checkedValueInterfaces (scopeCheckedCell scope))
             , requestRetainedGenerations = programRetained state }
           scoped :: Compiler
           scoped selection retained purpose session path includes products =
-            compiler selection retained (CellProgramCompile purpose scope) session path includes products
+            compiler selection retained (CellProgramCompile (programPurpose state purpose) scope) session path includes products
           directory = outDir </> "segment-" ++ show segmentIndex
       createDirectoryIfMissing True directory
       case cellPlanItems segment of
@@ -1370,7 +1378,16 @@ runCellProgramMode compiler caches args cellPath exact planned = do
           let original = Just (("main",owner), extractPlannedFingerprint inventory)
           -- Keep the ordered item under its original ordinal; its original
           -- module owns declarations and the generated instances.
+          let declared = [exportOccurrence identity | exported <- plannedExports inventory
+                , identity <- exportHead exported : exportChildren exported
+                , exportNamespace identity /= TypeNamespace]
+              remainingValues = [value { completedValueBinders = kept }
+                | value <- programValues state
+                , let kept = [(name,identifier) | (name,identifier) <- completedValueBinders value, name `notElem` declared]
+                , not (null kept)]
           pure state { programExact = extended, programOriginal = original
+            , programOriginals = programOriginals state ++ maybe [] pure original
+            , programValues = remainingValues
             , programPlans = programPlans state ++ [finalized]
             , programSources = programSources state ++ [plannedSourceFromDirectory finalized]
             , programDeclarations = programDeclarations state ++ [(offset,shaHex receipt)] }
@@ -1423,18 +1440,18 @@ runCellProgramMode compiler caches args cellPath exact planned = do
             (fmap (\value -> case expressionPlanPresentation value of ExpressionRendered -> "rendered"; ExpressionOpaque -> "opaque") expression)
             generation (checkedAdmissionDigest admission) (map programValueImport prefix) observation (programOriginal state)
             prefix (scopeValues scope)
-          localArgs = args { requestBindGen = Just generation, requestSessionRoot = Just root
+          localArgs = args { requestModuleCandidates = Nothing, requestBindGen = Just generation, requestSessionRoot = Just root
             , requestInjectVals = map exactModule (scopeValues scope)
             , requestRetainedGenerations = programRetained state }
           scoped :: Compiler
           scoped selection retained purpose session path includes products =
-            compiler selection retained (CellProgramCompile purpose scope) session path includes products
+            compiler selection retained (CellProgramCompile (programPurpose state purpose) scope) session path includes products
           directory = outDir </> "item-" ++ show index
       createDirectoryIfMissing True directory
       validateCheckedItemAdmission localArgs itemAdmission source verdict
       lastAttempt <- newIORef Nothing
       output <- timePhase timing "cell_program_native" $ compileClassifiedTurnKeeping scoped caches localArgs timing directory
-        source verdict (intercalate ", " (sbBinders verdict)) [] (Just itemAdmission) Nothing lastAttempt
+        source verdict (intercalate ", " (sbBinders verdict)) [] (Just itemAdmission) Nothing lastAttempt (priorProgramImports state)
       extended <- retainProgramProducts directory (compiledPipeline output)
         [originalProduct | originalProduct@(_,owner,_,_) <- compiledOriginalProducts output, T.unpack owner /= compiledModule output] scope
       let turn = compiledTurn output
@@ -1461,17 +1478,17 @@ runCellProgramMode compiler caches args cellPath exact planned = do
             0 [] (checkedTurnTemplates admission) (map exactModule (scopeValues scope)) (map programValueImport prefix)
             (case expressionPlanPresentation expression of ExpressionRendered -> "rendered"; ExpressionOpaque -> "opaque")
             (programOriginal state) prefix (scopeValues scope)
-          localArgs = args { requestBindGen = Just generation, requestSessionRoot = Just root
+          localArgs = args { requestModuleCandidates = Nothing, requestBindGen = Just generation, requestSessionRoot = Just root
             , requestInjectVals = map exactModule (scopeValues scope), requestRetainedGenerations = programRetained state }
           scoped :: Compiler
           scoped selection retained purpose session path includes products =
-            compiler selection retained (CellProgramCompile purpose scope) session path includes products
+            compiler selection retained (CellProgramCompile (programPurpose state purpose) scope) session path includes products
           directory = outDir </> "display-" ++ show index
           verdict = StmtBinders KBind (checkedDisplayBinders display) []
       createDirectoryIfMissing True directory
       lastAttempt <- newIORef Nothing
       output <- timePhase timing "cell_program_display" $ compileClassifiedTurnKeeping scoped caches localArgs timing directory
-        "" verdict (intercalate ", " (sbBinders verdict)) [] Nothing (Just display) lastAttempt
+        "" verdict (intercalate ", " (sbBinders verdict)) [] Nothing (Just display) lastAttempt (priorProgramImports state)
       extended <- retainProgramProducts directory (compiledPipeline output)
         [originalProduct | originalProduct@(_,owner,_,_) <- compiledOriginalProducts output, T.unpack owner /= compiledModule output] scope
       let turn = compiledTurn output
@@ -1487,6 +1504,21 @@ runCellProgramMode compiler caches args cellPath exact planned = do
     extractPlannedFingerprint inventory = plannedInterfaceFingerprint inventory
     plannedSourceFromDirectory plan = concatMap cellAnalysisSource (cellPlanItems plan)
 
+programPurpose :: ProgramCellState -> CompilePurpose -> CompilePurpose
+programPurpose state purpose = case purpose of
+  OriginalDeclarationCompile -> ProgramItemCompile True [] (programOriginals state) (selectedProgramValues (programValues state))
+  CheckedItemCompile annotations _ values -> ProgramItemCompile False annotations (programOriginals state) values
+  other -> other
+
+priorProgramImports :: ProgramCellState -> [String]
+priorProgramImports state = [owner | ((_,owner),_) <- programOriginals state
+  , Just owner /= fmap (snd . fst) (programOriginal state)]
+
+renderProgramBinder :: String -> String
+renderProgramBinder name
+  | isSymOcc (mkVarOcc name) = "(" ++ name ++ ")"
+  | otherwise = name
+
 programValueImport :: CompletedValueImport -> (String,[String])
 programValueImport value = (completedValueModule value,map fst (completedValueBinders value))
 
@@ -1500,15 +1532,15 @@ selectedProgramValues values =
   where winners = Map.fromList [(name,index) | (index,value) <- zip [0::Int ..] values
           , (name,_) <- completedValueBinders value]
 
-installProgramImports :: [CompletedValueImport] -> Maybe ((String,String),String) -> CellSourcePlan -> CellSourcePlan
+installProgramImports :: [CompletedValueImport] -> [((String,String),String)] -> CellSourcePlan -> CellSourcePlan
 installProgramImports values original plan = plan { cellPlanPrologue = prologue
   { prologueImports = prologueImports prologue ++ imports } }
   where
     prologue = cellPlanPrologue plan
     imports = [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ owner)
-      | ((_,owner),_) <- maybe [] pure original]
+      | ((_,owner),_) <- original]
       ++ [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ completedValueModule value
-        ++ " (" ++ intercalate ", " (map fst (completedValueBinders value)) ++ ")") | value <- values]
+        ++ " (" ++ intercalate ", " (map (renderProgramBinder . fst) (completedValueBinders value)) ++ ")") | value <- values]
 
 globalProgramKeys :: Int -> Int -> String -> String
 globalProgramKeys offset count source = T.unpack $ T.replace "__tidepool_program_" "__tidepool_cell_"

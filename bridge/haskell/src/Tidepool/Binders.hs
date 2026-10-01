@@ -258,6 +258,7 @@ data CellSplitError
   | CellPrologueFailure CellSourceSpan String
   | CellHeaderFailure String
   | CellDanglingOperatorFailure CellSourceSpan String
+  | CellUnsupportedLocalFixity CellSourceSpan
   deriving (Eq, Show)
 
 renderCellSplitError :: CellSplitError -> String
@@ -269,6 +270,9 @@ renderCellSplitError (CellDanglingOperatorFailure sourceSpan operatorText) =
   "<cell>:" ++ show (cellEndLine sourceSpan) ++ ":" ++ show (cellEndColumn sourceSpan)
     ++ ": cell ends with a dangling operator `" ++ operatorText
     ++ "`: remove it or supply its right operand"
+renderCellSplitError (CellUnsupportedLocalFixity sourceSpan) =
+  "<cell>:" ++ show (cellStartLine sourceSpan) ++ ":" ++ show (cellStartColumn sourceSpan)
+    ++ ": local fixity cannot cross prepared item boundaries; put the operator and its fixity in an authored declaration group"
 renderCellSplitError (CellHeaderFailure message) =
   "cell check template header: " ++ message
 
@@ -620,7 +624,9 @@ analyzeCellWithGrouping ordered dflags template source = do
     -- KDecl) are spliced without an enclosing section and are not at risk.
     classify effective ordinal item =
       let verdict = classifyWithFlagsExact effective (cellSourceText item)
-       in case (sbKind verdict, cellSourceDanglingOperator item) of
+       in if ordered && sbKind verdict /= KDecl && statementHasLocalFixity effective (cellSourceText item)
+            then Left (CellUnsupportedLocalFixity (cellSourceSpan item))
+            else case (sbKind verdict, cellSourceDanglingOperator item) of
             (KExpr, Just operatorText) ->
               Left (CellDanglingOperatorFailure (cellSourceSpan item) operatorText)
             _ -> Right CellAnalysisItem
@@ -1080,6 +1086,20 @@ classifyWithFlagsExact dflags src = classifyTurn declRes stmtRes modRes
     declRes = unP parseDeclaration (initParserState popts buf loc)
     stmtRes = unP parseStatement   (initParserState popts buf loc)
     modRes  = unP GHC.Parser.parseModule (initParserState popts buf loc)
+
+-- A local fixity affects later statements in a do segment but is not part of
+-- the type-only Val interface. Refuse it before whole-cell admission rather
+-- than reparse a later prepared item with a different associativity.
+statementHasLocalFixity :: DynFlags -> String -> Bool
+statementHasLocalFixity flags source = case lexTokenStream (initParserOpts flags)
+    (stringToStringBuffer source) (mkRealSrcLoc (mkFastString "<turn>") 1 1) of
+  POk _ tokens -> any (fixityToken . unLoc) tokens
+  PFailed _ -> False
+  where
+    fixityToken ITinfix = True
+    fixityToken ITinfixl = True
+    fixityToken ITinfixr = True
+    fixityToken _ = False
 
 -- | Boot a GHC session and classify one turn's source. A SUBSTEP, not a whole
 -- timed unit: it emits no phases of its own — a phase's owner has to be whatever knows it
