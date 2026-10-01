@@ -2121,15 +2121,19 @@ fn compile_invocation_inner(
                             .iter()
                             .any(|module| module.product == cache::ProductAvailability::Ready)
                         {
-                            if let Ok(mut artifacts) = assemble_with_products(
-                                &meta_bytes,
-                                &raw,
-                                &product_bytes,
-                                &[],
-                                Some(&evidence),
-                                None,
-                                &mut on_stage,
-                            ) {
+                            if let Ok(mut artifacts) = decode_fresh_products(&product_bytes)
+                                .and_then(|fresh| {
+                                    assemble_with_products(
+                                        &meta_bytes,
+                                        &raw,
+                                        fresh,
+                                        Vec::new(),
+                                        Some(&evidence),
+                                        None,
+                                        &mut on_stage,
+                                    )
+                                })
+                            {
                                 artifacts.producer_identity =
                                     Some(*endpoint.identity().producer_bytes());
                                 on_stage(
@@ -2281,11 +2285,7 @@ fn compile_invocation_inner(
                     "candidate product certificate unavailable".into(),
                 ));
             }
-            let fresh_products = tidepool_repr::execution_schema::parse_module_products(
-                &product_bytes,
-                &crate::prepared_artifact::production_requirements()?,
-                module_candidates::product_decode_limits(),
-            )?;
+            let fresh_products = decode_fresh_products(&product_bytes)?;
             if !fresh_products.is_empty() {
                 return Err(CompileError::ExtractFailed(
                     "fresh module product certificate unavailable".into(),
@@ -2299,8 +2299,8 @@ fn compile_invocation_inner(
             let artifacts = assemble_with_products(
                 &meta_bytes,
                 &raw,
-                &product_bytes,
-                &[],
+                fresh_products,
+                Vec::new(),
                 evidence.as_ref(),
                 None,
                 &mut *on_stage,
@@ -2311,7 +2311,7 @@ fn compile_invocation_inner(
                     &producer,
                     inv.include,
                     evidence,
-                    &fresh_products,
+                    &artifacts.module_products,
                     &product_bytes,
                     &package_bundle_bytes,
                     inv.source,
@@ -2321,11 +2321,7 @@ fn compile_invocation_inner(
         }
         let receipt = certified_products::decode_receipt(&receipt_bytes)
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-        let fresh_products = tidepool_repr::execution_schema::parse_module_products(
-            &product_bytes,
-            &crate::prepared_artifact::production_requirements()?,
-            module_candidates::product_decode_limits(),
-        )?;
+        let fresh_products = decode_fresh_products(&product_bytes)?;
         let valid_evidence = evidence.as_ref().filter(|value| value.valid(inv.source));
         let cached_receipts: Vec<_> = receipt
             .modules
@@ -2383,11 +2379,12 @@ fn compile_invocation_inner(
                     })
             })
             .collect::<Result<_, _>>()?;
+        let fresh_count = fresh_products.len();
         let mut artifacts = assemble_with_products(
             &meta_bytes,
             &raw,
-            &product_bytes,
-            &extra_products,
+            fresh_products,
+            extra_products,
             evidence.as_ref(),
             exact_request.as_ref(),
             &mut on_stage,
@@ -2449,7 +2446,7 @@ fn compile_invocation_inner(
                 &producer,
                 inv.include,
                 evidence,
-                &fresh_products,
+                &artifacts.module_products[..fresh_count],
                 &product_bytes,
                 &package_bundle_bytes,
                 inv.source,
@@ -2457,7 +2454,7 @@ fn compile_invocation_inner(
         }
         // A memo hit has no certified source group owner mapping. The module
         // store owns reuse for invocations with home products.
-        if exact_request.is_none() && cached_receipts.is_empty() && fresh_products.is_empty() {
+        if exact_request.is_none() && cached_receipts.is_empty() && fresh_count == 0 {
             if let (Some(key), Some(evidence)) = (&inv_key, evidence.as_ref()) {
                 store_memo(
                     key,
@@ -3071,24 +3068,26 @@ pub(crate) fn assemble(
     })
 }
 
+fn decode_fresh_products(bytes: &[u8]) -> Result<Vec<RawModuleProduct>, CompileError> {
+    Ok(tidepool_repr::execution_schema::parse_module_products(
+        bytes,
+        &crate::prepared_artifact::production_requirements()?,
+        module_candidates::product_decode_limits(),
+    )?)
+}
+
 fn assemble_with_products(
     meta_bytes: &[u8],
     raw: &[RawTargetOutput],
-    product_bytes: &[u8],
-    certified_cached: &[RawModuleProduct],
+    fresh_products: Vec<RawModuleProduct>,
+    certified_cached: Vec<RawModuleProduct>,
     evidence: Option<&cache::DependencyEvidence>,
     exact: Option<&crate::declaration_context::ExactCompilationRequest>,
     on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
     let mut artifacts = assemble(meta_bytes, raw, on_stage)?;
-    artifacts.module_products = tidepool_repr::execution_schema::parse_module_products(
-        product_bytes,
-        &crate::prepared_artifact::production_requirements()?,
-        module_candidates::product_decode_limits(),
-    )?;
-    artifacts
-        .module_products
-        .extend_from_slice(certified_cached);
+    artifacts.module_products = fresh_products;
+    artifacts.module_products.extend(certified_cached);
     if let Some(evidence) = evidence {
         let protected: BTreeMap<_, _> = exact
             .into_iter()
@@ -3591,6 +3590,227 @@ mod module_product_tests {
             groups: vec![],
         };
         ensure_ready_module_inventory(&[owner], &evidence).unwrap();
+    }
+
+    fn assembly_product(module: &str, ordinals: &[u32]) -> RawModuleProduct {
+        use tidepool_repr::execution_schema::{testing, Group};
+        RawModuleProduct {
+            unit: "main".into(),
+            module: module.into(),
+            interface: module.as_bytes().to_vec(),
+            groups: ordinals
+                .iter()
+                .map(|ordinal| {
+                    let mut wire = testing::wire_program();
+                    let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+                        unreachable!()
+                    };
+                    top.identity.unit = "main".into();
+                    top.identity.module = module.into();
+                    top.identity.occurrence = format!("entry{ordinal}");
+                    testing::projected_group(wire, *ordinal).unwrap()
+                })
+                .collect(),
+        }
+    }
+
+    fn assembly_evidence(modules: &[&str]) -> cache::DependencyEvidence {
+        cache::DependencyEvidence {
+            version: 4,
+            cache_safe: true,
+            selection_complete: true,
+            sources: Vec::new(),
+            resolutions: Vec::new(),
+            packages: Vec::new(),
+            modules: modules
+                .iter()
+                .map(|module| cache::ModuleEvidence {
+                    unit: "main".into(),
+                    module: (*module).into(),
+                    boot: false,
+                    source: PathBuf::from(format!("{module}.hs")),
+                    imports: Vec::new(),
+                    product: cache::ProductAvailability::Ready,
+                })
+                .collect(),
+        }
+    }
+
+    fn product_metadata() -> Vec<u8> {
+        tidepool_repr::serial::write_metadata(&DataConTable::new(), &MetaWarnings::default())
+            .unwrap()
+    }
+
+    #[test]
+    fn fresh_product_assembly_reuses_validated_module_and_group_allocations() {
+        let fresh = vec![
+            assembly_product("A", &[0, 1]),
+            assembly_product("B", &[2, 3]),
+        ];
+        let modules = fresh.as_ptr();
+        let groups = fresh
+            .iter()
+            .map(|product| product.groups.as_ptr())
+            .collect::<Vec<_>>();
+        let signatures = fresh
+            .iter()
+            .flat_map(|product| &product.groups)
+            .map(|group| group.definitions().signatures().as_ptr())
+            .collect::<Vec<_>>();
+        let artifacts = assemble_with_products(
+            &product_metadata(),
+            &[],
+            fresh,
+            Vec::new(),
+            Some(&assembly_evidence(&["A", "B"])),
+            None,
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(artifacts.module_products.as_ptr(), modules);
+        assert_eq!(
+            artifacts
+                .module_products
+                .iter()
+                .map(|product| product.groups.as_ptr())
+                .collect::<Vec<_>>(),
+            groups
+        );
+        assert_eq!(
+            artifacts
+                .module_products
+                .iter()
+                .flat_map(|product| &product.groups)
+                .map(|group| group.definitions().signatures().as_ptr())
+                .collect::<Vec<_>>(),
+            signatures
+        );
+    }
+
+    #[test]
+    fn fresh_product_assembly_preserves_fresh_prefix_and_cached_only_inventory() {
+        let cached = assembly_product("Cached", &[8, 9]);
+        let cached_signatures = cached.groups[0].definitions().signatures().as_ptr();
+        let fresh = vec![assembly_product("Fresh", &[0, 1])];
+        let artifacts = assemble_with_products(
+            &product_metadata(),
+            &[],
+            fresh,
+            vec![cached],
+            Some(&assembly_evidence(&["Fresh", "Cached"])),
+            None,
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            artifacts
+                .module_products
+                .iter()
+                .map(|product| product.module.as_str())
+                .collect::<Vec<_>>(),
+            ["Fresh", "Cached"]
+        );
+        assert_eq!(
+            artifacts.module_products[1].groups[0]
+                .definitions()
+                .signatures()
+                .as_ptr(),
+            cached_signatures
+        );
+        let cached = vec![assembly_product("Cached", &[8, 9])];
+        let artifacts = assemble_with_products(
+            &product_metadata(),
+            &[],
+            Vec::new(),
+            cached,
+            Some(&assembly_evidence(&["Cached"])),
+            None,
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(artifacts.module_products[0].module, "Cached");
+    }
+
+    #[test]
+    fn fresh_product_assembly_handles_empty_products_and_refuses_duplicate_owners() {
+        assert!(assemble_with_products(
+            &product_metadata(),
+            &[],
+            Vec::new(),
+            Vec::new(),
+            Some(&assembly_evidence(&[])),
+            None,
+            |_, _, _| {}
+        )
+        .unwrap()
+        .module_products
+        .is_empty());
+        assert!(assemble_with_products(
+            &product_metadata(),
+            &[],
+            vec![assembly_product("Owner", &[0])],
+            vec![assembly_product("Owner", &[1])],
+            Some(&assembly_evidence(&["Owner"])),
+            None,
+            |_, _, _| {}
+        )
+        .is_err());
+        assert!(assemble_with_products(
+            &product_metadata(),
+            &[],
+            vec![assembly_product("Other", &[0])],
+            Vec::new(),
+            Some(&assembly_evidence(&["Owner"])),
+            None,
+            |_, _, _| {}
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn fresh_product_byte_admission_refuses_malformed_and_duplicate_wire_owners() {
+        let rows = |names: &[&str]| {
+            Value::Array(vec![
+                Value::Text("TPMOD".into()),
+                Value::Integer(1.into()),
+                Value::Array(
+                    names
+                        .iter()
+                        .map(|name| {
+                            Value::Array(vec![
+                                Value::Text("main".into()),
+                                Value::Text((*name).into()),
+                                Value::Bytes(vec![1]),
+                                Value::Array(Vec::new()),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ])
+        };
+        let encode = |value| {
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+            bytes
+        };
+        assert!(decode_fresh_products(b"malformed product").is_err());
+        assert!(decode_fresh_products(&encode(rows(&["Duplicate", "Duplicate"]))).is_err());
+        let fresh = decode_fresh_products(&encode(rows(&["First", "Second"]))).unwrap();
+        let allocation = fresh.as_ptr();
+        let artifacts = assemble_with_products(
+            &product_metadata(),
+            &[],
+            fresh,
+            Vec::new(),
+            Some(&assembly_evidence(&["First", "Second"])),
+            None,
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(artifacts.module_products.as_ptr(), allocation);
+        assert!(decode_fresh_products(&encode(rows(&[])))
+            .unwrap()
+            .is_empty());
     }
 
     /// This test intentionally crosses the matched Rust frontend, Haskell
