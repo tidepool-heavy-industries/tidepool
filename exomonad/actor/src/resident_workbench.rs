@@ -16222,13 +16222,19 @@ mod request_tests {
             )
             .await
             .unwrap();
-        let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
-            panic!("source binds")
-        };
-        workbench
-            .settle_item(context.clone(), *fragment, *outcome)
-            .await
-            .unwrap();
+        match step {
+            ResidentWorkbenchStep::Running { fragment, outcome } => {
+                workbench
+                    .settle_item(context.clone(), *fragment, *outcome)
+                    .await
+                    .unwrap();
+            }
+            ResidentWorkbenchStep::Committed { .. } => {}
+            ResidentWorkbenchStep::Rejected(rejection) => {
+                panic!("source binding rejected: {}", rejection.output)
+            }
+            _ => panic!("source binding did not complete"),
+        }
         let original_scope = context.placement.lexical_scope;
         let input = workbench
             .access
@@ -16301,12 +16307,13 @@ mod request_tests {
         else {
             panic!("typed request")
         };
-        let types = workbench
+        let (types, custody_before_resume) = workbench
             .access
             .with_machine(context.clone(), move |session, _, _| {
-                Ok(session
+                let types = session
                     .request_site_type_evidence(site)
-                    .expect("closed unit input/reply evidence"))
+                    .expect("closed unit input/reply evidence");
+                Ok((types, session.outstanding_custody()))
             })
             .await
             .unwrap();
@@ -16325,6 +16332,18 @@ mod request_tests {
             .await
             .unwrap();
         workbench
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                assert_eq!(
+                    session.outstanding_custody(),
+                    custody_before_resume,
+                    "borrowed response adds no external custody or binding lease"
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        workbench
             .settle_item(context.clone(), *fragment, outcome)
             .await
             .unwrap();
@@ -16335,11 +16354,6 @@ mod request_tests {
                     session.value_handle_count(),
                     before + 1,
                     "only the completed requestScope binding adds a root"
-                );
-                assert_eq!(
-                    session.outstanding_custody(),
-                    0,
-                    "borrowed request delivery creates no escaping custody"
                 );
                 assert_eq!(
                     session
