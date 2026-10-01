@@ -44,7 +44,7 @@ routing = do
   assertCell owner "identical attention does not invoke the sink again" "checkObserved == 1"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first,second])"
   awaitCell owner "later publications arrive without rearming" "(== ([[\"question-a\",\"question-b\"]])) . map (map questionKey . workQuestions . sourceProgress) . collectedWork <$> readWork forwarding"
-  void $ turn (checkActor producer) "import Tidepool.Agent.Reply (pollReply)\noriginalReply <- pollReply sessionReply"
+  void $ turn (checkActor producer) "import Tidepool.Agent.Reply (pollReply, ReplyState (..))\noriginalReply <- pollReply sessionReply"
   assertCell (checkActor producer) "publishing progress preserves the original reply" "originalReply == ReplyOpen"
   void $ turn (checkActor producer) "respond (\"finished\" :: Text)"
   awaitCell owner "source closure leaves the actor's retained state queryable" "(== ([WorkClosed])) . map Exomonad.Contrib.Routing.sourceStatus . collectedWork <$> readWork forwarding"
@@ -404,11 +404,11 @@ forwardCandidate disposition = do
   else void $ turn (checkActor worker) ("respond (Candidate " <> gitOidLiteral candidate <> " [\"read exact feature\"] [\"independent review remains\"])")
   if disposition == CancelDestination then do
     awaitCell (checkActor lead) "cancellation remains a retained callback failure" "do\n  state <- pollRoute forwarding\n  pure (case state of { RouteFailed _ -> True; _ -> False })\n"
-    void $ turn (checkActor lead) "import Tidepool.Agent.Reply (pollReply)\nobligation <- pollReply sessionReply"
+    void $ turn (checkActor lead) "import Tidepool.Agent.Reply (pollReply, ReplyState (..))\nobligation <- pollReply sessionReply"
     assertCell (checkActor lead) "a cancelled destination cannot silently receive success" "case obligation of { ReplyCancellationRequested _ -> True; _ -> False }"
   else if disposition == LoseProducer then do
     awaitCell (checkActor lead) "lost execution remains explicit in the retained route" "do\n  state <- pollRoute forwarding\n  pure (case state of { RouteFailed _ -> True; _ -> False })\n"
-    void $ turn (checkActor lead) "import Tidepool.Agent.Reply (pollReply)\nobligation <- pollReply sessionReply"
+    void $ turn (checkActor lead) "import Tidepool.Agent.Reply (pollReply, ReplyState (..))\nobligation <- pollReply sessionReply"
     assertCell (checkActor lead) "lost execution does not become a successful candidate" "obligation == ReplyOpen"
   else do
     void $ turn owner "ready <- watch \"forwarded-candidate\" (awaitResponse lead)\nanswer <- awaitWatch ready"
