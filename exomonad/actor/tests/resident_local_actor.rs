@@ -247,16 +247,29 @@ async fn supply_command_until_started(
 }
 
 async fn wait_for_command_completions(backend: &DelayedCommandBackend, count: usize) {
-    loop {
-        if backend
-            .completion_count
-            .load(std::sync::atomic::Ordering::Acquire)
-            >= count
-        {
-            return;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            if backend
+                .completion_count
+                .load(std::sync::atomic::Ordering::Acquire)
+                >= count
+            {
+                return;
+            }
+            backend.completed.notified().await;
         }
-        backend.completed.notified().await;
-    }
+    })
+    .await;
+    assert!(
+        result.is_ok(),
+        "expected {count} command completions, observed {} ({} cancellations)",
+        backend
+            .completion_count
+            .load(std::sync::atomic::Ordering::Acquire),
+        backend
+            .cancellation_count
+            .load(std::sync::atomic::Ordering::Acquire),
+    );
 }
 
 #[tokio::test]
