@@ -637,6 +637,60 @@ impl ExactDeclarationContext {
         Ok(self)
     }
 
+    /// Admit the original supporting homes sealed by the same checked-cell
+    /// transaction. Lexical exposure remains a separate caller-selected graph.
+    pub(crate) fn extend_checked_original_products(
+        mut self,
+        producer_sha256: [u8; 32],
+        products: &[CertifiedRecoveryProduct],
+        exact_imports: &BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
+    ) -> Result<Self, CompileError> {
+        self.admit_producer(producer_sha256)?;
+        let existing = self
+            .inventory
+            .entries()
+            .into_iter()
+            .map(|entry| (entry.descriptor.owner.clone(), entry))
+            .collect::<BTreeMap<_, _>>();
+        let mut entries = Vec::new();
+        for product in products {
+            let owner = identity(&product.owner().unit, &product.owner().module);
+            if let Some(entry) = existing.get(&owner) {
+                let ArtifactPayload::Original(previous) = &entry.payload else {
+                    return Err(failure(
+                        "supporting original collides with type-only interface",
+                    ));
+                };
+                if previous.owner() != product.owner()
+                    || previous.interface_bytes() != product.interface_bytes()
+                    || previous.product_bytes() != product.product_bytes()
+                    || previous.package_imports_bytes() != product.package_imports_bytes()
+                    || previous.certification_bytes() != product.certification_bytes()
+                {
+                    return Err(failure("supporting original differs from retained owner"));
+                }
+                continue;
+            }
+            let mut requirements = crate::certified_products::certified_home_requirements(
+                product.certification_bytes(),
+                product.owner(),
+            )
+            .map_err(failure)?
+            .into_iter()
+            .map(|owner| identity(&owner.unit, &owner.module))
+            .collect::<Vec<_>>();
+            requirements.extend(exact_imports.get(&owner).into_iter().flatten().cloned());
+            entries.push(ArtifactEntry::original(
+                producer_sha256,
+                product.clone(),
+                requirements,
+            )?);
+        }
+        self.inventory = self.inventory.inventory().admit(&self.inventory, entries)?;
+        self.normalize()?;
+        Ok(self)
+    }
+
     pub fn toolchain_identity_sha256(&self) -> [u8; 32] {
         self.producer
     }
@@ -1238,4 +1292,65 @@ fn hex(bytes: &[u8; 32]) -> String {
 fn sha256(bytes: &[u8]) -> String {
     use sha2::Digest;
     format!("{:x}", sha2::Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion};
+    #[test]
+    fn supporting_originals_preserve_owned_products_without_lexical_exposure() {
+        let owner = CachedHomeOwner {
+            unit: "fixture".into(),
+            module: "Support".into(),
+            module_version: ModuleVersion([1; 32]),
+            skinny_iface_sha256: Sha256::digest(b"interface").into(),
+            product_sha256: Sha256::digest(b"product").into(),
+        };
+        let certification =
+            crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
+                .unwrap();
+        let product = CertifiedRecoveryProduct::from_certification(
+            owner.clone(),
+            b"interface".to_vec(),
+            b"product".to_vec(),
+            Vec::new(),
+            certification.clone(),
+        );
+        let context = ExactDeclarationContext::new(&[], &[], Vec::new())
+            .unwrap()
+            .extend_checked_original_products(
+                [2; 32],
+                std::slice::from_ref(&product),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert!(context.lexical_graph().is_empty());
+        assert_eq!(context.artifact_view().descriptors().len(), 1);
+        let repeated = context
+            .clone()
+            .extend_checked_original_products(
+                [2; 32],
+                std::slice::from_ref(&product),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert_eq!(context.semantic_sha256(), repeated.semantic_sha256());
+        assert_eq!(repeated.artifact_view().inventory().node_count(), 1);
+        let changed = CertifiedRecoveryProduct::from_certification(
+            owner,
+            b"interface".to_vec(),
+            b"changed".to_vec(),
+            Vec::new(),
+            certification,
+        );
+        assert!(context
+            .clone()
+            .extend_checked_original_products([2; 32], &[changed], &BTreeMap::new())
+            .is_err());
+        assert!(context
+            .extend_checked_original_products([99; 32], &[product], &BTreeMap::new())
+            .is_err());
+    }
 }

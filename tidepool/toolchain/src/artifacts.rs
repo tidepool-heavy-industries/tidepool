@@ -1962,7 +1962,7 @@ fn compile_invocation_inner(
                 recovery_products: Vec::new(),
             }
         };
-        let mut extra_products: Vec<_> = cached_receipts
+        let extra_products: Vec<_> = cached_receipts
             .iter()
             .map(|module| {
                 candidate_set
@@ -1978,15 +1978,6 @@ fn compile_invocation_inner(
                     })
             })
             .collect::<Result<_, _>>()?;
-        if let Some(request) = exact_request.as_ref() {
-            for product in request.context.recovery_products() {
-                extra_products.extend(tidepool_repr::execution_schema::parse_module_products(
-                    product.product_bytes(),
-                    &crate::prepared_artifact::production_requirements()?,
-                    module_candidates::product_decode_limits(),
-                )?);
-            }
-        }
         let mut artifacts = assemble_with_products(
             &meta_bytes,
             &raw,
