@@ -4,8 +4,9 @@ use super::*;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tidepool_toolchain::declaration_join::{
-    certify_recovered_declaration_tip, ClassInstanceEvidence, DeclarationExport, DeclarationKind,
-    ExportIdentity, ExportNamespace, InstanceInventory, RecoveryDeclarationSelection,
+    certify_recovered_declaration_tip_with_inventory, ClassInstanceEvidence, DeclarationExport,
+    DeclarationKind, ExportIdentity, ExportNamespace, InstanceInventory,
+    RecoveryDeclarationSelection,
 };
 
 /// Configured native composition backed by the lifetime run lock. This trait
@@ -328,10 +329,11 @@ impl SessionLib {
             let selected = graph
                 .artifacts
                 .iter()
-                .filter(|artifact| node.artifact_refs.contains(&artifact.key()))
+                .filter(|artifact| node.artifact_refs.contains(&artifact.artifact_id()))
                 .collect::<Vec<_>>();
             let mut products = Vec::new();
             let mut joins = Vec::new();
+            let mut values = Vec::new();
             for artifact in selected {
                 match artifact {
                     recovery::RecoveryArtifactClosure::Home(reference) => {
@@ -340,8 +342,26 @@ impl SessionLib {
                     recovery::RecoveryArtifactClosure::Join(reference) => {
                         joins.push(reference.clone())
                     }
+                    recovery::RecoveryArtifactClosure::ValueInterface(reference) => {
+                        values.push(reference.clone())
+                    }
                 }
             }
+            let artifact_ids = node.artifact_refs.iter().copied().collect::<BTreeSet<_>>();
+            let descriptors = graph
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact_ids.contains(&artifact.artifact_id()))
+                .map(|artifact| artifact.descriptor())
+                .collect::<Vec<_>>();
+            let dependencies = graph
+                .artifact_dependencies
+                .iter()
+                .filter(|edge| {
+                    artifact_ids.contains(&edge.source) && artifact_ids.contains(&edge.target)
+                })
+                .map(|edge| (edge.source, edge.target, edge.dependency.clone()))
+                .collect::<Vec<_>>();
             let instances = recovered_instances(&node.instances)
                 .ok_or_else(|| invalid("unsupported durable instance identity".into()))?;
             let family_closure = node
@@ -351,10 +371,13 @@ impl SessionLib {
                 .map(recovered_identity)
                 .collect::<Option<Vec<_>>>()
                 .ok_or_else(|| invalid("unsupported durable family closure identity".into()))?;
-            let evidence = Arc::new(certify_recovered_declaration_tip(
+            let evidence = Arc::new(certify_recovered_declaration_tip_with_inventory(
                 recovery_root,
                 &products,
                 &joins,
+                &values,
+                &descriptors,
+                &dependencies,
                 RecoveryDeclarationSelection {
                     root: root.clone(),
                     lexical: node.lexical.clone(),
