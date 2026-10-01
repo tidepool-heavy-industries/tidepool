@@ -16,10 +16,8 @@ fn fixture(
     let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
     let owner = ActorRef::first(ActorId(1));
     let child = ActorRef::first(ActorId(2));
-    let boundary = WorkbenchForkBoundary {
-        thread_id: "thread".into(),
-        call_id: "pending-call".into(),
-    };
+    let boundary =
+        WorkbenchForkBoundary::external("thread".into(), "request".into(), "pending-call".into());
     let attachment = if captured {
         HostedCheckpointAttachment::captured(Arc::new(()))
     } else {
@@ -154,10 +152,8 @@ fn captured_group_selected_admission_requires_exact_scope_and_execution_boundary
     let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
     let owner = ActorRef::first(ActorId(1));
     let child = ActorRef::first(ActorId(2));
-    let boundary = WorkbenchForkBoundary {
-        thread_id: "thread".into(),
-        call_id: "pending-call".into(),
-    };
+    let boundary =
+        WorkbenchForkBoundary::external("thread".into(), "request".into(), "pending-call".into());
     let (group, paths) = groups
         .begin_at_boundary(
             owner,
@@ -184,10 +180,8 @@ fn captured_group_selected_admission_requires_exact_scope_and_execution_boundary
         .unwrap();
     let phase = groups.request_commit(group, owner).unwrap();
     groups.gate(group, child).unwrap().mark_ready().unwrap();
-    let other = WorkbenchForkBoundary {
-        call_id: "other-call".into(),
-        ..boundary.clone()
-    };
+    let other =
+        WorkbenchForkBoundary::external("thread".into(), "request".into(), "other-call".into());
     assert!(matches!(
         groups.publish_captured_group(group, owner, Some(&other), &[(child, selected.clone())]),
         Err(ForkGroupError::NotReady(_))

@@ -74,6 +74,7 @@ tidepool_rust_library(
     srcs_filegroup = ":tidepool_runtime_sources",
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
+        "//exomonad/tool:exomonad_tool",
         "//third-party/rust:blake3",
         "//third-party/rust:ciborium",
         "//third-party/rust:log",
@@ -170,6 +171,7 @@ tidepool_rust_binary(
         "//bridge/atomic-write:tidepool_atomic_write",
         "//bridge/mcp:tidepool_mcp",
         "//bridge/testing:tidepool_testing",
+        "//exomonad/tool:exomonad_tool",
         "//third-party/rust:blake3",
         "//third-party/rust:ciborium",
         "//third-party/rust:frunk",

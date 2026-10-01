@@ -159,10 +159,11 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
             crate::CheckpointSourceLayer::default(),
             session,
             captured_scope,
-            WorkbenchForkBoundary {
-                thread_id: "local-fixture".into(),
-                call_id: "captured-issuer".into(),
-            },
+            WorkbenchForkBoundary::external(
+                "local-fixture".into(),
+                "request".into(),
+                "captured-issuer".into(),
+            ),
             None,
             retained_scope,
             crate::ActorPersistencePolicy::Ephemeral,

@@ -3075,9 +3075,7 @@ where
                     && effect_owner
                         .publication()
                         .boundary()
-                        .is_none_or(|boundary| {
-                            boundary.thread_id.is_empty() || boundary.call_id.is_empty()
-                        })
+                        .is_none_or(|boundary| !boundary.is_complete())
                 {
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
                     "context fork requires recorded invocation provenance from the hosted transport; use a Codex build that supplies contextCallId".into(),
@@ -4347,8 +4345,9 @@ where
                         .publication()
                         .hosted_boundary()
                         .filter(|boundary| {
-                            !boundary.thread_id.is_empty()
-                                && !boundary.call_id.is_empty()
+                            boundary
+                                .hosted()
+                                .is_some_and(exomonad_tool::OriginalOperation::is_complete)
                                 && !name.is_empty()
                         })
                         .cloned()
@@ -9975,17 +9974,15 @@ where
             let context = self.context(kernel.identity());
             let hosted_boundary = hosted_checkpoint_capture.as_ref().and_then(|_| {
                 let invocation_context = invocation.context.as_ref()?;
-                invocation_context.context_call_id.as_ref().map(|call_id| {
-                    tidepool_runtime::session::WorkbenchForkBoundary {
-                        thread_id: invocation_context.thread_id.clone(),
-                        call_id: call_id.clone(),
-                    }
-                })
+                invocation_context
+                    .model_operation()
+                    .cloned()
+                    .map(tidepool_runtime::session::WorkbenchForkBoundary::Hosted)
             });
             if hosted_checkpoint_capture.is_some()
-                && hosted_boundary.as_ref().is_none_or(|boundary| {
-                    boundary.thread_id.is_empty() || boundary.call_id.is_empty()
-                })
+                && hosted_boundary
+                    .as_ref()
+                    .is_none_or(|boundary| !boundary.is_complete())
             {
                 return Err(KernelInvocationFailure::Rejected {
                     actor: context.actor,
@@ -10268,12 +10265,10 @@ where
                 .replace(reservation_owner.clone());
             // This internal completion identity gates only selected-context children.
             // It never authorizes or describes a provider-context fork.
-            let completion = tidepool_runtime::session::WorkbenchForkBoundary {
-                thread_id: format!(
-                    "route-owner:{}@{}",
-                    context.actor.id.0, context.actor.incarnation.0
-                ),
-                call_id: format!("route:{}", watch.0),
+            let completion = tidepool_runtime::session::WorkbenchForkBoundary::Route {
+                actor_id: context.actor.id.0,
+                incarnation: context.actor.incarnation.0,
+                watch_id: watch.0,
             };
             self.fork_publication = ForkPublication::Route(completion.clone());
             let result = async {
@@ -12461,9 +12456,10 @@ mod tests {
 
     #[test]
     fn synthetic_route_boundary_cannot_issue_provider_checkpoint() {
-        let boundary = tidepool_runtime::session::WorkbenchForkBoundary {
-            thread_id: "route-owner:1@1".into(),
-            call_id: "route:9".into(),
+        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::Route {
+            actor_id: 1,
+            incarnation: 1,
+            watch_id: 9,
         };
         assert!(super::ForkPublication::Route(boundary.clone())
             .hosted_boundary()

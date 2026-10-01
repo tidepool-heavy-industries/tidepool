@@ -149,20 +149,34 @@ impl WorkbenchExecutions {
         &self,
         boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
     ) -> Option<WorkbenchBoundaryRecord> {
-        self.0.iter().find_map(|(key, record)| {
+        let mut terminal = None;
+        for (key, record) in &self.0 {
             let WorkbenchReplayKey::Hosted(invocation) = key else {
-                return None;
+                continue;
             };
             if !invocation.matches_boundary(boundary) {
-                return None;
+                continue;
             }
-            Some(match &record.state {
-                WorkbenchExecutionState::Unconfirmed => WorkbenchBoundaryRecord::Unconfirmed,
-                WorkbenchExecutionState::Terminal { reply, .. } => {
-                    WorkbenchBoundaryRecord::Terminal(reply.clone())
+            // Even one completed nested call does not prove that the enclosing
+            // provider program finished or what result it returned.
+            if !invocation.is_original_invocation() {
+                return Some(WorkbenchBoundaryRecord::Unconfirmed);
+            }
+            match &record.state {
+                WorkbenchExecutionState::Unconfirmed => {
+                    return Some(WorkbenchBoundaryRecord::Unconfirmed)
                 }
-            })
-        })
+                WorkbenchExecutionState::Terminal { reply, .. } => {
+                    // Several local invocations may share an original model call.
+                    // None of their individual replies proves its combined result.
+                    if terminal.is_some() {
+                        return Some(WorkbenchBoundaryRecord::Unconfirmed);
+                    }
+                    terminal = Some(reply.clone());
+                }
+            }
+        }
+        terminal.map(WorkbenchBoundaryRecord::Terminal)
     }
 
     /// Every retained execution whose outcome is known, paired with the raw
@@ -198,14 +212,15 @@ mod tests {
 
     #[test]
     fn recovered_workbench_fences_unsettled_native_calls_and_conflicting_input() {
-        let invocation =
-            crate::resident_tools::WorkbenchCallKey::from(exomonad_tool::ToolInvocationContext {
-                context_call_id: Some("outer".into()),
-                thread_id: "thread".into(),
-                turn_id: "turn".into(),
-                call_id: "call".into(),
-                namespace: None,
-            });
+        let invocation = crate::resident_tools::WorkbenchCallKey::from(
+            exomonad_tool::ToolInvocationContext::external(
+                "thread".into(),
+                "turn".into(),
+                "call".into(),
+                Some("outer".into()),
+                None,
+            ),
+        );
         let original = WorkbenchExecutionId::from_digest([1; 16]);
         let successor = WorkbenchExecutionId::from_digest([2; 16]);
         let request = WorkbenchRequest::from_cell_input("effectfulAction")
@@ -274,14 +289,15 @@ mod tests {
 
     #[test]
     fn interrupted_recovery_reads_only_the_exact_terminal_execution() {
-        let invocation =
-            crate::resident_tools::WorkbenchCallKey::from(exomonad_tool::ToolInvocationContext {
-                context_call_id: Some("outer".into()),
-                thread_id: "thread".into(),
-                turn_id: "turn".into(),
-                call_id: "call".into(),
-                namespace: None,
-            });
+        let invocation = crate::resident_tools::WorkbenchCallKey::from(
+            exomonad_tool::ToolInvocationContext::external(
+                "thread".into(),
+                "turn".into(),
+                "outer".into(),
+                Some("outer".into()),
+                None,
+            ),
+        );
         let execution = WorkbenchExecutionId::from_digest([3; 16]);
         let request =
             WorkbenchRequest::from_cell_input("unfold work").with_execution_id(execution.clone());
@@ -295,10 +311,11 @@ mod tests {
         let mut journal = WorkbenchExecutions::default();
         journal.begin(&execution, request.clone(), Some(&invocation));
         assert!(matches!(
-            journal.at_boundary(&tidepool_runtime::session::WorkbenchForkBoundary {
-                thread_id: "thread".into(),
-                call_id: "outer".into(),
-            }),
+            journal.at_boundary(&tidepool_runtime::session::WorkbenchForkBoundary::external(
+                "thread".into(),
+                "turn".into(),
+                "outer".into()
+            )),
             Some(WorkbenchBoundaryRecord::Unconfirmed)
         ));
         journal.record(
@@ -311,17 +328,68 @@ mod tests {
             Some(&invocation),
         );
         assert!(matches!(
-            journal.at_boundary(&tidepool_runtime::session::WorkbenchForkBoundary {
-                thread_id: "thread".into(),
-                call_id: "outer".into(),
-            }),
+            journal.at_boundary(&tidepool_runtime::session::WorkbenchForkBoundary::external("thread".into(), "turn".into(), "outer".into())),
             Some(WorkbenchBoundaryRecord::Terminal(found)) if found == reply
         ));
         assert!(journal
-            .at_boundary(&tidepool_runtime::session::WorkbenchForkBoundary {
-                thread_id: "thread".into(),
-                call_id: "other".into(),
-            })
+            .at_boundary(&tidepool_runtime::session::WorkbenchForkBoundary::external(
+                "thread".into(),
+                "turn".into(),
+                "other".into()
+            ))
             .is_none());
+        assert!(journal
+            .at_boundary(&tidepool_runtime::session::WorkbenchForkBoundary::external(
+                "thread".into(),
+                "later-turn".into(),
+                "outer".into()
+            ))
+            .is_none());
+    }
+
+    #[test]
+    fn several_nested_replies_do_not_prove_the_original_operation_result() {
+        let mut journal = WorkbenchExecutions::default();
+        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "thread".into(),
+            "turn".into(),
+            "outer".into(),
+        );
+        for (index, call) in ["nested-a", "nested-b"].into_iter().enumerate() {
+            let invocation = crate::resident_tools::WorkbenchCallKey::from(
+                exomonad_tool::ToolInvocationContext::external(
+                    "thread".into(),
+                    "turn".into(),
+                    call.into(),
+                    Some("outer".into()),
+                    None,
+                ),
+            );
+            let execution = WorkbenchExecutionId::from_digest([index as u8; 16]);
+            let request =
+                WorkbenchRequest::from_cell_input("pure ()").with_execution_id(execution.clone());
+            let reply = Ok(WorkbenchResponse {
+                status: WorkbenchRunStatus::Committed,
+                summary: Some(call.into()),
+                items: Vec::new(),
+                next_index: 1,
+                total: 1,
+            });
+            journal.record(
+                execution.clone(),
+                request,
+                reply,
+                crate::WorkbenchCancellationOutcome::NotSleeping { execution },
+                Some(&invocation),
+            );
+            assert!(matches!(
+                journal.at_boundary(&boundary),
+                Some(WorkbenchBoundaryRecord::Unconfirmed)
+            ));
+        }
+        assert!(matches!(
+            journal.at_boundary(&boundary),
+            Some(WorkbenchBoundaryRecord::Unconfirmed)
+        ));
     }
 }
