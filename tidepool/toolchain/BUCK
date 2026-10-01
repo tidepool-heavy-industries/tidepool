@@ -101,6 +101,7 @@ rust_filegroup(
         "src/timing.rs": "tidepool/toolchain/src/timing.rs",
         "src/toolchain.rs": "tidepool/toolchain/src/toolchain.rs",
         "src/turn_observations.rs": "tidepool/toolchain/src/turn_observations.rs",
+        "tests/fixtures/deployment-module-package/Consumer.hs": "tidepool/toolchain/tests/fixtures/deployment-module-package/Consumer.hs",
         "tests/fixtures/deployment-module-package/PreludePackage.hs": "tidepool/toolchain/tests/fixtures/deployment-module-package/PreludePackage.hs",
         "tests/fixtures/materialization-fault.c": "tidepool/toolchain/tests/fixtures/materialization-fault.c",
         "tests/fixtures/owned-declaration/ExactConsumer.hs": "tidepool/toolchain/tests/fixtures/owned-declaration/ExactConsumer.hs",

@@ -15,6 +15,7 @@ haskell_library(
     srcs = {
         "Tidepool/Binders.hs": "src/Tidepool/Binders.hs",
         "Tidepool/CborEncode.hs": "src/Tidepool/CborEncode.hs",
+        "Tidepool/CompileInput.hs": "src/Tidepool/CompileInput.hs",
         "Tidepool/DependencyEvidence.hs": "src/Tidepool/DependencyEvidence.hs",
         "Tidepool/DeclarationJoin.hs": "src/Tidepool/DeclarationJoin.hs",
         "Tidepool/WorkerServer.hs": "src/Tidepool/WorkerServer.hs",
