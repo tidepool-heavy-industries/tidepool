@@ -1,0 +1,408 @@
+//! The ordinary disk record references a complete immutable dependency proof.
+//! Resolution restores the full proof before any existing candidate validation.
+
+use super::*;
+use serde::ser::SerializeMap;
+use std::io::Cursor;
+
+#[derive(Debug, Clone)]
+pub(crate) struct SharedEvidence(Arc<SharedProof>);
+
+#[derive(Debug, Clone)]
+struct SharedProof {
+    evidence: DependencyEvidence,
+    reference: std::sync::OnceLock<Option<EvidenceRef>>,
+}
+
+impl From<DependencyEvidence> for SharedEvidence {
+    fn from(evidence: DependencyEvidence) -> Self {
+        Self(Arc::new(SharedProof {
+            evidence,
+            reference: std::sync::OnceLock::new(),
+        }))
+    }
+}
+
+impl std::ops::Deref for SharedEvidence {
+    type Target = DependencyEvidence;
+    fn deref(&self) -> &Self::Target {
+        &self.0.evidence
+    }
+}
+
+impl Serialize for SharedEvidence {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.evidence.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SharedEvidence {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        DependencyEvidence::deserialize(deserializer).map(Self::from)
+    }
+}
+
+#[cfg(test)]
+impl SharedEvidence {
+    pub(crate) fn make_mut(&mut self) -> &mut DependencyEvidence {
+        let proof = Arc::make_mut(&mut self.0);
+        proof.reference.take();
+        &mut proof.evidence
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct EvidenceRef {
+    sha256: String,
+    encoded_len: u64,
+}
+
+pub(super) fn encode_evidence(evidence: &DependencyEvidence) -> Option<(EvidenceRef, Vec<u8>)> {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(evidence, &mut bytes).ok()?;
+    if bytes.len() > RECORD_LIMIT {
+        return None;
+    }
+    Some((
+        EvidenceRef {
+            sha256: sha(&bytes),
+            encoded_len: bytes.len() as u64,
+        },
+        bytes,
+    ))
+}
+
+fn evidence_path(root: &Path, digest: &str) -> PathBuf {
+    root.join(format!("evidence-{digest}.cbor"))
+}
+
+pub(super) fn publish(root: &Path, evidence: &DependencyEvidence) -> Option<()> {
+    let (reference, bytes) = encode_evidence(evidence)?;
+    fs::create_dir_all(root).ok()?;
+    tidepool_atomic_write::write_best_effort(&evidence_path(root, &reference.sha256), &bytes).ok()
+}
+
+struct ByteString<'a>(&'a [u8]);
+impl Serialize for ByteString<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(self.0)
+    }
+}
+
+struct DiskRecord<'a> {
+    record: &'a Record,
+    evidence: &'a EvidenceRef,
+}
+
+impl Serialize for DiskRecord<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let record = self.record;
+        let mut map = serializer.serialize_map(Some(17))?;
+        map.serialize_entry("tag", &record.tag)?;
+        map.serialize_entry("version", &record.version)?;
+        map.serialize_entry("endpoint", &ByteString(&record.endpoint))?;
+        map.serialize_entry("include", &record.include)?;
+        map.serialize_entry("evidence", self.evidence)?;
+        map.serialize_entry("products", &ByteString(&record.products))?;
+        map.serialize_entry("unit", &record.unit)?;
+        map.serialize_entry("module", &record.module)?;
+        map.serialize_entry("source", &record.source)?;
+        map.serialize_entry("source_sha256", &record.source_sha256)?;
+        map.serialize_entry("interface", &ByteString(&record.interface))?;
+        map.serialize_entry("package_imports", &ByteString(&record.package_imports))?;
+        map.serialize_entry("target_source", &record.target_source)?;
+        map.serialize_entry("version_origin", &record.version_origin)?;
+        map.serialize_entry("original_owner", &record.original_owner)?;
+        map.serialize_entry(
+            "original_certification",
+            &ByteString(&record.original_certification),
+        )?;
+        map.serialize_entry("execution_source_sha256", &record.execution_source_sha256)?;
+        map.end()
+    }
+}
+
+pub(super) fn encode_record(record: &Record) -> Option<Vec<u8>> {
+    let reference = record
+        .evidence
+        .0
+        .reference
+        .get_or_init(|| encode_evidence(&record.evidence).map(|(reference, _)| reference))
+        .as_ref()?;
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(
+        &DiskRecord {
+            record,
+            evidence: reference,
+        },
+        &mut bytes,
+    )
+    .ok()?;
+    Some(bytes)
+}
+
+#[derive(Default)]
+pub(super) struct ReadBudget {
+    bytes: u64,
+    pub(super) exhausted: bool,
+    pub(super) evidence_bytes: u64,
+    evidence: BTreeMap<String, (u64, SharedEvidence)>,
+}
+
+impl ReadBudget {
+    pub(super) fn charge(&mut self, bytes: u64) -> Option<()> {
+        let Some(total) = self
+            .bytes
+            .checked_add(bytes)
+            .filter(|total| *total <= PAYLOAD_LIMIT as u64)
+        else {
+            self.exhausted = true;
+            return None;
+        };
+        self.bytes = total;
+        Some(())
+    }
+
+    pub(super) fn evidence_count(&self) -> usize {
+        self.evidence.len()
+    }
+
+    fn resolve(&mut self, root: &Path, reference: &EvidenceRef) -> Option<SharedEvidence> {
+        if reference.sha256.len() != 64
+            || !reference
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || reference.encoded_len > RECORD_LIMIT as u64
+        {
+            return None;
+        }
+        if let Some((len, evidence)) = self.evidence.get(&reference.sha256) {
+            return (*len == reference.encoded_len).then(|| evidence.clone());
+        }
+        let mut file = fs::File::open(evidence_path(root, &reference.sha256)).ok()?;
+        if file.metadata().ok()?.len() != reference.encoded_len {
+            return None;
+        }
+        self.charge(reference.encoded_len)?;
+        let mut bytes = Vec::new();
+        (&mut file)
+            .take(reference.encoded_len + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() as u64 != reference.encoded_len || sha(&bytes) != reference.sha256 {
+            return None;
+        }
+        let mut cursor = Cursor::new(bytes.as_slice());
+        let evidence: SharedEvidence = ciborium::de::from_reader(&mut cursor).ok()?;
+        if cursor.position() != reference.encoded_len {
+            return None;
+        }
+        self.evidence_bytes += reference.encoded_len;
+        self.evidence.insert(
+            reference.sha256.clone(),
+            (reference.encoded_len, evidence.clone()),
+        );
+        Some(evidence)
+    }
+}
+
+pub(super) fn decode_record(
+    payload: &[u8],
+    header: &RecordHeader,
+    root: &Path,
+    budget: &mut ReadBudget,
+) -> Option<Record> {
+    let mut cursor = Cursor::new(payload);
+    let record: Record<EvidenceRef> = ciborium::de::from_reader(&mut cursor).ok()?;
+    if cursor.position() != payload.len() as u64
+        || record.tag != "TPMCAN"
+        || record.version != RECORD_VERSION
+        || RecordHeader::for_record(&record, payload) != *header
+    {
+        return None;
+    }
+    let evidence = budget.resolve(root, &record.evidence)?;
+    Some(Record {
+        tag: record.tag,
+        version: record.version,
+        endpoint: record.endpoint,
+        include: record.include,
+        evidence,
+        products: record.products,
+        unit: record.unit,
+        module: record.module,
+        source: record.source,
+        source_sha256: record.source_sha256,
+        interface: record.interface,
+        package_imports: record.package_imports,
+        target_source: record.target_source,
+        version_origin: record.version_origin,
+        original_owner: record.original_owner,
+        original_certification: record.original_certification,
+        execution_source_sha256: record.execution_source_sha256,
+        execution_source: record.execution_source,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture() -> (tempfile::TempDir, Record, Vec<u8>) {
+        let root = tempfile::tempdir().unwrap();
+        let record = super::super::tests::candidate_fixture(root.path(), "Library");
+        publish(root.path(), &record.evidence).unwrap();
+        let payload = encode_record(&record).unwrap();
+        (root, record, payload)
+    }
+
+    fn decode(
+        payload: &[u8],
+        record: &Record,
+        root: &Path,
+        budget: &mut ReadBudget,
+    ) -> Option<Record> {
+        budget.charge(payload.len() as u64)?;
+        decode_record(
+            payload,
+            &RecordHeader::for_record(record, payload),
+            root,
+            budget,
+        )
+    }
+
+    #[test]
+    fn records_share_full_proof_and_preserve_original_identity() {
+        let (root, record, payload) = fixture();
+        let mut budget = ReadBudget::default();
+        let first = decode(&payload, &record, root.path(), &mut budget).unwrap();
+        let second = decode(&payload, &record, root.path(), &mut budget).unwrap();
+        assert!(Arc::ptr_eq(&first.evidence.0, &second.evidence.0));
+        assert_eq!(budget.evidence_count(), 1);
+        let (_, proof) = encode_evidence(&record.evidence).unwrap();
+        assert_eq!(budget.bytes, 2 * payload.len() as u64 + proof.len() as u64);
+        assert_eq!(
+            serde_json::to_vec(&first.evidence).unwrap(),
+            serde_json::to_vec(&record.evidence).unwrap()
+        );
+        assert_eq!(version_hash(&first), version_hash(&record));
+        assert_eq!(first.products, record.products);
+        assert_eq!(first.interface, record.interface);
+        assert_eq!(first.package_imports, record.package_imports);
+        assert_eq!(first.original_certification, record.original_certification);
+        assert_eq!(encode_record(&first), Some(payload));
+    }
+
+    #[test]
+    fn storage_format_refuses_inline_proof_and_previous_version() {
+        let (root, mut record, _) = fixture();
+        let mut inline = Vec::new();
+        ciborium::ser::into_writer(&record, &mut inline).unwrap();
+        assert!(decode(&inline, &record, root.path(), &mut ReadBudget::default()).is_none());
+        record.version = RECORD_VERSION - 1;
+        let previous = encode_record(&record).unwrap();
+        assert!(decode(&previous, &record, root.path(), &mut ReadBudget::default()).is_none());
+    }
+
+    #[test]
+    fn distinct_proofs_charge_the_aggregate_and_remain_separate() {
+        let (root, record, payload) = fixture();
+        let mut different = record.clone();
+        different.evidence.make_mut().sources[0].sha256 = sha(b"different invocation");
+        publish(root.path(), &different.evidence).unwrap();
+        let second_payload = encode_record(&different).unwrap();
+        let mut budget = ReadBudget::default();
+        let first = decode(&payload, &record, root.path(), &mut budget).unwrap();
+        let second = decode(&second_payload, &different, root.path(), &mut budget).unwrap();
+        assert!(!Arc::ptr_eq(&first.evidence.0, &second.evidence.0));
+        assert_eq!(budget.evidence_count(), 2);
+        let (_, proof) = encode_evidence(&record.evidence).unwrap();
+        let (_, different_proof) = encode_evidence(&different.evidence).unwrap();
+        assert_eq!(
+            budget.bytes,
+            (payload.len() + second_payload.len() + proof.len() + different_proof.len()) as u64
+        );
+
+        let mut budget = ReadBudget::default();
+        decode(&payload, &record, root.path(), &mut budget).unwrap();
+        budget.bytes = PAYLOAD_LIMIT as u64 - second_payload.len() as u64;
+        assert!(decode(&second_payload, &different, root.path(), &mut budget).is_none());
+        assert!(budget.exhausted);
+    }
+
+    #[test]
+    fn missing_changed_or_trailing_shared_proof_is_a_miss() {
+        let (root, record, payload) = fixture();
+        let (reference, mut proof) = encode_evidence(&record.evidence).unwrap();
+        let path = evidence_path(root.path(), &reference.sha256);
+        fs::remove_file(&path).unwrap();
+        assert!(decode(&payload, &record, root.path(), &mut ReadBudget::default()).is_none());
+        *proof.last_mut().unwrap() ^= 1;
+        fs::write(&path, &proof).unwrap();
+        assert!(decode(&payload, &record, root.path(), &mut ReadBudget::default()).is_none());
+
+        let (_, mut proof) = encode_evidence(&record.evidence).unwrap();
+        proof.push(0);
+        let trailing = EvidenceRef {
+            sha256: sha(&proof),
+            encoded_len: proof.len() as u64,
+        };
+        fs::write(evidence_path(root.path(), &trailing.sha256), &proof).unwrap();
+        let mut changed = Vec::new();
+        ciborium::ser::into_writer(
+            &DiskRecord {
+                record: &record,
+                evidence: &trailing,
+            },
+            &mut changed,
+        )
+        .unwrap();
+        assert!(decode(&changed, &record, root.path(), &mut ReadBudget::default()).is_none());
+    }
+
+    #[test]
+    fn references_and_aggregate_input_remain_bounded() {
+        let (root, record, payload) = fixture();
+        let (reference, _) = encode_evidence(&record.evidence).unwrap();
+        for altered in [
+            EvidenceRef {
+                sha256: "../proof".into(),
+                encoded_len: reference.encoded_len,
+            },
+            EvidenceRef {
+                sha256: reference.sha256.clone(),
+                encoded_len: reference.encoded_len + 1,
+            },
+            EvidenceRef {
+                sha256: reference.sha256.clone(),
+                encoded_len: RECORD_LIMIT as u64 + 1,
+            },
+        ] {
+            let mut changed = Vec::new();
+            ciborium::ser::into_writer(
+                &DiskRecord {
+                    record: &record,
+                    evidence: &altered,
+                },
+                &mut changed,
+            )
+            .unwrap();
+            assert!(decode(&changed, &record, root.path(), &mut ReadBudget::default()).is_none());
+        }
+        let mut budget = ReadBudget {
+            bytes: PAYLOAD_LIMIT as u64 - payload.len() as u64,
+            ..Default::default()
+        };
+        assert!(decode(&payload, &record, root.path(), &mut budget).is_none());
+        assert!(
+            budget.exhausted,
+            "the unique proof is charged to the aggregate input"
+        );
+
+        let mut trailing = payload;
+        trailing.push(0);
+        assert!(decode(&trailing, &record, root.path(), &mut ReadBudget::default()).is_none());
+    }
+}

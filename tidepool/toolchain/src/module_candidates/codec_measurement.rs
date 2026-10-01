@@ -28,7 +28,7 @@ impl LegacyRecord {
             version: RECORD_VERSION,
             endpoint: self.endpoint,
             include: self.include,
-            evidence: self.evidence,
+            evidence: self.evidence.into(),
             products: self.products,
             unit: self.unit,
             module: self.module,
@@ -123,7 +123,7 @@ fn retained_record_codec_measurement() {
         "retained_payload_sha256":sha(payload),"retained_payload_bytes":payload.len(),
         "unit":record.unit,"module":record.module,"original_buffers":identity,
         "record_version_after":RECORD_VERSION,"profile":"cargo test dev (unoptimized + debuginfo)",
-        "scope":"CBOR record body codec; excludes framing, hashing, filesystem and compiler execution",
+        "scope":"legacy inline in-memory record codec; excludes v11 shared-proof disk framing, hashing, filesystem and compiler execution",
         "first_timed_round":0,"warm_timed_rounds":10,"rounds":rows
     })).unwrap()).unwrap();
 }
@@ -204,4 +204,308 @@ fn retained_core_publication_framing_identity() {
         "original_buffers":identity,"cases":rows,
         "scope":"Byte identity and original ownership only; no compiler or runtime latency claim"
     })).unwrap()).unwrap();
+}
+
+/// The old inline proof format is accepted only by this opt-in retained fixture.
+#[test]
+#[ignore = "requires a private retained v10 producer directory and empty private cache"]
+fn retained_shared_evidence_inventory_measurement() {
+    let input = PathBuf::from(
+        std::env::var_os("TIDEPOOL_SHARED_EVIDENCE_INPUT").expect("retained producer directory"),
+    );
+    let report =
+        PathBuf::from(std::env::var_os("TIDEPOOL_SHARED_EVIDENCE_REPORT").expect("report output"));
+    let mut paths = Vec::new();
+    for shard in fs::read_dir(&input).unwrap() {
+        let shard = shard.unwrap().path();
+        if shard.is_dir() {
+            for entry in fs::read_dir(shard).unwrap() {
+                let path = entry.unwrap().path();
+                if path
+                    .extension()
+                    .is_some_and(|extension| extension == "cbor")
+                {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+    paths.sort();
+    assert_eq!(
+        paths.len(),
+        70,
+        "the retained production fixture has 70 owner records"
+    );
+    let requirements = crate::prepared_artifact::production_requirements().unwrap();
+    let mut old_bytes = 0usize;
+    let mut new_bytes = 0usize;
+    let mut old_proof_bytes = 0usize;
+    let mut unique_proofs = BTreeMap::new();
+    let mut owners = Vec::new();
+    let mut groups = Vec::new();
+    let mut symbols = BTreeSet::new();
+    let mut globals = BTreeSet::new();
+    let mut binder_references = 0usize;
+    let mut global_references = 0usize;
+    let mut referenced_graphs = BTreeSet::new();
+    let mut endpoint = None;
+    let mut include = None;
+    for path in &paths {
+        let file = fs::read(path).unwrap();
+        assert_eq!(&file[..8], b"TPCREC9\n");
+        let header_len = u32::from_be_bytes(file[8..12].try_into().unwrap()) as usize;
+        assert!(header_len <= HEADER_LIMIT);
+        let header: RecordHeader = serde_json::from_slice(&file[12..12 + header_len]).unwrap();
+        let body = &file[12 + header_len..];
+        assert!(body.len() <= RECORD_LIMIT);
+        assert_eq!(header.payload_len, body.len() as u64);
+        assert_eq!(header.payload_sha256, sha(body));
+        let mut cursor = std::io::Cursor::new(body);
+        let mut record: Record = ciborium::de::from_reader(&mut cursor).unwrap();
+        assert_eq!(cursor.position(), body.len() as u64);
+        assert_eq!(record.version, 8);
+        assert!(RecordHeader::for_record(&record, body) == header);
+        let identity = buffers(&record);
+        record.version = RECORD_VERSION;
+        let (reference, proof) = shared_evidence::encode_evidence(&record.evidence).unwrap();
+        if let Some(digest) = record.execution_source_sha256 {
+            referenced_graphs.insert(digest);
+        }
+        old_proof_bytes += proof.len();
+        unique_proofs.insert(sha(&proof), proof.len());
+        let producer_dir = record_dir(&record.endpoint);
+        assert!(
+            !producer_dir.starts_with(&input),
+            "measurement must not mutate the retained input"
+        );
+        shared_evidence::publish(&producer_dir, &record.evidence).unwrap();
+        let root = selected_record_root(&record).expect("unchanged current source selection");
+        let shard = root_shard(&producer_dir, &root);
+        fs::create_dir_all(&shard).unwrap();
+        let framed = encode_record_checked(&record).unwrap();
+        let frame_header_len = u32::from_be_bytes(framed[8..12].try_into().unwrap()) as usize;
+        new_bytes += framed.len() - 12 - frame_header_len;
+        old_bytes += body.len();
+        let output = shard.join(path.file_name().unwrap());
+        fs::write(&output, framed).unwrap();
+        let restored = read_record_path(&output).unwrap();
+        assert_eq!(buffers(&restored), identity);
+        assert_eq!(
+            restored.original_owner.owner(),
+            record.original_owner.owner()
+        );
+        assert_eq!(
+            restored.original_certification,
+            record.original_certification
+        );
+        assert_eq!(
+            serde_json::to_vec(&restored.evidence).unwrap(),
+            serde_json::to_vec(&record.evidence).unwrap()
+        );
+        assert!(record.evidence.valid(&record.target_source));
+        for product in tidepool_repr::execution_schema::parse_module_products(
+            &record.products,
+            &requirements,
+            product_decode_limits(),
+        )
+        .unwrap()
+        {
+            for group in &product.groups {
+                let inventory = group_inventory(group);
+                let fields = inventory.as_array().unwrap();
+                for binder in fields[1].as_array().unwrap() {
+                    let mut bytes = Vec::new();
+                    ciborium::ser::into_writer(binder, &mut bytes).unwrap();
+                    symbols.insert(bytes);
+                    binder_references += 1;
+                }
+                for global in fields[2].as_array().unwrap() {
+                    let mut bytes = Vec::new();
+                    ciborium::ser::into_writer(global, &mut bytes).unwrap();
+                    globals.insert(bytes);
+                    let mut symbol = Vec::new();
+                    ciborium::ser::into_writer(&global.as_array().unwrap()[0], &mut symbol)
+                        .unwrap();
+                    symbols.insert(symbol);
+                    global_references += 1;
+                }
+                groups.push(inventory);
+            }
+        }
+        if let Some(expected) = &endpoint {
+            assert_eq!(expected, &record.endpoint);
+        } else {
+            endpoint = Some(record.endpoint.clone());
+        }
+        if let Some(expected) = &include {
+            assert_eq!(expected, &record.include);
+        } else {
+            include = Some(record.include.clone());
+        }
+        owners.push(serde_json::json!({"module":record.module,"identity":identity,"proof_storage_sha256":serde_json::to_value(reference).unwrap()}));
+    }
+    let endpoint = endpoint.unwrap();
+    let producer_dir = record_dir(&endpoint);
+    let mut graph_bytes = 0usize;
+    let mut graph_count = 0usize;
+    for entry in fs::read_dir(&input).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file()
+            && path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("execution-")
+        {
+            graph_bytes += fs::metadata(&path).unwrap().len() as usize;
+            graph_count += 1;
+            fs::copy(&path, producer_dir.join(path.file_name().unwrap())).unwrap();
+        }
+    }
+    let include = include.unwrap();
+    let selected =
+        ordinary_records(&endpoint, &include, true).expect("production aggregate read fits");
+    assert_eq!(selected.len(), 70);
+    let mut group_wire = Vec::new();
+    ciborium::ser::into_writer(&Value::Array(groups.clone()), &mut group_wire).unwrap();
+    let referenced_graph_bytes: usize = referenced_graphs
+        .iter()
+        .map(|digest| {
+            fs::metadata(graph_path(&producer_dir, digest))
+                .unwrap()
+                .len() as usize
+        })
+        .sum();
+    let symbol_indices: BTreeMap<_, _> = symbols
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| (bytes.clone(), index))
+        .collect();
+    let global_indices: BTreeMap<_, _> = globals
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| (bytes.clone(), index))
+        .collect();
+    let encoded = |value: &Value| {
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(value, &mut bytes).unwrap();
+        bytes
+    };
+    let symbol_table = Value::Array(
+        symbols
+            .iter()
+            .map(|bytes| ciborium::de::from_reader(bytes.as_slice()).unwrap())
+            .collect(),
+    );
+    let global_table = Value::Array(
+        globals
+            .iter()
+            .map(|bytes| {
+                let value: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+                let mut fields = value.as_array().unwrap().clone();
+                fields[0] = Value::Integer((symbol_indices[&encoded(&fields[0])] as u64).into());
+                Value::Array(fields)
+            })
+            .collect(),
+    );
+    let indexed_groups = Value::Array(
+        groups
+            .iter()
+            .map(|group| {
+                let fields = group.as_array().unwrap();
+                Value::Array(vec![
+                    fields[0].clone(),
+                    Value::Array(
+                        fields[1]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|binder| {
+                                Value::Integer((symbol_indices[&encoded(binder)] as u64).into())
+                            })
+                            .collect(),
+                    ),
+                    Value::Array(
+                        fields[2]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|global| {
+                                Value::Integer((global_indices[&encoded(global)] as u64).into())
+                            })
+                            .collect(),
+                    ),
+                ])
+            })
+            .collect(),
+    );
+    let indexed_inventory_bytes = encoded(&Value::Array(vec![
+        symbol_table,
+        global_table,
+        indexed_groups,
+    ]))
+    .len();
+    let trace_path = report.with_extension("selection.log");
+    let subscriber = RetainedMeasurementSubscriber(trace_path);
+    let selection = tracing::subscriber::with_default(subscriber, || {
+        select_records_inner(
+            &endpoint,
+            &include,
+            &producer_dir.join("offer-scratch"),
+            selected
+                .into_iter()
+                .map(|record| (record, CandidateOrigin::Ordinary))
+                .collect(),
+            Some(&ExactCandidateExclusions::new(
+                BTreeSet::new(),
+                BTreeSet::new(),
+            )),
+        )
+    });
+    let selection_owners = selection.as_ref().map(|selection| selection.by_owner.len());
+    let distinct_proof_bytes: usize = unique_proofs.values().sum();
+    assert!(old_bytes > PAYLOAD_LIMIT);
+    assert!(new_bytes + distinct_proof_bytes < PAYLOAD_LIMIT);
+    fs::write(report, serde_json::to_vec_pretty(&serde_json::json!({
+        "scope":"private retained v10 conversion and production v11 ordinary record reader; no worker compilation or wall-clock speedup claim",
+        "old_record_count":paths.len(),"old_payload_bytes":old_bytes,"old_inline_proof_bytes":old_proof_bytes,
+        "new_payload_bytes":new_bytes,"unique_proofs":unique_proofs.len(),"unique_proof_bytes":distinct_proof_bytes,
+        "new_aggregate_read_bytes":new_bytes+distinct_proof_bytes,"payload_limit":PAYLOAD_LIMIT,"production_records_recovered":70,"production_selection_owners":selection_owners,
+        "group_rows":groups.len(),"group_inventory_cbor_bytes":group_wire.len(),"unique_symbols":symbols.len(),"unique_full_globals":globals.len(),
+        "binder_references":binder_references,"global_references":global_references,"unique_symbol_cbor_bytes":symbols.iter().map(Vec::len).sum::<usize>(),
+        "unique_global_cbor_bytes":globals.iter().map(Vec::len).sum::<usize>(),"graph_files":graph_count,"graph_file_bytes":graph_bytes,"referenced_graphs":referenced_graphs.len(),"referenced_graph_bytes":referenced_graph_bytes,
+        "indexed_inventory_model_bytes":indexed_inventory_bytes,"owners":owners
+    })).unwrap()).unwrap();
+}
+
+struct RetainedMeasurementSubscriber(PathBuf);
+impl tracing::Subscriber for RetainedMeasurementSubscriber {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Fields(BTreeMap<String, String>);
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.insert(field.name().into(), format!("{value:?}"));
+            }
+        }
+        let mut fields = Fields(BTreeMap::new());
+        event.record(&mut fields);
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.0)
+            .unwrap();
+        serde_json::to_writer(&mut file, &fields.0).unwrap();
+        use std::io::Write;
+        file.write_all(b"\n").unwrap();
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
 }

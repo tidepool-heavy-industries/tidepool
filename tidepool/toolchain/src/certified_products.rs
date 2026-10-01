@@ -3084,7 +3084,7 @@ pub(crate) fn certify_products(
                         bundle.product_bytes.as_slice(),
                         bundle.product_bytes.as_slice(),
                         bundle.package_imports_bytes.as_slice(),
-                        &bundle.evidence,
+                        &*bundle.evidence,
                         ready_source_sha(&bundle.evidence, &key.0, &key.1)?,
                         bundle.owner.module_version.clone(),
                     )
@@ -5311,7 +5311,7 @@ mod tests {
                 package_imports_sha256: hex(&sha(&package_bytes)),
                 package_imports_bytes: package_bytes,
                 product_bytes,
-                evidence,
+                evidence: evidence.into(),
                 target_source: "target".into(),
                 origin: crate::module_candidates::CandidateOrigin::Ordinary,
                 original_execution: None,
@@ -5334,23 +5334,31 @@ mod tests {
         use crate::cache::{ImportQualifier, ModuleImportEvidence, ResolutionEvidence};
         let (mut a, accepted_a, original_a) = cached_closure_fixture(root, "A");
         let (b, accepted_b, original_b) = cached_closure_fixture(root, "B");
-        a.evidence.modules[1].imports.push(ModuleImportEvidence {
-            qualifier: ImportQualifier::Unqualified,
-            module: "B".into(),
-            boot: false,
-            selected: Some(b.source.clone()),
-        });
-        a.evidence.resolutions.push(ResolutionEvidence {
+        a.evidence.make_mut().modules[1]
+            .imports
+            .push(ModuleImportEvidence {
+                qualifier: ImportQualifier::Unqualified,
+                module: "B".into(),
+                boot: false,
+                selected: Some(b.source.clone()),
+            });
+        a.evidence.make_mut().resolutions.push(ResolutionEvidence {
             qualifier: ImportQualifier::Unqualified,
             module: "B".into(),
             boot: false,
             selected: Some(b.source.clone()),
             candidates: vec![b.source.clone()],
         });
-        a.evidence.sources.push(b.evidence.sources[1].clone());
-        a.evidence.modules.push(b.evidence.modules[1].clone());
+        a.evidence
+            .make_mut()
+            .sources
+            .push(b.evidence.sources[1].clone());
+        a.evidence
+            .make_mut()
+            .modules
+            .push(b.evidence.modules[1].clone());
         assert!(a.evidence.valid(&a.target_source));
-        let current = a.evidence.clone();
+        let current = (*a.evidence).clone();
         (
             CandidateSet {
                 manifest_path: root.join("unused.cbor"),

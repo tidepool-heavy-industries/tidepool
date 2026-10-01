@@ -1018,7 +1018,7 @@ mod tests {
 
         let other = Fixture::new();
         let mut records = other.load().unwrap().records(&[3; 32]).unwrap();
-        records[0].evidence.modules[0]
+        records[0].evidence.make_mut().modules[0]
             .imports
             .push(ModuleImportEvidence {
                 qualifier: ImportQualifier::Unqualified,
@@ -1030,8 +1030,8 @@ mod tests {
             validate_closed(&records, &other.source),
             Err(ModulePackageError::OpenCohort)
         ));
-        records[0].evidence.modules[0].imports[0].module = "Library".into();
-        records[0].evidence.modules[0].imports[0].selected =
+        records[0].evidence.make_mut().modules[0].imports[0].module = "Library".into();
+        records[0].evidence.make_mut().modules[0].imports[0].selected =
             Some(other.source.join("WrongSource.hs"));
         assert!(matches!(
             validate_closed(&records, &other.source),
@@ -1043,7 +1043,7 @@ mod tests {
     fn strict_producer_cannot_hide_missing_prelude_behind_closed_leaves() {
         let fixture = Fixture::new();
         let records = fixture.load().unwrap().records(&[3; 32]).unwrap();
-        let mut evidence = records[0].evidence.clone();
+        let mut evidence = (*records[0].evidence).clone();
         evidence.modules.push(ModuleEvidence {
             unit: "u".into(),
             module: "Tidepool.Prelude".into(),
