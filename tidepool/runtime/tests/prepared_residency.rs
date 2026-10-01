@@ -339,7 +339,11 @@ fn custody_resume_classifies_rejected_frame_and_consumed_failure() {
     else {
         panic!("Console request must suspend");
     };
-    let held = notebook.session.prepared_binding_handle("held").unwrap();
+    let held = notebook
+        .session
+        .retain_binding_custody("held")
+        .expect("retain independent binding custody")
+        .unwrap();
     let error = notebook
         .session
         .resume_framed_custody_classified(
@@ -370,7 +374,11 @@ fn custody_resume_classifies_rejected_frame_and_consumed_failure() {
     else {
         panic!("Console request must suspend before its failure");
     };
-    let held = notebook.session.prepared_binding_handle("held").unwrap();
+    let held = notebook
+        .session
+        .retain_binding_custody("held")
+        .expect("retain independent binding custody")
+        .unwrap();
     let error = notebook
         .session
         .resume_handle_classified(hole, held)
@@ -423,7 +431,8 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
     );
     let custody = left
         .session
-        .prepared_binding_handle("held")
+        .retain_binding_custody("held")
+        .expect("retain independent binding custody")
         .expect("the bound name resolves to a live custody token");
     let before = left
         .session
@@ -440,6 +449,15 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
         left_handles_before - 1,
         "export releases the exported handle exactly as discard_custody would"
     );
+
+    // Consuming independently retained custody must leave the authored binding
+    // usable by a later native program in its original session.
+    let source_use = left.prepare_expression("pure (held + 1)");
+    left.expression(&source_use);
+    assert!(left
+        .session
+        .current_binding_in(tidepool_codegen::scope::ScopeId::ROOT, "held")
+        .is_some());
 
     let right_handles_before = right.session.value_handle_count();
     let imported = right

@@ -346,7 +346,8 @@ impl Default for SessionRunContext {
 
 /// Exclusive owned handle for one machine-rooted value.
 ///
-/// The session creates this handle when a finalized value leaves a parked frame.
+/// The session creates this handle when a finalized value leaves a parked frame
+/// or when a caller explicitly retains independent custody of a live binding.
 /// Consuming operations may deliver it once, adopt it into a binding, move it
 /// to another resource scope, or discard it. Raw [`ValueHandle`] access stays
 /// inside this module, so external callers cannot duplicate an ownership
@@ -361,16 +362,6 @@ pub struct RootCustody {
     handle: Option<ValueHandle>,
     cleanup: CustodyLease,
     provenance: Arc<ProgramProvenance>,
-    /// `true` when this token ALIASES a handle another owner (a live
-    /// binding, at present -- see [`ResidentSession::prepared_binding_handle`])
-    /// already keeps rooted, rather than exclusively owning it. An ordinary
-    /// (non-shared) handle's whole contract is "abandon it and its root is
-    /// released" -- exactly wrong for an alias, since abandoning the ALIAS
-    /// must not touch the root the other owner still needs. Sharing only
-    /// changes what an unconsumed drop does; every consuming operation
-    /// (delivery, mount, discard) behaves exactly as it does for an
-    /// exclusive ownership.
-    shared: bool,
 }
 
 // Custody must remain exclusive.
@@ -387,23 +378,6 @@ impl RootCustody {
             handle: Some(handle),
             cleanup: CustodyLease::new(cleanup),
             provenance,
-            shared: false,
-        }
-    }
-
-    /// [`Self::new`], but the wrapped handle aliases a root some other
-    /// owner already keeps alive (see the `shared` field doc) — dropping
-    /// this token unconsumed must not enqueue that root for release.
-    fn shared(
-        handle: ValueHandle,
-        cleanup: Arc<CustodyCleanup>,
-        provenance: Arc<ProgramProvenance>,
-    ) -> Self {
-        RootCustody {
-            handle: Some(handle),
-            cleanup: CustodyLease::new(cleanup),
-            provenance,
-            shared: true,
         }
     }
 
@@ -421,7 +395,6 @@ impl RootCustody {
             cleanup: self.cleanup.clone(),
             provenance: Arc::clone(&self.provenance),
             committed: false,
-            shared: self.shared,
         }
     }
 }
@@ -429,9 +402,7 @@ impl RootCustody {
 impl Drop for RootCustody {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
-            if !self.shared {
-                self.cleanup.enqueue(handle);
-            }
+            self.cleanup.enqueue(handle);
         }
     }
 }
@@ -540,7 +511,7 @@ impl Drop for BindingLease {
 
 /// Counts external ownership independently of temporary Arc references. Drop
 /// implementations enqueue their cleanup first; this field then releases the
-/// count before waking the owner, including shared/committed transfers.
+/// count before waking the owner, including committed transfers.
 #[derive(Debug)]
 struct CustodyLease(Arc<CustodyCleanup>);
 
@@ -617,10 +588,6 @@ struct CustodyTransfer {
     cleanup: CustodyLease,
     provenance: Arc<ProgramProvenance>,
     committed: bool,
-    /// Carried from the source [`RootCustody`] — see that type's `shared`
-    /// field doc. A transfer that fails before `commit` drops uncommitted,
-    /// same as an ordinary abandoned handle, so this must agree.
-    shared: bool,
 }
 
 impl CustodyTransfer {
@@ -630,25 +597,17 @@ impl CustodyTransfer {
 
     fn into_custody(mut self) -> RootCustody {
         self.committed = true;
-        if self.shared {
-            RootCustody::shared(
-                self.handle,
-                Arc::clone(&self.cleanup.0),
-                Arc::clone(&self.provenance),
-            )
-        } else {
-            RootCustody::new(
-                self.handle,
-                Arc::clone(&self.cleanup.0),
-                Arc::clone(&self.provenance),
-            )
-        }
+        RootCustody::new(
+            self.handle,
+            Arc::clone(&self.cleanup.0),
+            Arc::clone(&self.provenance),
+        )
     }
 }
 
 impl Drop for CustodyTransfer {
     fn drop(&mut self) {
-        if !self.committed && !self.shared {
+        if !self.committed {
             self.cleanup.enqueue(self.handle);
         }
     }
@@ -3348,8 +3307,8 @@ where
     /// The imported value never passed through one of THIS session's yield
     /// sites -- it was not produced by resuming a parked frame here -- so its
     /// provenance starts empty, the same choice already made for a value
-    /// minted without a parked frame behind it (see
-    /// [`Self::prepared_binding_handle`]).
+    /// minted without a parked frame behind it. Retained binding custody instead
+    /// preserves its binding's original provenance.
     #[allow(
         clippy::expect_used,
         reason = "exact identities are preflighted and native import mints live handles under this exclusive checkout"
@@ -6667,45 +6626,115 @@ where
         )
     }
 
-    /// The `ValueHandle` custody of a prepared-route binding named `name`,
-    /// for delivering an already-bound value into another parked frame by
-    /// handle ([`Self::resume_handle`]/[`Self::resume_framed_custody`]) —
-    /// [`Self::reenter_prepared`]'s `Handle`/`FramedHandle` branches' test
-    /// surface. Reuses `BoundValue`'s own linking handle rather than minting a fresh one, so
-    /// custody moves without disturbing the binding's root -- and, because
-    /// the binding table (not this token) is the handle's real owner, the
-    /// returned custody is [`RootCustody::shared`]: a caller that only ever
-    /// borrows it (`resume_framed_custody`'s `&RootCustody`) and then drops
-    /// it leaves `name`'s binding exactly as it was, same as never calling
-    /// this at all. Returns `None` for an unknown binding.
-    pub fn prepared_binding_handle(&self, name: &str) -> Option<RootCustody> {
-        let entry = self.state.bindings().resolve(name)?;
-        Some(self.borrow_prepared_binding(entry))
+    /// Retain independent custody of the current root-scope binding.
+    pub fn retain_binding_custody(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<RootCustody>, ResidentError> {
+        let Some(entry) = self.state.bindings().resolve(name) else {
+            return Ok(None);
+        };
+        self.retain_binding_custody_in(ScopeId::ROOT, name, entry.id)
     }
 
-    /// Borrow the binding still visible at `scope` only when it is the exact
-    /// binding mounted for the caller's request. A later same-name bind may
-    /// shadow it without changing the request's recorded identity.
-    pub fn prepared_binding_handle_in(
+    /// Retain the exact binding visible from `scope`. The new handle owns a
+    /// separate root of the same object and survives retirement of the binding.
+    pub fn retain_binding_custody_in(
+        &mut self,
+        scope: ScopeId,
+        name: &str,
+        expected: SessionVarId,
+    ) -> Result<Option<RootCustody>, ResidentError> {
+        let Some((handle, provenance)) = self.exact_binding_source(scope, name, expected)? else {
+            return Ok(None);
+        };
+        let engine = self
+            .state
+            .prepared_mut()
+            .ok_or(PreparedRuntimeError::SourceScopeAdmission)?;
+        let prepared = engine
+            .prepared_handle_of(handle)
+            .ok_or(PreparedRuntimeError::SourceScopeAdmission)?;
+        let retained = engine.retain_handle_value(prepared, RealmId::ROOT)?;
+        Ok(Some(RootCustody::new(
+            retained.raw(),
+            Arc::clone(&self.custody_cleanup),
+            provenance,
+        )))
+    }
+
+    fn exact_binding_source(
         &self,
         scope: ScopeId,
         name: &str,
         expected: SessionVarId,
-    ) -> Option<RootCustody> {
-        let entry = self.state.resolve_in(scope, name)?;
-        (entry.id == expected).then(|| self.borrow_prepared_binding(entry))
+    ) -> Result<Option<(ValueHandle, Arc<ProgramProvenance>)>, ResidentError> {
+        if !self.state.scope_tree().is_live(scope) {
+            return Err(SessionError::DeadScope(scope).into());
+        }
+        let Some(entry) = self
+            .state
+            .resolve_in(scope, name)
+            .filter(|entry| entry.id == expected)
+        else {
+            return Ok(None);
+        };
+        let reachable = self
+            .state
+            .bindings()
+            .scope_reachable_binding_ids(self.state.scope_tree(), self.run_context.lexical_scope);
+        if !reachable.contains(&expected) {
+            return Err(PreparedRuntimeError::SourceScopeAdmission.into());
+        }
+        Ok(Some((
+            entry.value.handle.raw(),
+            self.binding_provenance
+                .get(&expected.raw())
+                .cloned()
+                .unwrap_or_default(),
+        )))
     }
 
-    fn borrow_prepared_binding(
-        &self,
-        entry: &tidepool_codegen::binding_table::BindingEntry,
-    ) -> RootCustody {
-        let BoundValue { handle, .. } = &entry.value;
-        RootCustody::shared(
-            handle.raw(),
-            Arc::clone(&self.custody_cleanup),
-            Arc::new(ProgramProvenance::default()),
+    /// Resolve and borrow an exact mounted binding while delivering one framed
+    /// response. Missing or shadowed input leaves the parked hole untouched.
+    pub fn resume_framed_binding_sources_classified<T>(
+        &mut self,
+        hole: &ResidentHole,
+        scope: ScopeId,
+        name: &str,
+        expected: SessionVarId,
+        constructor: tidepool_repr::DataConId,
+        prefix: Vec<T>,
+    ) -> Result<Option<ResidentOutcome>, ResidentResumeError>
+    where
+        T: tidepool_bridge::ToHaskell + Send + 'static,
+    {
+        let Some((handle, provenance)) = self
+            .exact_binding_source(scope, name, expected)
+            .map_err(ResidentResumeError::Rejected)?
+        else {
+            return Ok(None);
+        };
+        let seed = hole.seed();
+        let cont_id = match hole {
+            ResidentHole::Plain(hole) => &hole.id,
+            ResidentHole::Binding(hole) => &hole.id,
+            ResidentHole::ProjectedBinding(hole) => &hole.id,
+        };
+        self.reenter(
+            cont_id,
+            ResidentResumeInput::FramedHandleSources {
+                handle,
+                constructor,
+                prefix: prefix
+                    .into_iter()
+                    .map(|field| Box::new(field) as Box<dyn tidepool_bridge::ToHaskell + Send>)
+                    .collect(),
+            },
+            seed,
+            Some(&provenance),
         )
+        .map(Some)
     }
 
     fn retire_resumed(&mut self, resumed: Option<&str>) {
@@ -6740,7 +6769,7 @@ mod custody_release_tests {
 
     #[test]
     fn final_external_lease_is_released_before_its_cleanup_notification() {
-        for mode in 0..6 {
+        for mode in 0..4 {
             let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
             let cleanup = Arc::clone(&session.custody_cleanup);
             let provenance = Arc::new(ProgramProvenance::default());
@@ -6749,18 +6778,10 @@ mod custody_release_tests {
                     let token = RootCustody::new(ValueHandle(1), cleanup.clone(), provenance);
                     Box::new(move || drop(token))
                 }
-                1 => {
-                    let token = RootCustody::shared(ValueHandle(1), cleanup.clone(), provenance);
-                    Box::new(move || drop(token))
-                }
-                2..=4 => {
-                    let token = if mode == 4 {
-                        RootCustody::shared(ValueHandle(1), cleanup.clone(), provenance)
-                    } else {
-                        RootCustody::new(ValueHandle(1), cleanup.clone(), provenance)
-                    };
+                1..=2 => {
+                    let token = RootCustody::new(ValueHandle(1), cleanup.clone(), provenance);
                     let transfer = token.into_transfer();
-                    if mode == 3 {
+                    if mode == 2 {
                         Box::new(move || transfer.commit())
                     } else {
                         Box::new(move || drop(transfer))
@@ -6806,17 +6827,196 @@ mod custody_release_tests {
         }
     }
 
+    fn bind_fixture(session: &mut TestSession, scope: ScopeId, generation: u64) -> SessionVarId {
+        let mut binding = crate::session::prepared::tests::evaluated_publication_fixture(
+            &mut session.state,
+            "x",
+            generation,
+        );
+        binding.scope = scope;
+        let id = binding.id;
+        session.state.bind_in(scope, binding).unwrap();
+        id
+    }
+
+    fn major_collect(session: &mut TestSession) {
+        session
+            .state
+            .require_prepared()
+            .unwrap()
+            .quiesce_and_collect_now()
+            .unwrap();
+    }
+
+    fn assert_live_binding(session: &mut TestSession, scope: ScopeId, id: SessionVarId) {
+        let entry = session.state.resolve_in(scope, "x").unwrap();
+        assert_eq!(entry.id, id);
+        let handle = entry.value.handle.raw();
+        assert!(
+            matches!(session.state.prepared_mut().unwrap().inspect_retained(handle).unwrap(),
+            PreparedOuter::Constructor { fields, .. } if matches!(fields.as_slice(),
+                [PreparedResult::Scalar(99)]))
+        );
+    }
+
     #[test]
-    fn transfer_and_shared_readers_keep_exact_lease_counts_until_final_release() {
+    fn exclusive_binding_custody_consumption_preserves_source_after_major_gc() {
+        let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+        let id = bind_fixture(&mut session, ScopeId::ROOT, 41);
+        let provenance = Arc::new(ProgramProvenance::default());
+        session
+            .binding_provenance
+            .insert(id.raw(), provenance.clone());
+        let original = session.value_handle_count();
+        let custody = session.retain_binding_custody("x").unwrap().unwrap();
+        assert!(Arc::ptr_eq(&custody.provenance, &provenance));
+        assert_eq!(session.value_handle_count(), original + 1);
+        assert!(session.discard_custody(custody));
+        major_collect(&mut session);
+        assert_live_binding(&mut session, ScopeId::ROOT, id);
+        let custody = session.retain_binding_custody("x").unwrap().unwrap();
+        let parcel = session.export_custody(custody).unwrap();
+        major_collect(&mut session);
+        assert_live_binding(&mut session, ScopeId::ROOT, id);
+        drop(parcel);
+        let custody = session.retain_binding_custody("x").unwrap().unwrap();
+        let custody = session.rehome_custody(custody, RealmId::fresh()).unwrap();
+        assert!(session.discard_custody(custody));
+        major_collect(&mut session);
+        assert_live_binding(&mut session, ScopeId::ROOT, id);
+        let custody = session.retain_binding_custody("x").unwrap().unwrap();
+        let owner = RealmId::fresh();
+        let custody = session.rehome_custody(custody, owner).unwrap();
+        assert_eq!(session.close_realm(owner), (0, 1));
+        drop(custody);
+        major_collect(&mut session);
+        assert_live_binding(&mut session, ScopeId::ROOT, id);
+        assert_eq!(session.value_handle_count(), original);
+    }
+
+    #[test]
+    fn exclusive_binding_custody_survives_source_scope_retirement() {
+        let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+        let scope = session.mint_scope(ScopeId::ROOT).unwrap();
+        let id = bind_fixture(&mut session, scope, 42);
+        session
+            .set_run_context(SessionRunContext {
+                lexical_scope: scope,
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        let custody = session
+            .retain_binding_custody_in(scope, "x", id)
+            .unwrap()
+            .unwrap();
+        let retained = custody.handle.unwrap();
+        session.set_run_context(SessionRunContext::ROOT).unwrap();
+        session.retire_scope(scope);
+        major_collect(&mut session);
+        assert!(session
+            .state
+            .prepared_mut()
+            .unwrap()
+            .inspect_retained(retained)
+            .is_ok());
+        assert!(matches!(
+            session.retain_binding_custody_in(scope, "x", id),
+            Err(ResidentError::Session(SessionError::DeadScope(_)))
+        ));
+        assert!(session.discard_custody(custody));
+        major_collect(&mut session);
+        assert_eq!(session.value_handle_count(), 0);
+    }
+
+    #[test]
+    fn exact_borrowed_binding_refusals_precede_hole_access_and_root_allocation() {
+        let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+        let id = bind_fixture(&mut session, ScopeId::ROOT, 43);
+        let capture = session.mint_detached_scope(ScopeId::ROOT).unwrap();
+        session
+            .set_run_context(SessionRunContext {
+                lexical_scope: capture,
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        let hole = ResidentHole::mint("not-a-parked-hole".into(), HoleSeed::Plain);
+        let before = session.value_handle_count();
+        assert!(matches!(
+            session.resume_framed_binding_sources_classified(
+                &hole,
+                ScopeId::ROOT,
+                "x",
+                id,
+                DataConId(0),
+                Vec::<i64>::new()
+            ),
+            Err(ResidentResumeError::Rejected(
+                ResidentError::WrongContinuation { .. }
+            ))
+        ));
+        assert_eq!(session.value_handle_count(), before);
+        assert_eq!(session.outstanding_custody(), 0);
+        // The detached capture retains the old root but original-name lookup
+        // still refuses a later replacement of that exact request input.
+        session.set_run_context(SessionRunContext::ROOT).unwrap();
+        bind_fixture(&mut session, ScopeId::ROOT, 44);
+        session
+            .set_run_context(SessionRunContext {
+                lexical_scope: capture,
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        assert!(session
+            .resume_framed_binding_sources_classified(
+                &hole,
+                ScopeId::ROOT,
+                "x",
+                id,
+                DataConId(0),
+                Vec::<i64>::new()
+            )
+            .unwrap()
+            .is_none());
+        let foreign_scope = session.mint_isolated_scope();
+        let foreign_id = bind_fixture(&mut session, foreign_scope, 45);
+        assert!(matches!(
+            session.resume_framed_binding_sources_classified(
+                &hole,
+                foreign_scope,
+                "x",
+                foreign_id,
+                DataConId(0),
+                Vec::<i64>::new()
+            ),
+            Err(ResidentResumeError::Rejected(ResidentError::Prepared(
+                PreparedRuntimeError::SourceScopeAdmission
+            )))
+        ));
+        session.retire_scope(foreign_scope);
+        assert!(matches!(
+            session.resume_framed_binding_sources_classified(
+                &hole,
+                foreign_scope,
+                "x",
+                foreign_id,
+                DataConId(0),
+                Vec::<i64>::new()
+            ),
+            Err(ResidentResumeError::Rejected(ResidentError::Session(
+                SessionError::DeadScope(_)
+            )))
+        ));
+        assert_eq!(session.outstanding_custody(), 0);
+    }
+
+    #[test]
+    fn transfer_keeps_exact_lease_count_until_final_release() {
         let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
         let cleanup = Arc::clone(&session.custody_cleanup);
         let token = RootCustody::new(ValueHandle(1), cleanup.clone(), Arc::default());
-        let shared = RootCustody::shared(ValueHandle(1), cleanup.clone(), Arc::default());
         drop(cleanup);
-        assert_eq!(session.outstanding_custody(), 2);
+        assert_eq!(session.outstanding_custody(), 1);
         let token = token.into_transfer().into_custody();
-        assert_eq!(session.outstanding_custody(), 2);
-        drop(shared);
         assert_eq!(session.outstanding_custody(), 1);
         assert!(session.custody_cleanup.abandoned.lock().is_empty());
         drop(token);

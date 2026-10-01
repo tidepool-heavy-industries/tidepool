@@ -248,6 +248,8 @@ pub(crate) struct ResourceLedger {
     next_continuation_id: u64,
     handles: RootHandleLedger,
     cancel_flags: HashMap<RealmId, Arc<AtomicBool>>,
+    #[cfg(test)]
+    pub(crate) fail_next_handle_reservation: bool,
 }
 
 impl ResourceLedger {
@@ -319,6 +321,10 @@ impl ResourceLedger {
         &mut self,
         additional: usize,
     ) -> Result<(), std::collections::TryReserveError> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_handle_reservation) {
+            return Vec::<u8>::new().try_reserve(usize::MAX);
+        }
         self.handles.try_reserve(additional)
     }
 

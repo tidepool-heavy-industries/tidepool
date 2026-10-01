@@ -4483,6 +4483,17 @@ impl PreparedEngine {
             .flatten()
     }
 
+    /// Duplicate a live root into independent custody of the same heap object.
+    pub fn retain_handle_value(
+        &mut self,
+        handle: PreparedHandle,
+        owner: RealmId,
+    ) -> Result<PreparedHandle, PreparedRuntimeError> {
+        self.machine
+            .retain_handle_value(handle, owner)
+            .map_err(PreparedRuntimeError::Run)
+    }
+
     /// Release one retained handle and deregister its root.
     pub fn release(&mut self, handle: PreparedHandle) -> bool {
         self.machine.release(handle)
@@ -6976,6 +6987,34 @@ pub(super) mod tests {
         generation: u64,
     ) -> BindingEntry {
         rooted_program_fixture(state, name, generation, producer_program())
+    }
+
+    pub(in crate::session) fn evaluated_publication_fixture(
+        state: &mut super::super::PersistentSession,
+        name: &str,
+        generation: u64,
+    ) -> BindingEntry {
+        let mut binding = rooted_publication_fixture(state, name, generation);
+        let engine = state.prepared_mut().unwrap();
+        let program = engine
+            .machine
+            .owner_of_handle(binding.value.handle)
+            .unwrap();
+        let result = engine
+            .machine
+            .run_entry_retained(program, ValueId(0), &[], SETTLE_CALL, RealmId::ROOT)
+            .unwrap();
+        let [PreparedResult::Managed(handle)] = result.values.as_slice() else {
+            panic!("computed managed result")
+        };
+        let handle = *handle;
+        assert!(engine.release(binding.value.handle));
+        binding.value = BoundValue {
+            root: engine.adopt(handle).unwrap(),
+            handle,
+            identity: binding.value.identity,
+        };
+        binding
     }
 
     pub(in crate::session) fn rooted_program_fixture(

@@ -9344,9 +9344,7 @@ where
                     (Some(access_site), Some((request, request_types, scope, input_binding))) => {
                         if !session.request_scope_types_match(&request_types, access_site) {
                             crate::request_effect::RequestScopeRefusal::RequestTypeMismatch
-                        } else if let Some(input) =
-                            session.prepared_binding_handle_in(scope, "sessionInput", input_binding)
-                        {
+                        } else {
                             let constructor = tidepool_bridge::get_qualified(
                                 session.data_con_table(),
                                 "Tidepool.Agent.Reply.Internal.RequestActive",
@@ -9362,15 +9360,19 @@ where
                                     "current request identity exceeds Haskell Int".into(),
                                 )
                             })?;
-                            return session
-                                .resume_framed_custody_sources_classified(
-                                    hole,
-                                    &input,
+                            if let Some(outcome) = session
+                                .resume_framed_binding_sources_classified(
+                                    &hole,
+                                    scope,
+                                    "sessionInput",
+                                    input_binding,
                                     constructor,
                                     vec![request],
                                 )
-                                .map_err(classify_resumption);
-                        } else {
+                                .map_err(classify_resumption)?
+                            {
+                                return Ok(outcome);
+                            }
                             crate::request_effect::RequestScopeRefusal::RequestInputShadowed
                         }
                     }
@@ -14891,7 +14893,8 @@ mod request_tests {
             "{text:?}: {outcome:?}"
         );
         session
-            .prepared_binding_handle(name)
+            .retain_binding_custody(name)
+            .expect("retain live binding")
             .expect("bound value custody")
     }
 
@@ -15292,7 +15295,7 @@ mod request_tests {
         let (machines, context, source, _root) = actor_registry_fixture();
         let child_id = tidepool_repr::SessionId(context.placement.session.0.wrapping_add(11));
         let (mut child_session, _child_root) = bare_session_at(child_id);
-        // `ResidentSession::prepared_binding_handle` resolves a name only in
+        // `ResidentSession::retain_binding_custody` resolves a name only in
         // `ScopeId::ROOT` (`BindingTable::resolve`'s own doc comment: "the
         // ROOT frame"), so the binding this test mounts (and later resolves
         // a custody token for) must live there too, not in a freshly minted
@@ -15319,7 +15322,7 @@ mod request_tests {
             ..context.clone()
         };
         // A real compiled/mounted binding bootstraps the session's engine;
-        // `prepared_binding_handle` then mints a `RootCustody` over it —
+        // `retain_binding_custody` then mints a `RootCustody` over it —
         // the SAME shape a reply or retained-progress value crosses the
         // resident-workbench boundary as — and this local variable is what
         // "outside the session" means: it is not released until this test
@@ -15335,7 +15338,8 @@ mod request_tests {
         )
         .expect("mount a real binding to hold a live handle");
         let custody = child_session
-            .prepared_binding_handle("outstanding")
+            .retain_binding_custody("outstanding")
+            .expect("retain mounted binding")
             .expect("the mounted binding resolves to a live custody token");
         machines.insert_idle(child_id, Box::new(child_session));
 
@@ -16144,7 +16148,8 @@ mod request_tests {
                         .current_binding_in(scope, "sourceValue")
                         .expect("source value remains visible");
                     Ok(session
-                        .prepared_binding_handle_in(scope, "sourceValue", id)
+                        .retain_binding_custody_in(scope, "sourceValue", id)
+                        .expect("retain source value")
                         .expect("borrow source value"))
                 })
                 .await
@@ -16175,16 +16180,177 @@ mod request_tests {
         workbench
             .access
             .with_machine(context, move |session, _, _| {
-                assert!(session
-                    .prepared_binding_handle_in(scope, "sessionInput", first)
-                    .is_none());
-                assert!(session
-                    .prepared_binding_handle_in(scope, "sessionInput", second)
-                    .is_some());
+                assert_ne!(
+                    session
+                        .current_binding_in(scope, "sessionInput")
+                        .map(|binding| binding.0),
+                    Some(first)
+                );
+                assert_eq!(
+                    session
+                        .current_binding_in(scope, "sessionInput")
+                        .map(|binding| binding.0),
+                    Some(second)
+                );
                 Ok(())
             })
             .await
             .expect("shadowed input is refused by identity");
+    }
+
+    #[tokio::test]
+    async fn current_request_private_cell_borrows_activation_input_without_extra_root() {
+        let (machines, mut context, mut source, _root) = actor_registry_fixture();
+        context.haskell_effects_alias = "'[Exomonad.Replies]".into();
+        source
+            .workbench_imports
+            .extend_text("qualified Tidepool.Agent.Reply as TidepoolReply");
+        let workbench =
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
+        let runner = ResidentActorRunner::new(machines, source.clone());
+        let step = workbench
+            .begin_fragment_split(
+                context.clone(),
+                source,
+                vec![],
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: "sourceValue <- pure ()".into(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
+            panic!("source binds")
+        };
+        workbench
+            .settle_item(context.clone(), *fragment, *outcome)
+            .await
+            .unwrap();
+        let original_scope = context.placement.lexical_scope;
+        let input = workbench
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                let (id, ..) = session
+                    .current_binding_in(original_scope, "sourceValue")
+                    .unwrap();
+                Ok(session
+                    .retain_binding_custody_in(original_scope, "sourceValue", id)?
+                    .expect("owned input"))
+            })
+            .await
+            .unwrap();
+        let (_, _, binding) = workbench
+            .mount_activation_input(
+                context.clone(),
+                "()".into(),
+                input,
+                "()".into(),
+                None,
+                vec![],
+            )
+            .await
+            .unwrap();
+        let (private, before) = workbench
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                Ok((
+                    session
+                        .mint_detached_scope(original_scope)
+                        .expect("capture activation"),
+                    session.value_handle_count(),
+                ))
+            })
+            .await
+            .unwrap();
+        context.placement.lexical_scope = private;
+        let cell = "requestScope <- (TidepoolReply.currentRequest :: Eff '[Exomonad.Replies] (TidepoolReply.RequestScope () ()))".to_owned();
+        let (_, prepared) = workbench
+            .prepare_cell(context.clone(), cell.clone())
+            .await
+            .unwrap();
+        let PreparedCell::Ready { mut items, .. } = prepared else {
+            panic!("ready private cell")
+        };
+        let step = workbench
+            .begin_prepared_cell_item(
+                context.clone(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: cell,
+                },
+                items.remove(0),
+                4096,
+            )
+            .await
+            .unwrap();
+        let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
+            panic!("request parks")
+        };
+        let boundary = runner
+            .capture_boundary(context.clone(), *outcome, context.placement.resource_scope)
+            .await
+            .unwrap();
+        let ResidentActorBoundary::CurrentRequest {
+            continuation,
+            site: Some(site),
+        } = boundary
+        else {
+            panic!("typed request")
+        };
+        let types = workbench
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                Ok(session
+                    .request_site_type_evidence(site)
+                    .expect("closed unit input/reply evidence"))
+            })
+            .await
+            .unwrap();
+        let outcome = runner
+            .resume_current_request(
+                context.clone(),
+                continuation,
+                Some(site),
+                Some((
+                    crate::RequestId(1),
+                    Arc::new(types),
+                    original_scope,
+                    binding,
+                )),
+            )
+            .await
+            .unwrap();
+        workbench
+            .settle_item(context.clone(), *fragment, outcome)
+            .await
+            .unwrap();
+        workbench
+            .access
+            .with_machine(context, move |session, _, _| {
+                assert_eq!(
+                    session.value_handle_count(),
+                    before + 1,
+                    "only the completed requestScope binding adds a root"
+                );
+                assert_eq!(
+                    session.outstanding_custody(),
+                    0,
+                    "borrowed request delivery creates no escaping custody"
+                );
+                assert_eq!(
+                    session
+                        .current_binding_in(original_scope, "sessionInput")
+                        .map(|row| row.0),
+                    Some(binding)
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

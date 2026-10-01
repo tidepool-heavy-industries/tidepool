@@ -2656,6 +2656,38 @@ impl<'code> PreparedMachine<'code> {
         })
     }
 
+    /// Create independent custody of the live handle's current object without
+    /// forcing or copying it. The source root remains owned by its ledger entry.
+    pub fn retain_handle_value(
+        &mut self,
+        handle: PreparedHandle,
+        owner: RealmId,
+    ) -> Result<PreparedHandle, ExecutionError> {
+        self.ensure_handle_access()?;
+        let entry = self
+            .handles
+            .handle(handle.raw)
+            .filter(|entry| entry.rep == handle.rep)
+            .ok_or(ExecutionError::UnknownPreparedHandle)?;
+        let pointer = unsafe { entry.slot.current() };
+        if pointer.is_null() {
+            return Err(ExecutionError::UnknownPreparedHandle);
+        }
+        self.handles
+            .try_reserve_handles(1)
+            .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
+        // A live handle already roots an admitted managed object. Registering
+        // another root neither enters generated code nor triggers collection.
+        let root = self
+            .old_space
+            .adopt_root(&self.machine, pointer)
+            .map_err(|cause| runtime_error(&self.machine, cause))?;
+        Ok(PreparedHandle {
+            raw: self.handles.insert_handle(root, owner, handle.rep),
+            rep: handle.rep,
+        })
+    }
+
     /// Start one incremental managed construction operation. Dropping the
     /// builder publishes no handle and releases all temporary root ownership.
     pub fn managed_builder(&mut self) -> Result<ManagedBuilder<'_, 'code>, ExecutionError> {
@@ -4246,6 +4278,99 @@ mod tests {
         };
         assert!(machine.release(*handle));
         assert!(!machine.release(*handle));
+    }
+
+    #[test]
+    fn retained_handle_custody_preserves_identity_and_allocation_rollback() {
+        let (mut machine, program) = machine();
+        machine.pin(program).unwrap();
+        let batch = machine
+            .run_entry_retained(
+                program,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: RunOptions::default().observation_budget,
+                    collect_before_observation: true,
+                },
+                RealmId::ROOT,
+            )
+            .unwrap();
+        let [PreparedResult::Managed(source)] = batch.values.as_slice() else {
+            panic!("managed result")
+        };
+        let source = *source;
+        let count = machine.handle_count();
+        let roots = machine.machine.persistent_roots_count();
+        machine.handles.fail_next_handle_reservation = true;
+        assert!(matches!(
+            machine.retain_handle_value(source, RealmId::ROOT),
+            Err(ExecutionError::Runtime(MachineFailure {
+                cause: RuntimeError::HeapOverflow,
+                disposition: MachineDisposition::Reusable
+            }))
+        ));
+        assert_eq!(machine.handle_count(), count);
+        assert_eq!(machine.machine.persistent_roots_count(), roots);
+        assert_eq!(machine.machine.rust_roots_len(), 0);
+        let retained = machine.retain_handle_value(source, RealmId::ROOT).unwrap();
+        assert_ne!(retained.raw(), source.raw());
+        assert_eq!(retained.rep, source.rep);
+        assert_eq!(
+            machine.handle_current_pointer(retained),
+            machine.handle_current_pointer(source)
+        );
+        let quiescent = machine.quiesce().unwrap();
+        machine.collect_major(quiescent).unwrap();
+        assert_eq!(
+            machine.handle_current_pointer(retained),
+            machine.handle_current_pointer(source)
+        );
+        assert!(machine.release(retained));
+        assert!(matches!(machine.inspect_retained(source.raw()).unwrap(),
+            PreparedOuter::Constructor { fields, .. } if fields.is_empty()));
+        let mut wrong_rep = source;
+        wrong_rep.rep = RuntimeRep::UnliftedRef;
+        assert!(matches!(
+            machine.retain_handle_value(wrong_rep, RealmId::ROOT),
+            Err(ExecutionError::UnknownPreparedHandle)
+        ));
+        let (mut foreign, _) = self::machine();
+        assert!(matches!(
+            foreign.retain_handle_value(source, RealmId::ROOT),
+            Err(ExecutionError::UnknownPreparedHandle)
+        ));
+        let mut builder = machine.managed_builder().unwrap();
+        let bytes = builder.bytes(b"retained bytes").unwrap();
+        let bytes = builder.finish(RealmId::ROOT, bytes).unwrap();
+        // The generic host builder publishes lifted roots; native ByteArray#
+        // results carry the unlifted representation in this same ledger.
+        let root = machine.take_handle_root(bytes).unwrap().unwrap();
+        let bytes = PreparedHandle {
+            raw: machine
+                .handles
+                .insert_handle(root, RealmId::ROOT, RuntimeRep::UnliftedRef),
+            rep: RuntimeRep::UnliftedRef,
+        };
+        let duplicate = machine.retain_handle_value(bytes, RealmId::ROOT).unwrap();
+        assert_eq!(duplicate.rep, bytes.rep);
+        assert_eq!(
+            machine.handle_current_pointer(bytes),
+            machine.handle_current_pointer(duplicate)
+        );
+        assert!(machine.release(bytes));
+        let quiescent = machine.quiesce().unwrap();
+        machine.collect_major(quiescent).unwrap();
+        assert!(
+            matches!(machine.observe_handle(program, duplicate, RunOptions::default().observation_budget).unwrap(),
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitByteArray(ref bytes)) if bytes == b"retained bytes")
+        );
+        assert!(machine.release(duplicate));
+        assert!(machine.release(source));
+        assert!(matches!(
+            machine.retain_handle_value(source, RealmId::ROOT),
+            Err(ExecutionError::UnknownPreparedHandle)
+        ));
     }
 
     #[test]
