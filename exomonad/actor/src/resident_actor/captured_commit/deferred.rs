@@ -175,7 +175,7 @@ where
                         child: *child,
                         session: placement.session,
                         scope: placement.lexical_scope,
-                        lexical: Some(lexical),
+                        lexical: Arc::new(OnceLock::from(lexical)),
                     });
                 }
                 Ok::<_, String>(true)
