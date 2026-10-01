@@ -43,14 +43,26 @@ pub(super) struct PromptConfig {
 /// A deployed standard library keeps its final immutable source location.
 /// The catalog identity authenticates its compiler and original module products;
 /// this record pins the run's selection and grants no native value authority.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct DeploymentSourceRoot {
     version: u32,
     root: PathBuf,
     source_pin: String,
-    producer_identity: String,
+    producer_identity: [u8; 32],
     catalog_identity: String,
+}
+
+impl DeploymentSourceRoot {
+    fn from_package(package: &tidepool_toolchain::toolchain::DeploymentModulePackage) -> Self {
+        Self {
+            version: 1,
+            root: package.source_root().to_path_buf(),
+            source_pin: package.source_identity().to_owned(),
+            producer_identity: *package.producer_identity(),
+            catalog_identity: package.catalog_identity().to_owned(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -75,10 +87,17 @@ impl RuntimeStdlib {
             Self::Deployment { selection } => &selection.root,
         }
     }
+
+    fn deployment(&self) -> Option<&DeploymentSourceRoot> {
+        match self {
+            Self::Captured { .. } => None,
+            Self::Deployment { selection } => Some(selection),
+        }
+    }
 }
 
-/// Captured workspace inputs. Actor launch and compilation use only this run's
-/// materialized paths and bytes, never the mutable workspace configuration.
+/// Frozen workspace inputs. Actor launch and compilation use this run's captured
+/// authored sources and its pinned library selection.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FrozenWorkspace {
     #[serde(default)]
@@ -112,6 +131,17 @@ pub struct FrozenWorkspace {
 
 impl FrozenWorkspace {
     pub(crate) fn load(workspace: &Path, run_root: &Path) -> Result<Self> {
+        let deployment = tidepool_toolchain::toolchain::configured_module_package()?
+            .as_ref()
+            .map(DeploymentSourceRoot::from_package);
+        Self::load_with_deployment(workspace, run_root, deployment)
+    }
+
+    fn load_with_deployment(
+        workspace: &Path,
+        run_root: &Path,
+        deployment: Option<DeploymentSourceRoot>,
+    ) -> Result<Self> {
         let directory = run_root.join("workspace");
         let manifest = directory.join("selection.json");
         if manifest.exists() {
@@ -130,11 +160,15 @@ impl FrozenWorkspace {
                         .into(),
                 );
             }
+            if frozen.runtime_stdlib.deployment() != deployment.as_ref() {
+                return Err("frozen standard library deployment changed; start a new swarm".into());
+            }
             let capture_root = directory.canonicalize()?;
-            for (root, sentinel) in [
-                (frozen.runtime_stdlib.root(), "Tidepool/Prelude.hs"),
-                (frozen.runtime_actors.as_path(), "Tidepool/Check.hs"),
-            ] {
+            let mut captures = vec![(frozen.runtime_actors.as_path(), "Tidepool/Check.hs")];
+            if let RuntimeStdlib::Captured { root } = &frozen.runtime_stdlib {
+                captures.push((root.as_path(), "Tidepool/Prelude.hs"));
+            }
+            for (root, sentinel) in captures {
                 if !root.canonicalize()?.starts_with(&capture_root)
                     || !root.join(sentinel).is_file()
                 {
@@ -168,7 +202,11 @@ impl FrozenWorkspace {
             }
         }
         let base = workspace.join(".exomonad");
-        let runtime_sources = crate::haskell_sources::runtime_source_roots()?;
+        let runtime_sources = crate::haskell_sources::runtime_source_roots(
+            deployment
+                .as_ref()
+                .map(|selection| selection.root.as_path()),
+        )?;
         let runtime_identity = crate::haskell_sources::runtime_capture_identity(&runtime_sources)?;
         std::fs::create_dir_all(&directory)?;
         let mut files = BTreeMap::new();
@@ -182,9 +220,10 @@ impl FrozenWorkspace {
             capture_sources(source, &relative, &directory, &mut files)?;
             include.push(directory.join(relative));
         }
-        let captured = capture_runtime_libraries(
+        let (runtime_stdlib, runtime_actors) = capture_selected_runtime_libraries(
             &runtime_sources,
             &runtime_identity,
+            deployment,
             &directory,
             capture,
             &mut files,
@@ -271,6 +310,7 @@ impl FrozenWorkspace {
             &config_text,
             &library_identity,
             &core_identity,
+            runtime_stdlib.deployment(),
             &prompts,
             logical_files,
         ))?)
@@ -314,10 +354,8 @@ impl FrozenWorkspace {
             config: config_text,
             library_identity,
             core_identity,
-            runtime_stdlib: RuntimeStdlib::Captured {
-                root: captured[0].clone(),
-            },
-            runtime_actors: captured[1].clone(),
+            runtime_stdlib,
+            runtime_actors,
             runtime_capture_identity: runtime_identity,
         };
         tidepool_atomic_write::write_durable(&manifest, &serde_json::to_vec_pretty(&frozen)?)?;
@@ -751,6 +789,42 @@ pub(super) fn capture_sources(
     files: &mut BTreeMap<PathBuf, String>,
 ) -> Result<()> {
     capture_tree(source, relative, destination, files, false)
+}
+
+fn capture_selected_runtime_libraries(
+    sources: &[PathBuf; 2],
+    expected_identity: &str,
+    deployment: Option<DeploymentSourceRoot>,
+    directory: &Path,
+    capture: uuid::Uuid,
+    files: &mut BTreeMap<PathBuf, String>,
+) -> Result<(RuntimeStdlib, PathBuf)> {
+    let Some(selection) = deployment else {
+        let captured =
+            capture_runtime_libraries(sources, expected_identity, directory, capture, files)?;
+        return Ok((
+            RuntimeStdlib::Captured {
+                root: captured[0].clone(),
+            },
+            captured[1].clone(),
+        ));
+    };
+    if selection.version != 1 || selection.root != sources[0].canonicalize()? {
+        return Err("unsupported or relocated standard library deployment".into());
+    }
+    let relative = PathBuf::from(format!("libraries/{capture}/actors"));
+    capture_sources(&sources[1], &relative, directory, files)?;
+    let actors = directory.join(relative);
+    let selected = [selection.root.clone(), actors.clone()];
+    let captured_identity = tidepool_toolchain::cache::source_roots_identity(
+        crate::haskell_sources::DEV_SOURCE_DOMAIN,
+        &selected,
+    )?;
+    if captured_identity != expected_identity {
+        return Err("runtime Haskell library changed during run capture".into());
+    }
+    crate::haskell_sources::verify_runtime_capture(&selected, expected_identity)?;
+    Ok((RuntimeStdlib::Deployment { selection }, actors))
 }
 
 fn capture_runtime_libraries(

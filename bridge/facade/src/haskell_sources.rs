@@ -44,10 +44,16 @@ pub(crate) fn source_identity() -> Result<String, tidepool_toolchain::cache::Sou
     ))
 }
 
-/// Resolve source roots for one run and refuse a dev checkout that changed
-/// after the binary was built. Release bundles are already bound to the binary.
-pub(crate) fn runtime_source_roots() -> Result<[PathBuf; 2], Box<dyn std::error::Error>> {
-    let roots = [ensure_embedded_stdlib()?, ensure_exomonad_haskell()?];
+/// Resolve a run's library roots, retaining a configured deployment's final
+/// stdlib path. A dev build refuses source bytes changed after its build.
+pub(crate) fn runtime_source_roots(
+    deployed_stdlib: Option<&Path>,
+) -> Result<[PathBuf; 2], Box<dyn std::error::Error>> {
+    let stdlib = match deployed_stdlib {
+        Some(root) => root.to_path_buf(),
+        None => ensure_builtin_stdlib()?,
+    };
+    let roots = [stdlib, ensure_exomonad_haskell()?];
     if let Some(expected) = DEV_SOURCE_IDENTITY {
         verify_dev_source_roots(&roots, expected)?;
     }
@@ -199,18 +205,21 @@ fn materialize(
     Ok(destination)
 }
 
-/// Resolve the general Tidepool library, honoring development overrides before
-/// falling back to the complete embedded source bundle.
+/// Resolve the configured deployment's immutable library, or use the ordinary
+/// development overrides and embedded fallback when no catalog is configured.
 pub fn ensure_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Some(package) = tidepool_toolchain::toolchain::configured_module_package()? {
+        return Ok(package.source_root().to_path_buf());
+    }
     let fallbacks = tidepool_toolchain::toolchain::StdlibFallbacks {
-        bundle: Some(ensure_embedded_stdlib()?),
+        bundle: Some(ensure_builtin_stdlib()?),
         ..dev_fallbacks()
     };
     Ok(tidepool_toolchain::toolchain::locate_stdlib(&fallbacks)?.dir)
 }
 
-/// Exomonad's frozen library must match `source_identity`, independent of launch
-/// cwd or development overrides used by the general Tidepool tools.
+/// Resolve the immutable deployment root when configured; otherwise use this
+/// binary's own library independently of launch cwd or development overrides.
 ///
 /// A dev build embeds nothing, so there is no fixed bundle to materialize:
 /// callers (the interactive driver's GHC include path, recipe checks) need a
@@ -218,6 +227,13 @@ pub fn ensure_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
 /// materialized stand-in. Run admission validates this selected checkout
 /// against the identity embedded by the dev build before capturing it.
 pub(crate) fn ensure_embedded_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Some(package) = tidepool_toolchain::toolchain::configured_module_package()? {
+        return Ok(package.source_root().to_path_buf());
+    }
+    ensure_builtin_stdlib()
+}
+
+fn ensure_builtin_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
     if EMBEDDED_STDLIB.is_empty() {
         return tidepool_toolchain::toolchain::locate_stdlib(&dev_fallbacks())
             .map(|location| location.dir)
