@@ -44,6 +44,13 @@ pub enum CheckoutError<H> {
     /// whatever kind of turn it is.
     #[error("session {0} is already running a turn")]
     Running(SessionId),
+    /// The session was replaced while this request waited for admission.
+    /// The request cannot consume the replacement's machine.
+    #[error("session {session} admission belongs to replaced epoch {admitted_epoch}")]
+    StaleAdmission {
+        session: SessionId,
+        admitted_epoch: u64,
+    },
     /// A notification-driven checkout wait reached its caller-supplied bound.
     #[error("timed out after {waited:?} waiting to check out session {session}")]
     WaitTimeout {
@@ -167,6 +174,7 @@ impl<M, H: std::fmt::Debug> Slot<M, H> {
 
 struct Entry<M, H> {
     epoch: u64,
+    availability: std::sync::Arc<SessionAvailability>,
     slot: Slot<M, H>,
 }
 
@@ -198,7 +206,6 @@ struct SessionAvailability {
 pub struct SessionRegistry<M, H> {
     slots: Mutex<HashMap<SessionId, Entry<M, H>>>,
     next_epoch: AtomicU64,
-    availability: Mutex<HashMap<SessionId, std::sync::Arc<SessionAvailability>>>,
     /// Bounded memory of why recently-removed sessions left — see
     /// [`Tombstone`] and [`CheckoutError::Retired`].
     tombstones: Mutex<VecDeque<Tombstone>>,
@@ -209,20 +216,18 @@ impl<M, H> Default for SessionRegistry<M, H> {
         SessionRegistry {
             slots: Mutex::new(HashMap::new()),
             next_epoch: AtomicU64::new(1),
-            availability: Mutex::new(HashMap::new()),
             tombstones: Mutex::new(VecDeque::new()),
         }
     }
 }
 
 impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
-    fn availability_for(&self, id: SessionId) -> std::sync::Arc<SessionAvailability> {
-        std::sync::Arc::clone(
-            self.availability
-                .lock()
-                .entry(id)
-                .or_insert_with(|| std::sync::Arc::new(SessionAvailability::default())),
-        )
+    fn fresh_epoch(&self) -> u64 {
+        self.next_epoch
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |epoch| {
+                epoch.checked_add(1)
+            })
+            .expect("session epoch space exhausted")
     }
 
     /// A fresh, empty registry.
@@ -273,19 +278,26 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     /// so the caller controls where the machine is allocated instead of an
     /// internal `Box::new` doing it implicitly.
     pub fn insert_idle(&self, id: SessionId, machine: Box<M>) -> Option<Slot<M, H>> {
-        let epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
-        let previous = self
-            .slots
-            .lock()
+        let epoch = self.fresh_epoch();
+        let mut slots = self.slots.lock();
+        // Replacement keeps one FIFO gate. Requests already queued at the old
+        // epoch drain as stale before new requests can acquire the replacement.
+        let availability = slots
+            .get(&id)
+            .map(|entry| std::sync::Arc::clone(&entry.availability))
+            .unwrap_or_default();
+        let previous = slots
             .insert(
                 id,
                 Entry {
                     epoch,
+                    availability: std::sync::Arc::clone(&availability),
                     slot: Slot::Idle(machine),
                 },
             )
-            .map(|e| e.slot);
-        self.availability_for(id).changed.notify_waiters();
+            .map(|entry| entry.slot);
+        drop(slots);
+        availability.changed.notify_waiters();
         previous
     }
 
@@ -304,16 +316,16 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
         if slots.contains_key(&id) {
             return Err(machine);
         }
-        let epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
+        let epoch = self.fresh_epoch();
         slots.insert(
             id,
             Entry {
                 epoch,
+                availability: Default::default(),
                 slot: Slot::Idle(machine),
             },
         );
         drop(slots);
-        self.availability_for(id).changed.notify_waiters();
         Ok(())
     }
 
@@ -324,12 +336,13 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     /// `reason` is recorded in the tombstone ring, so a later checkout against
     /// `id` reports [`CheckoutError::Retired`] naming it.
     pub fn remove(&self, id: SessionId, reason: impl Into<String>) -> Option<Slot<M, H>> {
-        let removed = self.slots.lock().remove(&id).map(|e| e.slot);
-        if removed.is_some() {
-            self.tombstone(id, reason.into());
-            self.availability_for(id).changed.notify_waiters();
-        }
-        removed
+        let mut slots = self.slots.lock();
+        let removed = slots.remove(&id)?;
+        // Record retirement before a queued request can observe the absent entry.
+        self.tombstone(id, reason.into());
+        drop(slots);
+        removed.availability.changed.notify_waiters();
+        Some(removed.slot)
     }
 
     /// Read-only access to the machine WITHOUT checking it out — only
@@ -379,29 +392,7 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     /// run). Refuses a session already running, one that is `Wedged`, or an
     /// unknown id.
     pub fn checkout_run(&self, id: SessionId) -> Result<Checkout<'_, M, H>, CheckoutError<H>> {
-        let mut slots = self.slots.lock();
-        match slots.get_mut(&id) {
-            None => Err(self.unknown_or_retired(id)),
-            Some(entry) => match &entry.slot {
-                Slot::Running { .. } => Err(CheckoutError::Running(id)),
-                Slot::Wedged { .. } => Err(CheckoutError::Terminal {
-                    session: id,
-                    label: entry.slot.label(),
-                }),
-                Slot::Idle(_) | Slot::Suspended { .. } => {
-                    let holes = slot_holes(&entry.slot);
-                    let epoch = entry.epoch;
-                    let machine = take_machine(&mut entry.slot, holes.clone());
-                    Ok(Checkout {
-                        registry: self,
-                        id,
-                        epoch,
-                        machine: Some(machine),
-                        holes,
-                    })
-                }
-            },
-        }
+        self.checkout_request(id, CheckoutRequest::Run, None)
     }
 
     /// Wait until `id`'s machine can be checked out for a run.
@@ -435,15 +426,20 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
         id: SessionId,
         request: CheckoutRequest<'_, H>,
     ) -> Result<Checkout<'_, M, H>, CheckoutError<H>> {
-        let availability = self.availability_for(id);
+        let (epoch, availability) = {
+            let slots = self.slots.lock();
+            let entry = slots.get(&id).ok_or_else(|| self.unknown_or_retired(id))?;
+            (entry.epoch, std::sync::Arc::clone(&entry.availability))
+        };
         let _position = availability.queue.lock().await;
         loop {
             let changed = availability.changed.notified();
-            let checkout = match request {
-                CheckoutRequest::Run => self.checkout_run(id),
-                CheckoutRequest::Resume(hole) => self.checkout_resume(id, hole),
-                CheckoutRequest::Child => self.checkout_child(id),
+            let requested = match &request {
+                CheckoutRequest::Run => CheckoutRequest::Run,
+                CheckoutRequest::Resume(hole) => CheckoutRequest::Resume(*hole),
+                CheckoutRequest::Child => CheckoutRequest::Child,
             };
+            let checkout = self.checkout_request(id, requested, Some(epoch));
             match checkout {
                 Err(CheckoutError::Running(_)) => changed.await,
                 result => return result,
@@ -460,71 +456,70 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
         id: SessionId,
         hole: &H,
     ) -> Result<Checkout<'_, M, H>, CheckoutError<H>> {
-        let mut slots = self.slots.lock();
-        match slots.get_mut(&id) {
-            None => Err(self.unknown_or_retired(id)),
-            Some(entry) => match &entry.slot {
-                Slot::Running { .. } => Err(CheckoutError::Running(id)),
-                Slot::Wedged { .. } => Err(CheckoutError::Terminal {
-                    session: id,
-                    label: entry.slot.label(),
-                }),
-                Slot::Idle(_) => Err(CheckoutError::WrongHole {
-                    session: id,
-                    attempted: hole.clone(),
-                    parked: Vec::new(),
-                }),
-                Slot::Suspended { holes, .. } if !holes.contains(hole) => {
-                    Err(CheckoutError::WrongHole {
-                        session: id,
-                        attempted: hole.clone(),
-                        parked: holes.clone(),
-                    })
-                }
-                Slot::Suspended { .. } => {
-                    let holes = slot_holes(&entry.slot);
-                    let epoch = entry.epoch;
-                    let machine = take_machine(&mut entry.slot, holes.clone());
-                    Ok(Checkout {
-                        registry: self,
-                        id,
-                        epoch,
-                        machine: Some(machine),
-                        holes,
-                    })
-                }
-            },
-        }
+        self.checkout_request(id, CheckoutRequest::Resume(hole), None)
     }
 
     /// Check a machine OUT for a CHILD run over its parked frames:
     /// `Suspended → Running`, requiring at least one parked hole. Otherwise
     /// identical to [`Self::checkout_run`].
     pub fn checkout_child(&self, id: SessionId) -> Result<Checkout<'_, M, H>, CheckoutError<H>> {
+        self.checkout_request(id, CheckoutRequest::Child, None)
+    }
+
+    fn checkout_request(
+        &self,
+        id: SessionId,
+        request: CheckoutRequest<'_, H>,
+        admitted_epoch: Option<u64>,
+    ) -> Result<Checkout<'_, M, H>, CheckoutError<H>> {
         let mut slots = self.slots.lock();
-        match slots.get_mut(&id) {
-            None => Err(self.unknown_or_retired(id)),
-            Some(entry) => match &entry.slot {
-                Slot::Running { .. } => Err(CheckoutError::Running(id)),
-                Slot::Wedged { .. } => Err(CheckoutError::Terminal {
+        let entry = slots
+            .get_mut(&id)
+            .ok_or_else(|| self.unknown_or_retired(id))?;
+        if let Some(admitted_epoch) = admitted_epoch {
+            if entry.epoch != admitted_epoch {
+                return Err(CheckoutError::StaleAdmission {
+                    session: id,
+                    admitted_epoch,
+                });
+            }
+        }
+        match &entry.slot {
+            Slot::Running { .. } => return Err(CheckoutError::Running(id)),
+            Slot::Wedged { .. } => {
+                return Err(CheckoutError::Terminal {
                     session: id,
                     label: entry.slot.label(),
-                }),
-                Slot::Idle(_) => Err(CheckoutError::NotSuspended(id)),
-                Slot::Suspended { .. } => {
-                    let holes = slot_holes(&entry.slot);
-                    let epoch = entry.epoch;
-                    let machine = take_machine(&mut entry.slot, holes.clone());
-                    Ok(Checkout {
-                        registry: self,
-                        id,
-                        epoch,
-                        machine: Some(machine),
-                        holes,
-                    })
-                }
-            },
+                })
+            }
+            Slot::Idle(_) | Slot::Suspended { .. } => {}
         }
+        match request {
+            CheckoutRequest::Run => {}
+            CheckoutRequest::Resume(hole) => {
+                let parked = slot_holes(&entry.slot);
+                if !parked.contains(hole) {
+                    return Err(CheckoutError::WrongHole {
+                        session: id,
+                        attempted: hole.clone(),
+                        parked,
+                    });
+                }
+            }
+            CheckoutRequest::Child if matches!(entry.slot, Slot::Idle(_)) => {
+                return Err(CheckoutError::NotSuspended(id));
+            }
+            CheckoutRequest::Child => {}
+        }
+        let holes = slot_holes(&entry.slot);
+        let machine = take_machine(&mut entry.slot, holes.clone());
+        Ok(Checkout {
+            registry: self,
+            id,
+            epoch: entry.epoch,
+            machine: Some(machine),
+            holes,
+        })
     }
 
     /// Settle a checked-out machine with its post-turn parked hole set under
@@ -533,18 +528,24 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     /// machine instead of writing it back.
     fn restore_suspended(&self, id: SessionId, epoch: u64, machine: Box<M>, holes: Vec<H>) {
         let mut slots = self.slots.lock();
-        match slots.get_mut(&id) {
+        let availability = match slots.get_mut(&id) {
             Some(entry) if entry.epoch == epoch => {
                 entry.slot = if holes.is_empty() {
                     Slot::Idle(machine)
                 } else {
                     Slot::Suspended { machine, holes }
                 };
+                Some(std::sync::Arc::clone(&entry.availability))
             }
-            _ => drop(machine),
-        }
+            _ => {
+                drop(machine);
+                None
+            }
+        };
         drop(slots);
-        self.availability_for(id).changed.notify_one();
+        if let Some(availability) = availability {
+            availability.changed.notify_one();
+        }
     }
 
     /// Settle a checked-out machine as `Wedged{since}` — the turn never gave
@@ -555,13 +556,17 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     /// machine to drop here — a stale mark is simply a no-op on the entry).
     fn mark_wedged(&self, id: SessionId, epoch: u64, since: Instant) {
         let mut slots = self.slots.lock();
-        if let Some(entry) = slots.get_mut(&id) {
-            if entry.epoch == epoch {
+        let availability = slots
+            .get_mut(&id)
+            .filter(|entry| entry.epoch == epoch)
+            .map(|entry| {
                 entry.slot = Slot::Wedged { since };
-            }
-        }
+                std::sync::Arc::clone(&entry.availability)
+            });
         drop(slots);
-        self.availability_for(id).changed.notify_waiters();
+        if let Some(availability) = availability {
+            availability.changed.notify_waiters();
+        }
     }
 }
 
@@ -787,15 +792,17 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
         let id = receipt.session_id();
         let epoch = receipt.into_epoch();
         let mut slots = self.slots.lock();
-        let removed = slots.get(&id).is_some_and(|e| e.epoch == epoch);
-        if removed {
-            slots.remove(&id);
-        }
-        drop(slots);
-        if removed {
+        let removed = if slots.get(&id).is_some_and(|entry| entry.epoch == epoch) {
+            let removed = slots.remove(&id);
             self.tombstone(id, reason.into());
+            removed
+        } else {
+            None
+        };
+        drop(slots);
+        if let Some(removed) = removed {
+            removed.availability.changed.notify_waiters();
         }
-        self.availability_for(id).changed.notify_waiters();
     }
 }
 
@@ -1365,5 +1372,111 @@ mod tests {
             .await
             .expect("cancelled queue head must not strand its successor")
             .expect("queued checkout succeeds after settlement");
+    }
+    fn poll_pending<F: std::future::Future>(future: std::pin::Pin<&mut F>) -> bool {
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        future.poll(&mut context).is_pending()
+    }
+
+    #[tokio::test]
+    async fn admission_metadata_is_owned_only_by_live_entries_and_waiters() {
+        let reg = SessionRegistry::<FakeMachine, Hole>::new();
+        for ordinal in 0..1024 {
+            let id = SessionId(1000 + ordinal);
+            assert_eq!(
+                err(reg.checkout_queued(id, CheckoutRequest::Run).await),
+                CheckoutError::Unknown(id)
+            );
+            reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
+            let availability = std::sync::Arc::downgrade(&reg.slots.lock()[&id].availability);
+            reg.remove(id, "churn").unwrap();
+            assert!(availability.upgrade().is_none());
+        }
+        assert!(reg.slots.lock().is_empty());
+        assert_eq!(reg.tombstones.lock().len(), TOMBSTONE_CAPACITY);
+    }
+
+    #[tokio::test]
+    async fn retiring_wakes_queued_waiters_and_releases_their_admission_owner() {
+        let reg = SessionRegistry::<FakeMachine, Hole>::new();
+        let id = SessionId(40);
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
+        let availability = std::sync::Arc::downgrade(&reg.slots.lock()[&id].availability);
+        let running = reg.checkout_run(id).unwrap();
+        let (_machine, receipt) = running.into_parts();
+        let first = reg.checkout_queued(id, CheckoutRequest::Run);
+        let second = reg.checkout_queued(id, CheckoutRequest::Run);
+        tokio::pin!(first, second);
+        assert!(poll_pending(first.as_mut()));
+        assert!(poll_pending(second.as_mut()));
+        reg.settle_retire(receipt, "retired owner");
+        assert!(matches!(err(first.await), CheckoutError::Retired { .. }));
+        assert!(matches!(err(second.await), CheckoutError::Retired { .. }));
+        // Completed futures no longer retain their admission Arc.
+        assert!(availability.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn removed_id_reuse_cannot_admit_waiters_from_the_previous_entry() {
+        let reg = SessionRegistry::<FakeMachine, Hole>::new();
+        let id = SessionId(41);
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 1 }));
+        let running = reg.checkout_run(id).unwrap();
+        let queued = reg.checkout_queued(id, CheckoutRequest::Run);
+        tokio::pin!(queued);
+        assert!(poll_pending(queued.as_mut()));
+        reg.remove(id, "replace removed session").unwrap();
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 99 }));
+        assert!(
+            matches!(err(queued.await), CheckoutError::StaleAdmission { session, .. } if session == id)
+        );
+        drop(running);
+        assert_eq!(reg.peek(id, |machine| machine.turns), Some(99));
+    }
+
+    #[tokio::test]
+    async fn live_replacement_keeps_one_fifo_gate_and_fences_old_epoch_waiters() {
+        let reg = SessionRegistry::<FakeMachine, Hole>::new();
+        let id = SessionId(42);
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 1 }));
+        let availability = std::sync::Arc::clone(&reg.slots.lock()[&id].availability);
+        let running = reg.checkout_run(id).unwrap();
+        let old_first = reg.checkout_queued(id, CheckoutRequest::Run);
+        let old_second = reg.checkout_queued(id, CheckoutRequest::Run);
+        tokio::pin!(old_first, old_second);
+        assert!(poll_pending(old_first.as_mut()));
+        assert!(poll_pending(old_second.as_mut()));
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 99 }));
+        assert!(std::sync::Arc::ptr_eq(
+            &availability,
+            &reg.slots.lock()[&id].availability
+        ));
+        let new_first = reg.checkout_queued(id, CheckoutRequest::Run);
+        let new_second = reg.checkout_queued(id, CheckoutRequest::Run);
+        tokio::pin!(new_first, new_second);
+        assert!(poll_pending(new_first.as_mut()));
+        assert!(poll_pending(new_second.as_mut()));
+        assert!(matches!(
+            err(old_first.await),
+            CheckoutError::StaleAdmission { .. }
+        ));
+        assert!(matches!(
+            err(old_second.await),
+            CheckoutError::StaleAdmission { .. }
+        ));
+        assert!(
+            poll_pending(new_second.as_mut()),
+            "second cannot bypass the first ticket"
+        );
+        let mut checkout = new_first.await.unwrap();
+        assert_eq!(checkout.machine().turns, 99);
+        assert!(
+            poll_pending(new_second.as_mut()),
+            "second waits for machine settlement"
+        );
+        checkout.restore_suspended(Vec::new());
+        new_second.await.unwrap().restore_suspended(Vec::new());
+        drop(running);
+        assert_eq!(reg.peek(id, |machine| machine.turns), Some(99));
     }
 }
