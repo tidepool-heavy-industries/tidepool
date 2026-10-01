@@ -101,7 +101,7 @@ episode = do
     "accepted == ReportAccepted"
   void $ turn owner "pending <- pollResponse worker\npure ()"
   assertCell owner "reporting incorporation does not settle original task"
-    "case pending of { ResponsePending -> True; _ -> False }"
+    "case pending of { ResponsePending _ -> True; _ -> False }"
   void $ turn owner "view <- episodeView active\ninspectFull (episodeComplete view, ownerReport (head (collectorOwners view)))"
   assertCell owner "completion needs presentation and exact worker reported checks"
     "episodeComplete view && case collectorOwners view of { [row] -> case (ownerDelivery row, ownerReport row) of { (UpdateTracked _ (Just (Right UpdatePresented)), Reported (Incorporated amendment head checks)) -> amendment == baselineAmendment change && head == after && checks == [\"read exact baseline\"]; _ -> False }; _ -> False }"
