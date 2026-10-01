@@ -1487,7 +1487,7 @@ pub struct ResidentActorRunner<H, O> {
 /// Preparation owns a fresh session until an exact actor takes custody. The
 /// runner's existing synchronous discard operation also covers a dropped await.
 pub(crate) struct ChildSessionStartupLease {
-    discard: Option<Box<dyn FnOnce() + Send>>,
+    discard: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
 
 impl ChildSessionStartupLease {
