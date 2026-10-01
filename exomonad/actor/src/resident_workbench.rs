@@ -2287,6 +2287,7 @@ impl ResidentRequest {
             Self::Replies(RepliesReq::ReplyWith(..)) => "reply",
             Self::Replies(RepliesReq::ObserveResponseWith(..)) => "pollResponse",
             Self::Replies(RepliesReq::CancelRequestWith(..)) => "cancelRequest",
+            Self::Replies(RepliesReq::DetachRequestWith(..)) => "detachRequest",
             Self::Replies(RepliesReq::AbandonResponseWith(..)) => "abandonResponse",
             Self::Replies(RepliesReq::ForgetResponseWith(..)) => "forgetResponse",
             Self::Replies(RepliesReq::ObserveReplyWith(..)) => "pollReply",
