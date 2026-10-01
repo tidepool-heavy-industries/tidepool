@@ -32,8 +32,7 @@ This executable example joins two differently typed inputs. No mailbox GADT or
 manual result casting is needed:
 
 ```haskell
-import GHC.Generics (Generic)
-data Join mode = Join { joinState :: mode :- State (Maybe Text, Maybe Int), sourceReady :: mode :- Call Text NoReply, checksReady :: mode :- Call Int NoReply, joined :: mode :- Call () (R.Reply (Maybe (Text, Int))) } deriving Generic
+data Join mode = Join { joinState :: mode :- State (Maybe Text, Maybe Int), sourceReady :: mode :- Call Text NoReply, checksReady :: mode :- Call Int NoReply, joined :: mode :- Call () (R.Reply (Maybe (Text, Int))) }
 let joinDefinition = coordinationActor "integration-join" Join
       { joinState = (Nothing, Nothing)
       , sourceReady = \commit -> modify' (\(_, checks) -> (Just commit, checks))
@@ -58,7 +57,7 @@ For fixed subscriptions, declare `mode :- Event input`, and supply
 `R.on source handler`. Source values identify the actual request or actor:
 
 ```haskell
-data Results mode = Results { resultState :: mode :- State [Either ResponseFailure (ResponseResult (Outcome Candidate))], arrived :: mode :- Event (Either ResponseFailure (ResponseResult (Outcome Candidate))), resultCount :: mode :- Call () (R.Reply Int) } deriving Generic
+data Results mode = Results { resultState :: mode :- State [Either ResponseFailure (ResponseResult (Outcome Candidate))], arrived :: mode :- Event (Either ResponseFailure (ResponseResult (Outcome Candidate))), resultCount :: mode :- Call () (R.Reply Int) }
 let resultDefinition = coordinationActor "candidate-results" Results
       { resultState = []
       , arrived = R.on (R.settlement worker) (\result -> modify' (++ [result]))
@@ -142,8 +141,7 @@ record for a binding that sits outside it. A signature and its equation go in
 the **same** cell item; a signature alone installs nothing.
 
 ```haskell
-import GHC.Generics (Generic)
-data Tally mode = Tally { tallyState :: mode :- State [Text], noted :: mode :- Call Text NoReply, noteCount :: mode :- Call () (R.Reply Int) } deriving Generic
+data Tally mode = Tally { tallyState :: mode :- State [Text], noted :: mode :- Call Text NoReply, noteCount :: mode :- Call () (R.Reply Int) }
 type TallyEffects = LocalEffects Tally '[Replies, Actor, Notifications]
 recordNote :: Text -> Handler [Text] TallyEffects ()
 recordNote note = modify' (++ [note])
