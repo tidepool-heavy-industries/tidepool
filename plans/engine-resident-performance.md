@@ -4,6 +4,43 @@ The delivery targets in `engine-compiled-cell-delivery.md` require the packaged
 host/Engine/Store route. A direct worker, the historical NO_DAEMON scaling
 fixture, and a private-session benchmark do not establish these targets.
 
+Prioritize removing unnecessary work before tuning or caching it. A candidate
+must identify the production consumer, the work that disappears, and the
+authority or ownership checks that remain. Report structural reductions
+separately from measured latency improvements.
+
+## Current structural reductions
+
+- Recovery publication: the retained v4 foundation snapshot at
+  `baseline-488cf013c1-run2/workspaces/durable-workspace-9HdfEn/`
+  is 12,663,202 bytes. Most graph rows repeat native dependency facts already
+  present in sealed artifacts. The v5 candidate persists interface selection
+  and derives native requirements from verified artifacts, preserving exact
+  lost-binding refusal. Its validation and byte comparison remain pending.
+  Compact JSON is already joined; it removes formatting bytes, not graph work.
+- Startup compilation: the admitted execution seals its output privately,
+  then the runtime reads and certifies the same bundle again. The candidate
+  hands off the original immutable decoded bundle, eliminating the second
+  certification and cache publication. Mutating a public runtime bundle must
+  still fail its compiler-issued proof check. Current startup acceptance tests
+  remain frozen on the prior implementation while this change is prepared.
+- Recovery hydration: the v5 candidate shares a verified artifact inventory
+  between manifest admission and hydration instead of discarding and decoding
+  it again. Separate later filesystem admissions must still detect tampering.
+- Scheduler tests: joined retirement checks use an existing empty binding
+  lease instead of compiling Haskell to exercise ownership alone. Native root
+  retention remains covered by separate native tests.
+- AgentSpec setup: a small candidate moves the resolved source-root inventory
+  into its owner rather than cloning it through resolution and publication.
+  Skipping reload compilation is not yet justified: an unchanged run module
+  does not establish unchanged helper sources or resident compilation inputs.
+
+These observations do not establish the production latency targets. The
+retained baseline above completed foundation publication but failed a later
+cell; it is diagnostic evidence, not a passing warm benchmark.
+
+## Production measurement
+
 Use the existing Exomonad production launcher with this workspace configuration:
 
 ```toml
