@@ -2046,6 +2046,158 @@ mod tests {
     }
 
     #[test]
+    fn private_recovery_validates_authentic_native_markers_and_later_tamper() {
+        use crate::session::{ModuleEnv, SessionId, SessionLib};
+        use tidepool_toolchain::declaration_join::ExactLexicalNode;
+
+        struct RunOwner(PathBuf);
+        impl crate::session::RecoveryRunAuthority for RunOwner {
+            fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
+                Ok(root == self.0)
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        // Produced by the owning toolchain's sealed recovery_native_fixture:
+        // a neutral original group 7 with an exact retained Val1.x generation 1.
+        let (original, value, files): (
+            RecoveryArtifactRef,
+            RecoveryValueInterfaceRef,
+            BTreeMap<PathBuf, Vec<u8>>,
+        ) = serde_json::from_str(include_str!("fixtures/recovery-native-packet.json")).unwrap();
+        for (path, bytes) in files {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+        let original = RecoveryArtifactClosure::Home(original);
+        let value = RecoveryArtifactClosure::ValueInterface(value);
+        let exact = RecoveryLiveDependency::NativeBinding {
+            artifact_id: value.artifact_id(),
+            binding: RecoverySourceIdentity {
+                unit: value.owner().unit.clone(),
+                module: value.owner().module.clone(),
+                namespace: "value".into(),
+                occurrence: "x".into(),
+                record_parent: None,
+            },
+            generation: 1,
+        };
+        let mut graph = RecoveryGraph::empty(41, 99).unwrap();
+        graph.high_water = Generation(2);
+        graph.artifacts = vec![original.clone(), value.clone()];
+        graph.nodes = vec![RecoveryNode {
+            id: Generation(2),
+            parent: None,
+            kind: RecoveryNodeKind::Authored,
+            implementation_refs: vec![],
+            lexical_roots: vec![original.owner()],
+            lexical: vec![
+                ExactLexicalNode {
+                    owner: original.owner(),
+                    imports: vec![value.owner()],
+                },
+                ExactLexicalNode {
+                    owner: value.owner(),
+                    imports: vec![],
+                },
+            ],
+            artifact_refs: vec![original.artifact_id(), value.artifact_id()],
+            exports: vec![],
+            retracts: vec![],
+            workbench_imports: vec![],
+            instances: RecoveryInstanceInventory::default(),
+            live_dependencies: vec![exact.clone()],
+            state: RecoveryNodeState::LiveValueDependency {
+                reason: "exact lost Val1.x".into(),
+            },
+        }];
+        graph.seal().unwrap();
+        let manifest = root.path().join("accepted.json");
+        assert!(matches!(
+            stage_v2(&manifest, root.path(), graph.clone())
+                .unwrap()
+                .publish(),
+            RecoveryPublishOutcome::Durable { .. }
+        ));
+        let mut accepted = SessionLib::open(
+            SessionId(41),
+            root.path().join("accepted-session"),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        accepted
+            .attach_owned_recovery_graph_v3(
+                &manifest,
+                std::sync::Arc::new(RunOwner(root.path().canonicalize().unwrap())),
+            )
+            .unwrap();
+        assert!(!accepted
+            .validate_recovered_public_owner(&owner("root"))
+            .unwrap());
+        assert_eq!(accepted.generation(), Generation(2));
+        assert!(accepted.current_module().is_none());
+
+        let mut wrong_generation = exact.clone();
+        let RecoveryLiveDependency::NativeBinding { generation, .. } = &mut wrong_generation else {
+            unreachable!()
+        };
+        *generation = 2;
+        let wrong_owner = RecoveryLiveDependency::NativeBinding {
+            artifact_id: original.artifact_id(),
+            binding: RecoverySourceIdentity {
+                unit: original.owner().unit,
+                module: original.owner().module,
+                namespace: "value".into(),
+                occurrence: "x".into(),
+                record_parent: None,
+            },
+            generation: 1,
+        };
+        for (index, markers) in [vec![], vec![wrong_generation], vec![wrong_owner]]
+            .into_iter()
+            .enumerate()
+        {
+            let mut forged = graph.clone();
+            forged.nodes[0].live_dependencies = markers;
+            if forged.nodes[0].live_dependencies.is_empty() {
+                forged.nodes[0].state = RecoveryNodeState::ExactArtifactClosure;
+            }
+            forged.seal().unwrap();
+            let path = root.path().join(format!("refused-{index}.json"));
+            assert!(matches!(
+                stage_v2(&path, root.path(), forged).unwrap().publish(),
+                RecoveryPublishOutcome::Durable { .. }
+            ));
+            let bytes = fs::read(&path).unwrap();
+            let mut session = SessionLib::open(
+                SessionId(42 + index as u64),
+                root.path().join(format!("refused-session-{index}")),
+                ModuleEnv::standalone_default(),
+            )
+            .unwrap();
+            assert!(
+                matches!(session.attach_recovery_graph_v2(&path), Err(crate::session::SessionError::RecoveryManifest { detail, .. }) if detail.contains("live dependencies differ from verified original native requirements"))
+            );
+            assert_eq!(session.generation(), Generation(0));
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+
+        let RecoveryArtifactClosure::Home(reference) = &original else {
+            unreachable!()
+        };
+        fs::write(
+            root.path().join(&reference.product_path),
+            b"tampered after successful hydration",
+        )
+        .unwrap();
+        let before = fs::read(&manifest).unwrap();
+        assert!(accepted
+            .validate_recovered_public_owner(&owner("root"))
+            .is_err());
+        assert_eq!(fs::read(&manifest).unwrap(), before);
+    }
+
+    #[test]
     fn v5_manifest_refuses_persisted_native_relation_rows() {
         let root = tempfile::tempdir().unwrap();
         let mut graph = fixture(root.path());

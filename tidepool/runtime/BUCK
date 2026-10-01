@@ -46,6 +46,7 @@ rust_filegroup(
         "src/session/fixtures/protected-scale-bind.hs": "tidepool/runtime/src/session/fixtures/protected-scale-bind.hs",
         "src/session/fixtures/protected-scale-foundation.hs": "tidepool/runtime/src/session/fixtures/protected-scale-foundation.hs",
         "src/session/fixtures/recovery-dependent.hs": "tidepool/runtime/src/session/fixtures/recovery-dependent.hs",
+        "src/session/fixtures/recovery-native-packet.json": "tidepool/runtime/src/session/fixtures/recovery-native-packet.json",
         "src/session/fixtures/recovery-original.hs": "tidepool/runtime/src/session/fixtures/recovery-original.hs",
         "src/session/inspection.rs": "tidepool/runtime/src/session/inspection.rs",
         "src/session/kernel.rs": "tidepool/runtime/src/session/kernel.rs",
