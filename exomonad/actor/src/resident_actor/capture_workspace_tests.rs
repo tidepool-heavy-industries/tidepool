@@ -156,6 +156,14 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
         .await
         .expect("issuer");
     assert_committed(&run_cell(issuer.clone(), "let capturedValue = 41 :: Int".into()).await);
+    let original_interface = root
+        .path()
+        .join(tidepool_repr::SessionModule::val(tidepool_repr::Generation(1)).relative_hi_path());
+    eprintln!(
+        "checkpoint workspace fixture: original interface {} observation {:?}",
+        original_interface.display(),
+        std::fs::read(&original_interface).map(|bytes| (bytes.len(), blake3::hash(&bytes)))
+    );
     let issuer_context = forest
         .directory
         .session_context(issuer.identity())
@@ -308,14 +316,28 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
     }
 
     eprintln!("checkpoint workspace fixture: both launch cells committed their groups");
+    eprintln!(
+        "checkpoint workspace fixture: startup interface {} observation {:?}",
+        original_interface.display(),
+        std::fs::read(&original_interface).map(|bytes| (bytes.len(), blake3::hash(&bytes)))
+    );
     let mut children = Vec::new();
     while children.len() < 2 {
         let event = tokio::time::timeout(std::time::Duration::from_secs(30), deployments.recv())
             .await
             .expect("child policy startup is bounded")
             .expect("deployment observer");
-        if let LocalResidentDeployment::PolicyInstalled(installation) = event {
-            children.push(installation);
+        match event {
+            LocalResidentDeployment::PolicyInstalled(installation) => children.push(installation),
+            LocalResidentDeployment::Retired { actor, terminal }
+                if actor != issuer.identity() && terminal.kind == ActorExitKind::Failed =>
+            {
+                panic!("child policy startup retired {actor:?}: {terminal:?}");
+            }
+            LocalResidentDeployment::ChildExited { notice } => {
+                panic!("child exited before both policies installed: {notice:?}");
+            }
+            _ => {}
         }
     }
     eprintln!("checkpoint workspace fixture: both actual child policies installed");

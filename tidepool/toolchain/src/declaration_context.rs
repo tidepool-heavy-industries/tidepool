@@ -1015,9 +1015,10 @@ impl ExactCompilationRequest {
                     || (qualifier != "none" && qualifier != format!("this:{unit}"))
                     || !imported.insert((qualifier, name, boot, unit))
                 {
-                    return Err(failure(
-                        "exact import witness leaves selected lexical graph",
-                    ));
+                    return Err(failure(format!(
+                        "exact import witness leaves selected lexical graph: source {}:{}, import {unit}:{name}, qualifier {qualifier}, boot {boot}, selected {}",
+                        owner.0, owner.1, selected.contains(&(unit, name)),
+                    )));
                 }
                 resolved.insert(identity(unit, name));
             }

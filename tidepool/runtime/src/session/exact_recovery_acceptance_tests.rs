@@ -217,6 +217,88 @@ fn recovered_public_owner_rejects_foreign_admission_and_incarnation_without_effe
 }
 
 #[test]
+fn materialization_retraction_attaches_authored_owner_before_publication() {
+    tidepool_testing::eval_harness::require_extract();
+    let durable = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let manifest = durable.path().join("declarations.json");
+    let mut session = PersistentSession::new(
+        Some(library(4412, source.path(), &manifest, &[])),
+        1024 * 1024,
+    );
+    let public = session.mint_isolated_scope();
+    session
+        .initialize_durable_public_scope(owner(1), public)
+        .unwrap();
+    let admission = session.begin_private_execution(public).unwrap();
+    let private = admission.private_scope();
+    session
+        .define_scoped_in(private, &[include_str!("fixtures/recovery-original.hs")])
+        .unwrap();
+    // A previously materialized value remains visible while this next binding
+    // moves from the declaration environment into the binding store.
+    let mut existing = prepared::tests::rooted_publication_fixture(&mut session, "existing", 4413);
+    existing.scope = private;
+    session.bind_in(private, existing).unwrap();
+    let mut entry = prepared::tests::rooted_publication_fixture(&mut session, "answer", 4414);
+    entry.scope = private;
+    session.bind_replacing_decl_in(private, entry).unwrap();
+    let generation = session.lib().scope_tip(private);
+    let authored_owner = session
+        .lib()
+        .log
+        .certified_authored_at(generation)
+        .unwrap()
+        .product()
+        .owner()
+        .clone();
+    let selection = session
+        .bindings()
+        .source_domain_selection_in(session.scope_tree(), private)
+        .unwrap();
+    assert_eq!(
+        selection
+            .domain_for_owner(selection.current(), &authored_owner)
+            .unwrap(),
+        selection.current()
+    );
+    session
+        .bindings()
+        .prepare_authored_source_publication_in(
+            session.scope_tree(),
+            private,
+            public,
+            &[],
+            &[],
+            &[authored_owner],
+        )
+        .unwrap();
+    let before = session.public_visibility_snapshot_in(private).unwrap();
+    session.retract_in(private, "absent").unwrap();
+    assert_eq!(
+        session.public_visibility_snapshot_in(private).unwrap(),
+        before
+    );
+    let intent = session
+        .freeze_execution_intent(&admission, vec![], vec![])
+        .unwrap();
+    let CertifiedDeclarationPublication::Accepted(accepted) = session
+        .restage_declaration_publication(owner(1), intent)
+        .unwrap()
+        .certify()
+        .unwrap()
+    else {
+        panic!("materialized declaration retraction must publish");
+    };
+    assert_eq!(
+        session
+            .publish_staged_public_manifest(accepted.stage().unwrap(), &PublicationDecision::new(),)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    );
+}
+
+#[test]
 fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_dependencies_and_retractions(
 ) {
     tidepool_testing::eval_harness::require_extract();

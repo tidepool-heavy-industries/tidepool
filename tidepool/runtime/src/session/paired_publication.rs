@@ -1764,7 +1764,6 @@ mod tests {
             .any(|export| export.head.occurrence == "%%"
                 && export.head.namespace == ExportNamespace::Value));
         session
-            .lib_mut()
             .retract_many_in(withdrawal.private_scope(), &["%%".into()])
             .unwrap();
         let withdrawn = session
@@ -2646,7 +2645,6 @@ mod tests {
             include_str!("fixtures/paired-rich-A2.hs"),
         );
         session
-            .lib_mut()
             .retract_many_in(
                 a.private_scope(),
                 &["retractValue".into(), "baseValue".into()],

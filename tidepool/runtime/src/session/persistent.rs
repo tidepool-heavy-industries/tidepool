@@ -1686,13 +1686,18 @@ impl PersistentSession {
     /// `helper` — the parent's name is still the parent's, and nothing ever
     /// walks downward.
     pub fn retract_in(&mut self, scope: ScopeId, name: &str) -> Result<(), SessionError> {
-        if !self.scopes.is_live(scope) {
-            return Err(SessionError::DeadScope(scope));
-        }
-        match self.lib.as_mut() {
-            Some(lib) => lib.retract_in(scope, name),
-            None => Ok(()),
-        }
+        self.retract_many_in(scope, &[name.to_string()])
+    }
+
+    /// Retract current declaration heads in one generation while retaining
+    /// their authored source origins in this scope's source-instance environment.
+    /// Names without a current declaration head are ignored.
+    pub fn retract_many_in(
+        &mut self,
+        scope: ScopeId,
+        names: &[String],
+    ) -> Result<(), SessionError> {
+        self.retract_heads_in(scope, names, None)
     }
 
     /// Retract a set of declaration heads through one durable declaration
@@ -1703,13 +1708,35 @@ impl PersistentSession {
         scope: ScopeId,
         names: &[String],
     ) -> Result<(), SessionError> {
+        self.retract_heads_in(
+            scope,
+            names,
+            Some(tidepool_toolchain::declaration_join::ExportNamespace::Value),
+        )
+    }
+
+    fn retract_heads_in(
+        &mut self,
+        scope: ScopeId,
+        names: &[String],
+        namespace: Option<tidepool_toolchain::declaration_join::ExportNamespace>,
+    ) -> Result<(), SessionError> {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
-        match self.lib.as_mut() {
-            Some(lib) => lib.retract_value_heads_in(scope, names),
-            None => Ok(()),
+        let Some(lib) = self.lib.as_mut() else {
+            return Ok(());
+        };
+        if let Some(staged) = lib.prepare_retraction_in(scope, names, namespace)? {
+            let visible_values = self
+                .bindings
+                .iter_current_in(&self.scopes, scope)
+                .into_iter()
+                .map(|(_, entry)| (entry.id, entry.module.module_name()))
+                .collect();
+            self.adopt_staged_declaration_in(staged.with_visible_values(visible_values))?;
         }
+        Ok(())
     }
 
     // -- scopes --------------------------------------------------------------

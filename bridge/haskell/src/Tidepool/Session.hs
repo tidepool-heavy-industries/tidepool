@@ -96,6 +96,7 @@ import GHC.Iface.Make (mkIfaceExports)
 import GHC.Iface.Binary
   ( writeBinIface, TraceBinIFace(..), CompressionIFace(..) )
 import GHC.Iface.Load (readIface)
+import GHC.Iface.Errors.Ppr (readInterfaceErrorDiagnostic)
 import GHC.IfaceToCore (typecheckIface)
 import GHC.Tc.Utils.Monad (initIfaceCheck)
 import GHC.Unit.Module.ModIface
@@ -115,7 +116,7 @@ import GHC.Unit.Module (ModuleName, mkModuleName, moduleNameString)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 
 import GHC.Utils.Fingerprint (fingerprint0)
-import GHC.Utils.Outputable (text)
+import GHC.Utils.Outputable (text, showSDoc)
 import GHC.Types.SrcLoc (noSrcSpan)
 import qualified GHC.Data.Maybe as MErr
 
@@ -317,9 +318,11 @@ injectSessionIface root sm hsc0 = liftIO $ do
   emitCount timing ("session_iface_decode_reads." ++ sessionModuleString sm) 1
   readRes <- readIface (hsc_dflags hsc0) (hsc_NC hsc0) theMod path
   case readRes of
-    MErr.Failed _ ->
+    MErr.Failed err ->
       ioError (userError ("injectSessionIface: readIface failed for "
-                          ++ sessionModuleString sm ++ " at " ++ path))
+                          ++ sessionModuleString sm ++ " at " ++ path
+                          ++ ": " ++ showSDoc (hsc_dflags hsc0)
+                               (readInterfaceErrorDiagnostic err)))
     MErr.Succeeded iface -> do
       details <- injectDetails hsc0 modNm iface
       let hmi = HomeModInfo iface details emptyHomeModInfoLinkable
