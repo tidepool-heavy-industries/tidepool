@@ -18,37 +18,32 @@ import Tidepool.Actors.Exomonad (Actor, AgentRef, GitOid, Response)
 import qualified Tidepool.Command as Cmd
 import Tidepool.Effects.Core (Commands, Jev)
 
--- A parent can retain the pending child's baseline while starting two exact,
--- read-only command probes in its own checkout. The returned launch retains
--- any jobs that need later observation and the probes not yet run.
+-- A parent can retain the pending child's baseline while running two exact,
+-- read-only command probes in its own checkout. The returned batch retains
+-- terminal observations and the probes not admitted to this batch.
 pendingChildExample
   :: (Member Actor effects, Member Commands effects)
   => AgentRef -> GitOid -> Response Incorporation -> Text
-  -> Eff effects (Either ProbeRefusal ProbeLaunch)
+  -> Eff effects (Either ProbeRefusal ProbeBatch)
 pendingChildExample owner baseline incorporation checkout = do
   void (watchIncorporatedBaseline owner baseline "pending child" incorporation)
   let probe name context args =
         CommandProbe name context checkout (Cmd.MiB 128) (Cmd.argv args)
-  result <- startProbeBatch (ProbeLimits 2 2)
+  result <- runProbeBatch (ProbeLimits 2 2)
     [ probe "status" "working tree status" ["git", "status", "--short"]
     , probe "head" "current commit" ["git", "rev-parse", "HEAD"]
     ]
   pure result
-
--- Run in a later cell after binding the launch, so an unavailable job cannot
--- discard another already-started job handle.
-observeOneExample :: Member Commands effects => ProbeStart -> Eff effects ProbeObservation
-observeOneExample = observeProbe (Cmd.Observation 0 0)
 
 -- Semantic selection carries the caller's typed command and budget directly
 -- into execution; there is no second name lookup or synthesized command.
 chosenProbeExample
   :: (Member Jev effects, Member Commands effects)
   => Text -> [CommandProbe]
-  -> Eff effects (Either ProbeChoiceFailure (Maybe (Either ProbeRefusal ProbeLaunch)))
+  -> Eff effects (Either ProbeChoiceFailure (Maybe (Either ProbeRefusal ProbeBatch)))
 chosenProbeExample question probes = do
   chosen <- chooseNextProbe question probes
-  traverse (traverse (startProbeBatch (ProbeLimits 1 1) . pure)) chosen
+  traverse (traverse (runProbeBatch (ProbeLimits 1 1) . pure)) chosen
 
 -- The actor can form a bounded semantic recommendation without waking its
 -- owner to summarize a slow job. Uncertain and unavailable judgments remain

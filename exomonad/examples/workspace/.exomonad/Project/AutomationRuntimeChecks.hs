@@ -19,30 +19,13 @@ commandCustody = do
     , "import Project.SlowCommandWatch"
     , "let probe name command = CommandProbe name name \"/tmp\" (Cmd.MiB 64) (Cmd.argv [\"sh\",\"-c\",command])"
     , "let commandProbes = [probe \"first\" \"printf first\", probe \"second\" \"printf second\"]"
-    , "launched <- startProbeBatch (ProbeLimits 2 2) commandProbes"
+    , "batch <- runProbeBatch (ProbeLimits 2 2) commandProbes"
     ]
-  started <- turn owner "inspectFull launched"
-  check "both supplied command probes start with exact job handles"
-    (all (`Text.isInfixOf` output started) ["ProbeRunning \"first\"", "ProbeRunning \"second\""])
-  first <- turn owner "let Right batch = launched\nfirstObserved <- observeProbe (Cmd.Observation 1000 0) (head (startedProbes batch))\ninspectFull firstObserved"
-  check "first retained probe yields its own stdout page"
-    ("ProbeObserved \"first\"" `Text.isInfixOf` output first
-      && "first" `Text.isInfixOf` output first)
-  second <- turn owner "let Right batch = launched\nsecondObserved <- observeProbe (Cmd.Observation 1000 0) (startedProbes batch !! 1)\ninspectFull secondObserved"
-  check "second retained probe stays independently observable"
-    ("ProbeObserved \"second\"" `Text.isInfixOf` output second
-      && "second" `Text.isInfixOf` output second)
+  assertCell owner "both supplied probes finish with independent exact job handles"
+    "case batch of { Right completed -> case observedProbes completed of { [ProbeObserved \"first\" firstJob firstReceipt (Right firstOut) _, ProbeObserved \"second\" secondJob secondReceipt (Right secondOut) _] -> firstJob /= secondJob && Cmd.commandOutcome firstReceipt == Cmd.CommandExited 0 && Cmd.commandOutcome secondReceipt == Cmd.CommandExited 0 && Cmd.pageText firstOut == \"first\" && Cmd.pageText secondOut == \"second\"; _ -> False }; _ -> False }"
   void $ turn owner "slowJob <- Cmd.background (Cmd.withStdin (Cmd.argv [\"sh\",\"-c\",\"read line; printf done\"]))\nRight slowWatcher <- watchSlowCommand me \"owned slow probe\" slowJob 10 64 (\\observation -> pure (either (const \"stdout unavailable\") Cmd.pageText (observedSlowStdout observation) <> either (const \"stderr unavailable\") Cmd.pageText (observedSlowStderr observation)))"
-  alerted <- awaitOutput owner
-    "slowState <- R.call (slowView (R.client slowWatcher)) ()\ninspectFull slowState"
-    (Text.isInfixOf "slowAlert = Just")
-  check "record actor observes the parent's shared job and retains one alert"
-    ("slowChecked = True" `Text.isInfixOf` alerted
-      && "slowAlert = Just" `Text.isInfixOf` alerted)
+  awaitCell owner "ongoing slow-job subscription retains one typed alert"
+    "do { state <- R.call (slowView (R.client slowWatcher)) (); pure (slowChecked state && case slowAlert state of { Just _ -> True; Nothing -> False }) }"
   void $ turn owner "Cmd.sendInput slowJob \"go\\n\"\nCmd.closeInput slowJob\nCmd.await slowJob"
-  watched <- awaitOutput owner
-    "slowState <- R.call (slowView (R.client slowWatcher)) ()\ninspectFull slowState"
-    (Text.isInfixOf "slowCompletion = Just")
-  check "the same watcher records later completion without another alert"
-    ("slowAlert = Just" `Text.isInfixOf` watched
-      && "slowCompletion = Just" `Text.isInfixOf` watched)
+  awaitCell owner "the same subscription records terminal completion and retains its alert"
+    "do { state <- R.call (slowView (R.client slowWatcher)) (); pure (case (slowCompletion state, slowAlert state) of { (Just receipt, Just _) -> Cmd.commandOutcome receipt == Cmd.CommandExited 0; _ -> False }) }"

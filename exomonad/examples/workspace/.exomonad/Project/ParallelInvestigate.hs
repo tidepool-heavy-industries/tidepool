@@ -1,28 +1,27 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Start a bounded batch of caller-supplied read-only command probes.
--- Starting every selected command before observing any of them permits
+-- | Await bounded caller-supplied read-only command probes.
+-- Starting every active command before awaiting any of them permits
 -- overlap through the command service. No command is synthesized or retried.
 module Project.ParallelInvestigate
   ( CommandProbe (..)
   , ProbeLimits (..)
   , ProbeRefusal (..)
-  , ProbeLaunch (..)
-  , ProbeStart (..)
+  , ProbeBatch (..)
   , ProbeObservation (..)
   , ProbePlan (..)
   , ProbeChoiceFailure (..)
   , selectProbes
   , planProbeBatch
-  , startProbeBatch
-  , observeProbe
+  , runProbeBatch
   , chooseNextProbe
   , FollowupStop (..), FollowupReport (..)
-  , followFailure, followFailureWith, resumeFollowup, resumeFollowupWith
+  , followFailure, followFailureWith
   ) where
 
 import Control.Monad (forM)
@@ -65,21 +64,21 @@ data ProbeStart
   | ProbeRunning Text Cmd.Job
   deriving (Show)
 
-data ProbeLaunch = ProbeLaunch
-  { startedProbes :: [ProbeStart]
+data ProbeBatch = ProbeBatch
+  { observedProbes :: [ProbeObservation]
   , unrunProbes :: [CommandProbe]
   , outsideSelectionBudget :: [CommandProbe]
   }
 
-instance Show ProbeLaunch where
-  show launch = "ProbeLaunch { startedProbes = " ++ show (startedProbes launch)
-    ++ ", unrunProbes = " ++ show (map probeName (unrunProbes launch))
-    ++ ", outsideSelectionBudget = " ++ show (map probeName (outsideSelectionBudget launch))
+instance Show ProbeBatch where
+  show batch = "ProbeBatch { observedProbes = " ++ show (observedProbes batch)
+    ++ ", unrunProbes = " ++ show (map probeName (unrunProbes batch))
+    ++ ", outsideSelectionBudget = " ++ show (map probeName (outsideSelectionBudget batch))
     ++ " }"
 
 data ProbeObservation
   = ProbeStartFailed Text Cmd.CommandError
-  | ProbeObserved Text Cmd.Job Cmd.CommandStatus
+  | ProbeObserved Text Cmd.Job Cmd.CommandResult
       (Either Cmd.CommandError Cmd.OutputPage)
       (Either Cmd.CommandError Cmd.OutputPage)
   deriving (Show)
@@ -158,41 +157,37 @@ validateProbe probe
 
 startValidProbe :: Member Commands effects => CommandProbe -> Eff effects ProbeStart
 startValidProbe probe = do
-  started <- Cmd.tryBackground
+  started <- Cmd.tryStart
     (Cmd.withMemory (probeMemory probe)
       (Cmd.inDirectory (probeDirectory probe) (probeCommand probe)))
   pure $ case started of
     Left refusal -> ProbeRejected (probeName probe) refusal
     Right job -> ProbeRunning (probeName probe) job
 
--- | Start at most `maximumConcurrent` jobs, owned by the caller's actor across
--- notebook calls. Observe the exact returned handles before starting a
--- continuation; a pending result remains a running job.
-startProbeBatch
+-- | Run one bounded batch in the current invocation. Every active command
+-- starts before any is awaited, so independent probes can overlap. Deferred
+-- and outside-budget probes remain explicit and are never submitted here.
+runProbeBatch
   :: Member Commands effects
   => ProbeLimits -> [CommandProbe]
-  -> Eff effects (Either ProbeRefusal ProbeLaunch)
-startProbeBatch limits selected = case planProbeBatch limits selected of
+  -> Eff effects (Either ProbeRefusal ProbeBatch)
+runProbeBatch limits selected = case planProbeBatch limits selected of
   Left refusal -> pure (Left refusal)
   Right plan -> do
     launched <- forM (plannedStart plan) startValidProbe
-    pure (Right (ProbeLaunch launched (plannedUnrun plan) (plannedOutsideBudget plan)))
+    observed <- forM launched collectProbe
+    pure (Right (ProbeBatch observed (plannedUnrun plan) (plannedOutsideBudget plan)))
 
--- | Observe one exact job after retaining its launch. A running status stays
--- running; the owner can revisit that Job without submitting another command.
--- The first page from each stream carries completeness flags. The caller's
--- Observation is passed through unchanged; the underlying Cmd.observe still
--- fails the cell if the retained Job itself is unavailable.
-observeProbe
-  :: Member Commands effects
-  => Cmd.Observation -> ProbeStart -> Eff effects ProbeObservation
-observeProbe observation started = case started of
+-- Retain bounded pages independently of process outcome. An unavailable job
+-- fails the continuation through Cmd.await; output refusal remains typed data.
+collectProbe :: Member Commands effects => ProbeStart -> Eff effects ProbeObservation
+collectProbe started = case started of
   ProbeRejected name refusal -> pure (ProbeStartFailed name refusal)
   ProbeRunning name job -> do
-    state <- Cmd.quiet (Cmd.observe observation job)
-    stdoutPage <- Cmd.tryPage job Cmd.Stdout Cmd.OutputBeginning
-    stderrPage <- Cmd.tryPage job Cmd.Stderr Cmd.OutputBeginning
-    pure (ProbeObserved name job state stdoutPage stderrPage)
+    result <- Cmd.quiet (Cmd.await job)
+    stdoutPage <- Cmd.tryPage job Cmd.Stdout (Cmd.OutputSlice 0 4096)
+    stderrPage <- Cmd.tryPage job Cmd.Stderr (Cmd.OutputSlice 0 4096)
+    pure (ProbeObserved name job (Cmd.commandResult result) stdoutPage stderrPage)
 
 -- | Optional semantic navigation among the supplied typed probes. A near
 -- tie or unavailable Jev response returns unresolved evidence; it never
@@ -218,15 +213,13 @@ chooseNextProbe question probes = do
 -- | The original outcome is never replaced by a diagnostic command's outcome.
 data FollowupStop
   = OriginalNotFailed
-  | OriginalStillRunning
   | OriginalNotDiagnosable Cmd.CommandResult
   | InvalidFollowupProbes ProbeRefusal
   | NoProbeNeeded
   | FollowupBudgetSpent
   | FollowupUnresolved ProbeChoiceFailure
-  | FollowupStillRunning Cmd.Job
   | FollowupStartRefused Text Cmd.CommandError
-  | FollowupRecoveryMismatch
+  | FollowupDiagnosticStopped Text Cmd.Job Cmd.CommandResult
   deriving (Show)
 
 data FollowupReport = FollowupReport
@@ -235,101 +228,48 @@ data FollowupReport = FollowupReport
   , followupStop :: FollowupStop
   } deriving (Show)
 
--- | At most two contextual, caller-supplied read-only diagnostics after a
--- terminal failure. Use from a completion handler or after a terminal observation;
--- a pending original is returned unchanged for the caller's existing completion
--- route. Observation works with shared jobs and never arms another owner's notice.
--- This never
--- retries the original command. Cancellation, unconfirmed exit, or retained
--- cleanup stop before diagnostics. Commands keep their supplied authority/budget.
+-- | Await one supplied original and at most two distinct caller-supplied
+-- diagnostics in the same continuation. Original failure is never retried or
+-- replaced by a diagnostic outcome. Cancellation, unconfirmed exit or unresolved
+-- cleanup stops further admission. Commands retain supplied authority/budgets.
 followFailure
   :: (Member Commands effects, Member Jev effects)
   => Text -> Cmd.Job -> [CommandProbe]
   -> Eff effects FollowupReport
 followFailure = followFailureWith chooseNextProbe
 
--- | Ordinary functions can supply a deterministic project policy instead of
--- Jev. The policy selects an existing probe value or explicitly abstains.
+-- | A project policy can choose a supplied probe or explicitly abstain.
 followFailureWith
   :: Member Commands effects
   => (Text -> [CommandProbe] -> Eff effects (Either ProbeChoiceFailure (Maybe CommandProbe)))
   -> Text -> Cmd.Job -> [CommandProbe]
   -> Eff effects FollowupReport
 followFailureWith choose intent original available = do
-  state <- Cmd.quiet (Cmd.observe (Cmd.Observation 0 0) original)
+  result <- Cmd.quiet (Cmd.await original)
   out <- Cmd.tryPage original Cmd.Stdout (Cmd.OutputSlice 0 4096)
   err <- Cmd.tryPage original Cmd.Stderr (Cmd.OutputSlice 0 4096)
-  let initial = ProbeObserved "original" original state out err
-  case state of
-    Cmd.CommandFinished receipt
-      | Cmd.commandCleanup receipt /= Cmd.CommandClean ->
-          pure (FollowupReport initial [] (OriginalNotDiagnosable receipt))
-      | Cmd.commandOutcome receipt == Cmd.CommandCancelled ->
-          pure (FollowupReport initial [] (OriginalNotDiagnosable receipt))
-      | Cmd.CommandUnconfirmed _ <- Cmd.commandOutcome receipt ->
-          pure (FollowupReport initial [] (OriginalNotDiagnosable receipt))
-      | Cmd.commandOutcome receipt /= Cmd.CommandExited 0 ->
-          case selectProbes available (map probeName available) >>= validateAll of
-            Left refusal -> pure (FollowupReport initial [] (InvalidFollowupProbes refusal))
-            Right probes -> continueFollowup choose intent initial [] probes (2 :: Int)
-    Cmd.CommandFinished _ -> pure (FollowupReport initial [] OriginalNotFailed)
-    _ -> pure (FollowupReport initial [] OriginalStillRunning)
+  let receipt = Cmd.commandResult result
+      initial = ProbeObserved "original" original receipt out err
+  if not (diagnosable receipt)
+    then pure (FollowupReport initial [] (OriginalNotDiagnosable receipt))
+    else if Cmd.commandOutcome receipt == Cmd.CommandExited 0
+      then pure (FollowupReport initial [] OriginalNotFailed)
+      else case selectProbes available (map probeName available) >>= validateAll of
+        Left refusal -> pure (FollowupReport initial [] (InvalidFollowupProbes refusal))
+        Right probes -> continueFollowup choose intent initial [] probes (2 :: Int)
   where
     validateAll probes = case [issue | probe <- probes, Just issue <- [validateProbe probe]] of
       issue : _ -> Left issue
       [] -> Right probes
 
--- | Resume only the exact pending diagnostic named in a retained report.
--- Prior observations consume their original budget; the pending job is never
--- submitted again. Use after its completion event or to inspect a retained
--- pending state after the original cell binding was lost.
-resumeFollowup
-  :: (Member Commands effects, Member Jev effects)
-  => Text -> Cmd.Job -> [CommandProbe] -> FollowupReport
-  -> Eff effects FollowupReport
-resumeFollowup = resumeFollowupWith chooseNextProbe
-
-resumeFollowupWith
-  :: Member Commands effects
-  => (Text -> [CommandProbe] -> Eff effects (Either ProbeChoiceFailure (Maybe CommandProbe)))
-  -> Text -> Cmd.Job -> [CommandProbe] -> FollowupReport
-  -> Eff effects FollowupReport
-resumeFollowupWith choose intent original available prior =
-  case (originalObservation prior, followupStop prior, reverse (diagnosticObservations prior)) of
-    (ProbeObserved _ originalJob (Cmd.CommandFinished receipt) _ _, FollowupStillRunning pending,
-      ProbeObserved name observedJob _ _ _ : previous)
-      | originalJob == original && observedJob == pending
-          && validFailure receipt
-          && length previous < 2
-          && validHistory name previous available
-          && validAvailable available -> do
-              status <- Cmd.quiet (Cmd.observe (Cmd.Observation 0 0) pending)
-              out <- Cmd.tryPage pending Cmd.Stdout (Cmd.OutputSlice 0 4096)
-              err <- Cmd.tryPage pending Cmd.Stderr (Cmd.OutputSlice 0 4096)
-              let updated = reverse previous ++ [ProbeObserved name pending status out err]
-                  remaining = filter (\item -> probeName item `notElem` map observationName updated) available
-              case status of
-                Cmd.CommandFinished _ -> continueFollowup choose intent
-                  (originalObservation prior) updated remaining (2 - length updated)
-                _ -> pure prior { diagnosticObservations = updated }
-    _ -> pure prior { followupStop = FollowupRecoveryMismatch }
-  where
-    validFailure receipt = Cmd.commandCleanup receipt == Cmd.CommandClean
-      && Cmd.commandOutcome receipt /= Cmd.CommandExited 0
-      && Cmd.commandOutcome receipt /= Cmd.CommandCancelled
-      && case Cmd.commandOutcome receipt of
-        Cmd.CommandUnconfirmed _ -> False
-        _ -> True
-    validHistory pendingName previous probes =
-      let names = pendingName : map observationName previous
-          availableNames = map probeName probes
-      in all (`elem` availableNames) names
-        && length names == Set.size (Set.fromList names)
-    validAvailable probes = case selectProbes probes (map probeName probes) of
-      Left _ -> False
-      Right selected -> all ((== Nothing) . validateProbe) selected
-    observationName (ProbeObserved name _ _ _ _) = name
-    observationName (ProbeStartFailed name _) = name
+-- Terminal outcome and cleanup are separate obligations. Only receipts whose
+-- cleanup settled and whose outcome is confirmed permit another diagnostic.
+diagnosable :: Cmd.CommandResult -> Bool
+diagnosable receipt = Cmd.commandCleanup receipt == Cmd.CommandClean
+  && case Cmd.commandOutcome receipt of
+    Cmd.CommandCancelled -> False
+    Cmd.CommandUnconfirmed _ -> False
+    _ -> True
 
 continueFollowup
   :: Member Commands effects
@@ -355,11 +295,11 @@ continueFollowup choose intent initial observed remaining budget
               ProbeRejected name issue ->
                 pure (FollowupReport initial observed (FollowupStartRefused name issue))
               ProbeRunning name job -> do
-                state <- Cmd.quiet (Cmd.observe (Cmd.Observation 30000 0) job)
-                out <- Cmd.tryPage job Cmd.Stdout (Cmd.OutputSlice 0 4096)
-                err <- Cmd.tryPage job Cmd.Stderr (Cmd.OutputSlice 0 4096)
-                let next = observed ++ [ProbeObserved name job state out err]
-                case state of
-                  Cmd.CommandFinished _ -> continueFollowup choose intent initial next
+                observation <- collectProbe (ProbeRunning name job)
+                let next = observed ++ [observation]
+                case observation of
+                  ProbeObserved _ _ receipt _ _
+                    | not (diagnosable receipt) -> pure (FollowupReport initial next
+                        (FollowupDiagnosticStopped name job receipt))
+                  _ -> continueFollowup choose intent initial next
                     (filter ((/= name) . probeName) remaining) (budget - 1)
-                  _ -> pure (FollowupReport initial next (FollowupStillRunning job))
