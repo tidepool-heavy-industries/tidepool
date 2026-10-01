@@ -60,6 +60,9 @@ pub enum WorkbenchBoundaryReconciliation {
 pub struct WorkbenchExecutionControl {
     pub(crate) invocation: Option<WorkbenchCallKey>,
     publication: Arc<PublicationDecision>,
+    native_cancel: Arc<std::sync::atomic::AtomicBool>,
+    reservation_attempt: crate::request::WorkbenchReservationAttempt,
+    execution: std::sync::OnceLock<WorkbenchExecutionId>,
     publication_waited: std::sync::atomic::AtomicBool,
     phase: std::sync::atomic::AtomicU8,
     sleep_outcome: std::sync::atomic::AtomicU8,
@@ -88,10 +91,19 @@ impl WorkbenchExecutionControl {
         Self::new(None)
     }
 
+    pub(crate) fn from_invocation(
+        invocation: Option<exomonad_tool::ToolInvocationContext>,
+    ) -> Arc<Self> {
+        Self::new(invocation.map(WorkbenchCallKey::from))
+    }
+
     fn new(invocation: Option<WorkbenchCallKey>) -> Arc<Self> {
         Arc::new(Self {
             invocation,
             publication: PublicationDecision::new(),
+            native_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reservation_attempt: crate::request::WorkbenchReservationAttempt::fresh(),
+            execution: std::sync::OnceLock::new(),
             publication_waited: std::sync::atomic::AtomicBool::new(false),
             phase: std::sync::atomic::AtomicU8::new(WORKBENCH_IDLE),
             sleep_outcome: std::sync::atomic::AtomicU8::new(SLEEP_NONE),
@@ -106,25 +118,44 @@ impl WorkbenchExecutionControl {
         Arc::clone(&self.publication)
     }
 
+    pub(crate) fn execution_id(&self, actor: crate::ActorRef) -> WorkbenchExecutionId {
+        self.execution
+            .get_or_init(|| {
+                self.invocation.as_ref().map_or_else(
+                    || WorkbenchExecutionId::from_digest(*uuid::Uuid::new_v4().as_bytes()),
+                    |invocation| execution_id(actor, invocation),
+                )
+            })
+            .clone()
+    }
+
+    pub(crate) fn reservation_owner(
+        &self,
+        actor: crate::ActorRef,
+    ) -> Option<crate::request::RequestReservationOwner> {
+        Some(crate::request::RequestReservationOwner::Workbench {
+            execution: self.execution_id(actor),
+            attempt: self.reservation_attempt.clone(),
+        })
+    }
+
+    pub(crate) fn native_cancel(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.native_cancel)
+    }
+
     pub(crate) fn arm_sleep(&self) {
+        // Admission cancellation remains sticky across every owned phase.
+        if self.cancellation_requested() {
+            return;
+        }
         self.sleep_outcome
             .store(SLEEP_NONE, std::sync::atomic::Ordering::Release);
-        #[allow(
-            clippy::expect_used,
-            reason = "arm_sleep is called once per workbench execution's own \
-                      sleep boundary and this control is not shared across \
-                      concurrent executions; a failed exchange means the \
-                      caller's own single-execution invariant broke, which \
-                      should panic rather than be silently ignored"
-        )]
-        self.phase
-            .compare_exchange(
-                WORKBENCH_IDLE,
-                WORKBENCH_SLEEPING,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .expect("one workbench execution cannot overlap sleep boundaries");
+        let _ = self.phase.compare_exchange(
+            WORKBENCH_IDLE,
+            WORKBENCH_SLEEPING,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        );
     }
 
     pub(crate) async fn wait_for_cancellation(&self) {
@@ -202,16 +233,23 @@ impl WorkbenchExecutionControl {
         let publication = self.publication.request_cancellation_if(|| {
             claimed = self
                 .phase
-                .compare_exchange(
-                    WORKBENCH_SLEEPING,
-                    WORKBENCH_CANCEL_REQUESTED,
+                .fetch_update(
                     std::sync::atomic::Ordering::AcqRel,
                     std::sync::atomic::Ordering::Acquire,
+                    |phase| {
+                        matches!(
+                            phase,
+                            WORKBENCH_IDLE | WORKBENCH_SLEEPING | WORKBENCH_EXPIRED
+                        )
+                        .then_some(WORKBENCH_CANCEL_REQUESTED)
+                    },
                 )
                 .is_ok();
             claimed
         });
         if claimed {
+            self.native_cancel
+                .store(true, std::sync::atomic::Ordering::Release);
             self.changed.notify_waiters();
         }
         if matches!(
@@ -236,11 +274,6 @@ impl WorkbenchExecutionControl {
         self.phase.load(std::sync::atomic::Ordering::Acquire) == WORKBENCH_CANCEL_REQUESTED
     }
 
-    /// Whether this is an unsettled model-visible `haskell` call (no tool
-    /// namespace) that is computing rather than parked in a cancellable
-    /// sleep. Codex cancels exactly such a call before admitting new input,
-    /// and `ResidentToolClient::cancel_workbench` answers `NotSleeping` for
-    /// it, so an input submitted now cannot be admitted until the cell ends.
     pub(crate) fn is_computing_hosted_cell(&self) -> bool {
         self.invocation
             .as_ref()
@@ -567,7 +600,6 @@ pub trait ResidentToolEndpoint: Send + Sync {
 #[derive(Clone)]
 pub(crate) struct ResidentToolClient {
     actor: crate::LocalActorRef,
-    dispatch_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -598,7 +630,10 @@ impl WorkbenchCallKey {
     }
 }
 
-fn execution_id(actor: crate::ActorRef, operation: &WorkbenchCallKey) -> WorkbenchExecutionId {
+pub(crate) fn execution_id(
+    actor: crate::ActorRef,
+    operation: &WorkbenchCallKey,
+) -> WorkbenchExecutionId {
     fn field(hasher: &mut blake3::Hasher, value: &[u8]) {
         hasher.update(&(value.len() as u64).to_le_bytes());
         hasher.update(value);
@@ -659,10 +694,7 @@ impl ResidentToolClient {
             .map_err(ResidentToolError::Invocation)
     }
     pub(crate) fn local(actor: crate::LocalActorRef) -> Self {
-        Self {
-            actor,
-            dispatch_gate: Arc::new(tokio::sync::Mutex::new(())),
-        }
+        Self { actor }
     }
 
     pub(crate) async fn cancel_workbench(
@@ -734,7 +766,6 @@ impl ResidentToolClient {
         &self,
         invocation: ToolInvocation,
     ) -> Result<serde_json::Value, ResidentToolError> {
-        let _turn = self.dispatch_gate.lock().await;
         let (response, receive) = oneshot::channel();
         self.actor
             .admit_mailbox(crate::KernelMessage::Tool {
@@ -762,7 +793,6 @@ impl ResidentToolClient {
         invocation: ToolInvocation,
         capture: Arc<dyn HostedCheckpointCapture>,
     ) -> Result<serde_json::Value, ResidentToolError> {
-        let _turn = self.dispatch_gate.lock().await;
         let (response, receive) = oneshot::channel();
         self.actor
             .admit_mailbox(crate::KernelMessage::ToolWithHostedCheckpoint {
@@ -871,7 +901,6 @@ impl ResidentToolClient {
                     "hosted checkpoint capture requires an exact provider invocation".into(),
                 ));
             }
-            let _turn = self.dispatch_gate.lock().await;
             let control = WorkbenchExecutionControl::untracked();
             return self
                 .dispatch_registered_workbench(request, control, None, installed_tools, None)
@@ -886,10 +915,9 @@ impl ResidentToolClient {
         let execution = execution_id(self.actor.identity(), &operation);
         request = request.with_execution_id(execution.clone());
         let control = WorkbenchExecutionControl::new(Some(operation.clone()));
-        // Publish before waiting for admission so transport cancellation can
-        // identify this exact invocation throughout dispatch and execution.
+        // The original control remains visible from transport admission through
+        // actor settlement, including while an independent execution is parked.
         let published = HostedCellPublication::publish(&self.actor, &control);
-        let _turn = self.dispatch_gate.lock().await;
         {
             // The cell runs under the actor span, so its span cannot be a
             // child of the tool call. This event is the join: the provider's
@@ -1239,6 +1267,42 @@ mod tests {
         })
     }
 
+    #[test]
+    fn direct_controls_retain_distinct_reservation_owners() {
+        let actor = crate::ActorRef::first(crate::ActorId(9));
+        let first = WorkbenchExecutionControl::untracked();
+        let sibling = WorkbenchExecutionControl::untracked();
+        let original = first
+            .reservation_owner(actor)
+            .expect("direct execution owner");
+        assert_eq!(first.reservation_owner(actor), Some(original.clone()));
+        assert_ne!(sibling.reservation_owner(actor), Some(original));
+        first.request_cancellation();
+        assert!(!sibling.cancellation_requested());
+    }
+
+    #[test]
+    fn computing_cancellation_preserves_sibling_native_flag() {
+        let first = WorkbenchExecutionControl::untracked();
+        let sibling = WorkbenchExecutionControl::untracked();
+        assert!(first.request_cancellation());
+        assert!(first
+            .native_cancel()
+            .load(std::sync::atomic::Ordering::Acquire));
+        assert!(!sibling
+            .native_cancel()
+            .load(std::sync::atomic::Ordering::Acquire));
+        first.arm_sleep();
+        assert!(
+            first.cancellation_requested(),
+            "cancel remains sticky at next effect"
+        );
+        assert!(!first.request_cancellation(), "one cancellation owner wins");
+        let decision = sibling.publication_decision();
+        assert!(!decision.claim_commit().unwrap().published());
+        assert_eq!(decision.phase(), PublicationPhase::Published);
+    }
+
     #[tokio::test]
     async fn exact_workbench_control_linearizes_cancellation_and_settlement() {
         let control = WorkbenchExecutionControl::untracked();
@@ -1361,11 +1425,11 @@ mod tests {
         let control = WorkbenchExecutionControl::untracked();
         control.arm_sleep();
         assert!(control.claim_expiry());
-        assert!(!control.request_cancellation());
         control.finish_sleep();
+        assert!(control.request_cancellation());
         assert_eq!(
             control.phase.load(std::sync::atomic::Ordering::Acquire),
-            WORKBENCH_IDLE
+            WORKBENCH_CANCEL_REQUESTED
         );
     }
 
@@ -1455,33 +1519,27 @@ mod tests {
         let (control, reply) = received.recv().await.unwrap();
         let control = control.unwrap();
         assert!(actor.hosted_cell_computing());
-        let mut queued_invocation = invocation.clone();
-        queued_invocation.call_id = "queued-call".into();
-        let queued = dispatch(client.clone(), queued_invocation);
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                if actor
-                    .hosted_cell()
-                    .find(|candidate| {
-                        candidate
-                            .invocation
-                            .as_ref()
-                            .is_some_and(|key| key.0.call_id == "queued-call")
-                    })
-                    .is_some()
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("queued call published before the gate");
-        queued.abort();
-        let _ = queued.await;
+        let mut second_invocation = invocation.clone();
+        second_invocation.call_id = "second-call".into();
+        let second = dispatch(client.clone(), second_invocation);
+        let (second_control, second_reply) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), received.recv())
+                .await
+                .expect("second call reaches actor while first is active")
+                .unwrap();
+        let second_control = second_control.unwrap();
+        second.abort();
+        let _ = second.await;
         assert!(
             actor.hosted_cell_computing(),
-            "abandoned queued call cannot hide active cell"
+            "abandoned caller retains accepted execution"
+        );
+        second_control.settle(terminal_reply());
+        actor.hosted_cell().complete(&second_control);
+        drop(second_reply);
+        assert!(
+            actor.hosted_cell_computing(),
+            "settling second execution preserves first"
         );
         control.arm_sleep();
         assert!(

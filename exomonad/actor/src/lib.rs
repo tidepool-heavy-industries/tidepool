@@ -90,7 +90,7 @@ pub use interactive_session::{
 };
 pub use kernel::{
     ActorAdmissionLease, ActorWorkbenchInvocation, CallAncestry, KernelCallFailure,
-    KernelCallReply, KernelInvocationFailure, KernelInvocationReply, KernelMessage,
+    KernelCallReply, KernelInvocationFailure, KernelInvocationReply, KernelMessage, KernelResume,
     KernelWorkbenchFailure, KernelWorkbenchReply, LocalActorRef, WorkbenchStepKey,
 };
 pub use lineage::{
@@ -119,6 +119,7 @@ pub use prompt_catalog::hosted_prompt_fingerprint as exomonad_hosted_prompt_fing
 pub use recovery::{
     ActorRecoveryJournal, ApplicationConversation, DurableActorAdmission, DurableActorApplication,
     DurableActorRecord, DurableActorTerminal, DurableRootSuccessorAdmission, RootRecoveryPlacement,
+    RootStartupIntent, RootStartupManifestPin,
 };
 pub use request::{
     AbandonResponseOutcome, ActorEventSequence, CancelRequestOutcome, CancellationReason,
@@ -133,7 +134,7 @@ pub use resident_actor::{
     spawn_resident_root, spawn_resident_root_in_incarnation,
     spawn_resident_root_with_fork_admission, ActorGraphNode, ActorProviderAdmission,
     ForkChildRelease, LocalResidentDeployment, LocalResidentInstallation, ReleaseAwait,
-    ResidentActorRoot, ResidentForest, ResidentKernelBehavior, ResourceRelease,
+    ResidentActorRoot, ResidentForest, ResidentKernelBehavior, ResourceRelease, RootStartupRelease,
 };
 pub use resident_interactive::{ResidentInteractivePolicy, HASKELL_TOOL};
 pub use resident_tools::{

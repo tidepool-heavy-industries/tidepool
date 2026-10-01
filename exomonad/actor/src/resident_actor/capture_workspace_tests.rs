@@ -73,9 +73,17 @@ impl ForkWorkspaceAdmission for PausedWorkspace {
 }
 
 async fn run_cell(actor: LocalActorRef, text: String) -> serde_json::Value {
+    run_cell_with_context(actor, text, None).await
+}
+
+async fn run_cell_with_context(
+    actor: LocalActorRef,
+    text: String,
+    context: Option<exomonad_tool::ToolInvocationContext>,
+) -> serde_json::Value {
     crate::ResidentInteractivePolicy::local(actor)
         .dispatch_boxed(ToolInvocation {
-            context: None,
+            context,
             name: crate::HASKELL_TOOL.into(),
             arguments: ToolArguments::Raw(text),
         })
@@ -175,29 +183,48 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
         .expect("capture published");
 
     let mut calls = Vec::new();
-    let mut launchers = Vec::new();
+    let launcher = forest
+        .new_workbench("shared-launcher".into(), role.clone())
+        .await
+        .expect("launcher");
     for label in ["first", "second"] {
-        let launcher = forest
-            .new_workbench(format!("launcher-{label}"), role.clone())
-            .await
-            .expect("launcher");
+        let invocation = exomonad_tool::ToolInvocationContext::external(
+            "capture-fixture".into(),
+            label.into(),
+            "haskell".into(),
+            None,
+            None,
+        );
+        let execution = crate::resident_tools::execution_id(
+            launcher.identity(),
+            &crate::resident_tools::WorkbenchCallKey::from(invocation.clone()),
+        );
+        let boundary = WorkbenchForkBoundary::Execution {
+            actor_id: launcher.identity().id.0,
+            incarnation: launcher.identity().incarnation.0,
+            execution_id: execution,
+        };
         let group_path = crate::ActorPath::parse(&format!("late/{label}")).expect("group path");
         let (group, reservations) = forest
             .environment
             .fork_groups
-            .begin(
+            .begin_at_boundary(
                 launcher.identity(),
                 group_path,
                 vec![crate::ActorPathSegment::new("reader").unwrap()],
                 None,
+                boundary,
             )
             .expect("owning group admission");
         let source = include_str!("capture_workspace_child.hs")
             .replace("CHILD_PATH", &reservations[0].allocated.to_string())
             .replace("GROUP_ID", &group.0.to_string())
             .replace("CHECKPOINT_TOKEN", &token);
-        calls.push(tokio::spawn(run_cell(launcher.clone(), source)));
-        launchers.push(launcher);
+        calls.push(tokio::spawn(run_cell_with_context(
+            launcher.clone(),
+            source,
+            Some(invocation),
+        )));
     }
     let mut admitted_paths = Vec::new();
     for _ in 0..2 {
@@ -221,6 +248,14 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
         );
     }
     assert_ne!(admitted_paths[0], admitted_paths[1]);
+    assert!(calls.iter().all(|call| !call.is_finished()));
+    let progressing = tokio::time::timeout(
+        std::time::Duration::from_secs(240),
+        run_cell(launcher.clone(), "pure (42 :: Int)".into()),
+    )
+    .await
+    .expect("third cell progresses while both launches wait");
+    assert_committed(&progressing);
     assert!(calls.iter().all(|call| !call.is_finished()));
     let retired = forest
         .environment
@@ -304,7 +339,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
             .expect("child shutdown");
         assert!(result.cleanup.is_confirmed(), "{:?}", result.cleanup);
     }
-    drop(launchers);
+    drop(launcher);
     forest.shutdown().await;
     assert_eq!(
         forest

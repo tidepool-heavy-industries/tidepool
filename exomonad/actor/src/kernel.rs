@@ -216,6 +216,15 @@ impl ActorWorkbenchInvocation {
     }
 }
 
+/// Distinguish a program continuation from confirmation of an already
+/// visible child surface. A repeated confirmation never resumes effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KernelResume {
+    ContinueProgram,
+    ConfirmChildDurability,
+    ReleaseRootStartup,
+}
+
 /// Every ordinary operation serialized through one local actor.
 ///
 /// Actor creation is intentionally absent: the owning actor calls
@@ -296,7 +305,9 @@ pub enum KernelMessage {
     /// parked on an external interaction rather than on `receive`.
     DrainMailbox,
     /// Resume actor-owned work after its initiating caller has been settled.
-    Resume,
+    Resume {
+        kind: KernelResume,
+    },
     ExternalApplicationFailed {
         failure: ExternalApplicationFailure,
         reply: RpcReplyPort<ExternalFailureDisposition>,
@@ -333,7 +344,7 @@ impl KernelMessage {
             Self::ToolCompleted { .. } => "ToolCompleted",
             Self::ReleaseFork { .. } => "ReleaseFork",
             Self::DrainMailbox => "DrainMailbox",
-            Self::Resume => "Resume",
+            Self::Resume { .. } => "Resume",
             Self::ExternalApplicationFailed { .. } => "ExternalApplicationFailed",
             Self::Shutdown { .. } => "Shutdown",
         }
@@ -404,7 +415,7 @@ impl std::fmt::Debug for KernelMessage {
                 formatter.debug_tuple("ReleaseFork").field(release).finish()
             }
             Self::DrainMailbox => formatter.write_str("DrainMailbox"),
-            Self::Resume => formatter.write_str("Resume"),
+            Self::Resume { kind } => formatter.debug_tuple("Resume").field(kind).finish(),
             Self::ExternalApplicationFailed { failure, .. } => formatter
                 .debug_struct("ExternalApplicationFailed")
                 .field("failure", failure)

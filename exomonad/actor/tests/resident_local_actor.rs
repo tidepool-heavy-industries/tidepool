@@ -56,6 +56,8 @@ impl DispatchEffect<TestSink> for NoHandlers {
 struct DelayedCommandBackend {
     started: tokio::sync::Notify,
     completed: tokio::sync::Notify,
+    manual_release: bool,
+    release: tokio::sync::Notify,
     completion_count: std::sync::atomic::AtomicUsize,
     cancellation_count: std::sync::atomic::AtomicUsize,
     output: std::sync::Mutex<std::collections::HashMap<String, String>>,
@@ -108,7 +110,11 @@ impl exomonad_actor::command_jobs::CommandBackend for DelayedCommandBackend {
                     .insert(id.to_owned(), "/test-workspace\n".into());
             } else {
                 self.started.notify_one();
-                tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+                if self.manual_release {
+                    self.release.notified().await;
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+                }
                 self.output
                     .lock()
                     .expect("backend output lock")
@@ -309,8 +315,14 @@ async fn resident_primary_command_notice_wait_cancels_before_notice_handoff() {
     resident_await_watch_case(WatchCase::PrimaryCommandNotifyCancellation).await;
 }
 
+#[tokio::test]
+async fn resident_parked_cell_publishes_into_latest_environment() {
+    resident_await_watch_case(WatchCase::PrimaryInterleavedPublication).await;
+}
+
 enum WatchCase {
     PrimaryRoundTrip,
+    PrimaryInterleavedPublication,
     StructuredRoundTrip,
     StructuredCommandPresentation,
     PrimaryCancellation,
@@ -321,6 +333,7 @@ enum WatchCase {
 }
 
 async fn resident_await_watch_case(case: WatchCase) {
+    let interleaved = matches!(case, WatchCase::PrimaryInterleavedPublication);
     let structured_command = matches!(case, WatchCase::StructuredCommandPresentation);
     let primary = !matches!(
         case,
@@ -481,7 +494,10 @@ async fn resident_await_watch_case(case: WatchCase) {
         assert_eq!(installation.actor.identity(), actor.identity());
         (actor, Some(task), installation.policy)
     };
-    let command_backend = std::sync::Arc::new(DelayedCommandBackend::default());
+    let command_backend = std::sync::Arc::new(DelayedCommandBackend {
+        manual_release: interleaved,
+        ..DelayedCommandBackend::default()
+    });
     let settled = if cancel_first {
         None
     } else {
@@ -506,10 +522,12 @@ async fn resident_await_watch_case(case: WatchCase) {
                         }
                         .into(),
                         arguments: if primary {
-                            ToolArguments::Raw(
+                            ToolArguments::Raw(if interleaved {
+                                include_str!("resident_local_actor/interleaved_bind_cell.hs").into()
+                            } else {
                                 include_str!("resident_local_actor/await_watch_cell.hs")
-                                    .replace("DELAY", "1"),
-                            )
+                                    .replace("DELAY", "1")
+                            })
                         } else {
                             ToolArguments::Structured(serde_json::json!({"delay": 1}))
                         },
@@ -542,6 +560,28 @@ async fn resident_await_watch_case(case: WatchCase) {
                 .is_err(),
             "awaitWatch must keep the hosted workbench parked while its exact command is live"
         );
+        if interleaved {
+            let mut second_context = settled_context.clone();
+            second_context.call_id = "publish-B".into();
+            second_context.context_call_id = Some("publish-B".into());
+            let second = tokio::time::timeout(
+                std::time::Duration::from_secs(180),
+                policy.dispatch_boxed(ToolInvocation {
+                    context: Some(second_context),
+                    name: exomonad_actor::HASKELL_TOOL.into(),
+                    arguments: ToolArguments::Raw("b :: Int\nb = 40".into()),
+                }),
+            )
+            .await
+            .expect("B publishes while A remains parked")
+            .expect("B publication");
+            assert_eq!(second["status"], "committed", "{second:?}");
+            assert!(
+                !settled_call.is_finished(),
+                "A still owns its parked continuation"
+            );
+            command_backend.release.notify_one();
+        }
         if primary {
             tokio::time::timeout(std::time::Duration::from_secs(2), async {
                 while !actor.hosted_cell_computing() && !settled_call.is_finished() {
@@ -563,6 +603,23 @@ async fn resident_await_watch_case(case: WatchCase) {
         .expect("watch tool call");
         if primary {
             assert_eq!(settled["status"], "committed", "{settled:?}");
+            if interleaved {
+                let mut read_context = settled_context.clone();
+                read_context.call_id = "read-joined".into();
+                read_context.context_call_id = Some("read-joined".into());
+                let joined = policy
+                    .dispatch_boxed(ToolInvocation {
+                        context: Some(read_context),
+                        name: exomonad_actor::HASKELL_TOOL.into(),
+                        arguments: ToolArguments::Raw("a + b".into()),
+                    })
+                    .await
+                    .expect("read joined values");
+                assert_eq!(joined["status"], "committed", "{joined:?}");
+                assert_eq!(joined["items"][0]["output"], "42", "{joined:?}");
+                forest.shutdown().await;
+                return;
+            }
             let operations = settled["items"][0]["operations"]
                 .as_array()
                 .expect("operation receipts");
