@@ -58,8 +58,9 @@ redPreserved = do
   assertCell owner "integration actor owns the allocated managed checkout"
     "managedIntegration == worktreeId integration"
   void $ turn owner $ Text.unlines
-    [ "let commandAt probe args = R.call (Fixture.probeCommand (R.client probe)) args"
-    , "let gitAt probe args = commandAt probe ([\"git\"] ++ args)"
+    [ "import qualified Tidepool.Effects.Core as Core"
+    , "let commandAt :: Member Core.Actor effects => R.ActorHandle Fixture.MergeProbe -> [Text] -> Eff effects Cmd.RunResult; commandAt probe args = R.call (Fixture.probeCommand (R.client probe)) args"
+    , "let gitAt :: Member Core.Actor effects => R.ActorHandle Fixture.MergeProbe -> [Text] -> Eff effects Cmd.RunResult; gitAt probe args = commandAt probe ([\"git\"] ++ args)"
     , "reflogBefore <- gitAt integrationProbe [\"reflog\", \"--format=%gs\"]"
     , "sourceEdit <- commandAt sourceProbe [\"sh\", \"-c\", \"printf 'candidate\\n' > red-preserved.txt\"]"
     , "sourceAdded <- gitAt sourceProbe [\"add\", \"--\", \"red-preserved.txt\"]"
