@@ -331,7 +331,7 @@ impl KernelContext {
                 )
             })?;
             context
-                .spawn_worker_retained(None, behavior, crate::WorkerLifetime::ActorOwned)
+                .spawn_worker_retained(None, behavior, crate::WorkerLifetime::ActorOwned, None)
                 .await
                 .map(|(actor, admission)| (actor, Some(admission)))
         } else {
@@ -467,7 +467,19 @@ impl KernelContext {
     where
         C: KernelBehavior,
     {
-        self.spawn_worker_retained(name, behavior, lifetime)
+        self.spawn_worker_retained(name, behavior, lifetime, None)
+            .await
+            .map(|(actor, _)| actor)
+    }
+
+    pub(crate) async fn spawn_worker_scoped<C: KernelBehavior>(
+        &self,
+        name: Option<String>,
+        behavior: C,
+        lifetime: crate::WorkerLifetime,
+        admission: Arc<dyn WorkerStartupAdmission>,
+    ) -> Result<LocalActorRef, ractor::SpawnErr> {
+        self.spawn_worker_retained(name, behavior, lifetime, Some(admission))
             .await
             .map(|(actor, _)| actor)
     }
@@ -477,6 +489,7 @@ impl KernelContext {
         name: Option<String>,
         behavior: C,
         lifetime: crate::WorkerLifetime,
+        startup_admission: Option<Arc<dyn WorkerStartupAdmission>>,
     ) -> Result<(LocalActorRef, tokio::sync::OwnedRwLockReadGuard<bool>), ractor::SpawnErr> {
         // Hold admission through registration so retirement cannot miss a
         // child whose startup is already in flight.
@@ -498,8 +511,15 @@ impl KernelContext {
             .map_err(|error| {
                 ractor::SpawnErr::StartupFailed(std::io::Error::other(error).into())
             })?;
+        if let Some(admission) = &startup_admission {
+            admission.reserve(identity).map_err(|detail| {
+                custody.accounted = true;
+                ractor::SpawnErr::StartupFailed(std::io::Error::other(detail).into())
+            })?;
+        }
         let arguments = LocalActorArguments {
             behavior,
+            startup_admission,
             terminal: terminal.clone(),
             directory: self.directory.clone(),
             identity,
@@ -841,8 +861,15 @@ pub trait KernelBehavior: Send + 'static {
 
 pub struct LocalActor<B>(PhantomData<fn() -> B>);
 
+/// The caller's existing work owner fences custody before actor startup.
+pub(crate) trait WorkerStartupAdmission: Send + Sync {
+    fn reserve(&self, actor: ActorRef) -> Result<(), String>;
+    fn admit(&self, actor: LocalActorRef) -> Result<(), String>;
+}
+
 pub struct LocalActorArguments<B> {
     pub behavior: B,
+    pub(crate) startup_admission: Option<Arc<dyn WorkerStartupAdmission>>,
     pub terminal: RetainedActorExit,
     pub directory: LocalActorDirectory,
     /// Logical identity is allocated by the routing owner before scheduler
@@ -891,7 +918,13 @@ impl<B> Drop for LocalActorState<B> {
                     }),
                 );
             }
-            retain_unconfirmed_exit(&self.terminal, self.context.identity, detail);
+        }
+        if self.terminal.get().is_none() {
+            retain_unconfirmed_exit(
+                &self.terminal,
+                self.context.identity,
+                "actor execution ended before publishing its terminal; execution and cleanup are unconfirmed",
+            );
         }
         for control in self.mailbox_admission.hosted_cell().take_all_and_clear() {
             control.mark_unconfirmed();
@@ -1020,6 +1053,7 @@ where
                 crate::CleanupComponentOutcome::Confirmed,
             )),
         });
+        let startup_admission = arguments.startup_admission;
         let mut state = LocalActorState {
             replacement: None,
             drain: DrainState::Open,
@@ -1034,15 +1068,30 @@ where
             mailbox_drain_scheduled: false,
             hosted_admission: HostedAdmission::Open,
         };
-        state.context.directory.insert(
-            LocalActorRef::with_identity_admission(
-                state.context.myself.clone(),
-                state.terminal.clone(),
-                state.context.identity,
-                state.mailbox_admission.clone(),
-            ),
-            std::sync::Arc::downgrade(&state.context),
+        let child = LocalActorRef::with_identity_admission(
+            state.context.myself.clone(),
+            state.terminal.clone(),
+            state.context.identity,
+            state.mailbox_admission.clone(),
         );
+        state
+            .context
+            .directory
+            .insert(child.clone(), std::sync::Arc::downgrade(&state.context));
+        if let Some(admission) = startup_admission {
+            if let Err(detail) = admission.admit(child) {
+                finish_actor(
+                    &state.context.myself.clone(),
+                    &mut state,
+                    Disposition::Stop(ActorTerminal {
+                        kind: crate::ActorExitKind::Cancelled,
+                        summary: detail.clone(),
+                    }),
+                )
+                .await;
+                return Err(std::io::Error::other(detail).into());
+            }
+        }
         match state.behavior.start(&state.context).await {
             Ok(KernelStep::Continue(())) => {}
             Ok(KernelStep::ContinueLater(())) => {
@@ -2217,6 +2266,7 @@ where
         LocalActor::<B>(PhantomData),
         LocalActorArguments {
             behavior,
+            startup_admission: None,
             terminal: terminal.clone(),
             directory,
             identity,

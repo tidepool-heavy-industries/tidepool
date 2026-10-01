@@ -45,6 +45,8 @@ mod hosted_retirement;
 #[cfg(all(test, feature = "codex-compat"))]
 mod hosted_tools_tests;
 #[cfg(all(test, feature = "codex-compat"))]
+mod invocation_lifetime_tests;
+#[cfg(all(test, feature = "codex-compat"))]
 mod jev_tests;
 #[cfg(all(test, feature = "codex-compat"))]
 mod lookup_availability_tests;

@@ -262,6 +262,64 @@ struct ResidentEnvironment<H, O> {
     recovery: Option<Arc<crate::ActorRecoveryJournal>>,
 }
 
+fn retain_retired_metadata<H, O>(
+    environment: &ResidentEnvironment<H, O>,
+    actor: ActorRef,
+    terminal: &ActorTerminal,
+) {
+    environment.fork_groups.fail_issuer_checkpoints(actor);
+    if let Some(recovery) = &environment.recovery {
+        if let Err(error) = recovery.retire(actor, terminal.kind, terminal.summary.clone()) {
+            tracing::error!(?actor, %error, "actor terminal evidence remains uncertain");
+        }
+    }
+    environment.fork_groups.retire_actor(actor);
+    if let Some(record) = environment.actors.lock().get_mut(&actor) {
+        record.terminal = Some(terminal.clone());
+    }
+}
+
+fn publish_retired<H, O>(
+    environment: &ResidentEnvironment<H, O>,
+    actor: ActorRef,
+    terminal: ActorTerminal,
+) {
+    retain_retired_metadata(environment, actor, &terminal);
+    let mut retired = environment.retired.lock();
+    if !retired.contains(&actor)
+        && environment
+            .deployments
+            .try_send(LocalResidentDeployment::Retired { actor, terminal })
+            .is_ok()
+    {
+        retired.insert(actor);
+    }
+}
+
+/// Confirm admission through the original retirement publisher. The exact
+/// incarnation enters `retired` only after channel admission, so retry cannot
+/// duplicate a delivered host cleanup or hide a failed send.
+async fn publish_retired_confirmed<H, O>(
+    environment: &ResidentEnvironment<H, O>,
+    actor: ActorRef,
+    terminal: ActorTerminal,
+) -> Result<(), String> {
+    retain_retired_metadata(environment, actor, &terminal);
+    if environment.retired.lock().contains(&actor) {
+        return Ok(());
+    }
+    let permit = tokio::time::timeout(RELEASE_WAIT, environment.deployments.reserve())
+        .await
+        .map_err(|_| "host retirement admission remains pending".to_owned())?
+        .map_err(|error| format!("host retirement admission unavailable: {error}"))?;
+    let mut retired = environment.retired.lock();
+    if !retired.contains(&actor) {
+        permit.send(LocalResidentDeployment::Retired { actor, terminal });
+        retired.insert(actor);
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct ResidentActorRecord {
     public_owner: ActorPublicOwnerPlane,
@@ -2045,25 +2103,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     }
 
     fn publish_retired(&self, actor: ActorRef, terminal: ActorTerminal) {
-        self.environment.fork_groups.fail_issuer_checkpoints(actor);
-        if let Some(recovery) = &self.environment.recovery {
-            if let Err(error) = recovery.retire(actor, terminal.kind, terminal.summary.clone()) {
-                // The actor is already terminal. Retain the earlier admission
-                // as active so restart reconciliation remains conservative.
-                tracing::error!(?actor, %error, "actor terminal evidence remains uncertain");
-            }
-        }
-        self.environment.fork_groups.retire_actor(actor);
-        if let Some(record) = self.environment.actors.lock().get_mut(&actor) {
-            record.terminal = Some(terminal.clone());
-        }
-        if self.environment.retired.lock().insert(actor) {
-            // best-effort: deployment observer channel may have no listener.
-            self.environment
-                .deployments
-                .try_send(LocalResidentDeployment::Retired { actor, terminal })
-                .ok();
-        }
+        publish_retired(&self.environment, actor, terminal);
     }
 
     /// Project a stop the supervisor just requested. The actor is already
@@ -2959,6 +2999,7 @@ where
         Box::pin(async move {
             let crate::ResidentActorStart { parent_hole, child } = start;
             let fork_group = child.descriptor.fork_group();
+            let invocation_work = effect_owner.invocation_work();
             // Captured before the move below: if this launch minted itself a
             // fresh session (`child_session_eligibility`) and admission fails
             // anywhere from here on, that session may already have been
@@ -2994,6 +3035,9 @@ where
                         if let Ok(children) =
                             self.environment.fork_groups.abort(group, context.actor)
                         {
+                            if let Some(invocation) = &invocation_work {
+                                invocation.retain_aborted_children(kernel, &children);
+                            }
                             for child in children {
                                 if let Some(child) = kernel.resolve(child) {
                                     // A child already gone from a failed fork-group admission is
@@ -3399,7 +3443,18 @@ where
             );
             behavior.admitted_checkpoint = checkpoint_admission;
             behavior.prepared_workspace = prepared_workspace;
-            let child = match kernel.spawn_worker(None, behavior, lifetime).await {
+            let startup_admission = (lifetime == crate::WorkerLifetime::InvocationOwned)
+                .then(|| effect_owner.invocation_work())
+                .flatten();
+            let spawned = match startup_admission {
+                Some(admission) => {
+                    kernel
+                        .spawn_worker_scoped(None, behavior, lifetime, admission)
+                        .await
+                }
+                None => kernel.spawn_worker(None, behavior, lifetime).await,
+            };
+            let child = match spawned {
                 Ok(child) => child,
                 Err(error) => {
                     if checkpoint_lease.is_some() {
@@ -3420,21 +3475,6 @@ where
                     ));
                 }
             };
-            if lifetime == crate::WorkerLifetime::InvocationOwned {
-                if let Some(invocation) = effect_owner.invocation_work() {
-                    if let Err(detail) = invocation.register_worker(child.clone()) {
-                        let cleanup = child
-                            .shutdown_with_cleanup(ActorTerminal {
-                                kind: ActorExitKind::Cancelled,
-                                summary: "invocation closed during worker admission".into(),
-                            })
-                            .await;
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                            "{detail}; worker admission cleanup: {cleanup:?}"
-                        )));
-                    }
-                }
-            }
             if let (Some(group), Some(lease), Some(descriptor)) = (
                 fork_group,
                 checkpoint_lease.as_ref(),
@@ -4770,6 +4810,7 @@ where
                             .map_err(|error| {
                                 ResidentActorWorkbenchError::ActorProtocol(error.to_string())
                             })?;
+                        invocation.retain_aborted_children(kernel, &children);
                         for child in children {
                             if let Some(child) = kernel.resolve(child) {
                                 let _ = child
@@ -4817,6 +4858,9 @@ where
                                 .map_err(|error| {
                                     ResidentActorWorkbenchError::ActorProtocol(error.to_string())
                                 })?;
+                            if let Some(invocation) = effect_owner.invocation_work() {
+                                invocation.retain_aborted_children(kernel, &children);
+                            }
                             for child in children {
                                 if let Some(child) = kernel.resolve(child) {
                                     // A child already gone from a failed fork-group admission is
@@ -4892,6 +4936,9 @@ where
                             .await;
                     }
                 };
+                if let Some(invocation) = effect_owner.invocation_work() {
+                    invocation.retain_aborted_children(kernel, &children);
+                }
                 for child in children {
                     if let Some(child) = kernel.resolve(child) {
                         // A child already gone from a failed fork-group admission is
@@ -5330,6 +5377,27 @@ where
                 self.environment
                     .runner
                     .resume_request_update(context.clone(), continuation, outcome)
+                    .await
+            }),
+            ResidentActorBoundary::RequestDetachment {
+                continuation,
+                request,
+            } => Box::pin(async move {
+                let detached = match effect_owner.invocation_work() {
+                    Some(invocation) => invocation.detach_request(
+                        &self.environment.requests,
+                        context.actor,
+                        request,
+                    ),
+                    None => self.environment.requests.detach_invocation_request(
+                        context.actor,
+                        request,
+                        None,
+                    ),
+                };
+                self.environment
+                    .runner
+                    .resume_request_update(context.clone(), continuation, detached)
                     .await
             }),
             ResidentActorBoundary::RequestCancellation(cancellation) => Box::pin(async move {

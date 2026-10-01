@@ -1542,7 +1542,7 @@ where
                 match published {
                     Ok(PrivateExecutionPublication::Manifest(
                         PublicManifestCommit::Durable | PublicManifestCommit::Ephemeral,
-                    )) => Self::settle_owned_execution(behavior, kernel, owned, result),
+                    )) => Self::settle_owned_execution(behavior, &kernel, owned, result),
                     Ok(PrivateExecutionPublication::Manifest(
                         PublicManifestCommit::PublishedDurabilityUnconfirmed { detail },
                     )) => Ok(WorkbenchAdvance::Park(
@@ -1578,7 +1578,7 @@ where
                             .terminate();
                         Self::settle_owned_execution(
                             behavior,
-                            kernel,
+                            &kernel,
                             owned,
                             Err(private_publication_failure(result, error)),
                         )

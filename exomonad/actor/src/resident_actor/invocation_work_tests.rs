@@ -40,15 +40,43 @@ fn invocation_membership_fences_actor_incarnation_and_reservation_attempt() {
     assert!(!route_work.matches(owner, &reservation));
 }
 
-struct Owner(Option<tokio::sync::oneshot::Sender<KernelContext>>);
+struct Owner {
+    context: Option<tokio::sync::oneshot::Sender<KernelContext>>,
+    startup_gate: Option<Arc<ShutdownGate>>,
+    shutdown_gate: Option<Arc<ShutdownGate>>,
+}
+
+impl Owner {
+    fn new(context: tokio::sync::oneshot::Sender<KernelContext>) -> Self {
+        Self {
+            context: Some(context),
+            startup_gate: None,
+            shutdown_gate: None,
+        }
+    }
+}
+
+struct ShutdownGate {
+    entered: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+    calls: AtomicUsize,
+}
 
 impl crate::KernelBehavior for Owner {
     fn start<'a>(
         &'a mut self,
         context: &'a KernelContext,
     ) -> BoxFuture<'a, Result<crate::KernelStep<()>, crate::KernelBehaviorError>> {
-        assert!(self.0.take().unwrap().send(context.clone()).is_ok());
-        Box::pin(async { Ok(crate::KernelStep::Continue(())) })
+        assert!(self.context.take().unwrap().send(context.clone()).is_ok());
+        let gate = self.startup_gate.clone();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.calls.fetch_add(1, Ordering::Relaxed);
+                gate.entered.add_permits(1);
+                gate.release.acquire().await.unwrap().forget();
+            }
+            Ok(crate::KernelStep::Continue(()))
+        })
     }
 
     fn cast<'a>(
@@ -104,7 +132,15 @@ impl crate::KernelBehavior for Owner {
         _: &'a KernelContext,
         _: &'a ActorTerminal,
     ) -> BoxFuture<'a, Result<(), crate::KernelBehaviorError>> {
-        Box::pin(async { Ok(()) })
+        let gate = self.shutdown_gate.clone();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.calls.fetch_add(1, Ordering::Relaxed);
+                gate.entered.add_permits(1);
+                gate.release.acquire().await.unwrap().forget();
+            }
+            Ok(())
+        })
     }
 
     fn stopped<'a>(&'a mut self, _: &'a KernelContext, _: &'a ActorTerminal) -> BoxFuture<'a, ()> {
@@ -119,16 +155,17 @@ struct Fixture {
     task: ractor::concurrency::JoinHandle<()>,
     kernel: KernelContext,
     environment: ResidentEnvironment<frunk::HNil, tidepool_mcp::CapturedOutput>,
+    deployments: mpsc::Receiver<LocalResidentDeployment>,
 }
 
 impl Fixture {
     async fn start() -> Self {
         let (send, receive) = tokio::sync::oneshot::channel();
-        let (actor, task) = crate::spawn_local_actor(None, Owner(Some(send)))
+        let (actor, task) = crate::spawn_local_actor(None, Owner::new(send))
             .await
             .unwrap();
         let kernel = receive.await.unwrap();
-        let (deployments, _receiver) = mpsc::channel(1);
+        let (deployments, receiver) = mpsc::channel(DEPLOYMENT_CHANNEL_CAPACITY);
         let environment = ResidentEnvironment {
             runner: ResidentActorRunner::new(
                 Arc::new(ActorMachineRegistry::new()),
@@ -155,6 +192,7 @@ impl Fixture {
             task,
             kernel,
             environment,
+            deployments: receiver,
         }
     }
 
@@ -182,6 +220,7 @@ impl Fixture {
                     memory: 64 * 1024 * 1024,
                     input: CommandInput::ClosedInput,
                 },
+                None,
             )
             .await
             .unwrap();
@@ -474,7 +513,7 @@ async fn concurrent_invocation_cleanup_cancels_owned_command_once() {
 async fn invocation_cleanup_preserves_completed_worker_terminal() {
     let fixture = Fixture::start().await;
     let (send, receive) = tokio::sync::oneshot::channel();
-    let (worker, task) = crate::spawn_local_actor(None, Owner(Some(send)))
+    let (worker, task) = crate::spawn_local_actor(None, Owner::new(send))
         .await
         .unwrap();
     let _worker_context = receive.await.unwrap();
@@ -614,5 +653,381 @@ async fn invocation_cleanup_cancels_owned_command_once_and_closes_detach() {
     ));
     fixture.cleanup(&work).await;
     assert_eq!(backend.cancellations.load(Ordering::Relaxed), 1);
+    fixture.finish().await;
+}
+
+fn group_with_child(fixture: &Fixture, child: ActorRef) -> crate::ForkGroupId {
+    let owner = fixture.actor.identity();
+    let groups = &fixture.environment.fork_groups;
+    let (group, reservations) = groups
+        .begin(
+            owner,
+            crate::ActorPath::parse("root/cleanup").unwrap(),
+            vec![crate::ActorPathSegment::new("child").unwrap()],
+            4,
+        )
+        .unwrap();
+    groups
+        .claim(group, owner, &reservations[0].allocated)
+        .unwrap();
+    groups.attach_child(group, owner, child).unwrap();
+    group
+}
+
+#[tokio::test]
+async fn interrupted_group_cleanup_retains_discovered_actor_owned_worker_for_retry() {
+    let fixture = Fixture::start().await;
+    let gate = Arc::new(ShutdownGate {
+        entered: tokio::sync::Semaphore::new(0),
+        release: tokio::sync::Semaphore::new(0),
+        calls: AtomicUsize::new(0),
+    });
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let worker = fixture
+        .kernel
+        .spawn_worker(
+            None,
+            Owner {
+                context: Some(send),
+                startup_gate: None,
+                shutdown_gate: Some(gate.clone()),
+            },
+            crate::WorkerLifetime::ActorOwned,
+        )
+        .await
+        .unwrap();
+    let _worker_context = receive.await.unwrap();
+    let child = worker.identity();
+    let group = group_with_child(&fixture, child);
+    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    work.register_group(group).unwrap();
+    assert!(
+        !work.owns_worker(child),
+        "group is the only invocation membership before abort"
+    );
+
+    let mut first_cleanup = Box::pin(work.cleanup(&fixture.environment, &fixture.kernel));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::select! {
+            _ = &mut first_cleanup => panic!("worker shutdown is still held"),
+            permit = gate.entered.acquire() => permit.unwrap().forget(),
+        }
+    })
+    .await
+    .unwrap();
+    assert!(work
+        .state
+        .lock()
+        .workers
+        .iter()
+        .any(|worker| worker.identity() == child));
+    assert!(work.cleanup_observation().is_none());
+    drop(first_cleanup);
+    assert!(matches!(
+        fixture
+            .environment
+            .fork_groups
+            .abort(group, fixture.actor.identity()),
+        Err(crate::ForkGroupError::Unknown(_))
+    ));
+    gate.release.add_permits(1);
+
+    fixture.cleanup(&work).await;
+
+    let cleanup = work.cleanup_observation().unwrap();
+    assert_eq!(cleanup.workers.len(), 1);
+    assert_eq!(cleanup.workers[0].actor, child);
+    assert_eq!(
+        cleanup.workers[0].kernel,
+        Ok(worker.terminal().cleanup().unwrap())
+    );
+    assert_eq!(
+        worker.terminal().get().unwrap().kind,
+        ActorExitKind::Cancelled
+    );
+    assert_eq!(gate.calls.load(Ordering::Relaxed), 1);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn unresolved_aborted_group_worker_remains_uncertain_across_cleanup_retries() {
+    let fixture = Fixture::start().await;
+    let missing = ActorRef {
+        id: crate::ActorId(fixture.actor.identity().id.0 + 1_000_000),
+        incarnation: crate::Incarnation(2),
+    };
+    assert!(fixture.kernel.resolve(missing).is_none());
+    let group = group_with_child(&fixture, missing);
+    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    work.register_group(group).unwrap();
+    for _ in 0..2 {
+        let cleanup = tokio::time::timeout(
+            Duration::from_secs(1),
+            work.cleanup(&fixture.environment, &fixture.kernel),
+        )
+        .await
+        .unwrap();
+        assert!(
+            cleanup.uncertainty().is_some(),
+            "missing worker cannot become confirmed by losing the group row"
+        );
+        assert!(work.state.lock().unresolved_workers.contains(&missing));
+        assert!(work.cleanup_observation().unwrap().uncertainty().is_some());
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn invocation_request_cleanup_retains_target_acknowledgment_without_retiring_worker() {
+    let mut fixture = Fixture::start().await;
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let worker = fixture
+        .kernel
+        .spawn_child(None, Owner::new(send))
+        .await
+        .unwrap();
+    let _worker_context = receive.await.unwrap();
+    let owner = fixture.actor.identity();
+    let target = worker.identity();
+    let work = InvocationWork::new(owner, reservation());
+    let requests = &fixture.environment.requests;
+    let request = requests.reserve_for_operation(
+        owner,
+        target,
+        "borrowed worker request".into(),
+        false,
+        Some(work.reservation.clone()),
+    );
+    requests.mark_queued(owner, target, request).unwrap();
+    requests.present(target, request).unwrap();
+
+    let cleanup = tokio::time::timeout(
+        Duration::from_secs(1),
+        work.cleanup(&fixture.environment, &fixture.kernel),
+    )
+    .await
+    .unwrap();
+
+    assert!(worker.terminal().get().is_none());
+    assert_eq!(cleanup.requests.len(), 1);
+    assert_eq!(cleanup.requests[0].request, request);
+    assert_eq!(
+        cleanup.requests[0].cancellation,
+        Ok(crate::CancelRequestOutcome::Requested)
+    );
+    assert_eq!(
+        cleanup.requests[0].target,
+        Ok(crate::request::RequestCleanupState::CancellationRequested {
+            reason: crate::CancellationReason::RequesterCancelled,
+            presented: true,
+        })
+    );
+    assert!(cleanup.uncertainty().is_some());
+    assert!(matches!(
+        fixture.deployments.try_recv(),
+        Ok(LocalResidentDeployment::RequestCancellation { .. })
+    ));
+    requests
+        .begin_cancellation_acknowledgement(target, request)
+        .unwrap();
+    requests.finish_cancellation_acknowledgement(request);
+
+    fixture.cleanup(&work).await;
+
+    assert_eq!(
+        work.cleanup_observation().unwrap().requests[0].target,
+        Ok(crate::request::RequestCleanupState::TargetClosed)
+    );
+    assert!(worker.terminal().get().is_none());
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn detached_invocation_request_survives_scope_cleanup_until_target_replies() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let target = ActorRef::first(crate::ActorId(owner.id.0 + 100));
+    let work = InvocationWork::new(owner, reservation());
+    let requests = &fixture.environment.requests;
+    let request = requests.reserve_for_operation(
+        owner,
+        target,
+        "detached request".into(),
+        false,
+        Some(work.reservation.clone()),
+    );
+    requests.mark_queued(owner, target, request).unwrap();
+    requests.present(target, request).unwrap();
+    work.detach_request(requests, owner, request).unwrap();
+
+    fixture.cleanup(&work).await;
+
+    assert!(work.cleanup_observation().unwrap().requests.is_empty());
+    assert!(matches!(
+        requests.observe_response(owner, request),
+        Ok(ResponseObservation::Pending(_))
+    ));
+    requests.begin_reply(target, request).unwrap();
+    requests.finish_reply(request, None);
+    assert_eq!(
+        requests.observe_response(owner, request),
+        Ok(ResponseObservation::Ready)
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn command_detach_preserves_linked_source_probe_after_invocation_cleanup() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let jobs = &fixture.environment.commands;
+    let (job, backend) = fixture.pending_command().await;
+    let (probe, probe_backend) = fixture.pending_command().await;
+    jobs.set_source_probe(&job, probe.clone()).unwrap();
+    let work = InvocationWork::new(owner, reservation());
+    work.register_command(job.clone()).unwrap();
+    work.register_command(probe.clone()).unwrap();
+    work.detach_command(jobs, owner, &job).unwrap();
+
+    fixture.cleanup(&work).await;
+
+    for (id, backend) in [(&job, backend), (&probe, probe_backend)] {
+        assert_eq!(backend.cancellations.load(Ordering::Relaxed), 0);
+        assert!(!matches!(
+            jobs.status(owner, id).await.unwrap(),
+            CommandStatus::CommandFinished(_)
+        ));
+        backend.finish.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(1), jobs.finished(id))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropped_scoped_worker_start_retains_exact_kernel_and_host_cleanup_uncertainty() {
+    let mut fixture = Fixture::start().await;
+    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    let gate = Arc::new(ShutdownGate {
+        entered: tokio::sync::Semaphore::new(0),
+        release: tokio::sync::Semaphore::new(0),
+        calls: AtomicUsize::new(0),
+    });
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let mut spawning = Box::pin(fixture.kernel.spawn_worker_scoped(
+        None,
+        Owner {
+            context: Some(send),
+            startup_gate: Some(gate.clone()),
+            shutdown_gate: None,
+        },
+        crate::WorkerLifetime::InvocationOwned,
+        work.clone(),
+    ));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::select! {
+            result = &mut spawning => panic!("startup remains held: {result:?}"),
+            permit = gate.entered.acquire() => permit.unwrap().forget(),
+        }
+    })
+    .await
+    .unwrap();
+    let worker_context = receive.await.unwrap();
+    let child = worker_context.identity();
+    let worker = {
+        let state = work.state.lock();
+        assert!(state.pending_workers.is_empty());
+        assert_eq!(state.workers.len(), 1);
+        assert_eq!(state.workers[0].identity(), child);
+        state.workers[0].clone()
+    };
+    work.close();
+    drop(spawning);
+    // Ractor cancels inline pre_start with the spawn future. A retained handle
+    // permits observation; it cannot certify the interrupted startup's cleanup.
+    assert_eq!(gate.calls.load(Ordering::Relaxed), 1);
+    fixture
+        .environment
+        .release_tracked
+        .store(true, Ordering::Release);
+    let cleanup = tokio::time::timeout(
+        crate::local_actor::SHUTDOWN_BUDGET + RELEASE_WAIT + Duration::from_secs(1),
+        async {
+            let (cleanup, ()) =
+                tokio::join!(work.cleanup(&fixture.environment, &fixture.kernel), async {
+                    let Some(LocalResidentDeployment::Retired { actor, terminal }) =
+                        fixture.deployments.recv().await
+                    else {
+                        panic!("original worker retirement must precede host cleanup")
+                    };
+                    assert_eq!(actor, child);
+                    assert_eq!(terminal.kind, ActorExitKind::Failed);
+                    let Some(LocalResidentDeployment::ReleaseAwait(request)) =
+                        fixture.deployments.recv().await
+                    else {
+                        panic!("exact worker cleanup must ask the host for its retained outcome")
+                    };
+                    assert_eq!(request.actor, child);
+                    assert!(request.answer(ResourceRelease::Retained(
+                        "startup resource release remains unconfirmed".into()
+                    )));
+                },);
+            cleanup
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(cleanup.workers.len(), 1);
+    assert_eq!(cleanup.workers[0].actor, child);
+    assert!(!matches!(&cleanup.workers[0].kernel, Ok(outcome) if outcome.is_confirmed()));
+    assert_eq!(
+        cleanup.workers[0].host,
+        Ok(ResourceRelease::Retained(
+            "startup resource release remains unconfirmed".into()
+        ))
+    );
+    assert!(cleanup.uncertainty().is_some());
+    assert!(work.cleanup_observation().unwrap().uncertainty().is_some());
+    assert!(work.owns_worker(worker.identity()));
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn closed_invocation_refuses_real_scoped_spawn_before_worker_initialization() {
+    let fixture = Fixture::start().await;
+    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    work.close();
+    let gate = Arc::new(ShutdownGate {
+        entered: tokio::sync::Semaphore::new(0),
+        release: tokio::sync::Semaphore::new(0),
+        calls: AtomicUsize::new(0),
+    });
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let result = fixture
+        .kernel
+        .spawn_worker_scoped(
+            None,
+            Owner {
+                context: Some(send),
+                startup_gate: Some(gate.clone()),
+                shutdown_gate: None,
+            },
+            crate::WorkerLifetime::InvocationOwned,
+            work.clone(),
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert_eq!(gate.calls.load(Ordering::Relaxed), 0);
+    assert!(
+        receive.await.is_err(),
+        "worker start never receives its kernel context"
+    );
+    assert!(work.state.lock().pending_workers.is_empty());
+    assert!(work.state.lock().workers.is_empty());
+    fixture.cleanup(&work).await;
     fixture.finish().await;
 }

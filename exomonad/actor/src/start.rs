@@ -97,8 +97,11 @@ pub(crate) struct ActorStartRequest {
 }
 
 impl ActorStartRequest {
-    /// Fresh launches belong to the current hosted invocation. Structured actor
-    /// turns have no invocation and retain their nearest actor ownership.
+    /// Explicit record services remain owned by their creating actor.
+    pub(crate) const RECORD_SERVICE_LIFETIME: WorkerLifetime = WorkerLifetime::ActorOwned;
+
+    /// Provider launches belong to the current hosted invocation. Structured
+    /// actor turns without one retain their nearest actor ownership.
     pub(crate) const FRESH_LAUNCH_LIFETIME: WorkerLifetime = WorkerLifetime::InvocationOwned;
 }
 
@@ -346,7 +349,7 @@ impl ResidentActorStart {
                 instructions: None,
                 context: ForkContext::SelectedContext,
                 checkpoint: None,
-                lifetime: ActorStartRequest::FRESH_LAUNCH_LIFETIME,
+                lifetime: ActorStartRequest::RECORD_SERVICE_LIFETIME,
                 fork_budget: None,
                 session_id,
                 parent_actor,

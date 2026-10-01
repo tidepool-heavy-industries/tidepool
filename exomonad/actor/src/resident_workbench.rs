@@ -1765,6 +1765,10 @@ pub(crate) enum ResidentActorBoundary {
         continuation: ResidentHole,
         job: String,
     },
+    RequestDetachment {
+        continuation: ResidentHole,
+        request: crate::RequestId,
+    },
     RequestCancellation(RequestCancellation),
     ResponseAbandonment(ResponseAbandonment),
     ResponseForget(ResponseForget),
@@ -1914,6 +1918,7 @@ impl ResidentActorBoundary {
             Self::RequestUpdatePoll { .. } => "pollRequestUpdate",
             Self::WatchProgressPoll { .. } => "pollWatch progress",
             Self::CommandReportPoll { .. } => "pollWatch command",
+            Self::RequestDetachment { .. } => "detachRequest",
             Self::RequestCancellation(_) => "cancelRequest",
             Self::ResponseAbandonment(_) => "abandonResponse",
             Self::ResponseForget(_) => "forgetResponse",
@@ -8214,6 +8219,12 @@ where
                             update: crate::RequestUpdateId { request: crate::request_effect::request_id(request)?,
                                 sequence: u64::try_from(sequence).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid update sequence".into()))? } })
                     }
+                    ResidentRequest::Replies(RepliesReq::DetachRequestWith(request_id)) => Ok(
+                        ResidentActorBoundary::RequestDetachment {
+                            continuation: hole,
+                            request: crate::request_effect::request_id(request_id)?,
+                        },
+                    ),
                     ResidentRequest::Replies(RepliesReq::CancelRequestWith(request_id)) => Ok(
                         ResidentActorBoundary::RequestCancellation(RequestCancellation {
                             continuation: hole,

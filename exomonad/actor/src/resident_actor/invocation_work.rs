@@ -17,6 +17,9 @@ struct InvocationWorkState {
     commands: Vec<String>,
     detached_commands: std::collections::HashSet<String>,
     workers: Vec<LocalActorRef>,
+    unresolved_workers: Vec<ActorRef>,
+    pending_workers: Vec<ActorRef>,
+    pending_cancellations: Vec<crate::RequestCancellationNotification>,
     groups: Vec<crate::ForkGroupId>,
     watches: Vec<crate::WatchId>,
     cleanup: Option<InvocationCleanup>,
@@ -26,6 +29,7 @@ struct InvocationWorkState {
 pub(super) struct InvocationCleanup {
     commands: Vec<InvocationCommandCleanup>,
     workers: Vec<InvocationWorkerCleanup>,
+    requests: Vec<InvocationRequestCleanup>,
     failures: Vec<String>,
 }
 
@@ -41,6 +45,13 @@ struct InvocationWorkerCleanup {
     actor: ActorRef,
     kernel: Result<crate::ResidentCleanupOutcome, String>,
     host: Result<ResourceRelease, String>,
+}
+
+#[derive(Clone, Debug)]
+struct InvocationRequestCleanup {
+    request: crate::RequestId,
+    cancellation: Result<crate::CancelRequestOutcome, crate::ReplyError>,
+    target: Result<crate::request::RequestCleanupState, crate::ReplyError>,
 }
 
 impl InvocationCleanup {
@@ -60,6 +71,23 @@ impl InvocationCleanup {
                     "command {} has no terminal cleanup result",
                     command.job
                 )),
+            }
+        }
+        for request in &self.requests {
+            if let Err(error) = &request.cancellation {
+                details.push(format!(
+                    "request {} cancellation: {error:?}",
+                    request.request.0
+                ));
+            }
+            if !matches!(
+                request.target,
+                Ok(crate::request::RequestCleanupState::TargetClosed)
+            ) {
+                details.push(format!(
+                    "request {} target cleanup: {:?}",
+                    request.request.0, request.target
+                ));
             }
         }
         for worker in &self.workers {
@@ -142,6 +170,22 @@ impl InvocationWork {
         Ok(())
     }
 
+    pub(super) fn detach_request(
+        &self,
+        requests: &RequestRegistry,
+        caller: ActorRef,
+        request: crate::RequestId,
+    ) -> Result<(), crate::ReplyError> {
+        if caller != self.owner {
+            return Err(crate::ReplyError::Unauthorized);
+        }
+        let state = self.state.lock();
+        if state.closed {
+            return Err(crate::ReplyError::CancellationRequested);
+        }
+        requests.detach_invocation_request(caller, request, Some(&self.reservation))
+    }
+
     pub(super) fn register_transient_watch(
         &self,
         watch: crate::WatchId,
@@ -156,7 +200,8 @@ impl InvocationWork {
         Ok(())
     }
 
-    pub(super) fn register_worker(&self, child: LocalActorRef) -> Result<(), String> {
+    #[cfg(test)]
+    fn register_worker(&self, child: LocalActorRef) -> Result<(), String> {
         let mut state = self.state.lock();
         if state.closed {
             return Err("invocation ownership is closed".into());
@@ -169,6 +214,23 @@ impl InvocationWork {
             state.workers.push(child);
         }
         Ok(())
+    }
+
+    pub(super) fn retain_aborted_children(&self, kernel: &KernelContext, children: &[ActorRef]) {
+        let mut state = self.state.lock();
+        for &actor in children {
+            if let Some(child) = kernel.resolve(actor) {
+                if !state
+                    .workers
+                    .iter()
+                    .any(|worker| worker.identity() == actor)
+                {
+                    state.workers.push(child);
+                }
+            } else if !state.unresolved_workers.contains(&actor) {
+                state.unresolved_workers.push(actor);
+            }
+        }
     }
 
     pub(super) fn owns_worker(&self, actor: ActorRef) -> bool {
@@ -228,6 +290,82 @@ impl InvocationWork {
             )
         };
         let mut cleanup = InvocationCleanup::default();
+        {
+            let mut state = self.state.lock();
+            let pending = std::mem::take(&mut state.pending_workers);
+            for actor in pending {
+                if let Some(child) = kernel.resolve(actor) {
+                    if !state
+                        .workers
+                        .iter()
+                        .any(|worker| worker.identity() == actor)
+                    {
+                        state.workers.push(child);
+                    }
+                } else {
+                    state.pending_workers.push(actor);
+                    cleanup.failures.push(format!(
+                        "worker {actor:?} admission cleanup remains unconfirmed"
+                    ));
+                }
+            }
+        }
+
+        for request in environment
+            .requests
+            .invocation_requests(self.owner, &self.reservation)
+        {
+            let cancellation = environment
+                .requests
+                .cancel_request(
+                    self.owner,
+                    request,
+                    crate::CancellationReason::RequesterCancelled,
+                )
+                .map(|(outcome, notification)| {
+                    if let Some(notification) = notification {
+                        let mut state = self.state.lock();
+                        if !state
+                            .pending_cancellations
+                            .iter()
+                            .any(|pending| pending.request == notification.request)
+                        {
+                            state.pending_cancellations.push(notification);
+                        }
+                    }
+                    outcome
+                });
+            cleanup.requests.push(InvocationRequestCleanup {
+                request,
+                cancellation,
+                target: environment
+                    .requests
+                    .request_cleanup_state(self.owner, request),
+            });
+        }
+
+        let pending_cancellations = self.state.lock().pending_cancellations.clone();
+        for notification in pending_cancellations {
+            let request = notification.request;
+            match tokio::time::timeout(
+                RELEASE_WAIT,
+                environment
+                    .deployments
+                    .send(LocalResidentDeployment::RequestCancellation { notification }),
+            )
+            .await
+            {
+                Ok(Ok(())) => self
+                    .state
+                    .lock()
+                    .pending_cancellations
+                    .retain(|pending| pending.request != request),
+                outcome => cleanup.failures.push(format!(
+                    "request {} cancellation delivery remains unconfirmed: {outcome:?}",
+                    request.0
+                )),
+            }
+        }
         for watch in watches {
             if let Err(error) = environment
                 .requests
@@ -244,21 +382,42 @@ impl InvocationWork {
             .await;
         for group in groups {
             match environment.fork_groups.abort(group, self.owner) {
-                Ok(children) => {
-                    for actor in children {
-                        if let Some(child) = kernel.resolve(actor) {
-                            if !workers.iter().any(|worker| worker.identity() == actor) {
-                                workers.push(child);
-                            }
-                        }
-                    }
-                }
+                Ok(children) => self.retain_aborted_children(kernel, &children),
                 Err(
                     crate::ForkGroupError::Unknown(_) | crate::ForkGroupError::AlreadyCommitted(_),
                 ) => {}
                 Err(error) => cleanup
                     .failures
                     .push(format!("fork group {} release: {error}", group.0)),
+            }
+        }
+        {
+            let mut state = self.state.lock();
+            for child in &state.workers {
+                if !workers
+                    .iter()
+                    .any(|worker| worker.identity() == child.identity())
+                {
+                    workers.push(child.clone());
+                }
+            }
+            let unresolved = std::mem::take(&mut state.unresolved_workers);
+            for actor in unresolved {
+                if let Some(child) = kernel.resolve(actor) {
+                    if !state
+                        .workers
+                        .iter()
+                        .any(|worker| worker.identity() == actor)
+                    {
+                        state.workers.push(child.clone());
+                    }
+                    if !workers.iter().any(|worker| worker.identity() == actor) {
+                        workers.push(child);
+                    }
+                } else {
+                    state.unresolved_workers.push(actor);
+                    cleanup.failures.push(format!("worker {actor:?} has no retained lifecycle owner; cleanup remains unconfirmed"));
+                }
             }
         }
         let command_cleanup =
@@ -311,38 +470,53 @@ impl InvocationWork {
                     kind: ActorExitKind::Cancelled,
                     summary: "owning tool invocation ended".into(),
                 };
-                let kernel = match tokio::time::timeout(
+                let (kernel, retained_terminal) = match tokio::time::timeout(
                     crate::local_actor::SHUTDOWN_BUDGET,
                     child.shutdown_with_cleanup(terminal),
                 )
                 .await
                 {
-                    Ok(Ok(shutdown)) => Ok(shutdown.cleanup),
-                    Ok(Err(error)) => Err(error.to_string()),
-                    Err(_) => Err("worker retirement remains unconfirmed".into()),
+                    Ok(Ok(shutdown)) => (Ok(shutdown.cleanup), Some(shutdown.terminal)),
+                    Ok(Err(error)) => (Err(error.to_string()), child.terminal().get()),
+                    Err(_) => (
+                        Err("worker retirement remains unconfirmed".into()),
+                        child.terminal().get(),
+                    ),
                 };
                 let host = if !environment
                     .release_tracked
                     .load(std::sync::atomic::Ordering::Acquire)
                 {
-                    Ok(ResourceRelease::Released)
-                } else {
-                    let (reply, release) = tokio::sync::oneshot::channel();
-                    let request = Arc::new(ReleaseAwait {
-                        actor,
-                        reply: Mutex::new(Some(reply)),
-                    });
-                    match environment
-                        .deployments
-                        .try_send(LocalResidentDeployment::ReleaseAwait(request))
-                    {
-                        Err(error) => Err(format!("host cleanup observation unavailable: {error}")),
-                        Ok(()) => match tokio::time::timeout(RELEASE_WAIT, release).await {
-                            Ok(Ok(outcome)) => Ok(outcome),
-                            Ok(Err(_)) => Err("host cleanup reply was lost".into()),
-                            Err(_) => Err("host cleanup remains pending".into()),
-                        },
+                    if let Some(terminal) = retained_terminal {
+                        publish_retired(environment, actor, terminal);
                     }
+                    Ok(ResourceRelease::Released)
+                } else if let Some(terminal) = retained_terminal {
+                    match publish_retired_confirmed(environment, actor, terminal).await {
+                        Err(error) => Err(error),
+                        Ok(()) => {
+                            let (reply, release) = tokio::sync::oneshot::channel();
+                            let request = Arc::new(ReleaseAwait {
+                                actor,
+                                reply: Mutex::new(Some(reply)),
+                            });
+                            match environment
+                                .deployments
+                                .try_send(LocalResidentDeployment::ReleaseAwait(request))
+                            {
+                                Err(error) => {
+                                    Err(format!("host cleanup observation unavailable: {error}"))
+                                }
+                                Ok(()) => match tokio::time::timeout(RELEASE_WAIT, release).await {
+                                    Ok(Ok(outcome)) => Ok(outcome),
+                                    Ok(Err(_)) => Err("host cleanup reply was lost".into()),
+                                    Err(_) => Err("host cleanup remains pending".into()),
+                                },
+                            }
+                        }
+                    }
+                } else {
+                    Err("worker has no published terminal; host cleanup remains unconfirmed".into())
                 };
                 InvocationWorkerCleanup {
                     actor,
@@ -355,6 +529,35 @@ impl InvocationWork {
         cleanup.workers = workers;
         self.state.lock().cleanup = Some(cleanup.clone());
         cleanup
+    }
+}
+
+impl crate::local_actor::WorkerStartupAdmission for InvocationWork {
+    fn reserve(&self, actor: ActorRef) -> Result<(), String> {
+        let mut state = self.state.lock();
+        if state.closed {
+            return Err("invocation closed before worker admission".into());
+        }
+        state.pending_workers.push(actor);
+        Ok(())
+    }
+
+    fn admit(&self, actor: LocalActorRef) -> Result<(), String> {
+        let mut state = self.state.lock();
+        state
+            .pending_workers
+            .retain(|pending| *pending != actor.identity());
+        if !state
+            .workers
+            .iter()
+            .any(|worker| worker.identity() == actor.identity())
+        {
+            state.workers.push(actor);
+        }
+        if state.closed {
+            return Err("invocation closed before worker initialization".into());
+        }
+        Ok(())
     }
 }
 
