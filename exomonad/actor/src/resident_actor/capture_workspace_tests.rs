@@ -17,6 +17,7 @@ use tidepool_testing::eval_harness;
 struct PausedWorkspace {
     entered: mpsc::UnboundedSender<String>,
     release: tokio::sync::Semaphore,
+    reject: std::sync::atomic::AtomicBool,
 }
 
 struct WorkspaceCustody;
@@ -51,6 +52,11 @@ impl ForkWorkspaceAdmission for PausedWorkspace {
                 .await
                 .expect("workspace release remains live")
                 .forget();
+            if self.reject.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(ForkWorkspaceAdmissionError {
+                    detail: "controlled parent continuation failure".into(),
+                });
+            }
             Ok(PreparedForkWorkspace::new(
                 WtWorktreeHandle {
                     handle_receipt: WtWorktreeReceipt {
@@ -131,6 +137,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
     let workspaces = Arc::new(PausedWorkspace {
         entered,
         release: tokio::sync::Semaphore::new(0),
+        reject: std::sync::atomic::AtomicBool::new(false),
     });
     let (forest, mut deployments) = ResidentForest::new(
         ActorWorkbenchSource::new(preamble, include),
@@ -361,7 +368,6 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         tidepool_mcp::forks_decl(),
         tidepool_mcp::fs_read_decl(),
         tidepool_mcp::worktree_decl(),
-        tidepool_mcp::sleep_decl(),
     ];
     let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("effect module");
     let mut include = effects.include_paths().to_vec();
@@ -383,10 +389,11 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         tidepool_runtime::DEFAULT_NURSERY_SIZE,
         Some(lib),
     );
-    let (entered, _entered_rx) = mpsc::unbounded_channel();
+    let (entered, mut entered_rx) = mpsc::unbounded_channel();
     let workspaces = Arc::new(PausedWorkspace {
         entered,
         release: tokio::sync::Semaphore::new(2),
+        reject: std::sync::atomic::AtomicBool::new(false),
     });
     let (forest, mut deployments) = ResidentForest::new(
         ActorWorkbenchSource::new(preamble, include),
@@ -395,10 +402,7 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         Some(workspaces.clone()),
         crate::Incarnation::FIRST,
     );
-    let role = crate::EffectiveRole::root().with_effect_keys(vec![
-        crate::ActorEffectKey::Forks,
-        crate::ActorEffectKey::Sleep,
-    ]);
+    let role = crate::EffectiveRole::root().with_effect_keys(vec![crate::ActorEffectKey::Forks]);
     let parent = forest
         .new_workbench("private-capture-parent".into(), role.clone())
         .await
@@ -488,14 +492,22 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
             "both child replies must precede parent completion"
         );
     }
-    parent
-        .shutdown(ActorTerminal {
-            kind: ActorExitKind::Failed,
-            summary: "parent failed after independent capture publication".into(),
-        })
-        .await
-        .expect("real parent failure");
-    assert_eq!(parent.terminal().wait().await.kind, ActorExitKind::Failed);
+    let blocker = tokio::time::timeout(std::time::Duration::from_secs(240), async {
+        loop {
+            let path = entered_rx.recv().await.expect("workspace request");
+            if path.contains("failure-barrier") {
+                break path;
+            }
+        }
+    })
+    .await
+    .expect("parent continues into the controlled external wait after captured publication");
+    assert!(blocker.contains("blocker"));
+    assert!(!call.is_finished());
+    workspaces
+        .reject
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    workspaces.release.add_permits(1);
     let parent_reply = tokio::time::timeout(std::time::Duration::from_secs(30), call)
         .await
         .expect("failed parent call settles")
@@ -503,11 +515,15 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
     if let Ok(reply) = parent_reply {
         assert_ne!(reply["status"], "committed", "{reply:?}");
     }
+    assert!(
+        parent.terminal().get().is_none(),
+        "this gate fails the parent cell while its supervising actor remains live"
+    );
     forest
         .environment
         .fork_groups
         .checkpoint(&token, session)
-        .expect("completed private capture admits readers after issuer failure");
+        .expect("completed private capture admits readers after parent cell failure");
     for child in &children {
         assert_captured_reader(child).await;
     }
