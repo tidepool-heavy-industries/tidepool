@@ -3621,17 +3621,31 @@ fn run_turn_with_pin(
         cmd.module_candidates(manifest);
     }
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
-    let run = endpoint.execute(&cmd).map_err(map_notfound)?;
+    let ordinary_admitted = req.exact_context.is_none() && checked.is_none() && display.is_none();
+    enum TurnCompilerOutput {
+        Admitted(tidepool_toolchain::artifacts::AdmittedTurnOutput),
+        Direct(tidepool_extract_cmd::ExtractRun),
+    }
+    let run = if ordinary_admitted {
+        TurnCompilerOutput::Admitted(offer.execute_admitted_turn(endpoint, cmd)?)
+    } else {
+        TurnCompilerOutput::Direct(endpoint.execute(&cmd).map_err(map_notfound)?)
+    };
+    let (output, elapsed, output_dir) = match &run {
+        TurnCompilerOutput::Admitted(run) => {
+            (run.compiler_output(), run.elapsed(), run.directory())
+        }
+        TurnCompilerOutput::Direct(run) => (&run.output, run.elapsed, temp.path()),
+    };
     timing::record_stage(
         timing::NO_NODE,
         timing::NO_ROUND,
         timing::STAGE_EXTRACT_SPAWN,
-        run.elapsed,
+        elapsed,
         0,
     );
-    let output = &run.output;
     timing::log_interface_counts(&output.stderr);
-    let stderr = run.stderr_lossy();
+    let stderr = String::from_utf8_lossy(&output.stderr);
     // A failed compile is still a real spawn — attribute its extract phases
     // the same as a successful one, before the early return below.
     forward_extract_timing(&stderr, "extract");
@@ -3650,18 +3664,18 @@ fn run_turn_with_pin(
         timing::log_module_timings(&module_timings);
     }
     if let Err(error) =
-        crate::diag::decode_extract_result(run.success(), &output.stdout, &output.stderr)
+        crate::diag::decode_extract_result(output.status.success(), &output.stdout, &output.stderr)
     {
-        let attempted_source = std::fs::read_to_string(temp.path().join("turn-attempt.hs")).ok();
+        let attempted_source = std::fs::read_to_string(output_dir.join("turn-attempt.hs")).ok();
         return Err(TurnFailure {
-            error: offer.retain_failure(temp.path(), &output.stderr, error),
+            error: offer.retain_failure(output_dir, &output.stderr, error),
             attempted_source,
         });
     }
 
-    let mut result = decode_turn_output_dir(temp.path(), &offer).map_err(|error| TurnFailure {
+    let mut result = decode_turn_output_dir(output_dir, &offer).map_err(|error| TurnFailure {
         error: offer.retain_failure(
-            temp.path(),
+            output_dir,
             &output.stderr,
             match error {
                 CompileError::ExtractFailed(detail) if !stderr.trim().is_empty() => {
@@ -3670,10 +3684,10 @@ fn run_turn_with_pin(
                 other => other,
             },
         ),
-        attempted_source: std::fs::read_to_string(temp.path().join("turn-attempt.hs"))
+        attempted_source: std::fs::read_to_string(output_dir.join("turn-attempt.hs"))
             .ok()
             .or_else(|| {
-                let bytes = std::fs::read(temp.path().join("turn.cbor")).ok()?;
+                let bytes = std::fs::read(output_dir.join("turn.cbor")).ok()?;
                 match decode_turn_out(&bytes).ok()? {
                     DecodedTurnOut::Bind { wrapped_source, .. }
                     | DecodedTurnOut::Expr { wrapped_source, .. } => Some(wrapped_source),
@@ -3681,6 +3695,38 @@ fn run_turn_with_pin(
                 }
             }),
     })?;
+    let compile_identity = match &run {
+        TurnCompilerOutput::Admitted(run) => run.compile_input_identity(),
+        TurnCompilerOutput::Direct(_) => None,
+    };
+    if let Some(identity) = compile_identity {
+        let compiled = match &mut result {
+            TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => compiled,
+            TurnResult::Decl(_) => {
+                return Err(CompileError::ExtractFailed(
+                    "compiler input proof has no native turn".into(),
+                )
+                .into())
+            }
+        };
+        let certification = compiled.certification.as_mut().ok_or_else(|| {
+            CompileError::ExtractFailed("compiler input proof has no certified products".into())
+        })?;
+        if !identity.matches_bundle(
+            &compiled.prepared,
+            &certification.groups,
+            &certification.target_owners,
+            &certification.package_interfaces,
+            &compiled.table,
+            &compiled.asks,
+        ) {
+            return Err(CompileError::ExtractFailed(
+                "admitted compiler output bundle changed before decoding".into(),
+            )
+            .into());
+        }
+        certification.compile_input_identity = Some(Arc::clone(identity));
+    }
     if let Some(admission) = display {
         let TurnResult::Bind {
             compiled, bound, ..
