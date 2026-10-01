@@ -4713,13 +4713,23 @@ async fn run_interactive_applications(
     let mut process_observations: JoinSet<()> = JoinSet::new();
     let mut health = tokio::time::interval(Duration::from_secs(1));
     if let Some(service) = embedded_service.as_ref() {
-        embedded_projection.publish(
-            &service.control,
-            &embedded_run,
-            &(host_graph)(),
-            &embedded_projection::LifecycleState::default(),
-            |_| None,
-        );
+        embedded_projection
+            .publish(
+                &service.control,
+                &embedded_run,
+                &(host_graph)(),
+                &embedded_projection::LifecycleState::default(),
+                |_| None,
+                |identity| {
+                    service
+                        .runtime
+                        .store()
+                        .embedded_agent_head(identity)
+                        .map(|head| head.map(|request| request.0))
+                },
+                |actor| !embedded_live.contains(&actor),
+            )
+            .map_err(|error| format!("embedded actor history projection failed: {error}"))?;
     }
     let failure = AssertUnwindSafe(async {
         let failure = loop {
@@ -4736,13 +4746,17 @@ async fn run_interactive_applications(
                         if let Err(error) = service.control.refresh_completed_model_requests(&service.runtime.store()) {
                             break Some(format!("embedded request projection failed: {error}"));
                         }
-                        embedded_projection.publish(
+                        if let Err(error) = embedded_projection.publish(
                             &service.control,
                             &embedded_run,
                             &(host_graph)(),
                             &states,
                             |actor| embedded_conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
-                        );
+                            |identity| service.runtime.store().embedded_agent_head(identity).map(|head| head.map(|request| request.0)),
+                            |actor| !embedded_live.contains(&actor),
+                        ) {
+                            break Some(format!("embedded actor history projection failed: {error}"));
+                        }
                     }
                     for actor in states.keys() {
                         if let Some(binding) = embedded_conversations.get(actor).cloned() {
@@ -4777,13 +4791,17 @@ async fn run_interactive_applications(
                     ).await {
                         break Some(format!("embedded browser command drain failed: {error}"));
                     }
-                    embedded_projection.publish(
+                    if let Err(error) = embedded_projection.publish(
                         &service.control,
                         &embedded_run,
                         &(host_graph)(),
                         &(*embedded_lifecycle_rx.borrow()).clone(),
                         |actor| embedded_conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
-                    );
+                        |identity| service.runtime.store().embedded_agent_head(identity).map(|head| head.map(|request| request.0)),
+                        |actor| !embedded_live.contains(&actor),
+                    ) {
+                        break Some(format!("embedded actor history projection failed: {error}"));
+                    }
                 }
                 #[cfg(feature = "codex-compat")]
                 if process_observations.is_empty() {
@@ -5372,13 +5390,17 @@ async fn run_interactive_applications(
                             );
                             let lifecycle_states =
                                 (*embedded_lifecycle_rx.borrow()).clone();
-                            embedded_projection.publish(
+                            if let Err(error) = embedded_projection.publish(
                                 &service.control,
                                 &embedded_run,
                                 &(host_graph)(),
                                 &lifecycle_states,
                                 |actor| embedded_conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
-                            );
+                                |identity| service.runtime.store().embedded_agent_head(identity).map(|head| head.map(|request| request.0)),
+                                |actor| !embedded_live.contains(&actor),
+                            ) {
+                                break Some(format!("embedded actor history projection failed: {error}"));
+                            }
                             let runtime = Arc::clone(&service.runtime);
                             #[cfg(test)]
                             let test_transport = service.test_transport();
