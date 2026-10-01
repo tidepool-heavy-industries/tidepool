@@ -588,7 +588,7 @@ async fn assert_captured_reader(child: &LocalResidentInstallation) {
         child.policy.dispatch_boxed(ToolInvocation {
             context: None,
             name: "ping".into(),
-            arguments: ToolArguments::Structured(serde_json::json!({})),
+            arguments: ToolArguments::Structured(serde_json::Value::Null),
         }),
     )
     .await
