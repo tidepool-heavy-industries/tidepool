@@ -8,7 +8,7 @@ do
     "CHILD_PATH" childEntry Nothing GROUP_ID
     Core.ActorResearchRole Core.ActorReadOnlyProfile []
     Nothing Core.RequireClean [] Nothing Nothing Nothing
-    Core.InheritedContext (Just "CHECKPOINT_TOKEN") Nothing Core.SwarmOwned)
+    Core.InheritedContext (Just "CHECKPOINT_TOKEN") Nothing Core.ParentOwned)
   case started of
     Left failure -> error (tshow failure) >> pure True
     Right _ -> pure True
