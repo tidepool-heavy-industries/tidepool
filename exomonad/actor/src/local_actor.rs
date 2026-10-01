@@ -695,6 +695,27 @@ pub trait KernelBehavior: Send + 'static {
         control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
     ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>>;
 
+    /// Capture a resident tool call as an owned actor task. The default keeps
+    /// its stateful effects in the existing serial behavior transfer.
+    fn dispatch_tool(
+        &mut self,
+        _context: &KernelContext,
+        invocation: exomonad_tool::ToolInvocation,
+        hosted_checkpoint_capture: Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
+        control: Arc<crate::WorkbenchExecutionControl>,
+    ) -> OwnedActorTask<Self, serde_json::Value>
+    where
+        Self: Sized,
+    {
+        OwnedActorTask::serial(move |mut behavior: Self, context| {
+            Box::pin(async move {
+                let tool = behavior.tool(&context, invocation, hosted_checkpoint_capture);
+                let result = crate::resident_workbench::with_execution_control(control, tool).await;
+                (behavior, OwnedActorCompletion::new(move |_| result))
+            })
+        })
+    }
+
     /// Hand execution-owned work to a task while retaining actor-owned state
     /// on the mailbox turn. The sequential form keeps an invocation intact
     /// for behaviors whose work remains actor-owned.
@@ -918,17 +939,30 @@ impl<B> Drop for LocalActorState<B> {
         let mut unconfirmed = false;
         for (_, pending) in self.pending_tasks.drain() {
             unconfirmed = true;
-            if let PendingActorTask::Workbench(pending) = pending {
-                if let Some(control) = pending.control.as_ref() {
-                    control.mark_unconfirmed();
+            match pending {
+                PendingActorTask::Workbench(pending) => {
+                    if let Some(control) = pending.control.as_ref() {
+                        control.mark_unconfirmed();
+                    }
+                    settle_pending_workbench(
+                        pending,
+                        Err(KernelInvocationFailure::Failed {
+                            actor: self.context.identity,
+                            detail: detail.into(),
+                        }),
+                    );
                 }
-                settle_pending_workbench(
-                    pending,
-                    Err(KernelInvocationFailure::Failed {
-                        actor: self.context.identity,
-                        detail: detail.into(),
-                    }),
-                );
+                PendingActorTask::Tool(pending) => {
+                    pending.control.mark_unconfirmed();
+                    settle_pending_tool(
+                        pending,
+                        Err(KernelInvocationFailure::Failed {
+                            actor: self.context.identity,
+                            detail: detail.into(),
+                        }),
+                    );
+                }
+                PendingActorTask::Kernel(_) => {}
             }
         }
         if unconfirmed {
@@ -973,8 +1007,16 @@ struct PendingWorkbench {
     hosted_cell: crate::kernel::HostedCellSlot,
 }
 
+struct PendingTool {
+    step: crate::WorkbenchStepKey,
+    reply: ractor::RpcReplyPort<crate::KernelInvocationReply>,
+    control: Arc<crate::WorkbenchExecutionControl>,
+    hosted_cell: crate::kernel::HostedCellSlot,
+}
+
 enum PendingActorTask {
     Workbench(PendingWorkbench),
+    Tool(PendingTool),
     Kernel(PendingKernel),
 }
 
@@ -982,6 +1024,7 @@ impl PendingActorTask {
     fn step(&self) -> &crate::WorkbenchStepKey {
         match self {
             Self::Workbench(pending) => &pending.step,
+            Self::Tool(pending) => &pending.step,
             Self::Kernel(pending) => &pending.step,
         }
     }
@@ -989,6 +1032,7 @@ impl PendingActorTask {
     fn generation(&self) -> u64 {
         match self {
             Self::Workbench(pending) => pending.step.execution_generation(),
+            Self::Tool(pending) => pending.step.execution_generation(),
             Self::Kernel(pending) => pending.step.execution_generation(),
         }
     }
@@ -998,6 +1042,30 @@ impl PendingActorTask {
             Self::Workbench(pending) => Some(pending),
             Self::Kernel(_) => None,
         }
+    }
+
+    fn control(&self) -> Option<&Arc<crate::WorkbenchExecutionControl>> {
+        match self {
+            Self::Workbench(pending) => pending.control.as_ref(),
+            Self::Tool(pending) => Some(&pending.control),
+            Self::Kernel(_) => None,
+        }
+    }
+
+    fn matches_workbench_boundary(
+        &self,
+        actor: ActorRef,
+        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> bool {
+        let Some(key) = self
+            .control()
+            .and_then(|control| control.invocation.as_ref())
+        else {
+            return false;
+        };
+        key.matches_boundary(boundary)
+            && self.step().request_execution()
+                == Some(&crate::resident_tools::execution_id(actor, key))
     }
 }
 
@@ -1182,11 +1250,12 @@ where
                 }
                 KernelMessage::Shutdown { terminal, reply } => {
                     for pending in state.pending_tasks.values() {
-                        if let Some(control) = pending
-                            .workbench()
-                            .and_then(|pending| pending.control.as_ref())
-                        {
-                            control.request_cancellation();
+                        match pending {
+                            PendingActorTask::Workbench(pending) => {
+                                if let Some(control) = &pending.control { control.request_cancellation(); }
+                            }
+                            PendingActorTask::Tool(pending) => { pending.control.request_cancellation(); }
+                            PendingActorTask::Kernel(_) => {}
                         }
                     }
                     state.mailbox_admission.close();
@@ -1200,18 +1269,26 @@ where
                     invocation,
                     reply,
                 } => {
-                    if state.pending_tasks.values().any(|pending| {
-                        pending.workbench().is_some_and(|pending| {
+                    let call = invocation
+                        .as_ref()
+                        .cloned()
+                        .map(crate::resident_tools::WorkbenchCallKey::from);
+                    if state.pending_tasks.values().any(|pending| match pending {
+                        PendingActorTask::Workbench(pending) => {
                             pending.execution.as_ref() == Some(&execution)
                                 && pending
                                     .control
                                     .as_ref()
                                     .and_then(|control| control.invocation.as_ref())
-                                    == invocation
-                                        .clone()
-                                        .map(crate::resident_tools::WorkbenchCallKey::from)
-                                        .as_ref()
-                        })
+                                    == call.as_ref()
+                        }
+                        PendingActorTask::Tool(pending) => {
+                            pending.step.request_execution() == Some(&execution)
+                                && call.as_ref().is_some_and(|call| {
+                                    pending.control.invocation.as_ref() == Some(call)
+                                })
+                        }
+                        PendingActorTask::Kernel(_) => false,
                     }) {
                         reply
                             .send(crate::WorkbenchCancellationOutcome::Unconfirmed {
@@ -1231,22 +1308,18 @@ where
                 }
                 KernelMessage::ReconcileWorkbenchBoundary { boundary, reply } => {
                     if state.pending_tasks.values().any(|pending| {
-                        pending.workbench().is_some_and(|pending| {
-                            pending.control.as_ref().is_some_and(|control| {
-                                control
-                                    .invocation
-                                    .as_ref()
-                                    .is_some_and(|key| key.matches_boundary(&boundary))
-                            })
-                        })
+                        pending.matches_workbench_boundary(state.context.identity, &boundary)
                     }) {
                         reply
                             .send(crate::WorkbenchBoundaryReconciliation::Pending)
                             .ok();
                     } else {
-                        state.deferred_mailbox.push_back(
-                            KernelMessage::ReconcileWorkbenchBoundary { boundary, reply },
-                        );
+                        state
+                            .deferred_mailbox
+                            .push_back(KernelMessage::ReconcileWorkbenchBoundary {
+                                boundary,
+                                reply,
+                            });
                     }
                     return Ok(());
                 }
@@ -1595,17 +1668,8 @@ where
                     return Ok(());
                 }
 
-                match state.behavior.tool(&state.context, invocation, None).await {
-                    Ok(step) => {
-                        settle_step(&myself, state, step, |output| {
-                            reply.send(Ok(output)).ok();
-                        })
-                        .await;
-                    }
-                    Err(error) => {
-                        reply.send(Err(error)).ok();
-                    }
-                }
+                start_tool(&myself, state, invocation, None, reply);
+                return Ok(());
             }
             KernelMessage::ToolWithHostedCheckpoint {
                 invocation,
@@ -1621,21 +1685,8 @@ where
                         .ok();
                     return Ok(());
                 }
-                match state
-                    .behavior
-                    .tool(&state.context, invocation, Some(capture))
-                    .await
-                {
-                    Ok(step) => {
-                        settle_step(&myself, state, step, |output| {
-                            reply.send(Ok(output)).ok();
-                        })
-                        .await;
-                    }
-                    Err(error) => {
-                        reply.send(Err(error)).ok();
-                    }
-                }
+                start_tool(&myself, state, invocation, Some(capture), reply);
+                return Ok(());
             }
             KernelMessage::ReconcileWorkbenchBoundary { boundary, reply } => {
                 let outcome = state
@@ -1880,24 +1931,20 @@ fn start_workbench<B: KernelBehavior>(
             invocation,
             control,
         } if concurrent => {
-            if let Some(control) = pending
-                .workbench()
-                .and_then(|pending| pending.control.as_ref())
-            {
-                pending
-                    .workbench()
-                    .expect("workbench task")
-                    .hosted_cell
-                    .complete(control);
+            if let Some(control) = pending.workbench().and_then(|pending| pending.control.as_ref()) {
+                pending.workbench().expect("workbench task").hosted_cell.complete(control);
             }
-            state.deferred_mailbox.push_front(KernelMessage::Workbench {
-                invocation,
-                control,
-                reply: match pending {
-                    PendingActorTask::Workbench(pending) => pending.reply,
-                    PendingActorTask::Kernel(_) => unreachable!("workbench admission"),
-                },
-            });
+            state
+                .deferred_mailbox
+                .push_front(KernelMessage::Workbench {
+                    invocation,
+                    control,
+                    reply: match pending {
+                        PendingActorTask::Workbench(pending) => pending.reply,
+                        PendingActorTask::Tool(_) => unreachable!("workbench admission"),
+                        PendingActorTask::Kernel(_) => unreachable!("workbench admission"),
+                    },
+                });
             return;
         }
         WorkbenchDispatch::Sequential {
@@ -1910,15 +1957,8 @@ fn start_workbench<B: KernelBehavior>(
             })
         }),
     };
-    if let Some(control) = pending
-        .workbench()
-        .and_then(|pending| pending.control.as_ref())
-    {
-        pending
-            .workbench()
-            .expect("workbench task")
-            .hosted_cell
-            .claim(control);
+    if let Some(control) = pending.workbench().and_then(|pending| pending.control.as_ref()) {
+        pending.workbench().expect("workbench task").hosted_cell.claim(control);
     }
     if let PendingActorTask::Workbench(workbench) = &mut pending {
         workbench.serial = task.is_serial();
@@ -1942,6 +1982,90 @@ fn can_admit_independent_workbench<B: KernelBehavior>(state: &LocalActorState<B>
         })
 }
 
+fn start_tool<B: KernelBehavior>(
+    myself: &RactorRef<KernelMessage>,
+    state: &mut LocalActorState<B>,
+    invocation: exomonad_tool::ToolInvocation,
+    hosted_checkpoint_capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
+    reply: ractor::RpcReplyPort<crate::KernelInvocationReply>,
+) {
+    assert!(state.pending_tasks.is_empty(), "tool admission is exclusive");
+    let control = crate::WorkbenchExecutionControl::from_invocation(invocation.context.clone());
+    state.mailbox_admission.hosted_cell().claim(&control);
+    let Some(generation) = state.next_task_generation.checked_add(1) else {
+        settle_pending_tool(
+            PendingTool {
+                step: crate::WorkbenchStepKey::new(state.context.identity, u64::MAX, None),
+                reply,
+                control,
+                hosted_cell: Arc::clone(state.mailbox_admission.hosted_cell()),
+            },
+            Err(KernelInvocationFailure::Failed {
+                actor: state.context.identity,
+                detail: "actor step generation exhausted".into(),
+            }),
+        );
+        return;
+    };
+    state.next_task_generation = generation;
+    let execution = invocation
+        .context
+        .as_ref()
+        .map(|context| {
+            crate::resident_tools::execution_id(
+                state.context.identity,
+                &crate::resident_tools::WorkbenchCallKey::from(context.clone()),
+            )
+        })
+        .unwrap_or_else(|| untracked_tool_execution(state.context.identity, generation));
+    let pending = PendingActorTask::Tool(PendingTool {
+        step: crate::WorkbenchStepKey::new(
+            state.context.identity,
+            generation,
+            Some(execution),
+        ),
+        reply,
+        control: Arc::clone(&control),
+        hosted_cell: Arc::clone(state.mailbox_admission.hosted_cell()),
+    });
+    let task = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        state.behavior.dispatch_tool(
+            &state.context,
+            invocation,
+            hosted_checkpoint_capture,
+            control,
+        )
+    })) {
+        Ok(task) => task,
+        Err(_) => {
+            fail_unconfirmed_task(
+                myself,
+                state,
+                pending,
+                "tool dispatch panicked; invocation outcome is unconfirmed".into(),
+            );
+            return;
+        }
+    };
+    let key = pending.generation();
+    state.pending_tasks.insert(key, pending);
+    spawn_actor_task(myself, state, generation, task);
+}
+
+fn untracked_tool_execution(
+    actor: ActorRef,
+    generation: u64,
+) -> tidepool_runtime::session::WorkbenchExecutionId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tidepool.untracked-tool-execution.v1\0");
+    hasher.update(&actor.id.0.to_le_bytes());
+    hasher.update(&actor.incarnation.0.to_le_bytes());
+    hasher.update(&generation.to_le_bytes());
+    let mut digest = [0_u8; 16];
+    digest.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    tidepool_runtime::session::WorkbenchExecutionId::from_digest(digest)
+}
+
 async fn start_kernel_task<B: KernelBehavior>(
     myself: &RactorRef<KernelMessage>,
     state: &mut LocalActorState<B>,
@@ -1953,10 +2077,7 @@ async fn start_kernel_task<B: KernelBehavior>(
         return;
     };
     state.next_task_generation = generation;
-    assert!(
-        state.pending_tasks.is_empty(),
-        "kernel admission is exclusive"
-    );
+    assert!(state.pending_tasks.is_empty(), "kernel admission is exclusive");
     let pending = PendingActorTask::Kernel(PendingKernel {
         step: crate::WorkbenchStepKey::new(state.context.identity, generation, None),
         operation,
@@ -2116,8 +2237,7 @@ fn park_actor_task<B: KernelBehavior, T: Send + 'static>(
             myself,
             state,
             pending,
-            "serial actor continuation parked while independent workbench tasks remain active"
-                .into(),
+            "serial actor continuation parked while independent workbench tasks remain active".into(),
         );
         return;
     }
@@ -2135,6 +2255,7 @@ fn park_actor_task<B: KernelBehavior, T: Send + 'static>(
     let next_step = pending.step().next_step(generation);
     match &mut pending {
         PendingActorTask::Workbench(pending) => pending.step = next_step,
+        PendingActorTask::Tool(pending) => pending.step = next_step,
         PendingActorTask::Kernel(pending) => pending.step = next_step,
     }
     let execution_generation = pending.generation();
@@ -2189,28 +2310,52 @@ async fn complete_actor_task<B: KernelBehavior>(
                 }
             }
         }
-        PendingActorTask::Kernel(pending) => {
-            match apply_actor_outcome::<B, ()>(state, outcome).await {
+        PendingActorTask::Tool(pending) => {
+            match apply_actor_outcome::<B, serde_json::Value>(state, outcome).await {
                 Ok(ActorAdvance::Park(task)) => {
-                    park_actor_task(myself, state, PendingActorTask::Kernel(pending), task);
+                    park_actor_task(myself, state, PendingActorTask::Tool(pending), task);
                     return;
                 }
-                Ok(ActorAdvance::Complete(step)) => finish_after_step(myself, state, step).await,
-                Err(TaskApplyFailure::Invocation(error)) => {
-                    fail_kernel_operation(
-                        myself,
-                        state,
-                        pending.operation,
-                        format!("{:?} failed: {error}", pending.operation),
-                    )
+                Ok(ActorAdvance::Complete(step)) => {
+                    settle_step(myself, state, step, |output| {
+                        settle_pending_tool(pending, Ok(output))
+                    })
                     .await;
                 }
+                Err(TaskApplyFailure::Invocation(error)) => {
+                    settle_pending_tool(pending, Err(error));
+                }
                 Err(TaskApplyFailure::Unconfirmed(detail)) => {
-                    fail_unconfirmed_task(myself, state, PendingActorTask::Kernel(pending), detail);
+                    fail_unconfirmed_task(
+                        myself,
+                        state,
+                        PendingActorTask::Tool(pending),
+                        detail,
+                    );
                     return;
                 }
             }
         }
+        PendingActorTask::Kernel(pending) => match apply_actor_outcome::<B, ()>(state, outcome).await {
+            Ok(ActorAdvance::Park(task)) => {
+                park_actor_task(myself, state, PendingActorTask::Kernel(pending), task);
+                return;
+            }
+            Ok(ActorAdvance::Complete(step)) => finish_after_step(myself, state, step).await,
+            Err(TaskApplyFailure::Invocation(error)) => {
+                fail_kernel_operation(
+                    myself,
+                    state,
+                    pending.operation,
+                    format!("{:?} failed: {error}", pending.operation),
+                )
+                .await;
+            }
+            Err(TaskApplyFailure::Unconfirmed(detail)) => {
+                fail_unconfirmed_task(myself, state, PendingActorTask::Kernel(pending), detail);
+                return;
+            }
+        },
     }
     if state.pending_tasks.is_empty() && state.terminal.get().is_none() {
         for notice in std::mem::take(&mut state.pending_child_exits) {
@@ -2256,15 +2401,22 @@ fn fail_unconfirmed_task<B: KernelBehavior>(
     pending: PendingActorTask,
     detail: String,
 ) {
-    if let PendingActorTask::Workbench(pending) = pending {
-        let failure = KernelInvocationFailure::Failed {
-            actor: state.context.identity,
-            detail: detail.clone(),
-        };
-        if let Some(control) = pending.control.as_ref() {
-            control.mark_unconfirmed();
+    let failure = KernelInvocationFailure::Failed {
+        actor: state.context.identity,
+        detail: detail.clone(),
+    };
+    match pending {
+        PendingActorTask::Workbench(pending) => {
+            if let Some(control) = pending.control.as_ref() {
+                control.mark_unconfirmed();
+            }
+            settle_pending_workbench(pending, Err(failure));
         }
-        settle_pending_workbench(pending, Err(failure));
+        PendingActorTask::Tool(pending) => {
+            pending.control.mark_unconfirmed();
+            settle_pending_tool(pending, Err(failure));
+        }
+        PendingActorTask::Kernel(_) => {}
     }
     state.hosted_admission = HostedAdmission::Closing;
     state.mailbox_admission.close();
@@ -2279,6 +2431,42 @@ fn settle_pending_workbench(pending: PendingWorkbench, reply: crate::KernelWorkb
     }
     let delivered = pending.reply.send(reply).is_ok();
     tracing::info!(target: "exomonad_actor::workbench_phase", step = ?pending.step, delivered, phase = "reply_settled", "workbench phase");
+}
+
+fn settle_pending_tool(pending: PendingTool, reply: crate::KernelInvocationReply) {
+    let control_reply = match &reply {
+        Ok(value) => Ok(WorkbenchResponse {
+            status: tidepool_runtime::session::WorkbenchRunStatus::Committed,
+            summary: None,
+            items: vec![tidepool_runtime::session::WorkbenchItemReceipt {
+                index: 0,
+                kind: None,
+                span: None,
+                source_items: Vec::new(),
+                status: tidepool_runtime::session::WorkbenchItemStatus::Committed,
+                output: value.to_string(),
+                diagnostics: Vec::new(),
+                failure_layer: None,
+                warnings: Vec::new(),
+                installed_bindings: Vec::new(),
+                operations: Vec::new(),
+                terminal_transfer: None,
+            }],
+            next_index: 1,
+            total: 1,
+        }),
+        Err(error) => Err(error.clone()),
+    };
+    pending.control.settle(control_reply);
+    pending.hosted_cell.complete(&pending.control);
+    let delivered = pending.reply.send(reply).is_ok();
+    tracing::info!(
+        target: "exomonad_actor::workbench_phase",
+        step = ?pending.step,
+        delivered,
+        phase = "tool_reply_settled",
+        "actor phase"
+    );
 }
 
 fn retain_unconfirmed_exit(terminal: &RetainedActorExit, actor: ActorRef, detail: &str) {
@@ -3878,7 +4066,11 @@ mod tests {
         actor
             .address()
             .send_message(KernelMessage::ActorStepCompleted {
-                step: crate::WorkbenchStepKey::new(actor.identity(), 1, Some(first_execution)),
+                step: crate::WorkbenchStepKey::new(
+                    actor.identity(),
+                    1,
+                    Some(first_execution),
+                ),
                 outcome: Box::new(()),
             })
             .expect("queue stale pre-park step");
@@ -3890,6 +4082,59 @@ mod tests {
 
         resume.notify_one();
         assert!(first.await.expect("resumed first reply").is_ok());
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "done".into(),
+            })
+            .await
+            .expect("shutdown");
+        task.await.expect("actor task");
+    }
+
+    #[tokio::test]
+    async fn legacy_tool_ingress_waits_for_parked_owned_workbench() {
+        let mut fixture = behavior(false);
+        fixture.behavior.owned_workbench = true;
+        fixture.behavior.independent_workbench_admission = true;
+        let parked = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+        fixture.behavior.owned_successor_gate = Some((Arc::clone(&parked), Arc::clone(&resume)));
+        fixture.behavior.owned_successor_source = Some("A".into());
+        let calls = Arc::clone(&fixture.calls);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let first = send_workbench_request(
+            &actor,
+            WorkbenchRequest::from_cell_input("A"),
+            None,
+        );
+        parked.notified().await;
+
+        let (reply, tool) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::Tool {
+                invocation: tool_invocation("queued"),
+                reply: reply.into(),
+            })
+            .expect("queue legacy tool call");
+        tokio::task::yield_now().await;
+        assert!(!calls.lock().contains(&"second"));
+
+        resume.notify_one();
+        assert!(first.await.expect("workbench reply").is_ok());
+        assert!(tool.await.expect("tool reply").is_ok());
+        assert_eq!(
+            &*calls.lock(),
+            &[
+                "workbench-start",
+                "workbench-next-step",
+                "workbench-end",
+                "second",
+            ]
+        );
         actor
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
