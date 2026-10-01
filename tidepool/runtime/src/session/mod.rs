@@ -84,8 +84,8 @@ pub use publication::{PublicationCancellation, PublicationDecision, PublicationP
 pub use tidepool_codegen::prepared_program::{ImageRegistry, Parcel};
 
 pub use recovery::{
-    DeclarationRecoveryReport, LostDeclaration, RecoveryFormatRefusal, RecoveryPublicOwner,
-    ReplayedDeclaration,
+    DeclarationRecoveryReport, RecoveryFormatRefusal, RecoveryPublicOwner, RestoredDeclaration,
+    UnavailableBinding,
 };
 
 pub use registry::{
@@ -696,15 +696,6 @@ pub struct SessionLib {
     /// its descendants, never sideways or upward; the regression is pinned by
     /// `session_decl_scope_tree.rs`.
     tips: HashMap<ScopeId, Generation>,
-    /// Optional durable root-declaration manifest. It records source and
-    /// retractions only; live values and scoped child state never enter it.
-    recovery_manifest_path: Option<PathBuf>,
-    recovery_turns: Vec<recovery::RecoveryTurn>,
-    /// Persistence happens after a declaration has semantically committed.
-    /// A write failure is observable here rather than returned as if retrying
-    /// the declaration were safe.
-    recovery_manifest_warning: Option<String>,
-    recovery_report: Option<DeclarationRecoveryReport>,
     durable_graph: Option<DurableDeclarationGraph>,
     /// Actor incarnations in one session have distinct process-local lexical
     /// scopes, including inherited-context children.
@@ -905,10 +896,6 @@ impl SessionLib {
             // what keeps `scope_tip`'s miss case meaning "empty" rather than
             // "whatever was pushed last anywhere" — see the field docs.
             tips: HashMap::from([(ScopeId::ROOT, Generation(0))]),
-            recovery_manifest_path: None,
-            recovery_turns: Vec::new(),
-            recovery_manifest_warning: None,
-            recovery_report: None,
             durable_graph: None,
             durable_public_scopes: BTreeMap::new(),
             #[cfg(test)]
@@ -1236,102 +1223,48 @@ impl SessionLib {
         Ok(())
     }
 
-    /// Reconstruct replayable root declarations from `path`, then attach that
-    /// path for future source commits. Replay uses the ordinary GHC admission
-    /// path and never repeats effects. Turns that depended on resident values,
-    /// and declarations that no longer type-check without such a turn, are
-    /// reported as lost rather than fabricated.
-    pub fn attach_recovery_manifest(
-        &mut self,
-        path: impl Into<PathBuf>,
-    ) -> Result<DeclarationRecoveryReport, SessionError> {
-        let path = path.into();
-        let manifest = recovery::read(&path)?;
-        let mut report = DeclarationRecoveryReport {
-            source_session: manifest.as_ref().map(|manifest| manifest.source_session),
+    /// Report exact restored public tips and native binding winners unavailable
+    /// in this session incarnation. Authored source is never replayed.
+    #[must_use]
+    pub fn declaration_recovery_report(&self) -> Option<DeclarationRecoveryReport> {
+        let state = self.durable_graph.as_ref()?;
+        let restored = state
+            .graph
+            .nodes
+            .iter()
+            .filter(|node| self.log.recovered_at(node.id).is_some())
+            .flat_map(|node| {
+                node.lexical_roots
+                    .iter()
+                    .map(move |root| RestoredDeclaration {
+                        generation: node.id.0,
+                        module: root.module.clone(),
+                    })
+            })
+            .collect();
+        let mut unavailable_bindings = state
+            .graph
+            .public_surfaces
+            .iter()
+            .flat_map(|surface| &surface.bindings)
+            .filter(|binding| binding.owner.session != self.id.0)
+            .map(|binding| UnavailableBinding {
+                name: binding.name.clone(),
+                session: binding.owner.session,
+                variable: binding.owner.variable,
+            })
+            .collect::<Vec<_>>();
+        unavailable_bindings.sort_by(|a, b| {
+            (&a.name, a.session, a.variable).cmp(&(&b.name, b.session, b.variable))
+        });
+        unavailable_bindings.dedup();
+        Some(DeclarationRecoveryReport {
+            source_session: state.graph.source_session,
             successor_session: self.id.0,
-            replayed: Vec::new(),
-            lost: Vec::new(),
-        };
-
-        if let Some(manifest) = manifest {
-            if self.log.generation() != Generation(0) {
-                return Err(SessionError::RecoveryManifest {
-                    path,
-                    detail: "recovery must attach before declarations are admitted".into(),
-                });
-            }
-            let migration = recovery::migrate_v1(&manifest);
-            if migration.high_water.0 == u64::MAX {
-                return Err(SessionError::RecoveryManifest {
-                    path,
-                    detail: "legacy declaration generation space exhausted".into(),
-                });
-            }
-            self.log.restore_high_water(migration.high_water);
-            report.lost = migration.lost;
-            let mut replay_failed = false;
-            for turn in migration.replay_safe {
-                if replay_failed {
-                    report.lost.push(LostDeclaration {
-                        origin_session: turn.origin_session,
-                        source_generation: turn.generation,
-                        source_hash: turn.source_hash,
-                        sources: turn.sources,
-                        reason: "an earlier legacy declaration could not be recovered".into(),
-                    });
-                    continue;
-                }
-                let sources: Vec<_> = turn.sources.iter().map(String::as_str).collect();
-                match self.define_batch(&sources) {
-                    Ok(generation) => {
-                        report.replayed.push(ReplayedDeclaration {
-                            origin_session: turn.origin_session,
-                            source_generation: turn.generation,
-                            successor_generation: generation.0,
-                            source_hash: turn.source_hash,
-                        });
-                        self.recovery_turns.push(recovery::RecoveryTurn::new(
-                            self.id.0,
-                            generation.0,
-                            turn.sources,
-                            Vec::new(),
-                            true,
-                        ));
-                    }
-                    Err(error) => {
-                        replay_failed = true;
-                        report.lost.push(LostDeclaration {
-                            origin_session: turn.origin_session,
-                            source_generation: turn.generation,
-                            source_hash: turn.source_hash,
-                            sources: turn.sources,
-                            reason: error.to_string(),
-                        });
-                    }
-                }
-            }
-        }
-        self.recovery_manifest_path = Some(path);
-        self.recovery_report = Some(report.clone());
-        Ok(report)
-    }
-
-    /// Last failure to publish source recovery state after a successful
-    /// semantic declaration commit. Retrying the original declaration would
-    /// be wrong; callers can surface this health fact and keep the session
-    /// usable.
-    #[must_use]
-    pub fn recovery_manifest_warning(&self) -> Option<&str> {
-        self.recovery_manifest_warning.as_deref()
-    }
-
-    /// Recovery facts for the current session incarnation, when a durable
-    /// manifest has been attached. These are metadata about source replay,
-    /// never reconstructed Haskell values.
-    #[must_use]
-    pub fn declaration_recovery_report(&self) -> Option<&DeclarationRecoveryReport> {
-        self.recovery_report.as_ref()
+            restored,
+            unavailable_bindings,
+            durability_unconfirmed: state.unconfirmed.is_some(),
+        })
     }
 
     /// Add include dirs used when extracting binders and validating candidate
@@ -1803,15 +1736,6 @@ impl SessionLib {
             .expect("just committed declaration")
             .value_types = value_types;
 
-        if scope == ScopeId::ROOT {
-            self.record_recovery_turn(recovery::RecoveryTurn::new(
-                self.id.0,
-                gen.0,
-                sources,
-                Vec::new(),
-                import_modules.is_empty() && inject_modules.is_empty(),
-            ));
-        }
         Ok(gen)
     }
 
@@ -1999,15 +1923,6 @@ impl SessionLib {
         } else {
             self.push_turn_in(staged.scope, staged.turn.clone())?
         };
-        if staged.scope == ScopeId::ROOT {
-            self.record_recovery_turn(recovery::RecoveryTurn::new(
-                self.id.0,
-                generation.0,
-                staged.turn.sources,
-                Vec::new(),
-                staged.import_modules.is_empty() && staged.inject_modules.is_empty(),
-            ));
-        }
         if let Some(detail) = uncertain {
             return Ok(DeclarationAdmission::PublishedDurabilityUnconfirmed {
                 commit: generation,
@@ -2345,21 +2260,6 @@ impl SessionLib {
         if retracts.is_empty() {
             return Ok(());
         }
-        if self.durable_graph.is_none()
-            && self.recovery_manifest_path.is_some()
-            && namespace.is_some()
-            && heads.iter().any(|(head, _)| {
-                retracts.iter().any(|retraction| {
-                    retraction.occurrence() == head.head_name()
-                        && !retraction.selects(head.head_namespace(), head.head_name())
-                })
-            })
-        {
-            return Err(SessionError::RecoveryManifest {
-                path: self.recovery_manifest_path.clone().unwrap(),
-                detail: "typed retraction requires the exact recovery graph format".into(),
-            });
-        }
         if let Some(state) = &self.durable_graph {
             let _ = state;
             paired_publication::exact_retractions(self, tip, &retracts)?;
@@ -2404,34 +2304,7 @@ impl SessionLib {
             self.restore_tip(scope, tip_before);
             return Err(e);
         }
-        if scope == ScopeId::ROOT {
-            self.record_recovery_turn(recovery::RecoveryTurn::new(
-                self.id.0,
-                gen.0,
-                Vec::new(),
-                retracts
-                    .iter()
-                    .map(|retraction| retraction.occurrence().to_owned())
-                    .collect(),
-                true,
-            ));
-        }
         Ok(())
-    }
-
-    fn record_recovery_turn(&mut self, turn: recovery::RecoveryTurn) {
-        let Some(path) = self.recovery_manifest_path.as_ref() else {
-            return;
-        };
-        self.recovery_turns.push(turn);
-        match recovery::write(path, self.id.0, &self.recovery_turns) {
-            Ok(()) => self.recovery_manifest_warning = None,
-            Err(error) => {
-                let warning = error.to_string();
-                tracing::warn!(path = %path.display(), error = %warning, "could not publish declaration recovery manifest after semantic commit");
-                self.recovery_manifest_warning = Some(warning);
-            }
-        }
     }
 
     /// Validate one declaration generation and capture its visible value types
@@ -3170,81 +3043,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_recovery_does_not_replay_past_an_ambiguous_turn_or_reuse_its_modules() {
-        let root = tempfile::tempdir().unwrap();
-        let manifest = root.path().join("recovery.json");
-        recovery::write(
-            &manifest,
-            41,
-            &[
-                recovery::RecoveryTurn::new(41, 1, vec!["data Old = Old".into()], Vec::new(), true),
-                recovery::RecoveryTurn::new(41, 2, Vec::new(), vec!["Old".into()], true),
-                recovery::RecoveryTurn::new(
-                    41,
-                    3,
-                    vec!["later :: Int\nlater = 3".into()],
-                    Vec::new(),
-                    true,
-                ),
-            ],
-        )
-        .unwrap();
-        let mut lib = staged_test_lib(&root);
-        let report = lib.attach_recovery_manifest(&manifest).unwrap();
-        assert!(report.replayed.is_empty());
-        assert_eq!(report.lost.len(), 3);
-        assert_eq!(lib.generation(), Generation(3));
-        assert!(lib.declaration_value_type(3, "later").is_none());
-        assert_eq!(
-            lib.define_batch(&["fresh :: Int\nfresh = 4"]).unwrap(),
-            Generation(4)
-        );
-        assert_eq!(lib.declaration_value_type(4, "fresh"), Some("Int"));
-    }
-
-    #[test]
-    fn safe_legacy_replay_renumbers_and_rebinds_future_manifest_to_successor() {
-        let root = tempfile::tempdir().unwrap();
-        let manifest = root.path().join("recovery.json");
-        recovery::write(
-            &manifest,
-            41,
-            &[recovery::RecoveryTurn::new(
-                41,
-                3,
-                vec!["answer :: Int\nanswer = 42".into()],
-                Vec::new(),
-                true,
-            )],
-        )
-        .unwrap();
-        let mut lib = staged_test_lib(&root);
-        let report = lib.attach_recovery_manifest(&manifest).unwrap();
-        assert_eq!(report.replayed.len(), 1);
-        assert_eq!(report.replayed[0].source_generation, 3);
-        assert_eq!(report.replayed[0].successor_generation, 4);
-        assert_eq!(lib.declaration_value_type(4, "answer"), Some("Int"));
-        assert_eq!(
-            lib.define_batch(&["next :: Int\nnext = answer + 1"])
-                .unwrap(),
-            Generation(5)
-        );
-        let successor = recovery::read(&manifest).unwrap().unwrap();
-        assert_eq!(successor.source_session, lib.id.0);
-        assert_eq!(successor.turns.len(), 2);
-        assert!(successor
-            .turns
-            .iter()
-            .all(|turn| turn.origin_session == lib.id.0));
-    }
-
-    #[test]
     fn adopting_a_validated_candidate_commits_it_once_and_keeps_its_artifact() {
         let root = tempfile::tempdir().unwrap();
-        let manifest = root.path().join("recovery.json");
         let mut lib = staged_test_lib(&root);
-        lib.attach_recovery_manifest(&manifest)
-            .expect("attach empty recovery manifest");
         let staged = validated_staged_answer(&lib);
         assert_eq!(
             staged.turn.value_types.get("answer").map(String::as_str),
@@ -3267,11 +3068,6 @@ mod tests {
         );
         assert_eq!(lib.generation(), Generation(1));
         assert_eq!(lib.declaration_value_type(1, "answer"), Some("Int"));
-        assert!(
-            manifest.exists(),
-            "adoption records the durable recovery turn"
-        );
-        assert!(lib.recovery_manifest_warning().is_none());
 
         lib.discard_staged(&staged);
         assert!(

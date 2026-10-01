@@ -183,10 +183,7 @@ impl SessionLib {
                 "recovery manifest must be the actual canonical run-owned file".into(),
             ));
         }
-        if self.log.generation() != Generation(0)
-            || self.recovery_manifest_path.is_some()
-            || self.durable_graph.is_some()
-        {
+        if self.log.generation() != Generation(0) || self.durable_graph.is_some() {
             return Err(invalid(
                 "recovery must attach before declarations are admitted".into(),
             ));

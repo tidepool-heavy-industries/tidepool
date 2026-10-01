@@ -11947,31 +11947,24 @@ where
             let Some(report) = session.declaration_recovery_report() else {
                 return Ok(Ok("declaration recovery is not configured".into()));
             };
-            let warning = session
-                .recovery_manifest_warning()
-                .map(|warning| format!("; manifest_warning={warning}"))
-                .unwrap_or_default();
             let mut lines = vec![format!(
-                "declaration recovery: source_session={:?}; successor_session={}; replayed={}; lost={}{}",
+                "declaration recovery: source_session={}; successor_session={}; restored={}; unavailable_bindings={}; durability_unconfirmed={}",
                 report.source_session,
                 report.successor_session,
-                report.replayed.len(),
-                report.lost.len(),
-                warning,
+                report.restored.len(),
+                report.unavailable_bindings.len(),
+                report.durability_unconfirmed,
             )];
-            lines.extend(report.replayed.iter().map(|item| {
+            lines.extend(report.restored.iter().map(|item| {
                 format!(
-                    "replayed session {} generation {} -> {} source_hash={}",
-                    item.origin_session,
-                    item.source_generation,
-                    item.successor_generation,
-                    item.source_hash
+                    "restored generation {} module {}",
+                    item.generation, item.module
                 )
             }));
-            lines.extend(report.lost.iter().map(|item| {
+            lines.extend(report.unavailable_bindings.iter().map(|item| {
                 format!(
-                    "lost session {} generation {} source_hash={} reason={}",
-                    item.origin_session, item.source_generation, item.source_hash, item.reason
+                    "unavailable binding {} session {} variable {}",
+                    item.name, item.session, item.variable
                 )
             }));
             Ok(Ok(lines.join("\n")))
