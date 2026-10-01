@@ -11,38 +11,38 @@ import Tidepool.Check
 preparationCompletion :: Member RecipeCheck effects => Eff effects ()
 preparationCompletion = do
   owner <- root
-  void $ turn owner "import Project.PrepareContinueChecks"
-  success <- turn owner $ Text.unlines
+  void $ turn owner "import Exomonad.Contrib.PrepareContinue\nimport Exomonad.Contrib.RetainedEvidence"
+  void $ turn owner $ Text.unlines
     [ "okJob <- Cmd.start (Cmd.withMemory (Cmd.MiB 64) (Cmd.argv [\"sh\", \"-c\", \"echo ready\"]))"
-    , "awaitPrepared okJob (\\_ -> pure (Right \"ready\" :: Either Text Text))"
+    , "prepared <- awaitPrepared okJob (\\_ -> pure (Right \"ready\" :: Either Text Text))"
     ]
-  check "preparation resumes with typed readiness" ("Right \"ready\"" `Text.isInfixOf` lastOutput success)
-  failed <- turn owner $ Text.unlines
+  assertCell owner "preparation resumes with typed readiness"
+    "case prepared of { Right ready -> ready == \"ready\"; _ -> False }"
+  void $ turn owner $ Text.unlines
     [ "badJob <- Cmd.start (Cmd.withMemory (Cmd.MiB 64) (Cmd.argv [\"sh\", \"-c\", \"printf failure-diagnostic >&2; exit 7\"]))"
-    , "awaitPrepared badJob (\\_ -> pure (Right \"ready\" :: Either Text Text))"
+    , "failed <- awaitPrepared badJob (\\_ -> pure (Right \"ready\" :: Either Text Text))"
     ]
-  check "failed preparation retains original command receipt" ("CommandExited 7" `Text.isInfixOf` lastOutput failed)
+  assertCell owner "failed preparation retains original command receipt"
+    "case failed of { Left (PreparationCommandFailed result) -> Cmd.job result == badJob && Cmd.commandOutcome (Cmd.commandResult result) == Cmd.CommandExited 7 && Cmd.commandCleanup (Cmd.commandResult result) == Cmd.CommandClean; _ -> False }"
 
-  mismatch <- turn owner "badReceipt <- Cmd.commandResult <$> Cmd.quiet (Cmd.await badJob)\nverifyPrepared okJob badReceipt (\\_ -> pure (Right () :: Either Text ()))"
-  check "observed preparation rejects a receipt from another command"
-    ("PreparationReceiptMismatch" `Text.isInfixOf` lastOutput mismatch)
+  void $ turn owner "badReceipt <- Cmd.commandResult <$> Cmd.quiet (Cmd.await badJob)\nmismatch <- verifyPrepared okJob badReceipt (\\_ -> pure (Right () :: Either Text ()))"
+  assertCell owner "observed preparation rejects a receipt from another command"
+    "case mismatch of { Left (PreparationReceiptMismatch supplied actual) -> supplied == badReceipt && Cmd.job actual == okJob && Cmd.commandOutcome supplied == Cmd.CommandExited 7 && Cmd.commandOutcome (Cmd.commandResult actual) == Cmd.CommandExited 0; _ -> False }"
 
-  budget <- turn owner "evidenceBudget 0"
-  check "retained read refuses zero byte budget" ("InvalidEvidenceBudget 0" `Text.isInfixOf` lastOutput budget)
-  recovered <- turn owner
-    "Right allowance <- pure (evidenceBudget 64)\nrecoverRetained allowance badJob"
-  check "bounded pages recover the failed job without resubmission"
-    (all (`Text.isInfixOf` lastOutput recovered)
-      ["CommandExited 7", "failure-diagnostic", "StreamComplete"])
-  bounded <- turn owner $ Text.unlines
+  assertCell owner "retained read refuses zero byte budget"
+    "evidenceBudget 0 == Left (InvalidEvidenceBudget 0)"
+  void $ turn owner "Right allowance <- pure (evidenceBudget 64)\nrecovered <- recoverRetained allowance badJob\nRight expectedStderr <- Cmd.tryPage badJob Cmd.Stderr (Cmd.OutputSlice 0 64)"
+  assertCell owner "bounded pages recover the failed job without resubmission"
+    "retainedJob recovered == badJob && retainedStatus recovered == Cmd.CommandFinished badReceipt && streamStop (retainedStdout recovered) == StreamComplete && streamStop (retainedStderr recovered) == StreamComplete && T.concat (map Cmd.pageText (streamPages (retainedStderr recovered))) == \"failure-diagnostic\" && streamPages (retainedStderr recovered) == [expectedStderr] && all (\\page -> not (Cmd.outputLossy (Cmd.pageDetails page)) && Cmd.outputLostBytes (Cmd.pageDetails page) == 0) (streamPages (retainedStderr recovered))"
+  void $ turn owner $ Text.unlines
     [ "largeResult <- Cmd.quiet (Cmd.run (Cmd.withMemory (Cmd.MiB 64) (Cmd.argv [\"sh\", \"-c\", \"printf abcdefghij\"])))"
     , "Right tiny <- pure (evidenceBudget 4)"
     , "small <- recoverRetained tiny (Cmd.job largeResult)"
-    , "(streamStop (retainedStdout small), map Cmd.pageText (streamPages (retainedStdout small)))"
+    , "Right expectedSmall <- Cmd.tryPage (Cmd.job largeResult) Cmd.Stdout (Cmd.OutputSlice 0 4)"
     ]
-  check "retained page reading stops at the requested byte budget"
-    (all (`Text.isInfixOf` lastOutput bounded) ["StreamBudgetReached", "abcd"])
+  assertCell owner "retained page reading stops at the requested byte budget"
+    "retainedJob small == Cmd.job largeResult && streamStop (retainedStdout small) == StreamBudgetReached && case streamPages (retainedStdout small) of { [page] -> page == expectedSmall && Cmd.pageText page == \"abcd\" && Cmd.outputStart (Cmd.pageDetails page) == 0 && Cmd.outputEnd (Cmd.pageDetails page) == 4 && Cmd.outputAvailableEnd (Cmd.pageDetails page) == 10; _ -> False }"
 
-  missing <- turn owner "awaitPrepared okJob (\\_ -> pure (Left \"prerequisite missing\" :: Either Text Text))"
-  check "readiness failure stays separate from successful command"
-    (all (`Text.isInfixOf` lastOutput missing) ["prerequisite missing", "CommandExited 0"])
+  void $ turn owner "missing <- awaitPrepared okJob (\\_ -> pure (Left \"prerequisite missing\" :: Either Text Text))"
+  assertCell owner "readiness failure stays separate from successful command"
+    "case missing of { Left (PreparationReadinessFailed issue result) -> issue == \"prerequisite missing\" && Cmd.job result == okJob && Cmd.commandOutcome (Cmd.commandResult result) == Cmd.CommandExited 0 && Cmd.commandCleanup (Cmd.commandResult result) == Cmd.CommandClean; _ -> False }"

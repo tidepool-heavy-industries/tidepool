@@ -26,19 +26,19 @@ boundedHistory = do
         , turn [TurnMessage RoleUser "third"]
         ]
       rendered = renderConversationContext 2 300 (Just turns)
-  check "conversation context excludes tool and privileged message bodies"
+  check "text: conversation context excludes tool and privileged message bodies"
     (all (not . (`T.isInfixOf` rendered)) ["secret", "system", "developer"])
-  check "newest messages retain role labels and chronological order"
+  check "text: newest messages retain role labels and chronological order"
     ("assistant: second\nuser: third\n" `T.isSuffixOf` rendered
       && not ("user: first" `T.isInfixOf` rendered))
-  check "dropped older messages are explicit"
+  check "text: dropped older messages are explicit"
     ("[earlier conversation omitted]" `T.isInfixOf` rendered)
   let wide = renderConversationContext 8 120
         (Just [turn [TurnMessage RoleUser (T.replicate 200 "🦀")]])
-  check "Unicode scalar bound retains complete characters and a role label"
+  check "text: Unicode scalar bound retains complete characters and a role label"
     (T.length wide <= 120 && "user: [start omitted] " `T.isInfixOf` wide
       && "🦀" `T.isInfixOf` wide)
-  check "unavailable and empty history are distinguishable"
+  check "text: unavailable and empty history are distinguishable"
     (renderConversationContext 8 120 Nothing
       /= renderConversationContext 8 120 (Just [])
       && "unavailable" `T.isInfixOf` renderConversationContext 8 120 Nothing
