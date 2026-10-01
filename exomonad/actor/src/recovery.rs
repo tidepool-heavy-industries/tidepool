@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tidepool_repr::jsonl::{SyncPolicy, TailPolicy};
 
-// V4 atomically records admission and startup intent. Earlier versions cannot
-// prove that an unbound actor never initialized and are explicitly unsupported.
-const VERSION: u32 = 4;
+// V5 pins compiler-issued startup input identity. V4 raw program hashes and
+// earlier rows cannot prove this startup contract and remain unsupported.
+const VERSION: u32 = 5;
 
 /// Issued by the Forest after checking its existing descriptor and directory.
 /// The process-local placement is deliberately absent from durable rows.
@@ -1310,7 +1310,7 @@ mod tests {
     #[test]
     fn old_journal_versions_are_unsupported_and_remain_untouched() {
         let directory = tempfile::tempdir().unwrap();
-        for version in [1, 2, 3] {
+        for version in [1, 2, 3, 4] {
             let path = directory.path().join(format!("v{version}.jsonl"));
             let bytes = format!("{{\"version\":{version},\"sequence\":1,\"event\":\"created\"}}\n");
             std::fs::write(&path, &bytes).unwrap();
