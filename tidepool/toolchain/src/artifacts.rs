@@ -2435,7 +2435,7 @@ fn compile_invocation_inner(
                 &deployment,
                 inv.include,
                 valid,
-                &fresh_products,
+                &artifacts.module_products[..fresh_count],
                 &product_bytes,
                 &package_bundle_bytes,
                 inv.source,
