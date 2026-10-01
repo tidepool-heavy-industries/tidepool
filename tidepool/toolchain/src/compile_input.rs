@@ -70,7 +70,8 @@ fn same_sites(left: &[YieldSite], right: &[YieldSite]) -> bool {
 }
 
 /// Failure to authenticate the compiler's complete consumed package inputs.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, thiserror::Error)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CompileInputError {
     #[error("compiler input proof unavailable: {}", path.display())]
     Unavailable { path: PathBuf },
@@ -86,6 +87,13 @@ pub enum CompileInputError {
     SourceMismatch { unit: String, module: String },
     #[error("compiler input proof does not support SOURCE boot owner {unit}:{module}")]
     UnsupportedBoot { unit: String, module: String },
+    #[error("compiler input proof does not support compiler-provided direct import {imported_unit}:{imported_module} of {unit}:{module}")]
+    UnsupportedWiredInput {
+        unit: String,
+        module: String,
+        imported_unit: String,
+        imported_module: String,
+    },
     #[error("compiler input proof omits package import {imported} of {unit}:{module}")]
     MissingPackageImport {
         unit: String,
@@ -107,6 +115,27 @@ pub(crate) struct ValidatedInputPackages {
 }
 
 impl ValidatedInputPackages {
+    pub(crate) fn read_supported(
+        path: &Path,
+        evidence_bytes: &[u8],
+        evidence: &DependencyEvidence,
+    ) -> Result<Option<Self>, CompileInputError> {
+        match Self::read(path, evidence_bytes, evidence) {
+            Ok(proof) => Ok(Some(proof)),
+            Err(
+                failure @ (CompileInputError::UnsupportedBoot { .. }
+                | CompileInputError::UnsupportedWiredInput { .. }),
+            ) => {
+                tracing::debug!(
+                    ?failure,
+                    "stable compiler input proof unavailable for unsupported input category"
+                );
+                Ok(None)
+            }
+            Err(failure) => Err(failure),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn fixture(interfaces: BTreeMap<(String, String), PackageInterfaceWitness>) -> Self {
         Self {
@@ -160,6 +189,23 @@ impl ValidatedInputPackages {
             return Err(CompileInputError::DependencyMismatch);
         }
         let body = header[3].as_array().ok_or(CompileInputError::Malformed)?;
+        if body.first().and_then(Value::as_text) == Some("unsupported-wired") {
+            let row = proof_row(&header[3], 3)?;
+            let owner = proof_owner(&row[1])?;
+            let imported = proof_owner(&row[2])?;
+            if !evidence.modules.iter().any(|module| {
+                (module.unit.as_str(), module.module.as_str())
+                    == (owner.0.as_str(), owner.1.as_str())
+            }) {
+                return Err(CompileInputError::OwnerCoverage);
+            }
+            return Err(CompileInputError::UnsupportedWiredInput {
+                unit: owner.0,
+                module: owner.1,
+                imported_unit: imported.0,
+                imported_module: imported.1,
+            });
+        }
         if body.first().and_then(Value::as_text) == Some("unsupported-boot") {
             let owners = proof_row(&header[3], 2)?[1]
                 .as_array()
@@ -685,7 +731,15 @@ mod tests {
                             .sha256
                             .clone(),
                     ),
-                    package_rows(),
+                    Value::Array(
+                        package_rows()
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter(|row| row.as_array().unwrap()[1].as_text() == Some("Facade"))
+                            .cloned()
+                            .collect(),
+                    ),
                 ])
             })
             .collect();
@@ -815,6 +869,76 @@ mod tests {
         assert!(matches!(
             ValidatedInputPackages::read(&root.path().join("missing"), &raw, &evidence),
             Err(CompileInputError::Unavailable { .. })
+        ));
+        let mut source = value.clone();
+        source.as_array_mut().unwrap()[3].as_array_mut().unwrap()[1]
+            .as_array_mut()
+            .unwrap()[0]
+            .as_array_mut()
+            .unwrap()[1] = Value::Text("0".repeat(64));
+        assert!(matches!(
+            ValidatedInputPackages::decode(&packet_bytes(&source), &raw, &evidence),
+            Err(CompileInputError::SourceMismatch { .. })
+        ));
+        let mut duplicate = value.clone();
+        let closure = duplicate.as_array_mut().unwrap()[3].as_array_mut().unwrap()[2]
+            .as_array_mut()
+            .unwrap();
+        closure.push(closure[0].clone());
+        assert!(matches!(
+            ValidatedInputPackages::decode(&packet_bytes(&duplicate), &raw, &evidence),
+            Err(CompileInputError::PackageConflict { .. })
+        ));
+    }
+
+    #[test]
+    fn compile_input_optional_proof_withholds_only_explicit_unsupported_categories() {
+        use ciborium::value::Value;
+        let root = tempfile::tempdir().unwrap();
+        let (evidence, packages) = packet_fixture(root.path());
+        let raw = serde_json::to_vec(&evidence).unwrap();
+        let owner = Value::Array(vec![
+            Value::Text(evidence.modules[0].unit.clone()),
+            Value::Text(evidence.modules[0].module.clone()),
+        ]);
+        let mut value = package_packet(&evidence, &raw, &packages);
+        value.as_array_mut().unwrap()[3] = Value::Array(vec![
+            Value::Text("unsupported-wired".into()),
+            owner.clone(),
+            Value::Array(vec![
+                Value::Text("compiler-unit".into()),
+                Value::Text("CompilerPrimitive".into()),
+            ]),
+        ]);
+        let path = root.path().join("compiler-inputs.cbor");
+        std::fs::write(&path, packet_bytes(&value)).unwrap();
+        assert!(matches!(
+            ValidatedInputPackages::read(&path, &raw, &evidence),
+            Err(CompileInputError::UnsupportedWiredInput { .. })
+        ));
+        assert!(
+            ValidatedInputPackages::read_supported(&path, &raw, &evidence)
+                .unwrap()
+                .is_none()
+        );
+        value.as_array_mut().unwrap()[3] = Value::Array(vec![
+            Value::Text("unsupported-boot".into()),
+            Value::Array(vec![owner]),
+        ]);
+        std::fs::write(&path, packet_bytes(&value)).unwrap();
+        assert!(
+            ValidatedInputPackages::read_supported(&path, &raw, &evidence)
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            ValidatedInputPackages::read_supported(&path, b"another offer", &evidence),
+            Err(CompileInputError::DependencyMismatch)
+        ));
+        std::fs::write(&path, b"malformed").unwrap();
+        assert!(matches!(
+            ValidatedInputPackages::read_supported(&path, &raw, &evidence),
+            Err(CompileInputError::Malformed)
         ));
     }
     #[test]

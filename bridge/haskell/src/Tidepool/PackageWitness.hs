@@ -187,13 +187,15 @@ packageInputClosure env roots = do
       | owner == gHC_PRIM = pure (Right pending)
       | isHomeUnit (hsc_home_unit env) (moduleUnit owner) =
           pure (Left "installed package input depends on an authored home owner")
-      | otherwise = case Map.lookup (unitString (moduleUnit owner), moduleNameString (moduleName owner)) known of
+      | otherwise = case Map.lookup ownerKey known of
           Just _ -> pure (Right pending)
+          Nothing | Map.member ownerKey pending -> pure (Right pending)
           Nothing -> do
             root <- packageImportRoot env owner
             case root of
               Left reason -> pure (Left reason)
               Right selected -> addRoot (Right pending) selected
+      where ownerKey = (unitString (moduleUnit owner), moduleNameString (moduleName owner))
     usage UsagePackageModule{usg_mod = owner} = [owner]
     usage UsageHomeModule{usg_mod_name = name, usg_unit_id = unit} =
       [mkModule (stringToUnit (unitIdString unit)) name]

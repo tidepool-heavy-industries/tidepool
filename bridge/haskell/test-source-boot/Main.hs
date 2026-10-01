@@ -11,7 +11,7 @@ import GHC.Clock (getMonotonicTimeNSec)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -33,10 +33,12 @@ import System.FilePath ((</>))
 import System.IO (hClose, hPutStrLn, openTempFile, stderr)
 import System.Process (readProcessWithExitCode)
 import Tidepool.CertifiedProducts (encodeCertifiedProducts)
+import Tidepool.CompileInput (writeCompileInputProof)
 import Tidepool.ExecutionSchema
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencyModule(..), DependencyImport(..)
-  , DependencyResolution(..), dependencySourceSha256, sourceEvidence, selectedHomeRequirements )
+  , DependencyResolution(..), ProductAvailability(..), dependencySourceSha256, sourceEvidence
+  , selectedHomeRequirements, renderDependencyEvidence )
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), freshExactState, installExactLexicalGraph)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts)
@@ -49,6 +51,7 @@ import Tidepool.PreparedStg (PreparedModule(..))
 
 main :: IO ()
 main = getArgs >>= \case
+  ["--package-inputs"] -> packageInputs
   ["--home-instance-edges"] -> selectedHomeInstanceEdges
   ["--fresh", work] -> reuseFresh work >>= requireReused "fresh worker"
   ["--mixed-fresh", work, count] -> reuseFresh work >>= requireMixed (read count)
@@ -91,6 +94,82 @@ main = getArgs >>= \case
     mixedGraph False 1
     mixedGraph True 10
   _ -> fail "unexpected SOURCE boot test arguments"
+
+-- Input identity follows checked imports even when an unused home body moves
+-- from validation-only to an executable resident memo product.
+packageInputs :: IO ()
+packageInputs = withScratch $ \work -> do
+  forM_ ["OptionalRoot", "OptionalSupport", "OptionalWarmer", "OptionalWiredRoot", "OptionalWiredSupport"] $ \name ->
+    copyFile ("test-source-boot/fixtures" </> name ++ ".hs") (work </> name ++ ".hs")
+  withResidentPipelineSelected [work] $ \compile -> do
+    let root selection = compile selection Set.empty GeneralCompile Nothing
+          (work </> "OptionalRoot.hs") [] Nothing
+    cold <- root (PreparedProducts Nothing)
+    unless ("OptionalSupport" `notElem` preparedNames cold) $
+      fail "cold input fixture did not leave its unused support validation-only"
+    _ <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
+      (work </> "OptionalWarmer.hs") [] Nothing
+    warm <- root (PreparedProducts Nothing)
+    unless ("OptionalSupport" `elem` preparedNames warm) $
+      fail "warm input fixture did not retain the executable support product"
+    coldBody <- proof work "cold" cold
+    warmBody <- proof work "warm" warm
+    case coldBody of
+      TList [TString "checked", TList owners, TList closure] -> do
+        let direct = Set.fromList [(unit, name) | TList [_, _, TList entries] <- owners,
+              TList [TString unit, TString name, _, _] <- entries]
+            complete = Set.fromList [(unit, name) | TList [TString unit, TString name, _, _] <- closure]
+        unless (Set.size complete > Set.size direct) $
+          fail "input fixture did not exercise transitive installed interface dependencies"
+      _ -> fail "ordinary checked input fixture lacks a complete package proof"
+    unless (normalized cold == normalized warm && coldBody == warmBody) $
+      fail "optional native availability changed checked compilation inputs"
+    writeManifestFor ["OptionalSupport"] work warm
+    reused <- root (PreparedProducts (Just (manifest work)))
+    unless (map candidateModule (pprAcceptedCandidates reused) == ["OptionalSupport"]) $
+      fail "input fixture did not exercise authenticated candidate hydration"
+    reusedBody <- proof work "candidate" reused
+    unless (normalized cold == normalized reused && coldBody == reusedBody) $
+      fail "accepted candidate lost its checked direct package inputs"
+    let incomplete = reused { pprPackageRoots = Map.delete (mkModuleName "OptionalSupport")
+          (pprPackageRoots reused) }
+    refused <- try (proof work "missing-owner" incomplete) :: IO (Either SomeException Term)
+    case refused of
+      Left _ -> pure ()
+      Right _ -> fail "compiler input issuer accepted missing candidate package roots"
+    let wiredRoot selection purpose = compile selection Set.empty purpose Nothing
+          (work </> "OptionalWiredRoot.hs") [] Nothing
+    wired <- wiredRoot (PreparedProducts Nothing) CertifyHomeProductsCompile
+    wiredBody <- proof work "wired-fresh" wired
+    case wiredBody of
+      TList [TString "unsupported-wired", TList [TString "main", TString "OptionalWiredSupport"], _] -> pure ()
+      _ -> fail "direct compiler-provided input lacked its typed unsupported category"
+    writeManifestFor ["OptionalWiredSupport"] work wired
+    wiredReused <- wiredRoot (PreparedProducts (Just (manifest work))) GeneralCompile
+    unless (map candidateModule (pprAcceptedCandidates wiredReused) == ["OptionalWiredSupport"]) $
+      fail "wired input fixture did not exercise authenticated candidate hydration"
+    wiredReusedBody <- proof work "wired-candidate" wiredReused
+    unless (wiredBody == wiredReusedBody) $
+      fail "candidate hydration changed compiler-provided input classification"
+  putStrLn "package inputs: cold/warm native divergence, identical checked closure, candidate roots, omission refusal and wired fresh/candidate refusal passed"
+  where
+    normalized result = renderDependencyEvidence ((pprDependencies result)
+      { dependencyModules = sortOn (\node -> (dependencyModuleUnit node, dependencyModuleName node))
+          [node { dependencyModuleProduct = ProductInterfaceOnly }
+          | node <- dependencyModules (pprDependencies result)] })
+    proof work label result = do
+      let directory = work </> ("input-proof-" ++ label)
+          evidence = pprDependencies result
+      createDirectory directory
+      writeFile (directory </> "dependencies.json") (renderDependencyEvidence evidence)
+      writeCompileInputProof directory (prHscEnv (pprPipelineResult result)) evidence
+        (pprPackageRoots result)
+      bytes <- BS.readFile (directory </> "compiler-inputs.cbor")
+      term <- either (fail . show) (pure . snd)
+        (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
+      case term of
+        TList [TString "TPCINPUT", TInt 1, _, body] -> pure body
+        _ -> fail "compiler input producer returned another proof category"
 
 selectedHomeInstanceEdges :: IO ()
 selectedHomeInstanceEdges = withScratch $ \work -> do

@@ -132,6 +132,73 @@ pub enum CompileFailureCause {
     ArtifactInventory {
         failure: crate::artifact_inventory::ArtifactInventoryFailure,
     },
+    CompileInput {
+        failure: crate::CompileInputError,
+    },
+    ModulePackage {
+        failure: ModulePackageFailure,
+    },
+}
+
+/// Structured projection of the package owner's refusal. I/O details remain
+/// in the human diagnostic; routing never depends on their rendered text.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ModulePackageFailure {
+    Io {
+        path: std::path::PathBuf,
+    },
+    Format,
+    Bounds,
+    CompilerMismatch,
+    UnknownCompiler,
+    CompilerConfiguration,
+    RootMoved,
+    MutableRoot,
+    SourceAlias {
+        path: std::path::PathBuf,
+    },
+    SourceChanged,
+    ArtifactChanged {
+        path: std::path::PathBuf,
+    },
+    OpenCohort,
+    IncompleteProduct {
+        unit: String,
+        module: String,
+        availability: crate::cache::ProductAvailability,
+    },
+}
+
+impl From<&crate::toolchain::ModulePackageError> for ModulePackageFailure {
+    fn from(error: &crate::toolchain::ModulePackageError) -> Self {
+        use crate::toolchain::ModulePackageError;
+        match error {
+            ModulePackageError::Io { path, .. } => Self::Io { path: path.clone() },
+            ModulePackageError::Format(_) => Self::Format,
+            ModulePackageError::Bounds => Self::Bounds,
+            ModulePackageError::CompilerMismatch => Self::CompilerMismatch,
+            ModulePackageError::UnknownCompiler => Self::UnknownCompiler,
+            ModulePackageError::CompilerConfiguration(_) => Self::CompilerConfiguration,
+            ModulePackageError::RootMoved => Self::RootMoved,
+            ModulePackageError::MutableRoot => Self::MutableRoot,
+            ModulePackageError::SourceAlias(path) => Self::SourceAlias { path: path.clone() },
+            ModulePackageError::SourceChanged => Self::SourceChanged,
+            ModulePackageError::ArtifactChanged(path) => {
+                Self::ArtifactChanged { path: path.clone() }
+            }
+            ModulePackageError::OpenCohort => Self::OpenCohort,
+            ModulePackageError::IncompleteProduct {
+                unit,
+                module,
+                availability,
+            } => Self::IncompleteProduct {
+                unit: unit.clone(),
+                module: module.clone(),
+                availability: *availability,
+            },
+        }
+    }
 }
 
 impl std::fmt::Display for FailureEnvelope {
@@ -260,6 +327,12 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         CompileError::ArtifactInventory(error) => CompileFailureCause::ArtifactInventory {
             failure: error.failure.clone(),
         },
+        CompileError::CompileInput(error) => CompileFailureCause::CompileInput {
+            failure: error.clone(),
+        },
+        CompileError::ModulePackage(error) => CompileFailureCause::ModulePackage {
+            failure: error.into(),
+        },
         CompileError::InputRejected(_) => CompileFailureCause::InputRejected,
         CompileError::Diagnostics(_) => CompileFailureCause::SourceDiagnostics,
         CompileError::WorkerFailure(_) => CompileFailureCause::WorkerFailure,
@@ -297,6 +370,35 @@ fn version_skew_message(re: &ReadError) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn input_and_package_proof_failures_keep_structured_owners() {
+        let input = classify_compile(&CompileError::CompileInput(
+            crate::CompileInputError::MissingPackageImport {
+                unit: "main".into(),
+                module: "Checked".into(),
+                imported: "Facade".into(),
+            },
+        ));
+        let input = serde_json::to_value(input).unwrap();
+        assert_eq!(input["cause"]["kind"], "compile_input");
+        assert_eq!(input["cause"]["failure"]["kind"], "missing_package_import");
+        assert_eq!(input["cause"]["failure"]["module"], "Checked");
+        let package = classify_compile(&CompileError::ModulePackage(
+            crate::toolchain::ModulePackageError::IncompleteProduct {
+                unit: "main".into(),
+                module: "Support".into(),
+                availability: crate::cache::ProductAvailability::InterfaceOnly,
+            },
+        ));
+        let package = serde_json::to_value(package).unwrap();
+        assert_eq!(package["cause"]["kind"], "module_package");
+        assert_eq!(package["cause"]["failure"]["module"], "Support");
+        assert_eq!(
+            package["cause"]["failure"]["availability"],
+            "interface_only"
+        );
+    }
 
     #[test]
     fn artifact_inventory_diagnostic_retains_typed_owner_edge() {

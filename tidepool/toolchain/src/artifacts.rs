@@ -1802,26 +1802,31 @@ fn seal_turn_outputs_inner(
     let certified_groups: Arc<[_]> = certified.groups.into();
     let compile_input_identity =
         if let Some((table, sites)) = identity_metadata.filter(|_| offer.exact.is_none()) {
-            let input_packages = crate::compile_input::ValidatedInputPackages::read(
+            let input_packages = crate::compile_input::ValidatedInputPackages::read_supported(
                 &output_dir.join("compiler-inputs.cbor"),
                 &evidence_bytes,
                 valid,
             )?;
-            crate::compile_input::seal(
-                &offer.producer,
-                &offer.include,
-                valid,
-                &input_packages,
-                source,
-                target,
-                prepared,
-                &certified_groups,
-                &pending_imports,
-                &package_interfaces,
-                table.clone(),
-                sites.to_vec(),
-            )?
-            .map(Arc::new)
+            input_packages
+                .map(|input_packages| {
+                    crate::compile_input::seal(
+                        &offer.producer,
+                        &offer.include,
+                        valid,
+                        &input_packages,
+                        source,
+                        target,
+                        prepared,
+                        &certified_groups,
+                        &pending_imports,
+                        &package_interfaces,
+                        table.clone(),
+                        sites.to_vec(),
+                    )
+                })
+                .transpose()?
+                .flatten()
+                .map(Arc::new)
         } else {
             None
         };
