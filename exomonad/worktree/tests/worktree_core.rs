@@ -121,6 +121,42 @@ fn caller_labels_with_invalid_ref_syntax_create_valid_branches() {
 }
 
 #[test]
+fn overlong_caller_labels_create_bounded_git_branches() {
+    let repo = TestRepo::init().expect("init");
+    repo.writer()
+        .commit_file("a.txt", "one", "first")
+        .expect("commit");
+    let base = tempfile::TempDir::new().expect("tempdir");
+    let manager = manager_over(&repo, base.path());
+    let git = GitCli::new();
+    let before = capture_state(&git, repo.path());
+    let long_component = format!("{}/tail", "x".repeat(300));
+    let deep_path = format!("{}tail", "x/".repeat(110));
+
+    for label in [long_component, deep_path] {
+        let normalized = exomonad_worktree::sanitize_branch_label(&label);
+        assert!(normalized.len() <= 200);
+        let handle = manager
+            .create(&WorktreeSpec::from_current_repository(&label))
+            .unwrap_or_else(|error| panic!("create with overlong label: {error}"));
+        assert_eq!(
+            handle.branch().as_str(),
+            format!("exomonad/worktree/{normalized}-{}", handle.id().as_str())
+        );
+        git.try_run(
+            repo.path(),
+            &[
+                "check-ref-format",
+                &format!("refs/heads/{}", handle.branch().as_str()),
+            ],
+        )
+        .expect("generated branch is a valid Git ref");
+        assert_eq!(handle.receipt().status, WorktreeRecordStatus::Finalized);
+        assert_untouched(&before, &capture_state(&git, repo.path()));
+    }
+}
+
+#[test]
 fn clean_creation_from_current_repository_leaves_source_untouched() {
     let repo = TestRepo::init().expect("init");
     let w = repo.writer();

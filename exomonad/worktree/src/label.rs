@@ -17,6 +17,8 @@ pub fn sanitize_agent_label(raw: &str) -> String {
 /// Components lose leading dots, interior dot runs become `-`, and
 /// intermediate `.lock` suffixes become `-lock` so the generated Git ref is
 /// valid. A final `.lock` remains valid before the generated `-<id>` suffix.
+/// The normalized label is capped at 200 ASCII bytes, leaving room for the
+/// owned namespace and a minted worktree id in a filesystem-backed ref.
 pub fn sanitize_branch_label(raw: &str) -> String {
     let label = sanitize(raw, true, "worktree");
     let mut components = label.split('/').peekable();
@@ -53,7 +55,19 @@ pub fn sanitize_branch_label(raw: &str) -> String {
         }
         out.push_str(&normalized);
     }
-    out
+    const MAX_LABEL_BYTES: usize = 200;
+    if out.len() > MAX_LABEL_BYTES {
+        // The sanitizer emits ASCII only, so this byte boundary is a char boundary.
+        out.truncate(MAX_LABEL_BYTES);
+        while out.ends_with('-') || out.ends_with('/') || out.ends_with('.') {
+            out.pop();
+        }
+    }
+    if out.is_empty() {
+        "worktree".to_string()
+    } else {
+        out
+    }
 }
 
 /// Shared implementation for the two slash policies.
@@ -178,6 +192,23 @@ mod tests {
         ] {
             assert_eq!(sanitize_agent_label(input), agent_expected, "{input:?}");
             assert_eq!(sanitize_branch_label(input), branch_expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn branch_labels_are_bounded_without_trailing_ref_separators() {
+        for input in [
+            "x".repeat(300),
+            "x/".repeat(120),
+            format!("{}.", "x".repeat(300)),
+        ] {
+            let label = sanitize_branch_label(&input);
+            assert!(label.len() <= 200, "label length {}", label.len());
+            assert!(
+                !label.ends_with('-') && !label.ends_with('/') && !label.ends_with('.'),
+                "{label:?}"
+            );
+            assert!(label.split('/').all(|component| !component.is_empty()));
         }
     }
 
