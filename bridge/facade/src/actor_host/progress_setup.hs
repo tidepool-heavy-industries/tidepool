@@ -1,5 +1,5 @@
 data ProgressNote = ProgressNote Int (Int -> Int)
-worker <- startAgent (readonlyAgent "progress-worker")
+worker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent "progress-worker"))
 let progressLabel = [label|progress-request|]
 (answer, updates) <- requestWithProgress @ProgressNote @Int worker (assignment progressLabel (10 :: Int))
 let progressWatchLabel = "progress-update" :: WatchLabel

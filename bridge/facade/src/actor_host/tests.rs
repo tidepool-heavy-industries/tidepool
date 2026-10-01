@@ -417,7 +417,7 @@ async fn selected_context_child_gets_its_own_machine_and_is_torn_down_on_retirem
 
     let setup = dispatch_haskell_script(
         root.as_ref(),
-        "child <- startAgent (readonlyAgent \"cross-session-child\")",
+        "child <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"cross-session-child\"))",
     )
     .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
@@ -4486,7 +4486,7 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
     );
     let idle_setup = dispatch_haskell_script(
         root.as_ref(),
-        "idle <- startAgent (readonlyAgent \"idle-notification-recipient\")",
+        "idle <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"idle-notification-recipient\"))",
     )
     .await;
     assert_eq!(idle_setup["status"], "committed", "{idle_setup:?}");
@@ -4729,7 +4729,7 @@ async fn settlement_notice_carries_a_readable_reply_preview() {
     let root = campaign.root_installation.policy.clone();
     let setup = dispatch_haskell_script(
         root.as_ref(),
-        "worker <- startAgent (readonlyAgent \"reply-preview-recipient\")\n\
+        "worker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"reply-preview-recipient\"))\n\
          let requestName = [label|reply-preview|]\n\
          answer <- request @String worker (assignment requestName (\"a readable reply\" :: String))",
     )
@@ -4800,7 +4800,7 @@ async fn settlement_notice_carries_a_readable_reply_preview_for_text() {
     let root = campaign.root_installation.policy.clone();
     let setup = dispatch_haskell_script(
         root.as_ref(),
-        "worker <- startAgent (readonlyAgent \"reply-preview-text-recipient\")\n\
+        "worker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"reply-preview-text-recipient\"))\n\
          let requestName = [label|reply-preview-text|]\n\
          answer <- request @Text worker (assignment requestName (\"a readable reply\" :: Text))",
     )
@@ -4868,7 +4868,7 @@ async fn settlement_notice_carries_a_structured_reply_whole_within_budget() {
     let root = campaign.root_installation.policy.clone();
     let setup = dispatch_haskell_script(
         root.as_ref(),
-        "worker <- startAgent (readonlyAgent \"reply-whole-recipient\")\n\
+        "worker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"reply-whole-recipient\"))\n\
          let requestName = [label|reply-whole|]\n\
          answer <- request @[Text] worker (assignment requestName [\"reply line \" <> tshow n | n <- [10 .. 99 :: Int]])",
     )

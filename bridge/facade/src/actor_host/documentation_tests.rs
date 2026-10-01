@@ -590,7 +590,7 @@ async fn notebook_cell_reply_marks_its_tail_not_run() {
     let root = campaign.root_installation.policy.clone();
     committed(
         root.as_ref(),
-        "worker <- startAgent (readonlyAgent \"notebook-reply-worker\")\n",
+        "worker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"notebook-reply-worker\"))\n",
     )
     .await;
     committed(
@@ -1069,7 +1069,7 @@ async fn watch_documentation_request_options_reports_progress_then_settles() {
     let root = campaign.root_installation.policy.clone();
     committed(
         root.as_ref(),
-        "lead <- startAgent (readonlyAgent \"documented-progress-lead\")",
+        "lead <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"documented-progress-lead\"))",
     )
     .await;
     let snippets: Vec<_> = examples(include_str!("../../../../exomonad/prompts/docs/watch.md"))
@@ -1132,7 +1132,7 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
     let mut child = None;
-    committed(root.as_ref(), "data Report = Report Int deriving Show\nworker <- startAgent (readonlyAgent \"activation-preview-worker\")").await;
+    committed(root.as_ref(), "data Report = Report Int deriving Show\nworker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"activation-preview-worker\"))").await;
     committed(
         root.as_ref(),
         include_str!("../actor_host_fixtures/generic_actor/activation_preview_setup.hs"),
@@ -1326,7 +1326,7 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
         .inspect_graph(campaign.actor.identity())
         .unwrap()
         .len();
-    let spawned = committed(root.as_ref(), "startAgent (readonlyAgent \"observe-once\")").await;
+    let spawned = committed(root.as_ref(), "startAgent (withAgentLifetime ActorOwned (readonlyAgent \"observe-once\"))").await;
     let spawned_name = spawned["items"][0]["installedBindings"][0]
         .as_str()
         .unwrap();

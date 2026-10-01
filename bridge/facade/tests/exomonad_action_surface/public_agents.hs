@@ -46,10 +46,13 @@ rootTools :: Tools.Tools (AsServerT (Eff ActorEffects))
 rootTools = Tools.tools
 
 startCoding :: WorktreeHandle -> Eff ActorEffects AgentRef
-startCoding = startAgent . codingAgent
+startCoding = startAgent . withAgentLifetime ActorOwned . codingAgent
 
 startReview :: Text -> Eff ActorEffects AgentRef
-startReview = startAgent . readonlyAgent
+startReview = startAgent . withAgentLifetime ActorOwned . readonlyAgent
+
+startPersisted :: AgentLaunchSpec -> Eff ActorEffects AgentRef
+startPersisted = startAgent . withAgentLifetime ActorOwned
 
 submit
   :: AgentRef
