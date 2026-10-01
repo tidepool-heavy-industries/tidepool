@@ -5,8 +5,8 @@ use super::*;
 use crate::session::{
     resident_cell_check_template, resident_workbench_templates, CertifiedDeclarationPublication,
     ExecutionPublication, ModuleEnv, OutputSink, PersistentSession, PublicManifestCommit,
-    PublicationDecision, RecoveryPublicOwner, ResidentSession, SessionLib, SessionRunContext,
-    SourceImports,
+    PublicationDecision, RecoveryPublicOwner, RecoveryRunAuthority, ResidentSession, SessionLib,
+    SessionRunContext, SourceImports,
 };
 use std::time::{Duration, Instant};
 use tidepool_codegen::{prepared_program::ImageRegistry, scope::ScopeId};
@@ -37,6 +37,54 @@ enum ScalePublication {
         owner: RecoveryPublicOwner,
         manifest: PathBuf,
     },
+}
+
+/// Hold the reference workspace's real exclusive file lock for the session.
+struct ScaleRunOwner {
+    root: PathBuf,
+    _lock: std::fs::File,
+}
+impl RecoveryRunAuthority for ScaleRunOwner {
+    fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
+        Ok(root.canonicalize()? == self.root)
+    }
+}
+fn scale_run_owner(root: &Path) -> Arc<ScaleRunOwner> {
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join("performance-run-owner.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    Arc::new(ScaleRunOwner {
+        root: root.canonicalize().unwrap(),
+        _lock: lock,
+    })
+}
+
+fn scale_workspace(durable: bool) -> (PathBuf, Option<tempfile::TempDir>) {
+    let root = if durable {
+        let parent = PathBuf::from(
+            std::env::var_os("TIDEPOOL_PERFORMANCE_WORKSPACE_ROOT")
+                .expect("durable evidence requires an explicit retained workspace parent"),
+        );
+        assert!(parent.is_absolute());
+        tempfile::Builder::new()
+            .prefix("durable-workspace-")
+            .tempdir_in(parent)
+            .unwrap()
+    } else {
+        tempfile::tempdir().unwrap()
+    };
+    let path = root.path().to_path_buf();
+    if durable {
+        eprintln!("durable-workspace retained={}", root.keep().display());
+        (path, None)
+    } else {
+        (path, Some(root))
+    }
 }
 
 fn counters(resident: &ScaleSession, images: &ImageRegistry) -> serde_json::Value {
@@ -578,14 +626,7 @@ fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool
             "the historical comparison uses isolated compiler submissions"
         );
     }
-    let root = tempfile::tempdir().unwrap();
-    let root_path = root.path().to_path_buf();
-    let root_guard = if durable {
-        eprintln!("durable-workspace retained={}", root.keep().display());
-        None
-    } else {
-        Some(root)
-    };
+    let (root_path, root_guard) = scale_workspace(durable);
     let effects = TestEffectSurface::minimal(&[]).unwrap();
     let images = Arc::new(ImageRegistry::new());
     let mut lib = SessionLib::open(SessionId(999), &root_path, ModuleEnv::standalone_default())
@@ -593,7 +634,8 @@ fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool
         .with_validation_include(effects.include_paths().to_vec());
     let publication = if durable {
         let manifest = root_path.join("declarations.json");
-        lib.attach_recovery_graph_v2(&manifest).unwrap();
+        lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path))
+            .unwrap();
         ScalePublication::Durable {
             owner: RecoveryPublicOwner::new(
                 &tidepool_repr::ActorPath::parse("root/performance").unwrap(),
@@ -802,15 +844,7 @@ fn resident_display_cells(count: usize, durable: bool) {
     );
     let identity = tidepool_extract_cmd::preflight_compiler_daemon(&socket)
         .expect("resident measurement cannot use direct fallback");
-    let root = tempfile::tempdir().unwrap();
-    let root_path = root.path().to_path_buf();
-    // Failure evidence must survive a panic in the real compiler/runtime path.
-    let root_guard = if durable {
-        eprintln!("durable-workspace retained={}", root.keep().display());
-        None
-    } else {
-        Some(root)
-    };
+    let (root_path, root_guard) = scale_workspace(durable);
     let effects = TestEffectSurface::minimal(&[]).unwrap();
     let images = Arc::new(ImageRegistry::new());
     let mut lib = SessionLib::open(SessionId(1000), &root_path, ModuleEnv::standalone_default())
@@ -818,7 +852,8 @@ fn resident_display_cells(count: usize, durable: bool) {
         .with_validation_include(effects.include_paths().to_vec());
     let publication = if durable {
         let manifest = root_path.join("declarations.json");
-        lib.attach_recovery_graph_v2(&manifest).unwrap();
+        lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path))
+            .unwrap();
         ScalePublication::Durable {
             owner: RecoveryPublicOwner::new(
                 &tidepool_repr::ActorPath::parse("root/performance").unwrap(),

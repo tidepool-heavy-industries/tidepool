@@ -16,6 +16,8 @@ mkdir "$evidence"
 export TIDEPOOL_DAEMON_ARGS='--workers 2 --rss-ceiling-mb 10240'
 export TIDEPOOL_TIMING=1 TIDEPOOL_KEEP_TEST_LOGS=1
 export TIDEPOOL_TEST_ARTIFACT_ROOT="$evidence/battery"
+export TIDEPOOL_PERFORMANCE_WORKSPACE_ROOT="$evidence/workspaces"
+mkdir "$TIDEPOOL_PERFORMANCE_WORKSPACE_ROOT"
 unset TIDEPOOL_EXTRACT_NO_DAEMON TIDEPOOL_EXTRACT_DAEMON_SOCKET
 filter='test(=session::turn::scaling_tests::complete_cell_consumes_item_and_display_without_compiler_requests) | test(=session::turn::scaling_tests::resident_durable_display_cells_2_baseline)'
 command=(bash scripts/battery.sh -p tidepool-runtime --lib --run-ignored all --test-threads 1 --success-output immediate --failure-output immediate -E "$filter")

@@ -112,7 +112,7 @@ join compilation remains visible in its own measured phase.
 The durable attribution baseline is the exact ignored runtime test
 `session::turn::scaling_tests::resident_durable_display_cells_2_baseline`.
 Use the same admitted battery command and frozen compiler pair above, changing
-only the exact test filter. It attaches the existing recovery graph owner,
+only the exact test filter. It attaches the existing recovery graph with a held exclusive reference-workspace run lock,
 initializes the durable public scope, publishes one real foundation declaration,
 warms the display path, and publishes two displayed cells. It retains the
 workspace and each actual `declarations-<cell>.json` snapshot. A successful
@@ -148,3 +148,14 @@ and a deliberately wrong producer before extraction count changes. It restores
 the exact deployment with a scoped guard before the valid compile. These
 refusal probes run only in that vertical correctness test; warm and durable
 measurement cells do not change authority configuration.
+
+Durable workspaces are created under the explicit retained
+`TIDEPOOL_PERFORMANCE_WORKSPACE_ROOT`, supplied by the bounded runner outside
+the dev shell's temporary directory. Keeping a child of the dev shell's scratch
+directory alone does not survive that shell's cleanup. The battery owner copies
+the compiler JSONL sidecar before daemon teardown as well as the readable log.
+The initial baseline on `e9be683815` selected exactly two tests and failed both:
+the valid multi-item program reached a worker error after 64 seconds
+(`ordinary source candidates cannot accompany exact declaration owners`), and
+the path-only durable graph lacked configured run authority. Its retained traces
+are failure evidence, with no completed durable or warm measurements.

@@ -325,6 +325,10 @@ finalize_battery_artifacts() {
   if [[ -n "$daemon_log" && -f "$compiler_log" ]]; then
     cp "$compiler_log" "$BATTERY_ARTIFACT_DIR/compiler.log"
   fi
+  local compiler_trace="${compiler_log%.log}.jsonl"
+  if [[ -n "$daemon_log" && -f "$compiler_trace" ]]; then
+    cp "$compiler_trace" "$BATTERY_ARTIFACT_DIR/compiler.jsonl"
+  fi
   scripts/toolchain-doctor.sh >"$BATTERY_ARTIFACT_DIR/toolchain-doctor.log" 2>&1 || true
   if [[ "$status" -eq 0 && "$BATTERY_DAEMON_START_FAILED" = 0 ]]; then
     # Only marked successful runs are eligible for bounded retention. Never
