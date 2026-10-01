@@ -317,28 +317,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
     eprintln!("checkpoint workspace fixture: both actual child policies installed");
     assert_ne!(children[0].actor.identity(), children[1].actor.identity());
     for child in &children {
-        let reply = child
-            .policy
-            .dispatch_boxed(ToolInvocation {
-                context: None,
-                name: crate::HASKELL_TOOL.into(),
-                arguments: ToolArguments::Raw("pure (capturedValue + 1)".into()),
-            })
-            .await
-            .expect("real child evaluates inherited lexical binding");
-        assert_committed(&reply);
-        assert_eq!(
-            reply["items"]
-                .as_array()
-                .expect("item receipts")
-                .last()
-                .expect("expression receipt")["output"]
-                .as_str()
-                .expect("rendered value")
-                .trim(),
-            "42",
-            "{reply:?}"
-        );
+        assert_captured_reader(child).await;
     }
     for child in children {
         let result = child
