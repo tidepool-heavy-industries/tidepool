@@ -1273,14 +1273,18 @@ where
             Some(cleanup),
         ) => Err(failed_checkpoint_cleanup_response(response, cleanup)),
     };
-    let result = result.map_err(|failure| {
-        KernelInvocationFailure::Workbench(crate::KernelWorkbenchFailure {
+    let result = result.map_err(|failure| match failure.source {
+        ResidentActorWorkbenchError::ToolDispatch(error) => KernelInvocationFailure::Rejected {
+            actor: context.actor,
+            detail: error.to_string(),
+        },
+        source => KernelInvocationFailure::Workbench(crate::KernelWorkbenchFailure {
             actor: context.actor,
             receipts: failure.receipts,
             failed_index: failure.failed_index,
             total: failure.total,
-            detail: failure.source.to_string(),
-        })
+            detail: source.to_string(),
+        }),
     });
     result
 }
@@ -9792,7 +9796,13 @@ where
                         })?;
                         self.fork_publication = ForkPublication::Resident;
                         self.set_standing(context.actor, ResidentStanding::Tools(next));
-                        return Ok(KernelStep::Continue(result));
+                        let output = result.into_output().map_err(|error| {
+                            KernelInvocationFailure::Rejected {
+                                actor: context.actor,
+                                detail: error.to_string(),
+                            }
+                        })?;
+                        return Ok(KernelStep::Continue(output));
                     }
                     ResidentActorBoundary::Completed => {
                         let result = result.ok_or_else(|| KernelInvocationFailure::Failed {
@@ -9801,8 +9811,14 @@ where
                         })?;
                         self.fork_publication = ForkPublication::Resident;
                         self.set_standing(context.actor, ResidentStanding::Terminal);
+                        let output = result.into_output().map_err(|error| {
+                            KernelInvocationFailure::Rejected {
+                                actor: context.actor,
+                                detail: error.to_string(),
+                            }
+                        })?;
                         return Ok(KernelStep::Stop {
-                            output: result,
+                            output,
                             terminal: completed_terminal(),
                         });
                     }

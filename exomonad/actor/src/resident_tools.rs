@@ -352,7 +352,7 @@ pub(crate) struct ResidentToolAwait {
 /// A completed invocation waiting for Rust to acknowledge its result.
 pub(crate) struct ResidentToolReply {
     pub(crate) continuation: ResidentHole,
-    pub(crate) result: serde_json::Value,
+    pub(crate) result: crate::resident_workbench::ToolDispatchReply,
 }
 
 #[derive(Debug, thiserror::Error)]

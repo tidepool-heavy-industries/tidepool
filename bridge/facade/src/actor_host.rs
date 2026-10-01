@@ -3662,7 +3662,7 @@ fn scaffolding_default() -> exomonad_actor::EffectiveRole {
 /// missing effect, and the spec entry, not a silent grant.
 ///
 /// A spec found by convention (`AgentSpec.hs`) or named by a configured entry
-/// point (`[haskell] spec`/`tools`) are both covered: whichever
+/// point (`[haskell] spec`) are both covered: whichever
 /// `exomonad_actor::agent_spec::resolve` would install for an actor with no
 /// checkout of its own is exactly what a project root installs, and what
 /// every configured child role's spec is compiled from. A workspace with no
@@ -3672,11 +3672,7 @@ pub(crate) fn spec_effect_preflight(
     workspace: &crate::exomonad::workspace::FrozenWorkspace,
 ) -> Vec<String> {
     let roots = workspace.captured_source_roots().to_vec();
-    let resolved = exomonad_actor::agent_spec::resolve(
-        &roots,
-        workspace.spec.as_deref(),
-        workspace.tools.as_deref(),
-    );
+    let resolved = exomonad_actor::agent_spec::resolve(&roots, workspace.spec.as_deref());
     let Some(entry) = resolved.entry.as_deref() else {
         return Vec::new();
     };
@@ -3710,7 +3706,7 @@ pub(crate) fn spec_effect_preflight(
 
 /// Find the `.hs` file a module entry point resolves to among `roots`, the
 /// same directories GHC would search — used when the spec's entry names a
-/// module (`[haskell] spec`/`tools`) rather than a file discovery already
+/// module (`[haskell] spec`) rather than a file discovery already
 /// found (`AgentSpec.hs`, carried on `ResolvedSpec::file`).
 fn find_module_source(roots: &[PathBuf], entry: &str) -> Option<String> {
     let (module, _) = entry.rsplit_once('.')?;
@@ -3874,11 +3870,12 @@ fn driver_sources(
         // What an actor installs at startup is compiled here too, so a broken
         // spec fails `exomonad check` and `exomonad init` instead of the first actor
         // to start. None of these is in `[haskell] modules`: the spec module is
-        // found by convention, and the two keys name a value, not an import.
+        // found by convention, and the configured key names a value, not an import.
         // They are imported qualified because they only need to typecheck.
-        let named = [inputs.spec.as_deref(), inputs.tools.as_deref()]
+        let named = inputs
+            .spec
+            .as_deref()
             .into_iter()
-            .flatten()
             .filter_map(|entry| entry.rsplit_once('.').map(|(module, _)| module.to_owned()));
         let conventional = inputs
             .provides_module("AgentSpec")
@@ -4186,13 +4183,6 @@ fn compile_root(
             .with_imports("Tidepool.Command (bash, withMemory, Memory(..))")
             .with_imports("qualified Tidepool.Actor as Actor")
             .with_default_quasiquoters()
-            .with_tools(
-                config
-                    .workspace_inputs
-                    .as_ref()
-                    .and_then(|inputs| inputs.tools.as_deref())
-                    .unwrap_or("Tidepool.Tools.tools"),
-            )
             // Rule two of spec discovery. Rule one is a file in an actor's own
             // checkout and belongs to no run-wide value; this key is how a
             // workspace names a spec for actors that have no checkout.

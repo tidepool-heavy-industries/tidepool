@@ -916,6 +916,41 @@ async fn resident_cleanup_case(fail_hook: bool) {
         .expect("change sibling state");
     assert_eq!(changed, serde_json::json!({"current": 73}));
 
+    // Malformed state transitions and completion calls must refuse without
+    // changing state or terminating the actor. The next valid call still runs.
+    for (name, arguments) in [
+        ("double_value", serde_json::json!({"value": "bad"})),
+        ("set_value", serde_json::json!({"next": "bad"})),
+        ("finish_value", serde_json::json!(false)),
+    ] {
+        let error = policy
+            .dispatch_boxed(ToolInvocation {
+                context: None,
+                name: name.into(),
+                arguments: ToolArguments::Structured(arguments),
+            })
+            .await
+            .expect_err("malformed tool input is a refusal");
+        assert!(
+            matches!(
+                error,
+                exomonad_actor::ResidentToolError::Invocation(
+                    exomonad_actor::KernelInvocationFailure::Rejected { .. }
+                )
+            ),
+            "{error}"
+        );
+    }
+    let unchanged = policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "current_value".into(),
+            arguments: ToolArguments::Structured(serde_json::json!({})),
+        })
+        .await
+        .expect("state remains available after refused transitions");
+    assert_eq!(unchanged, serde_json::json!({"current": 0}));
+
     let doubled = policy
         .dispatch_boxed(ToolInvocation {
             context: None,

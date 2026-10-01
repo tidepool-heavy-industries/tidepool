@@ -278,7 +278,6 @@ pub struct ActorWorkbenchSource {
     preamble: Arc<str>,
     base_include: Arc<[PathBuf]>,
     workbench_imports: SourceImports,
-    tools: Option<Arc<str>>,
     /// The workspace's `[haskell] spec` key, when it names one. Rule two of
     /// spec discovery; rule one is `AgentSpec.hs` in the run graph.
     spec: Option<Arc<str>>,
@@ -319,7 +318,6 @@ impl ActorWorkbenchSource {
                 "qualified Tidepool.Inspection as TidepoolInspection",
                 "Tidepool.Inspection (print, cellDisplay)",
             ]),
-            tools: None,
             spec: None,
             workspace_modules: Arc::from([]),
         }
@@ -361,20 +359,6 @@ impl ActorWorkbenchSource {
     #[must_use]
     pub fn with_imports(mut self, imports: &str) -> Self {
         self.workbench_imports.extend_text(imports);
-        self
-    }
-
-    /// Select the deployment-frozen, qualified Haskell tool-record value.
-    #[must_use]
-    pub fn with_tools(mut self, entry: impl Into<Arc<str>>) -> Self {
-        let entry = entry.into();
-        if let Some((module, _)) = entry.rsplit_once('.') {
-            self.workbench_imports
-                .extend_text(&format!("qualified {module}"));
-        }
-        self.workbench_imports
-            .extend_text("qualified Tidepool.Agent.Contract");
-        self.tools = Some(entry);
         self
     }
 
@@ -1398,10 +1382,43 @@ fn protected_observation(
     }))
 }
 
+/// Private matched-build envelope. The authored output stays inside `Success`;
+/// refusals never become values of a tool's advertised output schema.
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(crate) enum ToolDispatchReply {
+    Success {
+        output: serde_json::Value,
+    },
+    Refused {
+        #[serde(flatten)]
+        error: ToolDispatchError,
+    },
+}
+
+#[derive(Debug, serde::Deserialize, thiserror::Error)]
+#[serde(tag = "kind", content = "error", rename_all = "snake_case")]
+pub enum ToolDispatchError {
+    #[error("{0}")]
+    UnknownTool(String),
+    #[error("{0}")]
+    InvalidInput(String),
+}
+
+impl ToolDispatchReply {
+    pub(crate) fn into_output(self) -> Result<serde_json::Value, ToolDispatchError> {
+        match self {
+            Self::Success { output } => Ok(output),
+            Self::Refused { error } => Err(error),
+        }
+    }
+}
+
 enum WorkbenchDisplay {
     Binding(Vec<BoundBinder>),
     Opaque,
     Tool,
+    ToolDispatch,
     Observation {
         name: String,
         budget: usize,
@@ -2832,6 +2849,8 @@ pub enum ResidentActorWorkbenchError {
     StartCapture(#[from] crate::ActorStartCaptureError),
     #[error(transparent)]
     WaitCapture(#[from] crate::ActorWaitError),
+    #[error("tool dispatch refused: {0}")]
+    ToolDispatch(ToolDispatchError),
     #[error("invalid agent tool declaration set: {0}")]
     ToolDeclarations(serde_json::Error),
 }
@@ -3247,11 +3266,7 @@ where
         // AgentSpec, so every actor discovers the run's current spec.
         let mut roots = context.source_layer.to_vec();
         roots.extend(self.access.source.base_include.iter().cloned());
-        crate::agent_spec::resolve(
-            &roots,
-            self.access.source.spec.as_deref(),
-            self.access.source.tools.as_deref(),
-        )
+        crate::agent_spec::resolve(&roots, self.access.source.spec.as_deref())
     }
 
     /// Compile one spec and keep both of its products.
@@ -3270,9 +3285,10 @@ where
     ) -> Result<Option<ResidentWorkbenchTools>, ResidentActorWorkbenchError> {
         let resolved = self.resolve_spec(&context);
         let revision = resolved.source_revision();
-        let Some(entry) = resolved.entry.clone() else {
-            return Ok(None);
-        };
+        let entry = resolved
+            .entry
+            .clone()
+            .unwrap_or_else(|| "Tidepool.Agent.Contract.defaultSpec".into());
         let mut source = self.access.source.clone();
         // A spec found by convention is named by no configured key, so its
         // module is not in the shared workbench vocabulary; the fragment that
@@ -3292,17 +3308,6 @@ where
             source.preamble, context.haskell_effects_alias
         )
         .into();
-        // Rules one and two name a spec value; rule three names the tools
-        // record `[haskell] tools` names today. `installTools` is a spec whose
-        // only field is set, so both reach one installer and one retained
-        // dispatcher shape.
-        let installer = match resolved.rule {
-            crate::agent_spec::SpecRule::RunModule | crate::agent_spec::SpecRule::WorkspaceSpec => {
-                "installSpec"
-            }
-            crate::agent_spec::SpecRule::WorkspaceTools
-            | crate::agent_spec::SpecRule::BuiltinDefault => "installTools",
-        };
         let authored_effects = context.haskell_effects_alias.clone();
         let publication_resolved = resolved.clone();
         let mut compile_context = context.clone();
@@ -3311,7 +3316,7 @@ where
             ordinal: 1,
             total: 1,
             source: format!(
-                "_ <- Tidepool.Agent.Contract.{installer} @({authored_effects}) {entry}"
+                "_ <- Tidepool.Agent.Contract.installSpec @({authored_effects}) {entry}"
             ),
         };
         let verdict = TurnClassification {
@@ -3510,7 +3515,7 @@ where
                     1,
                     // A tool invocation has no submitted cell to point at.
                     String::new(),
-                    WorkbenchDisplay::Tool,
+                    WorkbenchDisplay::ToolDispatch,
                     Vec::new(),
                     outcome,
                 )
@@ -6611,7 +6616,9 @@ where
                     binders.iter().map(|binder| binder.name.clone()).collect()
                 }
                 WorkbenchDisplay::Observation { name, .. } => vec![name.clone()],
-                WorkbenchDisplay::Opaque | WorkbenchDisplay::Tool => Vec::new(),
+                WorkbenchDisplay::Opaque
+                | WorkbenchDisplay::Tool
+                | WorkbenchDisplay::ToolDispatch => Vec::new(),
             };
             installed_bindings.append(&mut fragment.recovered_jobs);
             // The same name-to-job fact `mount_command_job` records for a
@@ -6649,7 +6656,7 @@ where
                         .join(", ")
                 ),
                 WorkbenchDisplay::Opaque => "<opaque value>".into(),
-                WorkbenchDisplay::Tool => {
+                WorkbenchDisplay::Tool | WorkbenchDisplay::ToolDispatch => {
                     // A bounded observation marks what it could not afford to
                     // materialize. That is a size answer, so say so instead of
                     // letting the decoder call it a type mismatch.
@@ -6660,7 +6667,25 @@ where
                                 .into(),
                         ));
                     }
-                    String::from_value(result.value(), result.table())?
+                    let text = String::from_value(result.value(), result.table())?;
+                    if matches!(&fragment.display, WorkbenchDisplay::ToolDispatch) {
+                        let reply: ToolDispatchReply =
+                            serde_json::from_str(&text).map_err(|error| {
+                                ResidentActorWorkbenchError::ActorProtocol(format!(
+                                    "invalid tool dispatch reply: {error}"
+                                ))
+                            })?;
+                        let output = reply
+                            .into_output()
+                            .map_err(ResidentActorWorkbenchError::ToolDispatch)?;
+                        serde_json::from_value::<String>(output).map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(format!(
+                                "installed tool output must be rendered Text: {error}"
+                            ))
+                        })?
+                    } else {
+                        text
+                    }
                 }
                 WorkbenchDisplay::Observation { .. } => {
                     unreachable!("a completed observation is deferred above")
@@ -6688,6 +6713,7 @@ where
                 ),
                 WorkbenchDisplay::Opaque
                 | WorkbenchDisplay::Tool
+                | WorkbenchDisplay::ToolDispatch
                 | WorkbenchDisplay::Observation { .. } => None,
             };
             let receipt = projected_binding_receipt(bound_name.as_deref(), &output)?;
@@ -6697,6 +6723,7 @@ where
                 }
                 WorkbenchDisplay::Opaque
                 | WorkbenchDisplay::Tool
+                | WorkbenchDisplay::ToolDispatch
                 | WorkbenchDisplay::Observation { .. } => Vec::new(),
             };
             fragment.output.push(receipt);
@@ -8104,11 +8131,13 @@ where
                     ) => Ok(ResidentActorBoundary::ToolReply(
                         crate::resident_tools::ResidentToolReply {
                             continuation: hole,
-                            result: tidepool_runtime::value_to_json(
+                            result: serde_json::from_value(tidepool_runtime::value_to_json(
                                 &result,
                                 session.data_con_table(),
                                 0,
-                            ),
+                            )).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(
+                                format!("invalid actor tool dispatch reply: {error}")
+                            ))?,
                         },
                     )),
                     ResidentRequest::AgentSession(
@@ -12294,6 +12323,42 @@ mod split_probe {
                     .fetch_add(1, Ordering::SeqCst)
             })
             .ok();
+    }
+}
+
+#[cfg(test)]
+mod tool_dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_envelope_preserves_authored_output_and_decodes_typed_refusals() {
+        let output = serde_json::json!({"status": "refused", "output": [1, true, null]});
+        let reply: ToolDispatchReply = serde_json::from_value(serde_json::json!({
+            "status": "success", "output": output,
+        }))
+        .unwrap();
+        assert_eq!(reply.into_output().unwrap(), output);
+        for (kind, unknown) in [("unknown_tool", true), ("invalid_input", false)] {
+            let reply: ToolDispatchReply = serde_json::from_value(serde_json::json!({
+                "status": "refused", "kind": kind, "error": "correct the call",
+            }))
+            .unwrap();
+            let error = reply.into_output().unwrap_err();
+            assert_eq!(matches!(error, ToolDispatchError::UnknownTool(_)), unknown);
+            assert_eq!(error.to_string(), "correct the call");
+        }
+    }
+
+    #[test]
+    fn dispatch_envelope_rejects_old_payloads_and_unknown_tags() {
+        for payload in [
+            serde_json::json!("old naked output"),
+            serde_json::json!({"output": "old naked output"}),
+            serde_json::json!({"status": "success"}),
+            serde_json::json!({"status": "refused", "kind": "invented", "error": "bad"}),
+        ] {
+            assert!(serde_json::from_value::<ToolDispatchReply>(payload).is_err());
+        }
     }
 }
 

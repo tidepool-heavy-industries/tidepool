@@ -55,7 +55,6 @@ module Tidepool.Agent.Contract
   , HasAgentApi
   , HasActorApi
   , compileTools
-  , installTools
   , serveTools
   , serveToolsWith
   , serveToolsWithInitialUser
@@ -64,6 +63,8 @@ module Tidepool.Agent.Contract
   , ToolDeclaration (..)
   , ToolKind (..)
   , ToolCompileError (..)
+  , ToolDispatchError (..)
+  , renderToolDispatchError
   , renderToolCompileError
   , ToolName
   , StructuralValue
@@ -234,9 +235,21 @@ data ToolDeclaration = ToolDeclaration
 
 data CompiledTools m = CompiledTools
   { declarations :: [ToolDeclaration]
-  , dispatch :: ToolName -> StructuralValue -> m StructuralValue
+  , dispatch :: ToolName -> StructuralValue -> m (Either ToolDispatchError StructuralValue)
   , synopsis :: Text
   }
+
+-- | Rejected before the handler runs. A refusal is separate from the tool's
+-- declared output schema.
+data ToolDispatchError
+  = UnknownTool ToolName
+  | InvalidToolInput ToolName Text
+  deriving (Eq, Show)
+
+renderToolDispatchError :: ToolDispatchError -> Text
+renderToolDispatchError problem = case problem of
+  UnknownTool name -> "no such tool: " <> name
+  InvalidToolInput name message -> "invalid input for tool " <> name <> ": " <> message
 
 -- | Authoring failures only detectable once selector NAMES (not just
 -- selector TYPES) are in hand: two selectors normalizing to the same wire
@@ -309,7 +322,7 @@ data ToolEntry m result = ToolEntry
   , entryInputSchema :: Value
   , entryOutputSchema :: Value
   , entryKind :: ToolKind
-  , entryRun :: StructuralValue -> m result
+  , entryRun :: StructuralValue -> Either ToolDispatchError (m result)
   }
 
 -- | The single Generic traversal: read the selector name, obtain the input
@@ -362,8 +375,8 @@ instance
         , entryOutputSchema = jsonSchema (Proxy :: Proxy output)
         , entryKind = kind
         , entryRun = \sv -> case fromJSON sv of
-            Success input' -> toJSON <$> h input'
-            Error msg -> error (T.unpack fieldName ++ ": compileTools dispatch could not decode tool input: " ++ msg)
+            Success input' -> Right (toJSON <$> h input')
+            Error msg -> Left (InvalidToolInput (toSnakeCase fieldName) (T.pack msg))
         }
     ]
     where
@@ -383,8 +396,8 @@ instance
         , entryOutputSchema = jsonSchema (Proxy :: Proxy Text)
         , entryKind = RawKind
         , entryRun = \value -> case fromJSON value of
-            Success input -> toJSON . renderToolOutput <$> h input
-            Error message -> error (T.unpack fieldName ++ ": raw tool requires Text: " ++ message)
+            Success input -> Right (toJSON . renderToolOutput <$> h input)
+            Error message -> Left (InvalidToolInput (toSnakeCase fieldName) (T.pack message))
         }
     ]
     where
@@ -395,7 +408,7 @@ instance
   GCompileTools (M1 S s (K1 R (RawTool m output))) m (ActorToolStep state exit)
   where
   gCompileEntries leaf =
-    [ entry { entryRun = fmap ActorToolStay . entryRun entry }
+    [ entry { entryRun = fmap (fmap ActorToolStay) . entryRun entry }
     | entry <- (gCompileEntries leaf :: [ToolEntry m StructuralValue])
     ]
 
@@ -497,8 +510,8 @@ actorEntry fieldName kind desc outputSchema run =
     , entryOutputSchema = outputSchema
     , entryKind = kind
     , entryRun = \sv -> case fromJSON sv of
-        Success input' -> run input'
-        Error msg -> error (T.unpack fieldName ++ ": tool dispatch could not decode input: " ++ msg)
+        Success input' -> Right (run input')
+        Error msg -> Left (InvalidToolInput (toSnakeCase fieldName) (T.pack msg))
     }
 
 -- | The constraints needed to walk the server interpretation of a tools
@@ -510,12 +523,14 @@ actorEntry fieldName kind desc outputSchema run =
 -- A synonym macro-expands at every use site and has no dictionary to cull.
 -- Do not "tidy" this into a class.
 type HasAgentApi tools m =
-  ( Generic (tools (AsServerT m))
+  ( Applicative m
+  , Generic (tools (AsServerT m))
   , GCompileTools (Rep (tools (AsServerT m))) m StructuralValue
   )
 
 type HasActorApi tools m state exit =
-  ( Generic (tools (AsActorT m state exit))
+  ( Applicative m
+  , Generic (tools (AsActorT m state exit))
   , GCompileTools
       (Rep (tools (AsActorT m state exit)))
       m
@@ -536,12 +551,13 @@ compileTools v =
 
 data CompiledEntrySet m result = CompiledEntrySet
   { entryDeclarations :: [ToolDeclaration]
-  , entryDispatch :: ToolName -> StructuralValue -> m result
+  , entryDispatch :: ToolName -> StructuralValue -> m (Either ToolDispatchError result)
   , entrySynopsis :: Text
   }
 
 compileEntrySet
-  :: [ToolEntry m result]
+  :: Applicative m
+  => [ToolEntry m result]
   -> Either ToolCompileError (CompiledEntrySet m result)
 compileEntrySet raw =
   let named = [e {entryWireName = toSnakeCase (entrySelector e)} | e <- raw]
@@ -550,8 +566,8 @@ compileEntrySet raw =
         Right () ->
           let table = Map.fromList [(entryWireName e, entryRun e) | e <- named]
               dispatchFn n sv = case Map.lookup n table of
-                Just run -> run sv
-                Nothing -> error (T.unpack (T.pack "compileTools: dispatch called with unknown tool \"" <> n <> T.pack "\""))
+                Just run -> either (pure . Left) (fmap Right) (run sv)
+                Nothing -> pure (Left (UnknownTool n))
            in Right
                 CompiledEntrySet
                   { entryDeclarations = [ToolDeclaration (entryWireName e) (entryDescription e) (entryInputSchema e) (entryOutputSchema e) (entryKind e) | e <- named]
@@ -688,8 +704,8 @@ data NoTools mode = NoTools deriving (Generic)
 -- default, so every spec already written keeps compiling untouched; a spec
 -- spelled as a constructor application would break on every addition.
 data AgentSpec tools effects = AgentSpec
-  { -- | Exactly the record @[haskell] tools@ names today, unchanged. A field's
-    -- name is its tool's name and its types generate the schemas.
+  { -- | The tools record this spec installs. Each field names a tool, and its
+    -- types generate the schemas.
     --
     -- Not spelled @tools@: every authored tools module imports this module
     -- unqualified and names its own record @tools@, and a field selector by
@@ -711,13 +727,6 @@ toolCallEntry = 0
 -- | The entry index the retained dispatcher serves the after-tool slot at.
 afterToolEntry :: Int
 afterToolEntry = 1
-
--- | Install startup-compiled tools alongside the interactive workbench.
--- The runtime owns the captured dispatcher; this does not enter a serving loop.
-installTools
-  :: forall effects tools. HasAgentApi tools (Eff effects)
-  => tools (AsServerT (Eff effects)) -> Eff (AgentTools ': effects) ()
-installTools record = installSpec (defaultSpec {specTools = record})
 
 -- | Install one spec: its declared tool surface and every slot it fills, from
 -- a single compile of a single module.
@@ -752,9 +761,12 @@ installSpec spec = case compileTools (specTools spec) of
       runToolCall tooling = do
         (name, arguments) <- send AgentToolsInputWith
         result <- raise (dispatch tooling name arguments)
-        pure (case fromJSON result of
-          Success text -> text
-          Error _ -> renderToolOutput result)
+        pure (encodeValue (toolDispatchReply (fmap (toJSON . renderValue) result)))
+
+      renderValue :: StructuralValue -> Text
+      renderValue output = case fromJSON output of
+        Success text -> text
+        Error _ -> renderToolOutput output
 
       -- An unfilled slot is never selected by the runtime, which reads the
       -- installed slot list; asking for one anyway is the honest silence the
@@ -770,6 +782,18 @@ installSpec spec = case compileTools (specTools spec) of
             pure (renderAnnotation (Abstained (T.pack ("after-tool slot input: " ++ message))))
           Success (AfterToolInput call result) ->
             renderAnnotation <$> raise (slot call result)
+
+-- The private runtime boundary keeps refusal distinct from authored output.
+toolDispatchReply :: Either ToolDispatchError Value -> Value
+toolDispatchReply result = case result of
+  Right output -> object ["status" .= ("success" :: Text), "output" .= output]
+  Left problem -> object
+    [ "status" .= ("refused" :: Text)
+    , "error" .= renderToolDispatchError problem
+    , "kind" .= (case problem of
+        UnknownTool _ -> ("unknown_tool" :: Text)
+        InvalidToolInput _ _ -> "invalid_input")
+    ]
 
 renderAnnotation :: Annotation -> Text
 renderAnnotation = encodeValue . annotationToJson
@@ -831,14 +855,17 @@ serveToolsLoop initialUser initial build = loop initialUser initial
               )
           step <- entryDispatch compiled name arguments
           case step of
-            ActorToolStay result -> do
-              send (AgentToolsReplyWith result)
+            Left problem -> do
+              send (AgentToolsReplyWith (toolDispatchReply (Left problem)))
               loop Nothing state
-            ActorToolUpdate result next -> do
-              send (AgentToolsReplyWith result)
+            Right (ActorToolStay result) -> do
+              send (AgentToolsReplyWith (toolDispatchReply (Right result)))
+              loop Nothing state
+            Right (ActorToolUpdate result next) -> do
+              send (AgentToolsReplyWith (toolDispatchReply (Right result)))
               loop Nothing next
-            ActorToolFinish result exit -> do
-              send (AgentToolsReplyWith result)
+            Right (ActorToolFinish result exit) -> do
+              send (AgentToolsReplyWith (toolDispatchReply (Right result)))
               pure exit
 
 compileActorTools ::

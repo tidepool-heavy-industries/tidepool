@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 pub(crate) const SPEC_MODULE: &str = "AgentSpec";
 pub(crate) const SPEC_VALUE: &str = "agentSpec";
 
-/// Which of the four rules answered.
+/// Which install rule answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpecRule {
     /// `AgentSpec.agentSpec`, found in the active include roots.
@@ -26,9 +26,7 @@ pub enum SpecRule {
     /// The workspace's `[haskell] spec` key, for a workspace that wants
     /// another name.
     WorkspaceSpec,
-    /// The existing `[haskell] tools` entry point.
-    WorkspaceTools,
-    /// Nothing named a spec, and nothing is installed.
+    /// Nothing named a spec, so the empty `defaultSpec` is installed.
     BuiltinDefault,
 }
 
@@ -37,7 +35,6 @@ impl SpecRule {
         match self {
             Self::RunModule => "run module",
             Self::WorkspaceSpec => "workspace spec key",
-            Self::WorkspaceTools => "workspace tools key",
             Self::BuiltinDefault => "built-in default",
         }
     }
@@ -48,8 +45,8 @@ impl SpecRule {
 pub struct ResolvedSpec {
     pub rule: SpecRule,
     /// The qualified Haskell value the install fragment applies. `None` under
-    /// [`SpecRule::BuiltinDefault`]: nothing is named, so nothing is
-    /// installed and the actor behaves exactly as it does with no spec.
+    /// [`SpecRule::BuiltinDefault`]: the installer uses `defaultSpec`, whose
+    /// tools and slots are empty.
     pub entry: Option<String>,
     /// The file the entry was read from, when discovery found one on disk.
     /// A configured entry point names a module, not a path, so it has none.
@@ -112,7 +109,7 @@ impl ResolvedSpec {
 /// `layer` is the exact include graph this actor compiles against, private
 /// helper roots first and shared run roots after them. Helper roots may only
 /// contain `SessionHelpers`, so a discovered `AgentSpec` comes from the run.
-pub fn resolve(layer: &[PathBuf], spec: Option<&str>, tools: Option<&str>) -> ResolvedSpec {
+pub fn resolve(layer: &[PathBuf], spec: Option<&str>) -> ResolvedSpec {
     let searched: Vec<PathBuf> = layer.to_vec();
     if let Some(file) = layer.iter().find_map(|root| {
         let candidate = root.join(format!("{SPEC_MODULE}.hs"));
@@ -128,14 +125,6 @@ pub fn resolve(layer: &[PathBuf], spec: Option<&str>, tools: Option<&str>) -> Re
     if let Some(entry) = spec {
         return ResolvedSpec {
             rule: SpecRule::WorkspaceSpec,
-            entry: Some(entry.to_owned()),
-            file: None,
-            searched,
-        };
-    }
-    if let Some(entry) = tools {
-        return ResolvedSpec {
-            rule: SpecRule::WorkspaceTools,
             entry: Some(entry.to_owned()),
             file: None,
             searched,
@@ -243,54 +232,42 @@ agentSpec = defaultSpec { specTools = Tools.tools }
         assert!(required_effects_from_signature("module X where\n", "agentSpec").is_empty());
     }
 
-    /// Rule one wins over both configured keys, and names the file it was read
+    /// Convention wins over the configured name, and names the file it was read
     /// from, so a model never has to guess which spec is live.
     #[test]
     fn a_spec_module_in_the_run_graph_answers_first() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("AgentSpec.hs"), "module AgentSpec where\n").unwrap();
-        let resolved = resolve(
-            &[root.path().to_path_buf()],
-            Some("Project.Spec.agentSpec"),
-            Some("Project.Tools.tools"),
-        );
+        let resolved = resolve(&[root.path().to_path_buf()], Some("Project.Spec.agentSpec"));
         assert_eq!(resolved.rule, SpecRule::RunModule);
         assert_eq!(resolved.entry.as_deref(), Some("AgentSpec.agentSpec"));
         assert_eq!(resolved.file, Some(root.path().join("AgentSpec.hs")));
         assert_eq!(resolved.checked_module().as_deref(), Some("AgentSpec"));
     }
 
-    /// A run graph with no spec file uses the workspace's
-    /// keys decide, in their existing order.
+    /// A run graph with no conventional spec uses the configured name, or
+    /// the empty built-in spec when no name was configured.
     #[test]
-    fn a_run_without_a_spec_file_falls_through_in_order() {
+    fn a_run_without_a_spec_file_uses_configured_or_empty_spec() {
         let root = tempfile::tempdir().unwrap();
         let layer = [root.path().to_path_buf()];
-        let with_spec = resolve(
-            &layer,
-            Some("Project.Spec.agentSpec"),
-            Some("P.Tools.tools"),
-        );
+        let with_spec = resolve(&layer, Some("Project.Spec.agentSpec"));
         assert_eq!(with_spec.rule, SpecRule::WorkspaceSpec);
         assert_eq!(with_spec.entry.as_deref(), Some("Project.Spec.agentSpec"));
 
-        let tools_only = resolve(&layer, None, Some("P.Tools.tools"));
-        assert_eq!(tools_only.rule, SpecRule::WorkspaceTools);
-        assert_eq!(tools_only.entry.as_deref(), Some("P.Tools.tools"));
-
-        let nothing = resolve(&layer, None, None);
+        let nothing = resolve(&layer, None);
         assert_eq!(nothing.rule, SpecRule::BuiltinDefault);
         assert_eq!(nothing.entry, None);
         assert_eq!(nothing.checked_module(), None);
     }
 
-    /// With no include roots, configured keys still determine the rule.
+    /// With no include roots, the configured name still determines the rule.
     #[test]
     fn an_actor_without_a_layer_reports_the_configured_rule() {
-        let resolved = resolve(&[], None, Some("Tidepool.Command.Tools.tools"));
-        assert_eq!(resolved.rule, SpecRule::WorkspaceTools);
+        let resolved = resolve(&[], Some("Project.Spec.agentSpec"));
+        assert_eq!(resolved.rule, SpecRule::WorkspaceSpec);
         assert!(resolved.searched.is_empty());
-        assert!(resolved.describe().contains("workspace tools key"));
+        assert!(resolved.describe().contains("workspace spec key"));
         assert_eq!(layer_revision(&[]), None);
     }
 
@@ -307,8 +284,7 @@ agentSpec = defaultSpec { specTools = Tools.tools }
         std::os::unix::fs::symlink("revisions/revision-one", root.path().join("active")).unwrap();
         let resolved = resolve(
             &[root.path().join("active/0")],
-            None,
-            Some("Project.Tools.tools"),
+            Some("Project.Tools.agentSpec"),
         );
         assert_eq!(resolved.source_revision().as_deref(), Some("revision-one"));
     }
