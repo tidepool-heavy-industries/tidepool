@@ -269,7 +269,6 @@ pub struct CompiledArtifacts {
 /// never authority for a cached product.
 pub struct ModuleCandidateOffer {
     selected: Option<module_candidates::CandidateSet>,
-    admitted_producer: bool,
     producer: Vec<u8>,
     include: Vec<PathBuf>,
     exact: Option<crate::declaration_context::ExactCompilationRequest>,
@@ -359,21 +358,105 @@ fn immutable_candidates_in_context(
 
 impl ModuleCandidateOffer {
     /// Select immutable source candidates under configured compiler authority.
-    /// This capability permits the validated seal to issue input continuity.
+    /// Executing the offer through its owning turn method can issue input continuity.
     pub fn select_admitted(
         endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
         include: &[PathBuf],
         scratch: &Path,
     ) -> Self {
-        let mut offer = Self::select(endpoint.identity().producer_bytes(), include, scratch);
-        offer.admitted_producer = true;
-        offer
+        Self::select(endpoint.identity().producer_bytes(), include, scratch)
+    }
+
+    /// Execute an ordinary turn into fresh, privately owned outputs and seal
+    /// input continuity before returning those outputs to a consumer.
+    pub fn execute_admitted_turn(
+        &self,
+        endpoint: crate::toolchain::AdmittedCompilerEndpoint,
+        mut command: ExtractCmd,
+    ) -> Result<AdmittedTurnOutput, CompileError> {
+        let request = tidepool_extract_cmd::ExtractRequest::decode(&command.request_bytes())
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        if self.exact.is_some()
+            || !request.is_turn()
+            || self.producer != endpoint.identity().producer_bytes()
+            || request.include_paths()
+                != self
+                    .include
+                    .iter()
+                    .map(PathBuf::as_path)
+                    .collect::<Vec<_>>()
+            || request
+                .target_names()
+                .iter()
+                .any(|target| target != "__prepared")
+        {
+            return Err(CompileError::ExtractFailed(
+                "admitted turn recipe differs from selected offer".into(),
+            ));
+        }
+        let directory = tempfile::tempdir()?;
+        command.relocate_turn_outputs(directory.path());
+        let run = endpoint
+            .execute(&command)
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        let compile_input_identity = if request.supports_compile_input_identity()
+            && run.success()
+            && diag::decode_extract_result(true, &run.output.stdout, &run.output.stderr).is_ok()
+        {
+            self.seal_admitted_turn_identity(directory.path())
+                .map_err(|error| self.retain_failure(directory.path(), &run.output.stderr, error))?
+        } else {
+            None
+        };
+        Ok(AdmittedTurnOutput {
+            directory,
+            run,
+            compile_input_identity,
+        })
+    }
+
+    fn seal_admitted_turn_identity(
+        &self,
+        directory: &Path,
+    ) -> Result<Option<Arc<SealedCompileInputIdentity>>, CompileError> {
+        let value = crate::checked_cell::decode(&crate::checked_cell::read(
+            directory.join("turn.cbor"),
+            32 << 20,
+        )?)?;
+        let row = crate::checked_cell::row(&value, 2)?;
+        let source = match crate::checked_cell::string(&row[0])? {
+            "Bind" => crate::checked_cell::string(&crate::checked_cell::row(&row[1], 5)?[4])?,
+            "Expr" => crate::checked_cell::string(&crate::checked_cell::row(&row[1], 3)?[2])?,
+            "Decl" => return Ok(None),
+            _ => {
+                return Err(CompileError::ExtractFailed(
+                    "admitted turn result kind".into(),
+                ))
+            }
+        };
+        let module = extract_module_name(source).ok_or_else(|| {
+            CompileError::ExtractFailed("admitted turn source module missing".into())
+        })?;
+        let target = Arc::new(tidepool_repr::execution_schema::parse_program(
+            &crate::checked_cell::read(directory.join("__prepared.prepared.cbor"), 128 << 20)?,
+            &crate::prepared_artifact::production_requirements()?,
+            DecodeLimits::default(),
+        )?);
+        Ok(seal_turn_outputs_inner(
+            self,
+            directory,
+            &directory.join(format!("{module}.hs")),
+            source,
+            &target,
+            "__prepared",
+            true,
+        )?
+        .and_then(|sealed| sealed.compile_input_identity))
     }
 
     pub fn select(producer: &[u8], include: &[PathBuf], scratch: &Path) -> Self {
         Self {
             selected: module_candidates::select(producer, include, scratch),
-            admitted_producer: false,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: None,
@@ -393,7 +476,6 @@ impl ModuleCandidateOffer {
     ) -> Result<Self, CompileError> {
         Ok(Self {
             selected: None,
-            admitted_producer: false,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation(&scratch.join("exact-scope"), producer)?),
@@ -438,7 +520,6 @@ impl ModuleCandidateOffer {
         let context = checked_offer_context(context)?;
         Ok(Self {
             selected: immutable_candidates_in_context(&context, producer, include, scratch),
-            admitted_producer: false,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation_with_authorization(
@@ -497,7 +578,6 @@ impl ModuleCandidateOffer {
         let context = checked_offer_context(context)?;
         Ok(Self {
             selected: immutable_candidates_in_context(&context, producer, include, scratch),
-            admitted_producer: false,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation_with_authorization(
@@ -552,7 +632,6 @@ impl ModuleCandidateOffer {
         )?;
         Ok(Self {
             selected: immutable_candidates_in_context(&context, producer, include, scratch),
-            admitted_producer: false,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation_with_authorization(
@@ -610,7 +689,6 @@ impl ModuleCandidateOffer {
         )?;
         Ok(Self {
             selected: immutable_candidates_in_context(&context, producer, include, scratch),
-            admitted_producer: false,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation_with_authorization(
@@ -1015,7 +1093,6 @@ impl ModuleCandidateOffer {
     fn program_offer(&self, exact: crate::declaration_context::ExactCompilationRequest) -> Self {
         Self {
             selected: None,
-            admitted_producer: self.admitted_producer,
             producer: self.producer.clone(),
             include: self.include.clone(),
             exact: Some(exact),
@@ -1411,6 +1488,30 @@ fn ensure_no_uncertified_globals(artifacts: &CompiledArtifacts) -> Result<(), Co
     Ok(())
 }
 
+/// Outputs of one actual admitted execution. The source and native proof were
+/// sealed before this owning directory became observable by the caller.
+#[derive(Debug)]
+pub struct AdmittedTurnOutput {
+    directory: TempDir,
+    run: tidepool_extract_cmd::ExtractRun,
+    compile_input_identity: Option<Arc<SealedCompileInputIdentity>>,
+}
+
+impl AdmittedTurnOutput {
+    pub fn directory(&self) -> &Path {
+        self.directory.path()
+    }
+    pub fn compiler_output(&self) -> &std::process::Output {
+        &self.run.output
+    }
+    pub fn elapsed(&self) -> Duration {
+        self.run.elapsed
+    }
+    pub fn compile_input_identity(&self) -> Option<&Arc<SealedCompileInputIdentity>> {
+        self.compile_input_identity.as_ref()
+    }
+}
+
 /// Seal the exact worker-authored source and product sidecars of a successful
 /// resident turn. The runtime supplies the selected template's source path
 /// and the source text echoed by TurnOut, not the unspliced cell text.
@@ -1421,6 +1522,27 @@ pub fn seal_turn_outputs(
     source: &str,
     prepared: &Arc<PreparedProgram>,
     target: &str,
+) -> Result<Option<SealedTurnProducts>, CompileError> {
+    seal_turn_outputs_inner(
+        offer,
+        output_dir,
+        source_path,
+        source,
+        prepared,
+        target,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seal_turn_outputs_inner(
+    offer: &ModuleCandidateOffer,
+    output_dir: &Path,
+    source_path: &Path,
+    source: &str,
+    prepared: &Arc<PreparedProgram>,
+    target: &str,
+    issue_input_identity: bool,
 ) -> Result<Option<SealedTurnProducts>, CompileError> {
     if std::fs::read_to_string(source_path)? != source {
         return Err(CompileError::ExtractFailed(
@@ -1541,7 +1663,7 @@ pub fn seal_turn_outputs(
         );
     }
     let certified_groups: Arc<[_]> = certified.groups.into();
-    let compile_input_identity = if offer.admitted_producer && offer.exact.is_none() {
+    let compile_input_identity = if issue_input_identity && offer.exact.is_none() {
         let (table, _) = read_metadata(&read_sidecar("meta.cbor")?)?;
         let sites = read_yield_sites(&output_dir.join("asks.json"))?;
         crate::compile_input::seal(

@@ -498,6 +498,12 @@ impl ExtractCmd {
         self
     }
 
+    /// Replace turn outputs with a single owning compilation directory.
+    pub fn relocate_turn_outputs(&mut self, root: &Path) -> &mut Self {
+        self.request.relocate_turn_outputs(root);
+        self
+    }
+
     /// `--turn-out <path>` — where the `TurnOut` CBOR sidecar is written.
     pub fn turn_out(&mut self, path: impl AsRef<OsStr>) -> &mut Self {
         self.request.turn_out(path);

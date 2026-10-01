@@ -321,6 +321,54 @@ impl ExtractRequest {
         Self::decode(&unhex(payload)?)
     }
 
+    /// Exact source search order consumed by the worker.
+    pub fn include_paths(&self) -> Vec<&Path> {
+        self.fields
+            .iter()
+            .filter_map(|field| match field {
+                Field::Include(path) => Some(Path::new(path)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn is_turn(&self) -> bool {
+        self.fields.iter().any(|field| matches!(field, Field::Turn))
+    }
+
+    /// Input continuity currently covers plain turns without mutable compiler
+    /// context or specialized inspection/projection modes.
+    pub fn supports_compile_input_identity(&self) -> bool {
+        self.is_turn()
+            && self.fields.iter().all(|field| {
+                matches!(
+                    field,
+                    Field::Input(_)
+                        | Field::OutputDir(_)
+                        | Field::Target(_)
+                        | Field::Targets(_)
+                        | Field::Include(_)
+                        | Field::Turn
+                        | Field::TurnTemplate { .. }
+                        | Field::TurnOut(_)
+                        | Field::TurnVerdict(_)
+                        | Field::TurnPin(_)
+                        | Field::BuildProductsDir(_)
+                        | Field::ModuleCandidates(_)
+                        | Field::CertifyHomeProducts
+                        | Field::SessionRoot(_)
+                        | Field::BindGen(_)
+                )
+            })
+    }
+
+    pub(crate) fn relocate_turn_outputs(&mut self, root: &Path) {
+        self.fields
+            .retain(|field| !matches!(field, Field::OutputDir(_) | Field::TurnOut(_)));
+        self.output_dir(root);
+        self.turn_out(root.join("turn.cbor"));
+    }
+
     /// Requested output directory, if this request carries one.
     pub fn output_directory(&self) -> Option<&OsStr> {
         self.fields.iter().find_map(|field| match field {
@@ -1229,6 +1277,53 @@ mod tests {
         let mut warm = decoded;
         warm.redirect_outputs_for_warm_up(Path::new("/tmp/warm"));
         assert!(matches!(warm.fields.as_slice(), [Field::Input(_)]));
+    }
+
+    #[test]
+    fn relocated_turn_outputs_replace_old_sinks_and_preserve_recipe() {
+        let mut request = ExtractRequest::default();
+        request.input("authored-turn.txt");
+        request.turn();
+        request.include("/source/first");
+        request.include("/source/second");
+        request.output_dir("/caller/output");
+        request.turn_out("/caller/result.cbor");
+        request.relocate_turn_outputs(Path::new("/owned/output"));
+        let decoded = ExtractRequest::decode(&request.encode()).unwrap();
+        assert!(decoded.is_turn());
+        assert!(decoded.supports_compile_input_identity());
+        let mut mutable = decoded.clone();
+        mutable.session_incarnation("resident");
+        assert!(!mutable.supports_compile_input_identity());
+        assert_eq!(
+            decoded.include_paths(),
+            vec![Path::new("/source/first"), Path::new("/source/second")]
+        );
+        assert_eq!(
+            decoded.output_directory(),
+            Some(OsStr::new("/owned/output"))
+        );
+        assert_eq!(
+            decoded
+                .fields
+                .iter()
+                .filter(|field| matches!(field, Field::OutputDir(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            decoded
+                .fields
+                .iter()
+                .filter(|field| matches!(field, Field::TurnOut(_)))
+                .count(),
+            1
+        );
+        assert!(decoded.fields.iter().any(|field| matches!(field, Field::TurnOut(path) if path == OsStr::new("/owned/output/turn.cbor"))));
+        assert!(!decoded
+            .cli_argv()
+            .iter()
+            .any(|argument| argument == "/caller/output" || argument == "/caller/result.cbor"));
     }
 
     #[test]
