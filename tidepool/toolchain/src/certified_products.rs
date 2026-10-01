@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ciborium::value::Value;
 use sha2::{Digest, Sha256};
@@ -206,13 +207,14 @@ pub(crate) fn inherited_package_witnesses_with_validation(
 
 /// A group whose retained globals still need an exact live binding or native
 /// export owner. Runtime resolves those through its binding table or owning
-/// machine's export ledger before constructing `CertifiedGroup`.
+/// machine's export ledger before constructing `CertifiedGroup`. Immutable
+/// decoded payloads are shared when request contexts append native groups.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingCertifiedGroup {
     origin: ProductOrigin,
     owner: CachedHomeOwner,
-    group: ProjectedGroup,
-    imports: Vec<PendingImportOwner>,
+    group: Arc<ProjectedGroup>,
+    imports: Arc<[PendingImportOwner]>,
 }
 
 pub(crate) struct CertifiedProducts {
@@ -237,7 +239,11 @@ impl PendingCertifiedGroup {
     }
 
     pub fn into_parts(self) -> (CachedHomeOwner, ProjectedGroup, Vec<PendingImportOwner>) {
-        (self.owner, self.group, self.imports)
+        (
+            self.owner,
+            Arc::unwrap_or_clone(self.group),
+            self.imports.to_vec(),
+        )
     }
 }
 
@@ -1446,7 +1452,7 @@ fn encode_home_certification_with_validation(
             ));
         }
         let mut globals = Vec::new();
-        for (declaration, selected) in group.group.globals().iter().zip(&group.imports) {
+        for (declaration, selected) in group.group.globals().iter().zip(group.imports.iter()) {
             let selected = match selected {
                 PendingImportOwner::Source {
                     owner,
@@ -1739,8 +1745,8 @@ fn certify_inherited_inventory_with_validation(
             result.push(PendingCertifiedGroup {
                 origin: ProductOrigin::Cached,
                 owner: witness.owner.clone(),
-                group,
-                imports,
+                group: Arc::new(group),
+                imports: imports.into(),
             });
         }
     }
@@ -2073,12 +2079,12 @@ pub(crate) fn certify_products(
                         &mut validation,
                     )
                 })
-                .collect::<CertResult<_>>()?;
+                .collect::<CertResult<Vec<_>>>()?;
             Ok(PendingCertifiedGroup {
                 origin,
                 owner,
-                group,
-                imports,
+                group: Arc::new(group),
+                imports: imports.into(),
             })
         })
         .collect::<CertResult<_>>()?;
@@ -2495,9 +2501,27 @@ mod tests {
         PendingCertifiedGroup {
             owner: owner.clone(),
             origin: ProductOrigin::Cached,
-            group: testing::projected_group(wire, 7).unwrap(),
-            imports: vec![import],
+            group: Arc::new(testing::projected_group(wire, 7).unwrap()),
+            imports: vec![import].into(),
         }
+    }
+
+    #[test]
+    fn certified_group_clones_share_decoded_payload_and_import_inventory() {
+        let group = inherited_group(
+            &inherited_owner("Home"),
+            PendingImportOwner::Retained {
+                identity: testing::identity("Val", "x"),
+                generation: 7,
+            },
+        );
+        let copy = group.clone();
+        assert!(Arc::ptr_eq(&group.group, &copy.group));
+        assert!(Arc::ptr_eq(&group.imports, &copy.imports));
+        let (owner, decoded, imports) = copy.into_parts();
+        assert_eq!(owner, *group.owner());
+        assert_eq!(&decoded, group.group());
+        assert_eq!(imports, group.imports());
     }
 
     fn inherited_parsed(
@@ -2511,7 +2535,7 @@ mod tests {
                 unit: group.owner.unit.clone(),
                 module: group.owner.module.clone(),
                 interface: vec![0x42],
-                groups: vec![group.group.clone()],
+                groups: vec![group.group.as_ref().clone()],
             },
             decode_home_witness(&bytes).unwrap(),
         )
@@ -2593,7 +2617,9 @@ mod tests {
             vec![gb.clone()]
         );
         let mut conflicting_current = ga.clone();
-        if let PendingImportOwner::Source { owner, .. } = &mut conflicting_current.imports[0] {
+        if let PendingImportOwner::Source { owner, .. } =
+            &mut Arc::make_mut(&mut conflicting_current.imports)[0]
+        {
             owner.skinny_iface_sha256 = [91; 32];
         }
         assert!(matches!(
