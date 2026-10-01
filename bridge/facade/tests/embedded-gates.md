@@ -10,6 +10,7 @@ No live provider credentials are used.
 | M1 browser | `actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root` | Playwright input and real raw Haskell output, request-pinned reload/retry, interruption of the active operation, continue and root retirement. |
 | Complete-cell preflight | `actor_host::embedded_captured_unfold_tests::admitted_cell_late_type_error_has_no_effect_or_publication_on_retry` | An installed AgentSpec and admitted root reject a final type error before the first notification effect or binding publication; exact operation retry retains rejection without compiler work. |
 | Warm production cells | `actor_host::m1_host_tests::warm_cell_performance::production_engine_store_warm_display_cells_50` | Fifty source-backed displays across ten workloads through the production HTTP/Engine/Store host, exact original operations and exclusive daemon request attribution. |
+| Active cancellation | `actor_host::m1_host_tests::cancel_performance::production_engine_store_active_cancellation_50` | Fifty production interrupts of exact armed native Sleep calls, actual retained owner acknowledgment and separate durable output/round cleanup timings. |
 | M2 captured replies | `actor_host::embedded_captured_unfold_tests::embedded_captured_unfold_awaits_two_child_replies_before_parent_call_returns` | Two independent captured children reply while the parent call is unfinished; release refuses new use while admitted children retain their scope. |
 | M2 failure and reuse | `actor_host::embedded_captured_unfold_tests::embedded_captured_children_and_capture_survive_failure_of_the_unfinished_parent_cell` | Both children reply, the same parent cell fails, both children still read its completed private prefix, and a third child uses the retained checkpoint independently. |
 
@@ -130,3 +131,51 @@ and stops its owned daemon using the existing lifecycle recipe, then runs
 `scripts/resident-performance-report.py`. Cold-start and active cancellation
 measurements remain separate fixtures; this warm run alone does not establish
 all performance targets.
+
+## Active cancellation measurement
+
+The ignored cancellation fixture reuses the same production host and owned
+compiler trace inputs as the warm fixture. A real displayed `42` warms the host.
+Fifty authenticated HTTP inputs then cause the deterministic provider to issue
+fifty distinct original Haskell calls, each containing the adjacent single-Sleep
+fixture. Their source and qualified original request must be retained in Store.
+No transport or endpoint fabricates a cancellation result.
+
+Before each timed interval, the exact claim must be pending with no scheduler
+output. `LocalActorRef::hosted_workbench_waiting` must observe that exact original
+call's armed owner, and the production projection supplies its actual active
+round. This observation is momentary; the fixture rechecks immediately before
+sending `HostCommand::Interrupt` for that round. Compilation and readiness polls
+finish before the timer starts.
+
+The `cancel_ack` interval runs from HTTP interrupt submission to receipt of the
+exact scheduler `Cancelled` result and its retained
+`CancellationAcknowledgment::Stopped`. The production dispatcher can return
+`Stopped` only after the original native cancellation owner confirms abort.
+The fixture awaits that real acknowledgment concurrently with the HTTP request;
+HTTP `202` or a control-request receipt alone never qualifies. Every row retains
+actual monotonic `started_ns`, `settled_ns`, `effect_active_ns`, the exact original
+operation, execution identity and targeted round. It also asserts no compiler
+submissions occurred in the measured interval.
+
+A separate `cancel_cleanup` interval starts at the observed owner acknowledgment
+and ends after the original cancelled output/claim is durable, the production
+projection is waiting with no active round, the interrupt has its actual durable
+control receipt, and the issuer actor remains live. Native abort confirmation is
+already required by the acknowledgment boundary. This cleanup sample measures
+subsequent durable/host work; it makes no independent claim about heap reclamation.
+The fixture emits fifty rows of each kind and requires acknowledged final host
+and resident-forest cleanup on success.
+
+```sh
+python3 build/rust/isolated-libtest.py "$FACADE_TEST_BINARY" \
+  --exact actor_host::m1_host_tests::cancel_performance::production_engine_store_active_cancellation_50 \
+  --expected-count 1 --ignored --jobs 1 --timeout 1800
+```
+
+Use this owning isolated process runner: it bounds the test and kills residual
+process-group children on failure, timeout and completion. A failed assertion
+cannot establish acknowledged in-process forest cleanup. Retain its nonzero
+status and diagnostics, then stop only the assigned owned daemon through the
+existing lifecycle recipe. Compile/list evidence is separate from an executed
+fifty-sample campaign; actual execution waits for the real-cell correctness gate.

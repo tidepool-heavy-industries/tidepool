@@ -538,7 +538,7 @@ struct EmbeddedDispatcher {
     store: Arc<Store>,
 }
 
-fn original_operation(
+pub(super) fn original_operation(
     identity: &HostIdentity,
     operation: &OperationId,
 ) -> Result<exomonad_tool::OriginalOperation, String> {

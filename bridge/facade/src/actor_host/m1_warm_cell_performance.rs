@@ -187,20 +187,20 @@ impl ResponsesTransport for WarmTransport {
 }
 
 // The cursor reads each trace byte once, retaining an unfinished trailing line.
-struct DaemonTrace {
+pub(super) struct DaemonTrace {
     input: BufReader<std::fs::File>,
     partial: String,
 }
 
 impl DaemonTrace {
-    fn open(path: &std::path::Path) -> Self {
+    pub(super) fn open(path: &std::path::Path) -> Self {
         Self {
             input: BufReader::new(std::fs::File::open(path).expect("retained owned-daemon JSONL")),
             partial: String::new(),
         }
     }
 
-    fn read(&mut self) -> Vec<Value> {
+    pub(super) fn read(&mut self) -> Vec<Value> {
         let mut rows = Vec::new();
         loop {
             let mut line = String::new();
