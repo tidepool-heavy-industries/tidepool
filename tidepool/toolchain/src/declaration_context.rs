@@ -113,26 +113,33 @@ impl ExactCompilationRequest {
         {
             return Err(failure("program context has another producer"));
         }
-        let mut validation = PackageInterfaceValidation::default();
-        let (materialized, references) =
-            context.materialize_with_validation(root, &mut validation)?;
-        context.validate_artifacts(&materialized.artifacts)?;
-        let original_owners = self
+        // This request already owns authenticated materializations for its
+        // baseline context. A later item adds immutable entries, while output
+        // admission still revalidates the full consumed files for tampering.
+        let baseline_ids = self
             .context
-            .recovery_products()
+            .artifact_view()
+            .artifact_ids()
             .into_iter()
-            .map(|product| product.owner().clone())
-            .collect::<Vec<_>>();
-        let references = references
+            .collect::<BTreeSet<_>>();
+        let current_entries = context.artifact_view().entries();
+        let current_ids = current_entries
+            .iter()
+            .map(|entry| entry.descriptor.id)
+            .collect::<BTreeSet<_>>();
+        if !baseline_ids.is_subset(&current_ids) {
+            return Err(failure("program context removed an admitted artifact"));
+        }
+        let new_entries = current_entries
             .into_iter()
-            .filter(|reference| {
-                !original_owners.iter().any(|owner| {
-                    owner.unit == reference.unit
-                        && owner.module == reference.module
-                        && owner.product_sha256 == reference.product_sha256
-                })
-            })
+            .filter(|entry| !baseline_ids.contains(&entry.descriptor.id))
             .collect::<Vec<_>>();
+        let mut validation = PackageInterfaceValidation::default();
+        let (mut materialized, references) =
+            context.materialize_entries_with_validation(root, &new_entries, &mut validation)?;
+        materialized
+            .artifacts
+            .extend(self.artifacts.iter().cloned());
         let verified = references
             .iter()
             .map(|reference| {
@@ -646,12 +653,14 @@ impl ExactDeclarationContext {
         exact_imports: &BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
     ) -> Result<Self, CompileError> {
         self.admit_producer(producer_sha256)?;
-        let existing = self
-            .inventory
-            .entries()
-            .into_iter()
-            .map(|entry| (entry.descriptor.owner.clone(), entry))
-            .collect::<BTreeMap<_, _>>();
+        if products.is_empty() {
+            return Ok(self);
+        }
+        let existing = self.inventory.entries_for_owners(
+            products
+                .iter()
+                .map(|product| identity(&product.owner().unit, &product.owner().module)),
+        );
         let mut entries = Vec::new();
         for product in products {
             let owner = identity(&product.owner().unit, &product.owner().module);
@@ -687,7 +696,6 @@ impl ExactDeclarationContext {
             )?);
         }
         self.inventory = self.inventory.inventory().admit(&self.inventory, entries)?;
-        self.normalize()?;
         Ok(self)
     }
 
@@ -951,32 +959,51 @@ impl ExactDeclarationContext {
         ),
         CompileError,
     > {
-        let references = if self.recovery_products().is_empty() {
+        self.materialize_entries_with_validation(root, &self.inventory.entries(), validation)
+    }
+
+    fn materialize_entries_with_validation(
+        &self,
+        root: &Path,
+        entries: &[Arc<ArtifactEntry>],
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<
+        (
+            MaterializedExactDeclarationContext,
+            Vec<RecoveryArtifactRef>,
+        ),
+        CompileError,
+    > {
+        let products = entries
+            .iter()
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Original(product) => Some(product.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let references = if products.is_empty() {
             Vec::new()
         } else {
             recovery_artifacts::materialize_certified_products_with_validation(
                 root,
                 self.producer,
-                &self.recovery_products(),
+                &products,
                 validation,
             )
             .map_err(failure)?
         };
-        let mut interfaces_only = self.joined_interfaces();
-        interfaces_only.extend(
-            self.value_interfaces()
-                .into_iter()
-                .map(|value| value.interface().clone()),
-        );
-        let joined = interfaces_only
+        let joined = entries
             .iter()
-            .map(|join| join.materialize_with_validation(root, validation))
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Interface(interface, _) => Some(interface),
+                _ => None,
+            })
+            .map(|interface| interface.materialize_with_validation(root, validation))
             .collect::<Result<Vec<_>, _>>()
             .map_err(failure)?;
-        let interfaces = self.interface_owners();
-        let requirements = interfaces
+        let requirements = entries
             .iter()
-            .map(|interface| (&interface.owner, &interface.requirements))
+            .map(|entry| (&entry.descriptor.owner, &entry.requirements))
             .collect::<BTreeMap<_, _>>();
         let mut artifacts = Vec::new();
         for reference in &references {
@@ -1299,6 +1326,71 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
     use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion};
+    #[test]
+    fn unchanged_program_context_reuses_materialization_but_admission_checks_tampering() {
+        let owner = CachedHomeOwner {
+            unit: "fixture".into(),
+            module: "Support".into(),
+            module_version: ModuleVersion([1; 32]),
+            skinny_iface_sha256: Sha256::digest(b"interface").into(),
+            product_sha256: Sha256::digest(b"product").into(),
+        };
+        let certification =
+            crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
+                .unwrap();
+        let product = CertifiedRecoveryProduct::from_certification(
+            owner,
+            b"interface".to_vec(),
+            b"product".to_vec(),
+            Vec::new(),
+            certification,
+        );
+        let context = Arc::new(
+            ExactDeclarationContext::new(&[], &[], Vec::new())
+                .unwrap()
+                .extend_checked_original_products([2; 32], &[product], &BTreeMap::new())
+                .unwrap(),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let artifacts = vec![DeclarationArtifact {
+            interface: ExactIfaceArtifact {
+                unit: "fixture".into(),
+                module: "Support".into(),
+                path: directory.path().join("missing.hi"),
+                sha256: sha256(b"interface"),
+                requirements: Vec::new(),
+            },
+            product: Some(ModuleSnapshot {
+                module: "Support".into(),
+                path: directory.path().join("missing.bin"),
+                sha256: sha256(b"product"),
+            }),
+        }];
+        let request = ExactCompilationRequest {
+            context: context.clone(),
+            manifest: directory.path().join("scope"),
+            request_sha256: String::new(),
+            semantic_sha256: [1; 32],
+            producer_sha256: [2; 32],
+            artifacts,
+            groups: Arc::from([]),
+        };
+        let materialization_root = directory.path().join("program-inputs");
+        let effective = request
+            .in_program_context(&materialization_root, context)
+            .unwrap();
+        assert!(!materialization_root.exists());
+        assert_eq!(
+            effective.artifacts[0].interface.path,
+            request.artifacts[0].interface.path
+        );
+        assert!(Arc::ptr_eq(&effective.groups, &request.groups));
+        assert!(effective
+            .context
+            .validate_artifacts(&effective.artifacts)
+            .is_err());
+    }
+
     #[test]
     fn supporting_originals_preserve_owned_products_without_lexical_exposure() {
         let owner = CachedHomeOwner {
