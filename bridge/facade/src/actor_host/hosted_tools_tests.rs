@@ -11,7 +11,7 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
             std::fs::create_dir_all(directory.join("Project")).unwrap();
             std::fs::write(directory.join("Project/Tools.hs"), include_str!("hosted_tools_fixture.hs")).unwrap();
             std::fs::write(directory.join("config.toml"),
-                "[defaults]\nmodel='gpt-6-sol'\n[haskell]\nsource_roots=['.']\nmodules=['Project.Tools']\ntools='Project.Tools.tools'\n").unwrap();
+                "[defaults]\nmodel='gpt-6-sol'\n[haskell]\nsource_roots=['.']\nmodules=['Project.Tools']\nspec='Project.Tools.agentSpec'\n").unwrap();
             config.workspace_inputs = Some(crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root).unwrap());
         },
     ).await;

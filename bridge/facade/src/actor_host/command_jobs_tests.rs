@@ -347,7 +347,7 @@ pub(super) async fn backend_request(
 
 #[tokio::test]
 async fn structured_bash_uses_compiled_handler_and_shared_command_owner() {
-    let mut campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
     assert!(policy.tools().iter().any(|tool| matches!(tool,
         exomonad_tool::HostedTool::Function(declaration) if declaration.name == "bash")));
@@ -407,7 +407,7 @@ async fn structured_bash_uses_compiled_handler_and_shared_command_owner() {
 
 #[tokio::test]
 async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution() {
-    let mut campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
     let call = |name: &str, arguments| {
         policy.dispatch_boxed(ToolInvocation {
@@ -550,7 +550,7 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
 
 #[tokio::test]
 async fn structured_bash_oversized_output_retains_a_real_job() {
-    let mut campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start_with_shell().await;
     let backend = TestCommands::new();
     *backend.stdout.lock() = format!("BEGIN\n{}\nEND\n", "λ".repeat(32_000));
     backend.finish.send_replace(true);
@@ -638,7 +638,7 @@ async fn structured_bash_oversized_output_retains_a_real_job() {
 
 #[tokio::test]
 async fn structured_bash_timeout_preserves_the_command_for_haskell_continuation() {
-    let mut campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start_with_shell().await;
     let backend = TestCommands::new();
     let policy = campaign.root_installation.policy.clone();
     let running = tokio::spawn(policy.dispatch_boxed(ToolInvocation {
@@ -711,7 +711,7 @@ async fn structured_bash_timeout_preserves_the_command_for_haskell_continuation(
 /// the two tools not covered by the other command-jobs tests in this file.
 #[tokio::test]
 async fn write_stdin_and_cancel_command_each_name_the_same_retained_binding() {
-    let mut campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start_with_shell().await;
     let backend = TestCommands::new();
     let policy = campaign.root_installation.policy.clone();
     let call = |name: &str, arguments| {
@@ -1365,7 +1365,7 @@ async fn failed_command_display_retains_result_without_reexecution() {
 
 #[tokio::test]
 async fn command_jobs_cancel_before_backend_cannot_start_later() {
-    let mut campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start_with_shell().await;
     let started = campaign
         .root_installation
         .policy
@@ -1433,7 +1433,7 @@ async fn command_jobs_cancel_before_backend_cannot_start_later() {
 /// than hanging.
 #[tokio::test]
 async fn command_cancel_is_bounded_when_the_backend_never_confirms() {
-    let mut campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
     let running = tokio::spawn(policy.clone().dispatch_boxed(ToolInvocation {
         context: None,
@@ -2001,7 +2001,7 @@ pub(crate) async fn result_presentation_cases() -> Vec<(
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 
-    let mut campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
     let running = tokio::spawn(policy.dispatch_boxed(ToolInvocation {
         context: None,
@@ -2064,7 +2064,7 @@ pub(crate) async fn result_presentation_cases() -> Vec<(
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 
-    let mut campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
     let running = tokio::spawn(policy.dispatch_boxed(ToolInvocation {
         context: None,
@@ -2103,7 +2103,7 @@ pub(crate) async fn result_presentation_cases() -> Vec<(
 #[tokio::test]
 async fn flat_input_lifecycle_preserves_partial_acknowledgments() {
     use std::sync::atomic::Ordering::Release;
-    let mut campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
     let call = |name: &str, arguments| {
         policy.dispatch_boxed(ToolInvocation {
@@ -2256,7 +2256,7 @@ async fn resident_print_preserves_order_and_output_before_same_unit_failure() {
 #[tokio::test]
 async fn flat_output_pending_is_distinct_from_empty_and_failure() {
     use std::sync::atomic::Ordering::Release;
-    let mut campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
     let call = |name: &str, arguments| {
         policy.dispatch_boxed(ToolInvocation {
@@ -2359,7 +2359,7 @@ async fn command_receipts_preserve_owner_settlement_across_continuation_failure(
 
 #[tokio::test]
 async fn flat_pty_eof_rejection_proves_no_input_submitted() {
-    let mut campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
     let call = |name: &str, arguments| {
         policy.dispatch_boxed(ToolInvocation {
@@ -2631,7 +2631,7 @@ async fn sibling_actor_progresses_during_foreground_command_wait() {
 
 #[tokio::test]
 async fn background_bash_returns_at_once_and_its_notice_carries_the_source() {
-    let mut campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
     let running = tokio::spawn(policy.dispatch_boxed(ToolInvocation {
         context: None,

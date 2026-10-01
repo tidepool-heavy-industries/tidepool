@@ -243,7 +243,7 @@ async fn accepted_stdin_is_acknowledged_even_when_presentation_would_exhaust_obs
     let mut campaign = TestCampaign::start_with_conversation(
         exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
-        |_| {},
+        super::test_campaign::configure_shell_workspace,
         Some(reader),
     )
     .await;

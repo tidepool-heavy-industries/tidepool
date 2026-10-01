@@ -26,6 +26,27 @@ pub(super) fn commit_workspace(workspace: &std::path::Path) {
     .unwrap();
 }
 
+/// Select the shell record explicitly for tests of the hosted command tools.
+pub(super) fn configure_shell_workspace(config: &mut ActorHostConfig) {
+    let authored = config.workspace.join(".exomonad");
+    std::fs::create_dir_all(&authored).unwrap();
+    std::fs::write(
+        authored.join("AgentSpec.hs"),
+        include_str!("fixtures/shell_agent_spec.hs"),
+    )
+    .unwrap();
+    std::fs::write(
+        authored.join("config.toml"),
+        "[defaults]\nmodel='test-model'\n[haskell]\nsource_roots=['.']\nspec='AgentSpec.agentSpec'\n",
+    )
+    .unwrap();
+    commit_workspace(&config.workspace);
+    config.workspace_inputs = Some(
+        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+            .unwrap(),
+    );
+}
+
 pub(super) struct TestCampaign {
     pub config: ActorHostConfig,
     pub _repository: exomonad_worktree::testing::TestRepo,
@@ -196,6 +217,15 @@ impl TestCampaign {
 
     pub async fn start() -> Self {
         Self::start_with_research_policy(exomonad_actor::ResearchPolicy::default()).await
+    }
+
+    pub async fn start_with_shell() -> Self {
+        Self::start_with_config(
+            exomonad_actor::ResearchPolicy::default(),
+            |admission| admission,
+            configure_shell_workspace,
+        )
+        .await
     }
 
     pub async fn start_with_research_policy(

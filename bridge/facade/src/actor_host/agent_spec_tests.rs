@@ -31,7 +31,7 @@ fn tools_module(description: &str, answer: &str) -> String {
 {{-# LANGUAGE DeriveGeneric #-}}
 {{-# LANGUAGE OverloadedStrings #-}}
 {{-# LANGUAGE TypeOperators #-}}
-module Project.Tools (SpecTools (..), Probe (..), probeBody, tools) where
+module Project.Tools (SpecTools (..), Probe (..), probeBody, tools, agentSpec) where
 
 import Control.Monad.Freer (Eff)
 import Data.Text (Text)
@@ -52,6 +52,9 @@ probeBody _ = pure "{answer}"
 
 tools :: SpecTools (AsServerT (Eff effects))
 tools = SpecTools {{ probe = tool "{description}" probeBody }}
+
+agentSpec :: AgentSpec SpecTools effects
+agentSpec = defaultSpec {{ specTools = tools }}
 "#
     )
 }
@@ -168,7 +171,7 @@ const REENTERS: &str = "Annotated . (T.pack \"the slot ran the tool body and got
 
 const CONFIG: &str = "[defaults]\nmodel = 'gpt-6-sol'\n\
                       [haskell]\nsource_roots = ['.']\nmodules = ['Project.Tools']\n\
-                      tools = 'Project.Tools.tools'\n";
+                      spec = 'Project.Tools.agentSpec'\n";
 
 /// The same workspace with rule two answering: `[haskell] spec` names the
 /// module, so the ROOT installs the spec and its slot without needing a
@@ -176,7 +179,6 @@ const CONFIG: &str = "[defaults]\nmodel = 'gpt-6-sol'\n\
 const SPEC_CONFIG: &str = "[defaults]\nmodel = 'gpt-6-sol'\n\
                            [haskell]\nsource_roots = ['.']\n\
                            modules = ['Project.Tools', 'AgentSpec']\n\
-                           tools = 'Project.Tools.tools'\n\
                            spec = 'AgentSpec.agentSpec'\n";
 
 fn write_workspace(workspace: &Path, description: &str, answer: &str) {
@@ -588,21 +590,38 @@ async fn a_spec_that_does_not_typecheck_leaves_the_old_one_active_and_the_file_o
     campaign.hosted.await.unwrap();
 }
 
-/// Discovery is implicit, so it is reported. A workspace with no `AgentSpec.hs`
-/// anywhere resolves by the existing `[haskell] tools` key, and says so — which
-/// is also the check that such a workspace behaves exactly as it did before
-/// specs existed.
+/// A workspace with no conventional or configured spec installs the empty
+/// default, even when it imports a module exporting tools.
 #[tokio::test]
-async fn a_workspace_without_a_spec_file_reports_the_tools_key_and_behaves_as_before() {
-    let campaign = start(DESCRIPTION, "one").await;
+async fn a_workspace_without_a_spec_installs_the_empty_default() {
+    let campaign = TestCampaign::start_with_config(
+        exomonad_actor::ResearchPolicy::default(),
+        |admission| admission,
+        |config| {
+            write_workspace(&config.workspace, DESCRIPTION, "one");
+            std::fs::write(
+                config.workspace.join(".exomonad/config.toml"),
+                "[defaults]\nmodel='gpt-6-sol'\n[haskell]\nsource_roots=['.']\nmodules=['Project.Tools']\n",
+            )
+            .unwrap();
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
+            );
+        },
+    )
+    .await;
     let policy = campaign.root_installation.policy.clone();
     let policy = policy.as_ref();
 
     let status = status(policy).await;
-    assert!(status.contains("workspace tools key"), "{status}");
-    assert!(status.contains("Project.Tools.tools"), "{status}");
+    assert!(status.contains("built-in default"), "{status}");
     assert!(status.contains("slots=[]"), "{status}");
-    assert!(probe(policy).await.contains("one"));
+    assert!(!policy.tools().iter().any(|tool| tool.name() == "probe"));
+    assert!(!policy.tools().iter().any(|tool| tool.name() == "bash"));
 
     // The Haskell workbench is untouched by any of this.
     let cell = dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)").await;
@@ -994,7 +1013,12 @@ async fn the_root_finds_its_spec_by_convention_with_no_key_naming_it() {
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, DESCRIPTION, "keptwhole");
-            // CONFIG names only the tools key, and lists no spec module.
+            // Remove the configured spec so convention alone selects AgentSpec.
+            std::fs::write(
+                config.workspace.join(".exomonad/config.toml"),
+                CONFIG.replace("spec = 'Project.Tools.agentSpec'\n", ""),
+            )
+            .unwrap();
             std::fs::write(
                 config.workspace.join(".exomonad/AgentSpec.hs"),
                 spec_module(ANNOTATES),
@@ -1212,7 +1236,7 @@ const NESTED_TOOLS_MODULE: &str = r#"{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeOperators #-}
-module Project.Tools (MyTools (..), Probe (..), tools) where
+module Project.Tools (MyTools (..), Probe (..), tools, agentSpec) where
 
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
@@ -1236,9 +1260,12 @@ tools = MyTools
   { shell = Shell.tools
   , probe = tool "Answer one fixed question about a topic." (\_ -> pure "one")
   }
+
+agentSpec :: Member Cmd.Commands effects => AgentSpec MyTools effects
+agentSpec = defaultSpec { specTools = tools }
 "#;
 
-/// A campaign whose workspace `[haskell] tools` key names the nesting record.
+/// A campaign whose configured spec installs the nesting record.
 async fn start_nested() -> TestCampaign {
     TestCampaign::start_with_config(
         exomonad_actor::ResearchPolicy::default(),
