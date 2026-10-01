@@ -3676,7 +3676,11 @@ fn run_turn_with_pin(
         });
     }
 
-    let mut result = decode_turn_output_dir(output_dir, &offer).map_err(|error| TurnFailure {
+    let decoded = match &run {
+        TurnCompilerOutput::Admitted(run) => decode_admitted_turn_output(run),
+        TurnCompilerOutput::Direct(_) => decode_turn_output_dir(output_dir, &offer),
+    };
+    let mut result = decoded.map_err(|error| TurnFailure {
         error: offer.retain_failure(
             output_dir,
             &output.stderr,
@@ -3814,6 +3818,99 @@ pub(super) fn select_module_candidate_offer(
         }
         None => Ok(ModuleCandidateOffer::select(producer, include, scratch)),
     }
+}
+
+/// Construct the runtime observation from the original immutable admitted
+/// bundle. The exposed directory is retained only for compile diagnostics.
+fn decode_admitted_turn_output(
+    output: &tidepool_toolchain::artifacts::AdmittedTurnOutput,
+) -> Result<TurnResult, CompileError> {
+    let missing =
+        || CompileError::ExtractFailed("admitted turn lacks retained observations".into());
+    let turn = decode_turn_out(output.turn_bytes().ok_or_else(missing)?)?;
+    match turn {
+        DecodedTurnOut::Decl {
+            binders,
+            items,
+            source,
+        } => {
+            if output.native_output().is_some() {
+                return Err(CompileError::ExtractFailed(
+                    "declaration has a native output".into(),
+                ));
+            }
+            Ok(TurnResult::Decl(DeclarationReceipt {
+                binders,
+                items,
+                source,
+            }))
+        }
+        DecodedTurnOut::Bind {
+            binders,
+            variant,
+            bound,
+            asks,
+            wrapped_source,
+        } => {
+            let compiled = retained_compiled_turn(output, asks, &wrapped_source)?;
+            Ok(TurnResult::Bind {
+                binders,
+                variant,
+                bound,
+                compiled,
+                wrapped_source,
+            })
+        }
+        DecodedTurnOut::Expr {
+            variant,
+            asks,
+            wrapped_source,
+        } => {
+            let compiled = retained_compiled_turn(output, asks, &wrapped_source)?;
+            Ok(TurnResult::Expr {
+                variant,
+                compiled,
+                wrapped_source,
+            })
+        }
+    }
+}
+
+fn retained_compiled_turn(
+    output: &tidepool_toolchain::artifacts::AdmittedTurnOutput,
+    asks: Vec<YieldSite>,
+    wrapped_source: &str,
+) -> Result<CompiledTurn, CompileError> {
+    let native = output.native_output().ok_or_else(|| {
+        CompileError::ExtractFailed("admitted native turn has no retained bundle".into())
+    })?;
+    if native.source() != wrapped_source {
+        return Err(CompileError::ExtractFailed(
+            "admitted native source differs from observation".into(),
+        ));
+    }
+    let compiled = CompiledTurn {
+        table: native.table().clone(),
+        warnings: native.warnings().clone(),
+        asks,
+        prepared: native.target_owned(),
+        certification: native.products().map(|products| TurnCertification {
+            compile_input_identity: products.compile_input_identity.clone(),
+            groups: products.certified_groups.clone(),
+            target_owners: products.pending_imports.clone(),
+            package_interfaces: products.package_interfaces.clone(),
+            recovery_products: products.recovery_products.clone(),
+            checked_item: None,
+            checked_execution: products.checked_execution.clone(),
+            checked_prefix: None,
+            checked_display: products.checked_display.clone(),
+            checked_display_admission: None,
+        }),
+    };
+    if let Some(certification) = &compiled.certification {
+        certification.validate_checked_table(&compiled.table)?;
+    }
+    Ok(compiled)
 }
 
 /// Decode one item's full output directory into a [`TurnResult`]: the

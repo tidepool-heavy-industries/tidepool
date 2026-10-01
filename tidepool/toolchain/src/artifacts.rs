@@ -443,7 +443,15 @@ impl ModuleCandidateOffer {
         };
         let sites = decode_turn_yield_sites(site_observations)?;
         let mut output = read_native_turn_artifacts(directory, turn.clone(), source.to_owned())?;
+        let deserialize_start = Instant::now();
         let (table, warnings) = read_metadata(&output.metadata)?;
+        timing::record_stage(
+            timing::NO_NODE,
+            timing::NO_ROUND,
+            timing::STAGE_CBOR_DESERIALIZE,
+            deserialize_start.elapsed(),
+            0,
+        );
         let module = extract_module_name(source).ok_or_else(|| {
             CompileError::ExtractFailed("admitted turn source module missing".into())
         })?;
@@ -1427,12 +1435,31 @@ fn read_native_turn_artifacts(
     turn: Arc<[u8]>,
     source: String,
 ) -> Result<ProgramNativeOutput, CompileError> {
+    let prepared_read_start = Instant::now();
+    let prepared_bytes =
+        crate::checked_cell::read(directory.join("__prepared.prepared.cbor"), 128 << 20)?;
+    timing::record_stage(
+        timing::NO_NODE,
+        timing::NO_ROUND,
+        timing::STAGE_PREPARED_READ,
+        prepared_read_start.elapsed(),
+        prepared_bytes.len() as u64,
+    );
     let target = Arc::new(tidepool_repr::execution_schema::parse_program(
-        &crate::checked_cell::read(directory.join("__prepared.prepared.cbor"), 128 << 20)?,
+        &prepared_bytes,
         &crate::prepared_artifact::production_requirements()?,
         DecodeLimits::default(),
     )?);
-    let metadata = crate::checked_cell::read(directory.join("meta.cbor"), 32 << 20)?.into();
+    let metadata_read_start = Instant::now();
+    let metadata: Arc<[u8]> =
+        crate::checked_cell::read(directory.join("meta.cbor"), 32 << 20)?.into();
+    timing::record_stage(
+        timing::NO_NODE,
+        timing::NO_ROUND,
+        timing::STAGE_CBOR_READ,
+        metadata_read_start.elapsed(),
+        metadata.len() as u64,
+    );
     Ok(ProgramNativeOutput {
         directory: directory.to_owned(),
         target,
