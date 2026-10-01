@@ -1,7 +1,7 @@
 use super::test_campaign::TestCampaign;
 use super::tests::{dispatch_haskell_script, dispatch_lookup};
 use super::*;
-use exomonad_actor::command_jobs::{CommandBackend, CommandControl};
+use exomonad_actor::command_jobs::{CommandBackend, CommandBackendPurpose, CommandControl};
 use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 use tidepool_bridge_effects::*;
 
@@ -10,6 +10,7 @@ pub(super) struct TestCommands {
     stdout: Mutex<String>,
     stderr: Mutex<String>,
     exit_code: std::sync::atomic::AtomicI64,
+    script_exit_code: Mutex<Option<(String, i64)>>,
     /// Nonzero selects `CommandOutOfMemory(mib)` over the exit-code outcome —
     /// this backend bypasses real resource admission entirely, so an OOM
     /// outcome has to be injected directly to exercise how it presents.
@@ -91,6 +92,7 @@ impl TestCommands {
             stdout: Mutex::new("result".into()),
             stderr: Mutex::new(String::new()),
             exit_code: 0.into(),
+            script_exit_code: Mutex::new(None),
             oom_mib: 0.into(),
             degraded_output: false.into(),
             finish: watch::channel(false).0,
@@ -146,6 +148,12 @@ impl CommandBackend for TestCommands {
         _phase: watch::Sender<CommandStatus>,
     ) -> futures_util::future::BoxFuture<'a, CommandResult> {
         Box::pin(async move {
+            let script_exit_code = self
+                .script_exit_code
+                .lock()
+                .as_ref()
+                .filter(|(script, _)| spec.argv.get(4) == Some(script))
+                .map(|(_, exit_code)| *exit_code);
             self.specs.lock().push(spec);
             let mut done = self.finish.subscribe();
             while !*done.borrow_and_update() {
@@ -158,9 +166,9 @@ impl CommandBackend for TestCommands {
                 } else if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
                     CommandOutcome::CommandCancelled
                 } else {
-                    CommandOutcome::CommandExited(
-                        self.exit_code.load(std::sync::atomic::Ordering::Acquire),
-                    )
+                    CommandOutcome::CommandExited(script_exit_code.unwrap_or_else(|| {
+                        self.exit_code.load(std::sync::atomic::Ordering::Acquire)
+                    }))
                 },
                 cleanup: CommandCleanup::CommandClean,
             }
@@ -331,6 +339,20 @@ pub(super) async fn committed(campaign: &TestCampaign, source: &str) -> serde_js
     result
 }
 pub(super) async fn backend_request(
+    campaign: &mut TestCampaign,
+) -> Arc<exomonad_actor::command_jobs::CommandBackendRequest> {
+    loop {
+        let request = raw_backend_request(campaign).await;
+        match request.purpose {
+            CommandBackendPurpose::Command => return request,
+            CommandBackendPurpose::SourceProbe => request.supply(Ok(TestCommands::completed(
+                "/work/tree\n0123456789abcdef0123456789abcdef01234567\nclean\n",
+            ))),
+        }
+    }
+}
+
+pub(super) async fn raw_backend_request(
     campaign: &mut TestCampaign,
 ) -> Arc<exomonad_actor::command_jobs::CommandBackendRequest> {
     campaign
@@ -1255,6 +1277,7 @@ async fn command_output_ux_preserves_large_values_and_decodes_complete_stdout() 
         "streams-independent",
         "decode-error-distinct",
         "omission-kinds-preserved",
+        "unavailable-output-typed",
     ] {
         assert!(text.contains(marker), "missing {marker}: {text}");
     }
@@ -1368,7 +1391,8 @@ async fn bound_command_result_is_summarized_and_remains_readable() {
         .supply(Ok(unbound_backend.clone()));
     let unbound = unbound_run.await.unwrap();
     let unbound_output = unbound["items"][0]["output"].as_str().unwrap();
-    assert!(unbound_output.contains("session_id:"), "{unbound}");
+    assert!(unbound_output.contains("CommandExited 0"), "{unbound}");
+    assert!(!unbound_output.contains("session_id:"), "{unbound}");
     assert!(unbound_output.contains('U'), "{unbound}");
     assert_eq!(backend.specs.lock().len(), 1, "reading reran the command");
     assert_eq!(unbound_backend.specs.lock().len(), 1);
@@ -1493,10 +1517,11 @@ async fn command_jobs_cancel_before_backend_cannot_start_later() {
             "{cancelled}"
         );
     }
-    let backend = TestCommands::new();
-    backend_request(&mut campaign)
-        .await
-        .supply(Ok(backend.clone()));
+    let backend =
+        TestCommands::completed("/work/tree\n0123456789abcdef0123456789abcdef01234567\nclean\n");
+    let request = raw_backend_request(&mut campaign).await;
+    assert_eq!(request.purpose, CommandBackendPurpose::SourceProbe);
+    request.supply(Ok(backend.clone()));
     let result = campaign
         .root_installation
         .policy
@@ -1510,7 +1535,20 @@ async fn command_jobs_cancel_before_backend_cannot_start_later() {
         .await
         .unwrap();
     assert!(result.to_string().contains("CommandCancelled"), "{result}");
-    assert!(backend.specs.lock().is_empty());
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            raw_backend_request(&mut campaign)
+        )
+        .await
+        .is_err(),
+        "a cancelled job requested a command backend after its late source probe"
+    );
+    assert!(backend
+        .specs
+        .lock()
+        .iter()
+        .all(|spec| spec.argv[4].contains("git rev-parse")));
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -1599,18 +1637,14 @@ async fn command_hidden_by_the_response_budget_remains_unobserved() {
 }
 
 #[tokio::test]
-async fn disconnected_foreground_caller_retries_the_same_handoff_without_reexecution() {
+async fn disconnected_command_wait_retries_the_same_invocation_without_reexecution() {
     let mut campaign = TestCampaign::start().await;
     let backend = TestCommands::new();
-    backend.finish.send_replace(true);
-    backend.hold_output.send_replace(true);
-    backend
-        .output_unavailable
-        .store(true, std::sync::atomic::Ordering::Release);
+    *backend.stdout.lock() = "first".into();
     let call_id = uuid::Uuid::new_v4().to_string();
     let invocation = || ToolInvocation {
         context: Some(ToolInvocationContext::external(
-            "disconnected-foreground".into(),
+            "disconnected-command-wait".into(),
             call_id.clone(),
             call_id.clone(),
             Some(call_id.clone()),
@@ -1625,10 +1659,30 @@ async fn disconnected_foreground_caller_retries_the_same_handoff_without_reexecu
     backend_request(&mut campaign)
         .await
         .supply(Ok(backend.clone()));
-    backend.output_entered.notified().await;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while backend.executions() == 0 {
+            assert!(!waiter.is_finished(), "command call ended before execution");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("command was not started");
+    assert!(
+        !waiter.is_finished(),
+        "terminal wait returned before completion"
+    );
     waiter.abort();
     assert!(waiter.await.unwrap_err().is_cancelled());
-    backend.hold_output.send_replace(false);
+    assert!(!backend.cancelled.load(std::sync::atomic::Ordering::Acquire));
+    backend.finish();
+    let second = TestCommands::completed("second");
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(second.clone()));
+    let suffix = TestCommands::completed("suffix");
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(suffix.clone()));
     let policy = campaign.root_installation.policy.as_ref();
     let recovered = policy.dispatch_boxed(invocation()).await.unwrap();
     let repeated = policy.dispatch_boxed(invocation()).await.unwrap();
@@ -1636,172 +1690,170 @@ async fn disconnected_foreground_caller_retries_the_same_handoff_without_reexecu
         recovered, repeated,
         "exact transport retry changed the receipt"
     );
-    assert_eq!(recovered["status"], "backgrounded", "{recovered}");
-    let binding = recovered["items"][1]["installedBindings"][0]
-        .as_str()
-        .unwrap();
+    assert_eq!(recovered["status"], "committed", "{recovered}");
+    assert!(
+        recovered.to_string().contains("suffix-resumed"),
+        "{recovered}"
+    );
     policy
         .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
-            "disconnected-foreground".into(),
+            "disconnected-command-wait".into(),
             call_id.clone(),
             call_id,
         ))
         .await
         .unwrap();
-    let usable = committed(&campaign, &format!("Cmd.status {binding}")).await;
-    assert!(usable.to_string().contains("CommandExited 0"), "{usable}");
-    assert_eq!(backend.specs.lock().len(), 1);
-    assert!(!backend.cancelled.load(std::sync::atomic::Ordering::Acquire));
+    let retained = committed(&campaign, "Cmd.stdout (fst attempt)").await;
+    assert!(retained.to_string().contains("first"), "{retained}");
+    for backend in [&backend, &second, &suffix] {
+        assert_eq!(
+            backend.executions(),
+            1,
+            "transport retry replayed a command"
+        );
+        assert!(!backend.cancelled.load(std::sync::atomic::Ordering::Acquire));
+    }
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
 
 #[tokio::test]
-async fn command_run_retains_job_after_output_observation_failure() {
+async fn command_run_returns_typed_output_failure_and_resumes_the_suffix() {
     let mut campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.clone();
     let running = tokio::spawn(async move {
         dispatch_haskell_script(policy.as_ref(), include_str!("command_foreground_stop.hs")).await
     });
-    let backend = TestCommands::new();
+    let backend = TestCommands::completed("first");
     backend
         .output_unavailable
         .store(true, std::sync::atomic::Ordering::Release);
-    backend.finish.send_replace(true);
     backend_request(&mut campaign)
         .await
         .supply(Ok(backend.clone()));
+    let second = TestCommands::completed("second");
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(second.clone()));
+    let suffix = TestCommands::completed("suffix");
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(suffix.clone()));
     let result = running.await.unwrap();
-    assert_eq!(result["status"], "backgrounded", "{result}");
-    assert_eq!(result["items"][0]["status"], "committed", "{result}");
-    assert_eq!(result["items"][1]["status"], "stopped", "{result}");
-    assert_eq!(result["items"][2]["status"], "notRun", "{result}");
-    let binding = result["items"][1]["installedBindings"][0].as_str().unwrap();
-    assert_eq!(
-        backend.specs.lock().len(),
-        1,
-        "abandoned continuation ran another command"
-    );
-    let retained = committed(&campaign, &format!("Cmd.status {binding}")).await;
-    assert!(
-        retained.to_string().contains("CommandExited 0"),
-        "{retained}"
-    );
-    let missing = dispatch_haskell_script(
-        campaign.root_installation.policy.as_ref(),
-        "Cmd.job attempt",
-    )
-    .await;
-    assert!(
-        missing.to_string().contains("not in scope")
-            || missing.to_string().contains("Not in scope"),
-        "{missing}"
-    );
+    assert_eq!(result["status"], "committed", "{result}");
+    for item in result["items"].as_array().unwrap() {
+        assert_eq!(item["status"], "committed", "{result}");
+    }
+    let projected = committed(&campaign,
+        "(Cmd.commandOutcome (Cmd.commandResult (fst attempt)), Cmd.capturedOutput (fst attempt), Cmd.stdout (fst attempt), Cmd.stderr (fst attempt))",
+    ).await;
+    let typed = projected["items"][0]["output"].as_str().unwrap();
+    assert!(typed.contains("CommandExited 0"), "{typed}");
+    assert!(typed.contains("CommandUnavailable"), "{typed}");
+    assert_eq!(typed.matches("OutputUnavailable").count(), 2, "{typed}");
+    let text = result.to_string();
+    assert!(text.contains("output transport lost"), "{text}");
+    for marker in ["second", "suffix", "suffix-resumed"] {
+        assert!(text.contains(marker), "missing {marker}: {text}");
+    }
     let prefix = committed(&campaign, "foregroundPrefix").await;
     assert!(prefix.to_string().contains("prefix-preserved"), "{prefix}");
-    let repeated = dispatch_haskell_script(
-        campaign.root_installation.policy.as_ref(),
-        &format!("Cmd.await {binding}"),
-    )
-    .await;
-    assert_eq!(
-        repeated["items"][0]["installedBindings"][0], binding,
-        "{repeated}"
-    );
-    committed(
-        &campaign,
-        &format!("let savedCommandJob = {binding}\n{binding} <- pure (17 :: Int)"),
-    )
-    .await;
-    let shadowed = dispatch_haskell_script(
-        campaign.root_installation.policy.as_ref(),
-        "Cmd.await savedCommandJob",
-    )
-    .await;
-    let fresh = shadowed["items"][0]["installedBindings"][0]
-        .as_str()
-        .unwrap();
-    assert_ne!(
-        fresh, binding,
-        "shadowed automatic alias was reused: {shadowed}"
-    );
-    let preserved = committed(&campaign, binding).await;
-    assert!(preserved.to_string().contains("17"), "{preserved}");
-    let binding = fresh;
     backend
         .output_unavailable
         .store(false, std::sync::atomic::Ordering::Release);
     let recovered = committed(
         &campaign,
-        &format!("recovered <- Cmd.await {binding}\nCmd.stdout recovered"),
+        "recovered <- Cmd.await (Cmd.job (fst attempt))\nCmd.stdout recovered",
     )
     .await;
-    assert!(recovered.to_string().contains("result"), "{recovered}");
-    assert_eq!(backend.specs.lock().len(), 1, "recovery reran the command");
+    assert!(recovered.to_string().contains("first"), "{recovered}");
+    for backend in [&backend, &second, &suffix] {
+        assert_eq!(
+            backend.executions(),
+            1,
+            "output recovery replayed a command"
+        );
+    }
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
 
 #[tokio::test]
-async fn command_foreground_deadline_installs_binding_without_cancelling_or_resuming() {
+async fn command_wait_preserves_the_exact_continuation_until_terminal_completion() {
     let mut campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.clone();
     let running = tokio::spawn(async move {
         dispatch_haskell_script(policy.as_ref(), include_str!("command_foreground_stop.hs")).await
     });
     let backend = TestCommands::new();
+    *backend.stdout.lock() = "first".into();
     backend_request(&mut campaign)
         .await
         .supply(Ok(backend.clone()));
-    let result = running.await.unwrap();
-    assert_eq!(result["status"], "backgrounded", "{result}");
-    assert_eq!(result["items"][1]["status"], "stopped", "{result}");
-    assert_eq!(result["items"][2]["status"], "notRun", "{result}");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while backend.executions() == 0 {
+            assert!(
+                !running.is_finished(),
+                "command program ended before execution"
+            );
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("command was not started");
     assert!(
-        result["items"][1]["output"]
-            .as_str()
-            .unwrap()
-            .contains("stdout ·"),
-        "handoff omitted available output: {result}"
+        !running.is_finished(),
+        "terminal wait returned for a running command"
     );
-    let binding = result["items"][1]["installedBindings"][0].as_str().unwrap();
-    let live = committed(&campaign, &format!("Cmd.status {binding}")).await;
-    assert!(!live.to_string().contains("CommandFinished"), "{live}");
     assert!(!backend.cancelled.load(std::sync::atomic::Ordering::Acquire));
-    assert_eq!(backend.specs.lock().len(), 1);
-    backend.finish.send_replace(true);
-    let recovered = committed(
-        &campaign,
-        &format!("recovered <- Cmd.await {binding}\nCmd.stdout recovered"),
-    )
-    .await;
-    assert!(recovered.to_string().contains("result"), "{recovered}");
-    assert_eq!(
-        backend.specs.lock().len(),
-        1,
-        "await resumed the abandoned continuation"
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), backend_request(&mut campaign))
+            .await
+            .is_err(),
+        "the suffix started before the first command finished"
     );
+    backend.finish();
+    let second = TestCommands::completed("second");
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(second.clone()));
+    let suffix = TestCommands::completed("suffix");
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(suffix.clone()));
+    let result = running.await.unwrap();
+    assert_eq!(result["status"], "committed", "{result}");
+    for item in result["items"].as_array().unwrap() {
+        assert_eq!(item["status"], "committed", "{result}");
+    }
+    let text = result.to_string();
+    for marker in ["first", "second", "suffix", "suffix-resumed"] {
+        assert!(text.contains(marker), "missing {marker}: {text}");
+    }
+    assert_eq!(backend.specs.lock()[0].argv[4], "printf first");
+    assert_eq!(second.specs.lock()[0].argv[4], "printf second");
+    assert_eq!(suffix.specs.lock()[0].argv[4], "printf suffix");
+    for backend in [&backend, &second, &suffix] {
+        assert_eq!(backend.executions(), 1, "continuation replayed a command");
+    }
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
 
 #[tokio::test]
-async fn command_handler_failure_does_not_install_interactive_recovery_binding() {
+async fn command_handler_returns_typed_output_failure_without_interactive_recovery() {
     let mut campaign = TestCampaign::start().await;
     committed(&campaign, include_str!("command_handler_stop.hs")).await;
     let policy = campaign.root_installation.policy.clone();
     let mut running = tokio::spawn(async move {
-        super::tests::dispatch_haskell_script_result(
-            policy.as_ref(),
-            "R.call (execute (R.client handler)) ()",
-        )
-        .await
+        super::tests::dispatch_haskell_script_result(policy.as_ref(),
+            "handled <- R.call (execute (R.client handler)) ()\n(Cmd.commandOutcome (Cmd.commandResult handled), Cmd.capturedOutput handled, Cmd.stdout handled, Cmd.stderr handled)\n\"handler-suffix-resumed\" :: Text",
+        ).await
     });
-    let backend = TestCommands::new();
+    let backend = TestCommands::completed("handler");
     backend
         .output_unavailable
         .store(true, std::sync::atomic::Ordering::Release);
-    backend.finish.send_replace(true);
     let request = tokio::select! {
         result = &mut running => panic!("handler ended before requesting backend: {result:?}"),
         request = backend_request(&mut campaign) => request,
@@ -1810,19 +1862,25 @@ async fn command_handler_failure_does_not_install_interactive_recovery_binding()
     let result = running
         .await
         .unwrap()
-        .expect_err("handler failure must propagate")
-        .to_string();
-    assert!(result.contains("output transport lost"), "{result}");
-    assert!(!result.contains("installedBindings"), "{result}");
-    assert!(!result.contains("Continue with:"), "{result}");
-    assert_eq!(backend.specs.lock().len(), 1);
+        .expect("output availability is a typed handler result");
+    assert_eq!(result["status"], "committed", "{result}");
+    let typed = result["items"][1]["output"].as_str().unwrap();
+    assert!(typed.contains("CommandExited 0"), "{result}");
+    assert!(typed.contains("CommandUnavailable"), "{result}");
+    assert_eq!(typed.matches("OutputUnavailable").count(), 2, "{result}");
+    assert!(
+        result.to_string().contains("handler-suffix-resumed"),
+        "{result}"
+    );
+    assert!(!result.to_string().contains("Continue with:"), "{result}");
+    assert_eq!(backend.executions(), 1);
     committed(&campaign, "21 + 21 :: Int").await;
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
 
 #[tokio::test]
-async fn command_presentation_is_automatic_scoped_and_retains_quiet_results() {
+async fn command_wait_values_and_explicit_observations_have_one_display_owner() {
     let mut campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.clone();
     let mut running = tokio::spawn(async move {
@@ -1846,28 +1904,35 @@ async fn command_presentation_is_automatic_scoped_and_retains_quiet_results() {
     assert!(!text(1).contains("stdout ·"), "{result}");
     assert_eq!(text(2).matches("stdout ·").count(), 1, "{result}");
     // The finished-command status/next block renders exactly once, not once
-    // from `await`'s own presentation and again from the returned RunResult's
-    // automatic display.
+    // from an implicit command presentation and again from ordinary value display.
     assert_eq!(
         text(2).matches("next: inspect outcome and output").count(),
         1,
         "status block renders once: {result}"
     );
     assert!(text(3).contains("Right \"result\""), "{result}");
-    // The summarized bound command's output is first presented here, once.
-    assert_eq!(
-        text(4).matches("stdout ·").count(),
-        1,
-        "await presents output exactly once: {result}"
-    );
-    assert_eq!(
-        text(4).matches("next: inspect outcome and output").count(),
-        1,
-        "status block renders once: {result}"
+    assert!(
+        !text(4).contains("stdout ·"),
+        "bound await presented output: {result}"
     );
     assert!(
-        text(5).contains("result"),
-        "explicit output was consumed: {result}"
+        !text(4).contains("retained as"),
+        "await minted a presentation binding: {result}"
+    );
+    assert!(text(5).contains("Right \"result\""), "{result}");
+    assert_eq!(
+        text(6).matches("stdout ·").count(),
+        1,
+        "explicit observation presents output exactly once: {result}"
+    );
+    assert_eq!(
+        text(6).matches("next: inspect outcome and output").count(),
+        1,
+        "observation status block renders once: {result}"
+    );
+    assert!(
+        text(7).contains("result"),
+        "explicit page output was consumed: {result}"
     );
     assert_eq!(backend.specs.lock().len(), 3);
     campaign.forest.shutdown().await;
@@ -1891,10 +1956,7 @@ async fn command_skill_examples_execute_in_the_resident_workbench() {
     let backend = TestCommands::new();
     backend.finish.send_replace(true);
     tokio::select! {
-        request = campaign.next_deployment("first skill backend", Duration::from_secs(300), |event| match event {
-            LocalResidentDeployment::CommandBackend(request) => Ok(request),
-            other => Err(other),
-        }) => request.supply(Ok(backend.clone())),
+        request = backend_request(&mut campaign) => request.supply(Ok(backend.clone())),
         result = &mut running => panic!("skill failed before launching: {result:?}"),
     }
     let first = running.await.unwrap();
@@ -1916,12 +1978,6 @@ async fn command_skill_examples_execute_in_the_resident_workbench() {
     // the exact commit it ran at.
     committed(&campaign, examples.next().unwrap()).await;
     let commit = "0123456789abcdef0123456789abcdef01234567";
-    backend_request(&mut campaign)
-        .await
-        .supply(Ok(TestCommands::completed_streams(
-            &format!("/work/tree\n{commit}\nclean\n"),
-            "",
-        )));
     backend_request(&mut campaign)
         .await
         .supply(Ok(TestCommands::completed("test result: ok")));
@@ -1984,7 +2040,7 @@ async fn command_description_latency_probe() {
 }
 
 #[tokio::test]
-async fn command_binding_failure_preserves_the_existing_job_without_claiming_an_alias() {
+async fn command_output_failure_preserves_the_existing_authored_job() {
     let mut campaign = TestCampaign::start().await;
     committed(
         &campaign,
@@ -2008,15 +2064,10 @@ async fn command_binding_failure_preserves_the_existing_job_without_claiming_an_
         Ok(value) => value.to_string(),
         Err(error) => error.to_string(),
     };
-    // The job was already named by the model's own `retainedBeforeFailure
-    // <- Cmd.start ...`; the backgrounded-command handoff must offer that
-    // exact name back, never mint a fresh alias for a job the model already
-    // owns a binding for.
-    assert!(
-        rendered.contains("Continue with: result <- Cmd.await retainedBeforeFailure"),
-        "{rendered}"
-    );
-    assert!(!rendered.contains("job3"), "{rendered}");
+    assert!(rendered.contains("CommandExited 0"), "{rendered}");
+    assert!(rendered.contains("CommandUnavailable"), "{rendered}");
+    assert!(rendered.contains("OutputUnavailable"), "{rendered}");
+    assert!(!rendered.contains("Continue with:"), "{rendered}");
     assert!(!rendered.contains("automatic binding failed"), "{rendered}");
     let status = committed(&campaign, "Cmd.status retainedBeforeFailure").await;
     assert!(status.to_string().contains("CommandExited 0"), "{status}");
@@ -2143,10 +2194,10 @@ pub(crate) async fn result_presentation_cases() -> Vec<(
     .await;
     assert_eq!(backend.executions(), 1);
     cases.push((
-        "recovery-instruction",
+        "typed-output-unavailable",
         "command_binding_failure.hs via resident Haskell dispatch",
         recovery,
-        vec!["Continue with: result <- Cmd.await retainedBeforeFailure"],
+        vec!["CommandExited 0", "CommandUnavailable", "OutputUnavailable"],
         None,
         false,
     ));
@@ -2734,17 +2785,9 @@ async fn background_bash_returns_at_once_and_its_notice_carries_the_source() {
     // cannot expire behind a slow compile of the call itself.
     let commit = "0123456789abcdef0123456789abcdef01234567";
     let probe = TestCommands::completed_streams(&format!("/work/tree\n{commit}\ndirty\n"), "");
-    campaign
-        .next_deployment(
-            "probe backend",
-            Duration::from_secs(300),
-            |event| match event {
-                LocalResidentDeployment::CommandBackend(request) => Ok(request),
-                other => Err(other),
-            },
-        )
-        .await
-        .supply(Ok(probe.clone()));
+    let request = raw_backend_request(&mut campaign).await;
+    assert_eq!(request.purpose, CommandBackendPurpose::SourceProbe);
+    request.supply(Ok(probe.clone()));
     // The call returns without the command's backend: nothing waits on it.
     let response = running.await.unwrap().unwrap();
     assert_eq!(response["status"], "committed", "{response}");
@@ -2796,6 +2839,57 @@ async fn background_bash_returns_at_once_and_its_notice_carries_the_source() {
 }
 
 #[tokio::test]
+async fn command_direct_wait_captures_report_and_releases_subscription() {
+    let mut campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+    let running = tokio::spawn(async move {
+        dispatch_haskell_script(policy.as_ref(), include_str!("command_direct_wait.hs")).await
+    });
+    let backend = TestCommands::new();
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while backend.executions() == 0 {
+            assert!(!running.is_finished(), "direct wait ended before execution");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("command was not started");
+    assert!(
+        !running.is_finished(),
+        "direct wait returned before terminal completion"
+    );
+    backend.finish();
+    let result = running.await.unwrap();
+    assert_eq!(result["status"], "committed", "{result}");
+    let text = result.to_string();
+    for marker in [
+        "CommandExited 0",
+        "0123456789abcdef0123456789abcdef01234567",
+        "Just",
+        "True",
+        "direct-wait-captured",
+    ] {
+        assert!(text.contains(marker), "missing {marker}: {text}");
+    }
+    assert!(
+        campaign
+            .next_deployment_opt(Duration::from_millis(100), |event| match event {
+                LocalResidentDeployment::WatchChanged { notification } => Ok(notification),
+                other => Err(other),
+            })
+            .await
+            .is_none(),
+        "a direct wait emitted a named-watch notice"
+    );
+    assert_eq!(backend.executions(), 1);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn watched_command_jobs_wake_once_with_a_typed_report() {
     let mut campaign = TestCampaign::start().await;
     committed(
@@ -2804,20 +2898,27 @@ async fn watched_command_jobs_wake_once_with_a_typed_report() {
     )
     .await;
     let commit = "89abcdef0123456789abcdef0123456789abcdef";
-    // Deployment order: the background job's source probe, then the
-    // foreground job; the background command itself waits for the probe.
-    let source = backend_request(&mut campaign).await;
-    let foreground = backend_request(&mut campaign).await;
-    foreground.supply(Ok(TestCommands::completed("")));
-    source.supply(Ok(TestCommands::completed_streams(
-        &format!("/work/tree\n{commit}\nclean\n"),
-        "",
-    )));
-    let failing = TestCommands::completed_streams("", "error[E0308]: mismatched types\n");
-    failing
-        .exit_code
-        .store(101, std::sync::atomic::Ordering::Release);
-    backend_request(&mut campaign).await.supply(Ok(failing));
+    let commands = TestCommands::completed_streams("", "error[E0308]: mismatched types\n");
+    *commands.script_exit_code.lock() = Some(("cargo test".into(), 101));
+    let mut source_probes = 0;
+    let mut command_requests = 0;
+    while source_probes < 2 || command_requests < 2 {
+        let request = raw_backend_request(&mut campaign).await;
+        match request.purpose {
+            CommandBackendPurpose::SourceProbe => {
+                source_probes += 1;
+                request.supply(Ok(TestCommands::completed(&format!(
+                    "/work/tree\n{commit}\nclean\n"
+                ))));
+            }
+            CommandBackendPurpose::Command => {
+                command_requests += 1;
+                request.supply(Ok(commands.clone()));
+            }
+        }
+    }
+    assert_eq!(source_probes, 2);
+    assert_eq!(command_requests, 2);
     campaign
         .next_deployment(
             "watch notice",
@@ -2842,14 +2943,22 @@ async fn watched_command_jobs_wake_once_with_a_typed_report() {
         .is_none());
     let observed = committed(
         &campaign,
-        "WatchReady (report, foreground) <- pollWatch checked\n(Cmd.commandOutcome (Cmd.reportResult report), fmap Cmd.sourceCommit (Cmd.reportSource report), Cmd.reportOutputComplete report, Cmd.reportSource foreground)",
+        "WatchReady (report, foreground) <- pollWatch checked\n(Cmd.commandOutcome (Cmd.reportResult report), fmap Cmd.sourceCommit (Cmd.reportSource report), Cmd.reportOutputComplete report, fmap Cmd.sourceCommit (Cmd.reportSource foreground))",
     )
     .await;
-    let text = observed.to_string();
+    let text = observed["items"].as_array().unwrap().last().unwrap()["output"]
+        .as_str()
+        .unwrap();
     assert!(text.contains("CommandExited 101"), "{text}");
     assert!(text.contains(commit), "{text}");
     assert!(text.contains("True"), "{text}");
-    assert!(text.contains("Nothing"), "{text}");
+    assert_eq!(
+        text.matches(commit).count(),
+        2,
+        "both commands carry source: {text}"
+    );
+    assert!(!text.contains("Nothing"), "{text}");
+    assert_eq!(commands.executions(), 2);
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -2867,15 +2976,7 @@ async fn a_job_finished_before_its_watch_registers_wakes_exactly_once() {
             .await
         }
     });
-    campaign
-        .next_deployment(
-            "foreground backend",
-            Duration::from_secs(300),
-            |event| match event {
-                LocalResidentDeployment::CommandBackend(request) => Ok(request),
-                other => Err(other),
-            },
-        )
+    backend_request(&mut campaign)
         .await
         .supply(Ok(TestCommands::completed("")));
     assert_eq!(running.await.unwrap()["status"], "committed");

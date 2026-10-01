@@ -221,7 +221,12 @@ executeWith presenter
                 -- names the retained binding beside this line.
                 send (CommandPresentWith key (CommandVisible ("session_id: " <> key <> "\nrunning in background; its completion notice will wake you. Keep working; do not poll. read_output reads its output so far; cancel_command stops it. focus, yield_time_ms and max_output_bytes do not apply here. A host restart loses a running job.") 512))
                 pure ""
-            | otherwise -> presenter (maybe CompletionOrNotify (const ObserveOnce) wait) (Just script) purpose focus options retained
+            | otherwise -> do
+                shown <- presenter (maybe CompletionOrNotify (const ObserveOnce) wait) (Just script) purpose focus options retained
+                current <- Cmd.status retained
+                case current of
+                  Cmd.CommandFinished _ -> pure shown
+                  _ -> Cmd.detach retained >> pure shown
 
 writeInput :: (Member Cmd.Commands effects) => WriteInput -> Eff effects Text
 writeInput = writeInputWith defaultPresenter
