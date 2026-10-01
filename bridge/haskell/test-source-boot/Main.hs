@@ -52,6 +52,7 @@ main = getArgs >>= \case
     forM_ [1, 10, 100] (mixedGraph False)
     mixedGraph True 10
   [] -> withScratch $ \work -> do
+    selectedHomeInstanceEdges
     forM_ ["CacheEven.hs", "CacheEven.hs-boot", "CacheOdd.hs", "CacheEntry.hs"] $ \file ->
       copyFile ("test-source-boot/fixtures" </> file) (work </> file)
     cold <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
