@@ -40,6 +40,8 @@ import qualified Tidepool.Actor.Record as R
 import qualified Tidepool.Command as Cmd
 import Tidepool.Actors.Exomonad
 import Tidepool.Effects.Core (BranchName (..), Commands, WorktreeHandle (..), WorktreeReceipt (..))
+import Tidepool.Worktree (SubmissionObservation (..), HeadState (..), renderGitOid, renderWorktreeError)
+import Project.Types (cleanReviewCheckout)
 
 -- One serialized actor owns the integration checkout and optional publication
 -- branch. The project supplies the command; successful execution alone does
@@ -62,6 +64,7 @@ data IntegrationCheck = IntegrationCheck
   { integrationHead :: GitOid
   , integrationArgv :: [Text]
   , integrationReceipt :: Cmd.RunResult
+  , integrationSubmission :: Maybe SubmissionObservation
   , integrationDetail :: Text
   } deriving (Eq)
 
@@ -69,6 +72,7 @@ instance Show IntegrationCheck where
   show checked = "IntegrationCheck " ++ show (integrationHead checked)
     ++ " argv=" ++ show (integrationArgv checked)
     ++ " " ++ show (Cmd.commandResult (integrationReceipt checked))
+    ++ " source=" ++ show (fmap (cleanReviewCheckout . workingState) (integrationSubmission checked))
     ++ ": " ++ Text.unpack (integrationDetail checked)
 
 integrationPassed :: IntegrationCheck -> Bool
@@ -185,32 +189,40 @@ runPublish request = do
                           evidence <- checkedOutput path (GitOid checked)
                           case evidence of
                             Left failure -> block (PublicationBlocked failure) failure
-                            Right check -> do
-                              after <- gitIn path ["rev-parse", "HEAD"]
+                            Right original -> do
+                              after <- observeSubmission (worktreeId handle)
                               case after of
-                                Left failure -> block (IntegrationBlocked check failure) failure
-                                Right headAfter
-                                  | headAfter /= checked ->
+                                Left issue ->
+                                  let failure = "integration source observation unavailable: " <> renderWorktreeError issue
+                                  in block (IntegrationBlocked original failure) failure
+                                Right submission -> do
+                                  let check = original { integrationSubmission = Just submission }
+                                      headAfter = renderGitOid (headOid (submittedHead submission))
+                                  if headAfter /= checked then
                                       let reason = "integration command changed HEAD from " <> checked <> " to " <> headAfter
                                       in block (IntegrationBlocked check reason) reason
-                                  | not (integrationPassed check) -> do
-                                      history (IntegrationRed (GitOid before) check)
-                                      pure (RedPreserved (GitOid before) (GitOid checked) check)
-                                  | otherwise -> do
-                                      published <- case advance of
-                                        Nothing -> pure (Right ())
-                                        Just (BranchName branch) -> do
-                                          result <- runIn path ["git", "update-ref", "refs/heads/" <> branch, checked, before]
-                                          pure $ case result of
-                                            Left failure -> Left failure
-                                            Right receipt -> maybe (Right ()) Left (commandProblem receipt)
-                                      case published of
-                                        Left detail ->
-                                          let reason = "the checked head was not published to " <> branchText advance <> ": " <> detail
-                                          in block (IntegrationBlocked check reason) reason
-                                        Right () -> do
-                                          history (IntegrationPublished (GitOid before) check)
-                                          pure (Published (GitOid checked) (GitOid before) check)
+                                  else if not (integrationPassed check) then do
+                                    history (IntegrationRed (GitOid before) check)
+                                    pure (RedPreserved (GitOid before) (GitOid checked) check)
+                                  else if not (cleanReviewCheckout (workingState submission)) then
+                                    let reason = "integration command left the checked source dirty or in progress: "
+                                          <> Text.pack (show (workingState submission))
+                                    in block (IntegrationBlocked check reason) reason
+                                  else do
+                                    published <- case advance of
+                                      Nothing -> pure (Right ())
+                                      Just (BranchName branch) -> do
+                                        result <- runIn path ["git", "update-ref", "refs/heads/" <> branch, checked, before]
+                                        pure $ case result of
+                                          Left failure -> Left failure
+                                          Right receipt -> maybe (Right ()) Left (commandProblem receipt)
+                                    case published of
+                                      Left detail ->
+                                        let reason = "the checked head was not published to " <> branchText advance <> ": " <> detail
+                                        in block (IntegrationBlocked check reason) reason
+                                      Right () -> do
+                                        history (IntegrationPublished (GitOid before) check)
+                                        pure (Published (GitOid checked) (GitOid before) check)
   where
     history :: MergeEvent -> Handler MergeState MergeEffects ()
     history event = R.modify' (\state -> state
@@ -293,7 +305,7 @@ checkedOutput :: Text -> GitOid -> Handler MergeState MergeEffects (Either Text 
 checkedOutput path headChecked = do
   check <- R.gets mergeCheckCommand
   result <- runIn path check
-  pure $ fmap (\receipt -> IntegrationCheck headChecked check receipt (detail receipt)) result
+  pure $ fmap (\receipt -> IntegrationCheck headChecked check receipt Nothing (detail receipt)) result
   where
     detail receipt = case Cmd.capturedOutput receipt of
       Left failure -> "output unavailable: " <> Cmd.renderCommandError failure

@@ -2,7 +2,7 @@
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Project.MergeChecks (redPreserved, greenReceipt, commandFailure, checkedHeadChanged) where
+module Project.MergeChecks (redPreserved, greenReceipt, commandFailure, checkedHeadChanged, dirtyAfterSuccess) where
 
 import Prelude hiding (writeFile)
 import Control.Monad (void)
@@ -93,12 +93,12 @@ redPreserved = do
 greenReceipt :: Member RecipeCheck effects => Eff effects ()
 greenReceipt = do
   owner <- root
-  before <- git owner ["rev-parse", "HEAD"]
+  before <- checkpoint owner ".gitignore" "ignored-build/\n" "ignore disposable check output"
   void $ turn owner $ Text.unlines
     [ "import qualified Project.Merge as M"
     , "Right sourceTree <- createWorktree (fromRef \"HEAD\" \"green-source\")"
     , "Right integration <- createWorktree (fromRef \"HEAD\" \"green-receipt\")"
-    , "let command = [\"sh\", \"-c\", \"printf zero-tests\"]"
+    , "let command = [\"sh\", \"-c\", \"mkdir -p ignored-build; printf artifact > ignored-build/output; printf zero-tests\"]"
     , "merger <- R.start (M.mergeInto (worktreeId integration) Nothing command)"
     , "result <- R.call (M.publish (R.client merger)) (M.PublishRequest \"green receipt\" (worktreeId sourceTree) " <> gitOidLiteral before <> " \"green receipt\")"
     , "view <- R.call (M.mergeView (R.client merger)) ()"
@@ -160,4 +160,35 @@ checkedHeadChanged = do
     (lastOutput observed == "True")
   published <- git owner ["rev-parse", "refs/heads/" <> branch]
   check "the unchecked command commit was not published" (published == before)
+  void $ turn owner "R.finish merger"
+
+-- Tracked, index and untracked edits cannot be passed off as the unchanged
+-- commit, even when the project command exits successfully.
+dirtyAfterSuccess :: Member RecipeCheck effects => Eff effects ()
+dirtyAfterSuccess = do
+  owner <- root
+  before <- checkpoint owner "checked-source.txt" "committed source\n" "source before successful dirty check"
+  let branch = "recipe/dirty-success"
+  void $ git owner ["branch", branch, before]
+  observed <- turn owner $ Text.unlines
+    [ "import qualified Project.Merge as M"
+    , "import Tidepool.Worktree (SubmissionObservation (..), WorkingState (..), DirtySummary (..))"
+    , "Right sourceTree <- createWorktree (fromRef \"HEAD\" \"dirty-success-source\")"
+    , "Right integration <- createWorktree (fromRef \"HEAD\" \"dirty-success\")"
+    , "let command = [\"sh\", \"-c\", \"printf staged > checked-source.txt; git add -- checked-source.txt; printf working > checked-source.txt; printf untracked > unchecked-source.txt; printf successful-dirty-check\"]"
+    , "merger <- R.start (M.mergeInto (worktreeId integration) (Just \"recipe/dirty-success\") command)"
+    , "result <- R.call (M.publish (R.client merger)) (M.PublishRequest \"dirty source\" (worktreeId sourceTree) " <> gitOidLiteral before <> " \"dirty source\")"
+    , "view <- R.call (M.mergeView (R.client merger)) ()"
+    , "headAfter <- worktreeHead integration"
+    , "inspectFull (headAfter == Right " <> gitOidLiteral before <> " && case (result, reverse (M.mergeHistory view)) of { (M.MergeBlocked reason, M.MergeHistory _ _ (M.IntegrationBlocked evidence _) : _) -> \"dirty or in progress\" `T.isInfixOf` reason && M.integrationHead evidence == " <> gitOidLiteral before <> " && M.integrationArgv evidence == command && M.integrationPassed evidence && Cmd.stdout (M.integrationReceipt evidence) == Right \"successful-dirty-check\" && case M.integrationSubmission evidence of { Just submission -> case changes (workingState submission) of { DirtySummary staged unstaged untracked _ -> all (not . null) [staged, unstaged, untracked] }; Nothing -> False }; _ -> False })"
+    ]
+  check "successful command with unchanged HEAD retains dirty source proof and blocks publication"
+    (lastOutput observed == "True")
+  published <- git owner ["rev-parse", "refs/heads/" <> branch]
+  check "dirty tested source is not published as its original commit" (published == before)
+  pathResult <- turn owner "cwd (handleReceipt integration)"
+  let path = Text.dropAround (== '"') (Text.strip (lastOutput pathResult))
+  status <- git owner ["-C", path, "status", "--short"]
+  check "blocked publication preserves both tracked and untracked check edits"
+    ("MM checked-source.txt" `Text.isInfixOf` status && "?? unchecked-source.txt" `Text.isInfixOf` status)
   void $ turn owner "R.finish merger"
