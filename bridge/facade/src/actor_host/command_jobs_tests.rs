@@ -956,7 +956,7 @@ async fn inherited_command_is_readable_without_transferring_control_or_display_p
     let mut campaign = TestCampaign::start().await;
     committed(
         &campaign,
-        "job <- Cmd.start (Cmd.withStdin [bash|printf inherited|])",
+        "job <- do { issued <- Cmd.start (Cmd.withStdin [bash|printf inherited|]); Cmd.detach issued; pure issued }",
     )
     .await;
     let backend = TestCommands::new();
@@ -1042,38 +1042,29 @@ async fn inherited_command_is_readable_without_transferring_control_or_display_p
     assert!(output.to_string().contains("first-line"), "{output}");
     assert!(output.to_string().contains("second-line"), "{output}");
 
-    for operation in [
-        "Cmd.sendInput job \"foreign\"",
-        "Cmd.closeInput job",
-        "Cmd.resize job 40 80",
-        "Cmd.cancel job",
+    for (operation, refusal) in [
+        ("Cmd.sendInput job \"foreign\"", "not authorized"),
+        ("Cmd.closeInput job", "not authorized"),
+        ("Cmd.resize job 40 80", "not authorized"),
+        ("Cmd.cancel job", "not authorized"),
+        ("Cmd.detach job", "not authorized"),
+        ("Cmd.start (Cmd.argv [])", "not runnable"),
+        ("Cmd.background (Cmd.argv [])", "not runnable"),
     ] {
-        let denial = super::tests::dispatch_haskell_script_result(observer, operation).await;
+        let discarded = format!("do {{ {operation}; pure (424242 :: Int) }}");
+        let denial = super::tests::dispatch_haskell_script_result(observer, &discarded).await;
         let rendered = match denial {
-            Ok(value) => value.to_string(),
+            Ok(value) => {
+                assert_ne!(
+                    value["status"], "committed",
+                    "discarded command refusal must stop its continuation: {value}"
+                );
+                value.to_string()
+            }
             Err(error) => error.to_string(),
         };
-        assert!(
-            rendered.contains("not authorized"),
-            "{operation}: {rendered}"
-        );
+        assert!(rendered.contains(refusal), "{operation}: {rendered}");
     }
-    let detach_denial = super::tests::dispatch_haskell_script_result(
-        observer,
-        "do { Cmd.detach job; pure (424242 :: Int) }",
-    )
-    .await;
-    let rendered = match detach_denial {
-        Ok(value) => {
-            assert_ne!(
-                value["status"], "committed",
-                "discarding unit must not resume after a refused detach: {value}"
-            );
-            value.to_string()
-        }
-        Err(error) => error.to_string(),
-    };
-    assert!(rendered.contains("not authorized"), "{rendered}");
     assert_eq!(
         backend.control_count(),
         0,

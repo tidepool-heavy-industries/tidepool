@@ -190,15 +190,10 @@ data Capture = Capture
   }
   deriving (Eq, Show)
 
--- | The convenience form of a command operation: a refusal ends the cell.
---
--- Every one of these has a @try@ sibling that returns the refusal as a value,
--- which is what to reach for when a refusal is an ordinary outcome. When the
--- cell does end here, it ends saying what was refused and what to do, rather
--- than showing a bare constructor: @CommandUnauthorized@ alone told a reader
--- nothing about which authority was missing.
-checked :: Either CommandError a -> a
-checked = either (error . T.unpack . renderCommandError) id
+-- | Convenience refusals stop the continuation, even when its result is
+-- discarded. Existing @try@ variants retain the refusal as a typed value.
+checked :: Either CommandError a -> Eff effects a
+checked = either (error . T.unpack . renderCommandError) pure
 
 -- | What a refused command says, in words rather than a constructor.
 renderCommandError :: CommandError -> Text
@@ -219,7 +214,7 @@ renderCommandError failure = case failure of
 -- | Start work owned by this invocation. Await it or explicitly detach before
 -- returning; scope exit cancels unfinished owned work and retains cleanup.
 start :: (Member Commands effects) => Command -> Eff effects Job
-start = fmap checked . tryStart
+start command = tryStart command >>= checked
 
 -- | Start a command, returning the refusal instead of failing the cell.
 tryStart :: (Member Commands effects) => Command -> Eff effects (Either CommandError Job)
@@ -228,7 +223,7 @@ tryStart (Command spec) = fmap Job <$> send (CommandStartWith spec)
 -- | Transfer an owned job to this actor's lifetime. Borrowed handles cannot
 -- detach or cancel another owner's work.
 detach :: (Member Commands effects) => Job -> Eff effects ()
-detach job = tryDetach job >>= either (error . T.unpack . renderCommandError) pure
+detach job = tryDetach job >>= checked
 
 tryDetach :: (Member Commands effects) => Job -> Eff effects (Either CommandError ())
 tryDetach (Job key) = send (CommandDetachWith key)
@@ -240,7 +235,7 @@ tryDetach (Job key) = send (CommandDetachWith key)
 -- the checkout is not guarded while it runs. A job running when the host
 -- restarts is not recovered and sends no notice.
 background :: (Member Commands effects) => Command -> Eff effects Job
-background = fmap checked . tryBackground
+background command = tryBackground command >>= checked
 
 -- | Start in the background, returning the refusal instead of failing the cell.
 tryBackground :: (Member Commands effects) => Command -> Eff effects (Either CommandError Job)
@@ -262,14 +257,14 @@ run command = start command >>= await
 -- survive an unavailable output transport; explicit observation owns presentation.
 await :: (Member Commands effects) => Job -> Eff effects RunResult
 await retained@(Job key) = do
-  observation <- checked <$> send (CommandWaitWith key)
+  observation <- send (CommandWaitWith key) >>= checked
   pure (Finished retained (observedCommandResult observation) (observedCommandOutput observation))
 
 -- | Wait briefly and display newly available output, retaining the same job.
 -- An observation deadline returns the live status normally.
 observe :: (Member Commands effects) => Observation -> Job -> Eff effects CommandStatus
 observe Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job key) = do
-  current <- checked <$> send (CommandAwaitWith key milliseconds)
+  current <- send (CommandAwaitWith key milliseconds) >>= checked
   presentStatus key bytes False current
 
 -- | Observe an owned job for a bounded interval and request a completion
@@ -278,7 +273,7 @@ observe Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job 
 -- use 'observe' or 'awaitFinished' with a watch.
 observeCompletion :: (Member Commands effects) => Observation -> Job -> Eff effects CommandStatus
 observeCompletion Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job key) = do
-  current <- checked <$> send (CommandAwaitAndNotifyWith key milliseconds)
+  current <- send (CommandAwaitAndNotifyWith key milliseconds) >>= checked
   presentStatus key bytes True current
 
 presentStatus :: (Member Commands effects) => Text -> Int -> Bool -> CommandStatus -> Eff effects CommandStatus
@@ -313,7 +308,7 @@ observeWith ::
   (PresentedObservation -> Eff effects Text) ->
   Eff effects (CommandStatus, Text)
 observeWith options@Observation {waitMilliseconds = milliseconds} retained@(Job key) prepare = do
-  current <- checked <$> send (CommandAwaitWith key milliseconds)
+  current <- send (CommandAwaitWith key milliseconds) >>= checked
   presentObserved options retained prepare current
 
 presentObserved ::
@@ -463,7 +458,7 @@ asJSON :: (FromJSON a) => Text -> Either Text a
 asJSON = eitherDecode
 
 status :: (Member Commands effects) => Job -> Eff effects CommandStatus
-status (Job key) = checked <$> send (CommandStatusWith key)
+status (Job key) = send (CommandStatusWith key) >>= checked
 
 -- | Navigate retained stdout from its beginning; reading never executes again.
 output :: (Member Commands effects) => Job -> Eff effects OutputPage
@@ -483,7 +478,7 @@ nextPage OutputPage {pageJob = retained, pageStream = stream, pageDetails = deta
   readPage retained stream (OutputOffset (outputEnd details))
 
 readPage :: (Member Commands effects) => Job -> CommandStream -> CommandPosition -> Eff effects OutputPage
-readPage retained stream position = checked <$> tryPage retained stream position
+readPage retained stream position = tryPage retained stream position >>= checked
 
 -- | Read one page, returning the refusal instead of ending the cell. What
 -- 'readPage', 'readOutput' and 'next' are built from, and what a capture that
@@ -496,16 +491,16 @@ pageText :: OutputPage -> Text
 pageText = outputText . pageDetails
 
 sendInput :: (Member Commands effects) => Job -> Text -> Eff effects ()
-sendInput (Job key) text = checked <$> send (CommandInputWith key text)
+sendInput (Job key) text = send (CommandInputWith key text) >>= checked
 
 closeInput :: (Member Commands effects) => Job -> Eff effects ()
-closeInput (Job key) = checked <$> send (CommandCloseInputWith key)
+closeInput (Job key) = send (CommandCloseInputWith key) >>= checked
 
 resize :: (Member Commands effects) => Job -> Int -> Int -> Eff effects ()
-resize (Job key) rows columns = checked <$> send (CommandResizeWith key rows columns)
+resize (Job key) rows columns = send (CommandResizeWith key rows columns) >>= checked
 
 cancel :: (Member Commands effects) => Job -> Eff effects ()
-cancel (Job key) = checked <$> send (CommandCancelWith key)
+cancel (Job key) = send (CommandCancelWith key) >>= checked
 
 completion :: Job -> R.EventSource CommandResult
 completion = R.command
