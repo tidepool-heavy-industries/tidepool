@@ -221,14 +221,16 @@ def analyze_durable(rows):
                 problems.append("durable manifest size/path differs from retained snapshot")
             if document.get("checksum") != row.get("manifest_checksum") or not row.get("manifest_checksum"):
                 problems.append("durable manifest checksum differs from retained snapshot")
-            if document.get("public_schema") != "paired-public-v4" or row.get("public_schema") != "paired-public-v4":
-                problems.append("durable sample is not the complete artifact graph format")
+            public_schema = document.get("public_schema")
+            if public_schema not in ("paired-public-v4", "paired-public-v5") or row.get("public_schema") != public_schema:
+                problems.append("durable sample is not a matching retained artifact graph format")
         except (KeyError, TypeError, OSError, ValueError):
             problems.append("durable sample has no readable retained manifest")
     return {
         "status": "invalid" if problems else "measured", "count": len(rows),
         "phases_ms": {name: {"count": len(values), "p50_ms": percentile(values, 0.5), "p95_ms": percentile(values, 0.95)} for name, values in phases.items()},
         "samples": rows, "evidence_problems": sorted(set(problems)),
+        "format_note": "v4 rows describe historical timing only; current recovery requires v5",
         "byte_counter_note": "manifest_bytes is retained file size; uninstrumented encode/hash/write byte counts remain unknown",
     }
 

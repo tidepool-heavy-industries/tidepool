@@ -158,6 +158,10 @@ failure, not a completed timing row.
 
 Pass this retained log as `--durable-samples` to the reporter. This section is
 `unmeasured` when omitted and never contributes to the Engine/Store gate.
+Retained v4 samples remain historical timing evidence; the current runtime
+requires v5 for recovery. The reporter accepts those two known recorded formats
+only when the sample agrees with the retained document, and refuses unknown
+formats. Reporter validation does not admit a graph to the runtime.
 `metadata_stage_file_sync_ns` includes the owning stage operation (metadata
 encoding, integrity checks, staged file write and sync); the separate publication
 phase includes rename and directory sync. Certification is separate and absent
