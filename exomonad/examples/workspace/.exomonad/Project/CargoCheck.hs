@@ -70,6 +70,9 @@ instance FromJSON FocusedRecord where
       <*> fields .:? "summaries"
       <*> fields .:? "exit_code"
 
+data PreparationEvidence = NoPreparation | PreparationPassed | PreparationFailed Int | PreparationUnknown
+  deriving (Show, Eq)
+
 data FocusedResult = FocusedResult
   { focusedSpec :: FocusedSpec
   , focusedCommand :: Cmd.RunResult
