@@ -561,9 +561,13 @@ async fn resident_await_watch_case(case: WatchCase) {
             "awaitWatch must keep the hosted workbench parked while its exact command is live"
         );
         if interleaved {
-            let mut second_context = settled_context.clone();
-            second_context.call_id = "publish-B".into();
-            second_context.context_call_id = Some("publish-B".into());
+            let second_context = ToolInvocationContext::external(
+                "await-watch-test".into(),
+                "turn-settled".into(),
+                "publish-B".into(),
+                Some("publish-B".into()),
+                None,
+            );
             let second = tokio::time::timeout(
                 std::time::Duration::from_secs(180),
                 policy.dispatch_boxed(ToolInvocation {
@@ -604,9 +608,13 @@ async fn resident_await_watch_case(case: WatchCase) {
         if primary {
             assert_eq!(settled["status"], "committed", "{settled:?}");
             if interleaved {
-                let mut read_context = settled_context.clone();
-                read_context.call_id = "read-joined".into();
-                read_context.context_call_id = Some("read-joined".into());
+                let read_context = ToolInvocationContext::external(
+                    "await-watch-test".into(),
+                    "turn-settled".into(),
+                    "read-joined".into(),
+                    Some("read-joined".into()),
+                    None,
+                );
                 let joined = policy
                     .dispatch_boxed(ToolInvocation {
                         context: Some(read_context),
