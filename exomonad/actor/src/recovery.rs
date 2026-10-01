@@ -885,10 +885,6 @@ fn validate_startup(
             || owner_for_admission(&prior.admission) == owner_for_admission(admission)
             || prior.admission.actor_path != admission.actor_path
             || prior.admission.role != "root"
-            || prior
-                .startup
-                .as_ref()
-                .is_none_or(|intent| intent.bootstrap_identity != startup.bootstrap_identity)
             || records.values().any(|record| {
                 record
                     .startup
@@ -899,6 +895,16 @@ fn validate_startup(
             return Err(std::io::Error::other(
                 "startup predecessor is not the exact unsucceeded root",
             ));
+        }
+        let original_bootstrap = prior
+            .startup
+            .as_ref()
+            .map(|intent| intent.bootstrap_identity.as_str());
+        if original_bootstrap != Some(startup.bootstrap_identity.as_str()) {
+            return Err(std::io::Error::other(format!(
+                "startup compiled bootstrap differs from original predecessor: original={original_bootstrap:?}, observed={}",
+                startup.bootstrap_identity,
+            )));
         }
         let prior_application = prior
             .application
