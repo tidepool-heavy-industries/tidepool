@@ -654,11 +654,15 @@ impl ModuleCandidateOffer {
             )?,
             producer: producer.to_vec(),
             include: include.to_vec(),
-            exact: Some(context.prepare_compilation_with_authorization(
-                &scratch.join("exact-scope"),
-                producer,
-                Some(authorization),
-            )?),
+            exact: Some(
+                context
+                    .prepare_compilation_with_authorization(
+                        &scratch.join("exact-scope"),
+                        producer,
+                        Some(authorization),
+                    )?
+                    .with_checked_value_imports(checked_values.import_authority()),
+            ),
             checked_cell: Some(specification),
             planned_cell: None,
             checked_values: Some(checked_values),
@@ -718,11 +722,15 @@ impl ModuleCandidateOffer {
             )?,
             producer: producer.to_vec(),
             include: include.to_vec(),
-            exact: Some(context.prepare_compilation_with_authorization(
-                &scratch.join("exact-scope"),
-                producer,
-                Some(authorization),
-            )?),
+            exact: Some(
+                context
+                    .prepare_compilation_with_authorization(
+                        &scratch.join("exact-scope"),
+                        producer,
+                        Some(authorization),
+                    )?
+                    .with_checked_value_imports(inputs.import_authority()),
+            ),
             checked_cell: Some(specification),
             planned_cell: Some(planned),
             checked_values: Some(inputs),
@@ -801,7 +809,7 @@ impl ModuleCandidateOffer {
             selected,
             producer: producer.to_vec(),
             include: include.to_vec(),
-            exact: Some(exact),
+            exact: Some(exact.with_checked_value_imports(checked_item.prefix.import_authority()?)),
             checked_cell: None,
             planned_cell: None,
             checked_values: None,
@@ -884,7 +892,7 @@ impl ModuleCandidateOffer {
             selected,
             producer: producer.to_vec(),
             include: include.to_vec(),
-            exact: Some(exact),
+            exact: Some(exact.with_checked_value_imports(display.prefix.import_authority()?)),
             checked_cell: None,
             planned_cell: None,
             checked_values: None,

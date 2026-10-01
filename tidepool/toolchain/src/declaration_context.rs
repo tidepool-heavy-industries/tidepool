@@ -498,6 +498,7 @@ pub(crate) struct ExactCompilationRequest {
     pub(crate) groups: Arc<[PendingCertifiedGroup]>,
     // Only current-program source-selected support can add these roots.
     program_support: Option<ArtifactView>,
+    checked_value_imports: crate::checked_cell::CheckedValueImportAuthority,
 }
 
 /// A successful compiler transaction's actual generated source, bound to its
@@ -619,6 +620,13 @@ impl ExactSourceAdmission {
 }
 
 impl ExactCompilationRequest {
+    pub(crate) fn with_checked_value_imports(
+        mut self,
+        authority: crate::checked_cell::CheckedValueImportAuthority,
+    ) -> Self {
+        self.checked_value_imports = authority;
+        self
+    }
     pub(crate) fn in_program_context(
         &self,
         root: &Path,
@@ -720,6 +728,7 @@ impl ExactCompilationRequest {
             artifacts: materialized.artifacts,
             groups: groups.into(),
             program_support: self.program_support.clone(),
+            checked_value_imports: self.checked_value_imports.clone(),
         })
     }
 
@@ -858,6 +867,7 @@ impl ExactCompilationRequest {
     ) -> Result<Vec<ExactSourceAdmission>, CompileError> {
         let context_validate_start = std::time::Instant::now();
         self.context.validate_artifacts(&self.artifacts)?;
+        self.checked_value_imports.validate()?;
         if sha256(&std::fs::read(&self.manifest)?) != self.request_sha256 {
             return Err(failure("scope request changed during compilation"));
         }
@@ -957,6 +967,7 @@ impl ExactCompilationRequest {
         if let Some(planned) = planned {
             exact_owners.insert((planned.unit.as_str(), planned.module.as_str()));
         }
+        exact_owners.extend(self.checked_value_imports.owners());
         let source_owners: BTreeSet<_> = evidence
             .modules
             .iter()
@@ -984,6 +995,7 @@ impl ExactCompilationRequest {
                 entry.descriptor.owner.module.as_str(),
             )
         }));
+        selected.extend(self.checked_value_imports.owners());
         if let Some(planned) = planned {
             selected.insert((planned.unit.as_str(), planned.module.as_str()));
         }
@@ -1931,6 +1943,7 @@ impl ExactDeclarationContext {
             artifacts: materialized.artifacts,
             groups: groups.into(),
             program_support: None,
+            checked_value_imports: Default::default(),
         })
     }
 }
@@ -2441,11 +2454,23 @@ mod tests {
             artifacts: vec![],
             groups: Arc::from([]),
             program_support: None,
+            checked_value_imports: Default::default(),
         }
     }
 
     fn import_receipt(root: &Path, request: &ExactCompilationRequest, imported: &str) -> PathBuf {
-        let directory = root.join(format!("receipt-{imported}"));
+        import_receipt_owner(root, request, "fixture", imported, "none", false)
+    }
+
+    fn import_receipt_owner(
+        root: &Path,
+        request: &ExactCompilationRequest,
+        unit: &str,
+        imported: &str,
+        qualifier: &str,
+        boot: bool,
+    ) -> PathBuf {
+        let directory = root.join(format!("receipt-{unit}-{imported}-{qualifier}-{boot}"));
         std::fs::create_dir_all(&directory).unwrap();
         let source = "module Consumer where\n";
         let path = root.join("Consumer.hs");
@@ -2485,10 +2510,10 @@ mod tests {
                 text("Consumer"),
                 Value::Bool(false),
                 Value::Array(vec![Value::Array(vec![
-                    text("none"),
+                    text(qualifier),
                     text(imported),
-                    Value::Bool(false),
-                    text("fixture"),
+                    Value::Bool(boot),
+                    text(unit),
                 ])]),
             ])]),
         ]);
@@ -2497,6 +2522,85 @@ mod tests {
         ciborium::ser::into_writer(&value, &mut bytes).unwrap();
         std::fs::write(&receipt, bytes).unwrap();
         receipt
+    }
+
+    #[test]
+    fn checked_value_import_authority_keeps_hidden_and_future_owners_unselected() {
+        let root = tempfile::tempdir().unwrap();
+        let context = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_checked_original_products(
+                    [2; 32],
+                    &[support_product("Hidden")],
+                    &BTreeMap::new(),
+                )
+                .unwrap(),
+        );
+        let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(7));
+        let inputs = crate::checked_cell::CheckedValueInputs::capture(vec![(
+            owner,
+            Arc::from(b"original thin interface".as_slice()),
+        )])
+        .unwrap();
+        let request = program_request(root.path(), context.clone())
+            .with_checked_value_imports(inputs.import_authority());
+        request.checked_value_imports.validate().unwrap();
+        let receipt = import_receipt_owner(
+            root.path(),
+            &request,
+            "main",
+            &owner.module_name(),
+            "none",
+            false,
+        );
+        assert!(request.validate_receipt(&receipt, None, &context).is_ok());
+        assert!(context.lexical_graph().is_empty());
+        let mut value: Value =
+            ciborium::de::from_reader(std::fs::read(&receipt).unwrap().as_slice()).unwrap();
+        let fields = value.as_array_mut().unwrap();
+        let snapshot = PathBuf::from(fields[6].as_text().unwrap());
+        let replacement = "module Tidepool.Session.Val.G7 where\n";
+        std::fs::write(&snapshot, replacement).unwrap();
+        fields[5] = text(sha256(replacement.as_bytes()));
+        let mut evidence: crate::cache::DependencyEvidence =
+            serde_json::from_str(fields[7].as_text().unwrap()).unwrap();
+        evidence.sources[0].sha256 = sha256(replacement.as_bytes());
+        evidence.modules[0].unit = "main".into();
+        evidence.modules[0].module = owner.module_name();
+        fields[7] = text(serde_json::to_string(&evidence).unwrap());
+        let module = fields[8].as_array_mut().unwrap()[0].as_array_mut().unwrap();
+        module[0] = text("main");
+        module[1] = text(owner.module_name());
+        module[3] = Value::Array(vec![]);
+        let mut collision = Vec::new();
+        ciborium::ser::into_writer(&value, &mut collision).unwrap();
+        std::fs::write(&receipt, collision).unwrap();
+        assert!(request
+            .validate_receipt(&receipt, None, &context)
+            .unwrap_err()
+            .to_string()
+            .contains("fresh module replaced an admitted exact owner"));
+        for (unit, module, qualifier, boot) in [
+            ("fixture", "Hidden", "none", false),
+            ("main", "Tidepool.Session.Val.G8", "none", false),
+            ("foreign", "Tidepool.Session.Val.G7", "none", false),
+            ("main", "Tidepool.Session.Val.G7", "other:main", false),
+            ("main", "Tidepool.Session.Val.G7", "none", true),
+        ] {
+            let receipt =
+                import_receipt_owner(root.path(), &request, unit, module, qualifier, boot);
+            assert!(
+                request.validate_receipt(&receipt, None, &context).is_err(),
+                "{unit}:{module} {qualifier} boot={boot}"
+            );
+        }
+        std::fs::write(
+            inputs.root().join(owner.relative_hi_path()),
+            b"changed thin interface",
+        )
+        .unwrap();
+        assert!(request.checked_value_imports.validate().is_err());
     }
 
     #[test]
@@ -2896,6 +3000,7 @@ mod tests {
             artifacts: vec![],
             groups: Arc::from([]),
             program_support: None,
+            checked_value_imports: Default::default(),
         };
         let root = directory.path().join("program-inputs");
         assert!(!root.exists());
@@ -2961,6 +3066,7 @@ mod tests {
             artifacts,
             groups: Arc::from([]),
             program_support: None,
+            checked_value_imports: Default::default(),
         };
         let materialization_root = directory.path().join("program-inputs");
         let effective = request
