@@ -1144,6 +1144,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         ),
         &host_environment,
     );
+    let unset_environment = compiler_deployment_unsets(&host_environment);
     let launch = tmux
         .spawn_window(&TmuxLaunch {
             window_name: "Host".into(),
@@ -1151,7 +1152,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             program: host_launch.program,
             args: host_launch.args,
             environment: host_environment,
-            unset_environment: std::collections::BTreeSet::new(),
+            unset_environment,
         })
         .await;
     if let Err(error) = launch {
@@ -1301,6 +1302,8 @@ fn compiler_daemon_launch(
     log_path: &Path,
     compiler: &CompilerConfig,
 ) -> TmuxLaunch {
+    let environment = pane_environment();
+    let unset_environment = compiler_deployment_unsets(&environment);
     TmuxLaunch {
         window_name: "Compiler".into(),
         cwd: workspace.into(),
@@ -1319,8 +1322,8 @@ fn compiler_daemon_launch(
             "--log-path".into(),
             log_path.display().to_string(),
         ],
-        environment: pane_environment(),
-        unset_environment: std::collections::BTreeSet::new(),
+        environment,
+        unset_environment,
     }
 }
 
@@ -2502,9 +2505,20 @@ fn retain_run_executable(run_root: &Path, name: &str, source: &Path) -> std::io:
     Ok(destination)
 }
 
+const COMPILER_DEPLOYMENT_ENV_NAMES: &[&str] = &[
+    tidepool_toolchain::toolchain::ENV_COMPILER_DEPLOYMENT,
+    tidepool_toolchain::toolchain::ENV_COMPILER_MODULES,
+];
+
 /// Variables whose current values must override a possibly older tmux server
 /// environment. Tmux supplies fresh `TMUX`/`TMUX_PANE` identities itself.
 fn pane_environment() -> std::collections::BTreeMap<String, String> {
+    pane_environment_from(|name| std::env::var(name).ok())
+}
+
+fn pane_environment_from(
+    read: impl Fn(&str) -> Option<String>,
+) -> std::collections::BTreeMap<String, String> {
     const NAMES: &[&str] = &[
         "PATH",
         "HOME",
@@ -2521,8 +2535,6 @@ fn pane_environment() -> std::collections::BTreeMap<String, String> {
         "XDG_CONFIG_HOME",
         "TIDEPOOL_EXTRACT",
         "TIDEPOOL_EXTRACT_WORKER",
-        tidepool_toolchain::toolchain::ENV_COMPILER_DEPLOYMENT,
-        tidepool_toolchain::toolchain::ENV_COMPILER_MODULES,
         "TIDEPOOL_PRELUDE_DIR",
         "TIDEPOOL_GHC_LIBDIR",
         "TIDEPOOL_COMPILE_CACHE_DIR",
@@ -2547,11 +2559,18 @@ fn pane_environment() -> std::collections::BTreeMap<String, String> {
     ];
     NAMES
         .iter()
-        .filter_map(|name| {
-            std::env::var(name)
-                .ok()
-                .map(|value| ((*name).into(), value))
-        })
+        .chain(COMPILER_DEPLOYMENT_ENV_NAMES)
+        .filter_map(|name| read(name).map(|value| ((*name).into(), value)))
+        .collect()
+}
+
+fn compiler_deployment_unsets(
+    environment: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeSet<String> {
+    COMPILER_DEPLOYMENT_ENV_NAMES
+        .iter()
+        .filter(|name| !environment.contains_key(**name))
+        .map(|name| (*name).to_owned())
         .collect()
 }
 
@@ -3675,6 +3694,29 @@ mod tests {
             started.elapsed().as_micros() / iterations,
         );
         assert!(!observation.truncated);
+    }
+
+    #[test]
+    fn compiler_deployment_environment_preserves_present_and_clears_absent() {
+        let deployment = tidepool_toolchain::toolchain::ENV_COMPILER_DEPLOYMENT;
+        let modules = tidepool_toolchain::toolchain::ENV_COMPILER_MODULES;
+        for selected in [
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::from([(deployment.to_owned(), "compiler.json".to_owned())]),
+            std::collections::BTreeMap::from([(modules.to_owned(), "catalog.json".to_owned())]),
+            std::collections::BTreeMap::from([
+                (deployment.to_owned(), "compiler.json".to_owned()),
+                (modules.to_owned(), "catalog.json".to_owned()),
+            ]),
+        ] {
+            let environment = pane_environment_from(|name| selected.get(name).cloned());
+            assert_eq!(environment, selected);
+            let unset = compiler_deployment_unsets(&environment);
+            for name in [deployment, modules] {
+                assert_eq!(unset.contains(name), !selected.contains_key(name));
+            }
+            assert!(unset.iter().all(|name| !environment.contains_key(name)));
+        }
     }
 
     #[test]
