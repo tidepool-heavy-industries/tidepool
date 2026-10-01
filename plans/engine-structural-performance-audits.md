@@ -8,8 +8,9 @@ unnecessary work, not to add caches around it. Initial audits are read-only.
 
 Freeze Tidepool source at `1c510ee583076b0080ec53e23982b2dd6c7ebd19` and its
 actual harness pin `5ab7ee3ee4b288c05b5f73239fec4b99236858a7`. Use isolated
-recorded checkouts or `git show`. The shared harness checkout has since advanced;
-label any comparison with it separately. Preserve the root checkout's unrelated
+recorded checkouts or `git show`. The shared harness checkout's `44b48fde` is an
+ancestor of the pinned revision; label comparisons with that older checkout
+separately. Preserve the root checkout's unrelated
 `flake.nix` WIP and `test-source-boot/`.
 
 Read repository/subsystem contributor rules, the glossary, the RSI workflow
