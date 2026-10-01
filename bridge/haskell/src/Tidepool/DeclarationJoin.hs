@@ -66,7 +66,7 @@ import System.Posix.Files (createLink)
 import Tidepool.ExactHydration
 import Tidepool.Json (jsonString)
 import Tidepool.PackageWitness
-  ( PackageImportRoot(..), readPackageImports, sealPackageImports, validatePackageImportRoot )
+  ( PackageImportRoot(..), PackageImportEvidence(..), emptyPackageImports, readPackageImports, sealPackageImports, validatePackageImportRoot )
 
 data ModuleSnapshot = ModuleSnapshot
   { snapshotModule :: String, snapshotPath :: FilePath, snapshotSha256 :: String
@@ -558,25 +558,26 @@ validateDeclarationJoin initial input = do
 -- Advisory interface-only inspection can operate without authored package
 -- seals. The protected Rust certification front door additionally requires
 -- every input seal to match its owned bytes before and after this request.
-joinPackageRoots :: HscEnv -> [DeclarationArtifact] -> IO (Either String [PackageImportRoot])
+joinPackageRoots :: HscEnv -> [DeclarationArtifact] -> IO (Either String PackageImportEvidence)
 joinPackageRoots env artifacts = do
   captured <- forM artifacts $ \artifact -> do
     let exact = artifactInterface artifact
         path = exactPath exact ++ ".packages"
     exists <- doesFileExist path
-    if not exists then pure (Right []) else do
+    if not exists then pure (Right emptyPackageImports) else do
       bytes <- BS.readFile path
       readPackageImports path (sha256 bytes) exact
   case sequence captured of
     Left diagnostic -> pure (Left diagnostic)
     Right entries -> do
-      let roots = sort (nubBy (==) (concat entries))
+      let roots = sort (nubBy (==) (concatMap packageInterfaces entries))
+          provided = sort (nubBy (==) (concatMap compilerProvided entries))
           sameOwner a b = packageUnit a == packageUnit b && packageModule a == packageModule b
       if length (nubBy sameOwner roots) /= length roots
         then pure (Left "package witness owner has differing exact selections")
         else do
           validated <- mapM (validatePackageImportRoot env) roots
-          pure (roots <$ sequence validated)
+          pure (PackageImportEvidence roots provided <$ sequence validated)
 
 artifactsUnchanged :: [DeclarationArtifact] -> IO Bool
 artifactsUnchanged artifacts = and <$> forM artifacts (\artifact -> do

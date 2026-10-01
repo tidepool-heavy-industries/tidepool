@@ -136,7 +136,10 @@ impl std::fmt::Display for NewRefusal {
                 path.display()
             ),
             Self::Occupied(paths) => {
-                write!(formatter, "exomonad new would overwrite files that already exist, and wrote nothing:")?;
+                write!(
+                    formatter,
+                    "exomonad new would overwrite files that already exist, and wrote nothing:"
+                )?;
                 for path in paths {
                     write!(formatter, "\n  {}", path.display())?;
                 }

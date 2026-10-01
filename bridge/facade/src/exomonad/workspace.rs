@@ -1048,21 +1048,25 @@ mod tests {
         let prelude = selection.root.join("Tidepool/Prelude.hs");
         let original = std::fs::read(&prelude).unwrap();
         std::fs::write(&prelude, "module Tidepool.Prelude where\n").unwrap();
-        assert!(FrozenWorkspace::load_with_deployment(
-            project.path(),
-            run.path(),
-            Some(selection.clone())
-        )
-        .is_err());
+        assert!(
+            FrozenWorkspace::load_with_deployment(
+                project.path(),
+                run.path(),
+                Some(selection.clone())
+            )
+            .is_err()
+        );
         std::fs::write(&prelude, original).unwrap();
         let extra = selection.root.join("Tidepool/DeploymentExtra.hs");
         std::fs::write(&extra, "module Tidepool.DeploymentExtra where\n").unwrap();
-        assert!(FrozenWorkspace::load_with_deployment(
-            project.path(),
-            run.path(),
-            Some(selection.clone())
-        )
-        .is_err());
+        assert!(
+            FrozenWorkspace::load_with_deployment(
+                project.path(),
+                run.path(),
+                Some(selection.clone())
+            )
+            .is_err()
+        );
         std::fs::remove_file(extra).unwrap();
         std::fs::remove_file(prelude).unwrap();
         assert!(
@@ -1088,12 +1092,10 @@ mod tests {
         changed[3].catalog_identity.push_str("-changed");
         changed[4].root = selection.root.parent().unwrap().join("relocated");
         for selection in changed {
-            assert!(FrozenWorkspace::load_with_deployment(
-                project.path(),
-                run.path(),
-                Some(selection)
-            )
-            .is_err());
+            assert!(
+                FrozenWorkspace::load_with_deployment(project.path(), run.path(), Some(selection))
+                    .is_err()
+            );
             assert_eq!(std::fs::read(&manifest).unwrap(), admitted);
         }
         assert!(FrozenWorkspace::load_with_deployment(project.path(), run.path(), None).is_err());
@@ -1104,9 +1106,11 @@ mod tests {
         let error =
             FrozenWorkspace::load_with_deployment(project.path(), run.path(), Some(selection))
                 .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("unsupported frozen workspace format"));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported frozen workspace format")
+        );
         assert_eq!(std::fs::read(manifest).unwrap(), old);
     }
 
@@ -1136,9 +1140,11 @@ mod tests {
             .find_map(|root| std::fs::read_to_string(root.join("Project/Shared.hs")).ok())
             .unwrap();
         assert!(winner.contains("value = 1"));
-        assert!(std::fs::read_to_string(roots[1].join("Project/Shared.hs"))
-            .unwrap()
-            .contains("value = 2"));
+        assert!(
+            std::fs::read_to_string(roots[1].join("Project/Shared.hs"))
+                .unwrap()
+                .contains("value = 2")
+        );
         assert!(frozen.include.last().unwrap().ends_with("resources"));
     }
 
@@ -1174,14 +1180,16 @@ mod tests {
             std::fs::read_to_string(captured[0].join("Tidepool/Prelude.hs")).unwrap(),
             "old stdlib"
         );
-        assert!(capture_runtime_libraries(
-            &sources,
-            &expected,
-            &destination,
-            uuid::Uuid::new_v4(),
-            &mut BTreeMap::new(),
-        )
-        .is_err());
+        assert!(
+            capture_runtime_libraries(
+                &sources,
+                &expected,
+                &destination,
+                uuid::Uuid::new_v4(),
+                &mut BTreeMap::new(),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1259,9 +1267,11 @@ mod tests {
         selection.as_object_mut().unwrap().remove("core_identity");
         std::fs::write(&manifest, serde_json::to_vec(&selection).unwrap()).unwrap();
         let error = FrozenWorkspace::load(project.path(), run.path()).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("unsupported frozen workspace format"));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported frozen workspace format")
+        );
     }
 
     #[test]
@@ -1329,10 +1339,12 @@ mod tests {
                 .contains("New")
         );
         std::fs::write(frozen.include[0].join("Project/Types.hs"), "tampered").unwrap();
-        assert!(FrozenWorkspace::load(project.path(), first.path())
-            .unwrap_err()
-            .to_string()
-            .contains("frozen workspace input changed"));
+        assert!(
+            FrozenWorkspace::load(project.path(), first.path())
+                .unwrap_err()
+                .to_string()
+                .contains("frozen workspace input changed")
+        );
     }
 
     #[test]
@@ -1559,12 +1571,14 @@ mod tests {
         )
         .unwrap();
         for argv in [&["init", "-q"][..], &["add", "-A"][..]] {
-            assert!(std::process::Command::new("git")
-                .args(argv)
-                .current_dir(project)
-                .status()
-                .unwrap()
-                .success());
+            assert!(
+                std::process::Command::new("git")
+                    .args(argv)
+                    .current_dir(project)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
         }
     }
 

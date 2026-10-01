@@ -54,12 +54,36 @@ type DeclarationStagingContext = (SourceImports, Vec<String>, Vec<(SessionVarId,
 /// installation rechecks the handles under the final checkout; this record
 /// carries no permission to publish a binding.
 pub(crate) struct ResolvedCertifiedTurn {
-    pub groups: Vec<CertifiedGroup>,
+    pub groups: Vec<tidepool_codegen::prepared_program::ScopedCertifiedGroup>,
     pub target_owners: Vec<ImportOwner>,
     pub package_interfaces:
         tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces,
     pub source_evidence: BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
     pub inherited_needed: Vec<InheritedSourceDemand>,
+    pub source_plan: ResolvedSourceDomainPlan,
+}
+
+#[derive(Clone)]
+pub(crate) struct ResolvedSourceDomainPlan {
+    pub(super) target:
+        BTreeMap<SourceBinder, tidepool_codegen::prepared_program::ScopedSourceBinder>,
+    selection: tidepool_codegen::prepared_program::SourceDomainSelection,
+    witness: tidepool_codegen::binding_table::BindingScopeWitness,
+}
+
+impl ResolvedSourceDomainPlan {
+    #[cfg(test)]
+    pub(super) fn fixture(
+        target: BTreeMap<SourceBinder, tidepool_codegen::prepared_program::ScopedSourceBinder>,
+        selection: tidepool_codegen::prepared_program::SourceDomainSelection,
+        witness: tidepool_codegen::binding_table::BindingScopeWitness,
+    ) -> Self {
+        Self {
+            target,
+            selection,
+            witness,
+        }
+    }
 }
 
 fn value_import_specs(entries: impl IntoIterator<Item = (String, SessionModule)>) -> Vec<String> {
@@ -368,19 +392,6 @@ impl PersistentSession {
         self.bindings.collect_observations()
     }
 
-    /// Transfer the exact machine-created source roots from one native batch
-    /// into this lexical scope. Rejection returns every original token so the
-    /// installing checkout can release all roots and retire its unpublished
-    /// candidates without a partially visible source instance.
-    fn register_source_instances_in(
-        &mut self,
-        scope: ScopeId,
-        tokens: Vec<SourceInstanceLease>,
-    ) -> Result<Vec<SourceLeaseKey>, Vec<SourceInstanceLease>> {
-        self.bindings
-            .register_source_instances_in(&self.scopes, scope, tokens)
-    }
-
     /// One resolution pass over the exact scoped dependency closure. Sorted
     /// IDs preserve the binding owner's choice among same-owner aliases.
     fn scoped_prepared_bindings_in(
@@ -561,29 +572,14 @@ impl PersistentSession {
                 )?)
             })
             .collect::<Result<Vec<_>, PreparedRuntimeError>>()?;
-        let mut inherited = BTreeMap::<SourceBinder, SourceInstanceLease>::new();
-        let mut anchors = HashMap::<(CachedHomeOwner, u32), SourceInstanceLease>::new();
-        for lease in self.bindings.source_instances_in(&self.scopes, scope) {
-            let group = (lease.owner().clone(), lease.original_ordinal());
-            if anchors
-                .insert(group.clone(), lease.clone())
-                .is_some_and(|previous| previous.instance() != lease.instance())
-            {
-                return Err(PreparedRuntimeError::AmbiguousSourceGroup {
-                    owner: group.0,
-                    ordinal: group.1,
-                });
-            }
-            let binder = lease.binder().clone();
-            if inherited
-                .insert(binder.clone(), lease.clone())
-                .is_some_and(|previous| {
-                    previous.instance() != lease.instance() || previous.handle() != lease.handle()
-                })
-            {
-                return Err(PreparedRuntimeError::AmbiguousSourceInstance(binder));
-            }
-        }
+        let selection = self
+            .bindings
+            .source_domain_selection_in(&self.scopes, scope)
+            .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
+        let witness = self
+            .bindings
+            .scope_witness(&self.scopes, scope)
+            .ok_or(PreparedRuntimeError::SourceScopeAdmission)?;
         let roots = target_owners.iter().filter_map(|owner| match owner {
             ImportOwner::Source { version, binder } => Some(SourceBinder {
                 version: version.clone(),
@@ -593,18 +589,26 @@ impl PersistentSession {
             | ImportOwner::CodeExport { .. }
             | ImportOwner::Package { .. } => None,
         });
-        let selected = PendingGroupInventory::new(outlines)?
-            .seal_with_inherited(roots, &inherited, &anchors)?;
-        let (indices, inherited_needed) = selected.into_parts();
-        let mut groups = Vec::with_capacity(indices.len());
-        for index in indices {
-            let pending = &certification.groups[index];
+        let selected = PendingGroupInventory::new(outlines)?.seal_in_domains(roots, &selection)?;
+        let (plans, inherited_needed, target) = selected.into_parts();
+        let inherited_needed = inherited_needed
+            .into_iter()
+            .map(|scoped| scoped.into_demand())
+            .collect();
+        let mut groups = Vec::with_capacity(plans.len());
+        for plan in plans {
+            let pending = &certification.groups[plan.index()];
             let imports = resolve(pending.group().globals(), pending.imports())?;
-            groups.push(CertifiedGroup::admit(
-                pending.owner().clone(),
-                pending.group().clone(),
-                imports,
-            )?);
+            groups.push(
+                tidepool_codegen::prepared_program::ScopedCertifiedGroup::admit(
+                    CertifiedGroup::admit(
+                        pending.owner().clone(),
+                        pending.group().clone(),
+                        imports,
+                    )?,
+                    plan,
+                )?,
+            );
         }
         Ok(ResolvedCertifiedTurn {
             groups,
@@ -612,6 +616,11 @@ impl PersistentSession {
             package_interfaces: certification.package_interfaces.clone(),
             source_evidence,
             inherited_needed,
+            source_plan: ResolvedSourceDomainPlan {
+                target,
+                selection,
+                witness,
+            },
         })
     }
 
@@ -627,33 +636,65 @@ impl PersistentSession {
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
         demanded: Vec<DemandedImage>,
         inherited_needed: &[InheritedSourceDemand],
-    ) -> Result<(ProgramId, Vec<SourceLeaseKey>), PreparedRuntimeError> {
+    ) -> Result<
+        (
+            ProgramId,
+            tidepool_codegen::binding_table::SourceScopeAdmission,
+        ),
+        PreparedRuntimeError,
+    > {
         if !self.scopes.is_live(scope) {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
         }
-        let mut inherited = BTreeMap::<SourceBinder, SourceInstanceLease>::new();
-        let mut inherited_groups = HashMap::new();
-        for lease in self.bindings.source_instances_in(&self.scopes, scope) {
-            let group = (lease.owner().clone(), lease.original_ordinal());
-            if inherited_groups
-                .insert(group.clone(), lease.instance())
-                .is_some_and(|previous| previous != lease.instance())
-            {
-                return Err(PreparedRuntimeError::AmbiguousSourceGroup {
-                    owner: group.0,
-                    ordinal: group.1,
-                });
+        let qualified = target.source_plan().is_some();
+        let inherited = if let Some(plan) = target.source_plan() {
+            let current = self
+                .bindings
+                .scope_witness(&self.scopes, scope)
+                .ok_or(PreparedRuntimeError::SourceScopeAdmission)?;
+            if current != plan.witness {
+                return Err(PreparedRuntimeError::SourceScopeAdmission);
             }
-            let binder = lease.binder().clone();
-            if inherited
-                .insert(binder.clone(), lease.clone())
-                .is_some_and(|previous| {
-                    previous.instance() != lease.instance() || previous.handle() != lease.handle()
-                })
+            // The unchanged owner witness binds the private issued selection.
+            plan.selection.inherited().clone()
+        } else {
+            #[cfg(not(test))]
             {
-                return Err(PreparedRuntimeError::AmbiguousSourceInstance(binder));
+                return Err(PreparedRuntimeError::SourceScopeAdmission);
             }
-        }
+            #[cfg(test)]
+            {
+                let mut inherited = BTreeMap::new();
+                let mut anchors = HashMap::new();
+                for lease in self
+                    .bindings
+                    .selected_source_instances_in(&self.scopes, scope)
+                {
+                    let group = (lease.owner().clone(), lease.original_ordinal());
+                    if anchors
+                        .insert(group.clone(), lease.instance())
+                        .is_some_and(|old| old != lease.instance())
+                    {
+                        return Err(PreparedRuntimeError::AmbiguousSourceGroup {
+                            owner: group.0,
+                            ordinal: group.1,
+                        });
+                    }
+                    let key = tidepool_codegen::prepared_program::ScopedSourceBinder {
+                        domain: tidepool_codegen::prepared_program::SourceInstanceDomain::single(),
+                        source: lease.binder().clone(),
+                    };
+                    if inherited.insert(key.clone(), lease.clone()).is_some_and(
+                        |old: SourceInstanceLease| {
+                            old.instance() != lease.instance() || old.handle() != lease.handle()
+                        },
+                    ) {
+                        return Err(PreparedRuntimeError::AmbiguousSourceInstance(key.source));
+                    }
+                }
+                inherited
+            }
+        };
         let mut exact_external = HashMap::new();
         let retained = std::cell::OnceCell::new();
         for (globals, owners) in std::iter::once((target.globals(), target_owners)).chain(
@@ -707,7 +748,20 @@ impl PersistentSession {
             &self.bindings,
         )?;
         let tokens = std::mem::take(&mut staged.leases);
-        match self.register_source_instances_in(scope, tokens) {
+        let admitted = if qualified {
+            engine
+                .admit_source_instances(
+                    &mut self.bindings,
+                    &self.scopes,
+                    scope,
+                    std::mem::take(&mut staged.domain_leases),
+                )
+                .map_err(|_| tokens.clone())
+        } else {
+            self.bindings
+                .register_source_install_in(&self.scopes, scope, tokens.clone())
+        };
+        match admitted {
             Ok(keys) => {
                 let engine = bootstrap
                     .as_mut()
@@ -734,6 +788,19 @@ impl PersistentSession {
     /// Release only the source roots first introduced by a failed turn.
     /// Captured tips retain independent shares until their final owner drains.
     pub(crate) fn retire_failed_turn_source_instances(
+        &mut self,
+        scope: ScopeId,
+        keys: &tidepool_codegen::binding_table::SourceScopeAdmission,
+    ) -> bool {
+        let Some(released) = self.bindings.rollback_source_admission(scope, keys) else {
+            return false;
+        };
+        self.release_source_instance_roots(released);
+        true
+    }
+
+    #[cfg(test)]
+    pub(super) fn retire_fixture_source_subset(
         &mut self,
         scope: ScopeId,
         keys: &[SourceLeaseKey],
@@ -1562,6 +1629,18 @@ impl PersistentSession {
             .map(|(id, _)| id.var())
             .collect::<Vec<_>>();
         let items = staged.items().to_vec();
+        let source_origin = staged
+            .certified_authored
+            .as_ref()
+            .map(|certificate| {
+                self.bindings.prepare_source_owner_origin_in(
+                    &self.scopes,
+                    scope,
+                    certificate.product().owner().clone(),
+                )
+            })
+            .transpose()
+            .map_err(SessionError::InvalidPublicBindingPromotion)?;
         let admitted = self
             .lib
             .as_mut()
@@ -1569,6 +1648,9 @@ impl PersistentSession {
             .admit_staged_declaration_in(staged, &visible_values)?;
         admitted
             .map_commit(|generation| {
+                if let Some(source_origin) = source_origin {
+                    self.bindings.commit_source_owner_origin(source_origin);
+                }
                 self.bindings.preserve_observations(&captured_values);
                 for name in &replaced_names {
                     self.bindings.remove_current_in(scope, name);
@@ -1734,6 +1816,7 @@ impl PersistentSession {
             return None;
         }
         let lib = self.lib.as_ref()?;
+        let source_selection = self.bindings.scope_witness(&self.scopes, scope)?;
         let mut bindings: Vec<_> = self
             .bindings
             .iter_current_in(&self.scopes, scope)
@@ -1758,6 +1841,7 @@ impl PersistentSession {
             machine_incarnation: self.machine_incarnation,
             bindings,
             source_instances,
+            source_selection,
         })
     }
 
@@ -2548,16 +2632,25 @@ impl PersistentSession {
             return Ok(PublicManifestCommit::Stale);
         }
         let next_epoch = self.prepare_public_visibility_advance(ticket.public_scope)?;
-        let prepared = self
-            .bindings
-            .prepare_exact_publication_in(
+        let prepared = if let Some(declaration) = &ticket.declaration {
+            self.bindings.prepare_authored_source_publication_in(
+                &self.scopes,
+                ticket.private_scope,
+                ticket.public_scope,
+                &ticket.write_ids,
+                &ticket.source_keys,
+                &declaration.source_domain_owners,
+            )
+        } else {
+            self.bindings.prepare_exact_publication_in(
                 &self.scopes,
                 ticket.private_scope,
                 ticket.public_scope,
                 &ticket.write_ids,
                 &ticket.source_keys,
             )
-            .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        }
+        .map_err(SessionError::InvalidPublicBindingPromotion)?;
         let declared_names = ticket
             .declaration
             .as_ref()
@@ -3535,6 +3628,608 @@ mod checkpoint_scope_tests {
         lib.attach_recovery_graph_v2(root.join("declarations.json"))
             .unwrap();
         PersistentSession::new(Some(lib), 1024)
+    }
+
+    fn selected_sources(session: &PersistentSession, scope: ScopeId) -> Vec<SourceInstanceLease> {
+        session
+            .bindings
+            .selected_source_instances_in(&session.scopes, scope)
+    }
+
+    fn mint_fixture_origin(
+        session: &mut PersistentSession,
+        scope: ScopeId,
+        owner: CachedHomeOwner,
+    ) {
+        let origin = session
+            .bindings
+            .prepare_source_owner_origin_in(&session.scopes, scope, owner)
+            .unwrap();
+        session.bindings.commit_source_owner_origin(origin);
+    }
+
+    fn assert_unrelated_certified_turn_admitted(session: &mut PersistentSession, scope: ScopeId) {
+        use tidepool_repr::execution_schema::testing;
+        let mut wire = testing::wire_program();
+        let tidepool_repr::execution_schema::Group::NonRecursive(entry) = &mut wire.bindings[0]
+        else {
+            unreachable!()
+        };
+        entry.identity.unit = "main".into();
+        let prepared = testing::prepare(wire).unwrap();
+        let resolved = session
+            .resolve_certification_in(scope, &prepared, &TurnCertification::default())
+            .unwrap();
+        assert!(resolved.groups.is_empty());
+        let target = CertifiedTargetImage::compile(prepared, &ImageRegistry::new()).unwrap();
+        let (program, keys) = session
+            .install_certified_turn_in(scope, target, &[], &BTreeMap::new(), vec![], &[])
+            .unwrap();
+        assert!(keys.is_empty());
+        assert!(session.prepared_mut().unwrap().unpin(program));
+    }
+
+    #[test]
+    fn binding_publication_retains_independent_source_instances_without_selecting_them() {
+        use super::super::prepared::tests::install_selected_source_fixture;
+        let root = tempfile::tempdir().unwrap();
+        let mut session = publication_session(root.path(), 821);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let a = session.mint_detached_scope(public).unwrap();
+        let b = session.mint_detached_scope(public).unwrap();
+        let owner = public_owner("root/source-selection");
+        session
+            .bind_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        let (target_a, keys_a) = install_selected_source_fixture(&mut session, a, "a");
+        let (target_b, keys_b) = install_selected_source_fixture(&mut session, b, "a");
+        assert_eq!(keys_a.len(), 2);
+        assert_eq!(keys_b.len(), 2);
+        assert_ne!(keys_a[0].instance, keys_b[0].instance);
+        let external = session.mint_detached_scope(ScopeId::ROOT).unwrap();
+        assert!(session.retain_scope_dependencies(a, external));
+        assert!(session.retain_scope_dependencies(b, external));
+        assert_eq!(
+            session
+                .bindings
+                .source_instances_in(&session.scopes, external)
+                .len(),
+            4
+        );
+        assert!(selected_sources(&session, external).is_empty());
+        assert_unrelated_certified_turn_admitted(&mut session, external);
+        assert_eq!(session.retire_scope(external).roots_released, 0);
+        let capture_a = session.mint_detached_scope(a).unwrap();
+        let capture_b = session.mint_detached_scope(b).unwrap();
+        for (scope, keys) in [(a, &keys_a), (b, &keys_b)] {
+            let staged = session
+                .snapshot_publication(owner.clone(), public, scope, vec![], keys.to_vec())
+                .unwrap()
+                .stage()
+                .unwrap();
+            assert_eq!(
+                session
+                    .publish_staged_public_manifest(staged, &PublicationDecision::new())
+                    .unwrap(),
+                PublicManifestCommit::Durable
+            );
+        }
+        assert_eq!(
+            session
+                .bindings
+                .source_instances_in(&session.scopes, public)
+                .len(),
+            4
+        );
+        assert!(selected_sources(&session, public).is_empty());
+        assert_unrelated_certified_turn_admitted(&mut session, public);
+        assert!(session.prepared_mut().unwrap().unpin(target_a));
+        assert!(session.prepared_mut().unwrap().unpin(target_b));
+        assert_eq!(session.retire_scope(a).roots_released, 0);
+        assert_eq!(session.retire_scope(b).roots_released, 0);
+        for (capture, original) in [(capture_a, &keys_a), (capture_b, &keys_b)] {
+            let (reused, added) = install_selected_source_fixture(&mut session, capture, "a");
+            assert!(added.is_empty());
+            assert!(selected_sources(&session, capture)
+                .iter()
+                .all(|lease| original
+                    .iter()
+                    .any(|key| key.instance == lease.instance()
+                        && key.binder.as_ref() == lease.binder())));
+            assert!(session.prepared_mut().unwrap().unpin(reused));
+        }
+        let fresh = session.mint_detached_scope(public).unwrap();
+        let (fresh_target, fresh_keys) = install_selected_source_fixture(&mut session, fresh, "a");
+        assert_eq!(fresh_keys.len(), 2);
+        assert!(fresh_keys.iter().all(|key| !keys_a
+            .iter()
+            .chain(&keys_b)
+            .any(|old| old.instance == key.instance)));
+        assert!(session.prepared_mut().unwrap().unpin(fresh_target));
+        assert_eq!(session.retire_scope(fresh).roots_released, fresh_keys.len());
+        assert_eq!(session.retire_scope(capture_a).roots_released, 0);
+        assert_eq!(session.retire_scope(capture_b).roots_released, 0);
+        assert_eq!(session.retire_scope(public).roots_released, 4);
+        session
+            .prepared_mut()
+            .unwrap()
+            .quiesce_and_collect_now()
+            .unwrap();
+        assert_eq!(session.residency().unwrap().programs, 0);
+        assert_eq!(session.persistent_roots_count(), 0);
+    }
+
+    #[test]
+    fn authored_source_selection_preserves_late_group_support_after_binding_publication() {
+        use super::super::prepared::tests::install_selected_source_fixture;
+        let root = tempfile::tempdir().unwrap();
+        let mut session = publication_session(root.path(), 822);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let authored = session.mint_detached_scope(public).unwrap();
+        let unrelated = session.mint_detached_scope(public).unwrap();
+        let (target_a, keys_a) = install_selected_source_fixture(&mut session, authored, "a");
+        let (target_b, keys_b) = install_selected_source_fixture(&mut session, unrelated, "a");
+        assert!(session.retain_scope_dependencies(unrelated, authored));
+        let authored_custody = session
+            .public_visibility_snapshot_in(authored)
+            .unwrap()
+            .source_instances;
+        assert_eq!(authored_custody.len(), 4);
+        assert_eq!(selected_sources(&session, authored).len(), 2);
+        let owner = selected_sources(&session, authored)[0].owner().clone();
+        mint_fixture_origin(&mut session, authored, owner.clone());
+        let authored_promotion = session
+            .bindings
+            .prepare_authored_source_publication_in(
+                &session.scopes,
+                authored,
+                public,
+                &[],
+                &authored_custody,
+                &[owner],
+            )
+            .unwrap();
+        session
+            .bindings
+            .commit_exact_binding_promotion(authored_promotion);
+        let custody = session
+            .bindings
+            .prepare_exact_publication_in(&session.scopes, unrelated, public, &[], &keys_b)
+            .unwrap();
+        session.bindings.commit_exact_binding_promotion(custody);
+        assert_eq!(
+            session
+                .bindings
+                .source_instances_in(&session.scopes, public)
+                .len(),
+            4
+        );
+        assert_eq!(selected_sources(&session, public).len(), 2);
+        let later = session.mint_detached_scope(public).unwrap();
+        let (late_target, late_keys) = install_selected_source_fixture(&mut session, later, "late");
+        assert_eq!(late_keys.len(), 1);
+        assert_eq!(late_keys[0].binder.binder.occurrence, "late");
+        for original in &keys_a {
+            assert!(selected_sources(&session, later)
+                .iter()
+                .any(|lease| lease.instance() == original.instance
+                    && lease.binder() == original.binder.as_ref()));
+        }
+        for target in [target_a, target_b, late_target] {
+            assert!(session.prepared_mut().unwrap().unpin(target));
+        }
+        for scope in [authored, unrelated, later, public] {
+            session.retire_scope(scope);
+        }
+        session
+            .prepared_mut()
+            .unwrap()
+            .quiesce_and_collect_now()
+            .unwrap();
+        assert_eq!(session.residency().unwrap().programs, 0);
+    }
+
+    #[test]
+    fn conflicting_authored_source_selection_refuses_before_machine_changes() {
+        use super::super::prepared::tests::install_selected_source_fixture;
+        let root = tempfile::tempdir().unwrap();
+        let mut session = publication_session(root.path(), 823);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let a = session.mint_detached_scope(public).unwrap();
+        let b = session.mint_detached_scope(public).unwrap();
+        let (target_a, keys_a) = install_selected_source_fixture(&mut session, a, "a");
+        let (target_b, keys_b) = install_selected_source_fixture(&mut session, b, "a");
+        let owner = selected_sources(&session, a)[0].owner().clone();
+        for scope in [a, b] {
+            mint_fixture_origin(&mut session, scope, owner.clone());
+        }
+        let accepted = session
+            .bindings
+            .prepare_authored_source_publication_in(
+                &session.scopes,
+                a,
+                public,
+                &[],
+                &keys_a,
+                &[owner.clone()],
+            )
+            .unwrap();
+        session.bindings.commit_exact_binding_promotion(accepted);
+        let before = session.residency().unwrap();
+        let revision = session.bindings.mutation_revision();
+        assert!(matches!(
+            session.bindings.prepare_authored_source_publication_in(
+                &session.scopes,
+                b,
+                public,
+                &[],
+                &keys_b,
+                &[owner]
+            ),
+            Err(tidepool_codegen::binding_table::BindingPromotionError::ConflictingSourceOrigin)
+        ));
+        assert_eq!(session.residency().unwrap(), before);
+        assert_eq!(session.bindings.mutation_revision(), revision);
+        for target in [target_a, target_b] {
+            assert!(session.prepared_mut().unwrap().unpin(target));
+        }
+        for scope in [a, b, public] {
+            session.retire_scope(scope);
+        }
+        session
+            .prepared_mut()
+            .unwrap()
+            .quiesce_and_collect_now()
+            .unwrap();
+        assert_eq!(session.residency().unwrap().programs, 0);
+    }
+
+    #[test]
+    fn independent_authored_domains_keep_late_group_original_support() {
+        use super::super::prepared::tests::{
+            certified_source_group_modules, install_selected_groups_fixture,
+        };
+        use tidepool_repr::execution_schema::{testing, ModuleVersion};
+        let root = tempfile::tempdir().unwrap();
+        let mut session = publication_session(root.path(), 824);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let d = session.mint_detached_scope(public).unwrap();
+        let e = session.mint_detached_scope(public).unwrap();
+        let groups = [
+            certified_source_group_modules("D", "d1", 1, "Support", "support"),
+            certified_source_group_modules("D", "d2", 2, "Support", "support"),
+            certified_source_group_modules("E", "e1", 1, "Support", "support"),
+            certified_source_group_modules("Support", "support", 5, "Support", "support"),
+        ];
+        let source = |module, name| SourceBinder {
+            version: ModuleVersion([1; 32]),
+            binder: testing::identity(module, name),
+        };
+        let (target_d, keys_d) =
+            install_selected_groups_fixture(&mut session, d, &groups, source("D", "d1"));
+        let (target_e, keys_e) =
+            install_selected_groups_fixture(&mut session, e, &groups, source("E", "e1"));
+        let original_support = selected_sources(&session, d)
+            .into_iter()
+            .find(|lease| lease.binder().binder.module == "Support")
+            .unwrap();
+        for (scope, keys, owner) in [
+            (d, &keys_d, groups[0].owner().clone()),
+            (e, &keys_e, groups[2].owner().clone()),
+        ] {
+            mint_fixture_origin(&mut session, scope, owner.clone());
+            let publication = session
+                .bindings
+                .prepare_authored_source_publication_in(
+                    &session.scopes,
+                    scope,
+                    public,
+                    &[],
+                    keys,
+                    &[owner],
+                )
+                .unwrap();
+            session.bindings.commit_exact_binding_promotion(publication);
+        }
+        // d2 must inherit D's original support instance despite E's independently
+        // retained support. A single ambient map cannot express both domains.
+        let later = session.mint_detached_scope(public).unwrap();
+        let (target_late, _) =
+            install_selected_groups_fixture(&mut session, later, &groups, source("D", "d2"));
+        assert!(selected_sources(&session, later)
+            .iter()
+            .any(|lease| lease.instance() == original_support.instance()
+                && lease.handle() == original_support.handle()));
+        for target in [target_d, target_e, target_late] {
+            session.prepared_mut().unwrap().unpin(target);
+        }
+        for scope in [d, e, later, public] {
+            session.retire_scope(scope);
+        }
+    }
+
+    #[test]
+    fn nested_authored_domains_keep_unmaterialized_capture_after_origin_retirement() {
+        use super::super::prepared::tests::{
+            certified_source_group_modules, install_selected_groups_fixture,
+            prepare_selected_groups_fixture,
+        };
+        use tidepool_repr::execution_schema::{testing, ModuleVersion};
+        for reversed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut session = publication_session(root.path(), 825);
+            let public = session.mint_scope(ScopeId::ROOT).unwrap();
+            let d = session.mint_detached_scope(public).unwrap();
+            let groups = [
+                certified_source_group_modules("D", "d1", 1, "Support", "support"),
+                certified_source_group_modules("D", "d2", 2, "Support", "support"),
+                certified_source_group_modules("E", "e1", 1, "D", "d1"),
+                certified_source_group_modules("E", "e2", 2, "D", "d2"),
+                certified_source_group_modules("Support", "support", 5, "Support", "support"),
+            ];
+            let source = |module, name| SourceBinder {
+                version: ModuleVersion([1; 32]),
+                binder: testing::identity(module, name),
+            };
+            mint_fixture_origin(&mut session, d, groups[0].owner().clone());
+            let e = session.mint_detached_scope(d).unwrap();
+            assert!(
+                selected_sources(&session, e).is_empty(),
+                "D is unmaterialized at capture"
+            );
+            mint_fixture_origin(&mut session, e, groups[2].owner().clone());
+            let (td, kd) =
+                install_selected_groups_fixture(&mut session, d, &groups, source("D", "d1"));
+            let (te, ke) =
+                install_selected_groups_fixture(&mut session, e, &groups, source("E", "e1"));
+            let support_a = selected_sources(&session, d)
+                .into_iter()
+                .find(|lease| lease.owner().module == "Support")
+                .unwrap();
+            let support_b = selected_sources(&session, e)
+                .into_iter()
+                .find(|lease| lease.owner().module == "Support")
+                .unwrap();
+            assert_ne!(support_a.instance(), support_b.instance());
+            let publications = if reversed {
+                vec![(e, &ke, groups[2].owner()), (d, &kd, groups[0].owner())]
+            } else {
+                vec![(d, &kd, groups[0].owner()), (e, &ke, groups[2].owner())]
+            };
+            for (scope, keys, owner) in publications {
+                let prepared = session
+                    .bindings
+                    .prepare_authored_source_publication_in(
+                        &session.scopes,
+                        scope,
+                        public,
+                        &[],
+                        keys,
+                        &[owner.clone()],
+                    )
+                    .unwrap();
+                session.bindings.commit_exact_binding_promotion(prepared);
+            }
+            for target in [td, te] {
+                assert!(session.prepared_mut().unwrap().unpin(target));
+            }
+            session.retire_scope(d);
+            session.retire_scope(e);
+            let later = session.mint_detached_scope(public).unwrap();
+            let (target, owners, evidence, demanded, inherited) = prepare_selected_groups_fixture(
+                &session,
+                later,
+                &groups,
+                &[source("D", "d2"), source("E", "e2")],
+            );
+            let root_domain = target.source_plan().unwrap().target[&source("D", "d2")].domain;
+            let e_domain = target.source_plan().unwrap().target[&source("E", "e2")].domain;
+            assert_ne!(root_domain, e_domain);
+            let d2: Vec<_> = demanded
+                .iter()
+                .filter(|image| image.group().owner().module == "D")
+                .collect();
+            assert_eq!(d2.len(), 2);
+            assert!(
+                Arc::ptr_eq(d2[0].image(), d2[1].image()),
+                "immutable D2 image is shared"
+            );
+            let selection = session
+                .bindings
+                .source_domain_selection_in(&session.scopes, later)
+                .unwrap();
+            for image in d2 {
+                let key = image
+                    .qualified_source(&source("Support", "support"))
+                    .unwrap();
+                let selected = &selection.inherited()[&key];
+                assert_eq!(
+                    selected.handle(),
+                    if image.domain() == root_domain {
+                        support_a.handle()
+                    } else {
+                        support_b.handle()
+                    }
+                );
+            }
+            let (mixed, _) = session
+                .install_certified_turn_in(later, target, &owners, &evidence, demanded, &inherited)
+                .unwrap();
+            let d2_leases: Vec<_> = selected_sources(&session, later)
+                .into_iter()
+                .filter(|lease| lease.owner().module == "D" && lease.original_ordinal() == 2)
+                .collect();
+            assert_eq!(d2_leases.len(), 2);
+            assert_ne!(d2_leases[0].instance(), d2_leases[1].instance());
+            assert!(session.prepared_mut().unwrap().unpin(mixed));
+            session.retire_scope(later);
+            session.retire_scope(public);
+            session
+                .prepared_mut()
+                .unwrap()
+                .quiesce_and_collect_now()
+                .unwrap();
+            assert_eq!(session.persistent_roots_count(), 0);
+            assert_eq!(session.residency().unwrap().programs, 0);
+        }
+    }
+
+    #[test]
+    fn source_domain_metadata_change_refuses_prepared_install_atomically() {
+        use super::super::prepared::tests::{
+            certified_source_group_modules, prepare_selected_groups_fixture,
+        };
+        use tidepool_repr::execution_schema::{testing, ModuleVersion};
+        let root = tempfile::tempdir().unwrap();
+        let mut session = publication_session(root.path(), 826);
+        let scope = session.mint_detached_scope(ScopeId::ROOT).unwrap();
+        let groups = [certified_source_group_modules("D", "d1", 1, "D", "d1")];
+        let source = SourceBinder {
+            version: ModuleVersion([1; 32]),
+            binder: testing::identity("D", "d1"),
+        };
+        let (target, owners, evidence, demanded, inherited) =
+            prepare_selected_groups_fixture(&session, scope, &groups, &[source]);
+        let before = session.public_visibility_snapshot_in(scope).unwrap();
+        mint_fixture_origin(&mut session, scope, groups[0].owner().clone());
+        let after = session.public_visibility_snapshot_in(scope).unwrap();
+        assert_eq!(before.source_instances, after.source_instances);
+        assert_eq!(before.bindings, after.bindings);
+        assert_ne!(before.source_selection, after.source_selection);
+        assert!(matches!(
+            session
+                .install_certified_turn_in(scope, target, &owners, &evidence, demanded, &inherited),
+            Err(PreparedRuntimeError::SourceScopeAdmission)
+        ));
+        assert!(session.residency().is_none());
+        assert_eq!(session.public_visibility_snapshot_in(scope).unwrap(), after);
+    }
+
+    #[test]
+    fn failed_late_sibling_attachment_restores_capture_custody_and_selection() {
+        use super::super::prepared::tests::{
+            certified_sibling_fixture, install_selected_groups_fixture,
+        };
+        use tidepool_repr::execution_schema::{testing, ModuleVersion};
+        let root = tempfile::tempdir().unwrap();
+        let mut session = publication_session(root.path(), 827);
+        let a = session.mint_detached_scope(ScopeId::ROOT).unwrap();
+        let groups = [certified_sibling_fixture()];
+        let source = |name| SourceBinder {
+            version: ModuleVersion([1; 32]),
+            binder: testing::identity("Fixture", name),
+        };
+        let (ta, _) = install_selected_groups_fixture(&mut session, a, &groups, source("a"));
+        let b = session.mint_detached_scope(a).unwrap();
+        let (tb, _) = install_selected_groups_fixture(&mut session, a, &groups, source("b"));
+        let original_b = selected_sources(&session, a)
+            .into_iter()
+            .find(|lease| lease.binder().binder.occurrence == "b")
+            .unwrap();
+        let before_custody = session.bindings.source_instance_keys_in(&session.scopes, b);
+        let before_selection = selected_sources(&session, b);
+        let (failed, delta) =
+            install_selected_groups_fixture(&mut session, b, &groups, source("b"));
+        assert_eq!(delta.len(), 1);
+        assert!(selected_sources(&session, b)
+            .iter()
+            .any(|lease| lease.handle() == original_b.handle()));
+        assert!(session.prepared_mut().unwrap().unpin(failed));
+        assert!(session.retire_failed_turn_source_instances(b, &delta));
+        assert!(
+            !session.retire_failed_turn_source_instances(b, &delta),
+            "admission delta rolls back once"
+        );
+        assert_eq!(
+            session.bindings.source_instance_keys_in(&session.scopes, b),
+            before_custody
+        );
+        assert_eq!(selected_sources(&session, b).len(), before_selection.len());
+        assert!(selected_sources(&session, a)
+            .iter()
+            .any(|lease| lease.handle() == original_b.handle()));
+        for target in [ta, tb] {
+            session.prepared_mut().unwrap().unpin(target);
+        }
+        session.retire_scope(a);
+        assert!(
+            !session.prepared_mut().unwrap().release(original_b.handle()),
+            "failed B admission does not retain A's b root"
+        );
+        assert_eq!(selected_sources(&session, b).len(), 1);
+        session.retire_scope(b);
+        session
+            .prepared_mut()
+            .unwrap()
+            .quiesce_and_collect_now()
+            .unwrap();
+        assert_eq!(session.persistent_roots_count(), 0);
+    }
+
+    #[test]
+    fn stale_sibling_descriptor_cannot_restore_released_root_with_live_anchor() {
+        use super::super::prepared::tests::{
+            certified_sibling_fixture, install_selected_groups_fixture,
+            prepare_selected_groups_fixture,
+        };
+        use tidepool_repr::execution_schema::{testing, ModuleVersion};
+        let root = tempfile::tempdir().unwrap();
+        let mut session = publication_session(root.path(), 828);
+        let a = session.mint_detached_scope(ScopeId::ROOT).unwrap();
+        let groups = [certified_sibling_fixture()];
+        let source = |name| SourceBinder {
+            version: ModuleVersion([1; 32]),
+            binder: testing::identity("Fixture", name),
+        };
+        let (ta, _) = install_selected_groups_fixture(&mut session, a, &groups, source("a"));
+        let b = session.mint_detached_scope(a).unwrap();
+        let (old_target, old_delta) =
+            install_selected_groups_fixture(&mut session, a, &groups, source("b"));
+        let stale = selected_sources(&session, a)
+            .into_iter()
+            .find(|lease| lease.binder().binder.occurrence == "b")
+            .unwrap();
+        assert!(session.prepared_mut().unwrap().unpin(old_target));
+        assert!(session.retire_failed_turn_source_instances(a, &old_delta));
+        assert!(!session.prepared_mut().unwrap().release(stale.handle()));
+        let (target, owners, evidence, demanded, inherited) =
+            prepare_selected_groups_fixture(&session, b, &groups, &[source("b")]);
+        assert_eq!(inherited.len(), 1);
+        assert!(
+            session
+                .bindings
+                .retained_source_sibling_attachment(&inherited[0])
+                .is_none(),
+            "live anchor cannot issue a stale sibling descriptor"
+        );
+        let (fresh, _) = session
+            .install_certified_turn_in(b, target, &owners, &evidence, demanded, &inherited)
+            .unwrap();
+        let live = selected_sources(&session, b)
+            .into_iter()
+            .find(|lease| lease.binder().binder.occurrence == "b")
+            .unwrap();
+        assert_eq!(
+            live.instance(),
+            stale.instance(),
+            "exact group CAF is shared"
+        );
+        assert_ne!(
+            live.handle(),
+            stale.handle(),
+            "only a new machine-issued root is admitted"
+        );
+        for target in [ta, fresh] {
+            session.prepared_mut().unwrap().unpin(target);
+        }
+        session.retire_scope(a);
+        session.retire_scope(b);
+        session
+            .prepared_mut()
+            .unwrap()
+            .quiesce_and_collect_now()
+            .unwrap();
+        assert_eq!(session.persistent_roots_count(), 0);
     }
 
     #[test]

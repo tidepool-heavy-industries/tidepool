@@ -6,6 +6,8 @@ module Tidepool.ExactScope
   , PlannedCellAdmission(..), PlannedCellSlot(..)
   , readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation
+  , extendExactExecutionSources
+  , scopeExecutionNativeOwners
   ) where
 
 import Codec.CBOR.Decoding
@@ -13,13 +15,15 @@ import Codec.CBOR.Read (deserialiseFromBytes)
 import qualified Codec.CBOR.Encoding as E
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (IOException, try, throwIO)
-import Control.Monad (replicateM, unless, when)
+import Control.Monad (foldM, forM_, replicateM, unless, when)
 import qualified Crypto.Hash.SHA256 as SHA
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Char (isHexDigit)
 import Data.List (nub, isPrefixOf)
 import qualified Data.Text as T
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import GHC.Driver.Env (HscEnv)
 import Data.Word (Word64)
 import Numeric (showHex)
@@ -31,8 +35,13 @@ import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionM
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell (CheckedSignature(..), CheckedSignatureName(..))
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
+import Tidepool.ExecutionSource
+  ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
+  , ExecutionSourceRef(..), ExecutionSourceNode(..), decodeExecutionSources
+  , ExecutionSourceFailure(..), executionIdentityKey, executionSourceClosure, executionSourceOriginalNode
+  , executionSourceOriginalClosure )
 import Tidepool.PackageWitness
-  ( readPackageImports, validatePackageImportRoot )
+  ( PackageImportEvidence(..), readPackageImports, validatePackageImportRoot )
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), renderDependencyEvidence
   , revalidateDependencyEvidence )
@@ -45,6 +54,8 @@ data ExactScope = ExactScope
   , scopeInterfaces :: [(ExactIfaceArtifact, FilePath, String)]
   , scopeLexical :: [((String, String), [(String, String)])]
   , scopeProducts :: [ExactProduct]
+  , scopeExecutionGraphs :: [ExecutionSourceGraph]
+  , scopeExecutionOwners :: [ExecutionSourceRef]
   , scopeCheckedCell :: Maybe CheckedCellAdmission
   , scopeCheckedItem :: Maybe CheckedItemAdmission
   , scopeCheckedDisplay :: Maybe CheckedDisplayAdmission
@@ -126,6 +137,92 @@ data ExactOriginalGroup = ExactOriginalGroup
   , originalGlobals :: [(SymbolIdentity, Bool)]
   } deriving (Eq, Show)
 
+-- Attach provenance after native originals have been promoted. Recipes can
+-- supplement execution only for the exact native inventory already present;
+-- neither their owner rows nor their dependency graph grants lexical imports.
+extendExactExecutionSources :: [ExecutionSourceGraph] -> [ExecutionSourceRef]
+  -> ExactScope -> Either ExecutionSourceFailure ExactScope
+extendExactExecutionSources offeredGraphs offeredRefs scope = do
+  graphMap <- foldM insertGraph Map.empty (scopeExecutionGraphs scope ++ offeredGraphs)
+  references <- foldM insertReference Map.empty (scopeExecutionOwners scope ++ offeredRefs)
+  mapM_ (validateReference graphMap) (Map.elems references)
+  forM_ offeredRefs $ \reference -> do
+    _ <- executionSourceOriginalClosure (Map.elems graphMap) [reference]
+    pure ()
+  -- Current native admission can replace/reject a dependency while leaving
+  -- its import ABI valid. Withhold that optional execution root transitively;
+  -- the unchanged native product remains useful, and a later demanded splice
+  -- still refuses the missing capability.
+  available <- fmap concat $ mapM (\reference ->
+    case executionSourceClosure (Map.elems graphMap) (Map.elems references) (scopeExecutionNativeOwners scope)
+        [executionIdentityKey (executionRefIdentity reference)] of
+      Right closureNodes -> Right [(reference,closureNodes)]
+      Left (ExecutionSourceUnavailable _) -> Right []
+      Left refusal -> Left refusal) offeredRefs
+  let nodes = concatMap snd available
+  let selectedRefs = [reference | node <- nodes
+        , Just reference <- [Map.lookup (executionIdentityKey (executionNodeIdentity node)) references]]
+  needed <- foldM (retainGraph graphMap) Set.empty
+    [(executionRefIdentity reference,executionRefGraph reference) | reference <- selectedRefs]
+  retainedReferences <- foldM insertReference Map.empty (scopeExecutionOwners scope ++ map fst available)
+  let kept = Set.union (Set.map snd needed) (Set.fromList (map executionGraphSha256 (scopeExecutionGraphs scope)))
+      graphs = [graph | (sha,graph) <- Map.toAscList graphMap, sha `Set.member` kept]
+  unless (length graphs <= 4096 && Map.size references <= 4096
+      && sum (map (BS.length . executionGraphBytes) graphs) <= 4 * 1024 * 1024)
+    (Left (ExecutionSourceIncomplete ("","candidate execution parcel")))
+  pure scope {scopeExecutionGraphs=graphs,scopeExecutionOwners=Map.elems retainedReferences}
+  where
+    insertGraph selected graph = do
+      unless (executionGraphProducer graph == scopeProducerSha256 scope)
+        (Left (ExecutionSourceConflicting ("",executionGraphSha256 graph)))
+      case Map.lookup (executionGraphSha256 graph) selected of
+        Nothing -> Right (Map.insert (executionGraphSha256 graph) graph selected)
+        Just previous | executionGraphBytes previous == executionGraphBytes graph -> Right selected
+        _ -> Left (ExecutionSourceConflicting ("",executionGraphSha256 graph))
+    insertReference selected reference =
+      let key = executionIdentityKey (executionRefIdentity reference)
+      in case Map.lookup key selected of
+        Nothing -> Right (Map.insert key reference selected)
+        Just previous | previous == reference -> Right selected
+        _ -> Left (ExecutionSourceConflicting key)
+    validateReference graphs reference = do
+      let originalIdentity = executionRefIdentity reference
+          key = executionIdentityKey originalIdentity
+          matched product' = (originalUnit product',originalModule product') == key
+            && originalVersion product' == executionVersion originalIdentity
+            && originalIfaceSha256 product' == executionIfaceSha256 originalIdentity
+            && originalProductSha256 product' == executionNativeSha256 originalIdentity
+      unless (any matched (scopeProducts scope)
+          && any (\(iface,_,_) -> (exactUnit iface,exactModule iface) == key
+            && exactSha256 iface == executionIfaceSha256 originalIdentity) (scopeInterfaces scope))
+        (Left (ExecutionSourceConflicting key))
+      graph <- maybe (Left (ExecutionSourceMissing key)) Right
+        (Map.lookup (executionRefGraph reference) graphs)
+      unless (executionGraphProducer graph == scopeProducerSha256 scope
+          && any ((== originalIdentity) . executionOwnerIdentity) (executionGraphOwners graph))
+        (Left (ExecutionSourceConflicting key))
+      _ <- executionSourceOriginalNode (Map.elems graphs) originalIdentity (executionRefGraph reference)
+      pure ()
+    retainGraph graphs selected (originalIdentity,sha)
+      | (originalIdentity,sha) `Set.member` selected = Right selected
+      | otherwise = do
+          let key = executionIdentityKey originalIdentity
+          graph <- maybe (Left (ExecutionSourceMissing key)) Right (Map.lookup sha graphs)
+          unless (executionGraphProducer graph == scopeProducerSha256 scope)
+            (Left (ExecutionSourceConflicting key))
+          foldM (retainGraph graphs) (Set.insert (originalIdentity,sha) selected)
+            [(originalIdentity,original) | graphOwner <- executionGraphOwners graph
+              , executionOwnerIdentity graphOwner == originalIdentity
+              , Just original <- [executionOwnerOriginalGraph graphOwner]]
+
+scopeExecutionNativeOwners :: ExactScope -> [ExecutionSourceIdentity]
+scopeExecutionNativeOwners scope =
+  [ExecutionSourceIdentity (originalUnit product') (originalModule product')
+    (originalVersion product') (originalIfaceSha256 product') (originalProductSha256 product')
+  | product' <- scopeProducts scope
+  , any (\(iface,_,_) -> (exactUnit iface,exactModule iface) == (originalUnit product',originalModule product')
+      && exactSha256 iface == originalIfaceSha256 product') (scopeInterfaces scope)]
+
 data ExactCompilation = ExactCompilation
   { compilationScope :: ExactScope
   , compilationTransaction :: Word64
@@ -172,7 +269,7 @@ revalidateExactScope env scope = do
     checkInterface (iface, packages, packagesSha) = do
       roots <- readPackageImports packages packagesSha iface
       selected <- either fail pure roots
-      mapM_ (\root -> validatePackageImportRoot env root >>= either fail pure) selected
+      mapM_ (\root -> validatePackageImportRoot env root >>= either fail pure) (packageInterfaces selected)
     checkValue value = do
       bytes <- BS.readFile (exactPath value)
       unless (digest bytes == exactSha256 value) (fail "checked value interface changed")
@@ -239,7 +336,8 @@ decodeScope = do
   magic <- string
   version <- string
   unless (magic == "TPEXACTSCOPE"
-      && ((version == "2" && count == 7) || (version == "4" && count == 8)))
+      && ((version == "2" && count == 7) || (version == "4" && count == 8)
+        || (version == "5" && count == 9)))
     (fail "unsupported exact scope")
   semantic <- digestField
   producer <- digestField
@@ -290,7 +388,26 @@ decodeScope = do
           (exactUnit iface, exactModule iface) == (originalUnit originalProduct, originalModule originalProduct)
           && exactSha256 iface == originalIfaceSha256 originalProduct) interfaces) products)
     (fail "incomplete or conflicting exact owner closure")
-  (checked, checkedItem, checkedDisplay, includes) <- if version == "2" then pure (Nothing,Nothing,Nothing,Nothing) else do
+  (executionGraphs, executionOwners) <- if version == "5" then decodeExecutionSources else pure ([], [])
+  forM_ executionGraphs $ \graph -> unless (executionGraphProducer graph == producer)
+    (fail "original execution graph has another compiler producer")
+  forM_ executionOwners $ \reference -> do
+    let original = executionRefIdentity reference
+        matchingProduct product' = originalUnit product' == executionUnit original
+          && originalModule product' == executionModule original
+          && originalVersion product' == executionVersion original
+          && originalIfaceSha256 product' == executionIfaceSha256 original
+          && originalProductSha256 product' == executionNativeSha256 original
+        matchingGraph graph = executionGraphSha256 graph == executionRefGraph reference
+          && any ((== original) . executionOwnerIdentity) (executionGraphOwners graph)
+    unless (any matchingProduct products && any matchingGraph executionGraphs)
+      (fail "original execution reference leaves its admitted native owner")
+  nullPurpose <- if version == "5" then (== TypeNull) <$> peekTokenType else pure False
+  (checked, checkedItem, checkedDisplay, includes) <- if version == "2" || nullPurpose
+    then do
+      when nullPurpose decodeNull
+      pure (Nothing,Nothing,Nothing,Nothing)
+    else do
     authCount <- decodeListLen
     purpose <- string
     case purpose of
@@ -388,7 +505,8 @@ decodeScope = do
         paths <- includePaths
         pure (Nothing,Nothing,Just admission,Just paths)
       _ -> fail "unsupported exact compile purpose"
-  pure (ExactScope "" "" producer semantic interfaces lexical products checked checkedItem checkedDisplay includes)
+  pure (ExactScope "" "" producer semantic interfaces lexical products executionGraphs executionOwners
+    checked checkedItem checkedDisplay includes)
   where
     includePaths = bounded 4096 $ do
       path <- absolute

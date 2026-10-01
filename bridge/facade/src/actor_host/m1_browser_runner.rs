@@ -5,6 +5,7 @@ use super::*;
 use tokio::sync::oneshot;
 
 const RAW_INPUT: &str = "Run one real Haskell cell and retain its answer.";
+const TYPED_INPUT: &str = "Call the installed probe twice with different numbers.";
 const CANCEL_INPUT: &str = "Start a cancellable resident cell.";
 const CONTINUE_INPUT: &str = "Continue after the interrupted cell.";
 
@@ -21,6 +22,8 @@ struct ScriptState {
     requests: usize,
     raw_issued: bool,
     raw_completed: bool,
+    typed_issued: usize,
+    typed_completed: bool,
     cancel_issued: bool,
     continued: bool,
 }
@@ -41,12 +44,76 @@ fn real_cell_returned_42(item: &harness::item::Item) -> bool {
     cell_output_matches(item, "browser-real-cell", "42")
 }
 
+fn typed_result_matches(item: &harness::item::Item, call_id: &str, expected: &str) -> bool {
+    if item.0["type"] != "function_call_output" || item.0["call_id"] != call_id {
+        return false;
+    }
+    let Some(output) = item.0["output"].as_str() else {
+        return false;
+    };
+    let Ok(response) = serde_json::from_str::<Value>(output) else {
+        return false;
+    };
+    matches!(response["status"].as_str(), Some("completed" | "committed"))
+        && response["total"] == 1
+        && response["nextIndex"] == 1
+        && response["items"].as_array().is_some_and(|items| {
+            items.len() == 1
+                && items[0]["status"] == "committed"
+                && items[0]["output"]
+                    .as_str()
+                    .is_some_and(|output| output.trim() == expected)
+        })
+}
+
+fn probe_call(call_id: &str, number: i64) -> harness::item::Item {
+    harness::item::Item(json!({
+        "type":"function_call", "name":"probe", "call_id":call_id,
+        "arguments":serde_json::to_string(&json!({"number":number})).unwrap(),
+    }))
+}
+
+fn typed_reply_signature(item: &harness::item::Item) -> Value {
+    let output = item.0["output"]
+        .as_str()
+        .and_then(|output| serde_json::from_str::<Value>(output).ok());
+    json!({
+        "type": item.0["type"],
+        "callId": item.0["call_id"],
+        "response": output.as_ref().map(|response| json!({
+            "keys": response.as_object().map(|object| object.keys().collect::<Vec<_>>()),
+            "status": response["status"],
+            "nextIndex": response["nextIndex"],
+            "total": response["total"],
+            "items": response["items"].as_array().map(|items| items.iter().take(4).map(|item| {
+                json!({
+                    "status": item["status"],
+                    "outputPreview": item["output"].as_str().map(|value| value.chars().take(64).collect::<String>()),
+                    "outputIs42": item["output"].as_str().is_some_and(|value| value.trim() == "42"),
+                    "outputIs43": item["output"].as_str().is_some_and(|value| value.trim() == "43"),
+                })
+            }).collect::<Vec<_>>()),
+        })),
+    })
+}
+
 impl BrowserTransport {
     async fn create_for_request(
         &self,
         request: ResponsesRequest,
         request_id: Option<&harness::model::RequestId>,
     ) -> Result<ResponsesTurn, TransportError> {
+        for item in request.input.iter().filter(|item| {
+            matches!(
+                item.0["call_id"].as_str(),
+                Some("browser-typed-first" | "browser-typed-second")
+            ) && item.0["type"] == "function_call_output"
+        }) {
+            eprintln!(
+                "browser gate typed reply signature={}",
+                typed_reply_signature(item)
+            );
+        }
         for item in request.input.iter().filter(|item| {
             item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == "browser-real-cell"
         }) {
@@ -88,7 +155,40 @@ impl BrowserTransport {
             } else if !state.raw_completed && result_present {
                 state.raw_completed = true;
                 ("raw_result", final_answer("The resident cell returned 42."))
-            } else if state.raw_completed && !state.cancel_issued && contains_input(CANCEL_INPUT) {
+            } else if state.raw_completed && state.typed_issued == 0 && contains_input(TYPED_INPUT)
+            {
+                assert!(
+                    request.tools.iter().any(|tool| {
+                        tool["type"] == "function"
+                            && tool["name"] == "probe"
+                            && tool["strict"] == true
+                    }),
+                    "the model request must contain the actual installed typed tool"
+                );
+                state.typed_issued = 1;
+                ("typed_first", probe_call("browser-typed-first", 40))
+            } else if state.typed_issued == 1
+                && request
+                    .input
+                    .iter()
+                    .any(|item| typed_result_matches(item, "browser-typed-first", "Number 42"))
+            {
+                state.typed_issued = 2;
+                ("typed_second", probe_call("browser-typed-second", 41))
+            } else if state.typed_issued == 2
+                && !state.typed_completed
+                && request
+                    .input
+                    .iter()
+                    .any(|item| typed_result_matches(item, "browser-typed-second", "Number 43"))
+            {
+                state.typed_completed = true;
+                (
+                    "typed_result",
+                    final_answer("Installed typed tools returned 42 and 43."),
+                )
+            } else if state.typed_completed && !state.cancel_issued && contains_input(CANCEL_INPUT)
+            {
                 state.cancel_issued = true;
                 (
                     "cancel_input",
@@ -111,6 +211,11 @@ impl BrowserTransport {
                 )
             } else if state.raw_issued && !state.raw_completed {
                 ("raw_wait", final_answer("Waiting for the resident cell."))
+            } else if state.typed_issued > 0 && !state.typed_completed {
+                (
+                    "typed_wait",
+                    final_answer("Waiting for the installed tool result."),
+                )
             } else {
                 return Err(TransportError::Stream(
                     "unexpected browser scenario request".into(),
@@ -232,6 +337,14 @@ async fn pending_sleep_operation(
         };
     };
     let target = browser_target(&fixture.campaign);
+    let context = exomonad_tool::ToolInvocationContext {
+        origin: exomonad_tool::ToolInvocationOrigin::Model(
+            embedded_harness::original_operation(&target, &claim.operation)
+                .map_err(|error| error.to_string())?,
+        ),
+        call_id: claim.operation.call.0.clone(),
+        namespace: None,
+    };
     let expected_origin = harness::model::ConversationIdentity::Embedded {
         run: target.run,
         actor: target.actor,
@@ -254,6 +367,14 @@ async fn pending_sleep_operation(
             .is_some()
     {
         return Err("cancellable resident operation settled before interruption".into());
+    }
+    if fixture
+        .campaign
+        .actor
+        .hosted_workbench_waiting(&context)
+        .is_none()
+    {
+        return Ok(None);
     }
 
     let actor = fixture.campaign.actor.identity();
@@ -285,11 +406,17 @@ async fn drive_browser(
         "type":"ready", "version":1, "base_url":format!("http://{}", fixture.address),
         "session_secret":secret, "actor":{"name":identity.actor.0,"incarnation":identity.incarnation},
         "scenario":{"steps":[
-            {"action":"input", "text":RAW_INPUT,"wait_for_receipt":false,"provider_barriers":[
+            {"action":"input", "text":RAW_INPUT,"retry_unresolved":true,"wait_for_receipt":false,"provider_barriers":[
                 {"phase":"raw_input","expected_request_text":RAW_INPUT},
                 {"until_phase":"raw_result","timeout_ms":300000,"allowed_intermediate_phases":["raw_wait"],"expected_request_text":"42"}
             ], "wait_for_text":"The resident cell returned 42."},
-            {"action":"reload"}, {"action":"retry"},
+            {"action":"reload"}, {"action":"assert_settled_retry"},
+            {"action":"input", "text":TYPED_INPUT, "wait_for_receipt":false, "provider_barriers":[
+                {"phase":"typed_first", "expected_request_text":TYPED_INPUT},
+                {"until_phase":"typed_second", "allowed_intermediate_phases":["typed_wait"], "expected_request_text":"42"},
+                {"until_phase":"typed_result", "allowed_intermediate_phases":["typed_wait"], "expected_request_text":"43"}
+            ], "wait_for_text":"Installed typed tools returned 42 and 43."},
+            {"action":"reload"}, {"action":"assert_settled_retry"},
             {"action":"input","text":CANCEL_INPUT,"provider_barriers":[
                 {"phase":"cancel_input","expected_request_text":CANCEL_INPUT},
                 {"phase":"cancel_wait","timeout_ms":300000,"expected_request_text":CANCEL_INPUT}
@@ -310,6 +437,8 @@ async fn drive_browser(
         let mut started = false;
         let mut waiting: Option<Barrier> = None;
         let mut raw_completed = false;
+        let mut typed_completed = false;
+        let mut typed_compile_count = None;
         let mut cancel_wait = false;
         let mut cancel_pending_at = None;
         let mut cancel_operation = None;
@@ -324,6 +453,15 @@ async fn drive_browser(
                     let barrier = barrier.ok_or("scripted provider closed before browser completion")?;
                     last_phase = barrier.phase;
                     eprintln!("browser gate phase={last_phase} elapsed={:?}", journey_started.elapsed());
+                    if barrier.phase == "typed_first" {
+                        typed_compile_count = Some(tidepool_extract_cmd::extract_spawn_count());
+                    }
+                    if barrier.phase == "typed_result" {
+                        if typed_compile_count != Some(tidepool_extract_cmd::extract_spawn_count()) {
+                            return Err("first and repeated installed tool calls submitted compiler work".into());
+                        }
+                        typed_completed = true;
+                    }
                     if barrier.phase == "cancel_wait" {
                         cancel_operation = Some(tokio::time::timeout(Duration::from_secs(300), async {
                             loop {
@@ -369,7 +507,7 @@ async fn drive_browser(
                                 let detail = frame["detail"].as_str().unwrap_or("driver rejected the journey");
                                 return Err(format!("browser journey failed: {}", detail.replace(secret, "[test-secret]")));
                             }
-                            if !started || waiting.is_some() || !raw_completed || !cancel_wait || !continued {
+                            if !started || waiting.is_some() || !raw_completed || !typed_completed || !cancel_wait || !continued {
                                 return Err("browser finished before the real provider scenario completed".into());
                             }
                             return Ok(());
@@ -415,7 +553,16 @@ pub(super) async fn production_browser_journey() {
     });
     let host_transport: Arc<dyn ResponsesTransport> = transport.clone();
     let host_started = tokio::time::Instant::now();
-    let fixture = RunningBrowserHost::start(&settings, &host_transport)
+    let fixture = RunningBrowserHost::start_configured(&settings, &host_transport, |config| {
+        let authored = config.workspace.join(".exomonad");
+        std::fs::create_dir_all(&authored).unwrap();
+        std::fs::write(authored.join("AgentSpec.hs"), include_str!("fixtures/browser_agent_spec.hs")).unwrap();
+        std::fs::write(authored.join("config.toml"), "[defaults]\nmodel='test-model'\n[haskell]\nsource_roots=['.']\nspec='AgentSpec.agentSpec'\n").unwrap();
+        test_campaign::commit_workspace(&config.workspace);
+        config.workspace_inputs = Some(crate::exomonad::workspace::FrozenWorkspace::load(
+            &config.workspace, &config.run_root,
+        ).unwrap());
+    })
         .await
         .unwrap();
     eprintln!(
@@ -424,18 +571,59 @@ pub(super) async fn production_browser_journey() {
     );
     let outcome = drive_browser(&fixture, secret, barrier_rx).await;
     if outcome.is_err() {
-        eprintln!(
-            "browser gate {}",
-            fixture
-                .cell_settlement_diagnostic("browser-real-cell")
-                .await
-        );
-        eprintln!(
-            "browser gate {}",
-            fixture
-                .cell_settlement_diagnostic("browser-cancellable-cell")
-                .await
-        );
+        let store = fixture.runtime.store();
+        for call_id in [
+            "browser-real-cell",
+            "browser-typed-first",
+            "browser-typed-second",
+            "browser-cancellable-cell",
+        ] {
+            eprintln!(
+                "browser gate {}",
+                fixture.cell_settlement_diagnostic(call_id).await
+            );
+            for claim in store
+                .claims(&harness::model::CallId(call_id.into()))
+                .unwrap_or_default()
+                .iter()
+                .take(4)
+            {
+                let retained = store.replay_output_operation(&claim.operation);
+                let retained_signature = retained
+                    .as_ref()
+                    .ok()
+                    .and_then(|item| item.as_ref())
+                    .map(typed_reply_signature);
+                let scheduler = fixture.runtime.scheduler().output(&claim.operation).await;
+                let scheduler_signature = match &scheduler {
+                    Ok(Some(harness::turn::JobOutput::Completed(Ok(value)))) => {
+                        Some(typed_reply_signature(&harness::item::Item(json!({
+                            "type":"function_call_output", "call_id":call_id,
+                            "output":serde_json::to_string(value).unwrap(),
+                        }))))
+                    }
+                    _ => None,
+                };
+                eprintln!("browser gate call={call_id} retained_signature={retained_signature:?} scheduler_signature={scheduler_signature:?}");
+            }
+        }
+        if let Ok(agents) = store.list_agents() {
+            for agent in agents.iter().take(4) {
+                eprintln!(
+                    "browser gate durable agent={} state={:?} head={:?}",
+                    agent.path.0, agent.state, agent.head_request
+                );
+            }
+        }
+        if let Ok(events) = store.events(None) {
+            let kinds = events
+                .iter()
+                .rev()
+                .take(16)
+                .map(|event| (&event.kind, &event.request))
+                .collect::<Vec<_>>();
+            eprintln!("browser gate final durable event kinds={kinds:?}");
+        }
     }
     let terminal = fixture.campaign.actor.terminal().get();
     let retirement_cleanup = fixture.campaign.actor.terminal().cleanup();
@@ -457,5 +645,5 @@ pub(super) async fn production_browser_journey() {
         "browser retirement must retain confirmed actor cleanup"
     );
     let state = transport.state.lock();
-    assert!(state.raw_completed && state.cancel_issued && state.continued);
+    assert!(state.raw_completed && state.typed_completed && state.cancel_issued && state.continued);
 }

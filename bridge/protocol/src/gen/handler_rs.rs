@@ -80,35 +80,7 @@ fn body(e: &Effect) -> String {
         out.push_str("use tidepool_bridge_derive::FromHaskell;\n\n");
     }
 
-    // --- the typed failure ADT -------------------------------------------
-    if let Some(adt) = &e.errors {
-        out.push_str(&format!(
-            "/// The `{}` effect's typed per-verb failure (#335).\n",
-            e.name
-        ));
-        out.push_str("///\n");
-        out.push_str(
-            "/// `FromHaskell` is for test-side decoding of a `Left err`; the error is only\n",
-        );
-        out.push_str(
-            "/// ever SENT (`ToHaskell`) in production. `Debug` backs the `Display` path.\n",
-        );
-        out.push_str("#[derive(ToHaskell, FromHaskell, Debug, PartialEq, Eq)]\n");
-        out.push_str(&format!("pub enum {} {{\n", adt.name));
-        for v in &adt.variants {
-            out.push_str(&format!("    /// {}\n", v.doc));
-            let fields: Vec<String> = v
-                .fields
-                .iter()
-                .map(|f| {
-                    f.rust
-                        .rust_type(&f.ty, &format!("{}::{}::{}", e.name, adt.name, v.ctor))
-                })
-                .collect();
-            out.push_str(&super::render_variant(v.ctor, &fields));
-        }
-        out.push_str("}\n\n");
-    }
+    out.push_str(&typed_failure(e));
 
     // --- the request enum -------------------------------------------------
     out.push_str(&format!(
@@ -261,5 +233,40 @@ fn body(e: &Effect) -> String {
         out.push_str("    }\n");
     }
     out.push_str("}\n");
+    out
+}
+
+/// The schema-owned typed failure shared by handler and suspension projections.
+pub(super) fn typed_failure(e: &Effect) -> String {
+    let mut out = String::new();
+    if let Some(adt) = &e.errors {
+        out.push_str(&format!(
+            "/// The `{}` effect's typed per-verb failure (#335).\n",
+            e.name
+        ));
+        out.push_str("///\n");
+        out.push_str(
+            "/// `FromHaskell` is for test-side decoding of a `Left err`; the error is only\n",
+        );
+        out.push_str(
+            "/// ever SENT (`ToHaskell`) in production. `Debug` backs the `Display` path.\n",
+        );
+        out.push_str("#[derive(ToHaskell, FromHaskell, Debug, PartialEq, Eq)]\n");
+        out.push_str(&format!("pub enum {} {{\n", adt.name));
+        for v in &adt.variants {
+            out.push_str(&format!("    /// {}\n", v.doc));
+            let fields: Vec<String> = v
+                .fields
+                .iter()
+                .map(|f| {
+                    f.rust
+                        .rust_type(&f.ty, &format!("{}::{}::{}", e.name, adt.name, v.ctor))
+                })
+                .collect();
+            out.push_str(&super::render_variant(v.ctor, &fields));
+        }
+        out.push_str("}\n\n");
+    }
+
     out
 }

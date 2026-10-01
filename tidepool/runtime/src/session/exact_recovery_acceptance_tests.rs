@@ -970,7 +970,7 @@ fn successor_initialization_refuses_changed_or_released_native_dependencies() {
             assert!(session.prepared_mut().unwrap().release(lease.handle()));
             RecoveryInitializationFailure::UnavailableNativeDependency
         } else {
-            assert!(session.retire_failed_turn_source_instances(target, &keys[..1]));
+            assert!(session.retire_fixture_source_subset(target, &keys[..1]));
             RecoveryInitializationFailure::ChangedNativeDependencies
         };
         let before = std::fs::read(&manifest).unwrap();

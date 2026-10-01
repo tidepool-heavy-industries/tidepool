@@ -10,6 +10,69 @@ use crate::ProcessInvocation;
 #[serde(try_from = "String", into = "String")]
 pub struct SystemdSlice(String);
 
+/// Optional filesystem hiding for a single supervised host service.
+/// Paths are validated before they become systemd's whitespace-separated list.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "HostFilesystemPaths")]
+pub struct HostFilesystemPolicy {
+    inaccessible_paths: Vec<PathBuf>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct HostFilesystemPaths {
+    inaccessible_paths: Vec<PathBuf>,
+}
+
+impl TryFrom<HostFilesystemPaths> for HostFilesystemPolicy {
+    type Error = String;
+
+    fn try_from(paths: HostFilesystemPaths) -> Result<Self, Self::Error> {
+        Self::try_new(paths.inaccessible_paths)
+    }
+}
+
+impl HostFilesystemPolicy {
+    pub fn try_new(inaccessible_paths: Vec<PathBuf>) -> Result<Self, String> {
+        for path in &inaccessible_paths {
+            let text = path
+                .to_str()
+                .ok_or("host inaccessible path must be UTF-8")?;
+            if !path.is_absolute()
+                || path
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+                || text.bytes().any(|byte| {
+                    byte.is_ascii_whitespace()
+                        || byte.is_ascii_control()
+                        || matches!(byte, b'\\' | b'%' | b'\"' | b'\'')
+                })
+            {
+                return Err("host inaccessible paths require absolute paths without parent components, whitespace, controls, quotes, backslashes, or systemd specifiers".into());
+            }
+        }
+        Ok(Self { inaccessible_paths })
+    }
+
+    fn service_properties(&self) -> Vec<String> {
+        if self.inaccessible_paths.is_empty() {
+            return Vec::new();
+        }
+        vec![
+            "--property=PrivateUsers=yes".into(),
+            "--property=PrivateMounts=yes".into(),
+            format!(
+                "--property=InaccessiblePaths={}",
+                self.inaccessible_paths
+                    .iter()
+                    .map(|path| path.to_str().expect("validated UTF-8 path"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        ]
+    }
+}
+
 impl Default for SystemdSlice {
     fn default() -> Self {
         Self("swarm.slice".into())
@@ -108,6 +171,7 @@ impl SystemdSlice {
         unit: &str,
         command: ProcessInvocation,
         environment: &BTreeMap<String, String>,
+        filesystem: &HostFilesystemPolicy,
     ) -> ProcessInvocation {
         let mut args = vec![
             "--user".into(),
@@ -125,6 +189,7 @@ impl SystemdSlice {
             "--property=StartLimitBurst=5".into(),
             format!("--unit={unit}"),
         ];
+        args.extend(filesystem.service_properties());
         args.extend(environment.keys().map(|name| format!("--setenv={name}")));
         args.extend(["--".into(), command.program]);
         args.extend(command.args);
@@ -261,6 +326,7 @@ mod tests {
                 args: vec!["host".into(), "$HOME;literal".into()],
             },
             &environment,
+            &HostFilesystemPolicy::default(),
         );
         assert_eq!(wrapped.program, "systemd-run");
         assert!(wrapped
@@ -272,5 +338,55 @@ mod tests {
         assert!(wrapped.args.contains(&"--wait".into()));
         assert!(wrapped.args.contains(&"--setenv=PATH".into()));
         assert_eq!(wrapped.args.last().unwrap(), "$HOME;literal");
+    }
+    #[test]
+    fn host_filesystem_policy_rejects_systemd_list_and_specifier_syntax() {
+        for path in [
+            "relative", "/a/../b", "/a b", "/a\t", "/a\n", "/a\\b", "/a%b", "/a\"b", "/a'b",
+        ] {
+            assert!(
+                HostFilesystemPolicy::try_new(vec![PathBuf::from(path)]).is_err(),
+                "{path:?}"
+            );
+        }
+        assert!(serde_json::from_str::<HostFilesystemPolicy>(
+            r#"{"inaccessible_paths":["relative"]}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<HostFilesystemPolicy>(r#"{"unknown":[]}"#).is_err());
+    }
+
+    #[test]
+    fn supervised_host_filesystem_policy_is_per_unit_and_default_empty() {
+        let policy = HostFilesystemPolicy::try_new(vec![
+            PathBuf::from("/srv/swarm/checkouts"),
+            PathBuf::from("/srv/build"),
+        ])
+        .unwrap();
+        let service = |policy: &HostFilesystemPolicy| {
+            SystemdSlice::default().supervised_service(
+                "host-one",
+                ProcessInvocation {
+                    program: "/nix/store/host".into(),
+                    args: vec!["host".into()],
+                },
+                &BTreeMap::new(),
+                policy,
+            )
+        };
+        let default_policy = HostFilesystemPolicy::default();
+        let baseline = service(&default_policy);
+        let isolated = service(&policy);
+        let boundary = isolated.args.iter().position(|arg| arg == "--").unwrap();
+        assert_eq!(
+            &isolated.args[boundary..],
+            &["--", "/nix/store/host", "host"]
+        );
+        for property in policy.service_properties() {
+            assert!(isolated.args[..boundary].contains(&property));
+            assert!(!baseline.args.contains(&property));
+        }
+        assert!(isolated.args.contains(&"--unit=host-one".into()));
+        assert_eq!(isolated.args.len(), baseline.args.len() + 3);
     }
 }

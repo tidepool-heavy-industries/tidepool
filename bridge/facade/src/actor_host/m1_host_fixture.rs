@@ -161,6 +161,14 @@ impl RunningBrowserHost {
         settings: &crate::exomonad::EmbeddedLaunchConfig,
         transport: &Arc<dyn harness::engine::ResponsesTransport>,
     ) -> Result<Self, String> {
+        Self::start_configured(settings, transport, |_| {}).await
+    }
+
+    pub(super) async fn start_configured(
+        settings: &crate::exomonad::EmbeddedLaunchConfig,
+        transport: &Arc<dyn harness::engine::ResponsesTransport>,
+        configure: impl FnOnce(&mut ActorHostConfig),
+    ) -> Result<Self, String> {
         let _ = tracing_subscriber::fmt()
             .with_env_filter("exomonad_actor::workbench_phase=info")
             .with_test_writer()
@@ -171,6 +179,7 @@ impl RunningBrowserHost {
             |config| {
                 config.backend = crate::exomonad::HostBackendOptions::Embedded;
                 config.embedded = Some(settings.clone());
+                configure(config);
             },
         )
         .await;

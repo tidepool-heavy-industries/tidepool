@@ -65,6 +65,7 @@ module Tidepool.Agent.Contract
   , ToolCompileError (..)
   , ToolDispatchError (..)
   , renderToolDispatchError
+  , toolDispatchReply
   , renderToolCompileError
   , ToolName
   , StructuralValue
@@ -783,17 +784,18 @@ installSpec spec = case compileTools (specTools spec) of
           Success (AfterToolInput call result) ->
             renderAnnotation <$> raise (slot call result)
 
--- The private runtime boundary keeps refusal distinct from authored output.
+-- The runtime boundary keeps typed refusal distinct from authored output.
 toolDispatchReply :: Either ToolDispatchError Value -> Value
 toolDispatchReply result = case result of
   Right output -> object ["status" .= ("success" :: Text), "output" .= output]
   Left problem -> object
-    [ "status" .= ("refused" :: Text)
-    , "error" .= renderToolDispatchError problem
-    , "kind" .= (case problem of
-        UnknownTool _ -> ("unknown_tool" :: Text)
-        InvalidToolInput _ _ -> "invalid_input")
-    ]
+    ([ "status" .= ("refused" :: Text)
+     , "error" .= renderToolDispatchError problem
+     ] ++ case problem of
+       UnknownTool name ->
+         ["kind" .= ("unknown_tool" :: Text), "tool" .= name]
+       InvalidToolInput name message ->
+         ["kind" .= ("invalid_input" :: Text), "tool" .= name, "detail" .= message])
 
 renderAnnotation :: Annotation -> Text
 renderAnnotation = encodeValue . annotationToJson

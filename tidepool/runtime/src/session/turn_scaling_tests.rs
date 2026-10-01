@@ -572,6 +572,7 @@ fn try_execute_cell_with_authority_checks(
             (ticket, Some(certification_ns), stage_ns)
         }
     };
+    let recovery_work = ticket.recovery_work();
     let (_, publication_ns) = measured_duration(
         resident,
         images,
@@ -601,6 +602,10 @@ fn try_execute_cell_with_authority_checks(
     );
     // Retained snapshots and diagnostic reads do not belong to cell latency.
     let elapsed = cell_started.elapsed();
+    let inventory = resident.compile_view_in(public).and_then(|view| {
+        view.exact_declaration_context()
+            .map(|context| context.artifact_view().inventory().metrics())
+    });
     if let ScalePublication::Durable { manifest, .. } = publication_target {
         let bytes = std::fs::read(manifest).unwrap();
         let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -618,15 +623,15 @@ fn try_execute_cell_with_authority_checks(
                 "manifest_blake3": blake3::hash(&bytes).to_hex().to_string(),
                 "manifest_checksum": document.get("checksum"),
                 "public_schema": document.get("public_schema"),
-                "checksum_encode_bytes": null, "artifact_hash_bytes": null,
-                "manifest_write_bytes": null, "whole_graph_copies": null,
+                "checksum_encode_bytes": recovery_work.checksum_encode_bytes,
+                "recovery_validation_hash_bytes": recovery_work.recovery_validation_hash_bytes,
+                "recovery_materialization_hash_bytes": recovery_work.recovery_materialization_hash_bytes,
+                "manifest_write_bytes": recovery_work.manifest_write_bytes,
+                "artifact_inventory": inventory,
+                "inventory_counter_scope": "shared-artifact-inventory-owner",
             })
         );
     }
-    let inventory = resident.compile_view_in(public).and_then(|view| {
-        view.exact_declaration_context()
-            .map(|context| context.artifact_view().inventory().metrics())
-    });
     eprintln!(
         "protected-scale {}",
         serde_json::json!({
@@ -820,6 +825,30 @@ fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool
 
 fn growing_prefix(prefix: usize, baseline: usize) {
     growing_prefix_with_publication(prefix, baseline, false);
+}
+
+#[test]
+#[ignore = "resident durable scaling attribution; run after the two-cell baseline"]
+fn resident_durable_growing_prefix_1_baseline_0() {
+    growing_prefix_with_publication(1, 0, true);
+}
+
+#[test]
+#[ignore = "resident durable scaling attribution; run after the two-cell baseline"]
+fn resident_durable_growing_prefix_100_baseline_0() {
+    growing_prefix_with_publication(100, 0, true);
+}
+
+#[test]
+#[ignore = "resident durable scaling attribution; run after the two-cell baseline"]
+fn resident_durable_growing_prefix_1_baseline_100() {
+    growing_prefix_with_publication(1, 100, true);
+}
+
+#[test]
+#[ignore = "resident durable scaling attribution; run after the two-cell baseline"]
+fn resident_durable_growing_prefix_100_baseline_100() {
+    growing_prefix_with_publication(100, 100, true);
 }
 
 #[test]

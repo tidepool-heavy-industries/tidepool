@@ -5,7 +5,10 @@ load("@prelude//:rules.bzl", "genrule")
 # the dependency installation inputs.
 genrule(
     name = "web_manifests",
-    srcs = ["//third-party/rust:matched_harness_source"],
+    srcs = [
+        "//third-party/rust:matched_harness_source",
+        "//build/package:embedded_web_provenance",
+    ],
     out = ".",
 bash = """set -euo pipefail
 SOURCE_ROOT="$PWD/$(location //third-party/rust:matched_harness_source)"

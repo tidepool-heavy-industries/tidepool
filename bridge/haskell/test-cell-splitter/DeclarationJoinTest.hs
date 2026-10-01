@@ -232,7 +232,7 @@ recoveredConsumer root = do
           setTargets [target]
           graph <- depanal (map (mkModuleName . exactModule) artifacts) False
           env <- getSession
-          installed <- liftIO (installExactLexicalGraph graph [(joinedArtifact, [])] env)
+          installed <- liftIO (installExactLexicalGraph graph [(joinedArtifact, [])] noCheckedValueImports env)
           lexical <- either (liftIO . fail) pure installed
           setSession lexical
           summary <- getModSummary (if file == "Consumer" then mkModuleName "Main" else mkModuleName file)
@@ -293,7 +293,7 @@ recoveredNextConsumer root = do
           setTargets [target]
           graph <- depanal (map (mkModuleName . exactModule) artifacts) False
           env <- getSession
-          installed <- liftIO (installExactLexicalGraph graph lexical env >>= either fail pure)
+          installed <- liftIO (installExactLexicalGraph graph lexical noCheckedValueImports env >>= either fail pure)
           setSession installed
           getModSummary (if name == "NextConsumer" then mkModuleName "Main" else mkModuleName name)
     setSession hydrated
@@ -391,7 +391,7 @@ originalProductRootsProof = do
       candidate name groups = ModuleCandidate "main" name "/fixture/Source.hs"
         (replicate 64 '0') "/fixture/Source.hi" (replicate 64 '0')
         (replicate 64 '1') (replicate 64 '2') (replicate 64 '3') [] groups
-        "/fixture/Source.hi.packages" (replicate 64 '4')
+        "/fixture/Source.hi.packages" (replicate 64 '4') "/fixture/Source.tpmod" Nothing
       imported value generation = CandidateGlobal value Execution.LiftedRefRep Nothing False generation
       parserCandidate = candidate "Tidepool.Aeson.FromJSON"
         [CandidateGroup 137 [source, sibling] [imported sibling Nothing, imported package Nothing]]

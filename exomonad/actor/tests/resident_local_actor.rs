@@ -19,6 +19,13 @@ use tidepool_testing::eval_harness;
 
 use super::support;
 
+#[path = "resident_local_actor/completion_progress.rs"]
+mod completion_progress;
+#[path = "resident_local_actor/reload_progress.rs"]
+mod reload_progress;
+#[path = "resident_local_actor/reload_uncertainty.rs"]
+mod reload_uncertainty;
+
 #[derive(Clone, Default)]
 struct TestSink;
 
@@ -61,6 +68,13 @@ struct DelayedCommandBackend {
     completion_count: std::sync::atomic::AtomicUsize,
     cancellation_count: std::sync::atomic::AtomicUsize,
     output: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    keyed: Option<KeyedCommandGates>,
+}
+
+struct KeyedCommandGates {
+    started: tokio::sync::mpsc::UnboundedSender<(String, String)>,
+    release: std::collections::HashMap<String, tokio::sync::Semaphore>,
+    completed: std::sync::Mutex<Vec<(String, String)>>,
 }
 
 impl DelayedCommandBackend {
@@ -110,7 +124,23 @@ impl exomonad_actor::command_jobs::CommandBackend for DelayedCommandBackend {
                     .insert(id.to_owned(), "/test-workspace\n".into());
             } else {
                 self.started.notify_one();
-                if self.manual_release {
+                if let Some(keyed) = &self.keyed {
+                    let marker = spec.argv.last().expect("keyed command marker");
+                    let gate = keyed.release.get(marker).expect("known command marker");
+                    keyed
+                        .started
+                        .send((marker.clone(), id.to_owned()))
+                        .expect("test retains command admission receiver");
+                    gate.acquire()
+                        .await
+                        .expect("command gate remains live")
+                        .forget();
+                    keyed
+                        .completed
+                        .lock()
+                        .expect("keyed completion lock")
+                        .push((marker.clone(), id.to_owned()));
+                } else if self.manual_release {
                     self.release.notified().await;
                 } else {
                     tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
@@ -245,11 +275,38 @@ async fn supply_command_until_started(
                     assert_eq!(notification.owner, owner);
                     assert_eq!(notification.current, exomonad_actor::WatchStateProjection::Ready);
                 }
+                Some(LocalResidentDeployment::SettlementChanged { notification }) => {
+                    assert_command_settlement(&notification, owner, &backend);
+                }
                 Some(other) => panic!("unexpected deployment while awaiting command start: {}", other.kind()),
                 None => panic!("resident forest closed before starting the command"),
             }
         }
     }
+}
+
+fn assert_command_settlement(
+    notification: &exomonad_actor::SettlementNotification,
+    owner: exomonad_actor::ActorRef,
+    backend: &DelayedCommandBackend,
+) {
+    assert_eq!(notification.owner, owner);
+    assert_eq!(
+        notification.transition,
+        exomonad_actor::SettlementTransition::Ready
+    );
+    let job = notification
+        .command_job
+        .as_ref()
+        .expect("fixture command settlement");
+    assert!(
+        backend
+            .output
+            .lock()
+            .expect("backend output lock")
+            .contains_key(job),
+        "settlement belongs to an actually completed fixture command: {notification:?}"
+    );
 }
 
 async fn wait_for_command_completions(backend: &DelayedCommandBackend, count: usize) {
@@ -331,6 +388,502 @@ async fn resident_primary_command_notice_wait_cancels_before_notice_handoff() {
 #[tokio::test]
 async fn resident_parked_cell_publishes_into_latest_environment() {
     resident_await_watch_case(WatchCase::PrimaryInterleavedPublication).await;
+}
+
+type ResidentCellCall =
+    tokio::task::JoinHandle<Result<serde_json::Value, exomonad_actor::ResidentToolError>>;
+
+async fn wait_for_armed_call(
+    actor: &exomonad_actor::LocalActorRef,
+    context: &ToolInvocationContext,
+    call: &mut ResidentCellCall,
+) -> tidepool_runtime::session::WorkbenchExecutionId {
+    tokio::time::timeout(std::time::Duration::from_secs(180), async {
+        tokio::select! {
+            execution = async {
+                loop {
+                    if let Some(execution) = actor.hosted_workbench_waiting(context) {
+                        break execution;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            } => execution,
+            reply = &mut *call => panic!("call settled before arming its exact workbench wait: {context:?}: {reply:?}"),
+        }
+    })
+    .await
+    .expect("original workbench wait arms within the preparation bound")
+}
+
+struct ConcurrentResident {
+    forest: ResidentForest<NoHandlers, TestSink>,
+    actor: exomonad_actor::LocalActorRef,
+    policy: std::sync::Arc<dyn exomonad_actor::ResidentToolEndpoint>,
+    backend: std::sync::Arc<DelayedCommandBackend>,
+    started: tokio::sync::mpsc::UnboundedReceiver<(String, String)>,
+    deployment_task: tokio::task::JoinHandle<()>,
+    _root: tempfile::TempDir,
+}
+
+impl ConcurrentResident {
+    async fn new(bucket: u32, markers: &[&str]) -> Self {
+        Self::new_with_source(bucket, markers, None).await
+    }
+
+    async fn new_with_source(
+        bucket: u32,
+        markers: &[&str],
+        layers: Option<exomonad_actor::ActorSourceLayerResolver>,
+    ) -> Self {
+        eval_harness::require_extract();
+        let declarations = [
+            tidepool_mcp::agent_tools_decl(),
+            tidepool_mcp::actor_decl(),
+            tidepool_mcp::actor_kernel_decl(),
+            tidepool_mcp::actor_local_decl(),
+            tidepool_mcp::commands_decl(),
+            tidepool_mcp::fs_read_decl(),
+            tidepool_mcp::sleep_decl(),
+        ];
+        let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
+        let mut include = effects.include_paths().to_vec();
+        include.push(eval_harness::prelude_path());
+        let preamble = insert_preamble_imports(
+            &tidepool_mcp::build_preamble(&declarations, false),
+            "Tidepool.Agent.Contract",
+        );
+        let preamble =
+            insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Watch as Watch");
+        let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Watch (Watches)");
+        let preamble = format!(
+            "{preamble}\ntype ActorEffects = '[AgentTools, Actor, Commands, Watch.Watches, Sleep]\n"
+        );
+        let session = support::process_unique_session(bucket);
+        let root = tempfile::tempdir().expect("concurrent actor session root");
+        let lib = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
+            .expect("declaration plane")
+            .with_validation_include(include.clone());
+        let machine =
+            ResidentSession::unbootstrapped(NoHandlers, TestSink, DEFAULT_NURSERY_SIZE, Some(lib));
+        let (mut forest, mut deployments) = ResidentForest::new(
+            ActorWorkbenchSource::new(preamble, include),
+            session,
+            machine,
+            None,
+            exomonad_actor::Incarnation::FIRST,
+        );
+        if let Some(layers) = layers {
+            forest.set_source_layers(layers);
+        }
+        let actor = forest
+            .new_workbench(
+                "concurrent-publication".into(),
+                exomonad_actor::EffectiveRole::root().with_effect_keys(vec![
+                    exomonad_actor::ActorEffectKey::Commands,
+                    exomonad_actor::ActorEffectKey::Watches,
+                ]),
+            )
+            .await
+            .expect("concurrent workbench");
+        let policy = std::sync::Arc::new(exomonad_actor::ResidentInteractivePolicy::local(
+            actor.clone(),
+        ));
+        let (entered, started) = tokio::sync::mpsc::unbounded_channel();
+        let backend = std::sync::Arc::new(DelayedCommandBackend {
+            keyed: Some(KeyedCommandGates {
+                started: entered,
+                release: markers
+                    .iter()
+                    .map(|marker| ((*marker).to_owned(), tokio::sync::Semaphore::new(0)))
+                    .collect(),
+                completed: Default::default(),
+            }),
+            ..Default::default()
+        });
+        let owner = actor.identity();
+        let supplied = backend.clone();
+        let deployment_task = tokio::spawn(async move {
+            while let Some(deployment) = deployments.recv().await {
+                match deployment {
+                    LocalResidentDeployment::CommandBackend(request) => {
+                        assert_eq!(request.owner, owner);
+                        let backend: std::sync::Arc<
+                            dyn exomonad_actor::command_jobs::CommandBackend,
+                        > = supplied.clone();
+                        request.supply(Ok(backend));
+                    }
+                    LocalResidentDeployment::WatchChanged { notification } => {
+                        assert_eq!(notification.owner, owner);
+                    }
+                    LocalResidentDeployment::SettlementChanged { notification } => {
+                        assert_command_settlement(&notification, owner, &supplied);
+                    }
+                    LocalResidentDeployment::Retired { actor: retired, .. } => {
+                        assert_eq!(retired, owner);
+                        break;
+                    }
+                    other => panic!("unexpected concurrency deployment: {}", other.kind()),
+                }
+            }
+        });
+        Self {
+            forest,
+            actor,
+            policy,
+            backend,
+            started,
+            deployment_task,
+            _root: root,
+        }
+    }
+
+    fn spawn_cell(&self, key: &str, source: String) -> ResidentCellCall {
+        let policy = self.policy.clone();
+        let context = Self::cell_context(key);
+        tokio::spawn(async move {
+            policy
+                .dispatch_boxed(ToolInvocation {
+                    context: Some(context),
+                    name: exomonad_actor::HASKELL_TOOL.into(),
+                    arguments: ToolArguments::Raw(source),
+                })
+                .await
+        })
+    }
+
+    fn cell_context(key: &str) -> ToolInvocationContext {
+        ToolInvocationContext::external(
+            "concurrent-publication".into(),
+            key.into(),
+            key.into(),
+            Some(key.into()),
+            None,
+        )
+    }
+
+    async fn wait_started(&mut self, marker: &str, call: &mut ResidentCellCall) -> String {
+        let (actual, job) =
+            tokio::time::timeout(std::time::Duration::from_secs(180), async {
+                tokio::select! {
+                    started = self.started.recv() => started,
+                    reply = &mut *call => panic!("{marker} settled before command admission: {reply:?}"),
+                }
+            })
+                .await
+                .expect("real cell reaches its command")
+                .expect("command owner remains live");
+        assert_eq!(actual, marker);
+        assert!(!job.is_empty());
+        let context = Self::cell_context(marker);
+        let execution = wait_for_armed_call(&self.actor, &context, call).await;
+        assert!(
+            !call.is_finished(),
+            "{marker} retains its independent continuation"
+        );
+        execution.as_str().into()
+    }
+
+    fn release(&self, marker: &str) {
+        self.backend
+            .keyed
+            .as_ref()
+            .expect("keyed backend")
+            .release
+            .get(marker)
+            .expect("known marker")
+            .add_permits(1);
+    }
+
+    async fn settle(
+        call: ResidentCellCall,
+    ) -> Result<serde_json::Value, exomonad_actor::ResidentToolError> {
+        tokio::time::timeout(std::time::Duration::from_secs(600), call)
+            .await
+            .expect("real cell settles after gate release")
+            .expect("cell dispatch task")
+    }
+
+    async fn read(&self, key: &str, source: &str) -> serde_json::Value {
+        let reply = Self::settle(self.spawn_cell(key, source.into()))
+            .await
+            .expect("public read");
+        assert_eq!(reply["status"], "committed", "{reply:?}");
+        reply
+    }
+
+    async fn shutdown(self, markers: &[&str]) {
+        self.forest.shutdown().await;
+        assert_eq!(
+            self.actor.terminal().wait().await.kind,
+            exomonad_actor::ActorExitKind::Cancelled,
+        );
+        let cleanup = self.actor.terminal().cleanup().expect("retained cleanup");
+        assert!(cleanup.is_confirmed(), "{cleanup:?}");
+        {
+            let completed = self
+                .backend
+                .keyed
+                .as_ref()
+                .expect("keyed backend")
+                .completed
+                .lock()
+                .expect("keyed completion lock");
+            assert_eq!(
+                completed.len(),
+                markers.len(),
+                "each command executes once: {completed:?}"
+            );
+            for marker in markers {
+                assert_eq!(
+                    completed
+                        .iter()
+                        .filter(|(actual, _)| actual == marker)
+                        .count(),
+                    1
+                );
+            }
+            assert_eq!(
+                completed
+                    .iter()
+                    .map(|(_, job)| job)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
+                markers.len()
+            );
+        }
+        assert_eq!(
+            self.backend
+                .cancellation_count
+                .load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.deployment_task)
+            .await
+            .expect("retirement reaches the deployment owner")
+            .expect("deployment owner succeeds");
+    }
+}
+
+fn committed_execution(reply: &serde_json::Value) -> String {
+    assert_eq!(reply["status"], "committed", "{reply:?}");
+    let operations: Vec<_> = reply["items"]
+        .as_array()
+        .expect("item receipts")
+        .iter()
+        .filter_map(|item| item["operations"].as_array())
+        .flatten()
+        .collect();
+    assert!(
+        !operations.is_empty(),
+        "real command/watch effects have receipts"
+    );
+    let execution = operations[0]["id"]["execution"]
+        .as_str()
+        .expect("execution identity");
+    let mut addresses = std::collections::HashSet::new();
+    for operation in &operations {
+        assert_eq!(operation["disposition"], "committed");
+        assert_eq!(operation["id"]["execution"], execution);
+        assert!(
+            addresses.insert((
+                operation["id"]["inputUnitIndex"].as_u64().unwrap(),
+                operation["id"]["effectOrdinal"].as_u64().unwrap()
+            )),
+            "no duplicated operation receipt"
+        );
+    }
+    execution.into()
+}
+
+#[tokio::test]
+async fn resident_same_name_shadowing_follows_completion_order() {
+    let markers = ["shadow-0-A", "shadow-0-B", "shadow-1-A", "shadow-1-B"];
+    let mut fixture = ConcurrentResident::new(185, &markers).await;
+    for round in 0..2 {
+        fixture
+            .read(&format!("seed-{round}"), "x <- pure (0 :: Int)")
+            .await;
+        let source = include_str!("resident_local_actor/shadow_cell.hs");
+        let mut a = fixture.spawn_cell(
+            markers[round * 2],
+            source
+                .replace("OLD_BINDING", "oldA")
+                .replace("MARKER", markers[round * 2])
+                .replace("RESULT_VALUE", "11"),
+        );
+        let a_execution = fixture.wait_started(markers[round * 2], &mut a).await;
+        let mut b = fixture.spawn_cell(
+            markers[round * 2 + 1],
+            source
+                .replace("OLD_BINDING", "oldB")
+                .replace("MARKER", markers[round * 2 + 1])
+                .replace("RESULT_VALUE", "22"),
+        );
+        let b_execution = fixture.wait_started(markers[round * 2 + 1], &mut b).await;
+        assert!(!a.is_finished() && !b.is_finished());
+        let seed = fixture.read(&format!("parked-read-{round}"), "x").await;
+        assert_eq!(seed["items"][0]["output"], "0");
+        let (
+            first,
+            last,
+            first_index,
+            last_index,
+            first_value,
+            last_value,
+            first_execution,
+            last_execution,
+        ) = if round == 0 {
+            (
+                a,
+                b,
+                round * 2,
+                round * 2 + 1,
+                "11",
+                "22",
+                a_execution,
+                b_execution,
+            )
+        } else {
+            (
+                b,
+                a,
+                round * 2 + 1,
+                round * 2,
+                "22",
+                "11",
+                b_execution,
+                a_execution,
+            )
+        };
+        fixture.release(markers[first_index]);
+        let first = ConcurrentResident::settle(first)
+            .await
+            .expect("first publication");
+        assert_eq!(committed_execution(&first), first_execution);
+        assert!(!last.is_finished(), "other cell remains parked");
+        let current = fixture.read(&format!("first-read-{round}"), "x").await;
+        assert_eq!(current["items"][0]["output"], first_value);
+        fixture.release(markers[last_index]);
+        let last = ConcurrentResident::settle(last)
+            .await
+            .expect("last publication");
+        assert_eq!(committed_execution(&last), last_execution);
+        assert_ne!(committed_execution(&first), committed_execution(&last));
+        let current = fixture.read(&format!("last-read-{round}"), "x").await;
+        assert_eq!(current["items"][0]["output"], last_value);
+        let captures = fixture
+            .read(&format!("captured-read-{round}"), "oldA == 0 && oldB == 0")
+            .await;
+        assert_eq!(
+            captures["items"][0]["output"], "True",
+            "both admitted values retain their old meaning"
+        );
+    }
+    fixture.shutdown(&markers).await;
+}
+
+#[tokio::test]
+async fn resident_invalid_concurrent_declaration_join_publishes_nothing_from_loser() {
+    let markers = ["join-A", "join-B"];
+    let mut fixture = ConcurrentResident::new(186, &markers).await;
+    fixture
+        .read(
+            "join-base",
+            include_str!("resident_local_actor/join_base.hs"),
+        )
+        .await;
+    let source = include_str!("resident_local_actor/conflicting_join_cell.hs");
+    let mut a = fixture.spawn_cell(
+        markers[0],
+        source
+            .replace("SIDE", "A")
+            .replace("MARKER", markers[0])
+            .replace("RESULT_VALUE", "11"),
+    );
+    let a_execution = fixture.wait_started(markers[0], &mut a).await;
+    let mut b = fixture.spawn_cell(
+        markers[1],
+        source
+            .replace("SIDE", "B")
+            .replace("MARKER", markers[1])
+            .replace("RESULT_VALUE", "22"),
+    );
+    let b_execution = fixture.wait_started(markers[1], &mut b).await;
+    assert!(
+        !a.is_finished() && !b.is_finished(),
+        "both complete cells admitted before publication"
+    );
+    fixture.release(markers[1]);
+    let winner = ConcurrentResident::settle(b)
+        .await
+        .expect("B publishes its valid instance");
+    let winner_execution = committed_execution(&winner);
+    assert_eq!(winner_execution, b_execution);
+    fixture.release(markers[0]);
+    let failure = ConcurrentResident::settle(a)
+        .await
+        .expect_err("A's concurrent instance conflicts");
+    let exomonad_actor::ResidentToolError::Invocation(
+        exomonad_actor::KernelInvocationFailure::Workbench(failure),
+    ) = failure
+    else {
+        panic!("expected publication workbench failure: {failure:?}");
+    };
+    assert!(
+        failure.detail.contains("private publication rejected"),
+        "{failure:?}"
+    );
+    assert!(
+        failure.detail.contains("ClassInstanceConflict"),
+        "the real compiler join refuses the concurrent instances: {failure:?}"
+    );
+    let operations: Vec<_> = failure
+        .receipts
+        .iter()
+        .flat_map(|receipt| &receipt.operations)
+        .collect();
+    assert!(
+        !operations.is_empty(),
+        "completed effects survive publication rejection"
+    );
+    let loser_execution = &operations[0].id.execution;
+    assert_eq!(loser_execution.as_str(), a_execution);
+    assert_ne!(loser_execution.as_str(), winner_execution);
+    for operation in &operations {
+        assert_eq!(&operation.id.execution, loser_execution);
+        assert_eq!(
+            operation.disposition,
+            tidepool_runtime::session::WorkbenchOperationDisposition::Committed
+        );
+    }
+    let public = fixture
+        .read("join-winner-read", "joinValue False + onlyB + joinedB")
+        .await;
+    assert_eq!(public["items"][0]["output"], "66");
+    let constructor = fixture
+        .read(
+            "join-winner-constructor",
+            "case OnlyB of OnlyB -> (22 :: Int)",
+        )
+        .await;
+    assert_eq!(constructor["items"][0]["output"], "22");
+    for (key, source) in [
+        ("join-no-loser-early-native", "onlyA"),
+        ("join-no-loser-late-native", "joinedA"),
+        (
+            "join-no-loser-declaration",
+            "case OnlyA of OnlyA -> (11 :: Int)",
+        ),
+    ] {
+        let refused = ConcurrentResident::settle(fixture.spawn_cell(key, source.into()))
+            .await
+            .expect("invalid fresh source has a structured rejection");
+        assert_eq!(
+            refused["status"], "rejected",
+            "loser publishes nothing: {refused:?}"
+        );
+    }
+    fixture.shutdown(&markers).await;
 }
 
 enum WatchCase {
@@ -520,7 +1073,7 @@ async fn resident_await_watch_case(case: WatchCase) {
             "await-watch-test".into(),
             "turn-settled".into(),
             "call-settled".into(),
-            Some("await-watch-settled".into()),
+            Some("call-settled".into()),
             None,
         );
         let mut settled_call = {
@@ -557,17 +1110,7 @@ async fn resident_await_watch_case(case: WatchCase) {
         }
     }).await.expect("command start is bounded");
         if primary {
-            tokio::time::timeout(std::time::Duration::from_secs(2), async {
-                while actor.hosted_cell_computing() {
-                    assert!(
-                        !settled_call.is_finished(),
-                        "the cell must reach its captured watch"
-                    );
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("the owned watch parks promptly after command admission");
+            wait_for_armed_call(&actor, &settled_context, &mut settled_call).await;
         }
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(100), &mut settled_call)
@@ -668,7 +1211,7 @@ async fn resident_await_watch_case(case: WatchCase) {
         "await-watch-test".into(),
         "turn-cancelled".into(),
         "call-cancelled".into(),
-        Some("await-watch-cancelled".into()),
+        Some("call-cancelled".into()),
         None,
     );
     let mut cancelled_call = {
@@ -704,22 +1247,6 @@ async fn resident_await_watch_case(case: WatchCase) {
         })
         .await
         .expect("hosted sleep admission is prompt");
-        tokio::time::timeout(std::time::Duration::from_secs(180), async {
-            while actor.hosted_cell_computing() {
-                assert!(
-                    !cancelled_call.is_finished(),
-                    "sleep must reach its captured wait"
-                );
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("captured owned sleep parks after compiler preparation");
-        if let Ok(reply) =
-            tokio::time::timeout(std::time::Duration::from_millis(100), &mut cancelled_call).await
-        {
-            panic!("captured sleep settled before cancellation: {reply:?}");
-        }
     } else {
         let cancellation_start_bound = 180;
         tokio::time::timeout(std::time::Duration::from_secs(cancellation_start_bound), async {
@@ -728,6 +1255,15 @@ async fn resident_await_watch_case(case: WatchCase) {
             reply = &mut cancelled_call => panic!("cancellable watch cell settled before starting its command: {reply:?}"),
         }
     }).await.expect("cancellable command start is bounded");
+    }
+    let armed_execution =
+        wait_for_armed_call(&actor, &cancelled_context, &mut cancelled_call).await;
+    if cancel_sleep {
+        if let Ok(reply) =
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut cancelled_call).await
+        {
+            panic!("captured sleep settled before cancellation: {reply:?}");
+        }
     }
     let cancellation = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
@@ -746,7 +1282,10 @@ async fn resident_await_watch_case(case: WatchCase) {
     .await
     .expect("awaitWatch cancellation is prompt");
     let retained_reply = match cancellation {
-        exomonad_actor::WorkbenchCancellationOutcome::Cancelled { reply, .. } => reply,
+        exomonad_actor::WorkbenchCancellationOutcome::Cancelled { execution, reply } => {
+            assert_eq!(execution, armed_execution);
+            reply
+        }
         other => panic!("exact native continuation was not cancelled: {other:?}"),
     };
     let returned_reply =
@@ -802,6 +1341,9 @@ async fn resident_await_watch_case(case: WatchCase) {
                     notification.current,
                     exomonad_actor::WatchStateProjection::Ready
                 );
+            }
+            LocalResidentDeployment::SettlementChanged { notification } => {
+                assert_command_settlement(&notification, actor.identity(), &command_backend);
             }
             LocalResidentDeployment::Retired { actor: retired, .. } => {
                 assert_eq!(retired, actor.identity());

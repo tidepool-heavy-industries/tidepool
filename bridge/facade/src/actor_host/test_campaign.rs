@@ -1,6 +1,7 @@
 //! Shared real resident setup for focused and recursive actor scenarios.
 
 use super::*;
+use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 
 /// Commit everything a campaign's workspace carries before the run selects it.
 ///
@@ -257,6 +258,17 @@ impl TestCampaign {
         configure: impl FnOnce(&mut ActorHostConfig),
         conversation: Option<exomonad_actor::ConversationReader>,
     ) -> Self {
+        Self::start_with_model_factory(research_policy, transform, configure, conversation, None)
+            .await
+    }
+
+    pub(super) async fn start_with_model_factory(
+        research_policy: exomonad_actor::ResearchPolicy,
+        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        configure: impl FnOnce(&mut ActorHostConfig),
+        conversation: Option<exomonad_actor::ConversationReader>,
+        model_factory: Option<Arc<dyn exomonad_actor::CellModelFactory>>,
+    ) -> Self {
         tidepool_testing::eval_harness::require_extract();
         install_trace_file();
         let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
@@ -299,10 +311,11 @@ impl TestCampaign {
             hosted,
             deployments,
             root_installation,
-        } = super::model_free::ModelFreeSession::start_with_conversation(
+        } = super::model_free::ModelFreeSession::start_with_model_factory(
             &config,
             transform,
             conversation,
+            model_factory,
         )
         .await
         .unwrap();
@@ -369,4 +382,42 @@ fn install_trace_file() {
         .with_writer(std::sync::Mutex::new(file))
         .try_init()
         .ok();
+}
+
+pub(super) async fn dispatch_haskell_script(
+    endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
+    script: &str,
+) -> serde_json::Value {
+    dispatch_haskell_script_result(endpoint, script)
+        .await
+        .unwrap_or_else(|error| panic!("Haskell script failed:\n{script}\n\n{error}"))
+}
+
+pub(super) async fn dispatch_haskell_script_result(
+    endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
+    script: &str,
+) -> Result<serde_json::Value, exomonad_actor::ResidentToolError> {
+    let call_id = uuid::Uuid::new_v4().simple().to_string();
+    let result = endpoint
+        .dispatch_boxed(ToolInvocation {
+            context: Some(ToolInvocationContext::external(
+                "actor-host-vertical".into(),
+                call_id.clone(),
+                call_id.clone(),
+                Some(call_id.clone()),
+                Some("haskell".into()),
+            )),
+            name: exomonad_actor::HASKELL_TOOL.into(),
+            arguments: ToolArguments::Raw(script.into()),
+        })
+        .await;
+    endpoint
+        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "actor-host-vertical".into(),
+            call_id.clone(),
+            call_id,
+        ))
+        .await
+        .expect("recorded tool completion");
+    result
 }

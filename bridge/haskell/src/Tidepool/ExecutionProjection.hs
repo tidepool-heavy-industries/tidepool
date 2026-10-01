@@ -6,6 +6,7 @@ module Tidepool.ExecutionProjection
   , projectPreparedTargetWithConstructors
   , ProjectedGroup(..), ProjectedGroupBody(..)
   , projectPreparedModuleGroups, projectPreparedModuleGroupsSelected
+  , PreparedModuleProducts, projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes
   , PreparedProjection
   , prepareProjection
   , prepareProjectionWithReachability
@@ -57,6 +58,8 @@ import GHC.Core.Type (splitFunTys, splitTyConApp_maybe)
 import GHC.Core.TyCon qualified as GHC
 import GHC.Data.FastString (fsLit, unpackFS)
 import GHC.Driver.Env.Types (HscEnv, hsc_unit_env)
+import GHC.Driver.Env (hsc_home_unit)
+import GHC.Unit.Home (isHomeUnit)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
 import GHC.Stg.Syntax
 import GHC.Stg.Syntax qualified as Stg
@@ -79,7 +82,8 @@ import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
 import GHC.Types.Var.Set (dVarSetElems, isEmptyVarSet)
 import GHC.Unit.Env (ue_units)
 import GHC.Unit.Info (PackageName(..))
-import GHC.Unit.Module (mkModuleName, moduleName, moduleNameString, moduleUnit)
+import GHC.Unit.Module (ModuleName, mkModuleName, moduleName, moduleNameString, moduleUnit)
+import GHC.Unit.Module.ModIface (ModIface, mi_module)
 import GHC.Unit.Finder (FindResult(..), findImportedModule)
 import GHC.Types.PkgQual (PkgQual(OtherPkg))
 import GHC.Unit.State (lookupPackageName)
@@ -134,6 +138,10 @@ data ProjectionError
   | RejectedTypedSite Text
   deriving stock (Eq, Show)
 
+data ProjectionPurpose
+  = ExecutableTarget
+  | OriginalHomeProduct (Module -> Bool)
+
 data PState = PState
   { nextValue :: Word32, nextJoin :: Word32
   , values :: VarEnv ValueId, joins :: VarEnv JoinId
@@ -155,6 +163,7 @@ data PState = PState
   , textUnit :: Maybe TextUnitAuthority
   -- Tops outside the group currently being projected become explicit imports.
   , externalizedTops :: Set SymbolIdentity
+  , projectionPurpose :: ProjectionPurpose
   }
 
 type P a = StateT PState (Either ProjectionError) a
@@ -195,7 +204,7 @@ resolveTextPackageUnit hscEnv =
 -- | Narrow test seam for GHC literals which cannot be written in source Haskell.
 projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionError Atom
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
-  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty Nothing Nothing Nothing Nothing Set.empty)
+  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty Nothing Nothing Nothing Nothing Set.empty ExecutableTarget)
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
@@ -209,9 +218,46 @@ projectPreparedModuleGroups :: ProjectionContext -> PreparedModule
 projectPreparedModuleGroups context prepared =
   projectPreparedModuleGroupsSelected context prepared Nothing
 
+-- One compilation owns these outcomes for package closure and original-product
+-- publication. Keeping rejected outcomes also prevents the writer from projecting
+-- a module again under a different context or assigning different ordinals.
+newtype PreparedModuleProducts = PreparedModuleProducts
+  [(Module, Either ProjectionError [ProjectedGroup])]
+
+projectPreparedModuleProducts :: ProjectionContext -> [PreparedModule] -> PreparedModuleProducts
+projectPreparedModuleProducts context modules = PreparedModuleProducts
+  [(pmModule prepared, projectPreparedModuleGroups context prepared) | prepared <- modules]
+
+-- The compiler's actual home unit, complete source coverage and current module
+-- own original issuance. Package globals are sealed later against their exact
+-- canonical defining interfaces; executable targets keep their live imports.
+projectOriginalHomeModuleProducts :: HscEnv -> Map ModuleName ModIface
+  -> ProjectionContext -> [PreparedModule]
+  -> PreparedModuleProducts
+projectOriginalHomeModuleProducts env interfaces context modules =
+  let home = hsc_home_unit env
+      isHome owner = isHomeUnit home (moduleUnit owner)
+      purpose prepared
+        | pmCoverage prepared == CompleteSourceModule && isHome (pmModule prepared)
+        , Just interface <- Map.lookup (moduleName (pmModule prepared)) interfaces
+        , mi_module interface == pmModule prepared =
+            OriginalHomeProduct isHome
+        | otherwise = ExecutableTarget
+  in PreparedModuleProducts
+      [(pmModule prepared, projectPreparedModuleGroupsFor (purpose prepared) context prepared Nothing)
+      | prepared <- modules]
+
+preparedModuleProductOutcomes :: PreparedModuleProducts
+  -> [(Module, Either ProjectionError [ProjectedGroup])]
+preparedModuleProductOutcomes (PreparedModuleProducts outcomes) = outcomes
+
 projectPreparedModuleGroupsSelected :: ProjectionContext -> PreparedModule
   -> Maybe (Set Word32) -> Either ProjectionError [ProjectedGroup]
-projectPreparedModuleGroupsSelected context prepared selection = traverse projectOne surviving
+projectPreparedModuleGroupsSelected = projectPreparedModuleGroupsFor ExecutableTarget
+
+projectPreparedModuleGroupsFor :: ProjectionPurpose -> ProjectionContext -> PreparedModule
+  -> Maybe (Set Word32) -> Either ProjectionError [ProjectedGroup]
+projectPreparedModuleGroupsFor purpose context prepared selection = traverse projectOne surviving
   where
     identities = buildTopIdentityMap [prepared]
     originals = pmBindings prepared
@@ -254,7 +300,7 @@ projectPreparedModuleGroupsSelected context prepared selection = traverse projec
             (if pmCoverage prepared == CompleteSourceModule
               then Set.singleton owner else Set.empty)
             (projectionFormattingAuthority context) (projectionTimeAuthority context)
-            (projectionJsonAuthority context) (projectionTextUnit context) outside
+            (projectionJsonAuthority context) (projectionTextUnit context) outside purpose
       ((groups, types, sites, verbSites, jsonLayout), final) <- runStateT
         (do validatePreparedEvidence context [onlyGroup]
             preallocate [onlyGroup]
@@ -310,7 +356,7 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
         (projectionFormattingAuthority context) (projectionTimeAuthority context)
         (projectionJsonAuthority context)
         (projectionTextUnit context)
-        Set.empty
+        Set.empty ExecutableTarget
       -- An executable import's own top-level definition is never walked:
       -- 'homeModules'/'topIdentityMap' above still see the real, unfiltered
       -- module set (so a same-name internal identity cannot borrow home-module
@@ -1908,10 +1954,15 @@ internGlobal binder = do
           existing <- gets globalDecls
           generations <- gets retainedGenerations
           names <- gets topSymbols
+          purpose <- gets projectionPurpose
           let identity = GlobalId (fromIntegral (length existing))
               symbol = fromMaybe (idSymbol "value" externalBinder)
                 (lookupVarEnv names externalBinder)
-              retainedGeneration = Map.lookup symbol generations
+              retainedGeneration = case purpose of
+                OriginalHomeProduct isHome
+                  | Just owner <- nameModule_maybe (varName externalBinder)
+                  , not (isHome owner) -> Nothing
+                _ -> Map.lookup symbol generations
               declaration = GlobalDecl symbol rep signature evaluated
                 retainedGeneration
           modify' (\current -> current

@@ -1,12 +1,13 @@
 //! Production interrupt-to-owner-acknowledgment and subsequent cleanup samples.
 
-use super::warm_cell_performance::DaemonTrace;
+use super::warm_cell_performance::{require_owned_daemon, ClientRequests, DaemonTrace};
 use super::*;
 use harness::model::{CallId, ConversationIdentity, OperationId, RequestId};
 use harness::provider::CancellationAcknowledgment;
 use harness::turn::JobOutput;
 use std::collections::HashSet;
 use std::time::Instant;
+use tracing_subscriber::prelude::*;
 
 const SAMPLES: usize = 50;
 const WARMUP_INPUT: &str = "Warm the real cancellation measurement host.";
@@ -19,6 +20,7 @@ struct IssuedCell {
 }
 
 struct CancelTransport {
+    clients: ClientRequests,
     issued: Mutex<HashSet<usize>>,
     warmup_issued: AtomicUsize,
     warmup_displayed: tokio::sync::Notify,
@@ -62,6 +64,7 @@ impl CancelTransport {
                 request: request_id.clone(),
                 call: CallId(call_id.clone()),
             };
+            self.clients.issue(&operation);
             self.calls.send(IssuedCell { index, operation }).unwrap();
             harness::item::Item(
                 json!({"type":"custom_tool_call", "call_id":call_id, "name":"haskell", "input":SLEEP_SOURCE}),
@@ -171,7 +174,7 @@ async fn active_sleep(
     tokio::time::timeout(Duration::from_secs(300), async {
         loop {
             let store = fixture.runtime.store();
-            let claims = store.claims(&operation.call).unwrap();
+            let claims = store.claims_for_operation(operation).unwrap();
             if let Some(claim) = claims.first() {
                 assert_eq!(claims.len(), 1);
                 assert_eq!(&claim.operation, operation);
@@ -235,9 +238,16 @@ async fn production_engine_store_active_cancellation_50() {
         .collect::<Vec<_>>();
     assert_eq!(boots.len(), 1, "one actual owned daemon boot");
     assert_eq!(boots[0]["producer"], endpoint.producer_hex());
+    require_owned_daemon(&boots[0]);
     let epoch = boots[0]["daemon_epoch"].as_str().unwrap().to_owned();
+    let clients = ClientRequests::default();
+    tracing_subscriber::registry()
+        .with(clients.clone())
+        .try_init()
+        .expect("isolated fixture owns tracing subscriber");
     let (calls, mut issued) = mpsc::unbounded_channel();
     let transport = Arc::new(CancelTransport {
+        clients: clients.clone(),
         issued: Mutex::new(HashSet::new()),
         warmup_issued: AtomicUsize::new(0),
         warmup_displayed: tokio::sync::Notify::new(),
@@ -385,21 +395,26 @@ async fn production_engine_store_active_cancellation_50() {
             compiler_requests,
             "compilation must finish before the measured interrupt interval"
         );
+        let compiler_requests = clients.requests(&cell.operation);
+        assert!(
+            !compiler_requests.is_empty(),
+            "actual preparation must identify exact daemon invocations"
+        );
         let operation_id = serde_json::to_string(&cell.operation).unwrap();
         eprintln!(
             "resident-performance {}",
             json!({
-                "schema":1, "composition":"engine-store", "kind":"cancel_ack", "index":index,
+                "schema":1, "runner_id":"cancel_ack", "composition":"engine-store", "kind":"cancel_ack", "index":index,
                 "started_ns":started_ns, "settled_ns":settled_ns, "elapsed_ns":settled_ns-started_ns,
                 "completed":true, "daemon_epoch":epoch, "operation_id":operation_id,
-                "original_operation":cell.operation, "effect_active_ns":effect_active_ns,
+                "original_operation":cell.operation, "compiler_requests":compiler_requests, "effect_active_ns":effect_active_ns,
                 "acknowledged":true, "acknowledgment":"stopped", "workbench_execution_id":execution,
                 "interrupt_operation_id":interrupt_id, "interrupted_round":round,
             })
         );
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                let claims = store.claims(&cell.operation.call).unwrap();
+                let claims = store.claims_for_operation(&cell.operation).unwrap();
                 assert_eq!(claims.len(), 1);
                 assert_eq!(claims[0].operation, cell.operation);
                 if claims[0].state == harness::store::ClaimState::Settled
@@ -450,7 +465,7 @@ async fn production_engine_store_active_cancellation_50() {
         eprintln!(
             "resident-performance {}",
             json!({
-                "schema":1, "composition":"engine-store", "kind":"cancel_cleanup", "index":index,
+                "schema":1, "runner_id":"cancel_ack", "composition":"engine-store", "kind":"cancel_cleanup", "index":index,
                 "started_ns":settled_ns, "settled_ns":cleaned_ns, "elapsed_ns":cleaned_ns-settled_ns,
                 "completed":true, "daemon_epoch":epoch, "operation_id":operation_id,
                 "boundary":"owner-acknowledgment-to-durable-output-and-round-idle", "native_abort_confirmed":true,

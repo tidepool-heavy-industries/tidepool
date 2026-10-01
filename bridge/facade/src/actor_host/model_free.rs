@@ -44,6 +44,15 @@ impl ModelFreeSession {
         transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
         conversation: Option<exomonad_actor::ConversationReader>,
     ) -> Result<Self> {
+        Self::start_with_model_factory(config, transform, conversation, None).await
+    }
+
+    pub(super) async fn start_with_model_factory(
+        config: &ActorHostConfig,
+        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        conversation: Option<exomonad_actor::ConversationReader>,
+        model_factory: Option<Arc<dyn exomonad_actor::CellModelFactory>>,
+    ) -> Result<Self> {
         let session_root = Arc::new(tempfile::tempdir()?);
         let host_incarnation = Arc::new(HostIncarnationLease::claim(session_root.path())?);
         let (worktrees, bindings) = actor_worktree_resources_at(
@@ -109,6 +118,9 @@ impl ModelFreeSession {
         }
         if let Some(conversation) = conversation {
             forest = forest.with_conversation_reader(conversation);
+        }
+        if let Some(factory) = model_factory {
+            forest = forest.with_cell_model_factory(factory);
         }
         let forest = Arc::new(forest);
         let (actor, hosted) = forest.admit_root(descriptor, outcome).await?;

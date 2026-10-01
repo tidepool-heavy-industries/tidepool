@@ -26,6 +26,7 @@ mod declaration_context;
 pub mod declaration_join;
 pub mod diag;
 pub mod digest;
+mod execution_source;
 pub mod failclass;
 pub(crate) mod module_candidates;
 pub mod paths;

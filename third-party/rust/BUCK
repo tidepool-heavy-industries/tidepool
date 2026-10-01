@@ -2,13 +2,19 @@
 
 load("//build/rust:buildscript.bzl", "tidepool_buildscript_run")
 load("@prelude//rust:cargo_package.bzl", "cargo")
-load("@prelude//:rules.bzl", "filegroup")
-load("@toolchains//:tidepool.bzl", "nix_directory")
+load("@prelude//:rules.bzl", "alias", "filegroup")
+load("@toolchains//:tidepool.bzl", "checked_harness_source")
 
-nix_directory(
+checked_harness_source(
     name = "exomonad-harness-5fdd156badd86236",
     cp = read_root_config("nix", "coreutils") + "/cp",
-    store_path = read_root_config("nix", "matched_harness_source"),
+    python = read_root_config("nix", "python"),
+    revision = "b5f0cd2a890359def704a3c30bb19ad8fe15a5de",
+    nar_hash = "sha256-rlFsT7c8MubgUjxFtYaZGr5Xor31h8ik8q9DDEppSpo=",
+    cargo_lock = "root//:workspace_cargo_lock",
+    flake_lock = "root//:workspace_flake_lock",
+    provenance_script = "root//:embedded_web_provenance_script",
+    store_path = "/nix/store/3g2rffmpkcmjybn99gs3yn7jg75n4l34-source",
     visibility = [],
 )
 
@@ -15413,5 +15419,11 @@ cargo.rust_library(
 filegroup(
     name = "matched_harness_source",
     srcs = [":exomonad-harness-5fdd156badd86236"],
+    visibility = ["PUBLIC"],
+)
+
+alias(
+    name = "matched_harness_source_revision",
+    actual = ":exomonad-harness-5fdd156badd86236[revision]",
     visibility = ["PUBLIC"],
 )

@@ -12,6 +12,7 @@ mod background_command_example_tests;
 mod call_timing_tests;
 #[cfg(all(test, feature = "codex-compat"))]
 mod cell_compile_cost_tests;
+mod cell_model;
 #[cfg(all(test, feature = "codex-compat"))]
 pub(crate) mod command_jobs_tests;
 mod commands;
@@ -57,6 +58,8 @@ mod m1_host_tests;
 #[cfg(all(test, feature = "codex-compat"))]
 mod observation_budget_tests;
 mod overlay_resource;
+#[cfg(test)]
+mod packaged_catalog_tests;
 pub(crate) use overlay_resource::valid_artifact_path;
 #[cfg(all(test, feature = "codex-compat"))]
 mod source_reload_tests;
@@ -2810,6 +2813,10 @@ async fn run_owned(
     forest.set_jev_backend(jev_backend(&config));
     if let Some(layers) = &source_layers {
         forest.set_source_layers(layers.clone());
+    }
+    if let (Some(service), Some(settings)) = (&embedded_service, &config.embedded) {
+        forest = forest
+            .with_cell_model_factory(cell_model::admitted_factory(service, settings, &config));
     }
     forest.track_resource_release();
     let forest = Arc::new(forest);

@@ -1,5 +1,5 @@
-//! One INFO line per hosted tool call or Haskell cell, breaking down where
-//! its wall time went.
+//! One summary per hosted tool call or Haskell cell, plus compiler-round
+//! timings that identify the owning callsite.
 //!
 //! Admission opens one [`CallScope`]. Its registration scopes every owned
 //! successor and synchronous actor advance into the same totals. Every site
@@ -24,6 +24,7 @@ use std::time::Instant;
 
 #[derive(Default)]
 struct Totals {
+    execution: Option<tidepool_runtime::session::WorkbenchExecutionId>,
     checkout_wait_ms: AtomicU64,
     checkout_hold_ms: AtomicU64,
     compile_ms: AtomicU64,
@@ -72,19 +73,35 @@ pub fn add_exec_ms(ms: u128) {
         .ok();
 }
 
-/// Run `body` timed as one compile round trip (extractor/GHC), adding its
-/// elapsed wall time to the open scope's compile total; a no-op accumulation
-/// with no open scope, `body` still runs either way.
-pub async fn timed_compile<F: Future>(body: F) -> F::Output {
-    let started = Instant::now();
-    let result = body.await;
-    CURRENT
-        .try_with(|totals| {
-            saturating_add(&totals.compile_ms, started.elapsed().as_millis());
-            totals.compile_count.fetch_add(1, Ordering::Relaxed);
-        })
-        .ok();
-    result
+/// Time one compiler operation, including native preparation when the caller
+/// wraps it. Record its callsite and elapsed time in the open scope. With no
+/// open scope, the body still runs but contributes no timing evidence.
+#[track_caller]
+pub fn timed_compile<F: Future>(body: F) -> impl Future<Output = F::Output> {
+    // Capture at construction rather than inside the async block: the latter
+    // identifies its poll machinery instead of the owning compiler operation.
+    let caller = std::panic::Location::caller();
+    async move {
+        let started = Instant::now();
+        let result = body.await;
+        CURRENT
+            .try_with(|totals| {
+                let elapsed_ms = started.elapsed().as_millis();
+                saturating_add(&totals.compile_ms, elapsed_ms);
+                let round = totals.compile_count.fetch_add(1, Ordering::Relaxed) + 1;
+                tracing::info!(
+                    target: "exomonad_actor::call_timing",
+                    compile_round = round,
+                    execution = totals.execution.as_ref().map(|id| id.as_str()),
+                    compile_ms = elapsed_ms,
+                    caller_file = caller.file(),
+                    caller_line = caller.line(),
+                    "compiler round timing"
+                );
+            })
+            .ok();
+        result
+    }
 }
 
 /// One open per-call accumulator: `new`, `run` the call future inside it
@@ -118,12 +135,24 @@ impl CallScope {
     /// `kind` names the call: a hosted tool's name, or `"cell"` for a
     /// Haskell cell.
     pub fn new(kind: impl Into<String>, actor_id: u64, incarnation: u64) -> Self {
+        Self::for_execution(kind, actor_id, incarnation, None)
+    }
+
+    pub(crate) fn for_execution(
+        kind: impl Into<String>,
+        actor_id: u64,
+        incarnation: u64,
+        execution: Option<tidepool_runtime::session::WorkbenchExecutionId>,
+    ) -> Self {
         Self {
             kind: kind.into(),
             actor_id,
             incarnation,
             started: Instant::now(),
-            totals: Arc::new(Totals::default()),
+            totals: Arc::new(Totals {
+                execution,
+                ..Totals::default()
+            }),
         }
     }
 
@@ -151,6 +180,7 @@ impl CallScope {
             tool = %self.kind,
             actor = self.actor_id,
             incarnation = self.incarnation,
+            execution = self.totals.execution.as_ref().map(|id| id.as_str()),
             total_ms = self.started.elapsed().as_millis(),
             checkout_wait_ms = self.totals.checkout_wait_ms.load(Ordering::Relaxed),
             checkout_hold_ms = self.totals.checkout_hold_ms.load(Ordering::Relaxed),

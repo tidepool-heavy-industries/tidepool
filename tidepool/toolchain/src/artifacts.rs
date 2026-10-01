@@ -313,7 +313,7 @@ pub struct CompiledArtifacts {
 /// The same offer must be passed to final sealing; a manifest path alone is
 /// never authority for a cached product.
 pub struct ModuleCandidateOffer {
-    selected: Option<module_candidates::CandidateSet>,
+    selected: Option<Arc<module_candidates::CandidateSet>>,
     producer: Vec<u8>,
     include: Vec<PathBuf>,
     exact: Option<crate::declaration_context::ExactCompilationRequest>,
@@ -395,14 +395,66 @@ fn immutable_candidates_in_context(
     producer: &[u8],
     include: &[PathBuf],
     scratch: &Path,
-) -> Result<Option<module_candidates::CandidateSet>, CompileError> {
-    if empty_exact_context(context) {
-        Ok(module_candidates::select_configured(
-            producer, include, scratch,
-        )?)
-    } else {
-        Ok(None)
+    reserved: BTreeSet<String>,
+) -> Result<Option<Arc<module_candidates::CandidateSet>>, CompileError> {
+    let mut protected = BTreeSet::new();
+    for entry in context.interface_owners() {
+        protected.insert((entry.owner.unit, entry.owner.module));
+        protected.extend(
+            entry
+                .requirements
+                .into_iter()
+                .map(|owner| (owner.unit, owner.module)),
+        );
     }
+    for node in context.lexical_graph() {
+        protected.insert((node.owner.unit.clone(), node.owner.module.clone()));
+        protected.extend(
+            node.imports
+                .iter()
+                .map(|owner| (owner.unit.clone(), owner.module.clone())),
+        );
+    }
+    let exclusions = module_candidates::ExactCandidateExclusions::new(protected, reserved)
+        .with_originals(context.recovery_products());
+    Ok(
+        module_candidates::select_configured_disjoint(producer, include, scratch, &exclusions)?
+            .map(Arc::new),
+    )
+}
+
+fn checked_candidate_reservations(
+    specification: &crate::checked_cell::CheckedCellSpecification,
+    planned: Option<&crate::checked_cell::CheckedPlannedCellSpecification>,
+) -> BTreeSet<String> {
+    use crate::checked_cell::CheckedPlannedCellSlot;
+    use tidepool_repr::{Generation, SessionModule};
+    let mut reserved = specification
+        .injected_modules
+        .iter()
+        .chain(&specification.reserved_declaration_modules)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if let Some(planned) = planned {
+        for slot in &planned.slots {
+            match slot {
+                CheckedPlannedCellSlot::Prologue { declaration }
+                | CheckedPlannedCellSlot::Declaration { declaration } => {
+                    reserved.insert(SessionModule::lib(Generation(*declaration)).module_name());
+                }
+                CheckedPlannedCellSlot::Bind { value } => {
+                    reserved.insert(SessionModule::val(Generation(*value)).module_name());
+                }
+                CheckedPlannedCellSlot::Expression {
+                    capture, display, ..
+                } => {
+                    reserved.insert(SessionModule::val(Generation(*capture)).module_name());
+                    reserved.insert(SessionModule::val(Generation(*display)).module_name());
+                }
+            }
+        }
+    }
+    reserved
 }
 
 impl ModuleCandidateOffer {
@@ -486,7 +538,7 @@ impl ModuleCandidateOffer {
             _ => {
                 return Err(CompileError::ExtractFailed(
                     "admitted turn result kind".into(),
-                ))
+                ));
             }
         };
         let sites = decode_turn_yield_sites(site_observations)?;
@@ -529,7 +581,8 @@ impl ModuleCandidateOffer {
         scratch: &Path,
     ) -> Result<Self, CompileError> {
         Ok(Self {
-            selected: module_candidates::select_configured(producer, include, scratch)?,
+            selected: module_candidates::select_configured(producer, include, scratch)?
+                .map(Arc::new),
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: None,
@@ -592,7 +645,13 @@ impl ModuleCandidateOffer {
             checked_search_authorization(CheckedPurpose::Cell, authorization, include)?;
         let context = checked_offer_context(context)?;
         Ok(Self {
-            selected: immutable_candidates_in_context(&context, producer, include, scratch)?,
+            selected: immutable_candidates_in_context(
+                &context,
+                producer,
+                include,
+                scratch,
+                checked_candidate_reservations(&specification, None),
+            )?,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation_with_authorization(
@@ -650,7 +709,13 @@ impl ModuleCandidateOffer {
         ));
         let context = checked_offer_context(context)?;
         Ok(Self {
-            selected: immutable_candidates_in_context(&context, producer, include, scratch)?,
+            selected: immutable_candidates_in_context(
+                &context,
+                producer,
+                include,
+                scratch,
+                checked_candidate_reservations(&specification, Some(&planned)),
+            )?,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation_with_authorization(
@@ -708,7 +773,27 @@ impl ModuleCandidateOffer {
                     checked_item.authorization(producer, semantic_sha256)?,
                     include,
                 )?;
-                selected = immutable_candidates_in_context(&context, producer, include, scratch)?;
+                let mut reserved = checked_item
+                    .prefix
+                    .injected_modules()
+                    .into_iter()
+                    .collect::<BTreeSet<_>>();
+                reserved.extend(
+                    checked_item
+                        .item
+                        .reserved_declaration_modules()
+                        .iter()
+                        .cloned(),
+                );
+                reserved.insert(
+                    tidepool_repr::SessionModule::val(tidepool_repr::Generation(
+                        checked_item.generation,
+                    ))
+                    .module_name(),
+                );
+                selected = immutable_candidates_in_context(
+                    &context, producer, include, scratch, reserved,
+                )?;
                 Ok(authorization)
             },
         )?;
@@ -770,7 +855,28 @@ impl ModuleCandidateOffer {
                     display.authorization(producer, semantic_sha256)?,
                     include,
                 )?;
-                selected = immutable_candidates_in_context(&context, producer, include, scratch)?;
+                let mut reserved = display
+                    .prefix
+                    .injected_modules()
+                    .into_iter()
+                    .collect::<BTreeSet<_>>();
+                reserved.extend(
+                    display
+                        .capture
+                        .item()
+                        .reserved_declaration_modules()
+                        .iter()
+                        .cloned(),
+                );
+                reserved.insert(
+                    tidepool_repr::SessionModule::val(tidepool_repr::Generation(
+                        display.generation,
+                    ))
+                    .module_name(),
+                );
+                selected = immutable_candidates_in_context(
+                    &context, producer, include, scratch, reserved,
+                )?;
                 Ok(authorization)
             },
         )?;
@@ -916,7 +1022,7 @@ impl ModuleCandidateOffer {
                     _ => {
                         return Err(CompileError::ExtractFailed(
                             "declaration has another reserved slot".into(),
-                        ))
+                        ));
                     }
                 };
                 program_request = program_request
@@ -1007,7 +1113,7 @@ impl ModuleCandidateOffer {
                         _ => {
                             return Err(CompileError::ExtractFailed(
                                 "native item has another reserved slot".into(),
-                            ))
+                            ));
                         }
                     };
                     context =
@@ -1093,7 +1199,7 @@ impl ModuleCandidateOffer {
                 _ => {
                     return Err(CompileError::ExtractFailed(
                         "program native slot differs".into(),
-                    ))
+                    ));
                 }
             };
             let native = checked_cell::CheckedItemOffer {
@@ -1176,7 +1282,7 @@ impl ModuleCandidateOffer {
 
     fn program_offer(&self, exact: crate::declaration_context::ExactCompilationRequest) -> Self {
         Self {
-            selected: None,
+            selected: self.selected.clone(),
             producer: self.producer.clone(),
             include: self.include.clone(),
             exact: Some(exact),
@@ -1282,10 +1388,10 @@ impl ModuleCandidateOffer {
         };
         let interface = Arc::new(
             crate::recovery_artifacts::CertifiedValueInterface::from_checked_compilation(
-                {
-                    use sha2::Digest;
-                    sha2::Sha256::digest(&self.producer).into()
-                },
+                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                    &self.producer,
+                )
+                .sha256(),
                 identity.clone(),
                 crate::checked_cell::read(&path, 32 << 20)?,
                 crate::checked_cell::read(path.with_extension("hi.packages"), 4 << 20)?,
@@ -1502,11 +1608,19 @@ fn read_native_turn_artifacts(
         prepared_read_start.elapsed(),
         prepared_bytes.len() as u64,
     );
+    let prepared_decode_start = Instant::now();
     let target = Arc::new(tidepool_repr::execution_schema::parse_program(
         &prepared_bytes,
         &crate::prepared_artifact::production_requirements()?,
         DecodeLimits::default(),
     )?);
+    timing::record_stage(
+        timing::NO_NODE,
+        timing::NO_ROUND,
+        "native.prepared_decode",
+        prepared_decode_start.elapsed(),
+        prepared_bytes.len() as u64,
+    );
     let metadata_read_start = Instant::now();
     let metadata: Arc<[u8]> =
         crate::checked_cell::read(directory.join("meta.cbor"), 32 << 20)?.into();
@@ -1695,11 +1809,17 @@ fn seal_turn_outputs_inner(
     let package_bundle_bytes = read_sidecar("module-package-imports.cbor")?;
     let evidence_bytes = read_sidecar("dependencies.json")?;
     let receipt_bytes = read_sidecar("certified-products.cbor")?;
-    let fresh_products = tidepool_repr::execution_schema::parse_module_products(
-        &product_bytes,
-        &crate::prepared_artifact::production_requirements()?,
-        module_candidates::product_decode_limits(),
-    )?;
+    let product_decode_start = Instant::now();
+    let fresh_products =
+        certified_products::ParsedModuleProducts::decode(&product_bytes, &package_bundle_bytes)
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    timing::record_stage(
+        timing::NO_NODE,
+        timing::NO_ROUND,
+        "products.decode",
+        product_decode_start.elapsed(),
+        product_bytes.len() as u64,
+    );
     let exact_source = offer
         .exact
         .as_ref()
@@ -1721,7 +1841,7 @@ fn seal_turn_outputs_inner(
     };
     let needs_certificate = offer.has_candidates()
         || offer.exact.is_some()
-        || !fresh_products.is_empty()
+        || !fresh_products.products().is_empty()
         || !prepared.globals().is_empty()
         || evidence.as_ref().is_some_and(has_ready_home_module);
     if receipt_bytes.is_empty() {
@@ -1732,8 +1852,16 @@ fn seal_turn_outputs_inner(
         }
         return Ok(None);
     }
+    let receipt_decode_start = Instant::now();
     let receipt = certified_products::decode_receipt(&receipt_bytes)
         .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    timing::record_stage(
+        timing::NO_NODE,
+        timing::NO_ROUND,
+        "products.receipt_decode",
+        receipt_decode_start.elapsed(),
+        receipt_bytes.len() as u64,
+    );
     let Some(valid) = evidence.as_ref().filter(|evidence| evidence.valid(source)) else {
         if needs_certificate
             || receipt
@@ -1748,11 +1876,9 @@ fn seal_turn_outputs_inner(
         return Ok(None);
     };
     let certified = certified_products::certify_products(
-        offer.selected.as_ref(),
+        offer.selected.as_deref(),
         &receipt,
         &fresh_products,
-        &product_bytes,
-        &package_bundle_bytes,
         &evidence_bytes,
         source_path,
         valid,
@@ -1762,6 +1888,7 @@ fn seal_turn_outputs_inner(
         exact.as_ref(),
     )
     .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    let target_admission_start = Instant::now();
     ensure_ready_module_inventory(&receipt.modules, valid)?;
     let accepted = receipt
         .targets
@@ -1783,21 +1910,37 @@ fn seal_turn_outputs_inner(
     let package_interfaces =
         certified_products::certify_target_package_interfaces(prepared, &package_closure)
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-    module_candidates::record_deployment_acceptance(offer.selected.as_ref(), &receipt);
+    timing::record_stage_with_owners(
+        timing::NO_NODE,
+        timing::NO_ROUND,
+        "products.target_admission",
+        target_admission_start.elapsed(),
+        0,
+        receipt.targets.len(),
+    );
+    module_candidates::record_deployment_acceptance(offer.selected.as_deref(), &receipt);
     if offer
         .exact
         .as_ref()
         .is_none_or(|exact| empty_exact_context(&exact.context))
     {
-        module_candidates::publish(
+        let (_, publication) = module_candidates::prepare_publication(
             &offer.producer,
             &offer.include,
             valid,
-            &fresh_products,
-            &product_bytes,
-            &package_bundle_bytes,
+            fresh_products,
             source,
+            exact.as_ref().map_or(
+                module_candidates::CandidateVersionOrigin::Ordinary,
+                |admission| module_candidates::CandidateVersionOrigin::Exact {
+                    semantic_sha256: admission.request.semantic_sha256,
+                },
+            ),
+            &certified.recovery_products,
         );
+        module_candidates::publish_prepared(publication);
+    } else {
+        module_candidates::record_exact_context_publication_skip(fresh_products.products());
     }
     let certified_groups: Arc<[_]> = certified.groups.into();
     let compile_input_identity =
@@ -2197,8 +2340,9 @@ fn compile_invocation_inner(
     };
 
     if let Some(request) = exact_request.as_ref() {
-        use sha2::Digest;
-        let actual: [u8; 32] = sha2::Sha256::digest(&producer).into();
+        let actual =
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&producer)
+                .sha256();
         if actual != request.context.toolchain_identity_sha256() {
             return Err(CompileError::ExtractFailed(
                 "exact compile rebound to a different producer".into(),
@@ -2326,22 +2470,13 @@ fn compile_invocation_inner(
                 &mut *on_stage,
             )?;
             ensure_no_uncertified_globals(&artifacts)?;
-            if let Some(evidence) = evidence.as_ref() {
-                module_candidates::publish(
-                    &producer,
-                    inv.include,
-                    evidence,
-                    &artifacts.module_products,
-                    &product_bytes,
-                    &package_bundle_bytes,
-                    inv.source,
-                );
-            }
             return Ok(artifacts);
         }
         let receipt = certified_products::decode_receipt(&receipt_bytes)
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-        let fresh_products = decode_fresh_products(&product_bytes)?;
+        let fresh_products =
+            certified_products::ParsedModuleProducts::decode(&product_bytes, &package_bundle_bytes)
+                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
         let valid_evidence = evidence.as_ref().filter(|value| value.valid(inv.source));
         let cached_receipts: Vec<_> = receipt
             .modules
@@ -2353,8 +2488,6 @@ fn compile_invocation_inner(
                 candidate_set.as_ref(),
                 &receipt,
                 &fresh_products,
-                &product_bytes,
-                &package_bundle_bytes,
                 &evidence_bytes,
                 &input_path,
                 valid,
@@ -2367,7 +2500,7 @@ fn compile_invocation_inner(
             ensure_ready_module_inventory(&receipt.modules, valid)?;
             certified
         } else {
-            if !fresh_products.is_empty()
+            if !fresh_products.products().is_empty()
                 || !receipt.modules.is_empty()
                 || receipt
                     .targets
@@ -2399,7 +2532,31 @@ fn compile_invocation_inner(
                     })
             })
             .collect::<Result<_, _>>()?;
-        let fresh_count = fresh_products.len();
+        let fresh_count = fresh_products.products().len();
+        let (fresh_products, publication) = if (exact_request.is_none()
+            || deployment_export.is_some())
+            && evidence.is_some()
+        {
+            let (products, publication) = module_candidates::prepare_publication(
+                &producer,
+                inv.include,
+                evidence.as_ref().ok_or_else(|| {
+                    CompileError::ExtractFailed("candidate publication evidence unavailable".into())
+                })?,
+                fresh_products,
+                inv.source,
+                exact.as_ref().map_or(
+                    module_candidates::CandidateVersionOrigin::Ordinary,
+                    |admission| module_candidates::CandidateVersionOrigin::Exact {
+                        semantic_sha256: admission.request.semantic_sha256,
+                    },
+                ),
+                &certified.recovery_products,
+            );
+            (products, Some(publication))
+        } else {
+            (fresh_products.into_products(), None)
+        };
         let mut artifacts = assemble_with_products(
             &meta_bytes,
             &raw,
@@ -2417,6 +2574,7 @@ fn compile_invocation_inner(
                 "target product receipt count".into(),
             ));
         }
+        let target_admission_start = Instant::now();
         let package_closure = merge_package_closure(&receipt.packages, exact_request.as_ref())?;
         for (name, target) in &mut artifacts.targets {
             let accepted = receipt.targets.get(name).ok_or_else(|| {
@@ -2437,6 +2595,14 @@ fn compile_invocation_inner(
                 .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
             }
         }
+        timing::record_stage_with_owners(
+            timing::NO_NODE,
+            timing::NO_ROUND,
+            "products.target_admission",
+            target_admission_start.elapsed(),
+            0,
+            receipt.targets.len(),
+        );
         artifacts.certified_groups = certified.groups;
         artifacts.recovery_products = certified.recovery_products;
         artifacts.exact_source_admission = exact_source;
@@ -2445,31 +2611,26 @@ fn compile_invocation_inner(
         })?);
         module_candidates::record_deployment_acceptance(candidate_set.as_ref(), &receipt);
         if let Some((output_root, source_root)) = deployment_export {
-            let valid = valid_evidence.ok_or_else(|| {
+            valid_evidence.ok_or_else(|| {
                 CompileError::ModulePackage(crate::toolchain::ModulePackageError::OpenCohort)
+            })?;
+            let publication = publication.as_ref().ok_or_else(|| {
+                CompileError::ExtractFailed("module package publication unavailable".into())
             })?;
             module_candidates::deployment::export(
                 output_root,
                 source_root,
-                &producer,
                 &deployment,
-                inv.include,
-                valid,
-                &artifacts.module_products[..fresh_count],
-                &product_bytes,
-                &package_bundle_bytes,
-                inv.source,
+                publication,
             )?;
         }
-        if let Some(evidence) = evidence.as_ref().filter(|_| exact_request.is_none()) {
-            module_candidates::publish(
-                &producer,
-                inv.include,
-                evidence,
+        if exact_request.is_none() {
+            if let Some(publication) = publication {
+                module_candidates::publish_prepared(publication);
+            }
+        } else {
+            module_candidates::record_exact_context_publication_skip(
                 &artifacts.module_products[..fresh_count],
-                &product_bytes,
-                &package_bundle_bytes,
-                inv.source,
             );
         }
         // A memo hit has no certified source group owner mapping. The module
@@ -3957,8 +4118,12 @@ mod module_product_tests {
                     && owners.get(&group.owner().module) == Some(group.owner())),
             "an unaffected original owner survives source shadowing"
         );
-        eprintln!("deployment catalog {}: {} packaged modules, {} cached owners; shadowed FilePath and Prelude rebuilt",
-            package.catalog_identity(), cohort.len(), cached.len());
+        eprintln!(
+            "deployment catalog {}: {} packaged modules, {} cached owners; shadowed FilePath and Prelude rebuilt",
+            package.catalog_identity(),
+            cohort.len(),
+            cached.len()
+        );
     }
 
     #[test]

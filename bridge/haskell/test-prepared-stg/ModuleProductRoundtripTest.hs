@@ -40,7 +40,7 @@ import Tidepool.ExecutionProjection
 import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope
-  , installExactLexicalGraph )
+  , noCheckedValueImports, installExactLexicalGraph )
 import Tidepool.GhcPipeline
   ( PipelineResult(..), PipelineSelection(..), PreparedPipelineResult(..), runPipelineSelected )
 import Tidepool.PreparedSites (SiteRejection(..))
@@ -167,14 +167,15 @@ verifyModuleProductInterfaceRoundtrip work = do
   let hex = concatMap (\byte -> let s = showHex byte "" in replicate (2 - length s) '0' ++ s)
       manifest = work </> "module-candidates.cbor"
       packagePath = hi ++ ".packages"
+      productPath = hi ++ ".descriptor-only.tpmod"
       packageArtifact = ExactIfaceArtifact
         (unitString (moduleUnit (pmModule moduleA))) "ModuleProductA" hi
         (hex (BS.unpack digest)) []
   packageRoots <- maybe (ioError (userError "module product lacks selected package roots")) pure
-    (Map.lookup name (pprPackageRoots result))
+    (Map.lookup name (pprPackageImports result))
   let packageBytes = encodePackageImports packageArtifact packageRoots
       packageHash = hex (BS.unpack (SHA256.hash packageBytes))
-      candidate = encodeListLen 13
+      candidate = encodeListLen 14
         <> encodeString (T.pack (unitString (moduleUnit (pmModule moduleA))))
         <> encodeString "ModuleProductA"
         <> encodeString (T.pack a)
@@ -182,17 +183,19 @@ verifyModuleProductInterfaceRoundtrip work = do
         <> encodeString (T.pack hi)
         <> encodeString (T.pack (hex (BS.unpack digest)))
         <> encodeString (T.replicate 64 "0")
-        <> encodeString (T.replicate 64 "0")
+        <> encodeString (T.pack (hex (BS.unpack (SHA256.hash BS.empty))))
         <> encodeString (T.replicate 64 "0")
         <> encodeListLen 1
         <> encodeListLen 4 <> encodeString "none" <> encodeString "Prelude"
         <> encodeBool False <> encodeString ""
         <> encodeListLen 0
         <> encodeString (T.pack packagePath) <> encodeString (T.pack packageHash)
+        <> encodeString (T.pack productPath)
       manifestBytes = toLazyByteString
-        (encodeListLen 3 <> encodeString "TPMCAN" <> encodeString "5"
+        (encodeListLen 3 <> encodeString "TPMCAN" <> encodeString "6"
           <> encodeListLen 1 <> candidate)
   BS.writeFile packagePath packageBytes
+  BS.writeFile productPath BS.empty
   BS.writeFile manifest (BL.toStrict manifestBytes)
   hydratedCompile <- runPipelineSelected (PreparedProducts (Just manifest)) b [work]
   unless (map candidateModule (pprAcceptedCandidates hydratedCompile) == ["ModuleProductA"]
@@ -269,13 +272,13 @@ verifyModuleProductInterfaceRoundtrip work = do
     let sourceGraph = mkModuleGraph
           [node | node@(ModuleNode _ summary) <- mgModSummaries' (hsc_mod_graph producer)
                 , moduleNameString (moduleName (ms_mod summary)) == "ModuleProductB"]
-    duplicateLexical <- liftIO $ installExactLexicalGraph sourceGraph [(artifact, []), (otherUnit, [])] hydrated
+    duplicateLexical <- liftIO $ installExactLexicalGraph sourceGraph [(artifact, []), (otherUnit, [])] noCheckedValueImports hydrated
     unless (case duplicateLexical of Left "duplicate virtual lexical owner" -> True; _ -> False) $
       liftIO $ ioError (userError "virtual lexical module names were not unique across units")
-    hidden <- liftIO $ installExactLexicalGraph sourceGraph [] hydrated
+    hidden <- liftIO $ installExactLexicalGraph sourceGraph [] noCheckedValueImports hydrated
     unless (case hidden of Left _ -> True; Right _ -> False) $
       liftIO $ ioError (userError "implementation-only module became lexically importable")
-    lexicalResult <- liftIO $ installExactLexicalGraph sourceGraph [(artifact, [])] hydrated
+    lexicalResult <- liftIO $ installExactLexicalGraph sourceGraph [(artifact, [])] noCheckedValueImports hydrated
     lexical <- case lexicalResult of
       Right env -> pure env
       Left reason -> liftIO $ ioError (userError reason)

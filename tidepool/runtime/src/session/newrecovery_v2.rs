@@ -1,6 +1,7 @@
 //! Checksummed declaration recovery graph. The manifest is metadata only;
 //! executable bytes stay owned by the toolchain cache and its run-owned copy.
 
+use crate::session::RecoveryPublicationWork;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
@@ -9,8 +10,8 @@ use tidepool_repr::Generation;
 use tidepool_toolchain::artifact_inventory::{ArtifactDependency, ArtifactDescriptor, ArtifactId};
 use tidepool_toolchain::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
 use tidepool_toolchain::recovery_artifacts::{
-    verify_materialized_join, verify_materialized_ref, RecoveryArtifactError, RecoveryArtifactRef,
-    RecoveryJoinRef, RecoveryValueInterfaceRef,
+    verify_materialized_join_with_work, verify_materialized_ref_with_work, RecoveryArtifactError,
+    RecoveryArtifactRef, RecoveryArtifactWork, RecoveryJoinRef, RecoveryValueInterfaceRef,
 };
 
 #[path = "newrecovery_v2/snapshots.rs"]
@@ -302,6 +303,15 @@ pub(crate) enum RecoveryArtifactLossKind {
     Missing,
     Unreadable(String),
     DigestMismatch,
+    ExecutionSourceProducerMismatch {
+        unit: String,
+        module: String,
+        expected: [u8; 32],
+        actual: [u8; 32],
+    },
+    UnsupportedPackageImportsVersion {
+        found: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -363,27 +373,45 @@ pub enum RecoveryRefusal {
 pub(crate) struct StagedRecoveryManifest {
     inner: tidepool_atomic_write::StagedDurableWrite,
     graph: RecoveryGraph,
+    pub(crate) work: RecoveryPublicationWork,
 }
 
 /// A graph whose shape and checksum have been checked, or whose checksum was
 /// just produced by `seal`. Keeping that fact in the type lets staging avoid
 /// repeating the same full-graph validation at each private layer.
-struct ValidatedRecoveryGraph(RecoveryGraph);
+struct ValidatedRecoveryGraph(RecoveryGraph, RecoveryPublicationWork);
 
 impl ValidatedRecoveryGraph {
     fn check(graph: RecoveryGraph) -> Result<Self, RecoveryError> {
-        Ok(Self(graph.into_staging_snapshot()?))
+        let (graph, encoded_bytes) = graph.into_staging_snapshot_with_encoded_bytes()?;
+        Ok(Self(
+            graph,
+            RecoveryPublicationWork {
+                checksum_encode_bytes: encoded_bytes,
+                ..Default::default()
+            },
+        ))
     }
 
     fn seal(graph: RecoveryGraphCandidate) -> Result<Self, RecoveryError> {
-        Ok(Self(graph.seal()?))
+        let (graph, encoded_bytes) = graph.seal_with_encoded_bytes()?;
+        Ok(Self(
+            graph,
+            RecoveryPublicationWork {
+                checksum_encode_bytes: encoded_bytes,
+                ..Default::default()
+            },
+        ))
     }
 
     fn validate_artifact_files(
-        &self,
+        &mut self,
         root: &Path,
     ) -> Result<BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>, RecoveryError> {
-        self.0.validate_artifact_files_after_graph_validation(root)
+        let mut work = RecoveryArtifactWork::default();
+        let result = self.0.validate_artifact_files_with_work(root, &mut work);
+        self.1.recovery_validation_hash_bytes += work.hash_bytes;
+        result
     }
 }
 
@@ -446,7 +474,7 @@ pub(crate) fn stage_v2(
 fn stage_validated_v2(
     path: &Path,
     recovery_root: &Path,
-    graph: ValidatedRecoveryGraph,
+    mut graph: ValidatedRecoveryGraph,
 ) -> Result<StagedRecoveryManifest, RecoveryError> {
     if !graph.validate_artifact_files(recovery_root)?.is_empty() {
         return Err(error(
@@ -460,7 +488,7 @@ fn stage_metadata_v2(
     path: &Path,
     graph: ValidatedRecoveryGraph,
 ) -> Result<StagedRecoveryManifest, RecoveryError> {
-    let ValidatedRecoveryGraph(graph) = graph;
+    let ValidatedRecoveryGraph(graph, mut work) = graph;
     let bytes = serde_json::to_vec(&graph)
         .map_err(|e| error(format!("could not encode recovery graph: {e}")))?;
     if bytes.len() > MAX_MANIFEST_BYTES {
@@ -472,9 +500,11 @@ fn stage_metadata_v2(
             format!("could not stage recovery manifest: {}", e.source),
         )
     })?;
+    work.manifest_write_bytes += bytes.len() as u64;
     Ok(StagedRecoveryManifest {
         inner: staged,
         graph,
+        work,
     })
 }
 
@@ -872,6 +902,14 @@ impl RecoveryGraph {
         &self,
         root: &Path,
     ) -> Result<BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>, RecoveryError> {
+        self.validate_artifact_files_with_work(root, &mut RecoveryArtifactWork::default())
+    }
+
+    fn validate_artifact_files_with_work(
+        &self,
+        root: &Path,
+        work: &mut RecoveryArtifactWork,
+    ) -> Result<BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>, RecoveryError> {
         let root = fs::canonicalize(root)
             .map_err(|e| error(format!("could not resolve recovery root: {e}")))?;
         let mut losses = BTreeMap::new();
@@ -885,13 +923,14 @@ impl RecoveryGraph {
             let mut item_losses = Vec::new();
             let verification = match artifact {
                 RecoveryArtifactClosure::Home(reference) => {
-                    verify_materialized_ref(&root, reference).map(|_| ())
+                    verify_materialized_ref_with_work(&root, reference, work).map(|_| ())
                 }
                 RecoveryArtifactClosure::Join(reference) => {
-                    verify_materialized_join(&root, reference).map(|_| ())
+                    verify_materialized_join_with_work(&root, reference, work).map(|_| ())
                 }
                 RecoveryArtifactClosure::ValueInterface(reference) => {
-                    verify_materialized_join(&root, &reference.interface).map(|_| ())
+                    verify_materialized_join_with_work(&root, &reference.interface, work)
+                        .map(|_| ())
                 }
             };
             if let Err(error) = verification {
@@ -1415,6 +1454,10 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
 }
 
 fn checksum(graph: &impl GraphRead) -> Result<String, RecoveryError> {
+    checksum_with_encoded_bytes(graph).map(|(checksum, _)| checksum)
+}
+
+fn checksum_with_encoded_bytes(graph: &impl GraphRead) -> Result<(String, u64), RecoveryError> {
     let bytes = serde_json::to_vec(&GraphEncoding {
         graph,
         checksum: "",
@@ -1422,7 +1465,10 @@ fn checksum(graph: &impl GraphRead) -> Result<String, RecoveryError> {
     .map_err(|e| error(format!("could not encode recovery graph: {e}")))?;
     let mut domain = b"tidepool-recovery-graph-v5\0".to_vec();
     domain.extend_from_slice(&bytes);
-    Ok(blake3::hash(&domain).to_hex().to_string())
+    Ok((
+        blake3::hash(&domain).to_hex().to_string(),
+        bytes.len() as u64,
+    ))
 }
 
 fn valid_identity(identity: &RecoverySymbolIdentity) -> bool {
@@ -1450,6 +1496,33 @@ fn artifact_error_loss(
     error: RecoveryArtifactError,
 ) -> RecoveryArtifactLoss {
     let (component, path, kind) = match error {
+        RecoveryArtifactError::ExecutionSourceProducerMismatch {
+            unit,
+            module,
+            expected,
+            actual,
+        } => {
+            let (interface, product) = artifact.paths();
+            let (component, path) = match product {
+                Some(product) => (RecoveryArtifactComponent::Product, product),
+                None => (RecoveryArtifactComponent::Interface, interface),
+            };
+            (
+                component,
+                path.to_path_buf(),
+                RecoveryArtifactLossKind::ExecutionSourceProducerMismatch {
+                    unit,
+                    module,
+                    expected,
+                    actual,
+                },
+            )
+        }
+        RecoveryArtifactError::UnsupportedPackageImportsVersion { path, found } => (
+            RecoveryArtifactComponent::Interface,
+            path,
+            RecoveryArtifactLossKind::UnsupportedPackageImportsVersion { found },
+        ),
         RecoveryArtifactError::Unavailable(path) => {
             let (component, relative) = artifact_component(artifact, &path);
             (component, relative, RecoveryArtifactLossKind::Missing)
@@ -1756,7 +1829,7 @@ mod tests {
         };
         let package_witness = ciborium::value::Value::Array(vec![
             ciborium::value::Value::Text("TPPKGROOTS".into()),
-            ciborium::value::Value::Text("1".into()),
+            ciborium::value::Value::Text("2".into()),
             ciborium::value::Value::Array(vec![
                 ciborium::value::Value::Text("main".into()),
                 ciborium::value::Value::Text("Lib".into()),
@@ -1768,6 +1841,7 @@ mod tests {
                         .join(""),
                 ),
             ]),
+            ciborium::value::Value::Array(vec![]),
             ciborium::value::Value::Array(vec![]),
         ]);
         let mut package_bytes = Vec::new();
@@ -2029,8 +2103,9 @@ mod tests {
                 .collect::<String>();
             let witness = ciborium::value::Value::Array(vec![
                 text("TPPKGROOTS"),
-                text("1"),
+                text("2"),
                 ciborium::value::Value::Array(vec![text("main"), text(name), text(&digest)]),
+                ciborium::value::Value::Array(vec![]),
                 ciborium::value::Value::Array(vec![]),
             ]);
             let mut bytes = Vec::new();
@@ -2157,6 +2232,43 @@ mod tests {
             .push(reference.requirements[0].clone());
         duplicate.checksum = checksum(&duplicate).unwrap();
         assert!(RecoveryGraph::from_wire(duplicate).is_err());
+    }
+
+    #[test]
+    fn producer_mismatch_tombstones_the_original_without_resurrection() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wire = fixture(dir.path());
+        wire.public_surfaces[0].declaration_root = Some(Generation(1));
+        wire.seal().unwrap();
+        let graph = snapshot(&wire);
+        let artifact = &wire.artifacts[0];
+        assert!(matches!(
+            graph.projection(&owner("root"), &BTreeMap::new()).unwrap()[&identity("answer")],
+            RecoveryHead::Available { .. }
+        ));
+        let loss = artifact_error_loss(
+            artifact,
+            RecoveryArtifactError::ExecutionSourceProducerMismatch {
+                unit: "main".into(),
+                module: "Lib".into(),
+                expected: [1; 32],
+                actual: [2; 32],
+            },
+        );
+        assert_eq!(loss.component, RecoveryArtifactComponent::Product);
+        assert!(matches!(
+            &loss.kind,
+            RecoveryArtifactLossKind::ExecutionSourceProducerMismatch {
+                expected,
+                actual,
+                ..
+            } if *expected == [1; 32] && *actual == [2; 32]
+        ));
+        let losses = BTreeMap::from([(artifact.artifact_id(), vec![loss])]);
+        assert!(matches!(
+            graph.projection(&owner("root"), &losses).unwrap()[&identity("answer")],
+            RecoveryHead::Tombstone(_)
+        ));
     }
 
     #[test]
@@ -3111,6 +3223,82 @@ mod tests {
         let mut changed = graph;
         changed.nodes[1].state = RecoveryNodeState::ExactArtifactClosure;
         assert!(changed.validate().is_err());
+    }
+
+    #[test]
+    fn staged_publication_work_counts_actual_checksum_hash_and_write_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.json");
+        let baseline = snapshot(&fixture(dir.path()));
+        let staged = stage_public_visibility_v2(
+            &path,
+            dir.path(),
+            &baseline,
+            owner("root"),
+            0,
+            Vec::new(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let unsigned = serde_json::to_vec(&GraphEncoding {
+            graph: &staged.graph,
+            checksum: "",
+        })
+        .unwrap();
+        let encoded = serde_json::to_vec(&staged.graph).unwrap();
+        let expected_hash_bytes = staged
+            .graph
+            .artifacts()
+            .map(|artifact| {
+                let RecoveryArtifactClosure::Home(reference) = artifact else {
+                    unreachable!()
+                };
+                [
+                    &reference.interface_path,
+                    &reference.product_path,
+                    &reference.package_imports_path,
+                    &reference.certification_path,
+                ]
+                .into_iter()
+                .map(|relative| fs::metadata(dir.path().join(relative)).unwrap().len())
+                .sum::<u64>()
+            })
+            .sum::<u64>();
+        assert_eq!(staged.work.checksum_encode_bytes, unsigned.len() as u64);
+        assert_eq!(
+            staged.work.recovery_validation_hash_bytes,
+            expected_hash_bytes
+        );
+        assert_eq!(staged.work.recovery_materialization_hash_bytes, 0);
+        assert_eq!(staged.work.manifest_write_bytes, encoded.len() as u64);
+        assert!(staged.work.checksum_encode_bytes > 0 && expected_hash_bytes > 0);
+        let RecoveryPublishOutcome::Durable { graph, .. } = staged.publish() else {
+            panic!("durable fixture")
+        };
+        assert_eq!(fs::read(&path).unwrap(), encoded);
+        // Validated existing graphs perform no checksum encoding while staging.
+        let restaged = stage_v2(&path, dir.path(), graph).unwrap();
+        assert_eq!(restaged.work.checksum_encode_bytes, 0);
+        assert_eq!(
+            restaged.work.recovery_validation_hash_bytes,
+            expected_hash_bytes
+        );
+        assert_eq!(restaged.work.manifest_write_bytes, encoded.len() as u64);
+        let mut wire = fixture(dir.path());
+        wire.nodes.reverse();
+        wire.checksum = checksum(&wire).unwrap();
+        let noncanonical = snapshot(&wire);
+        let canonicalized = stage_v2(&path, dir.path(), noncanonical).unwrap();
+        let canonical_unsigned = serde_json::to_vec(&GraphEncoding {
+            graph: &canonicalized.graph,
+            checksum: "",
+        })
+        .unwrap();
+        assert_eq!(
+            canonicalized.work.checksum_encode_bytes,
+            canonical_unsigned.len() as u64
+        );
     }
 
     #[test]

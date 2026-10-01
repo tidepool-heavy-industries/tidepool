@@ -117,6 +117,7 @@ pub(super) struct PreparedDeclarationPublication {
     pub(super) generation: Generation,
     pub(super) joined: JoinedDeclaration,
     pub(super) declared_names: Vec<String>,
+    pub(super) source_domain_owners: Vec<tidepool_repr::execution_schema::CachedHomeOwner>,
 }
 
 fn invalid_at(path: &Path, detail: impl Into<String>) -> SessionError {
@@ -1059,6 +1060,7 @@ impl AcceptedDeclarationPublication {
     }
     pub fn stage(self) -> Result<StagedPublicManifest, SessionError> {
         let Self { mut base, receipt } = self;
+        let mut work = super::RecoveryPublicationWork::default();
         let context = Arc::new(ExactDeclarationContext::new(
             &[],
             std::slice::from_ref(&receipt),
@@ -1090,6 +1092,7 @@ impl AcceptedDeclarationPublication {
             let materialized = receipt
                 .materialize(root)
                 .map_err(|error| invalid_at(&error_path, error.to_string()))?;
+            work.recovery_materialization_hash_bytes += materialized.materialization_hash_bytes;
             let exports = receipt
                 .exports()
                 .iter()
@@ -1214,9 +1217,11 @@ impl AcceptedDeclarationPublication {
                     });
             surface.declaration_root = Some(base.reserved);
             candidate.replace_surface(surface);
-            *graph = candidate
-                .seal()
+            let (sealed, encoded_bytes) = candidate
+                .seal_with_encoded_bytes()
                 .map_err(|error| invalid_at(&error_path, error.to_string()))?;
+            work.checksum_encode_bytes += encoded_bytes;
+            *graph = sealed;
         }
         let mut turn = base
             .current_public
@@ -1327,7 +1332,14 @@ impl AcceptedDeclarationPublication {
             prologue: Default::default(),
             body: String::new(),
         };
+        let source_domain_owners = base
+            .intent
+            .writes
+            .iter()
+            .map(|write| write.evidence.product().owner().clone())
+            .collect();
         let declaration = PreparedDeclarationPublication {
+            source_domain_owners,
             generation: base.reserved,
             declared_names,
             joined: JoinedDeclaration {
@@ -1352,6 +1364,11 @@ impl AcceptedDeclarationPublication {
         {
             *base_checksum = checksum;
             *base_high_water = high_water;
+        }
+        if let super::StagedPublicationTarget::Durable { staged, .. } = &mut ticket.target {
+            staged.work.checksum_encode_bytes += work.checksum_encode_bytes;
+            staged.work.recovery_materialization_hash_bytes +=
+                work.recovery_materialization_hash_bytes;
         }
         ticket.declaration = Some(declaration);
         Ok(ticket)
@@ -1388,6 +1405,9 @@ impl SessionLib {
             .expect("declaration tip preflight") = generation;
     }
 }
+#[cfg(test)]
+mod linearization_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

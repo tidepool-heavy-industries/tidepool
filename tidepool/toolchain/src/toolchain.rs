@@ -392,14 +392,14 @@ pub fn locate_extract() -> Result<ExtractLocation, ToolchainError> {
 /// Bind the producer selected by the canonical extract resolution policy.
 /// Configured deployment authority admits the observed producer and exact
 /// consumed worker before this endpoint can authorize compilation.
-pub fn bind_extract_endpoint()
--> Result<(tidepool_extract_cmd::CompilerEndpoint, ExtractLocation), ToolchainError> {
+pub fn bind_extract_endpoint(
+) -> Result<(tidepool_extract_cmd::CompilerEndpoint, ExtractLocation), ToolchainError> {
     let (endpoint, location, _) =
         bind_admitted_extract_endpoint(&CompilerDeploymentConfiguration::from_env()?)?;
     Ok((endpoint, location))
 }
-fn bind_unadmitted_extract_endpoint()
--> Result<(tidepool_extract_cmd::CompilerEndpoint, ExtractLocation), ToolchainError> {
+fn bind_unadmitted_extract_endpoint(
+) -> Result<(tidepool_extract_cmd::CompilerEndpoint, ExtractLocation), ToolchainError> {
     let location = locate_extract()?;
     let cmd = tidepool_extract_cmd::ExtractCmd::with_bin(
         tidepool_extract_cmd::ResolvedExtractBin::assume_resolved(&location.path),
@@ -424,9 +424,9 @@ pub struct CompilerDeploymentAuthority {
     pub producer_identity: [u8; 32],
     /// BLAKE3 digest of the exact compiler worker executable admitted into it.
     pub consumed_worker_identity: [u8; 32],
-    /// Frontend path retained as configured build provenance.
+    /// Configured frontend artifact location and build provenance.
     pub frontend_path: PathBuf,
-    /// Worker selection path hashed into the configured producer identity.
+    /// Configured worker artifact location and build provenance.
     pub worker_path: PathBuf,
     /// GHC library directory hashed into the configured producer identity.
     pub ghc_libdir: PathBuf,
@@ -1476,11 +1476,9 @@ mod tests {
     fn unreadable_stamp_is_refused_and_missing_stamp_is_absent() {
         let directory = tempfile::TempDir::new().unwrap();
         assert!(read_stamp(directory.path()).is_err());
-        assert!(
-            read_stamp(&directory.path().join("absent.json"))
-                .unwrap()
-                .is_none()
-        );
+        assert!(read_stamp(&directory.path().join("absent.json"))
+            .unwrap()
+            .is_none());
     }
 
     #[test]

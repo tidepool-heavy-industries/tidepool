@@ -1,0 +1,95 @@
+//! Native consumption of a configured immutable deployment catalog.
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
+use tidepool_toolchain::certified_products::ProductOrigin;
+
+#[test]
+#[ignore = "requires the matched Nix deployment catalog and empty user caches"]
+fn packaged_cohort_executes_and_displays_without_build_inputs() {
+    assert!(
+        !Path::new(env!("CARGO_MANIFEST_DIR")).exists(),
+        "run this retained binary with checkout and build outputs inaccessible"
+    );
+    assert!(
+        std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).is_none(),
+        "the package gate must not adopt an existing daemon"
+    );
+    for variable in ["TIDEPOOL_COMPILE_CACHE_DIR", "TIDEPOOL_BUILD_PRODUCTS_DIR"] {
+        let directory = PathBuf::from(std::env::var_os(variable).expect("explicit empty cache"));
+        assert!(directory.is_absolute());
+        assert_eq!(std::fs::read_dir(directory).unwrap().count(), 0);
+    }
+    let package = tidepool_toolchain::toolchain::configured_module_package()
+        .unwrap()
+        .expect("configured immutable module catalog");
+    let source_root = package.source_root().to_owned();
+    assert!(source_root.starts_with("/nix/store"));
+    let catalog: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            std::env::var_os(tidepool_toolchain::toolchain::ENV_COMPILER_MODULES).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let cohort: BTreeSet<String> = catalog["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|module| {
+            let root = Path::new(catalog["output_root"].as_str().unwrap());
+            let owner: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(root.join(module["owner"]["path"].as_str().unwrap())).unwrap(),
+            )
+            .unwrap();
+            owner["module"].as_str().unwrap().to_owned()
+        })
+        .collect();
+
+    let source = tidepool_runtime::session::assemble_expression_module(
+        "{-# LANGUAGE DataKinds, FlexibleContexts, FlexibleInstances, MultiParamTypeClasses, NoImplicitPrelude, TypeOperators, UndecidableInstances #-}\nmodule PackagedCatalogDisplay where\nimport Tidepool.Prelude\nimport Control.Monad.Freer (Eff)\n",
+        "result",
+        "'[]",
+        "show (length (sort [41, 2, 3]) + 39 :: Int)",
+        tidepool_runtime::session::ExpressionLift::Pure,
+    );
+    let target = tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET;
+    let mut compiled =
+        tidepool_runtime::compile_targets(&source, &[target], &[source_root], |_, _, _| {})
+            .expect("package-backed expression compilation");
+    let cached: BTreeSet<_> = compiled
+        .certified_groups
+        .iter()
+        .filter(|group| group.origin() == ProductOrigin::Cached)
+        .map(|group| group.owner().module.clone())
+        .collect();
+    assert!(cached.contains("Tidepool.Prelude"));
+    assert!(cached.contains("Tidepool.Render"));
+    assert!(cached.contains("Tidepool.FilePath"));
+    assert!(compiled.certified_groups.iter().all(|group| {
+        !cohort.contains(&group.owner().module) || group.origin() == ProductOrigin::Cached
+    }));
+    let prepared = compiled
+        .targets
+        .remove(target)
+        .unwrap()
+        .prepared
+        .into_prepared();
+    let value = tidepool_runtime::run_prepared_program(
+        prepared,
+        &compiled.table,
+        tidepool_runtime::DEFAULT_NURSERY_SIZE,
+        &mut frunk::HNil,
+        &(),
+        |_| {},
+    )
+    .expect("actual native execution of the package-backed target");
+    let displayed = tidepool_runtime::value_to_json(&value, &compiled.table, 0);
+    assert_eq!(displayed, serde_json::json!("42"));
+    eprintln!(
+        "deployment catalog {}: {} cached owners; native display {displayed}",
+        package.catalog_identity(),
+        cached.len(),
+    );
+}

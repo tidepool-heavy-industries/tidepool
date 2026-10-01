@@ -296,7 +296,11 @@ pub(crate) fn certify_same_offer_planned_declaration(
             "planned original source differs from its exact admission",
         ));
     }
-    let toolchain_identity_sha256: [u8; 32] = Sha256::digest(producer_identity).into();
+    let toolchain_identity_sha256 =
+        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+            producer_identity,
+        )
+        .sha256();
     if baseline
         .is_some_and(|context| context.toolchain_identity_sha256() != toolchain_identity_sha256)
     {

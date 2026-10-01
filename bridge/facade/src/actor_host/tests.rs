@@ -1834,43 +1834,7 @@ async fn dispatch_haskell(
     last.expect("non-empty Haskell fixture")
 }
 
-pub(super) async fn dispatch_haskell_script(
-    endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
-    script: &str,
-) -> serde_json::Value {
-    dispatch_haskell_script_result(endpoint, script)
-        .await
-        .unwrap_or_else(|error| panic!("Haskell script failed:\n{script}\n\n{error}"))
-}
-
-pub(super) async fn dispatch_haskell_script_result(
-    endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
-    script: &str,
-) -> Result<serde_json::Value, exomonad_actor::ResidentToolError> {
-    let call_id = uuid::Uuid::new_v4().simple().to_string();
-    let result = endpoint
-        .dispatch_boxed(ToolInvocation {
-            context: Some(ToolInvocationContext::external(
-                "actor-host-vertical".into(),
-                call_id.clone(),
-                call_id.clone(),
-                Some(call_id.clone()),
-                Some("haskell".into()),
-            )),
-            name: exomonad_actor::HASKELL_TOOL.into(),
-            arguments: ToolArguments::Raw(script.into()),
-        })
-        .await;
-    endpoint
-        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
-            "actor-host-vertical".into(),
-            call_id.clone(),
-            call_id,
-        ))
-        .await
-        .expect("recorded tool completion");
-    result
-}
+pub(super) use super::test_campaign::{dispatch_haskell_script, dispatch_haskell_script_result};
 
 pub(super) async fn dispatch_structured_tool(
     endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
