@@ -325,7 +325,10 @@ struct RequestRecord {
     owner_state: OwnerState,
     deadline: Option<ActiveRequestDeadline>,
     progress: Option<ProgressSnapshot>,
+    /// Authored reporting intent; subscriptions temporarily own its wake.
     notify_owner: bool,
+    /// The owner notice was emitted, a named subscription owns it, or a direct
+    /// wait passed its cancellation gate and captured it.
     settlement_notified: bool,
     registered_at_unix_ms: u64,
     /// A bounded, best-effort text rendering of the reply value, attached by
