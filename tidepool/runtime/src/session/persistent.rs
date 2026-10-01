@@ -2228,7 +2228,7 @@ impl PersistentSession {
         graph.public_surfaces[index].owner = successor.clone();
         graph.public_surfaces[index].epoch = epoch;
         graph.seal().map_err(|error| invalid(error.to_string()))?;
-        let staged = super::recovery::stage_v2(&state.path, root, &graph)
+        let staged = super::recovery::stage_v2(&state.path, root, graph)
             .map_err(|error| invalid(error.to_string()))?;
         owner.validate_owner()?;
         if std::fs::read(&state.path).map_err(|error| invalid(error.to_string()))? != current_bytes

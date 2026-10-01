@@ -346,6 +346,30 @@ pub(crate) struct StagedRecoveryManifest {
     graph: RecoveryGraph,
 }
 
+/// A graph whose shape and checksum have been checked, or whose checksum was
+/// just produced by `seal`. Keeping that fact in the type lets staging avoid
+/// repeating the same full-graph validation at each private layer.
+struct ValidatedRecoveryGraph(RecoveryGraph);
+
+impl ValidatedRecoveryGraph {
+    fn check(graph: RecoveryGraph) -> Result<Self, RecoveryError> {
+        graph.validate()?;
+        Ok(Self(graph))
+    }
+
+    fn seal(mut graph: RecoveryGraph) -> Result<Self, RecoveryError> {
+        graph.seal()?;
+        Ok(Self(graph))
+    }
+
+    fn validate_artifact_files(
+        &self,
+        root: &Path,
+    ) -> Result<BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>, RecoveryError> {
+        self.0.validate_artifact_files_after_graph_validation(root)
+    }
+}
+
 pub(crate) enum RecoveryPublishOutcome {
     Durable {
         graph: RecoveryGraph,
@@ -397,9 +421,16 @@ impl StagedRecoveryManifest {
 pub(crate) fn stage_v2(
     path: &Path,
     recovery_root: &Path,
-    graph: &RecoveryGraph,
+    graph: RecoveryGraph,
 ) -> Result<StagedRecoveryManifest, RecoveryError> {
-    graph.validate()?;
+    stage_validated_v2(path, recovery_root, ValidatedRecoveryGraph::check(graph)?)
+}
+
+fn stage_validated_v2(
+    path: &Path,
+    recovery_root: &Path,
+    graph: ValidatedRecoveryGraph,
+) -> Result<StagedRecoveryManifest, RecoveryError> {
     if !graph.validate_artifact_files(recovery_root)?.is_empty() {
         return Err(error(
             "cannot stage a recovery graph with unavailable or corrupt artifacts",
@@ -410,10 +441,10 @@ pub(crate) fn stage_v2(
 
 fn stage_metadata_v2(
     path: &Path,
-    graph: &RecoveryGraph,
+    graph: ValidatedRecoveryGraph,
 ) -> Result<StagedRecoveryManifest, RecoveryError> {
-    graph.validate()?;
-    let bytes = serde_json::to_vec_pretty(graph)
+    let ValidatedRecoveryGraph(graph) = graph;
+    let bytes = serde_json::to_vec_pretty(&graph)
         .map_err(|e| error(format!("could not encode recovery graph: {e}")))?;
     if bytes.len() > MAX_MANIFEST_BYTES {
         return Err(error("recovery manifest exceeds the bounded size"));
@@ -426,7 +457,7 @@ fn stage_metadata_v2(
     })?;
     Ok(StagedRecoveryManifest {
         inner: staged,
-        graph: graph.clone(),
+        graph,
     })
 }
 
@@ -438,7 +469,7 @@ pub(crate) fn stage_high_water_v2(
     next: Generation,
 ) -> Result<StagedRecoveryManifest, RecoveryError> {
     let candidate = high_water_candidate(graph, next)?;
-    stage_metadata_v2(path, &candidate)
+    stage_metadata_v2(path, candidate)
 }
 
 /// Reserve one contiguous identity range through the metadata writer.
@@ -460,8 +491,7 @@ pub(crate) fn stage_high_water_range_v2(
     );
     let mut candidate = graph.clone();
     candidate.high_water = next;
-    candidate.seal()?;
-    stage_metadata_v2(path, &candidate)
+    stage_metadata_v2(path, ValidatedRecoveryGraph::seal(candidate)?)
 }
 
 /// Stage a binding/source-only public visibility change without allocating a
@@ -510,14 +540,14 @@ pub(crate) fn stage_public_visibility_v2(
         .ok_or_else(|| error("public visibility epoch exhausted"))?;
     surface.bindings = bindings;
     surface.source_instances = source_instances;
-    candidate.seal()?;
-    stage_v2(path, recovery_root, &candidate)
+    let candidate = ValidatedRecoveryGraph::seal(candidate)?;
+    stage_validated_v2(path, recovery_root, candidate)
 }
 
 fn high_water_candidate(
     graph: &RecoveryGraph,
     next: Generation,
-) -> Result<RecoveryGraph, RecoveryError> {
+) -> Result<ValidatedRecoveryGraph, RecoveryError> {
     graph.validate()?;
     let expected = graph
         .high_water
@@ -533,8 +563,7 @@ fn high_water_candidate(
     }
     let mut candidate = graph.clone();
     candidate.high_water = next;
-    candidate.seal()?;
-    Ok(candidate)
+    ValidatedRecoveryGraph::seal(candidate)
 }
 
 /// Read the current graph. Unsupported formats are refused without rewriting them.
@@ -549,7 +578,7 @@ pub(crate) fn read_v2(
             return Err(at(
                 path,
                 format!("could not read recovery manifest: {error}"),
-            ))
+            ));
         }
     };
     read_v2_bytes(path, recovery_root, &bytes)
@@ -810,6 +839,13 @@ impl RecoveryGraph {
         root: &Path,
     ) -> Result<BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>, RecoveryError> {
         self.validate()?;
+        self.validate_artifact_files_after_graph_validation(root)
+    }
+
+    fn validate_artifact_files_after_graph_validation(
+        &self,
+        root: &Path,
+    ) -> Result<BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>, RecoveryError> {
         let root = fs::canonicalize(root)
             .map_err(|e| error(format!("could not resolve recovery root: {e}")))?;
         let mut losses = BTreeMap::new();
@@ -1688,7 +1724,9 @@ mod tests {
         graph.nodes.retain(|node| node.id == Generation(1));
         graph.seal().unwrap();
         assert!(matches!(
-            stage_v2(&manifest, root.path(), &graph).unwrap().publish(),
+            stage_v2(&manifest, root.path(), graph.clone())
+                .unwrap()
+                .publish(),
             RecoveryPublishOutcome::Durable { .. }
         ));
 
@@ -1720,7 +1758,9 @@ mod tests {
         let manifest = root.path().join("declarations.json");
         let graph = fixture(root.path());
         assert!(matches!(
-            stage_v2(&manifest, root.path(), &graph).unwrap().publish(),
+            stage_v2(&manifest, root.path(), graph.clone())
+                .unwrap()
+                .publish(),
             RecoveryPublishOutcome::Durable { .. }
         ));
         let mut reopened = SessionLib::open(
@@ -1745,7 +1785,9 @@ mod tests {
         graph.nodes.retain(|node| node.id == Generation(1));
         graph.seal().unwrap();
         assert!(matches!(
-            stage_v2(&manifest, root.path(), &graph).unwrap().publish(),
+            stage_v2(&manifest, root.path(), graph.clone())
+                .unwrap()
+                .publish(),
             RecoveryPublishOutcome::Durable { .. }
         ));
         let RecoveryArtifactClosure::Home(reference) = &graph.artifacts[0] else {
@@ -1807,7 +1849,7 @@ mod tests {
             &published,
             root.clone(),
             1,
-            vec![next],
+            vec![next.clone()],
             vec![],
             None,
         )
@@ -1818,8 +1860,31 @@ mod tests {
         };
         let restarted = read_v2(&manifest, dir.path()).unwrap().unwrap().graph;
         assert_eq!(restarted, replacement);
+        let replacement_bytes = fs::read(&manifest).unwrap();
+        let repeated = match stage_public_visibility_v2(
+            &manifest,
+            dir.path(),
+            &replacement,
+            root.clone(),
+            2,
+            vec![next.clone()],
+            vec![],
+            None,
+        )
+        .unwrap()
+        .publish()
+        {
+            RecoveryPublishOutcome::Durable { graph, .. } => graph,
+            _ => panic!("expected durable unchanged-winner publication"),
+        };
         assert_eq!(
-            restarted.public_binding_tombstones(&root).unwrap(),
+            repeated.public_surfaces[0].bindings,
+            replacement.public_surfaces[0].bindings
+        );
+        assert_eq!(repeated.public_surfaces[0].epoch, 3);
+        assert_ne!(fs::read(&manifest).unwrap(), replacement_bytes);
+        assert_eq!(
+            repeated.public_binding_tombstones(&root).unwrap(),
             vec![RecoveryLostPublicBinding {
                 name: "answer".into(),
                 winner: RecoveryBindingId {
@@ -1828,17 +1893,19 @@ mod tests {
                 },
             }]
         );
+        let published_bytes = fs::read(&manifest).unwrap();
         assert!(stage_public_visibility_v2(
             &manifest,
             dir.path(),
-            &replacement,
-            root,
+            &repeated,
+            root.clone(),
             1,
             vec![],
             vec![],
             None,
         )
         .is_err());
+        assert_eq!(fs::read(&manifest).unwrap(), published_bytes);
     }
 
     #[test]
@@ -2072,7 +2139,9 @@ mod tests {
         graph.seal().unwrap();
         let manifest = dir.path().join("declarations.json");
         assert!(matches!(
-            stage_v2(&manifest, dir.path(), &graph).unwrap().publish(),
+            stage_v2(&manifest, dir.path(), graph.clone())
+                .unwrap()
+                .publish(),
             RecoveryPublishOutcome::Durable { .. }
         ));
         let read = read_v2(&manifest, dir.path()).unwrap().unwrap();
@@ -2266,7 +2335,7 @@ mod tests {
             }
         };
         fs::remove_file(dir.path().join(product)).unwrap();
-        let candidate = high_water_candidate(&graph, Generation(3)).unwrap();
+        let candidate = high_water_candidate(&graph, Generation(3)).unwrap().0;
         assert_eq!(candidate.high_water, Generation(3));
         assert_eq!(candidate.public_surfaces, graph.public_surfaces);
         assert_eq!(candidate.nodes, graph.nodes);
@@ -2340,6 +2409,14 @@ mod tests {
     fn artifact_bytes_are_checked_against_the_manifest_digests() {
         let dir = tempfile::tempdir().unwrap();
         let graph = fixture(dir.path());
+        let manifest = dir.path().join("recovery.json");
+        assert!(matches!(
+            stage_v2(&manifest, dir.path(), graph.clone())
+                .unwrap()
+                .publish(),
+            RecoveryPublishOutcome::Durable { .. }
+        ));
+        let published = fs::read(&manifest).unwrap();
         let artifact_id = graph.artifacts[0].artifact_id();
         let product = match &graph.artifacts[0] {
             RecoveryArtifactClosure::Home(reference) => reference.product_path.clone(),
@@ -2348,6 +2425,8 @@ mod tests {
             }
         };
         fs::write(dir.path().join(product), b"changed").unwrap();
+        assert!(stage_v2(&manifest, dir.path(), graph.clone()).is_err());
+        assert_eq!(fs::read(&manifest).unwrap(), published);
         let losses = graph.validate_artifact_files(dir.path()).unwrap();
         assert!(losses.contains_key(&artifact_id));
         assert!(losses
@@ -2385,7 +2464,7 @@ mod tests {
         graph.nodes[1].artifact_refs = graph.nodes[0].artifact_refs.clone();
         graph.seal().unwrap();
         let manifest_path = dir.path().join("recovery.json");
-        match stage_v2(&manifest_path, dir.path(), &graph)
+        match stage_v2(&manifest_path, dir.path(), graph.clone())
             .unwrap()
             .publish()
         {

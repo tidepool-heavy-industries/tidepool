@@ -2120,7 +2120,7 @@ impl SessionLib {
                 },
             ));
         graph.seal().map_err(|error| invalid(&error.to_string()))?;
-        recovery::stage_v2(&state.path, root, &graph).map_err(|error| invalid(&error.to_string()))
+        recovery::stage_v2(&state.path, root, graph).map_err(|error| invalid(&error.to_string()))
     }
 
     pub(crate) fn discard_staged(&self, staged: &StagedDeclaration) {
