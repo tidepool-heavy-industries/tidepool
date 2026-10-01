@@ -3,6 +3,38 @@
 use super::*;
 use crate::request::{ReplyError, RequestRegistry, WatchId, WatchObservation};
 
+/// A dropped or cancelled direct wait releases its subscription, never the
+/// producing request. Ready capture transfers release to the invocation and
+/// Haskell's forget operation because progress still reads this snapshot.
+struct TransientWatchLease {
+    requests: Arc<RequestRegistry>,
+    actor: crate::ActorRef,
+    watch: WatchId,
+    armed: bool,
+}
+
+impl TransientWatchLease {
+    fn new(requests: &Arc<RequestRegistry>, actor: crate::ActorRef, watch: WatchId) -> Self {
+        Self {
+            requests: Arc::clone(requests),
+            actor,
+            watch,
+            armed: requests.is_transient_watch(actor, watch),
+        }
+    }
+}
+
+impl Drop for TransientWatchLease {
+    fn drop(&mut self) {
+        if self.armed {
+            drop(
+                self.requests
+                    .release_transient_watch(self.actor, self.watch),
+            );
+        }
+    }
+}
+
 enum WatchWaitEvent {
     Resume(Result<WatchObservation, ReplyError>),
     Cancelled,
@@ -47,6 +79,7 @@ where
     O: OutputSink + Sync + 'static,
 {
     tracing::debug!(actor = ?context.actor, watch = ?poll.watch, "owned watch awaiting settlement");
+    let mut transient = TransientWatchLease::new(&environment.requests, context.actor, poll.watch);
     match wait_watch_event(
         &environment.requests,
         context.actor,
@@ -57,6 +90,7 @@ where
     .await
     {
         WatchWaitEvent::Resume(observation) => {
+            transient.armed = false;
             let observation = observation.map(|observation| {
                 watch_pending_observation(&environment, poll.watch, observation)
             });

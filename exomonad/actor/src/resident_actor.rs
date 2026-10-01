@@ -5308,7 +5308,11 @@ where
                     ResidentActorWorkbenchError::ActorProtocol("route owner is unavailable".into())
                 })?;
                 let settlements = command_settlement::CommandSettlements::new(&self.environment);
-                let dependencies = settlements.resolve(registration.dependencies)?;
+                let dependencies = settlements
+                    .resolve(registration.dependencies)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(watch_registration_refusal(error))
+                    })?;
                 let (watch, notifications) = self
                     .environment
                     .requests
@@ -5360,13 +5364,57 @@ where
                     .await
             }),
             ResidentActorBoundary::WatchRegistration(registration) => Box::pin(async move {
+                let settlements = command_settlement::CommandSettlements::new(&self.environment);
+                if registration.transient {
+                    let registered = match settlements.resolve(registration.dependencies) {
+                        Err(error) => Err(error),
+                        Ok(dependencies) => {
+                            let registered = self
+                                .environment
+                                .requests
+                                .register_transient_watch(context.actor, dependencies.clone());
+                            if registered.is_err() {
+                                settlements.release(&dependencies);
+                            }
+                            registered.and_then(|watch| {
+                                if let Some(invocation) = effect_owner.invocation_work() {
+                                    if let Err(error) = invocation.register_transient_watch(watch) {
+                                        drop(
+                                            self.environment
+                                                .requests
+                                                .release_transient_watch(context.actor, watch),
+                                        );
+                                        return Err(error);
+                                    }
+                                }
+                                i64::try_from(watch.0)
+                                    .map_err(|_| crate::request::ReplyError::Stale)
+                            })
+                        }
+                    };
+                    return self
+                        .environment
+                        .runner
+                        .resume_value(
+                            context.clone(),
+                            registration.continuation,
+                            crate::request_effect::ReplyResult(registered),
+                        )
+                        .await;
+                }
                 crate::ActorPathSegment::new(&registration.label).map_err(|error| {
                     ResidentActorWorkbenchError::ActorProtocol(format!(
                         "invalid watch label: {error}"
                     ))
                 })?;
-                let settlements = command_settlement::CommandSettlements::new(&self.environment);
-                let dependencies = settlements.resolve(registration.dependencies)?;
+                let dependencies =
+                    settlements
+                        .resolve(registration.dependencies)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(watch_registration_refusal(
+                                error,
+                            ))
+                        })?;
                 let (watch, notifications) = self
                     .environment
                     .requests

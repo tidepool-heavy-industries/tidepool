@@ -239,3 +239,105 @@ async fn stale_watch_and_replacement_incarnation_remain_typed_refusals() {
         WatchWaitEvent::Resume(Err(ReplyError::Stale))
     ));
 }
+
+#[tokio::test]
+async fn dropping_a_direct_wait_releases_only_its_subscription() {
+    let fixture = Fixture::new();
+    let transient = fixture
+        .registry
+        .register_transient_watch(
+            fixture.owner,
+            vec![vec![(
+                fixture.request,
+                crate::request::WatchRequirement::Response {
+                    allow_failure: false,
+                },
+            )]],
+        )
+        .unwrap();
+    let lease = TransientWatchLease::new(&fixture.registry, fixture.owner, transient);
+    let mut waiting = Box::pin(fixture.registry.await_watch(fixture.owner, transient));
+    assert!(matches!(futures_util::poll!(&mut waiting), Poll::Pending));
+    drop(lease);
+    assert!(matches!(waiting.await, Err(ReplyError::Stale)));
+    assert!(!fixture.registry.retains_watch(fixture.owner, transient));
+    assert!(fixture.registry.retains_watch(fixture.owner, fixture.watch));
+    fixture.complete();
+    assert!(matches!(
+        fixture.registry.observe_watch(fixture.owner, fixture.watch),
+        Ok(WatchObservation::Ready(_))
+    ));
+}
+
+#[tokio::test]
+async fn direct_readiness_wakes_without_a_named_watch_notice_and_preserves_typed_failure() {
+    let registry = Arc::new(RequestRegistry::default());
+    let owner = ActorRef::first(ActorId(81));
+    let target = ActorRef::first(ActorId(82));
+    let request = registry.reserve(owner, target);
+    registry.mark_queued(owner, target, request).unwrap();
+    registry.present(target, request).unwrap();
+    let watch = registry
+        .register_transient_watch(
+            owner,
+            vec![vec![(
+                request,
+                crate::request::WatchRequirement::Response {
+                    allow_failure: false,
+                },
+            )]],
+        )
+        .unwrap();
+    let control = crate::WorkbenchExecutionControl::untracked();
+    control.arm_sleep();
+    let retirement = RetainedActorExit::new();
+    let mut waiting = Box::pin(wait_watch_event(
+        &registry,
+        owner,
+        watch,
+        &control,
+        &retirement,
+    ));
+    assert!(matches!(futures_util::poll!(&mut waiting), Poll::Pending));
+    let (_, notices) = registry.abandon_response(owner, request).unwrap();
+    assert!(notices.is_empty());
+    assert!(matches!(waiting.await,
+        WatchWaitEvent::Resume(Ok(WatchObservation::Unavailable {
+            request: observed, failure: ResponseFailure::Abandoned,
+        })) if observed == request));
+    registry.release_transient_watch(owner, watch).unwrap();
+    assert_eq!(
+        registry.release_transient_watch(owner, watch),
+        Err(ReplyError::Stale)
+    );
+}
+
+#[test]
+fn transient_release_checks_exact_owner_and_never_removes_named_watch() {
+    let fixture = Fixture::new();
+    let transient = fixture
+        .registry
+        .register_transient_watch(fixture.owner, vec![])
+        .unwrap();
+    let replacement = ActorRef {
+        id: fixture.owner.id,
+        incarnation: Incarnation(fixture.owner.incarnation.0 + 1),
+    };
+    assert_eq!(
+        fixture
+            .registry
+            .release_transient_watch(replacement, transient),
+        Err(ReplyError::WrongIncarnation)
+    );
+    assert_eq!(
+        fixture
+            .registry
+            .release_transient_watch(fixture.owner, fixture.watch),
+        Err(ReplyError::Unauthorized)
+    );
+    assert!(fixture.registry.retains_watch(fixture.owner, fixture.watch));
+    fixture
+        .registry
+        .release_transient_watch(fixture.owner, transient)
+        .unwrap();
+}

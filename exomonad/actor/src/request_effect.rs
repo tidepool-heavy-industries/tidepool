@@ -152,6 +152,7 @@ pub(crate) enum WatchesReq {
     #[haskell(module = "Tidepool.Agent.Watch.Internal")]
     RegisterWatchWith(String, Vec<AwaitDependency>),
     RegisterWatchGroupsWith(String, Vec<Vec<AwaitDependency>>),
+    RegisterAwaitWith(Vec<Vec<AwaitDependency>>),
     RegisterRouteWith(String, tidepool_bridge::HaskellValue, Vec<AwaitDependency>),
     RegisterRouteGroupsWith(
         String,
@@ -273,6 +274,7 @@ pub(crate) struct CancellationAcknowledgement {
 }
 
 pub(crate) struct WatchRegistration {
+    pub transient: bool,
     pub continuation: ResidentHole,
     pub dependencies: Vec<Vec<(WatchSubject, crate::request::WatchRequirement)>>,
     pub label: String,

@@ -424,6 +424,7 @@ enum WatchState {
 }
 
 struct WatchRecord {
+    transient: bool,
     route: Option<routes::WatchRoute>,
     owner: ActorRef,
     label: String,
@@ -1875,6 +1876,28 @@ impl RequestRegistry {
         groups: Vec<Vec<(RequestId, WatchRequirement)>>,
         route: Option<routes::WatchRoute>,
     ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
+        self.register_watch_groups(owner, label, groups, route, false)
+    }
+
+    /// A direct suspended wait uses the same readiness owner, without a
+    /// model notification or a retained named subscription.
+    pub(crate) fn register_transient_watch(
+        &self,
+        owner: ActorRef,
+        groups: Vec<Vec<(RequestId, WatchRequirement)>>,
+    ) -> Result<WatchId, ReplyError> {
+        self.register_watch_groups(owner, "wait-for".into(), groups, None, true)
+            .map(|(watch, _)| watch)
+    }
+
+    fn register_watch_groups(
+        &self,
+        owner: ActorRef,
+        label: String,
+        groups: Vec<Vec<(RequestId, WatchRequirement)>>,
+        route: Option<routes::WatchRoute>,
+        transient: bool,
+    ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
         let group_count = groups.len();
         let dependencies = groups
             .iter()
@@ -1939,6 +1962,7 @@ impl RequestRegistry {
         state.watches.insert(
             id,
             WatchRecord {
+                transient,
                 route,
                 owner,
                 label,
@@ -2039,6 +2063,35 @@ impl RequestRegistry {
         state.watches.remove(&watch);
         release_settled_commands(&mut state);
         Ok(ForgetWatchOutcome::Forgotten)
+    }
+
+    pub(crate) fn is_transient_watch(&self, owner: ActorRef, watch: WatchId) -> bool {
+        self.state
+            .lock()
+            .watches
+            .get(&watch)
+            .is_some_and(|record| record.owner == owner && record.transient)
+    }
+
+    /// Drop only the invocation's subscription, including a pending one.
+    /// The producing request and its cancellation/cleanup state are untouched.
+    pub(crate) fn release_transient_watch(
+        &self,
+        owner: ActorRef,
+        watch: WatchId,
+    ) -> Result<(), ReplyError> {
+        let mut state = self.state.lock();
+        let record = state.watches.get(&watch).ok_or(ReplyError::Stale)?;
+        if record.owner != owner {
+            return Err(identity_error(record.owner, owner));
+        }
+        if !record.transient {
+            return Err(ReplyError::Unauthorized);
+        }
+        wake_watch_waiters(state.watches.get_mut(&watch).expect("watch checked"));
+        state.watches.remove(&watch);
+        release_settled_commands(&mut state);
+        Ok(())
     }
 
     /// Hold an existing command record for a watch about to register, so
@@ -2376,6 +2429,10 @@ fn invalidate_response_watches(
             failure: ResponseFailure::Released,
         };
         watch.progress.clear();
+        wake_watch_waiters(watch);
+        if watch.transient {
+            continue;
+        }
         if let Some(route) = &mut watch.route {
             route.schedule(*watch_id);
             continue;
@@ -2639,6 +2696,9 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
         wake_watch_waiters(watch);
         let occurred_at_unix_ms = unix_time_ms();
         watch.transitioned_at_unix_ms = Some(occurred_at_unix_ms);
+        if watch.transient {
+            continue;
+        }
         if let Some(route) = &mut watch.route {
             route.schedule(*watch_id);
             continue;

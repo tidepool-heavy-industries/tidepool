@@ -2296,6 +2296,7 @@ impl ResidentRequest {
             Self::Replies(RepliesReq::AcknowledgeCancellationWith(..)) => "acknowledgeCancellation",
             Self::Watches(WatchesReq::RegisterWatchWith(..)) => "watch",
             Self::Watches(WatchesReq::RegisterWatchGroupsWith(..)) => "watch",
+            Self::Watches(WatchesReq::RegisterAwaitWith(..)) => "waitFor",
             Self::Watches(WatchesReq::RegisterRouteWith(..)) => "route",
             Self::Watches(WatchesReq::RegisterRouteGroupsWith(..)) => "route",
             Self::Watches(WatchesReq::ObserveRouteWith(..)) => "pollRoute",
@@ -8313,7 +8314,7 @@ where
                             Ok(vec![crate::request_effect::AwaitDependency::checked(dependency)?])
                         }).collect::<Result<Vec<Vec<_>>, tidepool_bridge::BridgeError>>()?;
                         Ok(ResidentActorBoundary::RouteRegistration {
-                            registration: WatchRegistration { continuation: hole, label, dependencies }, entry,
+                            registration: WatchRegistration { transient: false, continuation: hole, label, dependencies }, entry,
                         })
                     }
                     ResidentRequest::Watches(WatchesReq::RegisterRouteGroupsWith(label, callback, groups)) => {
@@ -8322,7 +8323,7 @@ where
                             .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("route has no retained callback".into()))?;
                         let dependencies = groups.into_iter().map(|dependencies| dependencies.into_iter().map(crate::request_effect::AwaitDependency::checked).collect()).collect::<Result<Vec<Vec<_>>, _>>()?;
                         Ok(ResidentActorBoundary::RouteRegistration {
-                            registration: WatchRegistration { continuation: hole, label, dependencies }, entry,
+                            registration: WatchRegistration { transient: false, continuation: hole, label, dependencies }, entry,
                         })
                     }
                     ResidentRequest::Watches(WatchesReq::ListRoutesWith) => Ok(ResidentActorBoundary::RouteList(hole)),
@@ -8341,6 +8342,7 @@ where
                             .collect::<Result<Vec<Vec<_>>, tidepool_bridge::BridgeError>>()?;
                         Ok(ResidentActorBoundary::WatchRegistration(
                             WatchRegistration {
+                                transient: false,
                                 continuation: hole,
                                 dependencies,
                                 label,
@@ -8353,7 +8355,16 @@ where
                             .map(|dependencies| dependencies.into_iter().map(crate::request_effect::AwaitDependency::checked).collect())
                             .collect::<Result<Vec<Vec<_>>, _>>()?;
                         Ok(ResidentActorBoundary::WatchRegistration(
-                            WatchRegistration { continuation: hole, dependencies, label },
+                            WatchRegistration { transient: false, continuation: hole, dependencies, label },
+                        ))
+                    }
+                    ResidentRequest::Watches(WatchesReq::RegisterAwaitWith(groups)) => {
+                        let dependencies = groups
+                            .into_iter()
+                            .map(|dependencies| dependencies.into_iter().map(crate::request_effect::AwaitDependency::checked).collect())
+                            .collect::<Result<Vec<Vec<_>>, _>>()?;
+                        Ok(ResidentActorBoundary::WatchRegistration(
+                            WatchRegistration { transient: true, continuation: hole, dependencies, label: "wait-for".into() },
                         ))
                     }
                     ResidentRequest::Watches(WatchesReq::ObserveWatchWith(watch_id)) => {
