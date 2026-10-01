@@ -2940,7 +2940,7 @@ mod tests {
         assert_eq!(
             config.defaults,
             ExomonadAgentDefaults {
-                model: "gpt-6-sol".into(),
+                model: "gpt-6.1-sol".into(),
                 effort: ExomonadEffort::Medium,
             }
         );
@@ -3030,7 +3030,7 @@ mod tests {
             std::fs::read_to_string(workspace.path().join(".exomonad/config.toml")).unwrap();
         for expected in [
             "luna = \"gpt-6-luna\"",
-            "executor = \"gpt-6-sol\"",
+            "executor = \"gpt-6.1-sol\"",
             "planner = \"gpt-6-astra\"",
             "task = \"prompts/task.md\"",
             "review = \"prompts/review.md\"",
