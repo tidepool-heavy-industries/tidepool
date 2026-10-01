@@ -77,7 +77,7 @@ preserving the invocation and presenting output once. Explicit `yield_time_ms`
 job is still live, the tool detaches it to actor-owned lifetime before returning.
 `background: true` starts actor-owned work and returns immediately with completion
 delivery; focus, yield and output-budget presentation options do not apply there.
-In Haskell, `Cmd.observe`, `Cmd.observeCompletion` and `Cmd.observeWithCompletion`
+In Haskell, `Cmd.observe`, `Cmd.observeWith` and `Cmd.observeCompletion`
 return bounded status normally and never detach. Explicit ownership transfer is
 required before returning unfinished owned work. Use ordinary `Cmd.await` for a
 dependent continuation, or completion events for ongoing observers. Waiting alone
