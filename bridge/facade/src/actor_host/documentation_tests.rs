@@ -1378,8 +1378,7 @@ async fn reattachment_preserves_completed_unacknowledged_forks() {
             )),
             name: exomonad_actor::HASKELL_TOOL.into(),
             arguments: ToolArguments::Raw(
-                example(include_str!("../../../../exomonad/prompts/docs/unfold.md"))
-                    .replace("workers <- unfold", "workers <- unfoldDeferred")
+                include_str!("../actor_host_fixtures/generic_actor/deferred_unfold_example.hs")
                     .into(),
             ),
         })
@@ -1470,8 +1469,7 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
             name: exomonad_actor::HASKELL_TOOL.into(),
             arguments: ToolArguments::Raw(format!(
                 "{}\n{}\n{}\n{}",
-                example(include_str!("../../../../exomonad/prompts/docs/unfold.md"))
-                    .replace("workers <- unfold", "workers <- unfoldDeferred"),
+                include_str!("../actor_host_fixtures/generic_actor/deferred_unfold_example.hs"),
                 example(include_str!("../../../../exomonad/prompts/docs/watch.md")),
                 extra_group,
                 suffix.unwrap_or("")
@@ -2197,7 +2195,7 @@ async fn independent_admission_rejects_inheritance_and_supervised_escape() {
         result.to_string().contains("UnfoldUncapturedContext"),
         "{result}"
     );
-    committed(root.as_ref(), &fixture.replace("SwarmOwned", "ParentOwned")).await;
+    committed(root.as_ref(), &fixture.replace("SwarmOwned", "ActorOwned")).await;
     let (worker, _binding) = next_project_worker(&mut campaign).await;
     assert_eq!(
         worker.supervisor_parent,
