@@ -214,10 +214,22 @@ impl SessionCompileView {
         self
     }
 
-    /// Refresh only request-local live injection after cloning a cached view.
-    pub(super) fn canonicalize_injection(mut self) -> Self {
-        sort_modules(&mut self.injected_values);
-        self
+    /// Refresh only request-local inventory without copying the cached view's
+    /// old inventory. The lexical projection and its authority stay fixed.
+    #[must_use]
+    pub(super) fn with_request_inventory(
+        &self,
+        mut injected_values: Vec<SessionModule>,
+        next_value_generation: Generation,
+    ) -> Self {
+        sort_modules(&mut injected_values);
+        Self {
+            session: self.session,
+            lexical_scope: self.lexical_scope,
+            injected_values,
+            next_value_generation,
+            projection: self.projection.clone(),
+        }
     }
 
     /// Keep selected live values injected for already-compiled references,

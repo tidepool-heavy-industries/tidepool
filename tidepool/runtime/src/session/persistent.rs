@@ -1245,14 +1245,16 @@ impl PersistentSession {
     /// persistent binding store.
     pub fn compile_view_in(&self, scope: ScopeId) -> Option<SessionCompileView> {
         let cached = self.scoped_compile_view_in(scope)?;
-        let mut view = cached.view.clone();
-        view.injected_values = self
+        let injected_values = self
             .bindings
             .live_modules()
             .filter(|module| !self.is_stub_module(*module))
             .collect();
-        view.next_value_generation = self.val_gen.next();
-        Some(view.canonicalize_injection())
+        Some(
+            cached
+                .view
+                .with_request_inventory(injected_values, self.val_gen.next()),
+        )
     }
 
     pub(super) fn compile_view_digest_in(&self, scope: ScopeId) -> Option<[u8; 32]> {
@@ -3329,6 +3331,7 @@ mod checkpoint_scope_tests {
         let public = session.mint_isolated_scope();
         let private = session.mint_detached_scope(public).unwrap();
         let cached = session.scoped_compile_view_in(private).unwrap();
+        let initial = session.compile_view_in(private).unwrap();
         let sibling = session.mint_isolated_scope();
         let entry =
             super::super::prepared::tests::rooted_publication_fixture(&mut session, "sibling", 411);
@@ -3337,6 +3340,10 @@ mod checkpoint_scope_tests {
         session.set_val_gen(Generation(500));
         let view = session.compile_view_in(private).unwrap();
         assert_eq!(view.next_value_generation(), Generation(501));
+        assert_ne!(initial.next_value_generation(), Generation(501));
+        assert!(!initial.injected_values().contains(&module));
+        assert!(Arc::ptr_eq(&initial.projection, &view.projection));
+        assert!(Arc::ptr_eq(&view.projection, &cached.view.projection));
         assert!(view.injected_values().contains(&module));
         assert!(view.visible_values().is_empty());
         assert!(!view.reachable_values().contains(&module));
