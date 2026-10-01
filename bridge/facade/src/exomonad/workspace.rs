@@ -142,6 +142,12 @@ impl FrozenWorkspace {
         run_root: &Path,
         deployment: Option<DeploymentSourceRoot>,
     ) -> Result<Self> {
+        if deployment
+            .as_ref()
+            .is_some_and(|selection| selection.version != 1)
+        {
+            return Err("unsupported standard library deployment source format".into());
+        }
         let directory = run_root.join("workspace");
         let manifest = directory.join("selection.json");
         if manifest.exists() {
@@ -907,6 +913,173 @@ mod tests {
         reason = "test: launches short-lived git one-shots to build fixture repositories"
     )]
     use super::*;
+
+    // Workspace tests supply a private selection mirror. Production constructs
+    // that mirror only from the toolchain's admitted immutable module package.
+    fn deployment_fixture() -> (tempfile::TempDir, DeploymentSourceRoot) {
+        let fixture = tempfile::tempdir().unwrap();
+        let sources = crate::haskell_sources::runtime_source_roots(None).unwrap();
+        capture_sources(
+            &sources[0],
+            Path::new("stdlib"),
+            fixture.path(),
+            &mut BTreeMap::new(),
+        )
+        .unwrap();
+        let selection = DeploymentSourceRoot {
+            version: 1,
+            root: fixture.path().join("stdlib").canonicalize().unwrap(),
+            source_pin: "fixture-source".into(),
+            producer_identity: [7; 32],
+            catalog_identity: "fixture-catalog".into(),
+        };
+        (fixture, selection)
+    }
+
+    fn deployment_project(config: &str) -> tempfile::TempDir {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".exomonad")).unwrap();
+        std::fs::write(project.path().join(".exomonad/config.toml"), config).unwrap();
+        project
+    }
+
+    #[test]
+    fn deployed_stdlib_retains_final_root_without_run_copy() {
+        let (_fixture, selection) = deployment_fixture();
+        let project = deployment_project("[defaults]\nmodel = 'gpt-6-sol'\n");
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let frozen = FrozenWorkspace::load_with_deployment(
+            project.path(),
+            first.path(),
+            Some(selection.clone()),
+        )
+        .unwrap();
+        assert_eq!(frozen.runtime_stdlib(), selection.root);
+        assert!(frozen.runtime_actors().starts_with(first.path()));
+        for capture in std::fs::read_dir(first.path().join("workspace/libraries")).unwrap() {
+            let capture = capture.unwrap().path();
+            assert!(!capture.join("stdlib").exists());
+            assert!(capture.join("actors/Tidepool/Check.hs").is_file());
+        }
+        let identical = FrozenWorkspace::load_with_deployment(
+            project.path(),
+            second.path(),
+            Some(selection.clone()),
+        )
+        .unwrap();
+        assert_eq!(frozen.identity(), identical.identity());
+        let resumed =
+            FrozenWorkspace::load_with_deployment(project.path(), first.path(), Some(selection))
+                .unwrap();
+        assert_eq!(resumed.identity(), frozen.identity());
+    }
+
+    #[test]
+    fn deployed_stdlib_changed_source_refuses_without_rewriting_selection() {
+        let (_fixture, selection) = deployment_fixture();
+        let project = deployment_project("[defaults]\nmodel = 'gpt-6-sol'\n");
+        let run = tempfile::tempdir().unwrap();
+        FrozenWorkspace::load_with_deployment(project.path(), run.path(), Some(selection.clone()))
+            .unwrap();
+        let manifest = run.path().join("workspace/selection.json");
+        let admitted = std::fs::read(&manifest).unwrap();
+        let prelude = selection.root.join("Tidepool/Prelude.hs");
+        let original = std::fs::read(&prelude).unwrap();
+        std::fs::write(&prelude, "module Tidepool.Prelude where\n").unwrap();
+        assert!(FrozenWorkspace::load_with_deployment(
+            project.path(),
+            run.path(),
+            Some(selection.clone())
+        )
+        .is_err());
+        std::fs::write(&prelude, original).unwrap();
+        let extra = selection.root.join("Tidepool/DeploymentExtra.hs");
+        std::fs::write(&extra, "module Tidepool.DeploymentExtra where\n").unwrap();
+        assert!(FrozenWorkspace::load_with_deployment(
+            project.path(),
+            run.path(),
+            Some(selection.clone())
+        )
+        .is_err());
+        std::fs::remove_file(extra).unwrap();
+        std::fs::remove_file(prelude).unwrap();
+        assert!(
+            FrozenWorkspace::load_with_deployment(project.path(), run.path(), Some(selection))
+                .is_err()
+        );
+        assert_eq!(std::fs::read(manifest).unwrap(), admitted);
+    }
+
+    #[test]
+    fn deployed_stdlib_changed_authority_or_format_refuses_resume() {
+        let (_fixture, selection) = deployment_fixture();
+        let project = deployment_project("[defaults]\nmodel = 'gpt-6-sol'\n");
+        let run = tempfile::tempdir().unwrap();
+        FrozenWorkspace::load_with_deployment(project.path(), run.path(), Some(selection.clone()))
+            .unwrap();
+        let manifest = run.path().join("workspace/selection.json");
+        let admitted = std::fs::read(&manifest).unwrap();
+        let mut changed = vec![selection.clone(); 5];
+        changed[0].version = 2;
+        changed[1].source_pin.push_str("-changed");
+        changed[2].producer_identity[0] ^= 1;
+        changed[3].catalog_identity.push_str("-changed");
+        changed[4].root = selection.root.parent().unwrap().join("relocated");
+        for selection in changed {
+            assert!(FrozenWorkspace::load_with_deployment(
+                project.path(),
+                run.path(),
+                Some(selection)
+            )
+            .is_err());
+            assert_eq!(std::fs::read(&manifest).unwrap(), admitted);
+        }
+        assert!(FrozenWorkspace::load_with_deployment(project.path(), run.path(), None).is_err());
+        let mut old: serde_json::Value = serde_json::from_slice(&admitted).unwrap();
+        old["version"] = serde_json::json!(2);
+        let old = serde_json::to_vec(&old).unwrap();
+        std::fs::write(&manifest, &old).unwrap();
+        let error =
+            FrozenWorkspace::load_with_deployment(project.path(), run.path(), Some(selection))
+                .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported frozen workspace format"));
+        assert_eq!(std::fs::read(manifest).unwrap(), old);
+    }
+
+    #[test]
+    fn deployed_stdlib_preserves_ordered_authored_source_selection() {
+        let (_fixture, selection) = deployment_fixture();
+        let project = deployment_project(
+            "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['first', 'second']\n",
+        );
+        for (root, value) in [("first", 1), ("second", 2)] {
+            let path = project.path().join(".exomonad").join(root).join("Project");
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(
+                path.join("Shared.hs"),
+                format!("module Project.Shared where\nvalue = {value}\n"),
+            )
+            .unwrap();
+        }
+        let run = tempfile::tempdir().unwrap();
+        let frozen =
+            FrozenWorkspace::load_with_deployment(project.path(), run.path(), Some(selection))
+                .unwrap();
+        let roots = frozen.captured_source_roots();
+        assert_eq!(roots.len(), 2);
+        let winner = roots
+            .iter()
+            .find_map(|root| std::fs::read_to_string(root.join("Project/Shared.hs")).ok())
+            .unwrap();
+        assert!(winner.contains("value = 1"));
+        assert!(std::fs::read_to_string(roots[1].join("Project/Shared.hs"))
+            .unwrap()
+            .contains("value = 2"));
+        assert!(frozen.include.last().unwrap().ends_with("resources"));
+    }
 
     #[test]
     fn runtime_libraries_are_captured_and_changed_sources_refuse_publication() {
