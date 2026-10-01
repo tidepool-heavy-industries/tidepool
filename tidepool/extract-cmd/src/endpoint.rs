@@ -527,6 +527,8 @@ impl CompilerEndpoint {
         tracing::info!(
             transport = transport_name,
             phase = "compiler_transaction_admission",
+            producer = %identity.producer_hex(),
+            endpoint = %identity,
             elapsed_ms = u64::try_from(admission_started.elapsed().as_millis()).unwrap_or(u64::MAX),
             queue_ms = u64::try_from(admission_started.elapsed().as_millis()).unwrap_or(u64::MAX),
             "compiler transaction admitted"
@@ -550,6 +552,8 @@ impl CompilerEndpoint {
             "compile_request",
             compile_request = %daemon::compile_request_correlation(&cwd, &cmd.request.worker_argv()),
             transport = self.transport.name(),
+            producer = %self.identity.producer_hex(),
+            endpoint = %self.identity,
         );
         let _entered = span.enter();
         let start = Instant::now();
@@ -776,6 +780,18 @@ impl CompilerTransaction {
                 io::Error::other("compiler transaction is closed"),
             )
         })?;
+        let span = tracing::info_span!(
+            "compile_request",
+            compile_request = %daemon::compile_request_correlation(&cwd, &cmd.request.worker_argv()),
+            transport = match transport {
+                TransactionTransport::Direct(_) => "direct",
+                TransactionTransport::Daemon { .. } => "daemon",
+            },
+            transaction = true,
+            producer = %self.identity.producer_hex(),
+            endpoint = %self.identity,
+        );
+        let _entered = span.enter();
         let output = match transport {
             TransactionTransport::Direct(endpoint) => {
                 let request = daemon::encode_request(&cwd, &cmd.request.worker_argv());

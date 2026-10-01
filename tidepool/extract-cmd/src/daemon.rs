@@ -1009,6 +1009,8 @@ fn service_transaction(
     prepared: &PreparedWorker,
     config: &DaemonConfig,
     run_id: &str,
+    epoch: &[u8; 32],
+    queue_wait: Duration,
     request_deadline: Duration,
     rotate_after: u64,
     rss_ceiling_mb: u64,
@@ -1018,6 +1020,17 @@ fn service_transaction(
     early_replacements: &mut u64,
     mut next_request: impl FnMut(&mut UnixStream) -> RequestStep,
 ) -> Result<ConnectionOutcome, FrontendError> {
+    tracing::info!(
+        run_id,
+        daemon_pid = std::process::id(),
+        daemon_epoch = %hex(epoch),
+        worker_pid = worker.child.id(),
+        worker_slot,
+        transaction,
+        queue_ms = u64::try_from(queue_wait.as_millis()).unwrap_or(u64::MAX),
+        phase = "compiler_queue",
+        "compiler job dequeued"
+    );
     let mut transaction_failed = worker.begin_transaction().err();
     let mut orderly_end = false;
     while transaction_failed.is_none() {
@@ -1037,6 +1050,10 @@ fn service_transaction(
                     served = *served,
                     transaction,
                     worker = worker_slot,
+                    worker_pid = worker.child.id(),
+                    daemon_pid = std::process::id(),
+                    daemon_epoch = %hex(epoch),
+                    transport = "daemon",
                 );
                 let _entered = request_span.enter();
                 *followed_rotation = false;
@@ -1056,6 +1073,9 @@ fn service_transaction(
                             elapsed_ms,
                             phase = "compiler_service",
                             exit_code = code,
+                            worker_rss_mb = worker_rss_mb_logged(run_id, worker.child.id()),
+                            stdout_bytes = stdout.len() as u64,
+                            stderr_bytes = stderr.len() as u64,
                             transaction,
                             "compiler request finished"
                         );
@@ -1204,6 +1224,8 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
         executable = %executable.display(),
         worker = %prepared.selection().display(),
         producer = %hex(&producer),
+        daemon_pid = std::process::id(),
+        daemon_epoch = %hex(&epoch),
         socket = %config.socket.display(),
         available_mb = available_mb.unwrap_or(0),
         headroom_mb = DEFAULT_MEMORY_HEADROOM_MB,
@@ -1266,6 +1288,7 @@ enum Job {
 }
 
 struct PendingJob {
+    queued_at: Instant,
     job: Job,
     accepted: std::sync::mpsc::Receiver<()>,
     permit: Option<AdmissionPermit>,
@@ -1304,6 +1327,7 @@ fn admit_job(
     };
     let (accepted_tx, accepted_rx) = std::sync::mpsc::sync_channel(1);
     match sender.try_send(PendingJob {
+        queued_at: Instant::now(),
         job,
         accepted: accepted_rx,
         permit,
@@ -1405,6 +1429,14 @@ fn serve_workers(
             let ready_tx = ready_tx.clone();
             slots.push(scope.spawn(move || -> Result<(), FrontendError> {
                 let mut worker = Worker::spawn(prepared)?;
+                tracing::info!(
+                    run_id,
+                    daemon_pid = std::process::id(),
+                    daemon_epoch = %hex(epoch),
+                    worker_pid = worker.child.id(),
+                    worker_slot = slot,
+                    "compiler worker ready"
+                );
                 ready_tx.send(()).ok();
                 let mut served = 0u64;
                 // The first request this slot ever serves is cold, exactly
@@ -1481,6 +1513,8 @@ fn serve_workers(
                         prepared,
                         config,
                         run_id,
+                        epoch,
+                        pending.queued_at.elapsed(),
                         request_deadline,
                         rotate_after,
                         rss_ceiling_mb,
