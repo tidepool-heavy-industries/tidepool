@@ -2211,25 +2211,17 @@ impl MachineState {
             })
     }
 
-    /// Get-or-insert `value` into the one permanent machine-wide literal
-    /// pool, returning its (possibly freshly minted) pinned storage. Called
-    /// while planning a compile against this machine: content this pool
-    /// already carries returns the SAME storage (and therefore the same
-    /// address) every earlier compile already baked into generated code;
-    /// genuinely new content is minted and interned here, permanently, for
-    /// the rest of this machine's life -- including when the compile that
-    /// asked for it never ends up installed (see `absorb_interned_bytes`'s
-    /// doc for why that leak is acceptable).
+    /// Share the permanent pool for compile-time lookup. A compiled image
+    /// retains only the exact allocations it uses; planning does not mutate
+    /// this pool or admit newly minted storage until installation.
     pub(crate) fn interned_bytes(&self) -> Arc<crate::prepared_program::static_bytes::PinnedBytes> {
         Arc::clone(&self.interned_bytes.borrow())
     }
 
-    /// Fold `other`'s literals into the permanent pool: every entry `other`
-    /// carries that this pool does not already have (by content) joins it,
-    /// in place, forever. Called once a program installs, absorbing its own
-    /// compiled-in literal view (whether reused or newly minted at compile
-    /// time -- see `interned_bytes`) into the one authority every program's
-    /// generated `Addr#` accesses resolve against.
+    /// Admit every exact address in an installed image's literal manifest
+    /// into the permanent pool. Equal content at another address does not
+    /// replace the allocation the image embeds. Generated Addr# accesses
+    /// resolve against this one owner for the rest of the machine's life.
     ///
     /// Content is never removed once absorbed, even by a program that never
     /// finished installing or later retired: an interned literal is static
@@ -2245,16 +2237,9 @@ impl MachineState {
         if Arc::ptr_eq(&pool, other) {
             return;
         }
-        // `Arc::make_mut` clones only when something else still holds this
-        // exact pool snapshot (an outstanding compile's `existing_bytes`, or
-        // an earlier install that reused it verbatim because it added
-        // nothing -- see `PinnedBytes::overlay`/`absorb`'s docs); the common
-        // case, a compile that minted a few new literals, finds this cell
-        // the sole owner and grows the pool's `base` in place instead of
-        // cloning every literal ever interned in this session. `PinnedBytes`
-        // clones cheaply either way (its own fields are an `Arc` and an
-        // empty `local` layer -- see its overlay doc); the potentially large
-        // clone this guards is the inner `Tables` `absorb` mutates.
+        // Copy the lookup tables only while an outstanding compile still
+        // holds this pool snapshot. Compiled images own their used manifest
+        // independently, so installed images do not prolong that snapshot.
         let absorption = Arc::make_mut(&mut pool).absorb(other);
         pool.report_residency(absorption);
     }

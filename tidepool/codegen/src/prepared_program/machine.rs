@@ -80,6 +80,8 @@ use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, SymbolIdentity
 use tidepool_repr::{DataConId, PrincipalId};
 
 mod batch;
+#[cfg(test)]
+mod literal_manifest_tests;
 pub use batch::{BatchImport, BatchInstallReceipt, BatchLeaseRequest, BatchProgram};
 
 /// A compiled program and its custody. Deliberately !Send: code custody, its

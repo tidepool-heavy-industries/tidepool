@@ -8,33 +8,18 @@ use cranelift_frontend::FunctionBuilder;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_heap::external_storage::ExternalStorageKind;
 
-/// The machine-wide permanent literal pool (see [`crate::machine_state::MachineState::intern_literal_bytes`])
-/// and, before install, one program's own view of it: every literal its
-/// generated code embeds an address for, whether reused from an
-/// already-installed program or newly minted by this compile.
+/// A compiled image's exact literal manifest, or a machine's permanent pool.
+/// Each manifest owns every allocation embedded in its code, including reused
+/// storage borrowed from a machine during planning. It retains no unrelated
+/// entries from that machine's pool.
 ///
-/// Content-addressed and append-only: a logical byte string always maps to
-/// the same storage once interned, so entries are never removed and a
-/// conflicting re-insertion never happens. Generated host calls may embed
-/// `Arc::as_ptr` to a stored owner, never a pointer to a movable map field --
-/// the address index is a second view of the same pinned storage, and an
-/// entry, once inserted, is never replaced or dropped from either map for
-/// the life of the value.
-///
-/// An overlay, like [`DescriptorInterner`](super::interner::DescriptorInterner):
-/// `base` is shared by reference-counted pointer and `local` holds what this
-/// value adds on top of it. A compile's own view ([`Self::overlay`]) shares
-/// the machine's `base` outright and stores only its own newly minted
-/// literals in `local`, so building it costs exactly the new content, never
-/// the whole session's pool. The machine's own pool ([`Self::empty`],
-/// mutated only via [`Self::absorb`]) keeps `local` empty forever -- every
-/// absorbed program's content lands in `base` -- so a later compile's
-/// `overlay` can share that `base` by an `Arc::clone`. The two layers never
-/// hold the same key.
+/// The machine pool is append-only. Content lookup selects one canonical
+/// allocation, while address lookup owns every distinct allocation installed
+/// by an image, including equal content at different addresses. Escaped Addr#
+/// values therefore remain valid after their producing image retires.
 #[derive(Clone)]
 pub(crate) struct PinnedBytes {
-    base: Arc<Tables>,
-    local: Tables,
+    tables: Tables,
 }
 
 #[derive(Clone, Default)]
@@ -80,8 +65,7 @@ pub(crate) struct PinnedBytesAbsorption {
 impl PinnedBytes {
     pub(super) fn new(by_value: BTreeMap<Vec<u8>, Arc<[u8]>>) -> Self {
         Self {
-            base: Arc::new(Tables::default()),
-            local: Tables::from_map(by_value),
+            tables: Tables::from_map(by_value),
         }
     }
 
@@ -89,84 +73,30 @@ impl PinnedBytes {
     /// program installs, or a standalone compile's own starting point.
     pub(crate) fn empty() -> Self {
         Self {
-            base: Arc::new(Tables::default()),
-            local: Tables::default(),
-        }
-    }
-
-    /// One compile's view of `base` (the machine-wide pool at the moment
-    /// this compile started planning, handed out by
-    /// [`crate::machine_state::MachineState::interned_bytes`]) plus
-    /// `additions`: literals this compile newly minted because `base` did
-    /// not already carry them (`plan.rs`'s `pin_bytes` checks `base.get`
-    /// before adding, so `additions` never duplicates `base`'s content by
-    /// key). `base` is shared by `Arc::clone`, never copied, so this costs
-    /// exactly `additions`' size regardless of how large the session's pool
-    /// has grown -- the replacement for the old `merged`, which cloned the
-    /// whole pool on every compile that added even one literal.
-    pub(crate) fn overlay(
-        base: &Arc<PinnedBytes>,
-        additions: BTreeMap<Vec<u8>, Arc<[u8]>>,
-    ) -> Self {
-        debug_assert!(
-            base.local.by_value.is_empty(),
-            "a compile's overlay base must be the machine's flat pool"
-        );
-        Self {
-            base: Arc::clone(&base.base),
-            local: Tables::from_map(additions),
+            tables: Tables::default(),
         }
     }
 
     pub(super) fn get(&self, logical: &[u8]) -> Option<&Arc<[u8]>> {
-        self.local
-            .by_value
-            .get(logical)
-            .or_else(|| self.base.by_value.get(logical))
+        self.tables.by_value.get(logical)
     }
 
-    /// The pinned literal owning `address`, if any -- whichever of `local`
-    /// and `base` has the range-closest match, since the two layers never
-    /// share a key and an address always belongs to exactly one allocation.
+    /// The nearest allocation preceding `address`; callers check its bounds.
     fn address_entry(&self, address: usize) -> Option<(usize, &PinnedLiteral)> {
-        let local = self.local.by_address.range(..=address).next_back();
-        let base = self.base.by_address.range(..=address).next_back();
-        match (local, base) {
-            (Some((&la, ll)), Some((&ba, bl))) => Some(if la >= ba { (la, ll) } else { (ba, bl) }),
-            (Some((&la, ll)), None) => Some((la, ll)),
-            (None, Some((&ba, bl))) => Some((ba, bl)),
-            (None, None) => None,
-        }
+        self.tables
+            .by_address
+            .range(..=address)
+            .next_back()
+            .map(|(&base, literal)| (base, literal))
     }
 
-    /// Fold `other`'s own newly minted literals (its `local` layer -- see
-    /// [`Self::overlay`]) into this permanent machine-wide pool's `base`
-    /// layer, in place when nothing else currently shares this pool's
-    /// `base` `Arc` (the common case: a compile that minted a few new
-    /// literals is the sole reference by the time its program installs),
-    /// cloning `base`'s `Tables` only when something else does (an
-    /// outstanding compile still holding this exact snapshot, or an earlier
-    /// installed program that reused it verbatim because it added nothing).
-    /// `other.base` is never rescanned: by the append-only, monotonic
-    /// invariant above, whatever `other.base` carries was already folded
-    /// into `self` before `other` was compiled against it. Idempotent, and
-    /// a no-op when `other` added nothing.
-    ///
-    /// Content this pool already carries keeps its canonical storage, so
-    /// later compiles reuse one address. But the program's OWN storage for
-    /// that content is still what its generated code and the heap objects it
-    /// built embed: two programs planned against the same pool snapshot each
-    /// mint storage for content neither had, and the second to install must
-    /// not lose its copy. Every distinct storage is therefore kept alive and
-    /// resolvable through `by_address` for the machine's life, even when it
-    /// is a content duplicate.
+    /// Admit every exact allocation in an image's manifest. Existing content
+    /// keeps its canonical lookup address, but never suppresses admission of
+    /// another allocation whose address the installed code embeds.
     pub(crate) fn absorb(&mut self, other: &PinnedBytes) -> PinnedBytesAbsorption {
         let mut added = PinnedBytesAbsorption::default();
-        if other.local.by_value.is_empty() {
-            return added;
-        }
-        let base = Arc::make_mut(&mut self.base);
-        for (value, storage) in &other.local.by_value {
+        let base = &mut self.tables;
+        for (value, storage) in &other.tables.by_value {
             if !base.by_value.contains_key(value) {
                 base.insert_owned(value.clone(), Arc::clone(storage));
                 added.storage_entries += 1;
@@ -191,12 +121,11 @@ impl PinnedBytes {
     /// Physical storage includes duplicate content at distinct embedded addresses.
     pub(crate) fn report_residency(&self, absorption: PinnedBytesAbsorption) {
         if std::env::var("TIDEPOOL_MEMORY_DETAIL").as_deref() == Ok("1") {
-            let lifetime_storage_entries = self.base.by_address.len() + self.local.by_address.len();
+            let lifetime_storage_entries = self.tables.by_address.len();
             let lifetime_storage_bytes: usize = self
-                .base
+                .tables
                 .by_address
                 .values()
-                .chain(self.local.by_address.values())
                 .map(|literal| literal.storage.len())
                 .sum();
             tracing::info!(target: "tidepool_codegen::prepared_compile",

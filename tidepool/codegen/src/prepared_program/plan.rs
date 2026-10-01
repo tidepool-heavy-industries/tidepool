@@ -232,11 +232,13 @@ impl<'a> ProgramPlan<'a> {
 
         for (_, literal) in literals.iter() {
             let logical = literal.logical_bytes();
-            if existing_bytes.get(logical).is_none() {
-                bytes
-                    .entry(logical.to_vec())
-                    .or_insert_with(|| Arc::clone(literal.storage()));
-            }
+            bytes.entry(logical.to_vec()).or_insert_with(|| {
+                Arc::clone(
+                    existing_bytes
+                        .get(logical)
+                        .unwrap_or_else(|| literal.storage()),
+                )
+            });
         }
 
         for frame in &program.expressions().nodes {
@@ -438,9 +440,8 @@ impl<'a> ProgramPlan<'a> {
                     .get(tidepool_repr::execution_schema::GlobalId(index as u32))
                     .map(|literal| {
                         Arc::clone(
-                            existing_bytes
+                            bytes
                                 .get(literal.logical_bytes())
-                                .or_else(|| bytes.get(literal.logical_bytes()))
                                 .expect("selected literal is pinned by this plan"),
                         )
                     }),
@@ -531,11 +532,7 @@ impl<'a> ProgramPlan<'a> {
             import_slots,
             root_words,
             interned_constructors,
-            bytes: if bytes.is_empty() {
-                Arc::clone(existing_bytes)
-            } else {
-                Arc::new(PinnedBytes::overlay(existing_bytes, bytes))
-            },
+            bytes: Arc::new(PinnedBytes::new(bytes)),
             heap_tops,
             heap_top_specs,
             pap_layouts,
@@ -680,15 +677,10 @@ fn collect_literal(
 }
 
 fn pin_bytes(value: &[u8], bytes: &mut BTreeMap<Vec<u8>, Arc<[u8]>>, existing: &PinnedBytes) {
-    // Content this program's machine (or, for a standalone compile, this
-    // compile's own empty starting pool) already interned resolves through
-    // `existing` at the end of `ProgramPlan::new` (see `bytes.merged`);
-    // minting a second, unindexed copy here would bake a stale address into
-    // generated code for content that already has a canonical one.
-    if existing.get(value).is_some() {
-        return;
-    }
     bytes.entry(value.to_vec()).or_insert_with(|| {
+        if let Some(storage) = existing.get(value) {
+            return Arc::clone(storage);
+        }
         // GHC's primitive string literals have an implicit trailing NUL; the
         // wire payload is the logical key, not the complete backing storage.
         let mut storage = Vec::with_capacity(value.len() + 1);
