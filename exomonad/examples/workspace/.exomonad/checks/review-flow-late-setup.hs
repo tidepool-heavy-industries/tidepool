@@ -7,9 +7,3 @@ let task = Task (batch campaign "component") "plans/component.md" sourceHead
 (worker, _updates) <- unfold (taskGroup task)
   (childWithProgress @WorkProgress @(Outcome Candidate)
     (withLifetime ActorOwned $ withContext (selected taskContext) $ coding (atRef (GitRef (renderGitOid sourceHead))) (assignment [label|implement|] task)))
-Right coordinatorTree <- createWorktree
-  (fromRef (GitRef (renderGitOid sourceHead)) coordinatorName)
-let flowDefinition = R.withWorktree (worktreeId coordinatorTree)
-  (reviewFlow me task
-    (defaultReviewFlowPolicy { flowRepairLimit = limit, flowSourcePlan = sourcePlan }) worker)
-flow <- R.start flowDefinition

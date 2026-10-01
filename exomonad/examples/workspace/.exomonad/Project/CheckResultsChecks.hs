@@ -43,7 +43,7 @@ preparedCompletion = do
   void $ awaitOutput owner "Cmd.status (runJob successfulPreparation)" (Text.isInfixOf "CommandFinished")
   success <- turn owner "preparedSuccess <- collectFocused successfulPreparation\nfocusedPreparation preparedSuccess"
   check "successful preparation is retained separately from the check result" (lastOutput success == "PreparationPassed")
-  void $ turn owner "interrupted <- Cmd.start (Cmd.withStdin (Cmd.argv [\"sh\", \"-c\", \"read line\"]))\nCmd.cancel interrupted"
+  void $ turn owner "interrupted <- Cmd.background (Cmd.withStdin (Cmd.argv [\"sh\", \"-c\", \"read line\"]))\nCmd.cancel interrupted"
   void $ awaitOutput owner "Cmd.status interrupted" (Text.isInfixOf "CommandFinished")
   cancelled <- turn owner "cancelledResult <- collectFocused (PreparedFocusedRun spec interrupted)\n(focusedPreparation cancelledResult, focusedPassed cancelledResult)"
   check "interrupted preparation never claims success" (all (`Text.isInfixOf` lastOutput cancelled) ["PreparationUnknown", "False"])
@@ -57,7 +57,7 @@ completionRouting = do
       setup = Text.unlines
         [ "let spec = FocusedSpec \"fixture check\" \"fixture-source\" \"fixture-package\" \"lib\" \"fixture::one\" 1"
         , "let fixture kind = Cmd.withMemory (Cmd.MiB 256) (Cmd.argv [\"bash\", " <> Text.pack (show fixture) <> ", kind])"
-        , "late <- Cmd.start (fixture \"pass\")"
+        , "late <- Cmd.background (fixture \"pass\")"
         ]
   void $ turn owner setup
   planRefusals <- turn owner
@@ -139,7 +139,7 @@ completionRouting = do
   void $ turn owner "finishChecks partialWatcher"
   void $ turn owner "case recovered of { GateWatching _ handle -> finishChecks handle >> pure (); _ -> pure () }"
   void $ turn owner
-    "failed <- Cmd.start (fixture \"fail\")\nunknown <- Cmd.start (fixture \"unknown\")\nRight watcher <- watchChecks me NotifyProblems [(\"late\", FocusedRun spec late), (\"failed\", FocusedRun spec failed), (\"unknown\", FocusedRun spec unknown)]"
+    "failed <- Cmd.background (fixture \"fail\")\nunknown <- Cmd.background (fixture \"unknown\")\nRight watcher <- watchChecks me NotifyProblems [(\"late\", FocusedRun spec late), (\"failed\", FocusedRun spec failed), (\"unknown\", FocusedRun spec unknown)]"
   observed <- awaitOutput owner
     "view <- readChecks watcher\nmap (\\entry -> fmap (checkVerdict entry) (checkOutcome entry)) (checkEntries view)"
     (\text -> Text.count "Just " text == 3)
@@ -201,13 +201,13 @@ completionRouting = do
   void $ turn owner "finishChecks summarizer"
 
   preparedFail <- turn owner
-    "preparedFailedJob <- Cmd.start (fixture \"preparedfail\")\npreparedFailed <- collectFocused (PreparedFocusedRun spec preparedFailedJob)\n(focusedPassed preparedFailed, focusedResultSummary (PreparedFocusedRun spec preparedFailedJob) preparedFailed)"
+    "preparedFailedJob <- Cmd.background (fixture \"preparedfail\")\npreparedFailed <- collectFocused (PreparedFocusedRun spec preparedFailedJob)\n(focusedPassed preparedFailed, focusedResultSummary (PreparedFocusedRun spec preparedFailedJob) preparedFailed)"
   check "packet separates passed preparation from failed terminal test"
     (all (`Text.isInfixOf` lastOutput preparedFail)
       ["False", "preparation PreparationPassed", "terminal CommandExited 1", "test phase runner reported", "executed 0 passed, 1 failed", "runner exit Just 1"])
 
   void $ turn owner
-    "dirty <- Cmd.start (fixture \"dirty\")\nRight dirtyWatcher <- watchChecks me NotifyProblems [(\"dirty\", FocusedRun spec dirty)]"
+    "dirty <- Cmd.background (fixture \"dirty\")\nRight dirtyWatcher <- watchChecks me NotifyProblems [(\"dirty\", FocusedRun spec dirty)]"
   dirty <- awaitOutput owner
     "dirtyView <- readChecks dirtyWatcher\nchecksSummary dirtyView"
     (Text.isInfixOf "source dirty")
@@ -216,7 +216,7 @@ completionRouting = do
   void $ turn owner "finishChecks dirtyWatcher"
 
   void $ turn owner
-    "missing <- Cmd.start (fixture \"missingfile\")\nRight missingWatcher <- watchChecks me NotifyProblems [(\"missing\", FocusedRun spec missing)]"
+    "missing <- Cmd.background (fixture \"missingfile\")\nRight missingWatcher <- watchChecks me NotifyProblems [(\"missing\", FocusedRun spec missing)]"
   missing <- awaitOutput owner
     "missingView <- readChecks missingWatcher\n[(checkVerdict e outcome, focusedEvidence (checkFocused outcome)) | e <- checkEntries missingView, Just outcome <- [checkOutcome e]]"
     (Text.isInfixOf "did not retain its evidence record")
@@ -230,7 +230,7 @@ completionRouting = do
   void $ turn owner "finishChecks missingWatcher"
 
   setup <- turn owner
-    "zeroJob <- Cmd.start (fixture \"zero\")\nzeroResult <- collectFocused (FocusedRun spec zeroJob)\nzeroDiagnosis <- diagnoseFocused zeroResult\nsetupJob <- Cmd.start (fixture \"setup\")\nsetupResult <- collectFocused (FocusedRun spec setupJob)\nsetupDiagnosis <- diagnoseFocused setupResult\nshortJob <- Cmd.start (fixture \"short\")\nshortResult <- collectFocused (FocusedRun spec shortJob)\nshortDiagnosis <- diagnoseFocused shortResult\n(diagnosisBranch zeroDiagnosis, diagnosisBranch setupDiagnosis, focusedExecution shortResult, diagnosisBranch shortDiagnosis)"
+    "zeroJob <- Cmd.background (fixture \"zero\")\nzeroResult <- collectFocused (FocusedRun spec zeroJob)\nzeroDiagnosis <- diagnoseFocused zeroResult\nsetupJob <- Cmd.background (fixture \"setup\")\nsetupResult <- collectFocused (FocusedRun spec setupJob)\nsetupDiagnosis <- diagnoseFocused setupResult\nshortJob <- Cmd.background (fixture \"short\")\nshortResult <- collectFocused (FocusedRun spec shortJob)\nshortDiagnosis <- diagnoseFocused shortResult\n(diagnosisBranch zeroDiagnosis, diagnosisBranch setupDiagnosis, focusedExecution shortResult, diagnosisBranch shortDiagnosis)"
   check "zero selection, incomplete setup, and short execution stay distinct"
     ("(ZeroSelection,SetupIncomplete,ExecutionUnknown,SetupIncomplete)"
       `Text.isInfixOf` Text.filter (/= ' ') (lastOutput setup))
@@ -244,12 +244,12 @@ retainedRecovery = do
     , "let fixture kind = Cmd.withMemory (Cmd.MiB 256) (Cmd.argv [\"bash\", " <> Text.pack (show fixture) <> ", kind])"
     ]
   expired <- turn owner
-    "expiredJob <- Cmd.start (fixture \"expired\")\nexpiredResult <- Cmd.quiet (collectFocused (FocusedRun spec expiredJob))\n(focusedExecution expiredResult, focusedPassed expiredResult, focusedEvidence expiredResult)"
+    "expiredJob <- Cmd.background (fixture \"expired\")\nexpiredResult <- Cmd.quiet (collectFocused (FocusedRun spec expiredJob))\n(focusedExecution expiredResult, focusedPassed expiredResult, focusedEvidence expiredResult)"
   check ("a retained job with an incomplete output page cannot prove a pass: " <> Text.take 240 (lastOutput expired))
     (all (`Text.isInfixOf` lastOutput expired)
       ["ExecutionUnknown", "False", "focused command output is incomplete"])
   cancelled <- turn owner
-    "cancelledJob <- Cmd.start (Cmd.withMemory (Cmd.MiB 64) (Cmd.argv [\"sleep\", \"30\"]))\nCmd.cancel cancelledJob\ncancelledResult <- Cmd.quiet (collectFocused (PreparedFocusedRun spec cancelledJob))\n(focusedPreparation cancelledResult, focusedPassed cancelledResult, Cmd.commandCleanup (Cmd.commandResult (focusedCommand cancelledResult)))"
+    "cancelledJob <- Cmd.background (Cmd.withMemory (Cmd.MiB 64) (Cmd.argv [\"sleep\", \"30\"]))\nCmd.cancel cancelledJob\ncancelledResult <- Cmd.quiet (collectFocused (PreparedFocusedRun spec cancelledJob))\n(focusedPreparation cancelledResult, focusedPassed cancelledResult, Cmd.commandCleanup (Cmd.commandResult (focusedCommand cancelledResult)))"
   check "cancelled original job cannot prove preparation or whole-check acceptance"
     (all (`Text.isInfixOf` lastOutput cancelled)
       ["PreparationUnknown", "False"])
@@ -358,7 +358,7 @@ runningCommandCleanup :: Member RecipeCheck effects => Eff effects ()
 runningCommandCleanup = do
   owner <- root
   void $ turn owner
-    "live <- Cmd.start (Cmd.withMemory (Cmd.MiB 64) (Cmd.argv [\"sleep\", \"30\"]))"
+    "live <- Cmd.background (Cmd.withMemory (Cmd.MiB 64) (Cmd.argv [\"sleep\", \"30\"]))"
   running <- awaitOutput owner "Cmd.status live" (Text.isInfixOf "CommandRunning")
   check "command is running before resident shutdown" ("CommandRunning" `Text.isInfixOf` running)
   identity <- restart

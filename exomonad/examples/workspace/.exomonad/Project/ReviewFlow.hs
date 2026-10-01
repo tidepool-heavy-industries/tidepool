@@ -331,8 +331,12 @@ buildReviewFlow profile prepareSource owner task policy implementer checkPlan ch
               ReviewStopped _ -> cleanupReviewers request state
               pending -> pure (ReviewCleanupPending pending)
     , firstCandidate = R.on (R.settlement implementer) $ \result -> do
-        own <- R.self @ReviewFlow
-        acceptCandidate own implementer result
+        stage <- R.gets flowStage
+        case stage of
+          AwaitingCandidate -> do
+            own <- R.self @ReviewFlow
+            acceptCandidate own implementer result
+          _ -> pure ()
     , checksCompleted = \state -> do
         own <- R.self @ReviewFlow
         stage <- R.gets flowStage
@@ -659,11 +663,12 @@ buildReviewFlow profile prepareSource owner task policy implementer checkPlan ch
             [] -> publish (ReviewStopped ReviewerWithoutRequest)
             reviewer : _ -> do
               let request = ReviewRequest (AssignedTask task) candidate OwnerRepairs
-              (attempt, updates) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision)
+              _ <- requestWithProgressInto @WorkProgress @(Outcome ReviewDecision)
                 (responseActor reviewer)
                 ((assignment [label|review-correction|] request)
                   { guidance = Just (flowCorrectionInstructions policy), report = Silent })
-              retainReviewer own True candidate attempt updates
+                (\(attempt, updates) -> retainReviewer own True candidate attempt updates)
+              pure ()
 
     sourceCheck selected decision = case decision of
       Accepted reviewed
@@ -685,11 +690,12 @@ buildReviewFlow profile prepareSource owner task policy implementer checkPlan ch
       if count >= flowRepairLimit policy
         then publish (ReviewStopped (RepairBudgetSpent count candidate findings))
         else do
-          (attempt, updates) <- requestWithProgress @WorkProgress @(Outcome Candidate)
+          _ <- requestWithProgressInto @WorkProgress @(Outcome Candidate)
             (responseActor implementer)
             ((assignment [label|repair|] (RepairTask task candidate findings))
               { guidance = Just (flowRepairInstructions policy), report = Silent })
-          retainRepair own candidate attempt updates
+            (\(attempt, updates) -> retainRepair own candidate attempt updates)
+          pure ()
 
 -- Never reset or publish a branch. tryMerge owns checkout mutation; an
 -- ancestry check ensures this is a fast-forward, and HEAD is checked again.

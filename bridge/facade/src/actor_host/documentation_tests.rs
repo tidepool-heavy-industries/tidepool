@@ -2447,6 +2447,21 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     )
     .await;
     let (reviewer, _reviewer_binding) = next_project_worker(&mut campaign).await;
+    let review_source = campaign
+        .worktrees
+        .lookup(&exomonad_worktree::WorktreeId::from_raw(
+            &reviewer.launch_worktrees[0],
+        ))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        exomonad_worktree::git::GitCli::new()
+            .run(review_source.cwd(), &["rev-parse", "HEAD"])
+            .unwrap()
+            .trimmed(),
+        candidate.as_str(),
+        "independent review must inspect the originally submitted commit"
+    );
     let review_instructions =
         include_str!("../../../../exomonad/examples/workspace/.exomonad/prompts/review.md");
     assert_eq!(reviewer.instructions.as_deref(), Some(review_instructions));
@@ -2465,6 +2480,13 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
             .unwrap()
             .contains("focused candidate check"),
         "{evidence}"
+    );
+    assert!(
+        evidence["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("reportedChecks"),
+        "authored check summaries remain claims: {evidence}"
     );
     assert!(
         evidence["items"][0]["output"]

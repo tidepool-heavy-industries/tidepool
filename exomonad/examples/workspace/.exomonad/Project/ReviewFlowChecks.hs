@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Project.ReviewFlowChecks (oneComponent, failurePaths, sourcePreflight, emptyFindings, effectfulRouting, workflowExample) where
+module Project.ReviewFlowChecks (oneComponent, failurePaths, sourcePreflight, emptyFindings, effectfulRouting, workflowExample, lateCandidate, replacement) where
 
 import Prelude hiding (readFile, writeFile)
 import Control.Monad (void)
@@ -363,3 +363,52 @@ workflowExample = do
     ("ReviewEscalated" `Text.isInfixOf` output closed2
       && "ReviewCleanupAttempted" `Text.isInfixOf` output closed2)
   void $ turn owner2 "R.finish flow"
+
+-- The initial response may settle before any review actor subscribes.
+lateCandidate :: Member RecipeCheck effects => Eff effects ()
+lateCandidate = do
+  owner <- root
+  baseline <- git owner ["rev-parse", "HEAD"]
+  void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline
+    <> "\nlet limit = 1 :: Int\nlet campaignName = \"review-late-source\" :: CampaignLabel"
+    <> "\nlet coordinatorName = \"review-late-coordinator\" :: Text"
+    <> "\nlet sourcePlan = ComponentReview")
+  script owner "review-flow-late-setup"
+  worker <- activation
+  candidate <- checkpoint (checkActor worker) "review-flow.txt" "late candidate\n" "settled before review subscription"
+  void $ turn (checkActor worker) ("respond (Produced (Candidate " <> gitOidLiteral candidate <> " [] []))")
+  script owner "review-flow-late-start"
+  reviewer <- activation
+  headSeen <- git (checkActor reviewer) ["rev-parse", "HEAD"]
+  check "late subscription preserves the original exact candidate" (headSeen == candidate)
+  void $ turn (checkActor reviewer)
+    "respond (Produced (Accepted (ReviewedCandidate (reviewBasis sessionInput) (reviewInput sessionInput) [] \"late exact source\")))"
+  void $ awaitOutput owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (flowStage state)" (Text.isInfixOf "ReviewAccepted")
+  retained <- turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (length (flowCandidateReceipts state) == 1 && length (flowReviewerReceipts state) == 1 && case flowReviewedProof state of { Just _ -> True; _ -> False })"
+  check "late attachment retains original review proof and receipts" (lastOutput retained == "True")
+  void $ turn owner "R.finish flow"
+
+-- Original dynamic sources and checkpointed state survive record replacement.
+replacement :: Member RecipeCheck effects => Eff effects ()
+replacement = do
+  owner <- root
+  baseline <- git owner ["rev-parse", "HEAD"]
+  void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline
+    <> "\nlet limit = 1 :: Int\nlet campaignName = \"review-replacement\" :: CampaignLabel"
+    <> "\nlet coordinatorName = \"review-replacement-coordinator\" :: Text"
+    <> "\nlet sourcePlan = ComponentReview")
+  script owner "review-flow-loop"
+  worker <- activation
+  candidate <- checkpoint (checkActor worker) "review-flow.txt" "replacement candidate\n" "source before flow replacement"
+  void $ turn (checkActor worker) ("respond (Produced (Candidate " <> gitOidLiteral candidate <> " [] []))")
+  reviewer <- activation
+  void $ turn owner "before <- R.call (reviewSnapshot (R.client flow)) ()\nflow <- R.replace flow flowDefinition"
+  void $ turn (checkActor reviewer)
+    "let question = Question \"after-replacement\" (DesignQuestion \"plans/component.md\" (reviewBase (reviewBasis sessionInput)) \"owner decision\" [] [] [])\nreportProgress (WorkProgress [] [question])"
+  void $ awaitOutput owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (any (any ((== \"after-replacement\") . questionKey) . snd) (flowQuestions state))" (== "True")
+  void $ turn (checkActor reviewer)
+    "respond (Produced (Accepted (ReviewedCandidate (reviewBasis sessionInput) (reviewInput sessionInput) [] \"original request after replacement\")))"
+  void $ awaitOutput owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (flowStage state)" (Text.isInfixOf "ReviewAccepted")
+  retained <- turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (map requestId (flowReviewerRequests state) == map requestId (flowReviewerRequests before) && length (flowReviewerRequests state) == 1 && length (flowCandidateReceipts state) == 1 && length (flowAttachments state) == 1 && length (flowReviewerReceipts state) == 1 && case flowReviewedProof state of { Just _ -> True; _ -> False })"
+  check "replacement retains original sources without starting a second review" (lastOutput retained == "True")
+  void $ turn owner "R.finish flow"

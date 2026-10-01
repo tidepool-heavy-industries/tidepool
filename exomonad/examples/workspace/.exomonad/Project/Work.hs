@@ -13,7 +13,7 @@ module Project.Work
   , lunaTask, lunaTaskFrom, lunaTaskInputFrom, lunaLead, lunaLeadFrom
   , solTask, solTaskFrom, implement, reviewCandidate, reviewCommit, requestReview, repair
   , candidateAtSubmission, reviewCandidateAtSubmission, admitReviewedCheckpoint
-  , requestIncorporation, consultDesign
+  , RequestHandoff (..), requestIncorporation, consultDesign
   , settledValue
   , unownedPaths
   ) where
@@ -133,6 +133,10 @@ solTaskFrom label effort source task = withInstructions (projectPrompt "task") $
   withContext (selected taskContext) $ withModel "executor" $ withEffort effort $
   coding source (assignment label task)
 
+-- These response-returning project helpers hand unfinished work to later cells,
+-- so their branches explicitly use ActorOwned. Lower-level branch constructors
+-- leave lifetime selectable and scoped by default.
+--
 -- implement exposes no effort parameter of its own; Medium is chosen here
 -- because a caller with a bounded, ordinary implementation obligation has
 -- nowhere else to pass one through this entry point. A caller that needs a
@@ -142,7 +146,7 @@ implement
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
   => Task -> Eff effects (Response (Outcome Candidate), Progress WorkProgress)
 implement task = unfold (taskGroup task) $
-  childWithProgress @WorkProgress @(Outcome Candidate) (lunaTask [label|implement|] Medium task)
+  childWithProgress @WorkProgress @(Outcome Candidate) (withLifetime ActorOwned $ lunaTask [label|implement|] Medium task)
 
 -- Exact-scope reviews return findings to their requester because there is no
 -- owning Task with which to address a retained implementer.
@@ -213,9 +217,9 @@ unownedPaths
 unownedPaths base candidate owned = do
   let range = renderGitOid base <> ".." <> renderGitOid candidate
   result <- Cmd.run (Cmd.argv ["git", "diff", "--numstat", range])
-  case Cmd.stdout result of
-    Right stat -> pure [path | (_, _, path) <- numstatFiles stat, path `notElem` owned]
-    Left issue -> error ("unownedPaths: git diff --numstat " <> Text.unpack range <> " failed: " <> show issue)
+  case (Cmd.failure result, Cmd.stdout result, Cmd.commandCleanup (Cmd.commandResult result)) of
+    (Nothing, Right stat, Cmd.CommandClean) -> pure [path | (_, _, path) <- numstatFiles stat, path `notElem` owned]
+    unavailable -> error ("unownedPaths: git diff --numstat " <> Text.unpack range <> " failed: " <> show unavailable)
 
 -- A revised candidate gets its own exact checkout. A retained actor's previous
 -- checkout is never implicitly treated as the source named by a new request.
@@ -231,7 +235,7 @@ admitReview
   => ForkGroupPath -> ReviewRequest -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
 admitReview group request = unfold group $
   childWithProgress @WorkProgress @(Outcome ReviewDecision) $
-    withInstructions (projectPrompt "review") $ withContext (selected reviewContext) $
+    withLifetime ActorOwned $ withInstructions (projectPrompt "review") $ withContext (selected reviewContext) $
     withModel "luna" $ withEffort Medium $
     coding (atRef (GitRef (renderGitOid (candidateCommit (reviewInput request)))))
       (assignment [label|review|] request)
@@ -243,23 +247,38 @@ admitReview group request = unfold group $
 repair
   :: Member Replies effects
   => Label -> ReviewRequest -> Candidate -> [Text]
-  -> Eff effects (Either ReviewDecision (Response (Outcome Candidate)))
-repair label request candidate findings = case reviewBasis request of
+  -> Eff effects (Either ReviewDecision (RequestHandoff (Outcome Candidate)))
+repair label reviewRequest candidate findings = case reviewBasis reviewRequest of
   ExactScope _ _ _ -> pure (Left (Repair candidate findings))
-  AssignedTask task -> case repairOwner request of
+  AssignedTask task -> case repairOwner reviewRequest of
     OwnerRepairs -> pure (Left (Repair candidate findings))
-    RetainedImplementer actor -> Right <$> request actor
-      ((assignment label (RepairTask task candidate findings))
-        { guidance = Just (projectPrompt "repair") })
+    RetainedImplementer actor -> do
+      response <- request actor
+        ((assignment label (RepairTask task candidate findings))
+          { guidance = Just (projectPrompt "repair") })
+      Right <$> retainRequest response
 
 -- Reporting is the Assignment default (NotifyOwner); see lunaTaskFrom's note
 -- above.
 requestIncorporation
   :: Member Replies effects
-  => AgentRef -> Label -> Task -> PlanAmendment -> Eff effects (Response Incorporation)
-requestIncorporation recipient label task amendment = request recipient $
-  (assignment label (IncorporationTask task amendment))
-    { guidance = Just (projectPrompt "incorporate") }
+  => AgentRef -> Label -> Task -> PlanAmendment -> Eff effects (RequestHandoff Incorporation)
+requestIncorporation recipient label task amendment = do
+  response <- request recipient $
+    (assignment label (IncorporationTask task amendment))
+      { guidance = Just (projectPrompt "incorporate") }
+  retainRequest response
+
+-- A retention receipt proves only transfer of this request to actor ownership.
+-- A refusal leaves invocation ownership and its ordinary scope cleanup intact;
+-- the original response remains available to inspect or cancel.
+data RequestHandoff value = RequestHandoff
+  { handedRequest :: Response value
+  , handoffRetention :: Either ReplyError ()
+  } deriving (Show)
+
+retainRequest :: Member Replies effects => Response value -> Eff effects (RequestHandoff value)
+retainRequest response = RequestHandoff response <$> detachRequest response
 
 -- Build a complete packet from evidence already bound in the workbench. Record
 -- updates add alternatives or narrow the unblocked obligation when needed.
@@ -278,7 +297,7 @@ consultDesign
   => DesignSlot -> DesignQuestion -> Eff effects (Response DesignAnswer, Watch (Settlement DesignAnswer))
 consultDesign slot question = do
   expert <- unfold (specialistGroup slot) $ child $
-    withInstructions (projectPrompt "specialist") $ withContext (selected (designContext slot)) $
+    withLifetime ActorOwned $ withInstructions (projectPrompt "specialist") $ withContext (selected (designContext slot)) $
     withModel (specialistModel slot) $ withEffort (specialistEffort slot) $
     coding (atRef (GitRef (renderGitOid (questionSource question))))
       (assignment (specialistLabel slot) question)

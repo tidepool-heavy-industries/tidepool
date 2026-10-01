@@ -1,17 +1,15 @@
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE OverloadedLabels #-}
-{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TypeApplications #-}
 
 -- | Exact source, artifact and test-count evidence for a focused Cargo check.
 module Project.CargoCheck
-  ( FocusedSpec (..), FocusedSetupIssue (..), FocusedRun (..), FocusedRecord (..), FailureKind (..)
+  ( FocusedSpec (..), FocusedSetupIssue (..), FocusedRun (..), FocusedRecord (..)
   , FocusedResult (..), CheckExecution (..), SourceAssurance (..)
   , FailureEvidence (..), FocusedDiagnosis (..)
   , PreparationEvidence (..), startFocusedAfterWith
-  , startFocusedWith, startFocusedInWith, collectFocused, diagnoseFocused, finishFocused
+  , startFocusedWith, startFocusedInWith, collectFocused, diagnoseFocused
   , focusedPassed, focusedEvidenceComplete, focusedExecution, focusedSourceAssurance, focusedResultSummary
   ) where
 
@@ -19,12 +17,9 @@ import Control.Monad.Freer (Eff, Member)
 import Data.List (nub, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Jev.Operators as J
-import Jev.Operators (Packet ((:=), (:&)))
 import qualified Tidepool.Command as Cmd
-import qualified Project.Reflex as Reflex
 import Tidepool.Aeson (FromJSON (..), (.:), (.:?), withObject)
-import Tidepool.Effects.Core (Commands, Jev)
+import Tidepool.Effects.Core (Commands)
 import Tidepool.QQ.Bash (bash)
 
 data FocusedSpec = FocusedSpec
@@ -75,23 +70,12 @@ instance FromJSON FocusedRecord where
       <*> fields .:? "summaries"
       <*> fields .:? "exit_code"
 
-data FailureKind
-  = ImplementationFailure
-  | FixtureFailure
-  | MissingPrerequisite
-  | InsufficientEvidence
-  deriving (Show, Eq)
-
-data PreparationEvidence = NoPreparation | PreparationPassed | PreparationFailed Int | PreparationUnknown
-  deriving (Show, Eq)
-
 data FocusedResult = FocusedResult
   { focusedSpec :: FocusedSpec
   , focusedCommand :: Cmd.RunResult
   , focusedEvidencePath :: Maybe Text
   , focusedEvidence :: Either Text FocusedRecord
   , focusedPreparation :: PreparationEvidence
-  , focusedFailure :: Maybe (Either Text FailureKind)
   } deriving (Show)
 
 data CheckExecution = ExecutionPassed Int | ExecutionFailed Int Int | ExecutionUnknown
@@ -100,7 +84,7 @@ data CheckExecution = ExecutionPassed Int | ExecutionFailed Int Int | ExecutionU
 data SourceAssurance = SourceVerified | SourceModified Text | SourceDifferent (Maybe Text) | SourceUnrecorded
   deriving (Eq, Show)
 
--- Observable failure shape. The causal judgment in FailureKind is separate.
+-- Observable failure shape; this does not guess its cause.
 data FailureEvidence
   = NoFailureEvidence
   | EvidenceUnavailable
@@ -115,7 +99,6 @@ data FocusedDiagnosis = FocusedDiagnosis
   { diagnosisResult :: FocusedResult
   , diagnosisBranch :: FailureEvidence
   , diagnosisExcerpt :: Either Text Text
-  , diagnosisReflex :: Maybe Reflex.Reflex
   } deriving (Show)
 
 -- Run literal runner argv in the actor's checkout, appending --package,
@@ -298,7 +281,7 @@ collectFocused run = do
               [(value, "")] | value > 0 -> PreparationFailed value
               _ -> PreparationUnknown
             _ -> PreparationUnknown
-  pure (FocusedResult spec completed path evidence preparation Nothing)
+  pure (FocusedResult spec completed path evidence preparation)
 
 completeStderr :: Cmd.RunResult -> Either Text Text
 completeStderr completed = case Cmd.capturedOutput completed of
@@ -338,14 +321,7 @@ diagnoseFocused result = do
       excerpt = if branch == NoFailureEvidence
         then Right ""
         else diagnosticExcerpt (focusedCommand result)
-  let reflex = case (branch, focusedEvidence result, excerpt) of
-        (NoFailureEvidence, _, _) -> Nothing
-        (_, Right record, Right output) ->
-          case recordExitCode record of
-            Just code | code /= 0 -> Reflex.reflexFor code output
-            _ -> Nothing
-        _ -> Nothing
-  pure (FocusedDiagnosis result branch excerpt reflex)
+  pure (FocusedDiagnosis result branch excerpt)
 
 diagnosticExcerpt :: Cmd.RunResult -> Either Text Text
 diagnosticExcerpt completed = do
@@ -355,34 +331,6 @@ diagnosticExcerpt completed = do
           Text.dropEnd (Text.length "focused test record begin\n") prefix
         _ -> stderr
   pure (Text.takeEnd 8192 beforeRecord)
-
--- An optional diagnosis of a failed check never changes its pass rule.
-finishFocused
-  :: (Member Commands effects, Member Jev effects)
-  => FocusedRun -> Eff effects FocusedResult
-finishFocused run = do
-  result <- collectFocused run
-  diagnosis <- diagnoseFocused result
-  let spec = focusedSpec result
-  judgment <- case (Cmd.failure (focusedCommand result), focusedEvidence result, diagnosisExcerpt diagnosis) of
-    (Nothing, _, _) -> pure Nothing
-    (_, Left _, _) -> pure Nothing
-    (_, _, Left issue) -> pure (Just (Left issue))
-    (Just _, Right _, Right excerpt) -> do
-      let diagnostic = Text.takeEnd 8000 excerpt
-      answer <- J.ask1
-        (J.state (#intent := focusedIntent spec :& #diagnostic := diagnostic))
-        (J.choice "Which explanation best fits this failed focused check?"
-          (J.alt #implementation "The assertion or compiler diagnostic points to the implementation" ImplementationFailure
-            J..| J.alt #fixture "The failure points to test setup or fixture data" FixtureFailure
-            J..| J.alt #prerequisite "A missing tool, dependency or environment condition prevented the check" MissingPrerequisite
-            J..| J.alt #insufficient "The retained diagnostic does not establish any of those causes" InsufficientEvidence))
-      pure $ Just $ case answer of
-        Left issue -> Left (Text.pack (show issue))
-        Right choice -> case J.takenUnder J.lenient choice of
-          Left doubt -> Left doubt.why
-          Right (J.Settled kind) -> Right kind
-  pure result {focusedFailure = judgment}
 
 -- Exit, checkout identity, selected count and executed count are code facts.
 -- A Jev classification is never an input to this predicate.
