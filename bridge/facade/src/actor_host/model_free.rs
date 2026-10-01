@@ -71,7 +71,13 @@ impl ModelFreeSession {
             super::JournalOpenMode::Create,
             None,
         )?;
-        let (descriptor, machine, outcome) = root.into_parts();
+        let (descriptor, mut machine, entry) = root.into_parts();
+        let outcome = match entry {
+            exomonad_actor::ResidentRootEntry::Prepared(outcome) => outcome,
+            exomonad_actor::ResidentRootEntry::Startup(entry) => {
+                machine.run_startup_entry(entry)?
+            }
+        };
         let (forest, mut deployments) = ResidentForest::new_with_launch_resolver(
             source,
             descriptor.placement().session,

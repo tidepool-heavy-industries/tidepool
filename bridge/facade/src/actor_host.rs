@@ -2731,16 +2731,17 @@ async fn run_owned(
     )?;
     let prior_actor_records = actor_recovery.records();
     let accepted_source = active_source_identity(&run_root, config.workspace_inputs.is_some())?;
-    let (descriptor, machine, outcome) = root.into_parts();
-    let bootstrap_identity = match &outcome {
-        exomonad_actor::ResidentRootEntry::Startup(entry) => {
-            entry.compile_input_identity().to_owned()
-        }
-        exomonad_actor::ResidentRootEntry::Prepared(_) => {
-            return Err(runtime_error(
-                "root startup requires its installed executable entry",
-            ));
-        }
+    let (descriptor, mut machine, entry) = root.into_parts();
+    let exomonad_actor::ResidentRootEntry::Startup(entry) = entry else {
+        return Err(runtime_error(
+            "root startup requires its installed executable entry",
+        ));
+    };
+    let bootstrap_identity = entry.compile_input_identity().to_owned();
+    let outcome = if embedded_service.is_some() {
+        exomonad_actor::ResidentRootEntry::Startup(entry)
+    } else {
+        exomonad_actor::ResidentRootEntry::Prepared(machine.run_startup_entry(entry)?)
     };
     #[cfg(feature = "codex-compat")]
     let native_fork_admission = match &runtime_backend {
@@ -2857,17 +2858,22 @@ async fn run_owned(
         })
         .transpose()?;
     let (mut root_actor, mut root_task, startup_release) = if let Some(intent) = &startup_intent {
+        let exomonad_actor::ResidentRootEntry::Startup(entry) = outcome else {
+            return Err(runtime_error(
+                "embedded root startup lost its executable entry",
+            ));
+        };
         let (actor, task, release) = match recovered_root {
             Some((_, identity)) => {
                 forest
-                    .admit_pending_root_with_identity(descriptor, outcome, identity, intent.clone())
+                    .admit_pending_root_with_identity(descriptor, entry, identity, intent.clone())
                     .await?
             }
             None => {
                 let mut intent = intent.clone();
                 let run_root = run_root.clone();
                 forest
-                    .admit_pending_root(descriptor, outcome, move |identity| {
+                    .admit_pending_root(descriptor, entry, move |identity| {
                         intent.conversation = embedded_recovery::conversation(
                             &embedded_recovery::host_identity(&run_root, "/root", identity),
                         );
@@ -2886,6 +2892,11 @@ async fn run_owned(
         ));
         (actor, task, Some(release))
     } else {
+        let exomonad_actor::ResidentRootEntry::Prepared(outcome) = outcome else {
+            return Err(runtime_error(
+                "standalone root startup has no prepared outcome",
+            ));
+        };
         let (actor, task) = match recovered_root {
             Some((_, identity)) => {
                 forest
