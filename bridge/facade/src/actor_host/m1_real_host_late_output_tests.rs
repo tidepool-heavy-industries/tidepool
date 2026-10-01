@@ -85,7 +85,7 @@ impl ResponsesTransport for PendingCellTransport {
                         "the real root declaration did not expose the Haskell tool".into(),
                     ));
                 }
-                *self.declared_tools.lock().unwrap() = Some(request.tools.clone());
+                *self.declared_tools.lock().unwrap() = Some(request.tools.to_vec());
                 Ok(ResponsesTurn {
                     response_id: "m1-late-cell-start".into(),
                     items: vec![harness::item::Item(json!({
