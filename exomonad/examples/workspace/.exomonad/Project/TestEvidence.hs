@@ -4,7 +4,7 @@
 -- | Project policy for running focused Cargo checks in this repository.
 module Project.TestEvidence
   ( module Exomonad.Contrib.Check.Cargo
-  , startFocused, startFocusedIn, startFocusedAfter
+  , startFocused, startFocusedIn, startFocusedScopedIn, startFocusedAfter
   ) where
 
 import Control.Monad.Freer (Eff, Member)
@@ -21,3 +21,7 @@ startFocusedIn = startFocusedInWith ["scripts/cargo-focused-test"]
 
 startFocusedAfter :: Member Commands effects => Cmd.Memory -> FocusedSpec -> [Text] -> Eff effects (Either FocusedSetupIssue FocusedRun)
 startFocusedAfter = startFocusedAfterWith ["scripts/cargo-focused-test"]
+
+-- | Invocation-owned focused work; collect its terminal evidence in this cell.
+startFocusedScopedIn :: Member Commands effects => Text -> Cmd.Memory -> FocusedSpec -> Eff effects (Either FocusedSetupIssue FocusedRun)
+startFocusedScopedIn = startFocusedScopedInWith ["scripts/cargo-focused-test"]

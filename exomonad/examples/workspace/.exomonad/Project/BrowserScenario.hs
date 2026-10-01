@@ -1,28 +1,15 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE TypeApplications #-}
 
--- | Select one existing deterministic production browser integration test.
--- The tests own authentication, loopback ports, temporary stores and WebSocket
--- behavior; this module supplies no browser transport.
+-- | Prepare an exact source and await the selected deterministic production
+-- browser integration tests in one invocation. The tests own browser transport.
 module Project.BrowserScenario
   ( BrowserScenario (..)
   , BrowserWorkspace (..)
   , BrowserResources (..)
-  , BrowserPreparation (..)
-  , BrowserStartIssue (..)
-  , BrowserWatchIssue (..)
-  , BrowserReadyIssue (..)
-  , BrowserStarted (..)
-  , BrowserState (..)
-  , BrowserActor (browserSnapshot)
-  , startBrowserPreparation
-  , watchBrowserScenarios
+  , BrowserRunIssue (..)
+  , BrowserResult (..)
+  , runBrowserScenarios
   , browserFocusedSpec
   , browserPreparationCommand
   , browserReadinessCommand
@@ -32,18 +19,11 @@ import Control.Monad (forM)
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import GHC.Generics (Generic)
-import Exomonad.Contrib.CheckResults
-  ( CheckActor, CheckSetupIssue, NoticePolicy (NotifyAllTerminal), watchChecks )
-import Exomonad.Contrib.PrepareContinue (PreparationFailure, verifyPrepared)
 import Project.TestEvidence
-  ( FocusedRun, FocusedSetupIssue, FocusedSpec (..), startFocusedIn )
-import qualified Tidepool.Actor as Actor
-import qualified Tidepool.Actor.Record as R
-import Tidepool.Actors.Exomonad
+  ( FocusedResult, FocusedSetupIssue, FocusedSpec (..)
+  , collectFocused, startFocusedScopedIn )
 import qualified Tidepool.Command as Cmd
-import Tidepool.Effects.Core (Actor, Commands, Notifications)
-import Tidepool.Effects.Row (knownEffects)
+import Tidepool.Effects.Core (Commands)
 
 data BrowserScenario
   = BrowserJourney
@@ -60,92 +40,69 @@ data BrowserResources = BrowserResources
   , focusedMemory :: Cmd.Memory
   } deriving (Show, Eq)
 
--- | Bind this returned Job in the notebook before admitting the watcher. It
--- carries the exact checkout, source and resource policy to the next step.
-data BrowserPreparation = BrowserPreparation
-  { preparedWorkspace :: BrowserWorkspace
-  , preparedResources :: BrowserResources
-  , preparedJob :: Cmd.Job
-  } deriving (Show)
-
-data BrowserStartIssue
+data BrowserRunIssue
   = InvalidBrowserCheckout Text
-  | BrowserPreparationRejected Cmd.CommandError
-  deriving (Show, Eq)
-
-data BrowserWatchIssue
-  = NoBrowserScenarios
+  | NoBrowserScenarios
   | DuplicateBrowserScenario BrowserScenario
-  deriving (Show, Eq)
-
-data BrowserReadyIssue
-  = BrowserReadinessStartFailed Cmd.CommandError
-  | BrowserReadinessPending Cmd.Job Cmd.CommandStatus
-  | BrowserReadinessFailed Cmd.RunResult
+  | BrowserPreparationRejected Cmd.CommandError
+  | BrowserPreparationFailed Cmd.RunResult
+  | BrowserReadinessRejected Cmd.RunResult Cmd.CommandError
+  | BrowserReadinessFailed Cmd.RunResult Cmd.RunResult
   deriving (Show)
 
--- | Every selected test is retained even if another test's setup is refused.
--- CheckResults owns terminal evidence and notices for every started run.
-data BrowserStarted = BrowserStarted
-  { browserRuns :: [(BrowserScenario, Either FocusedSetupIssue FocusedRun)]
-  , browserChecks :: Maybe (Either CheckSetupIssue (ActorHandle CheckActor))
+-- | Receipts retain exact jobs and independent process, cleanup and output
+-- facts. Every selected scenario remains present even if another start fails.
+data BrowserResult = BrowserResult
+  { browserPreparation :: Cmd.RunResult
+  , browserReadiness :: Cmd.RunResult
+  , browserResults :: [(BrowserScenario, Either FocusedSetupIssue FocusedResult)]
   } deriving (Show)
 
-data BrowserState = BrowserState
-  { browserPreparation :: Cmd.Job
-  , browserResult :: Maybe (Either (PreparationFailure BrowserReadyIssue) BrowserStarted)
-  , browserNotice :: Maybe (Either NotificationError NotificationReceipt)
-  }
-
-instance Show BrowserState where
-  show state = "BrowserState { preparation = " ++ show (browserPreparation state)
-    ++ ", result = " ++ (case browserResult state of
-      Nothing -> "pending }"
-      Just (Left _) -> "preparation failed }"
-      Just (Right started) -> "focused setup " ++ show
-        [(scenario, either (const "refused") (const "started") launched)
-          | (scenario, launched) <- browserRuns started]
-        ++ "; checks " ++ (case browserChecks started of
-          Nothing -> "not started"
-          Just (Left _) -> "refused"
-          Just (Right _) -> "watching") ++ " }")
-
-data BrowserActor mode = BrowserActor
-  { browserState :: mode :- State BrowserState
-  , browserSnapshot :: mode :- Call () (R.Reply BrowserState)
-  , browserCompleted :: mode :- Event Cmd.CommandResult
-  , browserAttachChecks :: mode :- Call () NoReply
-  } deriving Generic
-
-type BrowserEffects = R.LocalEffects BrowserActor '[Replies, Actor, Notifications, Commands]
-
--- | Start one source-guarded asset build; the returned preparation retains its
--- Job independently of later actor admission.
-startBrowserPreparation
+runBrowserScenarios
   :: Member Commands effects
-  => BrowserWorkspace -> BrowserResources
-  -> Eff effects (Either BrowserStartIssue BrowserPreparation)
-startBrowserPreparation workspace resources
+  => BrowserWorkspace -> BrowserResources -> [BrowserScenario]
+  -> Eff effects (Either BrowserRunIssue BrowserResult)
+runBrowserScenarios workspace resources scenarios
   | not ("/" `Text.isPrefixOf` browserCheckout workspace) =
       pure (Left (InvalidBrowserCheckout (browserCheckout workspace)))
-  | otherwise = do
-      started <- Cmd.tryBackground $ Cmd.withMemory (preparationMemory resources) $
-        Cmd.inDirectory (browserCheckout workspace) (browserPreparationCommand workspace)
-      pure $ case started of
-        Left issue -> Left (BrowserPreparationRejected issue)
-        Right job -> Right (BrowserPreparation workspace resources job)
-
--- | One preparation serves all selected scenarios. The actor subscribes to
--- its exact completion, starts each focused test in the supplied checkout,
--- and gives CheckResults their terminal evidence.
-watchBrowserScenarios
-  :: Member Actor effects
-  => AgentRef -> BrowserPreparation -> [BrowserScenario]
-  -> Eff effects (Either BrowserWatchIssue (ActorHandle BrowserActor))
-watchBrowserScenarios owner preparation scenarios
   | null scenarios = pure (Left NoBrowserScenarios)
-  | Just duplicate <- firstDuplicate scenarios = pure (Left (DuplicateBrowserScenario duplicate))
-  | otherwise = Right <$> R.start (browserDefinition owner preparation scenarios)
+  | Just duplicate <- firstDuplicate scenarios =
+      pure (Left (DuplicateBrowserScenario duplicate))
+  | otherwise = do
+      preparationStart <- Cmd.tryStart $ Cmd.withMemory (preparationMemory resources) $
+        Cmd.inDirectory (browserCheckout workspace) (browserPreparationCommand workspace)
+      case preparationStart of
+        Left issue -> pure (Left (BrowserPreparationRejected issue))
+        Right preparationJob -> do
+          preparation <- Cmd.await preparationJob
+          if not (prerequisitePassed preparation)
+            then pure (Left (BrowserPreparationFailed preparation))
+            else do
+              readinessStart <- Cmd.tryStart $ Cmd.withMemory (preparationMemory resources) $
+                Cmd.inDirectory (browserCheckout workspace) (browserReadinessCommand workspace)
+              case readinessStart of
+                Left issue -> pure (Left (BrowserReadinessRejected preparation issue))
+                Right readinessJob -> do
+                  readiness <- Cmd.await readinessJob
+                  if not (prerequisitePassed readiness)
+                    then pure (Left (BrowserReadinessFailed preparation readiness))
+                    else do
+                      started <- forM scenarios $ \scenario -> do
+                        run <- startFocusedScopedIn (browserCheckout workspace) (focusedMemory resources)
+                          (browserFocusedSpec workspace scenario)
+                        pure (scenario, run)
+                      results <- forM started $ \(scenario, run) -> do
+                        result <- case run of
+                          Left issue -> pure (Left issue)
+                          Right focused -> Right <$> collectFocused focused
+                        pure (scenario, result)
+                      pure (Right (BrowserResult preparation readiness results))
+
+prerequisitePassed :: Cmd.RunResult -> Bool
+prerequisitePassed receipt = case
+  (Cmd.commandOutcome (Cmd.commandResult receipt), Cmd.commandCleanup (Cmd.commandResult receipt)) of
+    (Cmd.CommandExited 0, Cmd.CommandClean) -> True
+    _ -> False
 
 firstDuplicate :: [BrowserScenario] -> Maybe BrowserScenario
 firstDuplicate [] = Nothing
@@ -153,92 +110,9 @@ firstDuplicate (scenario : rest)
   | scenario `elem` rest = Just scenario
   | otherwise = firstDuplicate rest
 
-browserDefinition
-  :: AgentRef -> BrowserPreparation -> [BrowserScenario]
-  -> ActorSpec BrowserActor BrowserEffects
-browserDefinition owner preparation scenarios =
-  R.definition "browser-scenarios" (Actor.Selected knownEffects) BrowserActor
-    { browserState = BrowserState job Nothing Nothing
-    , browserSnapshot = \() -> R.get
-    , browserCompleted = R.on (Cmd.completion job) $ \completion -> do
-        result <- verifyPrepared job completion $ \_ -> do
-          readiness <- checkBrowserReadiness workspace
-          case readiness of
-            Left issue -> pure (Left issue)
-            Right () -> Right <$> startFocusedScenarios workspace resources scenarios
-        R.modify' (\state -> state { browserResult = Just result })
-        case result of
-          Right _ -> do
-            own <- R.self @BrowserActor
-            R.send (browserAttachChecks own) ()
-          Left _ -> pure ()
-        notice <- case result of
-          Left _ -> Just <$> sendMessage owner
-            ("Browser preparation failed; inspect retained preparation job "
-              <> Text.pack (show job) <> " and browserSnapshot")
-          Right started | setupIncomplete started ->
-              Just <$> sendMessage owner
-                ("Browser test setup incomplete; inspect browserSnapshot and retained runs")
-          _ -> pure Nothing
-        R.modify' (\state -> state { browserResult = Just result, browserNotice = notice })
-    , browserAttachChecks = \() -> do
-        current <- R.get
-        case browserResult current of
-          Just (Right started) | Nothing <- browserChecks started -> do
-            let focused = [(Text.pack (show scenario), run)
-                  | (scenario, Right run) <- browserRuns started]
-            watcher <- case focused of
-              [] -> pure Nothing
-              _ -> Just <$> watchChecks owner NotifyAllTerminal focused
-            R.modify' (\state -> state { browserResult = Just (Right
-              started { browserChecks = watcher }) })
-          _ -> pure ()
-    }
-  where
-    workspace = preparedWorkspace preparation
-    resources = preparedResources preparation
-    job = preparedJob preparation
-
-setupIncomplete :: BrowserStarted -> Bool
-setupIncomplete started =
-  any (either (const True) (const False) . snd) (browserRuns started)
-    || case browserChecks started of
-      Just (Left _) -> True
-      _ -> False
-
-checkBrowserReadiness
-  :: Member Commands effects
-  => BrowserWorkspace -> Eff effects (Either BrowserReadyIssue ())
-checkBrowserReadiness workspace = do
-  started <- Cmd.tryStart $ Cmd.inDirectory (browserCheckout workspace)
-    (browserReadinessCommand workspace)
-  case started of
-    Left issue -> pure (Left (BrowserReadinessStartFailed issue))
-    Right job -> do
-      status <- Cmd.quiet (Cmd.observe (Cmd.Observation 30000 0) job)
-      case status of
-        Cmd.CommandFinished _ -> do
-          receipt <- Cmd.quiet (Cmd.await job)
-          pure $ if Cmd.failure receipt == Nothing
-              && Cmd.commandCleanup (Cmd.commandResult receipt) == Cmd.CommandClean
-            then Right ()
-            else Left (BrowserReadinessFailed receipt)
-        other -> pure (Left (BrowserReadinessPending job other))
-
-startFocusedScenarios
-  :: Member Commands effects
-  => BrowserWorkspace -> BrowserResources -> [BrowserScenario]
-  -> Eff effects BrowserStarted
-startFocusedScenarios workspace resources scenarios = do
-  runs <- forM scenarios $ \scenario -> do
-    started <- startFocusedIn (browserCheckout workspace) (focusedMemory resources)
-      (browserFocusedSpec workspace scenario)
-    pure (scenario, started)
-  pure (BrowserStarted runs Nothing)
-
 -- | The web prerequisites from `scripts/verify-browser-journey`, ending
 -- before that script's browser assertion. Source and clean-tree checks bracket
--- the build in the actor's checkout; the caller retains this command's job.
+-- the build in the supplied checkout; the continuation retains the terminal receipt.
 browserPreparationCommand :: BrowserWorkspace -> Cmd.Command
 browserPreparationCommand workspace = Cmd.argv
   [ "nix", "develop", ".#web", "-c", "bash", "-lc"
