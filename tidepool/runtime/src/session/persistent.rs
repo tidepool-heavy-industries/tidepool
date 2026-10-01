@@ -1252,7 +1252,7 @@ impl PersistentSession {
             .filter(|module| !self.is_stub_module(*module))
             .collect();
         view.next_value_generation = self.val_gen.next();
-        Some(view.canonicalize())
+        Some(view.canonicalize_injection())
     }
 
     pub(super) fn compile_view_digest_in(&self, scope: ScopeId) -> Option<[u8; 32]> {
@@ -1337,17 +1337,19 @@ impl PersistentSession {
         SessionCompileView {
             session: lib.session_id(),
             lexical_scope: scope,
-            root: PathBuf::from(lib.include_dir()),
-            persistent_imports: self.workbench_imports_in(scope),
-            library: lib.current_module_in(scope),
-            visible_values,
-            visible_value_names,
             injected_values: Vec::new(),
-            reachable_values,
             next_value_generation: self.val_gen.next(),
-            shadowing,
-            staged_hiding: Vec::new(),
-            exact_context: lib.log.joined_context_at(lib.scope_tip(scope)),
+            projection: Arc::new(super::view::CompileViewProjection {
+                root: PathBuf::from(lib.include_dir()),
+                persistent_imports: self.workbench_imports_in(scope),
+                library: lib.current_module_in(scope),
+                visible_values,
+                visible_value_names,
+                reachable_values,
+                shadowing,
+                staged_hiding: Vec::new(),
+                exact_context: lib.log.joined_context_at(lib.scope_tip(scope)),
+            }),
         }
         .canonicalize()
     }
@@ -3263,6 +3265,8 @@ mod checkpoint_scope_tests {
             let hashed = session.compile_view_bytes_hashed.load(Ordering::Relaxed);
             for _ in 0..100 {
                 assert_eq!(session.compile_view_digest_in(scope), Some(cached.digest));
+                let reader = session.compile_view_in(scope).unwrap();
+                assert!(Arc::ptr_eq(&reader.projection, &cached.view.projection));
             }
             assert_eq!(
                 session.compile_view_bytes_hashed.load(Ordering::Relaxed),
@@ -3276,6 +3280,46 @@ mod checkpoint_scope_tests {
             session.retire_scope(scope);
             assert!(!session.compile_views.lock().contains_key(&scope));
         }
+    }
+
+    #[test]
+    fn compile_view_readers_share_metadata_and_isolate_later_shadowing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = publication_session(dir.path(), 417);
+        let scope = session.mint_isolated_scope();
+        let original =
+            super::super::prepared::tests::rooted_publication_fixture(&mut session, "answer", 417);
+        session.bind_in(scope, original).unwrap();
+        let reader = session.compile_view_in(scope).unwrap();
+        let last_reader = reader.clone();
+        let weak = Arc::downgrade(&reader.projection);
+        assert!(Arc::ptr_eq(&reader.projection, &last_reader.projection));
+        let original_imports = reader.turn_imports(&SourceImports::new());
+        let staged = reader
+            .clone()
+            .with_staged_values(SessionModule::val(Generation(418)), ["answer".into()]);
+        assert!(!Arc::ptr_eq(&reader.projection, &staged.projection));
+        assert_eq!(reader.turn_imports(&SourceImports::new()), original_imports);
+        assert!(!staged.is_current_for(&reader));
+        let replacement =
+            super::super::prepared::tests::rooted_publication_fixture(&mut session, "answer", 419);
+        session.bind_in(scope, replacement).unwrap();
+        let latest = session.compile_view_in(scope).unwrap();
+        assert!(!Arc::ptr_eq(&reader.projection, &latest.projection));
+        assert!(!latest.is_current_for(&reader));
+        assert_eq!(
+            reader.visible_values(),
+            &[SessionModule::val(Generation(417))]
+        );
+        assert_eq!(
+            latest.visible_values(),
+            &[SessionModule::val(Generation(419))]
+        );
+        session.retire_scope(scope);
+        drop(reader);
+        assert!(weak.upgrade().is_some());
+        drop(last_reader);
+        assert!(weak.upgrade().is_none());
     }
 
     #[test]

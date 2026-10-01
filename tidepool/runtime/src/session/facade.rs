@@ -230,17 +230,19 @@ mod tests {
         let view = SessionCompileView {
             session: SessionId(8),
             lexical_scope: ScopeId::ROOT,
-            root: dir.path().to_path_buf(),
-            persistent_imports: SourceImports::new(),
-            library: Some(SessionModule::lib(Generation(4))),
-            visible_values: Vec::new(),
-            visible_value_names: Vec::new(),
             injected_values: Vec::new(),
-            reachable_values: Vec::new(),
             next_value_generation: Generation(1),
-            shadowing: Vec::new(),
-            staged_hiding: Vec::new(),
-            exact_context: None,
+            projection: std::sync::Arc::new(crate::session::view::CompileViewProjection {
+                root: dir.path().to_path_buf(),
+                persistent_imports: SourceImports::new(),
+                library: Some(SessionModule::lib(Generation(4))),
+                visible_values: Vec::new(),
+                visible_value_names: Vec::new(),
+                reachable_values: Vec::new(),
+                shadowing: Vec::new(),
+                staged_hiding: Vec::new(),
+                exact_context: None,
+            }),
         }
         .canonicalize();
         let surface = ExactExportSurface::new(

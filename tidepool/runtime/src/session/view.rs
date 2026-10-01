@@ -134,6 +134,15 @@ impl SourceImports {
 pub struct SessionCompileView {
     pub(super) session: SessionId,
     pub(super) lexical_scope: ScopeId,
+    pub(super) injected_values: Vec<SessionModule>,
+    pub(super) next_value_generation: Generation,
+    pub(super) projection: Arc<CompileViewProjection>,
+}
+
+/// Immutable lexical metadata shared by readers of the same exact view.
+/// Request identity, generation and injection selection remain on the view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct CompileViewProjection {
     pub(super) root: PathBuf,
     pub(super) persistent_imports: SourceImports,
     pub(super) library: Option<SessionModule>,
@@ -143,7 +152,6 @@ pub struct SessionCompileView {
     /// module would accidentally expose those helpers before the binding store
     /// commits them.
     pub(super) visible_value_names: Vec<(SessionModule, Vec<String>)>,
-    pub(super) injected_values: Vec<SessionModule>,
     /// The part of `injected_values` a turn compiled at `lexical_scope` can
     /// actually reach: the value modules owned by the frames its lookup reads
     /// and by its inherited tip. Every other live module is injected only so
@@ -156,7 +164,6 @@ pub struct SessionCompileView {
     /// outlives its descendants, so the ancestor's frame keeps it live for as
     /// long as this scope exists.
     pub(super) reachable_values: Vec<SessionModule>,
-    pub(super) next_value_generation: Generation,
     pub(super) shadowing: Vec<super::ExportItem>,
     pub(super) staged_hiding: Vec<(SessionModule, Vec<super::ExportItem>)>,
     /// Immutable original declaration products and selected lexical graph.
@@ -181,27 +188,35 @@ impl SessionCompileView {
         };
         let bytes = serde_json::to_vec(&serde_json::json!({
             "version": "runtime-compile-view-v1", "session": self.session.0,
-            "scope": self.lexical_scope.0, "imports": self.persistent_imports.specs(),
-            "library": self.library.map(|module| module.module_name()),
-            "visible": self.visible_value_names.iter().map(|(module, names)| (module.module_name(), names)).collect::<Vec<_>>(),
-            "reachable": self.reachable_values.iter().map(SessionModule::module_name).collect::<Vec<_>>(),
-            "shadowing": items(&self.shadowing),
-            "hiding": self.staged_hiding.iter().map(|(module, hidden)| (module.module_name(), items(hidden))).collect::<Vec<_>>(),
-            "exact": self.exact_context.as_ref().map(|context| context.semantic_sha256()),
+            "scope": self.lexical_scope.0, "imports": self.projection.persistent_imports.specs(),
+            "library": self.projection.library.map(|module| module.module_name()),
+            "visible": self.projection.visible_value_names.iter().map(|(module, names)| (module.module_name(), names)).collect::<Vec<_>>(),
+            "reachable": self.projection.reachable_values.iter().map(SessionModule::module_name).collect::<Vec<_>>(),
+            "shadowing": items(&self.projection.shadowing),
+            "hiding": self.projection.staged_hiding.iter().map(|(module, hidden)| (module.module_name(), items(hidden))).collect::<Vec<_>>(),
+            "exact": self.projection.exact_context.as_ref().map(|context| context.semantic_sha256()),
         })).expect("runtime view contains serializable identities");
         (*blake3::hash(&bytes).as_bytes(), bytes.len())
     }
 
     pub(super) fn canonicalize(mut self) -> Self {
-        sort_modules(&mut self.visible_values);
-        self.visible_value_names
+        let projection = Arc::make_mut(&mut self.projection);
+        sort_modules(&mut projection.visible_values);
+        projection
+            .visible_value_names
             .sort_by_key(|(module, _)| module.module_name());
-        for (_, names) in &mut self.visible_value_names {
+        for (_, names) in &mut projection.visible_value_names {
             names.sort();
             names.dedup();
         }
         sort_modules(&mut self.injected_values);
-        sort_modules(&mut self.reachable_values);
+        sort_modules(&mut projection.reachable_values);
+        self
+    }
+
+    /// Refresh only request-local live injection after cloning a cached view.
+    pub(super) fn canonicalize_injection(mut self) -> Self {
+        sort_modules(&mut self.injected_values);
         self
     }
 
@@ -209,7 +224,7 @@ impl SessionCompileView {
     /// while withholding their unqualified exports from a new source turn.
     #[must_use]
     pub fn hide_value_names(mut self, names: &[String]) -> Self {
-        for (_, published) in &mut self.visible_value_names {
+        for (_, published) in &mut Arc::make_mut(&mut self.projection).visible_value_names {
             published.retain(|name| !names.contains(name));
         }
         self
@@ -219,7 +234,7 @@ impl SessionCompileView {
     /// just as they do in persisted declaration modules.
     #[must_use]
     pub fn shadow_preamble(&self, preamble: &str) -> String {
-        hide_preamble_exports(preamble, &self.shadowing)
+        hide_preamble_exports(preamble, &self.projection.shadowing)
     }
 
     #[must_use]
@@ -234,36 +249,36 @@ impl SessionCompileView {
 
     #[must_use]
     pub fn session_root(&self) -> &Path {
-        &self.root
+        &self.projection.root
     }
 
     /// User-authored imports that persist at this lexical scope.
     #[must_use]
     pub fn persistent_imports(&self) -> &SourceImports {
-        &self.persistent_imports
+        &self.projection.persistent_imports
     }
 
     /// Frontend-provided imports followed by user-authored persistent imports.
     #[must_use]
     pub fn workbench_imports(&self, external: &SourceImports) -> SourceImports {
         let mut imports = external.clone();
-        imports.extend(&self.persistent_imports);
+        imports.extend(&self.projection.persistent_imports);
         imports
     }
 
     #[must_use]
     pub fn library(&self) -> Option<SessionModule> {
-        self.library
+        self.projection.library
     }
 
     #[must_use]
     pub fn exact_declaration_context(&self) -> Option<&Arc<ExactDeclarationContext>> {
-        self.exact_context.as_ref()
+        self.projection.exact_context.as_ref()
     }
 
     #[must_use]
     pub fn visible_values(&self) -> &[SessionModule] {
-        &self.visible_values
+        &self.projection.visible_values
     }
 
     #[must_use]
@@ -275,7 +290,8 @@ impl SessionCompileView {
     /// closure. Other scopes' live modules do not become compiler inputs.
     #[must_use]
     pub fn with_scoped_injection(mut self) -> Self {
-        self.injected_values.clone_from(&self.reachable_values);
+        self.injected_values
+            .clone_from(&self.projection.reachable_values);
         self
     }
 
@@ -283,7 +299,7 @@ impl SessionCompileView {
     /// see the field's documentation for what is outside it.
     #[must_use]
     pub fn reachable_values(&self) -> &[SessionModule] {
-        &self.reachable_values
+        &self.projection.reachable_values
     }
 
     #[must_use]
@@ -298,7 +314,7 @@ impl SessionCompileView {
     /// scope, lexical root, imports, the declaration module, the visible
     /// value modules and names, and shadowing. Of the injected value
     /// modules, only the ones the turn could reach
-    /// (`compiled_against.reachable_values`) must still be live; the rest of
+    /// (`compiled_against.reachable_values()`) must still be live; the rest of
     /// the session's live set is injected for findability alone, so another
     /// actor binding or releasing its own values cannot invalidate this turn.
     /// A newly injected module the turn did not import is likewise harmless.
@@ -311,14 +327,18 @@ impl SessionCompileView {
     pub fn is_current_for(&self, compiled_against: &Self) -> bool {
         self.session == compiled_against.session
             && self.lexical_scope == compiled_against.lexical_scope
-            && self.root == compiled_against.root
-            && self.persistent_imports == compiled_against.persistent_imports
-            && self.library == compiled_against.library
-            && self.visible_values == compiled_against.visible_values
-            && self.visible_value_names == compiled_against.visible_value_names
-            && self.shadowing == compiled_against.shadowing
-            && self.staged_hiding == compiled_against.staged_hiding
-            && match (&self.exact_context, &compiled_against.exact_context) {
+            && self.projection.root == compiled_against.projection.root
+            && self.projection.persistent_imports == compiled_against.projection.persistent_imports
+            && self.projection.library == compiled_against.projection.library
+            && self.projection.visible_values == compiled_against.projection.visible_values
+            && self.projection.visible_value_names
+                == compiled_against.projection.visible_value_names
+            && self.projection.shadowing == compiled_against.projection.shadowing
+            && self.projection.staged_hiding == compiled_against.projection.staged_hiding
+            && match (
+                &self.projection.exact_context,
+                &compiled_against.projection.exact_context,
+            ) {
                 (Some(current), Some(compiled)) => {
                     Arc::ptr_eq(current, compiled)
                         || current.semantic_sha256() == compiled.semantic_sha256()
@@ -327,6 +347,7 @@ impl SessionCompileView {
                 _ => false,
             }
             && compiled_against
+                .projection
                 .reachable_values
                 .iter()
                 .all(|module| self.injected_values.contains(module))
@@ -341,8 +362,9 @@ impl SessionCompileView {
         declared: &[super::ExportItem],
     ) -> Self {
         self.hide_staged_names(declared);
-        self.shadowing.extend_from_slice(declared);
-        self.library = Some(module);
+        let projection = Arc::make_mut(&mut self.projection);
+        projection.shadowing.extend_from_slice(declared);
+        projection.library = Some(module);
         self
     }
 
@@ -366,11 +388,12 @@ impl SessionCompileView {
             })
             .collect();
         self.hide_staged_names(&names);
-        self.shadowing.extend(names);
-        self.visible_values.push(module);
-        self.visible_value_names.push((module, visible_names));
+        let projection = Arc::make_mut(&mut self.projection);
+        projection.shadowing.extend(names);
+        projection.visible_values.push(module);
+        projection.visible_value_names.push((module, visible_names));
         self.injected_values.push(module);
-        self.reachable_values.push(module);
+        projection.reachable_values.push(module);
         self.next_value_generation = module.gen().next();
         self.canonicalize()
     }
@@ -378,18 +401,27 @@ impl SessionCompileView {
     // Shadow names in earlier staged interfaces without dropping other names
     // exported by those modules or losing their qualified identity.
     fn hide_staged_names(&mut self, names: &[super::ExportItem]) {
-        for module in self.library.iter().chain(self.visible_values.iter()) {
-            if let Some((_, hidden)) = self.staged_hiding.iter_mut().find(|(key, _)| key == module)
+        let projection = Arc::make_mut(&mut self.projection);
+        for module in projection
+            .library
+            .iter()
+            .chain(projection.visible_values.iter())
+        {
+            if let Some((_, hidden)) = projection
+                .staged_hiding
+                .iter_mut()
+                .find(|(key, _)| key == module)
             {
                 hidden.extend_from_slice(names);
             } else {
-                self.staged_hiding.push((*module, names.to_vec()));
+                projection.staged_hiding.push((*module, names.to_vec()));
             }
         }
     }
 
     fn staged_import(&self, module: SessionModule) -> String {
         let hidden = self
+            .projection
             .staged_hiding
             .iter()
             .find(|(key, _)| *key == module)
@@ -406,6 +438,7 @@ impl SessionCompileView {
 
     fn visible_value_import(&self, module: SessionModule) -> String {
         let Some((_, published)) = self
+            .projection
             .visible_value_names
             .iter()
             .find(|(candidate, _)| *candidate == module)
@@ -413,6 +446,7 @@ impl SessionCompileView {
             return self.staged_import(module);
         };
         let hidden = self
+            .projection
             .staged_hiding
             .iter()
             .find(|(key, _)| *key == module)
@@ -462,10 +496,10 @@ impl SessionCompileView {
         specs.extend_generated_imports(
             &self.shadow_preamble(&self.workbench_imports(external).declaration_prefix()),
         );
-        if let Some(module) = self.library {
+        if let Some(module) = self.projection.library {
             specs.extend_text(&self.staged_import(module));
         }
-        for module in &self.visible_values {
+        for module in &self.projection.visible_values {
             specs.extend_text(&self.visible_value_import(*module));
         }
         specs.template_text()
@@ -484,8 +518,8 @@ impl SessionCompileView {
     #[must_use]
     pub fn include_paths(&self, base: &[PathBuf]) -> Vec<PathBuf> {
         let mut include = base.to_vec();
-        if !include.iter().any(|path| path == &self.root) {
-            include.push(self.root.clone());
+        if !include.iter().any(|path| path == &self.projection.root) {
+            include.push(self.projection.root.clone());
         }
         include
     }
@@ -505,20 +539,22 @@ mod tests {
         let mut view = SessionCompileView {
             session: SessionId(4),
             lexical_scope: ScopeId::ROOT,
-            root: PathBuf::from("/session"),
-            persistent_imports: SourceImports::from_specs(["Data.Set qualified as Set"]),
-            library: Some(SessionModule::lib(Generation(3))),
-            visible_values: vec![SessionModule::val(Generation(5))],
-            visible_value_names: Vec::new(),
             injected_values: vec![
                 SessionModule::val(Generation(2)),
                 SessionModule::val(Generation(5)),
             ],
-            reachable_values: Vec::new(),
             next_value_generation: Generation(6),
-            shadowing: Vec::new(),
-            staged_hiding: Vec::new(),
-            exact_context: None,
+            projection: std::sync::Arc::new(crate::session::view::CompileViewProjection {
+                root: PathBuf::from("/session"),
+                persistent_imports: SourceImports::from_specs(["Data.Set qualified as Set"]),
+                library: Some(SessionModule::lib(Generation(3))),
+                visible_values: vec![SessionModule::val(Generation(5))],
+                visible_value_names: Vec::new(),
+                reachable_values: Vec::new(),
+                shadowing: Vec::new(),
+                staged_hiding: Vec::new(),
+                exact_context: None,
+            }),
         }
         .canonicalize();
         let external = SourceImports::from_specs(["HarnessTypes (Decision (..))"]);
@@ -531,9 +567,11 @@ mod tests {
             view.injected_module_names(),
             ["Tidepool.Session.Val.G2", "Tidepool.Session.Val.G5"]
         );
-        view.shadowing.push(super::super::ExportItem::Value {
-            name: "after".into(),
-        });
+        Arc::make_mut(&mut view.projection)
+            .shadowing
+            .push(super::super::ExportItem::Value {
+                name: "after".into(),
+            });
         let external = SourceImports::from_specs(["Tidepool.Duration (after)"]);
         assert_eq!(view.turn_imports(&external),
             "Tidepool.Duration ()\nData.Set qualified as Set\nTidepool.Session.Lib.G3\nTidepool.Session.Val.G5");
@@ -544,24 +582,26 @@ mod tests {
         let base = SessionCompileView {
             session: SessionId(4),
             lexical_scope: ScopeId::ROOT,
-            root: PathBuf::from("/session"),
-            persistent_imports: SourceImports::from_specs(["Data.Set qualified as Set"]),
-            library: Some(SessionModule::lib(Generation(3))),
-            visible_values: vec![SessionModule::val(Generation(5))],
-            visible_value_names: Vec::new(),
             injected_values: vec![
                 SessionModule::val(Generation(2)),
                 SessionModule::val(Generation(4)),
                 SessionModule::val(Generation(5)),
             ],
-            reachable_values: vec![
-                SessionModule::val(Generation(2)),
-                SessionModule::val(Generation(5)),
-            ],
             next_value_generation: Generation(6),
-            shadowing: Vec::new(),
-            staged_hiding: Vec::new(),
-            exact_context: None,
+            projection: std::sync::Arc::new(crate::session::view::CompileViewProjection {
+                root: PathBuf::from("/session"),
+                persistent_imports: SourceImports::from_specs(["Data.Set qualified as Set"]),
+                library: Some(SessionModule::lib(Generation(3))),
+                visible_values: vec![SessionModule::val(Generation(5))],
+                visible_value_names: Vec::new(),
+                reachable_values: vec![
+                    SessionModule::val(Generation(2)),
+                    SessionModule::val(Generation(5)),
+                ],
+                shadowing: Vec::new(),
+                staged_hiding: Vec::new(),
+                exact_context: None,
+            }),
         }
         .canonicalize();
 
@@ -594,13 +634,13 @@ mod tests {
         // A concurrent write that changes what the turn imported must be
         // caught.
         let mut visible_changed = base.clone();
-        visible_changed
+        Arc::make_mut(&mut visible_changed.projection)
             .visible_values
             .push(SessionModule::val(Generation(7)));
         assert!(!visible_changed.is_current_for(&base));
 
         let mut shadowing_changed = base.clone();
-        shadowing_changed
+        Arc::make_mut(&mut shadowing_changed.projection)
             .shadowing
             .push(super::super::ExportItem::Value {
                 name: "interloper".into(),
@@ -608,7 +648,8 @@ mod tests {
         assert!(!shadowing_changed.is_current_for(&base));
 
         let mut library_changed = base.clone();
-        library_changed.library = Some(SessionModule::lib(Generation(8)));
+        Arc::make_mut(&mut library_changed.projection).library =
+            Some(SessionModule::lib(Generation(8)));
         assert!(!library_changed.is_current_for(&base));
     }
 
@@ -617,17 +658,19 @@ mod tests {
         let view = SessionCompileView {
             session: SessionId(4),
             lexical_scope: ScopeId::ROOT,
-            root: PathBuf::from("/session"),
-            persistent_imports: SourceImports::default(),
-            library: None,
-            visible_values: vec![SessionModule::val(Generation(5))],
-            visible_value_names: Vec::new(),
             injected_values: vec![SessionModule::val(Generation(5))],
-            reachable_values: Vec::new(),
             next_value_generation: Generation(6),
-            shadowing: Vec::new(),
-            staged_hiding: Vec::new(),
-            exact_context: None,
+            projection: std::sync::Arc::new(crate::session::view::CompileViewProjection {
+                root: PathBuf::from("/session"),
+                persistent_imports: SourceImports::default(),
+                library: None,
+                visible_values: vec![SessionModule::val(Generation(5))],
+                visible_value_names: Vec::new(),
+                reachable_values: Vec::new(),
+                shadowing: Vec::new(),
+                staged_hiding: Vec::new(),
+                exact_context: None,
+            }),
         }
         .with_staged_values(SessionModule::val(Generation(6)), ["answer".into()])
         .with_staged_values(SessionModule::val(Generation(7)), ["answer".into()]);
@@ -651,20 +694,22 @@ mod tests {
         let view = SessionCompileView {
             session: SessionId(4),
             lexical_scope: ScopeId::ROOT,
-            root: PathBuf::from("/session"),
-            persistent_imports: SourceImports::default(),
-            library: None,
-            visible_values: vec![old],
-            visible_value_names: vec![(
-                old,
-                vec!["__tidepoolPage5".into(), "cellDisplay".into(), ".+".into()],
-            )],
             injected_values: vec![old],
-            reachable_values: Vec::new(),
             next_value_generation: Generation(6),
-            shadowing: Vec::new(),
-            staged_hiding: Vec::new(),
-            exact_context: None,
+            projection: std::sync::Arc::new(crate::session::view::CompileViewProjection {
+                root: PathBuf::from("/session"),
+                persistent_imports: SourceImports::default(),
+                library: None,
+                visible_values: vec![old],
+                visible_value_names: vec![(
+                    old,
+                    vec!["__tidepoolPage5".into(), "cellDisplay".into(), ".+".into()],
+                )],
+                reachable_values: Vec::new(),
+                shadowing: Vec::new(),
+                staged_hiding: Vec::new(),
+                exact_context: None,
+            }),
         }
         .with_staged_values(SessionModule::val(Generation(6)), ["cellDisplay".into()]);
 
