@@ -2587,6 +2587,42 @@ pub fn check_cell_admitted(
     templates: &[TurnTemplate],
     fold: Option<CellFoldTurn<'_>>,
 ) -> Result<(CellCheck, Option<TurnResult>), CellCheckFailure> {
+    validate_cell_admitted_request(&req, &admission)?;
+    let view = admission.view();
+    if admission.reserved_generations().len() > 1 {
+        return Err(CompileError::ExtractFailed(
+            "checked cells support one initial reserved declaration group".into(),
+        )
+        .into());
+    }
+    if fold
+        .as_ref()
+        .is_some_and(|fold| fold.gen != view.next_value_generation().0)
+    {
+        return Err(CompileError::ExtractFailed(
+            "checked fold has another runtime generation".into(),
+        )
+        .into());
+    }
+    if fold.as_ref().is_some_and(|fold| {
+        fold.templates.len() != templates.len()
+            || fold
+                .templates
+                .iter()
+                .zip(templates)
+                .any(|(a, b)| a.kind != b.kind || a.source != b.source)
+    }) {
+        return Err(
+            CompileError::ExtractFailed("checked fold has another compiler recipe".into()).into(),
+        );
+    }
+    check_cell_impl(req, fold, Some(admission), Some(templates))
+}
+
+fn validate_cell_admitted_request(
+    req: &CellCheckRequest<'_>,
+    admission: &super::RuntimeCellAdmission,
+) -> Result<(), CellCheckFailure> {
     let view = admission.view();
     if admission.private_execution().is_none() {
         return Err(CompileError::ExtractFailed(
@@ -2620,34 +2656,123 @@ pub fn check_cell_admitted(
         )
         .into());
     }
-    if admission.reserved_generations().len() > 1 {
+    Ok(())
+}
+
+/// Prepare every authored item and display before the caller can execute the
+/// first native effect. The compiler owns and seals the complete immutable
+/// program, including original declaration and Val interface identities.
+pub fn compile_cell_program_admitted(
+    req: CellCheckRequest<'_>,
+    admission: Arc<super::RuntimeCellAdmission>,
+    templates: &[TurnTemplate],
+) -> Result<
+    (
+        CellCheck,
+        Arc<tidepool_toolchain::checked_cell::CellProgram>,
+    ),
+    CellCheckFailure,
+> {
+    validate_cell_admitted_request(&req, &admission)?;
+    let planned = admission.plan_reservation().ok_or_else(|| {
+        CompileError::ExtractFailed(
+            "complete cell compilation requires its parser reservation".into(),
+        )
+    })?;
+    let scratch = TempDir::new()?;
+    let cell_path = scratch.path().join("cell.txt");
+    let template_path = scratch.path().join("CellCheckTemplate.hs");
+    let output_path = scratch.path().join("cell.cbor");
+    std::fs::write(&cell_path, req.cell_text)?;
+    std::fs::write(&template_path, req.template)?;
+    let mut command = extract_cmd()?;
+    command
+        .input(&cell_path)
+        .cell()
+        .cell_template(&template_path)
+        .cell_out(&output_path)
+        .output_dir(scratch.path())
+        .includes(req.include)
+        .session_root(req.session_root)
+        .inject_vals(req.inject_modules);
+    if let Some(session) = req.session_id {
+        command.session_incarnation(session.0.to_string());
+    }
+    for (index, template) in templates.iter().enumerate() {
+        let path = scratch.path().join(format!("checked-template-{index}.hs"));
+        std::fs::write(&path, &template.source)?;
+        command.turn_template(template.kind.wire_name(), &path);
+    }
+    for (identity, generation) in admission.admitted_retained_imports() {
+        command.retained_generation(extract_identity(identity), *generation);
+    }
+    let endpoint = command.bind().map_err(map_notfound)?;
+    let specification = CheckedCellSpecification {
+        admission_digest: admission.digest(),
+        cell_source: req.cell_text.to_owned(),
+        template_source: req.template.to_owned(),
+        turn_templates: templates
+            .iter()
+            .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+            .collect(),
+        injected_modules: req.inject_modules.to_vec(),
+        reserved_declaration_modules: admission
+            .reserved_generations()
+            .iter()
+            .map(|generation| tidepool_repr::SessionModule::lib(*generation).module_name())
+            .collect(),
+    };
+    if specification.specification_digest() != admission.specification_digest() {
         return Err(CompileError::ExtractFailed(
-            "checked cells support one initial reserved declaration group".into(),
+            "cell compiler recipe differs from its runtime reservation".into(),
         )
         .into());
     }
-    if fold
-        .as_ref()
-        .is_some_and(|fold| fold.gen != view.next_value_generation().0)
-    {
-        return Err(CompileError::ExtractFailed(
-            "checked fold has another runtime generation".into(),
-        )
-        .into());
+    let include = req
+        .include
+        .iter()
+        .map(|path| path.to_path_buf())
+        .collect::<Vec<_>>();
+    let offer = ModuleCandidateOffer::select_cell_program(
+        endpoint.identity().producer_bytes(),
+        &include,
+        scratch.path(),
+        req.exact_context.clone(),
+        specification,
+        admission
+            .interfaces()
+            .iter()
+            .map(|interface| (interface.module(), interface.bytes_owned().clone()))
+            .collect(),
+        planned.compiler_specification(),
+    )?;
+    if let Some(root) = offer.checked_value_root() {
+        command.session_root(root);
     }
-    if fold.as_ref().is_some_and(|fold| {
-        fold.templates.len() != templates.len()
-            || fold
-                .templates
-                .iter()
-                .zip(templates)
-                .any(|(a, b)| a.kind != b.kind || a.source != b.source)
-    }) {
-        return Err(
-            CompileError::ExtractFailed("checked fold has another compiler recipe".into()).into(),
-        );
+    if let Some(manifest) = offer.exact_scope_path() {
+        command.session_artifacts(manifest);
     }
-    check_cell_impl(req, fold, Some(admission), Some(templates))
+    if let Some(manifest) = offer.manifest_path() {
+        command.module_candidates(manifest);
+    }
+    crate::paths::apply_build_products_dir(&mut command, &endpoint);
+    let run = endpoint.execute(&command).map_err(map_notfound)?;
+    let report =
+        crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
+            .map_err(|error| offer.retain_failure(scratch.path(), &run.output.stderr, error))?;
+    let program = offer
+        .admit_cell_program(scratch.path())
+        .map_err(|error| offer.retain_failure(scratch.path(), &run.output.stderr, error))?;
+    let mut checked = decode_cell_out(
+        program.checked_cell().observations(),
+        req.cell_text,
+        req.compile_generation,
+        req.compile_view_evidence,
+    )?;
+    checked.warnings = report.diagnostics;
+    checked.authority = Some(program.checked_cell().clone());
+    checked.admission = Some(admission);
+    Ok((checked, program))
 }
 
 fn check_cell_impl(
@@ -2912,6 +3037,172 @@ fn check_cell_impl(
 /// selector is caught here, before any process is spawned.
 pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
     run_turn_with_pin(req, None, false, None, None)
+}
+
+/// Select the precompiled native item from the complete immutable program.
+/// Runtime admission still owns the ordered cursor and exact live native leases.
+pub fn consume_cell_program_item(
+    admission: Arc<super::RuntimeCheckedItemAdmission>,
+) -> Result<TurnResult, TurnFailure> {
+    let program = admission.prefix().cell_program().ok_or_else(|| {
+        CompileError::ExtractFailed("item admission has no complete cell program".into())
+    })?;
+    let item = program
+        .items()
+        .get(admission.item().index())
+        .ok_or_else(|| {
+            CompileError::ExtractFailed("item is outside its complete cell program".into())
+        })?;
+    let execution = item.native().ok_or_else(|| {
+        CompileError::ExtractFailed("complete cell item has no native products".into())
+    })?;
+    if item.checked_item() != admission.item() || execution.generation() != admission.generation().0
+    {
+        return Err(CompileError::ExtractFailed(
+            "prepared item differs from its original reservation".into(),
+        )
+        .into());
+    }
+    let mut result = decode_cell_program_turn(item, false)?;
+    let certification = match &mut result {
+        TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => {
+            compiled.certification.as_mut()
+        }
+        TurnResult::Decl(_) => None,
+    }
+    .ok_or_else(|| {
+        CompileError::ExtractFailed("prepared native item lacks certified products".into())
+    })?;
+    certification.checked_prefix = Some(admission.prefix().clone());
+    execution.validate_runtime_admission(admission.digest(), program.admission_digest())?;
+    Ok(result)
+}
+
+/// Select the prepared generic display for an actually completed capture.
+/// Budget and seen-job inputs enter the native runner through runtime admission.
+pub fn consume_cell_program_display(
+    admission: Arc<super::RuntimeCheckedDisplayAdmission>,
+) -> Result<TurnResult, TurnFailure> {
+    let program = admission.prefix().cell_program().ok_or_else(|| {
+        CompileError::ExtractFailed("display admission has no complete cell program".into())
+    })?;
+    let item = program
+        .items()
+        .get(admission.execution().item().index())
+        .ok_or_else(|| {
+            CompileError::ExtractFailed("capture is outside its complete cell program".into())
+        })?;
+    let proof = item.display().ok_or_else(|| {
+        CompileError::ExtractFailed("complete cell capture has no prepared display".into())
+    })?;
+    if !admission.matches_compiled_display(proof)
+        || !Arc::ptr_eq(proof.capture(), admission.execution())
+        || proof.generation() != admission.generation().0
+    {
+        return Err(CompileError::ExtractFailed(
+            "prepared display differs from its completed capture".into(),
+        )
+        .into());
+    }
+    let mut result = decode_cell_program_turn(item, true)?;
+    let TurnResult::Bind {
+        compiled, bound, ..
+    } = &mut result
+    else {
+        return Err(CompileError::ExtractFailed(
+            "prepared display is not its binding bundle".into(),
+        )
+        .into());
+    };
+    let certification = compiled.certification.as_mut().ok_or_else(|| {
+        CompileError::ExtractFailed("prepared display lacks certified products".into())
+    })?;
+    certification.checked_display_admission = Some(admission.clone());
+    certification.validate_checked_display(&compiled.prepared, admission.generation().0, bound)?;
+    Ok(result)
+}
+
+fn decode_cell_program_turn(
+    item: &tidepool_toolchain::checked_cell::CellProgramItem,
+    display: bool,
+) -> Result<TurnResult, CompileError> {
+    let (turn_bytes, metadata_bytes, products, prepared) = if display {
+        (
+            item.display_turn_bytes(),
+            item.display_metadata_bytes(),
+            item.display_products(),
+            item.display().map(|proof| proof.target_owned()),
+        )
+    } else {
+        (
+            item.native_turn_bytes(),
+            item.native_metadata_bytes(),
+            item.native_products(),
+            item.native().map(|proof| proof.target_owned()),
+        )
+    };
+    let missing =
+        || CompileError::ExtractFailed("complete cell lacks its sealed output observations".into());
+    let turn = decode_turn_out(turn_bytes.ok_or_else(missing)?)?;
+    let (table, warnings) = read_metadata(metadata_bytes.ok_or_else(missing)?)?;
+    let products = products.ok_or_else(missing)?;
+    let prepared = prepared.ok_or_else(missing)?;
+    let certification = TurnCertification {
+        groups: products.certified_groups.clone(),
+        target_owners: products.pending_imports.clone(),
+        package_interfaces: products.package_interfaces.clone(),
+        recovery_products: products.recovery_products.clone(),
+        checked_item: (!display).then(|| item.checked_item().clone()),
+        checked_execution: (!display)
+            .then(|| item.native().expect("native products preflighted").clone()),
+        checked_prefix: None,
+        checked_display: display.then(|| {
+            item.display()
+                .expect("display products preflighted")
+                .clone()
+        }),
+        checked_display_admission: None,
+    };
+    certification.validate_checked_table(&table)?;
+    match turn {
+        DecodedTurnOut::Bind {
+            binders,
+            variant,
+            bound,
+            asks,
+            wrapped_source,
+        } => Ok(TurnResult::Bind {
+            binders,
+            variant,
+            bound,
+            wrapped_source,
+            compiled: CompiledTurn {
+                table,
+                warnings,
+                asks,
+                prepared,
+                certification: Some(certification),
+            },
+        }),
+        DecodedTurnOut::Expr {
+            variant,
+            asks,
+            wrapped_source,
+        } if !display => Ok(TurnResult::Expr {
+            variant,
+            wrapped_source,
+            compiled: CompiledTurn {
+                table,
+                warnings,
+                asks,
+                prepared,
+                certification: Some(certification),
+            },
+        }),
+        _ => Err(CompileError::ExtractFailed(
+            "complete native cell output has another item kind".into(),
+        )),
+    }
 }
 
 /// Compile only the next item of a runtime-owned completed prefix. Body,

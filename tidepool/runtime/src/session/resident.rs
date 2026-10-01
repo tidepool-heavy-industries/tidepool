@@ -2305,6 +2305,34 @@ where
         self.state.begin_checked_prefix(admission, first_item)
     }
 
+    pub fn begin_cell_program(
+        &self,
+        admission: Arc<super::RuntimeCellAdmission>,
+        program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
+    ) -> Result<Option<Arc<super::RuntimeCheckedPrefix>>, SessionError> {
+        self.state.begin_cell_program(admission, program)
+    }
+
+    pub fn admit_planned_cell_for_execution(
+        &mut self,
+        execution: Arc<super::PrivateExecutionAdmission>,
+        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
+        specification: Arc<dyn std::any::Any + Send + Sync>,
+        specification_digest: [u8; 32],
+        authority_digest: [u8; 32],
+        include_paths: Vec<PathBuf>,
+    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
+        self.settle_dropped_custody();
+        self.state.admit_planned_cell_for_execution(
+            execution,
+            plan,
+            specification,
+            specification_digest,
+            authority_digest,
+            include_paths,
+        )
+    }
+
     pub fn admit_cell_for_execution(
         &mut self,
         execution: Arc<super::PrivateExecutionAdmission>,
@@ -5329,10 +5357,14 @@ where
         };
         let run_exec_started = std::time::Instant::now();
         let ran = self.on_eval_thread(move |engine, table, handlers, captured| {
-            let argument = presentation
+            let argument = match presentation
                 .as_ref()
                 .map(|input| engine.build_host_value(realm, input, table))
-                .transpose()?;
+                .transpose()
+            {
+                Ok(argument) => argument,
+                Err(error) => return Ok(Err(error)),
+            };
             let outcome = settle_prepared(
                 engine,
                 program,

@@ -1345,7 +1345,6 @@ struct ProtectedObservation {
     prefix: Arc<tidepool_runtime::session::RuntimeCheckedPrefix>,
     execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
     binder: BoundBinder,
-    include: Vec<PathBuf>,
 }
 
 fn protected_observation(
@@ -1381,20 +1380,10 @@ fn protected_observation(
             "checked observation capture name differs".into(),
         ));
     }
-    let specification = prefix
-        .admission()
-        .specification()
-        .downcast_ref::<WorkbenchCompilationSpec>()
-        .ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                "checked observation lacks its owning workbench specification".into(),
-            )
-        })?;
     Ok(Some(ProtectedObservation {
         prefix: prefix.clone(),
         execution: execution.clone(),
         binder: binder.clone(),
-        include: specification.include.clone(),
     }))
 }
 
@@ -4170,8 +4159,8 @@ where
             .await
     }
 
-    /// One exact cell recipe retains its source/tool and input owners while
-    /// its items compile lazily against the successfully completed prefix.
+    /// Retain the admitted source and input owners while one compiler
+    /// transaction prepares all items before native execution becomes possible.
     async fn prepare_admitted_cell(
         &self,
         context: crate::ActorSessionContext,
@@ -4187,6 +4176,7 @@ where
                 "checked cell preparation requires its admitted private context and source revision".into(),
             ));
         }
+        let admission_execution = execution.clone();
         let snapshot_source = self.access.source.clone();
         let type_modules = self.type_modules.clone();
         let response = self.response.clone();
@@ -4195,7 +4185,7 @@ where
             .as_ref()
             .map(|guard| guard.mounted_input().clone());
         let snapshot_cell_source = cell_source.clone();
-        let (specification, admission) = self
+        let specification = self
             .access
             .with_machine(context.clone(), move |session, context, _| {
                 let (source, snapshot) = snapshot_cell_split_owned(
@@ -4243,7 +4233,7 @@ where
                         })
                         .collect(),
                     injected_modules: prepared.injected,
-                    reserved_declaration_modules: vec![snapshot.candidate_module.module_name()],
+                    reserved_declaration_modules: Vec::new(),
                 };
                 let specification = Arc::new(WorkbenchCompilationSpec {
                     _authority: authority.clone(),
@@ -4255,29 +4245,45 @@ where
                     retained: snapshot.retained,
                     declaration_imports: snapshot.view.workbench_imports(),
                 });
-                // The parser owns whether there is a declaration group. Reserve
-                // one exact original identity without classifying authored text.
-                let admission = session
-                    .admit_cell_for_execution(
-                        execution.admission.clone(),
-                        1,
-                        specification.clone(),
-                        specification.cell.specification_digest(),
-                        authority.authority_digest(),
-                        specification.include.clone(),
-                    )
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })?;
-                Ok((specification, admission))
+                Ok(specification)
             })
             .await?;
         let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
+        let parser_specification = specification.clone();
+        let parser_cancellation = cancellation.clone();
+        let plan = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+            tidepool_runtime::with_compiler_transaction_cancellable(parser_cancellation, || {
+                tidepool_toolchain::artifacts::parse_cell_plan(
+                    Arc::new(parser_specification.cell.clone()),
+                    &parser_specification.include,
+                )
+                .map_err(ResidentActorWorkbenchError::Compile)
+            })
+        }))
+        .await
+        .map_err(ResidentActorWorkbenchError::Join)??;
+        let reservation_specification = specification.clone();
+        let admission = self
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                session
+                    .admit_planned_cell_for_execution(
+                        admission_execution.admission.clone(),
+                        plan,
+                        reservation_specification.clone(),
+                        reservation_specification.cell.specification_digest(),
+                        reservation_specification._authority.authority_digest(),
+                        reservation_specification.include.clone(),
+                    )
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })
+            })
+            .await?;
         let check_specification = specification.clone();
         let check_admission = admission.clone();
-        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "checked_cell_compile_started", "workbench phase");
-        let (checked, folded) =
+        let (checked, program) =
             crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                 tidepool_runtime::with_compiler_transaction_cancellable(cancellation, || {
                     let include = check_specification
@@ -4286,7 +4292,7 @@ where
                         .map(PathBuf::as_path)
                         .collect::<Vec<_>>();
                     let view = check_admission.view();
-                    tidepool_runtime::session::turn::check_cell_admitted(
+                    tidepool_runtime::session::turn::compile_cell_program_admitted(
                         CellCheckRequest {
                             exact_context: view.exact_declaration_context().cloned(),
                             session_id: Some(view.session()),
@@ -4300,11 +4306,6 @@ where
                         },
                         check_admission.clone(),
                         &check_specification.templates,
-                        Some(tidepool_runtime::session::CellFoldTurn {
-                            templates: &check_specification.templates,
-                            gen: check_admission.initial_value_generation().0,
-                            retained_imports: &check_specification.retained,
-                        }),
                     )
                     .map_err(|failure| {
                         cell_check_error(failure, &check_specification.cell.cell_source)
@@ -4313,73 +4314,35 @@ where
             }))
             .await
             .map_err(ResidentActorWorkbenchError::Join)??;
-        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "checked_cell_compile_completed", "workbench phase");
         cancel_on_drop.0 = None;
-        let item_caps = (0..checked.items.len())
-            .map(|index| checked.checked_item(index))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(ResidentActorWorkbenchError::Compile)?;
-        let first = item_caps.first().cloned();
-        let prefix = if let Some(first) = first {
-            let prefix_admission = admission.clone();
-            tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "checked_prefix_admit_started", "workbench phase");
-            let prefix = Some(
-                self.access
-                    .with_machine(context.clone(), move |session, _, _| {
-                        session
-                            .begin_checked_prefix(prefix_admission, first)
-                            .map_err(|error| {
-                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                            })
+        let item_capabilities = program
+            .items()
+            .iter()
+            .map(|item| item.checked_item().clone())
+            .collect::<Vec<_>>();
+        let prefix = self
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                session
+                    .begin_cell_program(admission, program)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                     })
-                    .await?,
-            );
-            tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "checked_prefix_admit_completed", "workbench phase");
-            prefix
-        } else {
-            None
-        };
-        let mut items = item_caps
+            })
+            .await?;
+        let items = item_capabilities
             .into_iter()
-            .zip(&checked.items)
-            .map(|(item, observation)| PreparedCellItem {
+            .map(|item| PreparedCellItem {
                 ready: PreparedCellStep::Checked {
                     specification: specification.clone(),
-                    prefix: prefix.as_ref().expect("nonempty cell has a prefix").clone(),
+                    prefix: prefix
+                        .as_ref()
+                        .expect("nonempty complete cell has a prefix")
+                        .clone(),
                     item,
-                    verdict: observation.verdict.clone(),
                 },
             })
             .collect::<Vec<_>>();
-        if let Some(mut folded) = folded {
-            if checked.items.len() != 1 || checked.items[0].verdict.kind != TurnKind::Bind {
-                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    "checked fold is not one bind item".into(),
-                ));
-            }
-            let prefix = prefix.expect("fold has a checked prefix");
-            let item = checked
-                .checked_item(0)
-                .map_err(ResidentActorWorkbenchError::Compile)?;
-            let reservation = self
-                .access
-                .with_machine(context.clone(), move |session, _, _| {
-                    session.admit_checked_item(prefix, item).map_err(|error| {
-                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })
-                })
-                .await?;
-            checked
-                .attach_fold_prefix(&mut folded, reservation)
-                .map_err(ResidentActorWorkbenchError::Compile)?;
-            items[0].ready = PreparedCellStep::Executable(Box::new(ReadyBlock {
-                result: folded,
-                generation: admission.initial_value_generation(),
-                declaration_source: checked.items[0].source.clone(),
-                declaration_imports: specification.declaration_imports.clone(),
-                observation: None,
-            }));
-        }
         let bindings = self
             .access
             .with_machine(context, move |session, context, _| {
@@ -4703,7 +4666,6 @@ where
             specification,
             prefix,
             item,
-            verdict,
         } = &prepared.ready
         {
             let item = item.clone();
@@ -4740,26 +4702,7 @@ where
                 });
             }
             let specification = specification.clone();
-            let compile_specification = specification.clone();
-            let compile_block = block.clone();
-            let verdict = verdict.clone();
-            let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
-            let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
-            tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_item_compile_started", "workbench phase");
-            let ready = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                tidepool_runtime::with_compiler_transaction_cancellable(cancellation, || {
-                    compile_admitted_cell_item(
-                        &compile_specification,
-                        reservation,
-                        verdict,
-                        &compile_block,
-                    )
-                })
-            }))
-            .await
-            .map_err(ResidentActorWorkbenchError::Join)??;
-            tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_item_compile_completed", "workbench phase");
-            cancel_on_drop.0 = None;
+            let ready = consume_admitted_cell_item(&specification, reservation, &block)?;
             let ready = match ready {
                 CompiledBlock::Ready(ready) => *ready,
                 CompiledBlock::Rejected(diagnostic) => {
@@ -5692,7 +5635,7 @@ async fn render_checked_observation_off_checkout<H, O>(
     access: &ResidentMachineAccess<H, O>,
     context: &crate::ActorSessionContext,
     request: &ObservationRender,
-    cancellation: &tidepool_runtime::CompilerTransactionCancellation,
+    _cancellation: &tidepool_runtime::CompilerTransactionCancellation,
 ) -> Result<String, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -5701,7 +5644,6 @@ where
     let protected = request.protected.clone().ok_or_else(|| {
         ResidentActorWorkbenchError::ActorProtocol("protected display has no capture".into())
     })?;
-    let include = protected.include.clone();
     let budget = request.budget;
     let presented = request.presented.clone();
     tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_admit_started", "workbench phase");
@@ -5721,23 +5663,10 @@ where
         })
         .await?;
     tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_admit_completed", "workbench phase");
-    let compile_admission = admission.clone();
-    let compile_cancellation = cancellation.clone();
-    tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_compile_started", "workbench phase");
-    let result = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-        tidepool_runtime::with_compiler_transaction_cancellable(compile_cancellation, || {
-            let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-            tidepool_runtime::session::turn::run_checked_display(compile_admission, &include)
-                .map_err(|failure| {
-                    ResidentActorWorkbenchError::CompileInfrastructure(
-                        classify_compile(&failure.error).message,
-                    )
-                })
-        })
-    }))
-    .await
-    .map_err(ResidentActorWorkbenchError::Join)??;
-    tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_compile_completed", "workbench phase");
+    let result = tidepool_runtime::session::turn::consume_cell_program_display(admission.clone())
+        .map_err(|failure| {
+        ResidentActorWorkbenchError::CompileInfrastructure(classify_compile(&failure.error).message)
+    })?;
     let TurnResult::Bind {
         bound, compiled, ..
     } = result
@@ -10237,7 +10166,6 @@ enum PreparedCellStep {
         specification: Arc<WorkbenchCompilationSpec>,
         prefix: Arc<tidepool_runtime::session::RuntimeCheckedPrefix>,
         item: tidepool_toolchain::checked_cell::ExactCheckedItem,
-        verdict: TurnClassification,
     },
     Executable(Box<ReadyBlock>),
     Declaration {
@@ -10393,50 +10321,31 @@ where
     ))
 }
 
-fn compile_admitted_cell_item(
+fn consume_admitted_cell_item(
     specification: &WorkbenchCompilationSpec,
     reservation: Arc<tidepool_runtime::session::RuntimeCheckedItemAdmission>,
-    verdict: TurnClassification,
     block: &ParsedBlock,
 ) -> Result<CompiledBlock, ResidentActorWorkbenchError> {
-    let include = specification
-        .include
-        .iter()
-        .map(PathBuf::as_path)
-        .collect::<Vec<_>>();
-    let view = reservation.snapshot().view();
-    let injected = reservation.snapshot().compiler_prefix().injected_modules();
-    let result = match tidepool_runtime::session::turn::run_checked_item(
-        TurnRequest {
-            exact_context: view.exact_declaration_context().cloned(),
-            session_id: Some(view.session()),
-            turn_text: reservation.item().source(),
-            templates: &specification.templates,
-            include: &include,
-            session_root: view.session_root(),
-            inject_modules: &injected,
-            gen: reservation.generation().0,
-            verdict: Some(verdict),
-            target: None,
-            retained_imports: &specification.retained,
-        },
-        reservation.clone(),
-    ) {
-        Ok(result) => result,
-        Err(failure) if classify_compile(&failure.error).class == FailureClass::UserHaskell => {
-            return Ok(CompiledBlock::Rejected(render_turn_compile_rejection(
-                &failure.error,
-                failure.attempted_source.as_deref(),
-                &block.source,
-                &format!("<cell item {}>", block.ordinal),
-            )));
-        }
-        Err(failure) => {
-            return Err(ResidentActorWorkbenchError::CompileInfrastructure(
-                tidepool_runtime::session::render_cell_compile_error(&failure.error, &block.source),
-            ))
-        }
-    };
+    let result =
+        match tidepool_runtime::session::turn::consume_cell_program_item(reservation.clone()) {
+            Ok(result) => result,
+            Err(failure) if classify_compile(&failure.error).class == FailureClass::UserHaskell => {
+                return Ok(CompiledBlock::Rejected(render_turn_compile_rejection(
+                    &failure.error,
+                    failure.attempted_source.as_deref(),
+                    &block.source,
+                    &format!("<cell item {}>", block.ordinal),
+                )));
+            }
+            Err(failure) => {
+                return Err(ResidentActorWorkbenchError::CompileInfrastructure(
+                    tidepool_runtime::session::render_cell_compile_error(
+                        &failure.error,
+                        &block.source,
+                    ),
+                ))
+            }
+        };
     let observation = reservation
         .observation_name()
         .map(|name| {
