@@ -6112,12 +6112,9 @@ where
         self.spec_installs = 1;
         let prepare_started = std::time::Instant::now();
         let application_workbench = self.environment.runner.application_workbench();
-        let preparation = application_workbench.prepare_tools(context.clone(), self.spec_installs);
-        super::resident_workbench::log_startup_future_size(
-            "install_interactive_policy.prepare_tools",
-            std::mem::size_of_val(&preparation),
-        );
-        let compiled_tools = preparation.await;
+        let compiled_tools = application_workbench
+            .prepare_tools(context.clone(), self.spec_installs)
+            .await;
         tracing::info!(
             actor = %context.actor,
             phase = "startup",

@@ -57,18 +57,6 @@ use crate::request_effect::{
 };
 use crate::{ActorCompileViewError, ResponseExpectation};
 
-pub(crate) fn log_startup_future_size(name: &str, bytes: usize) {
-    use std::io::Write;
-
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/tidepool-annealing-future-sizes.log")
-    {
-        let _ = writeln!(file, "{name} bytes={bytes}");
-    }
-}
-
 tokio::task_local! {
     static SLOT_CONTINUATION_OWNER: ParkedHoleAbortRegistration;
     static INVOCATION_CANCEL: Arc<std::sync::atomic::AtomicBool>;
@@ -3597,17 +3585,15 @@ where
             // fragment produces is plain session-held data, so reading it back
             // out below is an ordinary later checkout, the same shape every
             // `resume_*` method already uses against a held hole.
-            let fragment = self.begin_fragment_split(
+            // Keep the large split-compile state out of this preparation
+            // future while preserving its cancellation and drop guards.
+            let fragment = Box::pin(self.begin_fragment_split(
                 compile_context.clone(),
                 source,
                 Vec::new(),
                 block,
                 Some(verdict),
-            );
-            log_startup_future_size(
-                "prepare_tools.begin_fragment_split",
-                std::mem::size_of_val(&fragment),
-            );
+            ));
             let step = fragment.await?;
             let ResidentWorkbenchStep::Running { outcome, .. } = step else {
                 let detail = match step {
@@ -5352,10 +5338,6 @@ where
                 ready,
                 8192,
             );
-            log_startup_future_size(
-                "begin_fragment_split.begin_ready_block_split",
-                std::mem::size_of_val(&step),
-            );
             let step = step.await?;
             cancel_on_drop.0 = None;
             return Ok(step);
@@ -6474,10 +6456,6 @@ where
         compiled,
         display_budget,
     );
-    log_startup_future_size(
-        "begin_ready_block_split.run_ready_block_split",
-        std::mem::size_of_val(&step),
-    );
     let step = step.await?;
     settle_deferred_display(access, context, step).await
 }
@@ -6567,10 +6545,6 @@ where
                 .map(|pending| PreparedSnapshotAttempt::Ready(Box::new(pending)))
                 .map_err(ResidentActorWorkbenchError::Resident)
         });
-        log_startup_future_size(
-            "run_ready_block_split.snapshot_checkout",
-            std::mem::size_of_val(&attempt_future),
-        );
         let attempt = attempt_future.await?;
         let pending = match attempt {
             PreparedSnapshotAttempt::Bootstrap => break 'split,
@@ -6619,10 +6593,6 @@ where
                     Err(error) => Err(ResidentActorWorkbenchError::Resident(error)),
                 }
             });
-        log_startup_future_size(
-            "run_ready_block_split.install_checkout",
-            std::mem::size_of_val(&install_future),
-        );
         let step = install_future.await?;
         tracing::info!(target: "exomonad_actor::workbench_phase", install_attempt, phase = "native_item_run_completed", "workbench phase");
         if let Some(step) = step {
