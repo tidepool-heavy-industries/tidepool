@@ -884,28 +884,36 @@ impl<H, O> ResidentMachineAccess<H, O> {
             .is_some_and(|current| Arc::ptr_eq(current, owner))
     }
 
-    fn clear_pending_child_teardown(
+    /// Complete terminal child cleanup under the same membership/owner lock
+    /// order as retirement admission. An older worker cannot erase a different
+    /// pending owner; terminal checkout settlement may complete the current one.
+    fn finish_child_session_teardown(
         &self,
         session_id: tidepool_repr::SessionId,
-        owner: &Arc<PendingChildTeardown>,
-    ) {
-        let removed = {
+        expected_owner: Option<&Arc<PendingChildTeardown>>,
+    ) -> bool {
+        let (removed_child, owner) = {
+            let mut children = self
+                .child_sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut pending = self
                 .pending_child_teardown
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if pending
-                .get(&session_id)
-                .is_some_and(|current| Arc::ptr_eq(current, owner))
-            {
-                pending.remove(&session_id)
-            } else {
-                None
+            if expected_owner.is_some_and(|owner| {
+                !pending
+                    .get(&session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, owner))
+            }) {
+                return false;
             }
+            (children.remove(&session_id), pending.remove(&session_id))
         };
-        if removed.is_some() {
+        if let Some(owner) = &owner {
             owner.wake.notify_one();
         }
+        removed_child || owner.is_some()
     }
 }
 
@@ -2710,7 +2718,7 @@ impl<H, O> ResidentActorRunner<H, O> {
                 Err(error) => {
                     let still_owned = access.owns_pending_child_teardown(session_id, &worker_owner);
                     if still_owned {
-                        access.clear_pending_child_teardown(session_id, &worker_owner);
+                        access.finish_child_session_teardown(session_id, Some(&worker_owner));
                     }
                     let result = if still_owned { Err(error) } else { Ok(()) };
                     let _ = initial_check_tx.send(result);
@@ -2734,7 +2742,7 @@ impl<H, O> ResidentActorRunner<H, O> {
                 {
                     tracing::debug!(session = ?session_id, %error,
                         "deferred child-session cleanup could not check out its machine");
-                    access.clear_pending_child_teardown(session_id, &worker_owner);
+                    access.finish_child_session_teardown(session_id, Some(&worker_owner));
                     break;
                 }
             }
@@ -2773,20 +2781,7 @@ impl<H, O> ResidentActorRunner<H, O> {
     /// resolution on any error after their own `provision_child_session`
     /// call succeeds.
     pub(crate) fn discard_child_session(&self, session_id: tidepool_repr::SessionId) {
-        self.access
-            .child_sessions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&session_id);
-        let owner = self
-            .access
-            .pending_child_teardown
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&session_id);
-        if let Some(owner) = owner {
-            owner.wake.notify_one();
-        }
+        self.access.finish_child_session_teardown(session_id, None);
         if self
             .access
             .machines
@@ -3202,7 +3197,17 @@ where
             }
             (None, None) => self.machines.checkout_queued(session_id, request).await,
         }
-        .map_err(ResidentActorWorkbenchError::Checkout)?;
+        .map_err(|error| {
+            if matches!(
+                error,
+                tidepool_runtime::session::registry::CheckoutError::Unknown(_)
+                    | tidepool_runtime::session::registry::CheckoutError::Retired { .. }
+                    | tidepool_runtime::session::registry::CheckoutError::Terminal { .. }
+            ) {
+                self.finish_child_session_teardown(session_id, None);
+            }
+            ResidentActorWorkbenchError::Checkout(error)
+        })?;
         // Every cell holds the run's resident machine exclusively, so the
         // wait for it is a primary per-cell cost. `info`, not `debug`: this
         // needs to reach the run's INFO log, not just the detailed trace.
@@ -3221,8 +3226,7 @@ where
         }
         let source = self.source.clone();
         let machines = Arc::clone(&self.machines);
-        let pending_child_teardown = Arc::clone(&self.pending_child_teardown);
-        let child_sessions = Arc::clone(&self.child_sessions);
+        let child_cleanup = self.sharing();
 
         let task = spawn_blocking_in_span(move || {
             // The blocking task owns the machine and its linear checkout
@@ -3249,6 +3253,7 @@ where
                                 .to_string(),
                         };
                         machines.settle_retire(receipt, reason);
+                        child_cleanup.finish_child_session_teardown(session_id, None);
                         tracing::info!(actor = %actor, session = ?session_id,
                             held_ms = held_since.elapsed().as_millis(),
                             "resident machine checkout released (retired)");
@@ -3260,25 +3265,16 @@ where
                     // cleanup owner's custody-release retry. Once nothing is
                     // left, the machine is removed outright instead of
                     // settling back to idle.
-                    let still_pending_teardown = pending_child_teardown
+                    let pending_owner = child_cleanup
+                        .pending_child_teardown
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .contains_key(&session_id);
-                    if still_pending_teardown {
+                        .get(&session_id)
+                        .cloned();
+                    if let Some(owner) = pending_owner {
                         let outstanding = session.outstanding_custody();
                         if outstanding == 0 {
-                            let mut child_sessions = child_sessions
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            let owner = pending_child_teardown
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .remove(&session_id);
-                            child_sessions.remove(&session_id);
-                            drop(child_sessions);
-                            if let Some(owner) = owner {
-                                owner.wake.notify_one();
-                            }
+                            child_cleanup.finish_child_session_teardown(session_id, Some(&owner));
                             machines.settle_retire(
                                 receipt,
                                 "actor retired, deferred custody now released",
@@ -3315,6 +3311,7 @@ where
                         receipt,
                         format!("machine became unavailable: a resident turn panicked ({message})"),
                     );
+                    child_cleanup.finish_child_session_teardown(session_id, None);
                     tracing::info!(actor = %actor, session = ?session_id,
                         held_ms = held_since.elapsed().as_millis(),
                         "resident machine checkout released (panic)");
@@ -15112,6 +15109,198 @@ mod request_tests {
             .unwrap()
             .insert(child_id);
         (runner, machines, child_id, custody)
+    }
+
+    fn child_session_with_binding_lease() -> (
+        ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        Arc<ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>>,
+        tidepool_repr::SessionId,
+        tidepool_runtime::session::resident::BindingLease,
+        tempfile::TempDir,
+    ) {
+        let (machines, runner, context, root) = child_admission_fixture();
+        let id = context.placement.session;
+        runner.access.child_sessions.lock().unwrap().insert(id);
+        let (mut session, receipt) = machines.checkout_run(id).unwrap().into_parts();
+        let lease = session.lease_bindings(&[]);
+        machines.settle_suspended(receipt, session, Vec::new());
+        (runner, machines, id, lease, root)
+    }
+
+    async fn assert_child_cleanup_finished(
+        runner: &ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        id: tidepool_repr::SessionId,
+        owner: &Arc<PendingChildTeardown>,
+    ) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while runner.access.machines.kind(id).is_some()
+                || !owner
+                    .worker
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(tokio::task::JoinHandle::is_finished)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal cleanup worker finishes");
+        assert!(!runner.access.child_sessions.lock().unwrap().contains(&id));
+        assert!(!runner
+            .access
+            .pending_child_teardown
+            .lock()
+            .unwrap()
+            .contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn reaper_release_final_binding_lease_wakes_and_finishes_cleanup() {
+        let (runner, machines, id, lease, _root) = child_session_with_binding_lease();
+        runner.retire_child_session(id, false).await.unwrap();
+        assert!(
+            machines.kind(id).is_some(),
+            "preparation lease retains the machine"
+        );
+        let owner = runner
+            .access
+            .pending_child_teardown
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .clone();
+        std::thread::spawn(move || drop(lease)).join().unwrap();
+        assert_child_cleanup_finished(&runner, id, &owner).await;
+    }
+
+    #[tokio::test]
+    async fn reaper_release_terminal_external_checkout_clears_membership_and_finishes_worker() {
+        let (runner, machines, id, lease, _root) = child_session_with_binding_lease();
+        runner.retire_child_session(id, false).await.unwrap();
+        let owner = runner
+            .access
+            .pending_child_teardown
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .clone();
+        assert!(machines.remove(id, "external terminal owner").is_some());
+        let result = runner
+            .access
+            .with_host_machine(
+                "observe-terminal-child",
+                id,
+                None,
+                |_, _| -> Result<(), ResidentActorWorkbenchError> {
+                    panic!("terminal child cannot enter")
+                },
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(ResidentActorWorkbenchError::Checkout(
+                CheckoutError::Retired { .. }
+            ))
+        ));
+        assert_child_cleanup_finished(&runner, id, &owner).await;
+        runner.retire_child_session(id, false).await.unwrap();
+        assert!(!runner
+            .access
+            .pending_child_teardown
+            .lock()
+            .unwrap()
+            .contains_key(&id));
+        drop(lease);
+    }
+
+    #[tokio::test]
+    async fn reaper_release_panicked_checkout_clears_membership_and_finishes_worker() {
+        let (runner, _machines, id, lease, _root) = child_session_with_binding_lease();
+        runner.retire_child_session(id, false).await.unwrap();
+        let owner = runner
+            .access
+            .pending_child_teardown
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .clone();
+        let result = runner
+            .access
+            .with_host_machine(
+                "panic-terminal-child",
+                id,
+                None,
+                |_, _| -> Result<(), ResidentActorWorkbenchError> {
+                    panic!("injected terminal checkout panic")
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(ResidentActorWorkbenchError::Join(_))));
+        assert_child_cleanup_finished(&runner, id, &owner).await;
+        drop(lease);
+    }
+
+    #[tokio::test]
+    async fn reaper_release_unknown_initial_checkout_clears_membership_and_finishes_worker() {
+        let (_machines, runner, context, _root) = child_admission_fixture();
+        let id = tidepool_repr::SessionId(context.placement.session.0 + 1);
+        runner.access.child_sessions.lock().unwrap().insert(id);
+        let retirement = runner.retire_child_session(id, false);
+        tokio::pin!(retirement);
+        assert!(matches!(
+            futures_util::poll!(retirement.as_mut()),
+            std::task::Poll::Pending
+        ));
+        let owner = runner
+            .access
+            .pending_child_teardown
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .clone();
+        retirement.await.unwrap();
+        assert_child_cleanup_finished(&runner, id, &owner).await;
+        runner.retire_child_session(id, false).await.unwrap();
+        assert!(!runner
+            .access
+            .pending_child_teardown
+            .lock()
+            .unwrap()
+            .contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn reaper_release_terminal_cleanup_preserves_different_worker_owner() {
+        let (runner, _machines, id, lease, _root) = child_session_with_binding_lease();
+        let owner = Arc::new(PendingChildTeardown::new());
+        runner
+            .access
+            .pending_child_teardown
+            .lock()
+            .unwrap()
+            .insert(id, owner.clone());
+        let stale = Arc::new(PendingChildTeardown::new());
+        assert!(!runner
+            .access
+            .finish_child_session_teardown(id, Some(&stale)));
+        assert!(runner.access.child_sessions.lock().unwrap().contains(&id));
+        assert!(runner.access.owns_pending_child_teardown(id, &owner));
+        assert!(runner
+            .access
+            .finish_child_session_teardown(id, Some(&owner)));
+        assert!(!runner.access.child_sessions.lock().unwrap().contains(&id));
+        assert!(!runner
+            .access
+            .pending_child_teardown
+            .lock()
+            .unwrap()
+            .contains_key(&id));
+        drop(lease);
     }
 
     /// A dedicated child session whose actor has retired, but for which a
