@@ -453,7 +453,14 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
     // Consuming independently retained custody must leave the authored binding
     // usable by a later native program in its original session.
     let source_use = left.prepare_expression("pure (held + 1)");
-    left.expression(&source_use);
+    let ResidentOutcome::Completed { result, .. } = left
+        .session
+        .run_with_sites("original_binding_after_export", source_use.code())
+        .unwrap()
+    else {
+        panic!("the original source binding remains usable after export")
+    };
+    assert_eq!(result.to_json(), serde_json::json!(1_000_000));
     assert!(left
         .session
         .current_binding_in(tidepool_codegen::scope::ScopeId::ROOT, "held")
