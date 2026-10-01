@@ -285,6 +285,14 @@ impl WorkbenchExecutionControl {
             )
     }
 
+    pub(crate) fn is_waiting_hosted_cell(&self) -> bool {
+        self.invocation
+            .as_ref()
+            .is_some_and(WorkbenchCallKey::is_original_invocation)
+            && self.terminal_reply().is_none()
+            && self.phase.load(std::sync::atomic::Ordering::Acquire) == WORKBENCH_SLEEPING
+    }
+
     async fn settled(&self) -> crate::KernelWorkbenchReply {
         let mut settlement = self.settlement.subscribe();
         loop {
@@ -1552,7 +1560,7 @@ mod tests {
             "thread".into(),
             "turn".into(),
             "call-1".into(),
-            Some("outer-call".into()),
+            Some("call-1".into()),
             None,
         );
         let dispatch = |client: ResidentToolClient, invocation: ToolInvocationContext| {
@@ -1568,9 +1576,10 @@ mod tests {
         let (control, reply) = received.recv().await.unwrap();
         let control = control.unwrap();
         assert!(actor.hosted_cell_computing());
+        assert!(actor.hosted_workbench_waiting(&invocation).is_none());
         let mut second_invocation = invocation.clone();
         second_invocation.call_id = "second-call".into();
-        let second = dispatch(client.clone(), second_invocation);
+        let second = dispatch(client.clone(), second_invocation.clone());
         let (second_control, second_reply) =
             tokio::time::timeout(std::time::Duration::from_secs(2), received.recv())
                 .await
@@ -1591,11 +1600,32 @@ mod tests {
             "settling second execution preserves first"
         );
         control.arm_sleep();
+        assert_eq!(
+            actor.hosted_workbench_waiting(&invocation),
+            Some(control.execution_id(actor.identity()))
+        );
+        let mut wrong_invocation = invocation.clone();
+        wrong_invocation.origin = ToolInvocationContext::external(
+            "other-thread".into(),
+            "turn".into(),
+            "call-1".into(),
+            Some("call-1".into()),
+            None,
+        )
+        .origin;
+        assert!(actor.hosted_workbench_waiting(&wrong_invocation).is_none());
+        assert!(actor.hosted_workbench_waiting(&second_invocation).is_none());
+        let mut namespaced = invocation.clone();
+        namespaced.namespace = Some("nested".into());
+        assert!(actor.hosted_workbench_waiting(&namespaced).is_none());
         assert!(
             !actor.hosted_cell_computing(),
             "a sleeping cell is interruptible"
         );
+        assert!(control.request_cancellation());
+        assert!(actor.hosted_workbench_waiting(&invocation).is_none());
         control.settle(terminal_reply());
+        assert!(actor.hosted_workbench_waiting(&invocation).is_none());
         actor.hosted_cell().complete(&control);
         reply.send(terminal_reply()).unwrap();
         running.await.unwrap().unwrap();
@@ -1612,13 +1642,16 @@ mod tests {
         assert!(!actor.hosted_cell_computing());
 
         // Dropping the caller leaves the actor's accepted work visible.
-        let abandoned = dispatch(client.clone(), invocation);
+        let abandoned = dispatch(client.clone(), invocation.clone());
         let (control, reply) = received.recv().await.unwrap();
         let control = control.unwrap();
         abandoned.abort();
         let _ = abandoned.await;
         assert!(actor.hosted_cell_computing());
+        control.arm_sleep();
+        assert!(actor.hosted_workbench_waiting(&invocation).is_some());
         control.settle(terminal_reply());
+        assert!(actor.hosted_workbench_waiting(&invocation).is_none());
         actor.hosted_cell().complete(&control);
         drop(reply);
         assert!(!actor.hosted_cell_computing());

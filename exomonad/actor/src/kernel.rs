@@ -645,6 +645,29 @@ impl LocalActorRef {
         self.admission.1.computing()
     }
 
+    /// Observe whether this exact original hosted call currently has an armed
+    /// workbench wait. The call can resume or settle immediately afterwards;
+    /// this observation does not acknowledge cancellation.
+    #[must_use]
+    pub fn hosted_workbench_waiting(
+        &self,
+        invocation: &exomonad_tool::ToolInvocationContext,
+    ) -> Option<tidepool_runtime::session::WorkbenchExecutionId> {
+        let key = crate::resident_tools::WorkbenchCallKey::from(invocation.clone());
+        if !key.is_original_invocation() {
+            return None;
+        }
+        let execution = crate::resident_tools::execution_id(self.identity, &key);
+        self.hosted_cell()
+            .find(|control| {
+                control.is_waiting_hosted_cell()
+                    && control.invocation.as_ref().is_some_and(|key| {
+                        crate::resident_tools::execution_id(self.identity, key) == execution
+                    })
+            })
+            .map(|_| execution)
+    }
+
     pub(crate) async fn abort_prepared_replacement(&self) -> Result<(), KernelBehaviorError> {
         let (reply, receive) = tokio::sync::oneshot::channel();
         self.address
