@@ -730,8 +730,6 @@ pub struct StagedDeclaration {
     base_generation: Generation,
     base_tip: Generation,
     turn: DeclTurn,
-    import_modules: Vec<String>,
-    inject_modules: Vec<String>,
     visible_values: Vec<(SessionVarId, String)>,
     /// The exact bytes GHC validated. Installing this candidate ([`SessionLib::
     /// adopt_staged_batch_with_receipt_and_vals_in`]) writes precisely these
@@ -809,7 +807,6 @@ pub struct DeclarationCandidateRender {
     rendered: RenderedModule,
     turn: DeclTurn,
     receipt: DeclarationReceipt,
-    import_modules: Vec<String>,
     inject_modules: Vec<String>,
 }
 
@@ -1780,7 +1777,6 @@ impl SessionLib {
             rendered,
             turn,
             receipt: receipt.clone(),
-            import_modules: import_modules.to_vec(),
             inject_modules: inject_modules.to_vec(),
         }
     }
@@ -2581,8 +2577,6 @@ pub fn validate_declaration_candidate(
         base_generation: candidate.base_generation,
         base_tip: candidate.base_tip,
         turn,
-        import_modules: candidate.import_modules,
-        inject_modules: candidate.inject_modules,
         visible_values: Vec::new(),
         rendered: candidate.rendered,
         certified_authored,

@@ -4242,7 +4242,6 @@ where
                     templates,
                     include: prepared.include,
                     evidence,
-                    retained: snapshot.retained,
                     declaration_imports: snapshot.view.workbench_imports(),
                 });
                 Ok(specification)
@@ -10157,7 +10156,6 @@ struct WorkbenchCompilationSpec {
     templates: Vec<tidepool_runtime::session::TurnTemplate>,
     include: Vec<PathBuf>,
     evidence: String,
-    retained: Vec<(SymbolIdentity, u64)>,
     declaration_imports: SourceImports,
 }
 

@@ -485,6 +485,17 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
         .attach_owned_recovery_graph_v3(&manifest, recovery_owner.clone())
         .unwrap();
     let mut consumer = PersistentSession::new(Some(recovered_library), 1024 * 1024);
+    let report = consumer.lib().declaration_recovery_report().unwrap();
+    assert_eq!(report.successor_session, 4403);
+    assert!(report
+        .restored
+        .iter()
+        .any(|tip| tip.generation == spec.declaration_tip));
+    assert!(!report.durability_unconfirmed);
+    assert!(report
+        .unavailable_bindings
+        .iter()
+        .all(|binding| binding.session != 4403));
     assert_eq!(consumer.lib().scope_tip(ScopeId::ROOT), Generation(0));
     // Ordinary minting creates an explicit G0 tip: successor transfer must
     // replace it with the recovered tip, not use inheritance-only seeding.

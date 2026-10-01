@@ -1485,7 +1485,7 @@ impl PersistentSession {
             items: observation.verdict.items.clone(),
         };
         let external = state.snapshot.view.persistent_imports().clone();
-        let (external_imports, import_modules, visible_values) =
+        let (external_imports, _, visible_values) =
             self.declaration_staging_context_in(scope, &receipt, &external)?;
         let base_tip = self.lib().scope_tip(scope);
         let turn = super::render::DeclTurn {
@@ -1520,14 +1520,6 @@ impl PersistentSession {
             base_generation: generation,
             base_tip,
             turn,
-            import_modules,
-            inject_modules: state
-                .snapshot
-                .view
-                .reachable_values()
-                .iter()
-                .map(|module| module.module_name())
-                .collect(),
             visible_values,
             rendered: super::render::RenderedModule {
                 module,
