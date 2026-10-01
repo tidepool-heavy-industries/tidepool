@@ -1362,19 +1362,20 @@ async fn reattachment_preserves_completed_unacknowledged_forks() {
         include_str!("../actor_host_fixtures/generic_actor/documentation_setup.hs"),
     )
     .await;
-    let boundary = tidepool_runtime::session::WorkbenchForkBoundary {
-        thread_id: "actor-host-recovery".into(),
-        call_id: "minimal-unfold".into(),
-    };
+    let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+        "actor-host-recovery".into(),
+        "minimal-turn".into(),
+        "minimal-unfold".into(),
+    );
     let result = root
         .dispatch_boxed(ToolInvocation {
-            context: Some(ToolInvocationContext {
-                context_call_id: Some(boundary.call_id.clone()),
-                thread_id: boundary.thread_id.clone(),
-                turn_id: "minimal-turn".into(),
-                call_id: "minimal-inner-call".into(),
-                namespace: Some("haskell".into()),
-            }),
+            context: Some(ToolInvocationContext::external(
+                boundary.thread_id.clone(),
+                "minimal-turn".into(),
+                "minimal-inner-call".into(),
+                Some(boundary.call_id.clone()),
+                Some("haskell".into()),
+            )),
             name: exomonad_actor::HASKELL_TOOL.into(),
             arguments: ToolArguments::Raw(
                 example(include_str!("../../../../exomonad/prompts/docs/unfold.md")).into(),
@@ -1457,13 +1458,13 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
     let result = tokio::time::timeout(
         Duration::from_secs(120),
         root.dispatch_boxed(ToolInvocation {
-            context: Some(ToolInvocationContext {
-                context_call_id: Some(call_id.clone()),
-                thread_id: "actor-host-vertical".into(),
-                turn_id: call_id.clone(),
-                call_id: call_id.clone(),
-                namespace: Some("haskell".into()),
-            }),
+            context: Some(ToolInvocationContext::external(
+                "actor-host-vertical".into(),
+                call_id.clone(),
+                call_id.clone(),
+                Some(call_id.clone()),
+                Some("haskell".into()),
+            )),
             name: exomonad_actor::HASKELL_TOOL.into(),
             arguments: ToolArguments::Raw(format!(
                 "{}\n{}\n{}\n{}",
@@ -1489,10 +1490,11 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
     campaign.assert_no_deployment("child started before tool completion", |event| {
         matches!(event, LocalResidentDeployment::PolicyInstalled(_))
     });
-    let completion = tidepool_runtime::session::WorkbenchForkBoundary {
-        thread_id: "actor-host-vertical".into(),
+    let completion = tidepool_runtime::session::WorkbenchForkBoundary::external(
+        "actor-host-vertical".into(),
+        call_id.clone(),
         call_id,
-    };
+    );
     let expected_children = groups * 2;
     root.complete_boxed(completion.clone()).await.unwrap();
     root.complete_boxed(completion).await.unwrap();

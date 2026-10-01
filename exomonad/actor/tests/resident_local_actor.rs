@@ -485,13 +485,13 @@ async fn resident_await_watch_case(case: WatchCase) {
     let settled = if cancel_first {
         None
     } else {
-        let settled_context = ToolInvocationContext {
-            context_call_id: Some("await-watch-settled".into()),
-            thread_id: "await-watch-test".into(),
-            turn_id: "turn-settled".into(),
-            call_id: "call-settled".into(),
-            namespace: None,
-        };
+        let settled_context = ToolInvocationContext::external(
+            "await-watch-test".into(),
+            "turn-settled".into(),
+            "call-settled".into(),
+            Some("await-watch-settled".into()),
+            None,
+        );
         let mut settled_call = {
             let policy = policy.clone();
             let context = settled_context.clone();
@@ -584,13 +584,13 @@ async fn resident_await_watch_case(case: WatchCase) {
         Some(settled)
     };
 
-    let cancelled_context = ToolInvocationContext {
-        context_call_id: Some("await-watch-cancelled".into()),
-        thread_id: "await-watch-test".into(),
-        turn_id: "turn-cancelled".into(),
-        call_id: "call-cancelled".into(),
-        namespace: None,
-    };
+    let cancelled_context = ToolInvocationContext::external(
+        "await-watch-test".into(),
+        "turn-cancelled".into(),
+        "call-cancelled".into(),
+        Some("await-watch-cancelled".into()),
+        None,
+    );
     let mut cancelled_call = {
         let policy = policy.clone();
         let context = cancelled_context.clone();

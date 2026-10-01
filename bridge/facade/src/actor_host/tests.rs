@@ -645,13 +645,13 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
     let capture = issuer
         .policy
         .dispatch_boxed(ToolInvocation {
-            context: Some(ToolInvocationContext {
-                context_call_id: Some(capture_call_id.clone()),
-                thread_id: "actor-host-vertical".into(),
-                turn_id: capture_call_id.clone(),
-                call_id: capture_call_id.clone(),
-                namespace: Some("haskell".into()),
-            }),
+            context: Some(ToolInvocationContext::external(
+                "actor-host-vertical".into(),
+                capture_call_id.clone(),
+                capture_call_id.clone(),
+                Some(capture_call_id.clone()),
+                Some("haskell".into()),
+            )),
             name: exomonad_actor::HASKELL_TOOL.into(),
             arguments: ToolArguments::Raw(include_str!("checkpoint_issuer_capture.hs").into()),
         })
@@ -660,10 +660,11 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
     assert_eq!(capture["status"], "committed", "{capture:?}");
     issuer
         .policy
-        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary {
-            thread_id: "actor-host-vertical".into(),
-            call_id: capture_call_id.clone(),
-        })
+        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "actor-host-vertical".into(),
+            capture_call_id.clone(),
+            capture_call_id.clone(),
+        ))
         .await
         .unwrap();
     issuer
@@ -765,13 +766,13 @@ async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() 
         target_id.id.0, target_id.incarnation.0
     );
     let request = ToolInvocation {
-        context: Some(ToolInvocationContext {
-            context_call_id: Some("lost-recovery-call".into()),
-            thread_id: "retained-native-thread".into(),
-            turn_id: "native-turn".into(),
-            call_id: "native-call".into(),
-            namespace: None,
-        }),
+        context: Some(ToolInvocationContext::external(
+            "retained-native-thread".into(),
+            "native-turn".into(),
+            "native-call".into(),
+            Some("lost-recovery-call".into()),
+            None,
+        )),
         name: exomonad_actor::HASKELL_TOOL.into(),
         arguments: exomonad_tool::ToolArguments::Raw(source),
     };
@@ -1848,22 +1849,23 @@ pub(super) async fn dispatch_haskell_script_result(
     let call_id = uuid::Uuid::new_v4().simple().to_string();
     let result = endpoint
         .dispatch_boxed(ToolInvocation {
-            context: Some(ToolInvocationContext {
-                context_call_id: Some(call_id.clone()),
-                thread_id: "actor-host-vertical".into(),
-                turn_id: call_id.clone(),
-                call_id: call_id.clone(),
-                namespace: Some("haskell".into()),
-            }),
+            context: Some(ToolInvocationContext::external(
+                "actor-host-vertical".into(),
+                call_id.clone(),
+                call_id.clone(),
+                Some(call_id.clone()),
+                Some("haskell".into()),
+            )),
             name: exomonad_actor::HASKELL_TOOL.into(),
             arguments: ToolArguments::Raw(script.into()),
         })
         .await;
     endpoint
-        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary {
-            thread_id: "actor-host-vertical".into(),
+        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "actor-host-vertical".into(),
+            call_id.clone(),
             call_id,
-        })
+        ))
         .await
         .expect("recorded tool completion");
     result
@@ -1877,23 +1879,24 @@ pub(super) async fn dispatch_structured_tool(
     let call_id = uuid::Uuid::new_v4().simple().to_string();
     let result = endpoint
         .dispatch_boxed(ToolInvocation {
-            context: Some(ToolInvocationContext {
-                context_call_id: Some(call_id.clone()),
-                thread_id: "actor-host-vertical".into(),
-                turn_id: call_id.clone(),
-                call_id: call_id.clone(),
-                namespace: Some(name.into()),
-            }),
+            context: Some(ToolInvocationContext::external(
+                "actor-host-vertical".into(),
+                call_id.clone(),
+                call_id.clone(),
+                Some(call_id.clone()),
+                Some(name.into()),
+            )),
             name: name.into(),
             arguments: ToolArguments::Structured(arguments),
         })
         .await
         .unwrap_or_else(|error| panic!("{name} tool failed: {error}"));
     endpoint
-        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary {
-            thread_id: "actor-host-vertical".into(),
+        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "actor-host-vertical".into(),
+            call_id.clone(),
             call_id,
-        })
+        ))
         .await
         .expect("recorded tool completion");
     result

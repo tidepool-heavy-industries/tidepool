@@ -3667,13 +3667,13 @@ mod tests {
             client
                 .dispatch_workbench(
                     WorkbenchRequest::from_cell_input("pure ()"),
-                    Some(ToolInvocationContext {
-                        context_call_id: None,
-                        thread_id: "thread".into(),
-                        turn_id: "turn".into(),
-                        call_id: "call".into(),
-                        namespace: None,
-                    }),
+                    Some(ToolInvocationContext::external(
+                        "thread".into(),
+                        "turn".into(),
+                        "call".into(),
+                        None,
+                        None,
+                    )),
                 )
                 .await
         });
@@ -3771,10 +3771,11 @@ mod tests {
         actor
             .address()
             .send_message(KernelMessage::ToolCompleted {
-                boundary: tidepool_runtime::session::WorkbenchForkBoundary {
-                    thread_id: "thread".into(),
-                    call_id: "call".into(),
-                },
+                boundary: tidepool_runtime::session::WorkbenchForkBoundary::external(
+                    "thread".into(),
+                    "call".into(),
+                    "call".into(),
+                ),
                 reply: completed_tx.into(),
             })
             .expect("queue completion");
@@ -3827,10 +3828,11 @@ mod tests {
                 reply: call_tx.into(),
             })
             .unwrap();
-        let boundary = tidepool_runtime::session::WorkbenchForkBoundary {
-            thread_id: "parked-thread".into(),
-            call_id: "completed-call".into(),
-        };
+        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "parked-thread".into(),
+            "completed-call".into(),
+            "completed-call".into(),
+        );
         let (completed_tx, mut completed_rx) = oneshot::channel();
         actor
             .address()

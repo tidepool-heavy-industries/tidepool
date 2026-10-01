@@ -56,13 +56,13 @@ async fn bash_call_logs_one_call_timing_summary_line() {
     let invocation = ToolInvocation {
         name: "bash".into(),
         arguments: ToolArguments::Structured(serde_json::json!({"cmd": "echo hi"})),
-        context: Some(ToolInvocationContext {
-            context_call_id: Some("call-timing-once".into()),
-            thread_id: "call-timing-thread".into(),
-            turn_id: "call-timing-turn".into(),
-            call_id: "call-timing-once".into(),
-            namespace: None,
-        }),
+        context: Some(ToolInvocationContext::external(
+            "call-timing-thread".into(),
+            "call-timing-turn".into(),
+            "call-timing-once".into(),
+            Some("call-timing-once".into()),
+            None,
+        )),
     };
     let dispatch = tokio::spawn(policy.dispatch_boxed(invocation));
     // The command settles only after a real ~50ms delay, so the effect
