@@ -105,6 +105,40 @@ fn execute_cell(
     expected_display: Option<&str>,
     publication_target: &ScalePublication,
 ) -> Duration {
+    execute_cell_with_authority_checks(
+        resident,
+        public,
+        effects,
+        images,
+        scenario,
+        label,
+        source,
+        declarations,
+        expected_display,
+        publication_target,
+        AuthorityChecks::Configured,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum AuthorityChecks {
+    Configured,
+    RefusalBranches,
+}
+
+fn execute_cell_with_authority_checks(
+    resident: &mut ScaleSession,
+    public: ScopeId,
+    effects: &TestEffectSurface,
+    images: &ImageRegistry,
+    scenario: (usize, usize),
+    label: &str,
+    source: &str,
+    declarations: usize,
+    expected_display: Option<&str>,
+    publication_target: &ScalePublication,
+    authority_checks: AuthorityChecks,
+) -> Duration {
     let cell_started = Instant::now();
     let execution = Arc::new(resident.begin_private_execution(public).unwrap());
     let view = execution.view();
@@ -162,30 +196,61 @@ fn execute_cell(
     let include = view.include_paths(effects.include_paths());
     let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let injected = view.injected_module_names();
+    let compile_cell = || {
+        compile_cell_program_admitted(
+            CellCheckRequest {
+                exact_context: view.exact_declaration_context().cloned(),
+                session_id: Some(view.session()),
+                cell_text: source,
+                template: &template,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                compile_generation: admission.initial_value_generation().0,
+                compile_view_evidence: "",
+            },
+            admission.clone(),
+            &templates,
+        )
+    };
+    if matches!(authority_checks, AuthorityChecks::RefusalBranches) {
+        struct RestoreDeployment(std::ffi::OsString);
+        impl Drop for RestoreDeployment {
+            fn drop(&mut self) {
+                std::env::set_var("TIDEPOOL_COMPILER_DEPLOYMENT", &self.0);
+            }
+        }
+        let configured = std::env::var_os("TIDEPOOL_COMPILER_DEPLOYMENT")
+            .expect("vertical test requires configured deployment");
+        let guard = RestoreDeployment(configured.clone());
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        std::env::remove_var("TIDEPOOL_COMPILER_DEPLOYMENT");
+        assert!(
+            compile_cell().is_err(),
+            "unconfigured planned compile must refuse admission"
+        );
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+        let mut mismatch: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(configured).unwrap()).unwrap();
+        let producer = mismatch["producer_identity"].as_array_mut().unwrap();
+        producer[0] = serde_json::json!(producer[0].as_u64().unwrap() ^ 1);
+        let wrong = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(wrong.path(), serde_json::to_vec(&mismatch).unwrap()).unwrap();
+        std::env::set_var("TIDEPOOL_COMPILER_DEPLOYMENT", wrong.path());
+        assert!(
+            compile_cell().is_err(),
+            "wrong producer planned compile must refuse admission"
+        );
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+        drop(guard);
+    }
     let (checked, program) = measured(
         resident,
         images,
         scenario,
         &format!("{label}.compile_cell"),
         None,
-        |_| {
-            compile_cell_program_admitted(
-                CellCheckRequest {
-                    exact_context: view.exact_declaration_context().cloned(),
-                    session_id: Some(view.session()),
-                    cell_text: source,
-                    template: &template,
-                    include: &include,
-                    session_root: view.session_root(),
-                    inject_modules: &injected,
-                    compile_generation: admission.initial_value_generation().0,
-                    compile_view_evidence: "",
-                },
-                admission.clone(),
-                &templates,
-            )
-            .unwrap()
-        },
+        |_| compile_cell().unwrap(),
     );
     assert!(!checked.items.is_empty());
     eprintln!(
@@ -889,7 +954,7 @@ fn complete_cell_consumes_item_and_display_without_compiler_requests() {
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
-    execute_cell(
+    execute_cell_with_authority_checks(
         &mut resident,
         public,
         &effects,
@@ -900,5 +965,6 @@ fn complete_cell_consumes_item_and_display_without_compiler_requests() {
         0,
         Some("42"),
         &ScalePublication::Ephemeral,
+        AuthorityChecks::RefusalBranches,
     );
 }

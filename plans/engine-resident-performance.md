@@ -142,3 +142,9 @@ It makes no packaged-product latency claim. The later durable scaling tests
 `resident_durable_growing_prefix_10_baseline_0` and
 `resident_durable_growing_prefix_10_baseline_100` reuse the same actual-cell and
 publication helper; they are opt-in and are not part of this baseline command.
+
+The small complete-cell vertical also refuses a missing configured deployment
+and a deliberately wrong producer before extraction count changes. It restores
+the exact deployment with a scoped guard before the valid compile. These
+refusal probes run only in that vertical correctness test; warm and durable
+measurement cells do not change authority configuration.

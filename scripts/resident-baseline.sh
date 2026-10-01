@@ -50,7 +50,8 @@ python3 - "$evidence/manifest.json" "$status" <<'PY'
 import hashlib, json, pathlib, sys
 path = pathlib.Path(sys.argv[1])
 manifest = json.loads(path.read_text())
-manifest['exit_code'] = int(sys.argv[2])
+manifest['battery_exit_code'] = int(sys.argv[2])
+manifest['exit_code'] = manifest['battery_exit_code']
 manifest['selected_files_unchanged'] = all(hashlib.sha256(pathlib.Path(row['path']).read_bytes()).hexdigest() == row['sha256'] for row in manifest['selected_files'].values())
 try:
     cgroup = next(line.split(':', 2)[2] for line in pathlib.Path('/proc/self/cgroup').read_text().splitlines() if line.startswith('0::'))
@@ -58,6 +59,10 @@ try:
     manifest['scope_memory_peak_bytes'] = int((pathlib.Path('/sys/fs/cgroup') / cgroup.lstrip('/') / 'memory.peak').read_text())
 except (OSError, StopIteration, ValueError):
     manifest['scope_memory_peak_bytes'] = None
+if not manifest['selected_files_unchanged']:
+    manifest['exit_code'] = 1
 path.write_text(json.dumps(manifest, indent=2) + '\n')
+if not manifest['selected_files_unchanged']:
+    raise SystemExit('frozen compiler files changed during baseline')
 PY
 exit "$status"
