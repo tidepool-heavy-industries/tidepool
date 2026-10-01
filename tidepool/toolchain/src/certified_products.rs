@@ -1329,6 +1329,65 @@ pub(crate) fn certified_home_requirements(
         .collect())
 }
 
+/// Direct native requirements are distinct from typechecking closure. They
+/// retain the dependent and required original group ordinals, or exact live
+/// binding generation; graph reachability grants no native lease.
+pub(crate) fn certified_native_requirements(
+    bytes: &[u8],
+    owner: &CachedHomeOwner,
+) -> CertResult<
+    Vec<(
+        crate::declaration_join::ExactModuleIdentity,
+        crate::artifact_inventory::ArtifactDependency,
+    )>,
+> {
+    use crate::artifact_inventory::ArtifactDependency;
+    let witness = decode_home_witness(bytes)?;
+    if &witness.owner != owner {
+        return Err(CertificationError::Mismatch("native requirements owner"));
+    }
+    let mut requirements = Vec::new();
+    for (dependent_ordinal, _, globals) in witness.groups {
+        for global in globals {
+            let (owner, dependency) = match global.owner {
+                ReceiptImportOwner::Source {
+                    unit,
+                    module,
+                    original_ordinal,
+                    ..
+                } => (
+                    crate::declaration_join::ExactModuleIdentity { unit, module },
+                    ArtifactDependency::NativeGroup {
+                        dependent_ordinal,
+                        required_ordinal: original_ordinal,
+                    },
+                ),
+                ReceiptImportOwner::Retained {
+                    identity,
+                    generation,
+                } => (
+                    crate::declaration_join::ExactModuleIdentity {
+                        unit: identity.unit,
+                        module: identity.module,
+                    },
+                    ArtifactDependency::NativeBinding {
+                        dependent_ordinal,
+                        generation,
+                        namespace: identity.namespace,
+                        occurrence: identity.occurrence,
+                        record_parent: identity.record_parent,
+                    },
+                ),
+                ReceiptImportOwner::Package { .. } => continue,
+            };
+            requirements.push((owner, dependency));
+        }
+    }
+    requirements.sort();
+    requirements.dedup();
+    Ok(requirements)
+}
+
 fn verify_home_witness(bytes: &[u8], owner: &CachedHomeOwner) -> CertResult<HomeCertification> {
     verify_home_witness_with_validation(bytes, owner, &mut PackageInterfaceValidation::default())
 }
@@ -2456,6 +2515,49 @@ mod tests {
             },
             decode_home_witness(&bytes).unwrap(),
         )
+    }
+
+    #[test]
+    fn artifact_native_edges_preserve_original_group_and_binding_generations() {
+        use crate::artifact_inventory::ArtifactDependency;
+        let owner = inherited_owner("Consumer");
+        let source = inherited_owner("Original");
+        let source_group = inherited_group(
+            &owner,
+            PendingImportOwner::Source {
+                owner: source.clone(),
+                original_ordinal: 11,
+                binder: testing::identity("Original", "entry"),
+            },
+        );
+        let bytes = encode_home_certification(&owner, &[source_group], &BTreeMap::new()).unwrap();
+        let edges = certified_native_requirements(&bytes, &owner).unwrap();
+        assert_eq!(
+            edges,
+            vec![(
+                crate::declaration_join::ExactModuleIdentity {
+                    unit: source.unit,
+                    module: source.module
+                },
+                ArtifactDependency::NativeGroup {
+                    dependent_ordinal: 7,
+                    required_ordinal: 11
+                }
+            )]
+        );
+        let binding = testing::identity("Value", "bound");
+        let retained_group = inherited_group(
+            &owner,
+            PendingImportOwner::Retained {
+                identity: binding.clone(),
+                generation: 41,
+            },
+        );
+        let bytes = encode_home_certification(&owner, &[retained_group], &BTreeMap::new()).unwrap();
+        assert!(
+            matches!(&certified_native_requirements(&bytes,&owner).unwrap()[0].1,ArtifactDependency::NativeBinding{dependent_ordinal:7,generation:41,occurrence,..} if occurrence=="bound")
+        );
+        assert!(certified_native_requirements(&bytes, &inherited_owner("Imposter")).is_err());
     }
 
     #[test]

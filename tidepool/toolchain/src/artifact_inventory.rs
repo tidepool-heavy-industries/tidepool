@@ -1,6 +1,7 @@
 //! Scoped original-artifact ownership. Graph indices are private implementation
 //! details; durable and compiler boundaries use content-bound artifact IDs.
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use petgraph::stable_graph::{NodeIndex, StableDiGraph};
@@ -23,11 +24,21 @@ pub enum ArtifactKind {
     LexicalJoin,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactDependency {
     Interface,
-    NativeGroup { original_ordinal: u32 },
+    NativeGroup {
+        dependent_ordinal: u32,
+        required_ordinal: u32,
+    },
+    NativeBinding {
+        dependent_ordinal: u32,
+        generation: u64,
+        namespace: String,
+        occurrence: String,
+        record_parent: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -98,6 +109,7 @@ pub(crate) struct ArtifactEntry {
     pub descriptor: ArtifactDescriptor,
     pub payload: ArtifactPayload,
     pub requirements: Vec<ExactModuleIdentity>,
+    pub native_requirements: Vec<(ExactModuleIdentity, ArtifactDependency)>,
 }
 
 impl ArtifactEntry {
@@ -105,8 +117,15 @@ impl ArtifactEntry {
         producer: [u8; 32],
         product: CertifiedRecoveryProduct,
         requirements: Vec<ExactModuleIdentity>,
-    ) -> Self {
+    ) -> Result<Self, CompileError> {
         let owner = product.owner();
+        let native_requirements = crate::certified_products::certified_native_requirements(
+            product.certification_bytes(),
+            owner,
+        )
+        .map_err(|error| {
+            CompileError::ExtractFailed(format!("artifact inventory native requirements: {error}"))
+        })?;
         let descriptor = descriptor(
             ArtifactKind::OriginalModule,
             ExactModuleIdentity {
@@ -119,11 +138,12 @@ impl ArtifactEntry {
             digest(product.package_imports_bytes()),
             Some(digest(product.certification_bytes())),
         );
-        Self {
+        Ok(Self {
             descriptor,
             payload: ArtifactPayload::Original(product),
             requirements,
-        }
+            native_requirements,
+        })
     }
     pub(crate) fn interface(
         interface: CertifiedJoinedInterface,
@@ -146,9 +166,85 @@ impl ArtifactEntry {
             descriptor,
             payload: ArtifactPayload::Interface(interface, kind),
             requirements,
+            native_requirements: Vec::new(),
         }
     }
 }
+pub(crate) fn restore_recovery_dependencies(
+    entries: &mut [ArtifactEntry],
+    descriptors: &[ArtifactDescriptor],
+    dependencies: &[(ArtifactId, ArtifactId, ArtifactDependency)],
+) -> Result<(), CompileError> {
+    use crate::artifact_inventory::ArtifactDependency;
+    let expected = entries
+        .iter()
+        .map(|entry| (entry.descriptor.id, entry.descriptor.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let supplied = descriptors
+        .iter()
+        .map(|descriptor| (descriptor.id, descriptor.clone()))
+        .collect::<BTreeMap<_, _>>();
+    if supplied.len() != descriptors.len() || supplied != expected {
+        return Err(failure(
+            "recovered artifact descriptor closure differs from certified bytes",
+        ));
+    }
+    let owners = descriptors
+        .iter()
+        .map(|descriptor| (descriptor.owner.clone(), descriptor.id))
+        .collect::<BTreeMap<_, _>>();
+    let edges = dependencies.iter().cloned().collect::<BTreeSet<_>>();
+    if edges.len() != dependencies.len()
+        || edges
+            .iter()
+            .any(|(from, to, _)| !expected.contains_key(from) || !expected.contains_key(to))
+    {
+        return Err(failure("invalid recovered dependency endpoints"));
+    }
+    let expected_native = entries
+        .iter()
+        .flat_map(|entry| {
+            entry.native_requirements.iter().map(|(owner, dependency)| {
+                Ok((
+                    entry.descriptor.id,
+                    *owners
+                        .get(owner)
+                        .ok_or_else(|| failure("native dependency artifact is missing"))?,
+                    dependency.clone(),
+                ))
+            })
+        })
+        .collect::<Result<BTreeSet<_>, CompileError>>()?;
+    let actual_native = edges
+        .iter()
+        .filter(|(_, _, dependency)| !matches!(dependency, ArtifactDependency::Interface))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if expected_native != actual_native {
+        return Err(failure(
+            "recovered native dependencies differ from original certification",
+        ));
+    }
+    for entry in entries.iter_mut() {
+        let requirements = edges
+            .iter()
+            .filter(|(from, _, dependency)| {
+                *from == entry.descriptor.id && matches!(dependency, ArtifactDependency::Interface)
+            })
+            .map(|(_, to, _)| expected[to].owner.clone())
+            .collect::<BTreeSet<_>>();
+        if matches!(entry.descriptor.kind, ArtifactKind::ValueInterface)
+            && requirements != entry.requirements.iter().cloned().collect()
+        {
+            return Err(failure(
+                "value interface dependencies differ from retained evidence",
+            ));
+        }
+        entry.requirements = requirements.into_iter().collect();
+    }
+    Ok(())
+}
+
 fn descriptor(
     kind: ArtifactKind,
     owner: ExactModuleIdentity,
@@ -186,6 +282,18 @@ struct InventoryState {
     indices: BTreeMap<ArtifactId, NodeIndex>,
     payloads: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     roots: BTreeMap<ArtifactId, usize>,
+    graph_visits: AtomicU64,
+    view_queries: AtomicU64,
+    entry_handle_copies: AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactInventoryMetrics {
+    pub nodes: usize,
+    pub graph_visits: u64,
+    pub view_queries: u64,
+    pub entry_handle_copies: u64,
+    pub whole_graph_copies: u64,
 }
 
 /// A run/context family owns one inventory, without a global registry.
@@ -203,9 +311,9 @@ impl std::fmt::Debug for ArtifactInventory {
 }
 impl ArtifactInventory {
     pub fn empty_view(&self) -> ArtifactView {
-        self.retain(Vec::new(), None)
+        self.retain(Vec::new(), Vec::new())
     }
-    fn retain(&self, roots: Vec<ArtifactId>, parent: Option<ArtifactView>) -> ArtifactView {
+    fn retain(&self, roots: Vec<ArtifactId>, parents: Vec<ArtifactView>) -> ArtifactView {
         let mut state = self.0.lock().expect("inventory lock");
         for id in &roots {
             *state.roots.entry(*id).or_default() += 1;
@@ -214,7 +322,7 @@ impl ArtifactInventory {
         ArtifactView(Arc::new(ViewLease {
             inventory: self.clone(),
             roots,
-            parent,
+            parents,
         }))
     }
     pub(crate) fn admit(
@@ -236,6 +344,8 @@ impl ArtifactInventory {
         for mut entry in entries {
             entry.requirements.sort();
             entry.requirements.dedup();
+            entry.native_requirements.sort();
+            entry.native_requirements.dedup();
             let id = entry.descriptor.id;
             roots.insert(id);
             if let Some(previous) = state
@@ -273,6 +383,10 @@ impl ArtifactInventory {
                 .requirements
                 .iter()
                 .any(|owner| !owners.contains_key(owner))
+                || entry
+                    .native_requirements
+                    .iter()
+                    .any(|(owner, _)| !owners.contains_key(owner))
             {
                 return Err(failure("incomplete interface requirements"));
             }
@@ -290,6 +404,10 @@ impl ArtifactInventory {
                     .graph
                     .add_edge(source, target, ArtifactDependency::Interface);
             }
+            for (owner, dependency) in &entry.native_requirements {
+                let target = state.indices[&owners[owner]];
+                state.graph.add_edge(source, target, dependency.clone());
+            }
             state.payloads.insert(id, Arc::new(entry));
         }
         // Root registration occurs under the same lock as admission, so another
@@ -301,8 +419,18 @@ impl ArtifactInventory {
         Ok(ArtifactView(Arc::new(ViewLease {
             inventory: self.clone(),
             roots,
-            parent: Some(parent.clone()),
+            parents: vec![parent.clone()],
         })))
+    }
+    pub fn metrics(&self) -> ArtifactInventoryMetrics {
+        let state = self.0.lock().expect("inventory lock");
+        ArtifactInventoryMetrics {
+            nodes: state.graph.node_count(),
+            graph_visits: state.graph_visits.load(Ordering::Relaxed),
+            view_queries: state.view_queries.load(Ordering::Relaxed),
+            entry_handle_copies: state.entry_handle_copies.load(Ordering::Relaxed),
+            whole_graph_copies: 0,
+        }
     }
     pub fn node_count(&self) -> usize {
         self.0.lock().expect("inventory lock").graph.node_count()
@@ -312,7 +440,7 @@ impl ArtifactInventory {
 struct ViewLease {
     inventory: ArtifactInventory,
     roots: Vec<ArtifactId>,
-    parent: Option<ArtifactView>,
+    parents: Vec<ArtifactView>,
 }
 impl Drop for ViewLease {
     fn drop(&mut self) {
@@ -347,6 +475,7 @@ fn closure(
     let mut seen = BTreeSet::new();
     while let Some(id) = pending.pop() {
         if seen.insert(id) {
+            state.graph_visits.fetch_add(1, Ordering::Relaxed);
             if let Some(index) = state.indices.get(&id) {
                 pending.extend(
                     state
@@ -370,6 +499,9 @@ impl std::fmt::Debug for ArtifactView {
     }
 }
 impl ArtifactView {
+    pub fn is_empty(&self) -> bool {
+        self.roots().is_empty()
+    }
     pub fn inventory(&self) -> &ArtifactInventory {
         &self.0.inventory
     }
@@ -388,27 +520,66 @@ impl ArtifactView {
         let mut edges = Vec::new();
         for id in &ids {
             for edge in state.graph.edges(state.indices[id]) {
-                edges.push((*id, state.graph[edge.target()].id, *edge.weight()));
+                edges.push((*id, state.graph[edge.target()].id, edge.weight().clone()));
             }
         }
         edges.sort();
         edges
     }
     fn roots(&self) -> Vec<ArtifactId> {
-        let mut roots = self.0.roots.clone();
-        let mut parent = self.0.parent.as_ref();
-        while let Some(view) = parent {
-            roots.extend_from_slice(&view.0.roots);
-            parent = view.0.parent.as_ref();
+        let mut pending = vec![self];
+        let mut roots = BTreeSet::new();
+        let mut seen = BTreeSet::new();
+        while let Some(view) = pending.pop() {
+            if seen.insert(Arc::as_ptr(&view.0)) {
+                roots.extend(view.0.roots.iter().copied());
+                pending.extend(view.0.parents.iter());
+            }
         }
-        roots
+        roots.into_iter().collect()
+    }
+    /// Retain exactly these reachable artifact roots, independently of the
+    /// source view's lifetime. Hidden dependencies remain graph-owned.
+    pub fn select_roots(&self, roots: Vec<ArtifactId>) -> Result<Self, CompileError> {
+        let state = self.0.inventory.0.lock().expect("inventory lock");
+        let owned = closure(&state, self.roots().into_iter());
+        if roots.iter().any(|id| !owned.contains(id)) {
+            return Err(failure("selected artifact is outside retained view"));
+        }
+        drop(state);
+        Ok(self.0.inventory.retain(roots, Vec::new()))
+    }
+    pub(crate) fn merge(&self, other: &Self) -> Result<Self, CompileError> {
+        if self.is_empty() {
+            return Ok(other.clone());
+        }
+        if Arc::ptr_eq(&self.0.inventory.0, &other.0.inventory.0) {
+            Ok(ArtifactView(Arc::new(ViewLease {
+                inventory: self.0.inventory.clone(),
+                roots: Vec::new(),
+                parents: vec![self.clone(), other.clone()],
+            })))
+        } else {
+            self.0.inventory.admit(
+                self,
+                other
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.as_ref().clone())
+                    .collect(),
+            )
+        }
     }
     pub(crate) fn entries(&self) -> Vec<Arc<ArtifactEntry>> {
         let state = self.0.inventory.0.lock().expect("inventory lock");
+        state.view_queries.fetch_add(1, Ordering::Relaxed);
         let mut entries = closure(&state, self.roots().into_iter())
             .iter()
             .filter_map(|id| state.payloads.get(id).cloned())
             .collect::<Vec<_>>();
+        state
+            .entry_handle_copies
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
         entries.sort_by(|a, b| a.descriptor.owner.cmp(&b.descriptor.owner));
         entries
     }
@@ -440,24 +611,29 @@ mod tests {
         }
     }
     fn entry(name: &str, requirements: &[&str]) -> ArtifactEntry {
+        let owner = CachedHomeOwner {
+            unit: "unit".into(),
+            module: name.into(),
+            module_version: ModuleVersion([1; 32]),
+            skinny_iface_sha256: digest(name.as_bytes()),
+            product_sha256: digest(name.as_bytes()),
+        };
+        let certification =
+            crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
+                .unwrap();
         let product = CertifiedRecoveryProduct::from_certification(
-            CachedHomeOwner {
-                unit: "unit".into(),
-                module: name.into(),
-                module_version: ModuleVersion([1; 32]),
-                skinny_iface_sha256: digest(name.as_bytes()),
-                product_sha256: digest(name.as_bytes()),
-            },
+            owner,
             name.as_bytes().to_vec(),
             name.as_bytes().to_vec(),
             vec![],
-            vec![],
+            certification,
         );
         ArtifactEntry::original(
             [2; 32],
             product,
             requirements.iter().map(|name| module(name)).collect(),
         )
+        .unwrap()
     }
     #[test]
     fn retained_views_reclaim_after_last_reader_without_copying_payloads() {
@@ -527,6 +703,111 @@ mod tests {
         drop(second);
         assert_eq!(inventory.node_count(), 0);
     }
+    #[test]
+    fn selected_root_keeps_hidden_requirements_and_reclaims_unselected_history() {
+        let inventory = ArtifactInventory::default();
+        let empty = inventory.empty_view();
+        let view = inventory
+            .admit(
+                &empty,
+                vec![
+                    entry("Hidden", &[]),
+                    entry("Visible", &["Hidden"]),
+                    entry("Obsolete", &[]),
+                ],
+            )
+            .unwrap();
+        let visible = view
+            .descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.owner == module("Visible"))
+            .unwrap()
+            .id;
+        let selected = view.select_roots(vec![visible]).unwrap();
+        assert!(selected.select_roots(vec![ArtifactId([99; 32])]).is_err());
+        drop(view);
+        assert_eq!(inventory.node_count(), 2);
+        assert_eq!(selected.descriptors().len(), 2);
+        let metrics = inventory.metrics();
+        assert_eq!(metrics.whole_graph_copies, 0);
+        assert!(metrics.graph_visits > 0);
+        assert!(metrics.entry_handle_copies > 0);
+        drop(selected);
+        assert_eq!(inventory.node_count(), 0);
+    }
+    #[test]
+    fn native_requirements_remain_typed_and_do_not_grant_a_value_implementation() {
+        let inventory = ArtifactInventory::default();
+        let empty = inventory.empty_view();
+        let mut consumer = entry("Consumer", &["Original"]);
+        consumer.native_requirements.push((
+            module("Original"),
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal: 2,
+                required_ordinal: 7,
+            },
+        ));
+        let view = inventory
+            .admit(&empty, vec![entry("Original", &[]), consumer])
+            .unwrap();
+        let dependencies = view.dependencies();
+        assert_eq!(dependencies.len(), 2);
+        assert!(dependencies
+            .iter()
+            .any(|(_, _, edge)| matches!(edge, ArtifactDependency::Interface)));
+        assert!(dependencies.iter().any(|(_, _, edge)| matches!(
+            edge,
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal: 2,
+                required_ordinal: 7
+            }
+        )));
+    }
+
+    #[test]
+    fn recovery_restores_exact_interface_edges_and_refuses_native_or_id_forgery() {
+        let original = entry("Original", &[]);
+        let mut consumer = entry("Consumer", &[]);
+        consumer.native_requirements.push((
+            module("Original"),
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal: 2,
+                required_ordinal: 7,
+            },
+        ));
+        let descriptors = vec![original.descriptor.clone(), consumer.descriptor.clone()];
+        let edges = vec![
+            (
+                consumer.descriptor.id,
+                original.descriptor.id,
+                ArtifactDependency::Interface,
+            ),
+            (
+                consumer.descriptor.id,
+                original.descriptor.id,
+                ArtifactDependency::NativeGroup {
+                    dependent_ordinal: 2,
+                    required_ordinal: 7,
+                },
+            ),
+        ];
+        let mut entries = vec![original.clone(), consumer.clone()];
+        restore_recovery_dependencies(&mut entries, &descriptors, &edges).unwrap();
+        assert_eq!(entries[1].requirements, vec![module("Original")]);
+        assert!(restore_recovery_dependencies(&mut entries, &descriptors, &edges[..1]).is_err());
+        let mut forged = descriptors.clone();
+        forged[0].producer_sha256 = [99; 32];
+        assert!(restore_recovery_dependencies(&mut entries, &forged, &edges).is_err());
+        let mut duplicated = edges.clone();
+        duplicated.push(edges[0].clone());
+        assert!(restore_recovery_dependencies(&mut entries, &descriptors, &duplicated).is_err());
+        let mut wrong_endpoint = edges.clone();
+        wrong_endpoint[0].1 = ArtifactId([99; 32]);
+        assert!(
+            restore_recovery_dependencies(&mut entries, &descriptors, &wrong_endpoint).is_err()
+        );
+    }
+
     #[test]
     fn dependency_and_artifact_ids_are_stable_across_inventory_allocation() {
         let a = ArtifactInventory::default();

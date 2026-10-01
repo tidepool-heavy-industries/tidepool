@@ -42,6 +42,7 @@ pub(crate) struct ExactCompilationRequest {
     pub(crate) manifest: PathBuf,
     pub(crate) request_sha256: String,
     pub(crate) semantic_sha256: [u8; 32],
+    pub(crate) producer_sha256: [u8; 32],
     pub(crate) artifacts: Vec<DeclarationArtifact>,
     pub(crate) groups: Vec<PendingCertifiedGroup>,
 }
@@ -100,6 +101,71 @@ impl ExactSourceAdmission {
 }
 
 impl ExactCompilationRequest {
+    pub(crate) fn in_program_context(
+        &self,
+        root: &Path,
+        context: Arc<ExactDeclarationContext>,
+    ) -> Result<Self, CompileError> {
+        if context.toolchain_identity_sha256() != self.producer_sha256
+            && !(context.toolchain_identity_sha256() == [0; 32]
+                && context.artifact_view().is_empty())
+        {
+            return Err(failure("program context has another producer"));
+        }
+        let mut validation = PackageInterfaceValidation::default();
+        let (materialized, references) =
+            context.materialize_with_validation(root, &mut validation)?;
+        context.validate_artifacts(&materialized.artifacts)?;
+        let original_owners = self
+            .context
+            .recovery_products()
+            .into_iter()
+            .map(|product| product.owner().clone())
+            .collect::<Vec<_>>();
+        let references = references
+            .into_iter()
+            .filter(|reference| {
+                !original_owners.iter().any(|owner| {
+                    owner.unit == reference.unit
+                        && owner.module == reference.module
+                        && owner.product_sha256 == reference.product_sha256
+                })
+            })
+            .collect::<Vec<_>>();
+        let verified = references
+            .iter()
+            .map(|reference| {
+                recovery_artifacts::verify_materialized_ref_with_validation(
+                    root,
+                    reference,
+                    &mut validation,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(failure)?;
+        let mut groups = self.groups.clone();
+        groups.extend(
+            certify_inherited_products_with_validation(
+                &verified
+                    .iter()
+                    .map(|artifact| InheritedProductInput { artifact })
+                    .collect::<Vec<_>>(),
+                &self.groups,
+                &mut validation,
+            )
+            .map_err(failure)?,
+        );
+        Ok(Self {
+            context,
+            manifest: self.manifest.clone(),
+            request_sha256: self.request_sha256.clone(),
+            semantic_sha256: self.semantic_sha256,
+            producer_sha256: self.producer_sha256,
+            artifacts: materialized.artifacts,
+            groups,
+        })
+    }
+
     pub(crate) fn admit_source(
         &self,
         source_path: &Path,
@@ -145,7 +211,10 @@ impl ExactCompilationRequest {
         root: &Path,
         context: &ExactDeclarationContext,
     ) -> Result<Vec<ExactSourceAdmission>, CompileError> {
-        if context.toolchain_identity_sha256() != self.context.toolchain_identity_sha256() {
+        if context.toolchain_identity_sha256() != self.producer_sha256
+            && !(context.toolchain_identity_sha256() == [0; 32]
+                && context.artifact_view().is_empty())
+        {
             return Err(failure("same-transaction context has another producer"));
         }
         self.validate_outputs_selected(root, None, context)
@@ -390,6 +459,45 @@ impl ExactDeclarationContext {
         values: &[RecoveryValueInterfaceRef],
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
+        Self::capture_recovery_inputs(root, products, joins, values, None, lexical)
+    }
+    pub fn capture_recovery_with_inventory(
+        root: &Path,
+        products: &[RecoveryArtifactRef],
+        joins: &[RecoveryJoinRef],
+        values: &[RecoveryValueInterfaceRef],
+        descriptors: &[crate::artifact_inventory::ArtifactDescriptor],
+        dependencies: &[(
+            crate::artifact_inventory::ArtifactId,
+            crate::artifact_inventory::ArtifactId,
+            crate::artifact_inventory::ArtifactDependency,
+        )],
+        lexical: Vec<ExactLexicalNode>,
+    ) -> Result<Self, CompileError> {
+        Self::capture_recovery_inputs(
+            root,
+            products,
+            joins,
+            values,
+            Some((descriptors, dependencies)),
+            lexical,
+        )
+    }
+    fn capture_recovery_inputs(
+        root: &Path,
+        products: &[RecoveryArtifactRef],
+        joins: &[RecoveryJoinRef],
+        values: &[RecoveryValueInterfaceRef],
+        inventory: Option<(
+            &[crate::artifact_inventory::ArtifactDescriptor],
+            &[(
+                crate::artifact_inventory::ArtifactId,
+                crate::artifact_inventory::ArtifactId,
+                crate::artifact_inventory::ArtifactDependency,
+            )],
+        )>,
+        lexical: Vec<ExactLexicalNode>,
+    ) -> Result<Self, CompileError> {
         let mut context = Self {
             producer: [0; 32],
             inventory: ArtifactInventory::default().empty_view(),
@@ -435,7 +543,7 @@ impl ExactDeclarationContext {
                 context.producer,
                 product,
                 requirements,
-            ));
+            )?);
         }
         for reference in joins {
             context.admit_producer(reference.toolchain_identity_sha256)?;
@@ -477,6 +585,13 @@ impl ExactDeclarationContext {
             }
             entries.push(entry);
         }
+        if let Some((descriptors, dependencies)) = inventory {
+            crate::artifact_inventory::restore_recovery_dependencies(
+                &mut entries,
+                descriptors,
+                dependencies,
+            )?;
+        }
         context.inventory = context
             .inventory
             .inventory()
@@ -496,46 +611,11 @@ impl ExactDeclarationContext {
         let mut entries = Vec::new();
         for certificate in authored {
             self.admit_producer(certificate.toolchain_identity_sha256())?;
-            for product in certificate.recovery_products() {
-                let owner = identity(&product.owner().unit, &product.owner().module);
-                let requirements = certificate
-                    .interfaces
-                    .iter()
-                    .find(|interface| interface.owner == owner)
-                    .ok_or_else(|| failure("original interface metadata missing"))?
-                    .requirements
-                    .clone();
-                entries.push(ArtifactEntry::original(
-                    self.producer,
-                    product.clone(),
-                    requirements,
-                ));
-            }
-            for join in &certificate.joined_interfaces {
-                let owner = identity(join.unit(), join.module());
-                let requirements = certificate
-                    .interfaces
-                    .iter()
-                    .find(|interface| interface.owner == owner)
-                    .ok_or_else(|| failure("retained interface metadata missing"))?
-                    .requirements
-                    .clone();
-                entries.push(ArtifactEntry::interface(
-                    join.clone(),
-                    ArtifactKind::LexicalJoin,
-                    requirements,
-                ));
-            }
+            self.inventory = self.inventory.merge(certificate.artifact_view())?;
         }
         for join in joins {
             self.admit_producer(join.toolchain_identity_sha256())?;
-            entries.extend(
-                join.context()
-                    .inventory
-                    .entries()
-                    .iter()
-                    .map(|entry| entry.as_ref().clone()),
-            );
+            self.inventory = self.inventory.merge(join.context().artifact_view())?;
             entries.push(ArtifactEntry::interface(
                 join.interface().clone(),
                 ArtifactKind::LexicalJoin,
@@ -1075,10 +1155,54 @@ impl ExactDeclarationContext {
             manifest,
             request_sha256: sha256(&bytes),
             semantic_sha256,
+            producer_sha256: sha2::Sha256::digest(producer).into(),
             artifacts: materialized.artifacts,
             groups,
         })
     }
+}
+
+pub(crate) fn certified_artifact_view(
+    producer: [u8; 32],
+    products: &[CertifiedRecoveryProduct],
+    interfaces: &[ExactInterfaceOwner],
+    joined: &[CertifiedJoinedInterface],
+    baseline: Option<&ExactDeclarationContext>,
+) -> Result<ArtifactView, CompileError> {
+    let view = baseline.map_or_else(
+        || ArtifactInventory::default().empty_view(),
+        |context| context.artifact_view().clone(),
+    );
+    let mut entries = Vec::new();
+    for product in products {
+        let owner = identity(&product.owner().unit, &product.owner().module);
+        let requirements = interfaces
+            .iter()
+            .find(|interface| interface.owner == owner)
+            .ok_or_else(|| failure("original interface metadata missing"))?
+            .requirements
+            .clone();
+        entries.push(ArtifactEntry::original(
+            producer,
+            product.clone(),
+            requirements,
+        )?);
+    }
+    for join in joined {
+        let owner = identity(join.unit(), join.module());
+        let requirements = interfaces
+            .iter()
+            .find(|interface| interface.owner == owner)
+            .ok_or_else(|| failure("joined interface metadata missing"))?
+            .requirements
+            .clone();
+        entries.push(ArtifactEntry::interface(
+            join.clone(),
+            ArtifactKind::LexicalJoin,
+            requirements,
+        ));
+    }
+    view.inventory().admit(&view, entries)
 }
 
 fn text(value: impl Into<String>) -> Value {
